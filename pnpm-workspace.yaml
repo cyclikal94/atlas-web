@@ -1,0 +1,4 @@
+minimumReleaseAgeExclude:
+  - '@tanstack/react-router@1.170.39'
+onlyBuiltDependencies:
+  - esbuild

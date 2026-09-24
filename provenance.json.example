@@ -1,0 +1,20 @@
+{
+  "atlas_backend_ref": {
+    "tag": "vX.Y.Z",
+    "commit": "<full backend commit SHA>"
+  },
+  "contract_hash": "<SHA-256 of api/openapi.json>",
+  "api_types_version": "X.Y.Z",
+  "api_types_tarball_sha256": "<SHA-256>",
+  "frontend_ref": {
+    "tag": "vX.Y.Z",
+    "commit": "<full frontend commit SHA>"
+  },
+  "ci_run_id": "<CI run ID>",
+  "backend_image_digest": "sha256:<tested image digest>",
+  "backend_native_checksum": "<tested native archive SHA256SUMS entry>",
+  "generation_inputs": {
+    "openapi_typescript": "7.4.3",
+    "generator_config_hash": "<generation lock/config SHA-256>"
+  }
+}

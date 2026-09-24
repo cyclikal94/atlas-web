@@ -1,0 +1,12 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+coverage/
+.agtx/
+.claude/
+.codex/
+.DS_Store
+.env
+.env.*
+!.env.example
