@@ -28,7 +28,7 @@
     "dexie-react-hooks": "4.4.0",
     "@radix-ui/react-dialog": "1.1.23",
     "openapi-fetch": "0.13.8",
-    "@atlas/api-types": "file:vendor/atlas-api-types-0.0.0-bootstrap.fe4dba10.tgz"
+    "@atlas/api-types": "file:vendor/atlas-api-types-0.27.0-rc.1.tgz"
   },
   "devDependencies": {
     "vite": "8.3.0",

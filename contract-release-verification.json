@@ -1,0 +1,20 @@
+{
+  "verified_by": "github-api-and-release-download",
+  "pin_sha256": "ed876bc3d834bcb6e959e60f348d662ad119ed33cfeb3fe77eaff1860c4686f6",
+  "repository": "cyclikal94/atlas",
+  "release_id": 398351163,
+  "asset_id": 595659450,
+  "release_url": "https://github.com/cyclikal94/atlas/releases/download/v0.27.0-rc.1/atlas-api-types-0.27.0-rc.1.tgz",
+  "backend_tag": "v0.27.0-rc.1",
+  "backend_commit": "7621f2fe8e033e67004a7f0767f38db26c6a46b8",
+  "tarball_sha256": "898375708c48f7dae091916feed003a0e31e075bdd34d651c869d466b36b981a",
+  "contract_sha256": "ba586a03dd10b82590533beaaecdb387524c302c18707a5c8d83a1fd28847900",
+  "version": "0.27.0-rc.1",
+  "verified_at": "2026-09-28T14:54:32.028496+00:00",
+  "verification_transport": "Python urllib: public GitHub REST API and release downloads",
+  "published_checksums_verified": [
+    "SHA256SUMS",
+    "atlas-api-types-0.27.0-rc.1.tgz.sha256"
+  ],
+  "source_verified": true
+}

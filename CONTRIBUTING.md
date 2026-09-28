@@ -29,7 +29,8 @@ it starts inert and hidden. Do not lift that gate without the reviewed lifecycle
 `@atlas/api-types` contains backend-generated declarations only; `openapi-fetch`
 is this repository's runtime dependency. The backend generation tooling owns
 `openapi-typescript`. Never read a sibling checkout during frontend builds.
-The initial local tarball is labelled bootstrap-only and is not a published release.
+The vendored tarball comes from the published backend release named by the pin.
+Its verification record binds the asset and tag to their hashes and source commit.
 A released pin is required before creating delivery worktrees; check with
 `pnpm check:contract --require-release` after publication and deliberate re-pinning.
 
@@ -37,5 +38,5 @@ The approved workflow, decisions and reviewed specifications live in the sibling
 `atlas-orchestrator` repository. Task inputs are staged under `.agtx/approved` by
 the supervisor. Follow the card's scope and acceptance criteria. Fixture tests do
 not prove integration against the required backend fixes. Do not commit, push,
-merge or deploy without explicit authorisation; the initial commit awaits Kieran's
-review. Keep generated output, dependency directories and agent state out of Git.
+merge or deploy without explicit authorisation. Keep generated output, dependency
+directories and agent state out of Git.
