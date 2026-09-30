@@ -1,0 +1,53 @@
+# Atlas web (the frontend only). The backend is deployed by its own chart; this chart's Ingress routes the backend's
+# paths to it and everything else to the frontend, on ONE public origin (docs/hosting.md).
+
+image:
+  # Required. The chart never guesses a registry: set it to the atlas-web image you built or pulled.
+  repository: ""
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+  # Optional: pin by digest (sha256:...). When set it takes precedence over tag.
+  digest: ""
+
+replicaCount: 2
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Required when enabled: the one public host. TLS is terminated at the Ingress; the same origin reaches both services.
+  host: ""
+  tls: []
+  # The backend's Service. Required when enabled.
+  backend:
+    serviceName: ""
+    servicePort: 3000
+  # Paths routed to the backend. This list is the one in src/lib/backend-routes.ts;
+  # scripts/check-route-parity.mjs fails the build if it drifts. Do not edit it here alone.
+  backendPaths:
+    - /api
+    - /health
+    - /ready
+    - /auth
+    - /oidc
+
+podAnnotations: {}
+podLabels: {}
+imagePullSecrets: []
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+nodeSelector: {}
+tolerations: []
+affinity: {}

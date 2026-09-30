@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#08090A" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F7F8F9" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <noscript><link rel="stylesheet" href="/noscript.css" /></noscript>
+    <title>Atlas (fixture)</title>
+    <!-- Pre-paint theme: an external script, because the content security policy forbids inline script. -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <!-- Neutral screens only: the boot gate, the compatibility message, the neutral entry. -->
+    <div id="neutral-root">
+      <dialog open class="neutral-gate" aria-labelledby="gate-heading">
+        <div class="neutral-gate__body">
+          <span aria-hidden="true" class="neutral-gate__mark"></span>
+          <h1 id="gate-heading" tabindex="-1">Atlas</h1>
+          <p role="status" class="neutral-gate__loading">Opening Atlas…</p>
+          <noscript><p>Atlas needs JavaScript to open.</p></noscript>
+        </div>
+      </dialog>
+    </div>
+    <!-- Everything that renders account data lives here, inert and hidden until the lifecycle lifts the gate. -->
+    <div id="protected-root" inert aria-hidden="true"></div>
+    <script type="module" src="/src/fixture/main.tsx"></script>
+  </body>
+</html>

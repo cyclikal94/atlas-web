@@ -1,0 +1,67 @@
+/*
+ * Tailwind reads the design tokens through `inline` so utilities such as bg-canvas, text-ink-1
+ * and border-field-edge resolve to var(--canvas) and follow the active theme without a rebuild.
+ * The default Tailwind palette is removed: only accepted tokens exist as colour utilities.
+ */
+@theme inline {
+  --color-*: initial;
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-raised: var(--raised);
+  --color-chrome: var(--chrome);
+  --color-chrome-inset: var(--chrome-inset);
+  --color-chrome-inset-edge: var(--chrome-inset-edge);
+  --color-inset: var(--inset);
+  --color-tab-bar: var(--tab-bar);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-chrome-edge: var(--chrome-edge);
+  --color-field-edge: var(--field-edge);
+  --color-ink-1: var(--ink-1);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-placeholder: var(--placeholder);
+  --color-action-fill: var(--action-fill);
+  --color-action-ink: var(--action-ink);
+  --color-action-on: var(--action-on);
+  --color-action-hover: var(--action-hover);
+  --color-action-tint: var(--action-tint);
+  --color-action-tint-edge: var(--action-tint-edge);
+  --color-nav-active: var(--nav-active);
+  --color-select-tint: var(--select-tint);
+  --color-rail-hover: var(--rail-hover);
+  --color-row-hover: var(--row-hover);
+  --color-done: var(--done);
+  --color-done-tint: var(--done-tint);
+  --color-done-edge: var(--done-edge);
+  --color-missed: var(--missed);
+  --color-missed-tint: var(--missed-tint);
+  --color-missed-edge: var(--missed-edge);
+  --color-conflict: var(--conflict);
+  --color-conflict-tint: var(--conflict-tint);
+  --color-conflict-edge: var(--conflict-edge);
+  --color-conflict-text: var(--conflict-text);
+  --color-withheld: var(--withheld);
+  --color-withheld-tint: var(--withheld-tint);
+  --color-withheld-edge: var(--withheld-edge);
+  --color-scrim: var(--scrim);
+
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+
+  --radius-*: initial;
+  --radius-badge: 6px;
+  --radius-nav: 7px;
+  --radius-control: 8px;
+  --radius-row: 10px;
+  --radius-card: 12px;
+  --radius-dialog: 14px;
+  --radius-round: 9999px;
+
+  --shadow-*: initial;
+  --shadow-modal: 0 30px 70px -20px rgba(0, 0, 0, 0.9);
+
+  --breakpoint-*: initial;
+  --breakpoint-tablet: 768px;
+  --breakpoint-desktop: 1280px;
+}

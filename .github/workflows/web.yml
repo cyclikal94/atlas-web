@@ -1,7 +1,14 @@
 name: Web checks
+# No path filter: every push and pull request runs every job (WEB-03 3.9). CI calls the same scripts a developer runs
+# locally (scripts/smoke-*.sh, scripts/check-*.mjs), so local and CI evidence are the same code. Nothing here publishes,
+# tags, pushes an image or creates a release.
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+
+env:
+  PNPM_VERSION: 12.4.2
+
 jobs:
   web-checks:
     runs-on: ubuntu-24.04
@@ -11,7 +18,7 @@ jobs:
           persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
@@ -20,7 +27,15 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm docs:tokens -- --check
       - run: pnpm build
+      - run: pnpm build:fixture
+      - run: pnpm package:prepare
+      - run: pnpm check:artefacts
+      - run: pnpm check:route-parity
+      - run: node scripts/check-no-fixture.mjs dist
+      - run: node scripts/check-budgets.mjs dist-fixture
+
   web-contract:
     runs-on: ubuntu-24.04
     steps:
@@ -29,15 +44,19 @@ jobs:
           persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:contract
+      - run: pnpm check:contract --require-release
       - run: pnpm typecheck
       - run: pnpm build
+
+  # The browser suite on every supported engine. The fixture build proves the shell; the production build proves the neutral
+  # app. A pass here is layer B (fixture) evidence, not integration evidence.
   web-e2e:
     runs-on: ubuntu-24.04
     steps:
@@ -46,7 +65,98 @@ jobs:
           persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - run: pnpm test:e2e
+        env:
+          ATLAS_E2E_BROWSERS: all
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
+
+  # Build once; the archive and the image both carry that dist/ and its provenance. The image is built and smoke-tested on a
+  # native runner per architecture (no emulation), then the whole production browser suite runs against the container.
+  web-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm package:prepare
+        env:
+          ATLAS_CI_RUN_ID: ${{ github.run_id }}
+      - run: pnpm check:artefacts
+      - run: node scripts/smoke-archive.mjs
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: PLATFORMS=${{ matrix.platform }} BROWSER_PLATFORM=${{ matrix.platform }} ./scripts/smoke-image.sh
+      - run: ./scripts/smoke-helm.sh
+      - run: pnpm build:fixture
+      - run: ./scripts/smoke-fixture-nginx.sh
+      - run: node scripts/package-archive.mjs --out release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atlas-web-archive-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: |
+            release/
+            dist/_web/provenance.json
+          retention-days: 7
+
+  # B19: the reference nginx proxy, the frontend image and a STUB backend (fixture evidence).
+  web-compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm package:prepare
+      - run: ./scripts/smoke-compose.sh --stub
+
+  # Layer C: the REAL released backend the contract is pinned to, acquired from its published release and verified against its
+  # published SHA256SUMS. First through the Vite preview proxy with the native binary, then through the reference nginx proxy
+  # with the released container image (by digest). Loopback only; disposable databases; everything is torn down.
+  web-integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
@@ -54,4 +164,48 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm build
-      - run: pnpm test:e2e
+      - run: pnpm package:prepare
+      - name: Fetch and verify the pinned backend release
+        run: |
+          set -euo pipefail
+          tag="$(node -p "require('./contract-pin.json').backend_tag")"
+          base="https://github.com/cyclikal94/atlas/releases/download/${tag}"
+          mkdir -p "$RUNNER_TEMP/backend"
+          cd "$RUNNER_TEMP/backend"
+          curl -fsSL -O "$base/SHA256SUMS" -O "$base/atlas-x86_64-unknown-linux-gnu.tar.gz" -O "$base/container-image.txt"
+          grep ' \./atlas-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum -c -
+          tar xzf atlas-x86_64-unknown-linux-gnu.tar.gz
+          echo "ATLAS_BACKEND_BIN=$PWD/atlas-release/atlas-server" >> "$GITHUB_ENV"
+          echo "ATLAS_BACKEND_IMAGE=ghcr.io/cyclikal94/atlas@$(sed -n 's/^Digest: *//p' container-image.txt | head -1)" >> "$GITHUB_ENV"
+      - run: ./scripts/smoke-native-backend.sh "$ATLAS_BACKEND_BIN"
+      - run: ./scripts/smoke-compose.sh --real
+
+  # The chart on a disposable kind cluster (created by this job and deleted with it; no existing cluster is touched). The script deploys
+  # into a namespace of its own and removes only what it created, so it is also safe against a cluster that already holds releases.
+  web-helm-kind:
+    runs-on: ubuntu-24.04
+    env:
+      KIND_CLUSTER_NAME: atlas-web-ci
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm package:prepare
+      # The cluster is created and used under one name. helm/kind-action defaults to "chart-testing" while `kind load` defaults to
+      # "kind", so an unnamed cluster is never the one an image is loaded into. scripts/smoke-kind.sh refuses to run unless
+      # KIND_CLUSTER_NAME exists, and tests/static/kind-workflow.test.ts pins this wiring. Its release, namespace and image tag carry a
+      # per-run id, and it deletes only the namespace and tag it created (tests/static/kind-smoke.test.ts).
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+      - name: Build, load and deploy
+        run: ./scripts/smoke-kind.sh

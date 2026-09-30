@@ -1,0 +1,11 @@
+// R2 no-locks-query. navigator.locks.query() is never evidence of anything (matrix section 3.6.3 item 3): a held lock,
+// a hint, a time-out or an earlier read must not be treated as proof of another page's state.
+language js(typescript, jsx)
+
+or {
+  `navigator.locks.query($args)`,
+  `$_.locks.query($args)`,
+  `locks.query($args)`
+} as $hit where {
+  register_diagnostic(span=$hit, message="R2 no-locks-query: never call navigator.locks.query() (docs/lint-rules.md).", severity="error")
+}

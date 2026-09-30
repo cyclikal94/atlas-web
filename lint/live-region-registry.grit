@@ -1,0 +1,9 @@
+// R6 live-region-registry. Live regions are registered in one place each: the announcer, the neutral gate, and the sync
+// status chip. A stray one would announce protected text while the gate is closed (matrix section 3.7.2 step 1c).
+// Scoped by biome.json. Matches the attribute itself, so it is independent of the element and its other props.
+language js(typescript, jsx)
+
+JsxAttribute() as $attribute where {
+  $attribute <: r"^(?:aria-live=.*|role=(?:\"|')?(?:status|alert|log)(?:\"|')?|role=\{(?:\"|')(?:status|alert|log)(?:\"|')\})$",
+  register_diagnostic(span=$attribute, message="R6 live-region-registry: live regions live only in the announcer, the gate and the sync chip (docs/lint-rules.md).", severity="error")
+}

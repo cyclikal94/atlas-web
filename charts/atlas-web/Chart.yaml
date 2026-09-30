@@ -1,0 +1,8 @@
+apiVersion: v2
+name: atlas-web
+description: "The Atlas web client. A static frontend, deployed independently of the backend behind one public origin."
+type: application
+# The chart is versioned with the frontend release (WEB-15 sets both). It never deploys the backend.
+version: 0.0.0
+appVersion: "0.0.0"
+kubeVersion: ">=1.27.0-0"

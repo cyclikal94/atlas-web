@@ -1,0 +1,18 @@
+// R1 no-raw-network. Every request that carries an account's credentials goes through the stamped, leased wrapper
+// (matrix section 3.6.2 step 1), so no other code may reach the network. WEB-08a supplies the wrapper in
+// src/lib/api-client. The rule is name-strict: a property called "fetch" on your own object also matches (suppress with
+// a reasoned biome-ignore). It is scoped by biome.json overrides, not here.
+language js(typescript, jsx)
+
+or {
+  `window.fetch`,
+  `globalThis.fetch`,
+  `self.fetch`,
+  `navigator.sendBeacon`,
+  `XMLHttpRequest`,
+  `WebSocket`,
+  `EventSource`,
+  `fetch` where { $hit <: not within `$_.fetch` }
+} as $hit where {
+  register_diagnostic(span=$hit, message="R1 no-raw-network: reach the network only through src/lib/api-client (docs/lint-rules.md).", severity="error")
+}

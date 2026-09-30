@@ -1,0 +1,38 @@
+# Reference reverse proxy for ONE public origin (Q6). Browser pages and assets go to the frontend; the backend's paths go to
+# the backend. TLS termination is the operator's: this example listens on plain HTTP and is for loopback use only.
+# It is an nginx template: the official image substitutes ${ATLAS_WEB_UPSTREAM}, ${ATLAS_BACKEND_UPSTREAM} and
+# ${ATLAS_PROXY_MAX_BODY} from the environment when it starts.
+#
+# It must forward Host and must not add, rewrite or strip Set-Cookie, Path, Domain, X-CSRF-Token, Origin or Host. The
+# production session cookie is __Host-atlas_session: host-only, Path=/, no Domain. Adding a Domain makes the browser
+# discard it. No proxy_cookie_* directive appears here on purpose.
+server {
+  listen 8080 default_server;
+  listen [::]:8080 default_server;
+  server_name _;
+
+  server_tokens off;
+  client_max_body_size ${ATLAS_PROXY_MAX_BODY};
+
+  # The prefix list is the one in src/lib/backend-routes.ts; scripts/check-route-parity.mjs keeps them identical.
+  # A proxy_pass with no URI part sends the request path unchanged (no rewriting).
+  location ~ ^/(?:api|health|ready|auth|oidc)(?:/|$) {
+    proxy_pass http://${ATLAS_BACKEND_UPSTREAM};
+    proxy_http_version 1.1;
+    proxy_redirect off;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  location / {
+    proxy_pass http://${ATLAS_WEB_UPSTREAM};
+    proxy_http_version 1.1;
+    proxy_redirect off;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}

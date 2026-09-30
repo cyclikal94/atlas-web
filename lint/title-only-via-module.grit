@@ -1,0 +1,12 @@
+// R5 title-only-via-module. The tab title can reveal what is open, so document.title is protected surface
+// (matrix section 3.7.1) and is written only in src/protected-surface/title.ts. Scoped by biome.json.
+language js(typescript, jsx)
+
+or {
+  `document.title = $value`,
+  `window.document.title = $value`,
+  `globalThis.document.title = $value`,
+  `document.title += $value`
+} as $hit where {
+  register_diagnostic(span=$hit, message="R5 title-only-via-module: set the title through src/protected-surface/title.ts (docs/lint-rules.md).", severity="error")
+}

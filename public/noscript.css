@@ -1,0 +1,4 @@
+/* Loaded only when JavaScript is off (index.html, inside <noscript>): the boot message would otherwise never resolve. */
+.neutral-gate__loading {
+  display: none;
+}

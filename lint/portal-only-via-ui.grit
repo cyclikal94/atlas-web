@@ -1,0 +1,30 @@
+// R3 portal-only-via-ui. No portal may render account data outside #protected-root (matrix section 3.7.1), so portals
+// are created only in src/components/ui/**, which resolves its container from the registry. Scoped by biome.json.
+language js(typescript, jsx)
+
+or {
+  `createPortal($args)`,
+  `$_.createPortal($args)`,
+  `document.body.$method($args)` where {
+    $method <: or {
+      `append`,
+      `appendChild`,
+      `prepend`,
+      `insertAdjacentHTML`,
+      `insertAdjacentElement`,
+      `replaceChildren`,
+      `before`,
+      `after`
+    }
+  },
+  `document.write($args)`,
+  `document.writeln($args)`,
+  `import $_ from $source` where {
+    $source <: r"\"(?:react-dom|@radix-ui/react-(?:portal|dialog|alert-dialog|popover|tooltip|dropdown-menu|select|hover-card|context-menu|menubar|navigation-menu|toast))\""
+  },
+  `import { $_ } from $source` where {
+    $source <: r"\"(?:react-dom|@radix-ui/react-(?:portal|dialog|alert-dialog|popover|tooltip|dropdown-menu|select|hover-card|context-menu|menubar|navigation-menu|toast))\""
+  }
+} as $hit where {
+  register_diagnostic(span=$hit, message="R3 portal-only-via-ui: portals and portal-producing components belong in src/components/ui (docs/lint-rules.md).", severity="error")
+}

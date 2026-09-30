@@ -8,7 +8,13 @@
       "!dist",
       "!node_modules",
       "!playwright-report",
-      "!test-results"
+      "!test-results",
+      "!dist-fixture",
+      "!.agents",
+      "!.agtx",
+      "!.claude",
+      "!.codex",
+      "!.mcp.json"
     ]
   },
   "formatter": {
@@ -24,6 +30,47 @@
   "javascript": {
     "formatter": {
       "quoteStyle": "double"
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["src/**", "!src/lib/api-client/**"],
+      "plugins": ["./lint/no-raw-network.grit"]
+    },
+    {
+      "includes": ["src/**"],
+      "plugins": ["./lint/no-locks-query.grit"]
+    },
+    {
+      "includes": ["src/**", "!src/components/ui/**"],
+      "plugins": ["./lint/portal-only-via-ui.grit"]
+    },
+    {
+      "includes": [
+        "src/**",
+        "!src/session/**",
+        "!src/fixture/**",
+        "!src/protected-surface/**"
+      ],
+      "plugins": ["./lint/gate-import-allowlist.grit"]
+    },
+    {
+      "includes": ["src/**", "!src/protected-surface/title.ts"],
+      "plugins": ["./lint/title-only-via-module.grit"]
+    },
+    {
+      "includes": [
+        "src/**",
+        "!src/components/ui/announcer.tsx",
+        "!src/components/ui/neutral-gate.tsx",
+        "!src/components/ui/sync-status.tsx"
+      ],
+      "plugins": ["./lint/live-region-registry.grit"]
+    }
+  ],
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
     }
   }
 }

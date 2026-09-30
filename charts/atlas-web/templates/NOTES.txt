@@ -1,0 +1,13 @@
+Atlas web {{ .Chart.AppVersion }} is deployed as the frontend only. It does not deploy the backend.
+
+{{- if .Values.ingress.enabled }}
+
+One public origin: https://{{ .Values.ingress.host }}
+  /api, /health, /ready, /auth, /oidc -> Service "{{ .Values.ingress.backend.serviceName }}"
+  everything else                     -> Service "{{ include "atlas-web.fullname" . }}"
+Set the backend's ATLAS_PUBLIC_ORIGIN to that origin exactly.
+{{- else }}
+
+The Ingress is disabled. Route the backend paths to the backend and everything else to Service "{{ include "atlas-web.fullname" . }}" yourself,
+on one public origin (see docs/hosting.md).
+{{- end }}

@@ -1,29 +1,51 @@
 import {
-  createRootRoute,
+  createMemoryHistory,
   createRoute,
   createRouter,
-  Outlet,
+  type RouterHistory,
+  redirect,
 } from "@tanstack/react-router";
-export function Welcome() {
-  return (
-    <main>
-      <h1>Atlas</h1>
-      <p>Welcome to Atlas.</p>
-    </main>
-  );
+import { peopleRoute } from "../features/people/route";
+import { settingsRoute } from "../features/settings/route";
+import { sharingRoute } from "../features/sharing/route";
+import { tasksRoute } from "../features/tasks/route";
+import { todayRoute } from "../features/today/route";
+import { rootRoute } from "./root-route";
+
+/**
+ * The protected application's route tree. Production does not mount it: WEB-08 mounts it under the exposure gate.
+ * Browser history is used (never hash routing), because the OIDC return carries its grant in the URL fragment.
+ */
+export function createAppRouter(
+  options: { history?: RouterHistory; initialPath?: string } = {},
+) {
+  const home = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
+    beforeLoad: () => {
+      throw redirect({ to: "/today", replace: true });
+    },
+  });
+  const routeTree = rootRoute.addChildren([
+    home,
+    todayRoute(rootRoute),
+    tasksRoute(rootRoute),
+    peopleRoute(rootRoute),
+    sharingRoute(rootRoute),
+    settingsRoute(rootRoute),
+  ]);
+  return createRouter({
+    routeTree,
+    history:
+      options.history ??
+      (options.initialPath
+        ? createMemoryHistory({ initialEntries: [options.initialPath] })
+        : undefined),
+  });
 }
-const rootRoute = createRootRoute({ component: Outlet });
-const indexRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/",
-  component: Welcome,
-});
-export const router = createRouter({
-  routeTree: rootRoute.addChildren([indexRoute]),
-  defaultNotFoundComponent: Welcome,
-});
+
 declare module "@tanstack/react-router" {
   interface Register {
-    router: typeof router;
+    router: ReturnType<typeof createAppRouter>;
   }
 }

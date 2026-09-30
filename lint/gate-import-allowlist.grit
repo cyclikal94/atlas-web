@@ -1,0 +1,14 @@
+// R4 gate-import-allowlist. The gate's mount and lift functions are callable only from the session module (WEB-08a)
+// and the fixture entry (matrix section 3.6.3). Scoped by biome.json; the allowlist grows only by reviewed change.
+language js(typescript, jsx)
+
+or {
+  `import $_ from $source`,
+  `import { $_ } from $source`,
+  `import * as $_ from $source`,
+  `import($source)`,
+  `export { $_ } from $source`
+} as $hit where {
+  $source <: r"\"[^\"]*protected-surface/gate(?:\.ts)?\"",
+  register_diagnostic(span=$hit, message="R4 gate-import-allowlist: only src/session and src/fixture may import the gate (docs/lint-rules.md).", severity="error")
+}

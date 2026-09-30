@@ -1,17 +1,47 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider } from "@tanstack/react-router";
-import { StrictMode } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { router } from "./app/router";
-import "./styles.css";
+import { CompatibilityScreen } from "./app/CompatibilityScreen";
+import {
+  type CapabilityReport,
+  checkCapabilities,
+  probeCapabilities,
+} from "./app/capabilities";
+import { NeutralEntry } from "./app/NeutralEntry";
+import { ThemeProvider } from "./design/ThemeProvider";
+import "./styles/index.css";
+import { NeutralGate } from "./components/ui/neutral-gate";
+
+/**
+ * Production entry: the neutral app only. It never mounts the protected tree and never imports the gate
+ * primitives (lint rule R4), so #protected-root stays inert and empty. It does not touch location.hash,
+ * because WEB-08b reads the OIDC grant from the URL fragment.
+ */
+function NeutralApp() {
+  const [report, setReport] = useState<CapabilityReport | null>(() => {
+    const presence = checkCapabilities();
+    return presence.ok ? null : presence;
+  });
+  useEffect(() => {
+    let cancelled = false;
+    void probeCapabilities().then((result) => {
+      if (!cancelled) setReport(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (report && !report.ok)
+    return <CompatibilityScreen issues={report.issues} />;
+  if (!report) return <NeutralGate heading="Atlas" message="Opening Atlas…" />;
+  return <NeutralEntry />;
+}
 
 const neutralRoot = document.getElementById("neutral-root");
 if (!neutralRoot) throw new Error("Missing neutral root");
 createRoot(neutralRoot).render(
   <StrictMode>
-    <QueryClientProvider client={new QueryClient()}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>
+    <ThemeProvider>
+      <NeutralApp />
+    </ThemeProvider>
   </StrictMode>,
 );
-// Protected content remains inert and hidden until WEB-08a supplies its exposure gate.

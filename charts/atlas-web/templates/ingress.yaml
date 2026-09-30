@@ -1,0 +1,47 @@
+{{- if .Values.ingress.enabled }}
+{{- $host := required "ingress.host is required when the Ingress is enabled" .Values.ingress.host }}
+{{- $backend := required "ingress.backend.serviceName is required when the Ingress is enabled" .Values.ingress.backend.serviceName }}
+{{- /*
+  One public origin (Q6): the backend's paths go to the backend Service, everything else to this frontend. Prefix
+  matching is element-wise, so /api matches /api and /api/x but not /apiary. The Ingress controller must forward Host and must
+  not add, rewrite or strip Set-Cookie, X-CSRF-Token or Origin (docs/hosting.md).
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "atlas-web.fullname" . }}
+  labels:
+    {{- include "atlas-web.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          {{- range .Values.ingress.backendPaths }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $backend }}
+                port:
+                  number: {{ $.Values.ingress.backend.servicePort }}
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "atlas-web.fullname" . }}
+                port:
+                  name: http
+{{- end }}
