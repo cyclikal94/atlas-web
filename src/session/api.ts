@@ -1,0 +1,316 @@
+import type { CapabilityIssue } from "../app/capabilities";
+import type { createApiClient } from "../lib/api-client";
+import type { AtlasError } from "../lib/api-client/problem";
+import type { StampedFailure } from "./kernel/types";
+import type { NeutralStateId } from "./model/neutral-state";
+import type {
+  AccountId,
+  AttemptMethod,
+  DeviceId,
+  DeviceSummary,
+  Epoch,
+  IsoInstant,
+  OperationId,
+  Seq,
+  SessionId,
+} from "./model/types";
+import type {
+  ApiCompatibility,
+  ConsentTicket,
+  Identity,
+  SessionView,
+} from "./model/view";
+import type { LocalWorkSummary } from "./ports/deletion";
+
+export { StampedRequestError } from "./kernel/types";
+/** The public types of the session module (plan section 6). Nothing here is implementation. */
+export type {
+  ApiCompatibility,
+  CapabilityIssue,
+  ConsentTicket,
+  Identity,
+  LocalWorkSummary,
+  NeutralStateId,
+  SessionView,
+  StampedFailure,
+};
+
+export interface Store<T> {
+  get(): T;
+  subscribe(listener: () => void): () => void;
+}
+
+// ---- the stamped wrapper (decision D-06) --------------------------------------------------------------------------
+export type RequestClass = "ordinary" | "recovery"; // verification and operation are internal
+export type StampedFetch = (request: Request) => Promise<Response>;
+export interface StampedApi {
+  /**
+   * Every call is one request with its own activity, lease and (ordinary and recovery) issue lock. It resolves to a
+   * Response, or throws StampedRequestError from a closed set. Network errors, aborts and time-outs rethrow as the
+   * platform's own error.
+   */
+  /**
+   * The typed client. Each call resolves with its result, decoded, only if the durable record still names `account` and
+   * `epoch` AFTER that decode (the client library decodes the Response after the stamped fetch returns it, and that is
+   * asynchronous); otherwise it rejects with `StampedRequestError("stale")`. A caller that asks for `parseAs: "stream"`
+   * reads the body itself, after the call.
+   */
+  client(
+    klass: RequestClass,
+    account: AccountId,
+    epoch: Epoch,
+  ): ReturnType<typeof createApiClient>;
+  /**
+   * A stamped `fetch`: the Response it returns has been read in full and was validated against the record when it was
+   * handed back. Decoding it (`json()` is asynchronous) is the caller's work, so a caller that applies the decoded value
+   * checks the stamp again inside its own atomic commit (docs/session.md, obligation 4).
+   */
+  fetchFor(klass: RequestClass, account: AccountId, epoch: Epoch): StampedFetch;
+}
+
+// ---- attempts (WEB-08b builds registration and OIDC on this; the password method is delivered here) -----------------
+export type BeginResult =
+  | { kind: "started"; handle: AttemptHandle }
+  /** A gating attempt exists: it is resolved first (offline: state 1c's offline variant). */
+  | { kind: "resolving" }
+  /** Waited 20 s for atlas-auth: "Another tab is finishing a sign-in. Try again." */
+  | { kind: "lock_timeout" }
+  | { kind: "storage_unavailable" };
+export interface AttemptHandle {
+  readonly epoch: Epoch;
+  readonly method: AttemptMethod;
+  /** Never the verifier. */
+  readonly challenge: string;
+}
+export type ExchangeResult =
+  | {
+      kind: "grant";
+      grant: string;
+      grant_expires_at: IsoInstant;
+      account_id: AccountId;
+    }
+  | { kind: "error"; error: AtlasError | null; status: number }
+  | { kind: "network_failure" };
+export type AttemptOutcome =
+  | { kind: "settled"; account_id: AccountId; epoch: Epoch }
+  /** An Atlas 4xx or 503 device_capacity: definitive. */
+  | { kind: "refused"; error: AtlasError; definitive: true }
+  /** The exchange (login, registration) failed before any activation: nothing was sent that could set a cookie. */
+  | { kind: "exchange_failed"; status: number | null }
+  /** Discarded silently: the epoch is no longer the latest. */
+  | { kind: "superseded" }
+  /** indeterminate or verifying: resolution continues. */
+  | { kind: "gating" }
+  | {
+      kind: "not_started";
+      reason:
+        | "hidden"
+        | "lock_timeout"
+        | "closing_write_gave_up"
+        | "attempt_gone"
+        | "wipe_pending";
+    };
+export interface Attempts {
+  begin(method: AttemptMethod): Promise<BeginResult>;
+  /** Password path: runs step 2 (exchange) then continues to steps 3 to 5. Never returns the password or verifier. */
+  signInWithPassword(
+    handle: AttemptHandle,
+    credentials: { username: string; password: string },
+  ): Promise<AttemptOutcome>;
+  /** For WEB-08b: feed a result the caller obtained itself (registration; OIDC start). */
+  completeExchange(
+    handle: AttemptHandle,
+    result: ExchangeResult,
+  ): Promise<AttemptOutcome>;
+  /** OIDC: phase `redirected`, releases atlas-attempt-<epoch>. */
+  markRedirected(handle: AttemptHandle): Promise<void>;
+  /** A stale grant is discarded with no effect. */
+  landing(fragment: {
+    grant: string;
+    attempt: string;
+    account: string;
+  }): Promise<AttemptOutcome>;
+  /** The person cancelled before activation; only for non-gating phases. */
+  cancel(handle: AttemptHandle): Promise<void>;
+}
+
+// ---- operations --------------------------------------------------------------------------------------------------
+export interface SessionSummary {
+  id: SessionId;
+  device_id: DeviceId;
+  created_at: IsoInstant;
+  expires_at: IsoInstant;
+  authentication: "local" | "oidc";
+  current: boolean;
+}
+export interface DeviceRow {
+  id: DeviceId;
+  last_synced_at: IsoInstant | null;
+  active_sessions: number;
+  current: boolean;
+  state_token: string;
+  summary: DeviceSummary;
+}
+export interface DevicesRead {
+  devices: readonly DeviceRow[];
+}
+export type OperationStart =
+  | { kind: "started"; operation_id: OperationId }
+  /** The recount at confirmation differs from what the person saw (D-18); nothing is fenced. */
+  | { kind: "reconfirm"; unsynced: LocalWorkSummary }
+  | {
+      kind: "refused";
+      reason:
+        | "operation_pending"
+        | "not_settled"
+        | "attempt_gating"
+        | "no_current_device"
+        | "offline"
+        | "fence_exists"
+        | "closing_write_gave_up"
+        | "storage_unavailable";
+    };
+export type Result<T> =
+  | { ok: true; value: T }
+  | {
+      ok: false;
+      error: "offline" | "auth_state" | "not_sent" | "closed" | "http";
+      status?: number;
+      atlasError?: AtlasError;
+    };
+export interface Operations {
+  /**
+   * How many unsynced changes and recovery copies this browser holds for the settled account, as the confirmation dialog
+   * shows them (a count, and a digest that `logout` and `retireThisDevice` recheck). Null when nobody is settled.
+   * WEB-09a supplies the real port; until then the default reports none.
+   */
+  summariseLocalWork(): Promise<LocalWorkSummary | null>;
+  readDevices(): Promise<Result<DevicesRead>>;
+  listSessions(): Promise<Result<{ sessions: readonly SessionSummary[] }>>;
+  /** An ordinary DELETE without a key; refuses `settled.session_id` (use `logout`). */
+  revokeOtherSession(id: SessionId): Promise<Result<"revoked" | "gone">>;
+  retireOtherDevice(
+    read: DeviceRow,
+  ): Promise<Result<"confirmed_applied" | "superseded" | "rejected_stale">>;
+  /** Both raise the fence and envelope in ONE closing-write transaction, then send. The person has confirmed. */
+  logout(confirmation: { unsynced: LocalWorkSummary }): Promise<OperationStart>;
+  retireThisDevice(confirmation: {
+    read: DeviceRow;
+    unsynced: LocalWorkSummary;
+  }): Promise<OperationStart>;
+  changePassword(input: {
+    current: string;
+    next: string;
+  }): Promise<Result<"changed">>;
+  unlinkOidc(): Promise<Result<"unlinked">>;
+  /** Re-drives every operation fence: at boot, on online, on becoming visible, after a settlement. */
+  resume(options?: { force?: boolean }): void;
+  readonly pending: Store<
+    readonly {
+      account_id: AccountId;
+      op: "logout" | "retire_device";
+      operation_id: OperationId;
+    }[]
+  >;
+}
+
+// ---- recovery (WEB-09b) ------------------------------------------------------------------------------------------
+export interface RecoveryHandle {
+  readonly account: AccountId;
+  readonly epoch: Epoch;
+  readonly s: Seq;
+}
+export type RecoveryBegin =
+  | { kind: "eligible"; handle: RecoveryHandle }
+  | {
+      kind: "ineligible";
+      reason:
+        | "no_fence"
+        | "operation_pending"
+        | "credential_unverified"
+        | "current_epoch_entry"
+        | "attempt_gating"
+        | "unresolved_lease"
+        | "stale"
+        | "offline";
+    };
+export interface Recovery {
+  begin(account: AccountId): Promise<RecoveryBegin>;
+  finish(
+    handle: RecoveryHandle,
+  ): Promise<
+    | "cleared"
+    | "not_eligible"
+    | "rerun"
+    | "superseded"
+    | "lock_timeout"
+    | "failed"
+  >;
+  /** WEB-09b reports the job's phase so the neutral states 2 and 3 can show; it changes no protection. */
+  report(phase: "catching_up" | "failed" | null): void;
+}
+
+// ---- the canonical deletion procedure (WEB-04 7.8) -----------------------------------------------------------------
+export type WipeOutcome =
+  | { kind: "deleted" }
+  | { kind: "absent" }
+  | { kind: "superseded_incarnation" }
+  | { kind: "awaiting_consent"; count: number }
+  /** The prompt the choice was made on is no longer the current one (resolved, replaced or changed): nothing was applied. */
+  | { kind: "prompt_superseded" }
+  | {
+      kind: "retry_later";
+      reason: "delete_error" | "blocked" | "adapter_missing";
+    };
+export interface Wipe {
+  /** Runs the canonical procedure inside atlas-delete:<account>. Re-enterable at step 0; idempotent. */
+  run(account: AccountId, operationId: OperationId): Promise<WipeOutcome>;
+  /**
+   * The person's answer to the renewed-consent prompt they were shown, named by the ticket in the view. It is applied only
+   * while that prompt is still the page's current one and its ledger entry is unchanged (same account, same operation, same
+   * consent digest); otherwise nothing is applied, the prompt is re-derived and `prompt_superseded` is returned.
+   */
+  resolveConsent(
+    ticket: ConsentTicket,
+    choice: "delete" | "keep",
+  ): Promise<WipeOutcome>;
+  /** Boot: re-enter every outstanding ledger entry. */
+  recoverPending(): Promise<void>;
+}
+
+/** A fact the person should be told, once (the UI shows it and dismisses it). Carries no account data. */
+export type SessionNotice = {
+  id: string;
+  /** A logout or retirement was confirmed applied while the person had signed in again to recover: still signed in. */
+  kind: "remained_signed_in";
+};
+
+export interface Session {
+  readonly bootId: string;
+  readonly notices: Store<readonly SessionNotice[]>;
+  dismissNotice(id: string): void;
+  start(options?: { beforeStart?: () => void }): Promise<void>;
+  /** Tests and HMR only. */
+  dispose(): void;
+  readonly view: Store<SessionView>;
+  readonly identity: Store<Identity | null>;
+  readonly api: StampedApi;
+  readonly attempts: Attempts;
+  readonly operations: Operations;
+  readonly recovery: Recovery;
+  readonly wipe: Wipe;
+  readonly compat: Store<ApiCompatibility>;
+  /** Actions the neutral states offer. */
+  readonly actions: NeutralActions;
+}
+
+export interface NeutralActions {
+  /** Ask the composition root to lead to a sign-in surface (WEB-08b); until then it explains that none exists yet. */
+  signIn(): void;
+  /** Re-run whatever the state is waiting on (a user retry resets the back-off). */
+  retry(): void;
+  reload(): void;
+  reviewDevice(): void;
+  /** The choice on the renewed-consent prompt; `ticket` is the one the view carried with that prompt. */
+  consent(choice: "delete" | "keep", ticket: ConsentTicket): void;
+}

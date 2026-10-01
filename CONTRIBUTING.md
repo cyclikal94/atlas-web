@@ -30,23 +30,28 @@ Browser, backend and proxy share **one origin**. Backend paths (`/api`, `/health
 src/app/                 the application: capability check, neutral screens, router, providers, shell/
 src/components/ui/       the shared primitives (the only place portals may be created)
 src/design/              tokens mirror, theme logic, contrast maths
+src/session/             the account lifecycle: who is signed in, whether a request may be sent, whether anything may be shown. Import only `src/session` (its index),
+                         never a deeper path; docs/session.md. `adapters/protected-surface.ts` is the only importer of the gate
 src/protected-surface/   gate, title, portal container (the gate is importable only from src/session and src/fixture)
 src/features/            one folder per destination; placeholders until WEB-10 to WEB-14 replace them
 src/lib/                 api-client (the only place that may reach the network), backend-routes, sync-chip, form-recovery
-src/fixture/             the fixture entry and controls gallery: never packaged
+src/fixture/             the fixture entry, controls gallery, session harness and neutral-state pages: never packaged
 src/styles/              tokens.css (the source of the theme), fonts, base
 lint/                    the guardrail rules; docs/lint-rules.md
 deploy/, charts/         nginx configs, Compose, the Helm chart
 scripts/                 checks, packaging, smoke tests
-tests/                   Vitest (jsdom), Playwright (tests/e2e), lint fixtures
+tests/                   Vitest (jsdom), Playwright (tests/e2e, tests/integration), lint fixtures; tests/support/session is the fake platform
+scripts/integration/     the released-backend integration harness and delaying proxy (pnpm test:integration)
 ```
 
 ## Rules of the road
 
 - **Scope.** WEB-07 owns the foundation. Authentication and account lifecycle are WEB-08; storage and sync are WEB-09; service-worker registration and update UX are WEB-14.
-  Do not pull them forward. `src/lib/db/` stays empty.
+  Do not pull them forward. `src/lib/db/` stays empty. WEB-08a (the session primitives) is in `src/session`; registration, OIDC and the sign-in form are WEB-08b, the lifecycle traces on a rendered
+  cache are WEB-08c.
 - **The protected root.** `#protected-root` starts inert and hidden. Everything that renders account data lives inside it, including dialogs and tooltips (use the shared
-  `Dialog` and `Tooltip`, which render into the registered portal container). Do not lift the gate; that is WEB-08a's reviewed lifecycle. Lint rules R1 to R6 enforce the mechanical parts.
+  `Dialog` and `Tooltip`, which render into the registered portal container). Do not lift the gate; only the session's `act` does, through `src/session/adapters/protected-surface.ts`. Lint rules R1 to R12 enforce the mechanical parts
+  (R7 to R12 by `scripts/check-session-conventions.mjs`, run by `pnpm lint`). Never send a request except through `session.api`; never read `atlas-auth` except in `src/session`.
 - **Tokens.** Colours come from tokens (`bg-canvas`, `text-ink-2`, `border-field-edge`). Never write a hex value in a component. Change a token in `src/styles/tokens.css`, mirror it in
   `src/design/tokens.ts`, add or adjust its declared pairs in `src/design/contrast-pairs.ts`, and run `pnpm docs:tokens`. The contrast test fails on any declared pair below its minimum.
   Inputs use `field-edge` and fill only from `canvas` or `panel` (Q17).
@@ -60,7 +65,7 @@ tests/                   Vitest (jsdom), Playwright (tests/e2e), lint fixtures
 
 ## Evidence
 
-Checks write to `.agtx/evidence/WEB-07/<check-id>/` (git-ignored). A check that cannot run is recorded as **not run, with the reason**, never as passed.
+Checks write to `.agtx/evidence/WEB-07/<check-id>/` and, for the session module, `.agtx/evidence/WEB-08a/{design,profiling,fixture,integration,lint}/` (git-ignored). A check that cannot run is recorded as **not run, with the reason**, never as passed.
 
 ## Contract
 

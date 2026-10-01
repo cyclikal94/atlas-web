@@ -211,10 +211,19 @@ describe("WF-SETTINGS-05 Appearance", () => {
     expect((await axe(document.body)).violations).toEqual([]);
   });
 
-  test("Settings home lists only Appearance and does not pull in account or calendar settings", async () => {
+  // WEB-08a: the home list is the registry (src/features/settings/sections.ts). WEB-07's placeholder listed Appearance
+  // alone; WEB-08a adds Sessions & devices and Your data, and still no calendar (WEB-13a's entry) or export.
+  test("Settings home lists the registered sections and does not pull in calendar or export settings", async () => {
     await mount("/settings");
     const main = screen.getByRole("main");
-    expect(within(main).getAllByRole("link")).toHaveLength(1);
-    expect(main.textContent).not.toMatch(/export|calendar|account/i);
+    expect(
+      within(main)
+        .getAllByRole("link")
+        .map((link) => link.textContent?.split(/(?<=[a-z])(?=[A-Z])/)[0]),
+    ).toHaveLength(3);
+    expect(
+      within(main).getByRole("link", { name: "Appearance" }),
+    ).toBeInTheDocument();
+    expect(main.textContent).not.toMatch(/export|calendar/i);
   });
 });

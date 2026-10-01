@@ -194,4 +194,56 @@ describe("probeCapabilities (functional)", () => {
       { id: "web-locks", reason: "absent" },
     ]);
   });
+
+  describe("the atlas-auth canary (WEB-08a, matrix 3.7.2 item 3)", () => {
+    test("a canary that writes passes, and runs only after the throwaway database opened", async () => {
+      const calls: string[] = [];
+      const report = await probeCapabilities(
+        env({
+          canary: async () => {
+            calls.push("canary");
+            return true;
+          },
+        }),
+        200,
+      );
+      expect(report).toEqual({ ok: true, issues: [] });
+      expect(calls).toEqual(["canary"]);
+    });
+
+    test.each([
+      ["answers false", async () => false],
+      ["rejects", async () => Promise.reject(new Error("quota"))],
+      ["never answers", () => new Promise<boolean>(() => undefined)],
+    ])("a canary that %s is an indexeddb failure", async (_name, canary) => {
+      const report = await probeCapabilities(env({ canary }), 50);
+      expect(report.ok).toBe(false);
+      expect(report.issues).toEqual([{ id: "indexeddb", reason: "failed" }]);
+    });
+
+    test("when IndexedDB itself failed the canary is not run and the failure is reported once", async () => {
+      let ran = false;
+      const report = await probeCapabilities(
+        env({
+          indexedDB: {
+            open: () => {
+              throw new Error("private window");
+            },
+            deleteDatabase: () => ({}) as IDBOpenDBRequest,
+          },
+          canary: async () => {
+            ran = true;
+            return true;
+          },
+        }),
+        200,
+      );
+      expect(ran).toBe(false);
+      expect(report.issues).toEqual([{ id: "indexeddb", reason: "failed" }]);
+    });
+
+    test("no canary supplied: behaviour is exactly WEB-07's", async () => {
+      expect((await probeCapabilities(env(), 200)).ok).toBe(true);
+    });
+  });
 });

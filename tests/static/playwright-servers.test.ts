@@ -11,6 +11,9 @@ const NAMES = [
   "fixture-firefox",
   "production-webkit",
   "fixture-webkit",
+  "integration-chromium",
+  "integration-firefox",
+  "integration-webkit",
 ];
 const cli = (...args: string[]) => ["node", "playwright", "test", ...args];
 
@@ -72,6 +75,20 @@ describe("which servers a run needs", () => {
     expect(needed("--project=fixture-*", "-g", "loop")).toEqual(["fixture"]);
   });
 
+  test("an integration-only run needs neither of our servers (its runner starts the released backend and its own preview)", () => {
+    expect(needed("--project=integration-chromium")).toEqual([]);
+    expect(
+      needed("--project", "integration-firefox", "integration-webkit"),
+    ).toEqual([]);
+    expect(needed("--project=integration-*")).toEqual([]);
+  });
+
+  test("an integration project mixed with a fixture project still needs the fixture server", () => {
+    expect(
+      needed("--project=integration-chromium", "--project=fixture-chromium"),
+    ).toEqual(["fixture"]);
+  });
+
   test("a mixed selection needs both, and names match case-insensitively", () => {
     expect(
       needed(
@@ -106,8 +123,14 @@ describe("the real playwright.config.ts", () => {
     vi.resetModules();
     const { default: config } = await import("../../playwright.config");
     const list = config.webServer;
+    // The production preview is started through scripts/preview-with-stub-backend.mjs (`vite preview` with a stub backend behind its
+    // proxy, because the app now asks the server for its API version at boot); it is still "the production preview" here.
     return (Array.isArray(list) ? list : list ? [list] : []).map(
-      (entry) => entry.command.replace(/^pnpm /, "").split(" ")[0],
+      (entry) =>
+        entry.command
+          .replace(/^node scripts\/preview-with-stub-backend\.mjs/, "preview")
+          .replace(/^pnpm /, "")
+          .split(" ")[0],
     );
   }
 

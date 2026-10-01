@@ -21,7 +21,9 @@ failing one, because Web Locks, IndexedDB and `inert` underpin the cross-tab acc
 A browser that lacks or fails one of these shows the **compatibility screen** (`src/app/CompatibilityScreen.tsx`) and nothing else. It states which
 requirement failed and the supported browsers. It offers no way past it and shows nothing about any account. The check is presence (synchronous) and a
 functional probe with a 3 s time-out: a lock request that must be granted at once, and a throwaway IndexedDB database that must open and is deleted.
-A probe that hangs counts as a failure. WEB-08a extends the check with the `atlas-auth` canary and the `api_version` check.
+A probe that hangs counts as a failure. The check also runs the **`atlas-auth` canary** (one small write of the durable sign-in record, the same 3 s bound): a page that cannot write it cannot
+coordinate, so it never exposes anything and shows the compatibility screen. The server's `api_version` is checked separately, after boot, by `GET /health`; a version outside `>=0.27.0 <0.28.0` (derived
+from `contract-pin.json`) or a missing one replaces the sign-in entry with a compatibility screen, and never hides an account that is already settled.
 
 Older major versions are not blocked by user-agent sniffing: capability detection decides. The policy is about what is tested, not what is refused.
 
@@ -62,6 +64,11 @@ Recorded honestly, with what each result does and does not prove.
   Appearance radio group is checked in full on Chromium and WebKit and only for the wrap from the first control on Firefox. Real Firefox has **not** been checked (WEB-15).
 - **Offline in WebKit is not verified here.** Playwright's WebKit cannot emulate offline for service-worker navigations, so the offline deep-link test is skipped
   there. Real Safari offline behaviour is WEB-14a and WEB-15 evidence.
+- **WEB-08a, the session module** (`docs/session.md`). Real Chromium, Firefox and WebKit (one Playwright version each) ran: the production `atlas-auth` IndexedDB store (creation-order visibility across two pages, atomic abort,
+  `versionchange`, a malformed record failing closed), Web Locks (FIFO per name, grant only after release, release when the holder closes, abort before grant, `query()` never called), `BroadcastChannel` hints,
+  and the level-0 gate with real `inert` and the real top layer; the screens in both themes at 320, 390, 768 and 1280 px with axe including contrast; and the integration set against the released backend
+  (`pnpm test:integration`). **Limitations:** visibility is driven by overriding `document.visibilityState` and dispatching `visibilitychange`, not by the engine's own event; Playwright contexts are ephemeral
+  profiles, so `durability: 'strict'` is not measured against a real on-disk profile; real freeze, bfcache and assistive technology are WEB-08c; real Safari and devices are WEB-15.
 - **Not exercised:** previous-major versions of any browser, real Android and iOS devices, the installed web app, HTTPS with a real certificate (so the `__Host-` cookie
   was observed only through the documented loopback variant, `atlas_session`).
 

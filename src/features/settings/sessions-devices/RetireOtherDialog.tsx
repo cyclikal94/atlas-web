@@ -1,0 +1,101 @@
+import { useState } from "react";
+import { Button } from "../../../components/ui/button";
+import { Dialog } from "../../../components/ui/dialog";
+import { List } from "../../../components/ui/list";
+import { type DeviceRow, useSession } from "../../../session";
+import { untilSent } from "./until-sent";
+import { summaryLines } from "./wipe-copy";
+
+/**
+ * Retiring ANOTHER device (SA-10). It touches nothing on this browser, so there is no unsynced-work warning. The call
+ * carries the approved-state token of the read that supplied this row; a device that changed since answers
+ * `rejected_stale`, which is never retried against changed state. PROPOSED copy (gap G-5).
+ */
+export const RETIRE_OTHER_TITLE = "Retire this other device?";
+export const RETIRE_OTHER_BODY =
+  "Retiring a device signs it out and frees its place for syncing. It can sign in again later.";
+export const RETIRE_OTHER_STALE =
+  "Something about that device changed before your request was processed, so nothing was removed. Check the device and try again if you still want to retire it.";
+export const RETIRE_OTHER_FAILED =
+  "Couldn't retire this device — please try again.";
+
+export function RetireOtherDialog({
+  device,
+  onDone,
+  onClose,
+}: {
+  device: DeviceRow;
+  /** Called after a confirmed retirement, so the list can reload. */
+  onDone(): void;
+  onClose(): void;
+}) {
+  const session = useSession();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const confirm = async () => {
+    setBusy(true);
+    setMessage(null);
+    const result = await untilSent(() =>
+      session.operations.retireOtherDevice(device),
+    ).catch(() => null);
+    setBusy(false);
+    if (result?.ok) {
+      if (result.value === "rejected_stale") {
+        setMessage(RETIRE_OTHER_STALE);
+        return;
+      }
+      onDone();
+      onClose();
+      return;
+    }
+    const requestId =
+      result && !result.ok ? result.atlasError?.request_id : undefined;
+    setMessage(
+      requestId
+        ? `${RETIRE_OTHER_FAILED} Request ID: ${requestId}`
+        : RETIRE_OTHER_FAILED,
+    );
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={RETIRE_OTHER_TITLE}
+      initialFocusSelector="[data-keep]"
+      footer={
+        <>
+          <Button variant="secondary" data-keep="" onClick={onClose}>
+            Keep this device
+          </Button>
+          {busy ? (
+            <Button variant="primary" disabled reason="Working…">
+              Retire device
+            </Button>
+          ) : (
+            <Button variant="primary" onClick={() => void confirm()}>
+              Retire device
+            </Button>
+          )}
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3 text-[14px] leading-[1.6] text-ink-1">
+        <p>{RETIRE_OTHER_BODY}</p>
+        <List className="flex flex-col gap-1 text-ink-2">
+          {summaryLines(device.summary).map((line) => (
+            <li key={line} className="ml-5 list-disc">
+              {line}
+            </li>
+          ))}
+        </List>
+        {message ? (
+          <p data-refusal="" className="text-ink-2">
+            {message}
+          </p>
+        ) : null}
+      </div>
+    </Dialog>
+  );
+}

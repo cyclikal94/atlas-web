@@ -135,7 +135,7 @@ if [ "$MODE" = "--stub" ]; then
     answer="$(body -H "Origin: $ORIGIN" -H "X-CSRF-Token: token-123" -H "Cookie: atlas_session=abc" "$ORIGIN$path")"
     expect_contains "backend path $path reaches the backend with the path unchanged" "$answer" "\"uri\":\"$path\""
   done
-  expect_eq "/health?probe=1 is answered by the backend" "$(body "$ORIGIN/health?probe=1")" '{"status":"ok"}'
+  expect_eq "/health?probe=1 is answered by the backend" "$(body "$ORIGIN/health?probe=1")" '{"api_version":"0.27.0","status":"ok"}'
   answer="$(body -H "Origin: $ORIGIN" -H "X-CSRF-Token: token-123" -H "Cookie: atlas_session=abc" "$ORIGIN/api/x")"
   expect_contains "Host reaches the backend as the public host" "$answer" "\"host\":\"127.0.0.1:$PORT\""
   expect_contains "Origin reaches the backend unchanged" "$answer" "\"origin\":\"$ORIGIN\""

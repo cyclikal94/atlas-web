@@ -20,11 +20,34 @@ export function setNeutralTitle(doc: Document = document): void {
   doc.title = NEUTRAL_TITLE;
 }
 
-/** No-op while the protected root is gated; the neutral title stays. */
+const titleOf = (parts: readonly string[]): string =>
+  [...parts, NEUTRAL_TITLE].join(" · ");
+
+/** The destination a gated page asked for; page memory only, applied when the gate lifts over the SAME tree. */
+let pendingParts: readonly string[] | null = null;
+
+/** No-op while the protected root is gated; the neutral title stays and the request is remembered. */
 export function setProtectedTitle(
   parts: readonly string[],
   doc: Document = document,
 ): void {
-  if (protectedSurfaceIsGated(doc)) return;
-  doc.title = [...parts, NEUTRAL_TITLE].join(" · ");
+  if (protectedSurfaceIsGated(doc)) {
+    pendingParts = parts;
+    return;
+  }
+  pendingParts = null;
+  doc.title = titleOf(parts);
+}
+
+/** Called by the session after it lifts the gate: shows the title the tree asked for while it was gated. */
+export function restoreProtectedTitle(doc: Document = document): void {
+  if (pendingParts && !protectedSurfaceIsGated(doc)) {
+    doc.title = titleOf(pendingParts);
+    pendingParts = null;
+  }
+}
+
+/** Called when the tree is unmounted: a title requested by a tree that no longer exists is discarded. */
+export function forgetProtectedTitle(): void {
+  pendingParts = null;
 }

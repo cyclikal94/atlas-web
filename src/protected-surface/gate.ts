@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { commitSync } from "../components/ui/sync-commit";
 
 /**
  * Gate primitives for #protected-root (account-lifecycle matrix, section 3.7). WEB-07 ships only the mechanism.
@@ -38,4 +39,17 @@ export function mountProtectedTree(
   const reactRoot = createRoot(root);
   reactRoot.render(node);
   return () => reactRoot.unmount();
+}
+
+/**
+ * The same, committed SYNCHRONOUSLY: when this returns the tree is in the DOM and its effects have run. `act` (matrix
+ * 3.6.3) mounts and releases the exposure lock in one synchronous step, so the mount cannot be left to React's scheduler.
+ */
+export function mountProtectedTreeSync(
+  root: HTMLElement,
+  node: ReactNode,
+): () => void {
+  const reactRoot = createRoot(root);
+  commitSync(() => reactRoot.render(node));
+  return () => commitSync(() => reactRoot.unmount());
 }

@@ -21,6 +21,17 @@ export interface Announcer {
 
 const AnnouncerContext = createContext<Announcer | null>(null);
 
+/**
+ * The page has one protected tree and so one announcer. The session's protected-surface adapter, which is not a React
+ * component, reaches it through this bridge: it clears the live regions when the level-0 gate closes, and it announces
+ * that the window now shows a different account (matrix 3.7.2). Both are no-ops when no tree is mounted.
+ */
+let active: Announcer | null = null;
+export const liveRegions: Announcer = {
+  announce: (message, politeness) => active?.announce(message, politeness),
+  clearAll: () => active?.clearAll(),
+};
+
 export function AnnouncerProvider({ children }: { children: ReactNode }) {
   const polite = useRef<HTMLDivElement>(null);
   const assertive = useRef<HTMLDivElement>(null);
@@ -55,18 +66,20 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
     }
   }, [cancel]);
 
-  useEffect(() => {
-    const pending = frames.current;
-    return () => {
-      for (const frame of pending.values()) window.cancelAnimationFrame(frame);
-      pending.clear();
-    };
-  }, []);
-
   const value = useMemo<Announcer>(
     () => ({ announce, clearAll }),
     [announce, clearAll],
   );
+
+  useEffect(() => {
+    const pending = frames.current;
+    active = value;
+    return () => {
+      if (active === value) active = null;
+      for (const frame of pending.values()) window.cancelAnimationFrame(frame);
+      pending.clear();
+    };
+  }, [value]);
   return (
     <AnnouncerContext.Provider value={value}>
       {children}

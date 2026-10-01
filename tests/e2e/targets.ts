@@ -56,12 +56,17 @@ export function neededTargets(
   if (!filters) return new Set(TARGETS);
   const matchers = filters.map(matcher);
   const needed = new Set<Target>();
+  let matchedAny = false;
   for (const name of projectNames) {
     const lower = name.toLocaleLowerCase();
     if (!matchers.some((matches) => matches(lower))) continue;
+    matchedAny = true;
     for (const target of TARGETS) {
       if (lower.startsWith(`${target}-`)) needed.add(target);
     }
   }
-  return needed.size > 0 ? needed : new Set(TARGETS);
+  // A selection that matched only `integration-*` projects needs no server of ours: scripts/integration/run.mjs starts its own
+  // (the released backend, the delaying proxy and a fixture preview) and passes the URL in.
+  if (matchedAny) return needed;
+  return new Set(TARGETS);
 }

@@ -1,0 +1,390 @@
+{
+  "hold-only-guard": [
+    {
+      "family": "detection",
+      "params": {
+        "klass": "ordinary",
+        "d4": "commit",
+        "d0B": 10,
+        "daA": 0,
+        "order": "A_first",
+        "pageState": "visible"
+      },
+      "violation": "V2"
+    },
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S3",
+        "order": "victim_first",
+        "release": "after",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V5"
+    }
+  ],
+  "no-boundary-guard": [
+    {
+      "family": "detection",
+      "params": {
+        "klass": "ordinary",
+        "d4": "abort",
+        "d0B": 0,
+        "daA": 0,
+        "order": "A_first",
+        "pageState": "visible"
+      },
+      "violation": "V2"
+    },
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S3",
+        "order": "victim_first",
+        "release": "after",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V5"
+    }
+  ],
+  "refused-lease-kept": [
+    {
+      "family": "detection",
+      "params": {
+        "klass": "ordinary",
+        "d4": "abort",
+        "d0B": 0,
+        "daA": 0,
+        "order": "A_first",
+        "pageState": "visible"
+      },
+      "violation": "W2"
+    },
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S3",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "recovery",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "W2"
+    }
+  ],
+  "closing-no-issue-wait": [
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "foreign",
+        "write": "activating",
+        "stage": "S3",
+        "order": "victim_first",
+        "release": "after",
+        "d1": "unbounded",
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V5"
+    }
+  ],
+  "closing-no-cancel-unsent": [
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S3",
+        "order": "victim_first",
+        "release": "after",
+        "d1": "unbounded",
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V5"
+    }
+  ],
+  "closing-not-refused": [
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S3",
+        "order": "write_first",
+        "release": "during",
+        "d1": "unbounded",
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V5"
+    }
+  ],
+  "issue-lock-released-early": [
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "foreign",
+        "write": "activating",
+        "stage": "S5",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V5"
+    }
+  ],
+  "cancelled-keeps-issue-lock": [
+    {
+      "family": "detection",
+      "params": {
+        "klass": "ordinary",
+        "d4": "abort",
+        "d0B": 0,
+        "daA": 0,
+        "order": "A_first",
+        "pageState": "visible"
+      },
+      "violation": "P-D/W3"
+    },
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S2",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "P-D/W3"
+    }
+  ],
+  "no-ex1": [
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "foreign",
+        "write": "activating",
+        "stage": "S1",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "P-G"
+    },
+    {
+      "family": "exposure",
+      "params": {
+        "d0N": 0,
+        "d0L": 10,
+        "d1": 10,
+        "d2": "unbounded",
+        "d3": 0,
+        "da": "unbounded",
+        "order": "N_first",
+        "d4": "abort",
+        "klass": "ordinary",
+        "pageType": "resumed"
+      },
+      "violation": "V2"
+    }
+  ],
+  "no-ex2-exposure": [
+    {
+      "family": "foreign",
+      "params": {
+        "victim": "exposure",
+        "writer": "foreign",
+        "write": "activating",
+        "stage": "S2",
+        "order": "write_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V3"
+    }
+  ],
+  "no-ex3": [
+    {
+      "family": "exposure",
+      "params": {
+        "d0N": 0,
+        "d0L": 0,
+        "d1": 0,
+        "d2": 0,
+        "d3": 0,
+        "da": 0,
+        "order": "N_first",
+        "d4": "abort",
+        "klass": "ordinary",
+        "pageType": "cold_offline"
+      },
+      "violation": "V1"
+    }
+  ],
+  "exposure-lock-released-before-act": [
+    {
+      "family": "request",
+      "params": {
+        "victim": "request",
+        "writer": "foreign",
+        "write": "activating",
+        "stage": "S1",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V4"
+    },
+    {
+      "family": "own",
+      "params": {
+        "victim": "exposure",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S1",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V4"
+    }
+  ],
+  "cancel-only-reserved": [
+    {
+      "family": "own",
+      "params": {
+        "victim": "exposure",
+        "writer": "own",
+        "write": "operation",
+        "stage": "S1",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "unbounded"
+      },
+      "violation": "V3"
+    }
+  ],
+  "completion-accepted-for-cancelled": [
+    {
+      "family": "own",
+      "params": {
+        "victim": "exposure",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S3",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "after_write"
+      },
+      "violation": "V4"
+    },
+    {
+      "family": "stage",
+      "params": {
+        "stage": "S3",
+        "trigger": "hide",
+        "delivery": "during_newer_covering",
+        "pageType": "resumed"
+      },
+      "violation": "V4"
+    }
+  ],
+  "no-closing-block": [
+    {
+      "family": "own",
+      "params": {
+        "victim": "exposure",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S2",
+        "order": "write_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "V3"
+    }
+  ],
+  "cancel-keeps-exposure-lock": [
+    {
+      "family": "own",
+      "params": {
+        "victim": "exposure",
+        "writer": "own",
+        "write": "activating",
+        "stage": "S2",
+        "order": "victim_first",
+        "release": "during",
+        "d1": 0,
+        "klass": "ordinary",
+        "outcome": "commit",
+        "d3": "zero"
+      },
+      "violation": "P-D/W1"
+    },
+    {
+      "family": "stage",
+      "params": {
+        "stage": "S2",
+        "trigger": "hide",
+        "delivery": "before_newer",
+        "pageType": "resumed"
+      },
+      "violation": "P-D/W1"
+    }
+  ]
+}

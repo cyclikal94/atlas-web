@@ -10,6 +10,7 @@
       "!playwright-report",
       "!test-results",
       "!dist-fixture",
+      "!tests/.mutants",
       "!.agents",
       "!.agtx",
       "!.claude",
@@ -34,7 +35,11 @@
   },
   "overrides": [
     {
-      "includes": ["src/**", "!src/lib/api-client/**"],
+      "includes": [
+        "src/**",
+        "!src/lib/api-client/boundary.ts",
+        "!src/lib/api-client/unstamped.ts"
+      ],
       "plugins": ["./lint/no-raw-network.grit"]
     },
     {
@@ -63,6 +68,7 @@
         "src/**",
         "!src/components/ui/announcer.tsx",
         "!src/components/ui/neutral-gate.tsx",
+        "!src/components/ui/neutral-state.tsx",
         "!src/components/ui/sync-status.tsx"
       ],
       "plugins": ["./lint/live-region-registry.grit"]

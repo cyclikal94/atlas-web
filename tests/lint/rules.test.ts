@@ -69,13 +69,37 @@ const fixtures: Fixture[] = [
     expected: [["R1", 2]],
   },
   {
-    name: "R1: the api-client folder may reach the network",
-    path: "src/lib/api-client/wrapper.ts",
+    name: "R1 (narrowed): only boundary.ts and unstamped.ts of the api-client may reach the network",
+    path: "src/lib/api-client/boundary.ts",
     code: lines(
       'export const a = () => fetch("/x");',
       "export const b = () => new XMLHttpRequest();",
     ),
     expected: [],
+  },
+  {
+    name: "R1 (narrowed): unstamped.ts may reach the network",
+    path: "src/lib/api-client/unstamped.ts",
+    code: lines('export const a = () => fetch("/x");'),
+    expected: [],
+  },
+  {
+    name: "R1 (narrowed): the rest of the api-client folder is covered like any other code",
+    path: "src/lib/api-client/wrapper.ts",
+    code: lines(
+      'export const a = () => fetch("/x");',
+      "export const b = () => new XMLHttpRequest();",
+    ),
+    expected: [
+      ["R1", 1],
+      ["R1", 2],
+    ],
+  },
+  {
+    name: "R1 (narrowed): the session kernel is covered",
+    path: "src/session/kernel/leak.ts",
+    code: lines('export const a = () => globalThis.fetch("/x");'),
+    expected: [["R1", 1]],
   },
   {
     name: "R1: similarly named things are not caught",
@@ -213,7 +237,7 @@ const fixtures: Fixture[] = [
     ),
     expected: [1, 2, 3, 4, 5].map((line) => ["R6", line] as [string, number]),
   },
-  ...["announcer", "sync-status", "neutral-gate"].map(
+  ...["announcer", "sync-status", "neutral-gate", "neutral-state"].map(
     (name): Fixture => ({
       name: `R6: ${name} may hold live regions`,
       path: `src/components/ui/${name}.tsx`,

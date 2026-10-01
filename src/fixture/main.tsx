@@ -2,6 +2,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { useSyncExternalStore } from "react";
 import { ProtectedProviders } from "../app/providers";
 import { createAppRouter } from "../app/router";
+import { SessionNotices } from "../app/SessionNotices";
 import { ShellEnvProvider } from "../app/shell/env";
 import type { ChipDestination, SyncStatusModel } from "../lib/sync-chip";
 import {
@@ -9,7 +10,11 @@ import {
   liftGate,
   mountProtectedTree,
 } from "../protected-surface/gate";
+import { SessionProvider } from "../session";
 import { ControlsGallery } from "./ControlsGallery";
+import { mountNeutralPage } from "./neutral-page";
+import { fixtureSession } from "./session-double";
+import type { SessionHarness } from "./session-harness/main";
 import "../styles/index.css";
 
 /**
@@ -48,6 +53,8 @@ declare global {
     __atlasFixture?: {
       setSync(next: SyncStatusModel): void;
       opened: ChipDestination[];
+      /** Present only on the `/__session` harness page (src/fixture/session-harness). */
+      session?: SessionHarness;
     };
   }
 }
@@ -56,45 +63,61 @@ window.__atlasFixture = { setSync: store.set, opened };
 document.documentElement.dataset.atlasFixture = ATLAS_FIXTURE_ONLY;
 
 const router = createAppRouter();
+const session = fixtureSession(params);
 
 function FixtureApp() {
   const syncModel = useSyncExternalStore(store.subscribe, store.get);
   return (
-    <ShellEnvProvider
-      value={{
-        syncModel,
-        onOpenSync: (destination) => {
-          opened.push(destination);
-        },
-        // On the icon rail there is room for one 44px control: a compact form with its own accessible name.
-        accountSlot: ({ collapsed }) =>
-          collapsed ? (
-            <div
-              role="img"
-              aria-label="Fixture account"
-              className="flex size-11 items-center justify-center rounded-nav text-[13px] font-semibold text-ink-2"
-            >
-              F
-            </div>
-          ) : (
-            <div className="px-2.5 py-2 text-[13px] text-ink-2">
-              Fixture account
-            </div>
-          ),
-      }}
-    >
-      <RouterProvider router={router} />
-    </ShellEnvProvider>
+    <SessionProvider session={session}>
+      <ShellEnvProvider
+        value={{
+          syncModel,
+          onOpenSync: (destination) => {
+            opened.push(destination);
+          },
+          // On the icon rail there is room for one 44px control: a compact form with its own accessible name.
+          accountSlot: ({ collapsed }) =>
+            collapsed ? (
+              <div
+                role="img"
+                aria-label="Fixture account"
+                className="flex size-11 items-center justify-center rounded-nav text-[13px] font-semibold text-ink-2"
+              >
+                F
+              </div>
+            ) : (
+              <div className="px-2.5 py-2 text-[13px] text-ink-2">
+                Fixture account
+              </div>
+            ),
+        }}
+      >
+        <RouterProvider router={router} />
+        <SessionNotices />
+      </ShellEnvProvider>
+    </SessionProvider>
   );
 }
 
-const root = getProtectedRoot();
-// The real lifecycle (WEB-08a) decides when the boot gate goes; the fixture clears it and lifts the gate at once.
-document.getElementById("neutral-root")?.replaceChildren();
-liftGate(root);
-mountProtectedTree(
-  root,
-  <ProtectedProviders>
-    {location.pathname === "/__controls" ? <ControlsGallery /> : <FixtureApp />}
-  </ProtectedProviders>,
-);
+if (location.pathname === "/__neutral") {
+  // One neutral state or the resume gate, for rendered checks (src/fixture/neutral-page.tsx).
+  mountNeutralPage(params);
+} else if (location.pathname === "/__session") {
+  // The session harness (real adapters, real engine, no backend): see src/fixture/session-harness.
+  void import("./session-harness/main");
+} else {
+  const root = getProtectedRoot();
+  // The real lifecycle (WEB-08a) decides when the boot gate goes; the fixture clears it and lifts the gate at once.
+  document.getElementById("neutral-root")?.replaceChildren();
+  liftGate(root);
+  mountProtectedTree(
+    root,
+    <ProtectedProviders>
+      {location.pathname === "/__controls" ? (
+        <ControlsGallery />
+      ) : (
+        <FixtureApp />
+      )}
+    </ProtectedProviders>,
+  );
+}

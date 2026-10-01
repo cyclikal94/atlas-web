@@ -8,13 +8,13 @@
   "tolerance": 0.1,
   "baseline": {
     "dist": {
-      "initial_js_gzip": 69878,
-      "css_gzip": 6344,
+      "initial_js_gzip": 99814,
+      "css_gzip": 6708,
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 137936,
-      "css_gzip": 6344,
+      "initial_js_gzip": 170002,
+      "css_gzip": 6708,
       "fonts": 83736
     }
   }

@@ -26,6 +26,10 @@ const browsers = [
     : []),
 ];
 
+// ATLAS_INTEGRATION_URL is set by scripts/integration/run.mjs only: the specs in tests/integration run against the RELEASED backend
+// behind the delaying proxy. Without it they skip themselves and are reported as not run, so `pnpm test:e2e` is unaffected.
+const INTEGRATION = process.env.ATLAS_INTEGRATION_URL ?? "http://127.0.0.1:9";
+
 const projects = browsers.flatMap(({ name, device }) => [
   {
     name: `production-${name}`,
@@ -36,6 +40,12 @@ const projects = browsers.flatMap(({ name, device }) => [
     name: `fixture-${name}`,
     testMatch: /fixture\..*\.spec\.ts/,
     use: { ...device, baseURL: FIXTURE },
+  },
+  {
+    name: `integration-${name}`,
+    testDir: "./tests/integration",
+    testMatch: /integration\..*\.spec\.ts/,
+    use: { ...device, baseURL: INTEGRATION },
   },
 ]);
 const needed = neededTargets(
@@ -56,7 +66,8 @@ export default defineConfig({
       ? []
       : [
           {
-            command: "pnpm preview --port 4173 --strictPort",
+            // The production app asks the server for its API version at boot; a stub backend answers it (scripts/preview-with-stub-backend.mjs).
+            command: "node scripts/preview-with-stub-backend.mjs --port 4173",
             url: PRODUCTION,
             reuseExistingServer: false,
           },

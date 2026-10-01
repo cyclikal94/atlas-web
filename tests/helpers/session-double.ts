@@ -1,0 +1,114 @@
+import { vi } from "vitest";
+import type { Operations, Session, Store } from "../../src/session";
+
+/**
+ * A `Session` for component tests: every operation is a spy with a harmless default, and any of them can be replaced. It
+ * is a double of the PUBLIC interface only, so it proves what a screen does with each answer and nothing about the protocol
+ * (that is the fake-world suites' job).
+ */
+export const store = <T>(value: T): Store<T> => ({
+  get: () => value,
+  subscribe: () => () => undefined,
+});
+
+export function sessionDouble(
+  operations: Partial<Operations> = {},
+  overrides: Partial<Session> = {},
+): Session {
+  const base: Operations = {
+    summariseLocalWork: vi.fn(async () => ({
+      count: 0,
+      items: [],
+      digest: "0",
+    })),
+    readDevices: vi.fn(async () => ({
+      ok: true as const,
+      value: { devices: [] },
+    })),
+    listSessions: vi.fn(async () => ({
+      ok: true as const,
+      value: { sessions: [] },
+    })),
+    revokeOtherSession: vi.fn(async () => ({
+      ok: true as const,
+      value: "revoked" as const,
+    })),
+    retireOtherDevice: vi.fn(async () => ({
+      ok: true as const,
+      value: "confirmed_applied" as const,
+    })),
+    logout: vi.fn(async () => ({
+      kind: "started" as const,
+      operation_id: "op-1",
+    })),
+    retireThisDevice: vi.fn(async () => ({
+      kind: "started" as const,
+      operation_id: "op-1",
+    })),
+    changePassword: vi.fn(async () => ({
+      ok: true as const,
+      value: "changed" as const,
+    })),
+    unlinkOidc: vi.fn(async () => ({
+      ok: true as const,
+      value: "unlinked" as const,
+    })),
+    resume: vi.fn(),
+    pending: store([]),
+  };
+  const fail = (name: string) => () => {
+    throw new Error(`session double: ${name} was not expected`);
+  };
+  return {
+    bootId: "boot",
+    notices: store([]),
+    dismissNotice: vi.fn(),
+    start: vi.fn(async () => undefined),
+    dispose: vi.fn(),
+    view: store({ kind: "displaying" as const, account_id: "acct", epoch: 1 }),
+    identity: store({ account_id: "acct", epoch: 1, session_id: "sess-1" }),
+    api: {
+      client: fail("api.client"),
+      fetchFor: fail("api.fetchFor"),
+    } as never,
+    attempts: {} as never,
+    operations: { ...base, ...operations },
+    recovery: {} as never,
+    wipe: {} as never,
+    compat: store({ status: "supported" as const, version: "0.27.0" }),
+    actions: {
+      signIn: vi.fn(),
+      retry: vi.fn(),
+      reload: vi.fn(),
+      reviewDevice: vi.fn(),
+      consent: vi.fn(),
+    },
+    ...overrides,
+  };
+}
+
+export const sessionRow = (over: Record<string, unknown> = {}) => ({
+  id: "sess-1",
+  device_id: "dev-1",
+  created_at: "2026-09-30T09:00:00.000Z",
+  expires_at: "2026-10-30T09:00:00.000Z",
+  authentication: "local" as const,
+  current: true,
+  ...over,
+});
+
+export const deviceRow = (over: Record<string, unknown> = {}) => ({
+  id: "dev-1",
+  last_synced_at: "2026-09-30T11:00:00.000Z",
+  active_sessions: 2,
+  current: true,
+  state_token: "tok-1",
+  summary: {
+    sessions: 2,
+    native_handoffs: 0,
+    notification_subscriptions: 1,
+    pending_sign_ins: 0,
+    sync_registered: true,
+  },
+  ...over,
+});

@@ -1,8 +1,9 @@
 /**
  * Browser capability check (Q12). Atlas requires Web Locks, IndexedDB, the HTML inert attribute and a secure
  * context. There is no fallback for a missing or failing capability: coordination between tabs and the
- * account-data deletion and recovery guarantees depend on them. WEB-08a extends this with the atlas-auth
- * canary and the api_version check.
+ * account-data deletion and recovery guarantees depend on them. WEB-08a adds the `atlas-auth` canary: one write of the
+ * durable sign-in record, without which a page cannot coordinate (matrix 3.7.2 item 3). The api_version check is a
+ * separate, network-bound step and is not part of this synchronous-then-bounded probe.
  */
 
 export type CapabilityId =
@@ -26,6 +27,11 @@ export interface CapabilityEnv {
   locks: Pick<LockManager, "request"> | undefined;
   indexedDB: Pick<IDBFactory, "open" | "deleteDatabase"> | undefined;
   hasInert: boolean;
+  /**
+   * One small write of `boot.last_boot_at` to the `atlas-auth` store, supplied by the composition root. A false answer, a
+   * rejection or no answer within the bound is reported as `indexeddb: failed`.
+   */
+  canary?: () => Promise<boolean>;
 }
 
 export function browserEnv(): CapabilityEnv {
@@ -159,8 +165,14 @@ export async function probeCapabilities(
   if (!absent.has("indexeddb") && env.indexedDB) {
     const factory = env.indexedDB;
     probes.push(
-      withTimeout(indexedDbWork(factory), timeoutMs).then((result) => {
-        if (result !== true) issues.push({ id: "indexeddb", reason: "failed" });
+      withTimeout(indexedDbWork(factory), timeoutMs).then(async (result) => {
+        if (result !== true) {
+          issues.push({ id: "indexeddb", reason: "failed" });
+          return;
+        }
+        if (!env.canary) return;
+        const canary = await withTimeout(env.canary(), timeoutMs);
+        if (canary !== true) issues.push({ id: "indexeddb", reason: "failed" });
       }),
     );
   }
