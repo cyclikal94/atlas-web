@@ -19,6 +19,15 @@ export const FORBIDDEN = [
       "data.captureRequest",
     ],
   },
+  {
+    why: "the production sync leader, its recovery job and their plans (WEB-09b) are a dynamic import of the boot shim",
+    patterns: [
+      "data.acquireOwnership",
+      "data.activateSnapshot",
+      "data.captureRecoveryRequest",
+      "data.recovery_request",
+    ],
+  },
 ];
 
 /** The relative paths of the scripts `index.html` loads eagerly. */

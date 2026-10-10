@@ -5,8 +5,8 @@ import type { RawAnswer, UnstampedApi } from "./transport";
 import { apiUrl } from "./wire";
 
 /**
- * The small unstamped surface (matrix 3.6.2 step 1): the login-family exchanges, `activate`, `activate/cancel` and
- * `/health`. They carry no credential of the settled account that the server uses, and none of their answers can
+ * The small unstamped surface (matrix 3.6.2 step 1): the login-family exchanges (password, registration, OIDC start), the
+ * invitation preview, `activate`, `activate/cancel` and `/health`. They carry no credential of the settled account that the server uses, and none of their answers can
  * report on the settled session's validity; the attempt record is their durable cover.
  */
 async function read(
@@ -44,6 +44,7 @@ export function createUnstampedApi(
     ).then((response) => read(response, signal));
   return {
     exchange: (path, body, signal) => post(path, body, signal),
+    preview: (body, signal) => post("/registration/preview", body, signal),
     activate: (body, signal) =>
       post("/browser-sessions/activate", body, signal),
     cancel: (body, signal) =>

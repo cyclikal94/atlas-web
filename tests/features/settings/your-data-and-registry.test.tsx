@@ -98,12 +98,12 @@ describe("WF-SETTINGS-06 Your data (F-DATA)", () => {
 });
 
 describe("the Settings registry (F-REG)", () => {
-  // EXTENDED BY WEB-13a: the calendar entry is appended (owner WEB-13, order 60: between Appearance and Your data); the three
-  // earlier entries are unchanged, in the same order.
-  test("Sessions & devices and Your data are registered by WEB-08, Appearance by WEB-07, in order", () => {
+  // Calendar registration is retained alongside the authentication and existing Settings entries.
+  test("Signing in, Sessions & devices, Appearance, Calendars and Your data are registered in order", () => {
     expect(
       settingsSections().map((s) => [s.id, s.label, s.owner, s.route]),
     ).toEqual([
+      ["signing-in", "Signing in", "WEB-08", "signing-in"],
       ["sessions", "Sessions & devices", "WEB-08", "sessions"],
       ["appearance", "Appearance", "WEB-07", "appearance"],
       ["calendars", "Calendars", "WEB-13", "calendars"],
@@ -134,9 +134,9 @@ describe("the Settings registry (F-REG)", () => {
     for (const section of settingsSections()) {
       cleanup();
       await mount(`/settings/${section.route}`);
-      if (section.id === "appearance")
+      if (section.id === "appearance" || section.id === "signing-in")
         expect(
-          await screen.findByRole("dialog", { name: "Appearance" }),
+          await screen.findByRole("dialog", { name: section.label }),
         ).toBeInTheDocument();
       else
         expect(

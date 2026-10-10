@@ -1,6 +1,7 @@
 import { recogniseAtlasError } from "../../lib/api-client/problem";
 import { apiUrl } from "../../lib/api-client/wire";
 import type {
+  AccountSummary,
   DeviceRow,
   DevicesRead,
   OperationStart,
@@ -157,6 +158,118 @@ export async function handleOperationAnswer(
       return { kind: "outcome", outcome: "rejected_stale", inflight };
   }
   return unresolved();
+}
+
+/**
+ * One stamped ordinary request, answered through the two validations a public call needs. A clean answer first passes
+ * `releaseResponse`, the boundary every stamped request shares with the typed client: its body is read there (unless the
+ * caller needs only the status) and the answer is handed on only if the durable record still names the identity the call was
+ * made under (G4). The call's own decode (`read`) is asynchronous too, and it runs AFTER that, so the result is validated a
+ * second time, at the record, after the last decode (`sealResult`): nothing that can be overtaken by another page's
+ * transition remains between the verdict and the promise the application holds. `closed` means the identity moved on, at
+ * either check: the answer belongs to an identity that is no longer settled, and nothing of it is returned. The surrender,
+ * hold and lease retirement of the answer's first step (`handleOrdinaryAnswer`) run before, and unchanged, for a
+ * self-revoking answer too. A call that needs only the status (`readBody: false`) decodes nothing, so the first check is
+ * its last.
+ */
+export async function ordinaryCall<T>(
+  k: Kernel,
+  method: string,
+  path: string,
+  options: {
+    headers?: Record<string, string>;
+    body?: unknown;
+    selfRevoking?: "password" | "unlink";
+    /** False for a call that needs only the status: the body is discarded, not read. Default true. */
+    readBody?: boolean;
+  },
+  read: (response: Response) => Result<T> | Promise<Result<T>>,
+): Promise<Result<T>> {
+  const identity = k.identity.get();
+  if (!identity) return { ok: false, error: "not_sent" };
+  const request = new Request(apiUrl(path), {
+    method,
+    headers: {
+      ...(options.body !== undefined
+        ? { "content-type": "application/json" }
+        : {}),
+      ...options.headers,
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+  const outcome = await send<OrdinaryAnswer>(k, {
+    klass: "ordinary",
+    account: identity.account_id,
+    epoch: identity.epoch,
+    request,
+    selfRevoking: options.selfRevoking,
+    onAnswer: handleOrdinaryAnswer,
+  });
+  switch (outcome.kind) {
+    case "answered": {
+      if (outcome.value.kind !== "response")
+        return { ok: false, error: "auth_state" };
+      try {
+        const released = await releaseResponse(
+          k,
+          identity.account_id,
+          identity.epoch,
+          outcome.value.response,
+          { readBody: options.readBody },
+        );
+        const result = read(released);
+        return options.readBody === false
+          ? await result
+          : await sealResult(k, identity.account_id, identity.epoch, result);
+      } catch (error) {
+        // `stale`: the identity moved on, so the answer is not for this caller. Anything else is the body's read: the
+        // connection dropped after the headers.
+        return {
+          ok: false,
+          error: error instanceof StampedRequestError ? "closed" : "offline",
+        };
+      }
+    }
+    case "failed":
+      return { ok: false, error: "offline" };
+    case "closed":
+    case "closed_unresolved":
+    case "stale":
+      return { ok: false, error: "closed" };
+    default:
+      return { ok: false, error: "not_sent" };
+  }
+}
+
+export async function jsonResult<T>(
+  response: Response,
+  check: (value: unknown) => T | null,
+): Promise<Result<T>> {
+  if (!response.ok) {
+    let atlas = null;
+    try {
+      atlas = recogniseAtlasError(
+        response.headers.get("content-type"),
+        await response.json(),
+      );
+    } catch {
+      atlas = null;
+    }
+    return {
+      ok: false,
+      error: "http",
+      status: response.status,
+      atlasError: atlas ?? undefined,
+    };
+  }
+  try {
+    const parsed = check(await response.json());
+    return parsed === null
+      ? { ok: false, error: "http", status: response.status }
+      : { ok: true, value: parsed };
+  } catch {
+    return { ok: false, error: "http", status: response.status };
+  }
 }
 
 export interface PendingOperation {
@@ -492,117 +605,20 @@ export class OperationService implements Operations {
   }
 
   // ---- ordinary self-revoking and list calls ---------------------------------------------------------------------
-  /**
-   * One stamped ordinary request, answered through the two validations a public call needs. A clean answer first passes
-   * `releaseResponse`, the boundary every stamped request shares with the typed client: its body is read there (unless the
-   * caller needs only the status) and the answer is handed on only if the durable record still names the identity the call was
-   * made under (G4). The call's own decode (`read`) is asynchronous too, and it runs AFTER that, so the result is validated a
-   * second time, at the record, after the last decode (`sealResult`): nothing that can be overtaken by another page's
-   * transition remains between the verdict and the promise the application holds. `closed` means the identity moved on, at
-   * either check: the answer belongs to an identity that is no longer settled, and nothing of it is returned. The surrender,
-   * hold and lease retirement of the answer's first step (`handleOrdinaryAnswer`) run before, and unchanged, for a
-   * self-revoking answer too. A call that needs only the status (`readBody: false`) decodes nothing, so the first check is
-   * its last.
-   */
-  private async ordinary<T>(
+  private ordinary<T>(
     method: string,
     path: string,
-    options: {
-      headers?: Record<string, string>;
-      body?: unknown;
-      selfRevoking?: "password" | "unlink";
-      /** False for a call that needs only the status: the body is discarded, not read. Default true. */
-      readBody?: boolean;
-    },
+    options: Parameters<typeof ordinaryCall>[3],
     read: (response: Response) => Result<T> | Promise<Result<T>>,
   ): Promise<Result<T>> {
-    const { k } = this;
-    const identity = k.identity.get();
-    if (!identity) return { ok: false, error: "not_sent" };
-    const request = new Request(apiUrl(path), {
-      method,
-      headers: {
-        ...(options.body !== undefined
-          ? { "content-type": "application/json" }
-          : {}),
-        ...options.headers,
-      },
-      body:
-        options.body === undefined ? undefined : JSON.stringify(options.body),
-    });
-    const outcome = await send<OrdinaryAnswer>(k, {
-      klass: "ordinary",
-      account: identity.account_id,
-      epoch: identity.epoch,
-      request,
-      selfRevoking: options.selfRevoking,
-      onAnswer: handleOrdinaryAnswer,
-    });
-    switch (outcome.kind) {
-      case "answered": {
-        if (outcome.value.kind !== "response")
-          return { ok: false, error: "auth_state" };
-        try {
-          const released = await releaseResponse(
-            k,
-            identity.account_id,
-            identity.epoch,
-            outcome.value.response,
-            { readBody: options.readBody },
-          );
-          const result = read(released);
-          return options.readBody === false
-            ? await result
-            : await sealResult(k, identity.account_id, identity.epoch, result);
-        } catch (error) {
-          // `stale`: the identity moved on, so the answer is not for this caller. Anything else is the body's read: the
-          // connection dropped after the headers.
-          return {
-            ok: false,
-            error: error instanceof StampedRequestError ? "closed" : "offline",
-          };
-        }
-      }
-      case "failed":
-        return { ok: false, error: "offline" };
-      case "closed":
-      case "closed_unresolved":
-      case "stale":
-        return { ok: false, error: "closed" };
-      default:
-        return { ok: false, error: "not_sent" };
-    }
+    return ordinaryCall(this.k, method, path, options, read);
   }
 
-  private async json<T>(
+  private json<T>(
     response: Response,
     check: (value: unknown) => T | null,
   ): Promise<Result<T>> {
-    if (!response.ok) {
-      let atlas = null;
-      try {
-        atlas = recogniseAtlasError(
-          response.headers.get("content-type"),
-          await response.json(),
-        );
-      } catch {
-        atlas = null;
-      }
-      return {
-        ok: false,
-        error: "http",
-        status: response.status,
-        atlasError: atlas ?? undefined,
-      };
-    }
-    try {
-      const parsed = check(await response.json());
-      return parsed === null
-        ? { ok: false, error: "http", status: response.status }
-        : { ok: true, value: parsed };
-    } catch {
-      return { ok: false, error: "http", status: response.status };
-    }
+    return jsonResult(response, check);
   }
 
   readDevices(): Promise<Result<DevicesRead>> {
@@ -700,11 +716,36 @@ export class OperationService implements Operations {
     );
   }
 
-  unlinkOidc(): Promise<Result<"unlinked">> {
+  /** `GET /me`: an ordinary stamped read that shares `listSessions`' decode path, so it is released and sealed the same way. */
+  readAccount(): Promise<Result<AccountSummary>> {
+    return this.ordinary("GET", "/me", {}, (response) =>
+      this.json(response, (value) => {
+        if (typeof value !== "object" || value === null) return null;
+        const body = value as Record<string, unknown>;
+        const issuers = body.oidc_issuers;
+        if (
+          typeof body.id !== "string" ||
+          typeof body.username !== "string" ||
+          typeof body.has_password !== "boolean" ||
+          !Array.isArray(issuers) ||
+          !issuers.every((issuer) => typeof issuer === "string")
+        )
+          return null;
+        return {
+          id: body.id,
+          username: body.username,
+          has_password: body.has_password,
+          oidc_issuers: [...issuers] as string[],
+        };
+      }),
+    );
+  }
+
+  unlinkOidc(issuer: string): Promise<Result<"unlinked">> {
     return this.ordinary(
       "DELETE",
       "/oidc/identities",
-      { selfRevoking: "unlink", readBody: false },
+      { body: { issuer }, selfRevoking: "unlink", readBody: false },
       (response): Result<"unlinked"> =>
         response.status >= 200 && response.status < 300
           ? { ok: true, value: "unlinked" }

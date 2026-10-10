@@ -33,12 +33,16 @@ export function Button({
   ...rest
 }: ButtonProps) {
   const reasonId = useId();
+  // A disabled control is described by its reason FIRST and then by anything the caller associated with it (a consequence, a rule).
+  const extra = rest["aria-describedby"];
   const button = (
     <button
       {...rest}
       type={type}
       disabled={disabled}
-      aria-describedby={disabled ? reasonId : rest["aria-describedby"]}
+      aria-describedby={
+        disabled ? (extra ? `${reasonId} ${extra}` : reasonId) : extra
+      }
       className={`atlas-transition inline-flex min-h-11 items-center justify-center gap-2 rounded-control px-4 py-2.5 text-[13.5px] disabled:opacity-60 ${VARIANT[variant]}`}
     >
       {children}

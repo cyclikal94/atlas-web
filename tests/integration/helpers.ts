@@ -13,9 +13,40 @@ import type { Session } from "../../src/session";
  * They skip themselves, and are reported as not run, unless scripts/integration/run.mjs started that stack.
  */
 export const ENABLED = Boolean(process.env.ATLAS_INTEGRATION_URL);
-export type Who = "alice" | "bob" | "carol" | "dave" | "erin";
+export type Who =
+  | "alice"
+  | "bob"
+  | "carol"
+  | "dave"
+  | "erin"
+  | "frank"
+  | "grace"
+  | "heidi"
+  | "ivan"
+  | "judy"
+  | "kate"
+  | "liam"
+  | "mia"
+  | "nora"
+  | "olga"
+  | "pete"
+  | "quinn";
 export const ACCOUNTS: Record<Who, { username: string; password: string }> =
   JSON.parse(process.env.ATLAS_INTEGRATION_ACCOUNTS ?? "{}");
+/** Standalone signup invitations made by the released backend's own `invite` command; each token works once. */
+export const INVITATIONS: Array<{
+  id: string;
+  token: string;
+  expires_at: string;
+}> = JSON.parse(process.env.ATLAS_INTEGRATION_INVITATIONS || "[]");
+/** The stub OpenID Connect provider, when the stack configured it (the backend is then configured with its issuer). */
+export const OIDC: {
+  issuer: string;
+  control: string;
+  client_id: string;
+} | null = process.env.ATLAS_INTEGRATION_OIDC
+  ? JSON.parse(process.env.ATLAS_INTEGRATION_OIDC)
+  : null;
 const CONTROL = process.env.ATLAS_INTEGRATION_CONTROL ?? "";
 export const ORIGIN = process.env.ATLAS_INTEGRATION_URL ?? "";
 export const BACKEND = process.env.ATLAS_INTEGRATION_BACKEND ?? "";
@@ -29,6 +60,7 @@ export interface ProxyRule {
   action:
     | "hold"
     | "hold_request"
+    | "buffer_request"
     | "delay"
     | "drop_after_forward"
     /** WEB-13a: destroy the browser's connection after `ms` while the backend request carries on (an answer lost mid-execution). */
@@ -73,6 +105,37 @@ export const proxy = {
   log: () => call<ProxyLogEntry[]>("GET", "/log"),
 };
 
+/** The stub provider's control port (hold, release, deny, choose the approved subject). Throws when the stack has no provider. */
+async function providerCall<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  if (!OIDC)
+    throw new Error(
+      "this stack did not configure the stub OpenID Connect provider",
+    );
+  const response = await fetch(`${OIDC.control}${path}`, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return (await response.json()) as T;
+}
+export const provider = {
+  /** The subject the next authorisations approve. Unique per test: an identity links to ONE account. */
+  subject: (sub: string) => providerCall("POST", "/subject", { sub }),
+  hold: (on = true) => providerCall("POST", "/hold", { on }),
+  deny: (on = true) => providerCall("POST", "/deny", { on }),
+  release: () => providerCall<{ released: number }>("POST", "/release"),
+  waiting: async () =>
+    (await providerCall<{ waiting: number }>("GET", "/waiting")).waiting,
+  reset: async () => {
+    await providerCall("POST", "/hold", { on: false });
+    await providerCall("POST", "/deny", { on: false });
+  },
+};
+
 const allowedStatuses = new WeakMap<TestInfo, Set<number>>();
 /** The console guard of tests/e2e/helpers.ts, with the one thing an integration run needs: a test DECLARES the HTTP statuses it provokes. */
 export const test = base.extend<{
@@ -88,6 +151,7 @@ export const test = base.extend<{
         "not run: scripts/integration/run.mjs did not start the backend, the proxy and the preview",
       );
       if (ENABLED) await proxy.reset();
+      if (ENABLED && OIDC) await provider.reset();
       await use(undefined);
     },
     { auto: true },
@@ -173,9 +237,12 @@ declare global {
 export async function bootHarness(
   context: BrowserContext,
   route = "/today",
+  hash = "",
 ): Promise<Page> {
   const page = await context.newPage();
-  await page.goto(`/__session?route=${encodeURIComponent(route)}`);
+  // `hash` is the URL fragment a link carries (an invitation token). It is kept in the address, as in production, until boot's
+  // first statement reads and strips it.
+  await page.goto(`/__session?route=${encodeURIComponent(route)}${hash}`);
   await exposeSession(page);
   return page;
 }
@@ -284,12 +351,14 @@ export async function raw(
     body?: unknown;
     cookie?: string;
     headers?: Record<string, string>;
+    /** The Origin header: the preview origin by default, a different one to test the check, `null` to send none. */
+    origin?: string | null;
   } = {},
 ) {
   const response = await fetch(`${API}${path}`, {
     method,
     headers: {
-      origin: ORIGIN,
+      ...(options.origin === null ? {} : { origin: options.origin ?? ORIGIN }),
       ...(options.body !== undefined
         ? { "content-type": "application/json" }
         : {}),
@@ -500,15 +569,28 @@ export const watchLift = (page: Page) =>
 export const liftedAt = (page: Page) =>
   page.evaluate(() => window.__t.liftedAt as number | null);
 
-/** Append a measurement to the profiling evidence (P-5 and friends). */
+/**
+ * Append a measurement to the profiling evidence. The directory is `ATLAS_MEASUREMENTS_DIR` (the runner sets it beside the
+ * evidence directory it was given), so a task's measurements never land in an earlier task's folder; the WEB-08a path is the
+ * default only for a run that does not say.
+ */
 import { appendFileSync, mkdirSync } from "node:fs";
 export function recordMeasurement(
   name: string,
   value: Record<string, unknown>,
 ): void {
-  mkdirSync(".agtx/evidence/WEB-08a/profiling", { recursive: true });
+  const dir =
+    process.env.ATLAS_MEASUREMENTS_DIR || ".agtx/evidence/WEB-08a/profiling";
+  mkdirSync(dir, { recursive: true });
+  // The engine that produced the figure, so three engines' lines are never mistaken for one (`test.info()` exists only in a test).
+  let engine: string | undefined;
+  try {
+    engine = test.info().project.name.replace("integration-", "");
+  } catch {
+    engine = undefined;
+  }
   appendFileSync(
-    ".agtx/evidence/WEB-08a/profiling/measurements.jsonl",
-    `${JSON.stringify({ name, at: new Date().toISOString(), ...value })}\n`,
+    `${dir}/measurements.jsonl`,
+    `${JSON.stringify({ name, engine, at: new Date().toISOString(), ...value })}\n`,
   );
 }

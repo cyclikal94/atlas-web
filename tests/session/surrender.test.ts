@@ -193,7 +193,10 @@ describe("surrender first (check 2)", () => {
   test("OIDC unlink records reason `unlinked`", async () => {
     const f = await newWorld();
     const l = await signedInPage(f);
-    await answerOnce(f, () => l.page.session.operations.unlinkOidc());
+    f.server.accounts.get(l.account)?.oidcIssuers.push(f.server.oidcIssuer);
+    await answerOnce(f, () =>
+      l.page.session.operations.unlinkOidc(f.server.oidcIssuer),
+    );
     expect(stateOf(f).fences[l.account]?.[0]).toMatchObject({
       reason: "unlinked",
     });

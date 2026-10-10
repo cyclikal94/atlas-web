@@ -7,6 +7,10 @@
 // 1-based; absent = every match). Actions:
 //   hold                 forward now, deliver the response only after POST /release/<id> (the backend has already committed)
 //   hold_request         do NOT forward until POST /release/<id>
+//   buffer_request       read the WHOLE request now, hold it, and forward it on POST /release/<id> EVEN IF THE CLIENT HAS GONE (it
+//                        models a gateway or queue that has accepted a request and delivers it late). `hold_request` cannot: it keeps
+//                        the request unread, so a client that times out and aborts takes the request with it. A reset or a stop
+//                        DISCARDS buffered requests instead of forwarding them, so no late write lands in a later test.
 //   delay                deliver the response after `ms`
 //   drop_after_forward   forward, let the backend commit, then destroy the connection (the browser sees it close)
 //   drop_client_after    forward, and after `ms` destroy the BROWSER's connection while the backend request carries on: an answer lost
@@ -53,7 +57,8 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
     const rule = rules.find((r) => !r.spent && match(r, req));
     if (rule && rule.ordinal !== undefined) rule.spent = true;
     if (rule) entry.rule = rule.id;
-    const forward = () => {
+    // `buffered`: the whole request body when it was read ahead of time (`buffer_request`); otherwise it is piped through.
+    const forward = (buffered) => {
       const upstreamReq = httpRequest(
         {
           host: target.hostname,
@@ -83,6 +88,14 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
               return;
             }
             const deliver = (override) => {
+              // The client may have given up (its own time-out) long before a buffered request was released.
+              if (res.destroyed || res.writableEnded) {
+                entry.events.push({
+                  t: Date.now() - entry.at,
+                  event: "client_gone",
+                });
+                return;
+              }
               const status = override?.status ?? upstreamRes.statusCode;
               const headers = override?.headers ?? { ...upstreamRes.headers };
               const payload = override?.body ?? body;
@@ -170,16 +183,18 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
           t: Date.now() - entry.at,
           event: "upstream_error",
         });
+        if (res.destroyed || res.writableEnded) return;
         // An upstream error AFTER the answer began (a reset of a large response, a client that went away) must not throw: the
         // connection is simply ended. Before the answer began, it is a 502.
-        if (res.headersSent || res.writableEnded) {
+        if (res.headersSent) {
           res.destroy();
           return;
         }
         res.writeHead(502, { "content-type": "application/json" });
         res.end("{}");
       });
-      req.pipe(upstreamReq);
+      if (buffered) upstreamReq.end(buffered);
+      else req.pipe(upstreamReq);
     };
     if (rule?.action === "drop_client_after") {
       const timer = setTimeout(() => {
@@ -190,6 +205,24 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
         req.socket.destroy();
       }, rule.ms ?? 0);
       timer.unref?.();
+    }
+    if (rule?.action === "buffer_request") {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        const list = held.get(rule.id) ?? [];
+        list.push({
+          deliver: () => forward(Buffer.concat(chunks)),
+          discard: () => {},
+          entry,
+        });
+        held.set(rule.id, list);
+        entry.events.push({
+          t: Date.now() - entry.at,
+          event: "buffered_request",
+        });
+      });
+      return;
     }
     if (rule?.action === "hold_request") {
       const list = held.get(rule.id) ?? [];
@@ -256,7 +289,7 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
         rules.length = 0;
         log.length = 0;
         for (const list of held.values())
-          for (const item of list) item.deliver();
+          for (const item of list) (item.discard ?? item.deliver)();
         held.clear();
         return json(200, {});
       }
@@ -276,7 +309,8 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
       };
     },
     async stop() {
-      for (const list of held.values()) for (const item of list) item.deliver();
+      for (const list of held.values())
+        for (const item of list) (item.discard ?? item.deliver)();
       await Promise.all(
         [proxy, control].map(
           (s) =>

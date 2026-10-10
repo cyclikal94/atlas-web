@@ -2,6 +2,7 @@ import type { AnyRoute } from "@tanstack/react-router";
 import { buildCalendarsSection } from "../calendars/section";
 import { buildAppearanceSection } from "./appearance-section";
 import { buildSessionsDevicesSection } from "./sessions-devices/section";
+import { buildSigningInSection } from "./signing-in/section";
 import { buildYourDataSection } from "./your-data/section";
 
 /**
@@ -24,6 +25,16 @@ export interface SettingsSection {
 }
 
 const SECTIONS: readonly SettingsSection[] = [
+  {
+    id: "signing-in",
+    label: "Signing in",
+    // Provisional (design gap G-24): the board's "Password, and your corp-sso link" names a provider this client cannot know.
+    description: "Your password and single sign-on link.",
+    route: "signing-in",
+    order: 20,
+    owner: "WEB-08",
+    build: buildSigningInSection,
+  },
   {
     id: "sessions",
     label: "Sessions & devices",

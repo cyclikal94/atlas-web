@@ -14,7 +14,9 @@ import { ProtectedProviders } from "../../src/app/providers";
 import { createAppRouter } from "../../src/app/router";
 import { ShellEnvProvider } from "../../src/app/shell/env";
 import { APPEARANCE_STORAGE_KEY } from "../../src/design/theme";
+import { SessionProvider } from "../../src/session";
 import { installMatchMedia } from "../helpers/match-media";
+import { sessionDouble } from "../helpers/session-double";
 
 afterEach(async () => {
   cleanup();
@@ -33,16 +35,18 @@ beforeEach(() => {
 async function mount(path: string) {
   const router = createAppRouter({ initialPath: path });
   render(
-    <ProtectedProviders>
-      <ShellEnvProvider
-        value={{
-          syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
-          onOpenSync: () => {},
-        }}
-      >
-        <RouterProvider router={router} />
-      </ShellEnvProvider>
-    </ProtectedProviders>,
+    <SessionProvider session={sessionDouble()}>
+      <ProtectedProviders>
+        <ShellEnvProvider
+          value={{
+            syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+            onOpenSync: () => {},
+          }}
+        >
+          <RouterProvider router={router} />
+        </ShellEnvProvider>
+      </ProtectedProviders>
+    </SessionProvider>,
   );
   await screen.findByRole("main", { hidden: true });
   return router;
@@ -223,7 +227,7 @@ describe("WF-SETTINGS-05 Appearance", () => {
       within(main)
         .getAllByRole("link")
         .map((link) => link.textContent?.split(/(?<=[a-z])(?=[A-Z])/)[0]),
-    ).toHaveLength(4);
+    ).toHaveLength(5); // Signing in, Sessions & devices, Appearance, Calendars, Your data.
     expect(
       within(main).getByRole("link", { name: "Appearance" }),
     ).toBeInTheDocument();

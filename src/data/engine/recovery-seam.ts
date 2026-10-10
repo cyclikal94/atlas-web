@@ -1,4 +1,5 @@
 import type { Store } from "../../session";
+import type { RecoveryJobState, ResyncNotice } from "./recovery-job";
 
 /**
  * The seam to WEB-09b's recovery job (plan 5.9). This slice performs the ordinary-phase invalidation transaction and then asks
@@ -18,6 +19,11 @@ export interface RecoverySeam {
   request(reason: RecoveryReason): void;
   /** True while a recovery is running; feeds the chip's "Resyncing" (from the instant the `410` arrived, Q24). */
   readonly active: Store<boolean>;
+  /** WEB-09b's job: its own state, its Q24 notice and the person's acts. The default has none. */
+  readonly state?: Store<RecoveryJobState>;
+  readonly notice?: Store<ResyncNotice | null>;
+  acknowledge?(id: string): void;
+  retryNow?(): void;
 }
 
 const never: Store<boolean> = {

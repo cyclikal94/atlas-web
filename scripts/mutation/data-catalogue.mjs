@@ -1082,8 +1082,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "        if (await hasOtherDisplaying(reader, owner, inWindow, window))\n          others.add(owner);",
-        "        if (false as boolean && (await hasOtherDisplaying(reader, owner, inWindow, window)))\n          others.add(owner);",
+        // RE-ANCHORED by WEB-09b (the window's reconciliation moved into `reconcileEffectWindow`, two spaces shallower): the same defect.
+        "      if (await hasOtherDisplaying(reader, owner, inWindow, window))\n        others.add(owner);",
+        "      if (false as boolean && (await hasOtherDisplaying(reader, owner, inWindow, window)))\n        others.add(owner);",
       ),
   },
   {
@@ -14117,6 +14118,930 @@ export const UNIT = [
         "w.outcomes === outcomes;",
       ),
   },
+  // ---- WEB-09b (10 October 2026): the production leader, the staged snapshot, the recovery job and its budgets ---------------------------
+  {
+    id: "MU-1201",
+    title:
+      "WEB-09b: a staged snapshot page is not admitted by the staging compare-and-set (W22 lists no STG)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-2 to S-7|S-8 the same page requested again/,
+    patch: (t) =>
+      sub(
+        t,
+        '    guards: ["INC", "CLS", "STG", "GEN", "OWN", "EPO"],\n    quota: "cache",\n  },\n  scope: ["cache_staging"],',
+        '    guards: ["INC", "CLS", "GEN", "OWN", "EPO"],\n    quota: "cache",\n  },\n  scope: ["cache_staging"],',
+      ),
+  },
+  {
+    id: "MU-1202",
+    title:
+      "WEB-09b: the STG guard itself compares nothing (a page at another staged position is applied)",
+    file: "src/data/model/guards.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-2 to S-7|S-8 the same page requested again/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (sync.staging_position !== (captured.expectedPosition ?? null))\n      return "position";',
+        '    if (sync.staging_position !== (captured.expectedPosition ?? null) && (false as boolean))\n      return "position";',
+      ),
+  },
+  {
+    id: "MU-1203",
+    title:
+      "WEB-09b: the activation swaps in the staged rows of ANOTHER generation, not those of the attempt it activates",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-9 the final page and the swap|S-11 adopted rows/,
+    patch: (t) =>
+      sub(
+        t,
+        '        "recovery_generation",\n        generation,\n',
+        '        "recovery_generation",\n        generation - 1,\n',
+      ),
+  },
+  {
+    id: "MU-1204",
+    title:
+      "WEB-09b: the activation does not clear the old cache before the swap",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-9 the final page and the swap/,
+    patch: (t) => sub(t, 'writes: [w.clear("cache")],', "writes: [],"),
+  },
+  {
+    id: "MU-1205",
+    title:
+      "WEB-09b: the activation releases receipts NEWER than the snapshot's boundary (content that predates the change)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-12 unsent work is byte-identical/,
+    patch: (t) =>
+      sub(t, "row.receipt_revision <= boundary,", "row.receipt_revision >= 0,"),
+  },
+  {
+    id: "MU-1206",
+    title:
+      "WEB-09b (P-7): the activation's receipt bookkeeping writes the effect rows of UNSENT work too",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-12 unsent work is byte-identical/,
+    // Re-anchored in review cycle 1 (R8): the selection is the same; the `deletes` option it sat beside is gone (the receipt bookkeeping
+    // is no longer made in recovery mode at all). Its tests are the ordinary activation and W26 (S-12), where it now applies.
+    patch: (t) =>
+      sub(t, "        select: acknowledgedOnly,\n      });", "      });"),
+  },
+  {
+    id: "MU-1208",
+    title:
+      "WEB-09b (Q7): an attempt is adopted up to the whole lifetime, without the margin",
+    file: "src/data/model/recovery.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /O-2 at \(and after\) the lifetime/,
+    patch: (t) =>
+      sub(
+        t,
+        "config.snapshotCursorLifetimeMs - config.snapshotAdoptMarginMs",
+        "config.snapshotCursorLifetimeMs",
+      ),
+  },
+  {
+    id: "MU-1209",
+    title:
+      "WEB-09b (case (c)): a restart under a new generation leaves the old generation's staged rows",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /O-2 at \(and after\) the lifetime/,
+    patch: (t) =>
+      sub(
+        t,
+        '        writes: [w.clear("cache_staging")],\n        sync: {\n          ...sync,\n          ...withoutAttemptStreaks(sync),\n          owner,',
+        "        writes: [],\n        sync: {\n          ...sync,\n          ...withoutAttemptStreaks(sync),\n          owner,",
+      ),
+  },
+  {
+    id: "MU-1210",
+    title:
+      "WEB-09b (trace 5): a page's success resets the whole-attempt counter (a healthy page one keeps the loop going for ever)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /trace 5/,
+    patch: (t) =>
+      sub(
+        t,
+        "    delta_error_streak: 0,\n    ...(cursorless ? { sync_error_streak: 0 } : {}),\n  };",
+        "    delta_error_streak: 0,\n    recovery_attempt_streak: 0,\n    ...(cursorless ? { sync_error_streak: 0 } : {}),\n  };",
+      ),
+  },
+  {
+    id: "MU-1211",
+    title:
+      "WEB-09b (trace 6): a blocked budget still captures an automatic request",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: [
+      "tests/data/recovery-job.test.ts",
+      "tests/data/snapshot-plans.test.ts",
+    ],
+    expect: /trace 6|a blocked budget sends nothing|permits ONE attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (blocked !== null && input.allowBlocked !== true)",
+        "if (blocked !== null && input.allowBlocked !== true && (false as boolean))",
+      ),
+  },
+  {
+    id: "MU-1212",
+    title:
+      "WEB-09b: three unrecognised answers on a cursor count the attempt but do not abandon the cursor",
+    file: "src/data/model/recovery.ts",
+    tests: [
+      "tests/data/snapshot-plans.test.ts",
+      "tests/data/recovery-job.test.ts",
+    ],
+    expect: /R-1 the reducer|trace 5/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return {\n        ...base,\n        delta_error_streak: 0,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        attemptCounted: true,\n        abandon: true,\n      };\n    }",
+        "      return {\n        ...base,\n        delta_error_streak: 0,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        attemptCounted: true,\n        abandon: false,\n      };\n    }",
+      ),
+  },
+  {
+    id: "MU-1213",
+    title:
+      "WEB-09b: a server-instructed restart (410, 409 access_changed) is counted against the whole-attempt budget",
+    file: "src/data/model/recovery.ts",
+    tests: [
+      "tests/data/snapshot-plans.test.ts",
+      "tests/data/recovery-job.test.ts",
+    ],
+    expect: /R-1 the reducer|restarts cursor-less, counting nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "server_restart":\n      return {\n        ...base,\n        delta_error_streak: 0,',
+        '    case "server_restart":\n      return {\n        ...base,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        delta_error_streak: 0,',
+      ),
+  },
+  {
+    id: "MU-1214",
+    title:
+      "WEB-09b (matrix 3.7.3): a recovery that has made its data commit never asks `finish` (the fence never clears)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /T24 A|T24 F/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (issued.mode === "ordinary") return idle();\n    return finish(b, issued.handle);',
+        'if (issued.mode === "ordinary") return idle();\n    return idle();',
+      ),
+  },
+  {
+    id: "MU-1215",
+    title:
+      "WEB-09b (T24 H): an ineligible `begin` is ignored and the recovery reads anyway",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /T24 H/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in review cycle 2 (R3): `ineligible` now also takes the binding and the epoch of its admission wait.
+        'if (begun.kind === "ineligible")\n          return ineligible(',
+        'if (begun.kind === "ineligible" && (false as boolean))\n          return ineligible(',
+      ),
+  },
+  {
+    id: "MU-1216",
+    title:
+      "WEB-09b (matrix 3.7.3): recovery reads use the ORDINARY request class",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /T24 A|T24 B/,
+    patch: (t) =>
+      sub(t, 'mode === "recovery" ? "recovery" : "ordinary",', '"ordinary",'),
+  },
+  {
+    id: "MU-1217",
+    title:
+      "WEB-09b (row 6 case 5): the leader gives the lock up on an account transition",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-3 the lock is never released/,
+    patch: (t) =>
+      sub(
+        t,
+        "    b.controller.abort();",
+        "    b.controller.abort();\n    deps.election.dispose();",
+      ),
+  },
+  {
+    id: "MU-1218",
+    title: "WEB-09b: a follower page binds and runs the writers as if it led",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-1\/L-2|F-1 variant 1|F-2 variant 2/,
+    patch: (t) =>
+      sub(
+        t,
+        "const leading = (): boolean =>",
+        "const leading = (): boolean => true || ",
+      ),
+  },
+  {
+    id: "MU-1219",
+    title:
+      "WEB-09b (P-8): the engine keeps running while the recovery job has the cache to itself",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-6 the engine is stopped while the job has the cache/,
+    patch: (t) =>
+      sub(
+        t,
+        "const wanted = live && !job.exclusive.get();",
+        "const wanted = live;",
+      ),
+  },
+  {
+    id: "MU-1220",
+    title:
+      "WEB-09b: the engine and the dispatcher run while the account is fenced (a loop of refused requests)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-10/,
+    patch: (t) =>
+      sub(
+        t,
+        "displayed(b.account);",
+        "(displayed(b.account) || (true as boolean));",
+      ),
+  },
+  {
+    id: "MU-1221",
+    title:
+      "WEB-09b: the leader reopens the account by itself when its service ends (a wipe's latch is lifted)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-9b/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (bound === b) unbind();",
+        "if (bound === b) {\n          unbind();\n          follow();\n        }",
+      ),
+  },
+  {
+    id: "MU-1222",
+    title:
+      "WEB-09b (row 3): the leader opens the account while a logout or retirement is pending",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-9/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (deps.operationPending(identity.account_id)) return;",
+        "if (deps.operationPending(identity.account_id) && (false as boolean)) return;",
+      ),
+  },
+  {
+    id: "MU-1223",
+    title:
+      "WEB-09b (E-B14): a staged page's local-write identity carries the generation (a reload forgets three failures)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /survives a reload/,
+    patch: (t) =>
+      sub(
+        t,
+        "? snapshotPageOperation(position)",
+        // A template literal is the patched TEXT here, so its placeholders are built, not interpolated.
+        [
+          "? `",
+          "$",
+          "{snapshotPageOperation(position)}#",
+          "$",
+          "{sync.recovery_generation}`",
+        ].join(""),
+      ),
+  },
+  {
+    id: "MU-1224",
+    title:
+      "WEB-09b (P-7): a catch-up page in recovery mode is reconciled like an ordinary page (unsent work written, receipts deleted)",
+    file: "src/data/plans/commit-page.ts",
+    tests: ["tests/data/commit-page-recovery.test.ts"],
+    // Review cycle 1 (R8): the case was renamed when the recovery stopped writing acknowledged work too.
+    expect: /NOTHING of the queue is written/,
+    patch: (t) =>
+      sub(t, '...(input.mode === "recovery" ? { recovery: true } : {}),', ""),
+  },
+  {
+    id: "MU-1225",
+    title:
+      "WEB-09b: an abandoned catch-up cursor leaves the cache shown as valid",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /R-2 an abandonment/,
+    patch: (t) =>
+      sub(
+        t,
+        '        ...(sync.cache_status === "valid"\n          ? { cache_status: "invalid" as const, cursor: null }\n          : {}),',
+        "",
+      ),
+  },
+  {
+    id: "MU-1226",
+    title:
+      "WEB-09b: Try again resets a whole-attempt failure it did not see (the reset is not versioned)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /R-4 Try again/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (fields.recovery_budget_version !== input.expect)",
+        "if (fields.recovery_budget_version !== input.expect && (false as boolean))",
+      ),
+  },
+  {
+    id: "MU-1227",
+    title:
+      "WEB-09b (P-3): with a production leader on the page the provider still builds and disposes a runtime of its own",
+    file: "src/data/ui/react.tsx",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /waits for and uses the PAGE's runtime/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (leaderStarted() || host.runtime.get() !== null) {",
+        "if ((leaderStarted() || host.runtime.get() !== null) && (false as boolean)) {",
+      ),
+  },
+  {
+    id: "MU-1228",
+    title:
+      "WEB-09b (P-11): a follower page reads 'Updates stopped' merely because another page leads",
+    file: "src/data/model/status.ts",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /FS-1|FS-2/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (inputs.follower === true) {",
+        "if (inputs.follower === true && (false as boolean)) {",
+      ),
+  },
+  {
+    id: "MU-1229",
+    title:
+      "WEB-09b: a page of another boundary revision is staged into the attempt",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /a delta page, a revision mismatch and a lapsed hold/,
+    patch: (t) =>
+      sub(
+        t,
+        "revision !== staged",
+        "revision !== staged && (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-1230",
+    title:
+      "WEB-09b (R28): a staged page is written after the hold it was admitted under ended",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /a delta page, a revision mismatch and a lapsed hold/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (input.leaseLive !== undefined && !input.leaseLive())\n    return { kind: "lease_lapsed" };',
+        "",
+      ),
+  },
+  {
+    id: "MU-1231",
+    title:
+      "WEB-09b (OWN): the recovery job's capture is admitted for a binding that no longer owns the database",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /another binding's token/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!owns(sync, input.token))\n      return { result: { kind: "gated", reason: "owner" } };',
+        "",
+      ),
+  },
+  {
+    id: "MU-1232",
+    title:
+      "WEB-09b: a draft saved through another facade (this page's screens, a follower page) does not wake the leader's dispatcher",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-11/,
+    patch: (t) =>
+      sub(
+        t,
+        '            message.stores.includes("drafts")\n          )\n            dispatcher.wake();',
+        '            message.stores.includes("drafts") &&\n            (false as boolean)\n          )\n            dispatcher.wake();',
+      ),
+  },
+  {
+    id: "MU-1233",
+    title:
+      "WEB-09b (trace 6, E-B13): the one attempt a page load permits while blocked is spent at the capture, so a request withheld at the issue check leaves the load with none",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /spent only by a request that is ISSUED/,
+    patch: (t) =>
+      sub(
+        t,
+        '    trigger ??= capture.position === null ? "first_snapshot" : "adopted";\n',
+        '    trigger ??= capture.position === null ? "first_snapshot" : "adopted";\n    permitBlocked = false;\n',
+      ),
+  },
+  {
+    id: "MU-1234",
+    title:
+      "WEB-09b (trace 6, E-B13 in WebKit): a request the session refuses before sending it (not_sent, not_covered) keeps the load's one permitted attempt, so the load sends nothing",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect:
+      /the permitted attempt is RETURNED when the session refuses its request/,
+    patch: (t) =>
+      sub(
+        t,
+        '        issued.permit &&\n        (error.kind === "not_sent" || error.kind === "not_covered")\n      )\n        permitBlocked = true;\n',
+        '        issued.permit &&\n        (error.kind === "not_sent" || error.kind === "not_covered")\n      )\n        void 0;\n',
+      ),
+  },
+  // ---- WEB-09b review cycle 1 (10 October 2026): R1 to R8 ------------------------------------------------------------------------------
+  {
+    id: "MU-1235",
+    title:
+      "WEB-09b R8: an activation in RECOVERY mode does the queue's receipt bookkeeping itself (the recovery writes acknowledged drafts and their effects)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: [
+      "tests/data/snapshot-plans.test.ts",
+      "tests/data/recovery-job.test.ts",
+    ],
+    expect:
+      /S-12 unsent work is byte-identical|the whole queue is byte-identical/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const stats =\n      input.mode === "recovery"',
+        "    const stats =\n      (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-1236",
+    title:
+      "WEB-09b R8: a catch-up page in recovery mode reconciles the queue's effects (acknowledged drafts written by the recovery)",
+    file: "src/data/plans/reconcile-windows.ts",
+    tests: [
+      "tests/data/commit-page-recovery.test.ts",
+      "tests/data/recovery-job.test.ts",
+    ],
+    expect: /NOTHING of the queue is written|the whole queue is byte-identical/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (input.recovery === true) {",
+        "  if (input.recovery === true && (false as boolean)) {",
+      ),
+  },
+  {
+    id: "MU-1237",
+    title:
+      "WEB-09b R8: the receipt bookkeeping a recovery owed is never done after the display (W26 never runs)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /W26 releases the acknowledged receipt/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (capture.reconcilePending === true)\n",
+        "if (capture.reconcilePending === true && (false as boolean))\n",
+      ),
+  },
+  {
+    id: "MU-1238",
+    title:
+      "WEB-09b R1: a recovery is finished on ANY handle once some data commit was made (a second re-authentication finishes without its own catch-up)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R1 \(lock_timeout\)|R1 \(failed\)/,
+    // TWO layers protect R1 (the proof is cleared by a new `begin`, and it is bound to the exact handle): either alone is an equivalent
+    // mutant (the first run of review cycle 1 found the handle comparison alone survives). Removing both is the defect the review found.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "        commitProof.handle === handle\n",
+          "        (true as boolean)\n",
+        ),
+        "        handle = null;\n        commitProof = null;\n        const begun",
+        "        handle = null;\n        const begun",
+      ),
+  },
+  {
+    id: "MU-1239",
+    title:
+      "WEB-09b R3: a refusal that only the durable record ends is never asked again on the record's notification (a resolved gate leaves recovery waiting)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(/,
+    // Redefined in review cycle 2 (R3): `awaitsRecord` is gone; the same defect in the new mechanism is a `begin` refusal on the record
+    // that is left as a bare event wait (no admission wait, so a resolution in the same epoch is never noticed).
+    patch: (t) =>
+      sub(
+        t,
+        'return awaitAdmission(b, "recovery", epoch, "begin");',
+        'return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1240",
+    title:
+      "WEB-09b R4: when an obsolete step ends, the replacement binding is not scheduled (it waits for an unrelated notification)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts", "tests/data/leader.test.ts"],
+    expect: /R4: with NO further notification|L-13/,
+    patch: (t) =>
+      sub(
+        t,
+        '      woken = false;\n      const current = binding;\n      if (current !== null && alive(current))\n        schedule(current, { when: "now" });\n      else resolveWaiters();',
+        "      woken = false;\n      resolveWaiters();",
+      ),
+  },
+  {
+    id: "MU-1241",
+    title:
+      "WEB-09b R4: the recovery request does not carry its binding's ownership signal (an obsolete call stays outstanding)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R4: the obsolete request is aborted/,
+    patch: (t) =>
+      sub(
+        t,
+        '{ method: "GET", signal: b.ownership.signal }',
+        '{ method: "GET" }',
+      ),
+  },
+  {
+    id: "MU-1242",
+    title:
+      "WEB-09b R5: the response-derived budget write (W24) bypasses the stamp's admission (G1, G2, the persistence hold)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R5/,
+    patch: (t) =>
+      sub(
+        t,
+        "const out = await service.commit(recordRecoveryOutcome, {",
+        "const out = await service.store.run(recordRecoveryOutcome, {",
+      ),
+  },
+  {
+    id: "MU-1243",
+    title:
+      "WEB-09b R5: W24 lists no epoch mirror (an earlier epoch's answer, admitted before the mirror moved, counts)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /R-3b an answer of an EARLIER epoch/,
+    patch: (t) =>
+      sub(
+        t,
+        '    guards: ["INC", "CLS", "GEN", "OWN", "EPO"],\n    quota: null,',
+        '    guards: ["INC", "CLS", "GEN", "OWN"],\n    quota: null,',
+      ),
+  },
+  {
+    id: "MU-1244",
+    title:
+      "WEB-09b R6: a follower ignores the leader's durable stops and says 'Up to date'",
+    file: "src/data/model/status.ts",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /R6:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (stops.paused || stops.pageStopped || stops.floor)",
+        "        (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-1245",
+    title:
+      "WEB-09b R6: the follower's facts do not read a durably paused `sync` read caller",
+    file: "src/data/plans/facts.ts",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /R6: a durably PAUSED/,
+    patch: (t) =>
+      sub(
+        t,
+        "    paused: sync.read_retry_states.sync?.paused === true,",
+        "    paused: false,",
+      ),
+  },
+  {
+    id: "MU-1246",
+    title:
+      "WEB-09b R2: the leading page ignores a follower's request to retry updates",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/retry-routing.test.ts"],
+    expect: /a FOLLOWER's retry is applied by the leading page/,
+    patch: (t) =>
+      sub(
+        t,
+        "            retryHere({ account: message.account, epoch: message.epoch });",
+        "            void message;",
+      ),
+  },
+  {
+    id: "MU-1247",
+    title:
+      "WEB-09b R2: the leader applies a retry made against another epoch's view",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/retry-routing.test.ts"],
+    expect: /a retry made against another epoch/,
+    patch: (t) =>
+      sub(
+        t,
+        "      identity.epoch !== target.epoch\n",
+        "      (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-1248",
+    title:
+      "WEB-09b R2: a follower's 'Retry now' / 'Try again' for updates asks nobody (it has no engine or job)",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/retry-routing.test.ts"],
+    expect: /posts `retry_requested`/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (follower !== null && leader.engine === undefined) {\n        const identity = deps.identity.get();",
+        "      if (follower !== null && leader.engine === undefined && (false as boolean)) {\n        const identity = deps.identity.get();",
+      ),
+  },
+  {
+    id: "MU-1249",
+    title:
+      "WEB-09b R2: the neutral state's 'Try again' does not reach the recovery owner (the session's retry tells no listener)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/recovery-api.test.ts"],
+    expect: /the neutral state's Try again is the recovery owner's act too/,
+    patch: (t) => sub(t, "      recovery.retried();", "      void 0;"),
+  },
+  {
+    id: "MU-1250",
+    title:
+      "WEB-09b R7: 'save as new' is rebuilt on nothing although the authorised current read loaded",
+    file: "src/features/sync/ItemDetailDialog.tsx",
+    tests: ["tests/features/sync/recovery-screens.test.tsx"],
+    expect: /U-6/,
+    patch: (t) =>
+      sub(
+        t,
+        ".saveAsNew(draft.local_id, base)",
+        ".saveAsNew(draft.local_id, null)",
+      ),
+  },
+  {
+    id: "MU-1251",
+    title:
+      "WEB-09b R7: the new attempt is enabled while the authorised current read is still loading or has failed",
+    file: "src/features/sync/ItemDetailDialog.tsx",
+    tests: ["tests/features/sync/recovery-screens.test.tsx"],
+    expect: /U-7/,
+    patch: (t) =>
+      sub(t, '    read === "loaded" ||\n', "    (true as boolean) ||\n"),
+  },
+  // ---- WEB-09b review cycle 2 (R3, R7) ----------------------------------------------------------------------------------------------
+  {
+    id: "MU-1262",
+    title:
+      "WEB-09b R3 (cycle 2): a cover that closes after `begin` (closed, closed_unresolved) leaves the job running with nothing to wake it",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(closed/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "closed",\n          );',
+        '          return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1263",
+    title:
+      "WEB-09b R3 (cycle 2): a not_sent that outlasts the immediate retries ends in a bare event wait (a released hold is never noticed)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(not_sent|R3 \(lost hint/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "not_sent",\n          );',
+        '          return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1264",
+    title:
+      "WEB-09b R3 (cycle 2): a recovery request refused by the cover keeps its handle, so the resumed run is finished under the old `s`",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(closed/,
+    patch: (t) =>
+      sub(
+        t,
+        '          if (issued.mode === "recovery") {\n            handle = null;\n            commitProof = null;\n          }\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1265",
+    title:
+      "WEB-09b R3 (cycle 2): an open, unchanged admission revision always permits another attempt (a refusal the probe cannot see loops)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /tried ONCE more/,
+    patch: (t) =>
+      sub(t, "(changed || !episode.consumed || due)", "(changed || true)"),
+  },
+  {
+    id: "MU-1266",
+    title:
+      "WEB-09b R3 (cycle 2): a standing admission wait has no paced reconciliation (a lost notification strands it)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /lost hint/,
+    patch: (t) =>
+      sub(
+        t,
+        "    let ms = Math.min(\n      config.recoveryBeginRetryMaxMs,",
+        '    return { when: "event" } as Next;\n    let ms = Math.min(\n      config.recoveryBeginRetryMaxMs,',
+      ),
+  },
+  {
+    id: "MU-1267",
+    title:
+      "WEB-09b R3 (cycle 2): the first probe after a refusal permits no attempt unless the revision moved since an earlier probe (a gate resolved before the wait was installed is never tried)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /came and went/,
+    patch: (t) =>
+      sub(
+        t,
+        "(changed || !episode.consumed || due)",
+        "((changed && seen) || due)",
+      ),
+  },
+  {
+    id: "MU-1268",
+    title:
+      "WEB-09b R3 (cycle 2): a notification is dropped while the job stands in an admission wait (only the paced timer is left)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(closed after/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (eligibility() === lastEligibility && !waiting) return;",
+        "if (eligibility() === lastEligibility) return;",
+      ),
+  },
+  {
+    id: "MU-1269",
+    title:
+      "WEB-09b R7 (cycle 2): the authorised current read hands back the command's result without sealing it against the durable record",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /refused|durable record|fails closed|sealed once/,
+    patch: (t) =>
+      sub(
+        t,
+        "result = await seal(account, epoch, interpreted);",
+        "result = await interpreted;",
+      ),
+  },
+  {
+    id: "MU-1270",
+    title:
+      "WEB-09b R7 (cycle 2): the current read is validated against the page's identity mirror instead of the durable record",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /notice never arrives|LATER interpretation/,
+    patch: (t) =>
+      sub(
+        t,
+        "result = await seal(account, epoch, interpreted);",
+        "result = await interpreted;\n          const mirror = deps.identity.get();\n          if (mirror?.account_id !== account || mirror.epoch !== epoch) return unavailable;",
+      ),
+  },
+  {
+    id: "MU-1271",
+    title:
+      "WEB-09b R7 (cycle 2): the current read's own scope (lifetime, binding, service, caller's signal) is not checked at release",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /stops during the decode|service ends|cancels/,
+    patch: (t) =>
+      sub(t, "return live() ? result : unavailable;", "return result;"),
+  },
+  {
+    id: "MU-1272",
+    title:
+      "WEB-09b R7 (cycle 2): the caller's cancellation does not end the current read's scope (a command that ignores its signal is handed back)",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /cancels/,
+    patch: (t) =>
+      sub(
+        t,
+        'signal?.addEventListener("abort", onCaller, { once: true });',
+        "void onCaller;",
+      ),
+  },
+  {
+    id: "MU-1273",
+    title:
+      "WEB-09b R3 (cycle 2): the session's admission probe ignores this page's hold",
+    file: "src/session/kernel/admission.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /hold and closing write block it/,
+    patch: (t) =>
+      sub(
+        t,
+        "blocked: !stamp || !open || hold || closing,",
+        "blocked: !stamp || !open || closing,",
+      ),
+  },
+  {
+    id: "MU-1274",
+    title:
+      "WEB-09b R3 (cycle 2): the admission revision does not include the account's fences (an O11 removal in the same epoch changes nothing it reads)",
+    file: "src/session/kernel/admission.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /added and removed IN THE SAME EPOCH/,
+    patch: (t) =>
+      sub(
+        t,
+        "        state.fence_seq,\n        fences,\n",
+        "        state.fence_seq,\n",
+      ),
+  },
+  {
+    id: "MU-1275",
+    title:
+      "WEB-09b R3 (cycle 2): the admission revision counts this page's OWN leases (its own requests would wake its own wait)",
+    file: "src/session/kernel/admission.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /another page's request lease/,
+    patch: (t) =>
+      sub(
+        t,
+        "leasesOfOthers(state, account, k.bootId)",
+        'leasesOfOthers(state, account, "not-a-page")',
+      ),
+  },
+  {
+    id: "MU-1277",
+    title:
+      "WEB-09b R3 (cycle 2): an open admission revision whose attempt was refused is never tried again (a CSRF token only a new verification can fetch strands the job)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /open but refused/,
+    patch: (t) =>
+      sub(
+        t,
+        "      now >= episode.retryAt;",
+        "      now >= episode.retryAt &&\n      (false as boolean);",
+      ),
+  },
+  {
+    id: "MU-1276",
+    title:
+      "WEB-09b R7 (cycle 2): `session.api.seal` hands a result back after the session was disposed",
+    file: "src/session/session.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /disposed session/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (k.disposed) throw new StampedRequestError("stale");',
+        "void k.disposed;",
+      ),
+  },
   // ---- WEB-13a: calendar sources, connections and the manual refresh (MU-1300 onwards; the range reserved for WEB-13a) ----------
   {
     id: "MU-1300",
@@ -15226,6 +16151,12 @@ export const UNIT = [
  * of a fallback that no longer exists has nothing to patch; what each of them stood for is covered by the mutant named beside it.
  */
 export const RETIRED = [
+  {
+    id: "MU-1207",
+    why: '(WEB-09b review cycle 1, R8) an activation in recovery mode deletes the finished receipts it released: the recovery-mode activation no longer does any receipt bookkeeping (the approved brief: the recovery touches no draft, `pending_effects` or outbox entry), so there is no deletion of it to switch on and the anchor (`deletes: input.mode !== "recovery"` of `reconcileReceipts`) does not exist',
+    replacedBy:
+      "MU-1235 (a recovery-mode activation does the bookkeeping itself), MU-1237 (the owed bookkeeping is never done after the display) and S-12's recovery branch",
+  },
   {
     id: "MU-444",
     why: "(REAL ENGINE) a hold in the origin's ledger lapses at once, so a page that dies mid-save frees its bytes immediately: with the ownership of revision 15 a hold of a page that has gone is reclaimed AT ONCE on proof whatever its lease, and a hold of a page that lives is never judged by its lease, so the lease no longer decides the outcome of that spec: the mutant is equivalent there",
@@ -17510,6 +18441,202 @@ export const ENGINE = [
         t,
         "        if (endedStreak >= config.localWritePauseAfter) stopsChanged();\n",
         "",
+      ),
+  }, // ---- WEB-09b review cycle 1 (10 October 2026): the planned native mutants NM-B1 to NM-B4 (plan 10.5) and the real-engine sensitivity
+  // of the cycle's fixes (R1, R2, R3, R6, R8). Each is selected by its own case of the leader or recovery spec, all three browsers.
+  {
+    id: "MU-1252",
+    title:
+      "WEB-09b NM-B1: (REAL ENGINE) the leader gives its lock up on an account transition (a follower is granted it; the lock's scope is the page's life)",
+    file: "src/data/leader/leader.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-B8 lock scope",
+    expect: /E-B8 lock scope/,
+    patch: (t) =>
+      sub(
+        t,
+        "    b.controller.abort();",
+        "    b.controller.abort();\n    deps.election.dispose();",
+      ),
+  },
+  {
+    id: "MU-1253",
+    title:
+      "WEB-09b NM-B2: (REAL ENGINE) the final page and the swap are TWO transactions (the final page is staged first, then activated): a page closed between them leaves a staged attempt at the wrong position",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.data-leader.spec.ts",
+    grep: "E-B11 the activation is held open",
+    expect: /E-B11 the activation is held open/,
+    patch: (t) =>
+      sub(
+        t,
+        "              : await service.commit(activateSnapshot, {\n                  ...common,\n                  operation: issued.capture.operation,\n                  activateOperation: issued.capture.activateOperation as string,\n                  now: deps.clock.iso(),\n                  mode: issued.mode,\n                });",
+        '              : await (async () => {\n                  const first = await service.commit(commitStagingPage, {\n                    ...common,\n                    scan: { ...ok, hasMore: true },\n                    operation: issued.capture.operation,\n                  });\n                  if (first.kind !== "applied" || first.value.kind !== "staged")\n                    return first;\n                  return service.commit(activateSnapshot, {\n                    ...common,\n                    captured: { ...issued.captured, expectedPosition: ok.nextCursor },\n                    operation: issued.capture.operation,\n                    activateOperation: issued.capture.activateOperation as string,\n                    now: deps.clock.iso(),\n                    mode: issued.mode,\n                  });\n                })();',
+      ),
+  },
+  {
+    id: "MU-1254",
+    title:
+      "WEB-09b NM-B3: (REAL ENGINE) an adopted attempt ignores its staging position (the reloaded leader asks cursor-less, never for the staged page)",
+    file: "src/data/plans/recovery-writers.ts",
+    spec: "tests/e2e/fixture.data-leader.spec.ts",
+    grep: "E-B3 the leader's page reloads mid-snapshot",
+    expect: /E-B3 the leader's page reloads mid-snapshot/,
+    patch: (t) =>
+      sub(
+        t,
+        "const position = snapshot ? sync.staging_position : sync.cursor;",
+        "const position = snapshot ? null : sync.cursor;",
+      ),
+  },
+  {
+    id: "MU-1255",
+    title:
+      "WEB-09b NM-B4: (REAL ENGINE) a follower page binds and issues `/sync` as if it led",
+    file: "src/data/leader/leader.ts",
+    spec: "tests/e2e/fixture.data-leader.spec.ts",
+    grep: "E-B1 one leader among three pages",
+    expect: /E-B1 one leader among three pages/,
+    patch: (t) =>
+      sub(
+        t,
+        "const leading = (): boolean =>",
+        "const leading = (): boolean => true || ",
+      ),
+  },
+  {
+    id: "MU-1256",
+    title:
+      "WEB-09b R1: (REAL ENGINE) a second re-authentication finishes on the earlier epoch's data commit, without its own catch-up (both layers removed)",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-R7 T24 G and R1|E-R7b T24 G and R1",
+    expect: /E-R7 T24 G and R1|E-R7b T24 G and R1/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "        commitProof.handle === handle\n",
+          "        (true as boolean)\n",
+        ),
+        "        handle = null;\n        commitProof = null;\n        const begun",
+        "        handle = null;\n        const begun",
+      ),
+  },
+  {
+    id: "MU-1257",
+    title:
+      "WEB-09b R2: (REAL ENGINE) state 3's visible 'Try again' does not reach the recovery job (the account stays hidden)",
+    file: "src/session/session.ts",
+    spec: "tests/e2e/fixture.data-leader.spec.ts",
+    grep: "E-R4 T24 D",
+    expect: /E-R4 T24 D/,
+    patch: (t) => sub(t, "      recovery.retried();", "      void 0;"),
+  },
+  {
+    id: "MU-1258",
+    title:
+      "WEB-09b R2: (REAL ENGINE) a follower's 'Try again' on the blocking state asks nobody",
+    file: "src/data/ui/env.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-B15 R2",
+    expect: /E-B15 R2/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (follower !== null && leader.engine === undefined) {\n        const identity = deps.identity.get();",
+        "      if (follower !== null && leader.engine === undefined && (false as boolean)) {\n        const identity = deps.identity.get();",
+      ),
+  },
+  {
+    id: "MU-1259",
+    title:
+      "WEB-09b R3: (REAL ENGINE) a gate resolved in the same epoch (O11, a finished attempt) never wakes the waiting recovery",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-R10 T24 H and R3|E-R12 T24 H and R3",
+    expect: /E-R10 T24 H and R3|E-R12 T24 H and R3/,
+    // Redefined in review cycle 2 (R3), like MU-1239: `awaitsRecord` is gone; the defect is a record refusal left as a bare event wait.
+    patch: (t) =>
+      sub(
+        t,
+        'return awaitAdmission(b, "recovery", epoch, "begin");',
+        'return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1260",
+    title:
+      "WEB-09b R6: (REAL ENGINE) a follower ignores the leader's durable stops and says 'Up to date'",
+    file: "src/data/model/status.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-B16 R6 and R2",
+    expect: /E-B16 R6 and R2/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (stops.paused || stops.pageStopped || stops.floor)",
+        "        (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-1261",
+    title:
+      "WEB-09b R8: (REAL ENGINE) a recovery-mode catch-up page writes the queue's bookkeeping (an acknowledged draft written while fenced)",
+    file: "src/data/plans/reconcile-windows.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-R11 R8",
+    expect: /E-R11 R8/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (input.recovery === true) {",
+        "  if (input.recovery === true && (false as boolean)) {",
+      ),
+  },
+  {
+    id: "MU-1278",
+    title:
+      "WEB-09b R3 (cycle 2): (REAL ENGINE) a cover that closes after `begin` leaves the job running with nothing to wake it",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-R14 R3",
+    expect: /E-R14 R3/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "closed",\n          );',
+        '          return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1279",
+    title:
+      "WEB-09b R3 (cycle 2): (REAL ENGINE) a not_sent that outlasts the immediate retries ends in a bare event wait",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-R15 R3",
+    expect: /E-R15 R3/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "not_sent",\n          );',
+        '          return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1280",
+    title:
+      "WEB-09b R7 (cycle 2): (REAL ENGINE) the authorised current read hands back the command's result without sealing it at the durable record",
+    file: "src/data/ui/env.ts",
+    spec: "tests/e2e/fixture.data-recovery.spec.ts",
+    grep: "E-R16 R7",
+    expect: /E-R16 R7/,
+    patch: (t) =>
+      sub(
+        t,
+        "result = await seal(account, epoch, interpreted);",
+        "result = await interpreted;",
       ),
   },
   // ---- WEB-13a (REAL ENGINE): the Calendars screen in the production composition --------------------------------------------
