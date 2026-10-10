@@ -69,6 +69,7 @@
         "!src/components/ui/announcer.tsx",
         "!src/components/ui/neutral-gate.tsx",
         "!src/components/ui/neutral-state.tsx",
+        "!src/components/ui/neutral-status.tsx",
         "!src/components/ui/sync-status.tsx"
       ],
       "plugins": ["./lint/live-region-registry.grit"]

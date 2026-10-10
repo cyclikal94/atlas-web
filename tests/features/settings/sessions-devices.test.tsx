@@ -83,7 +83,8 @@ const twoSessions = () =>
         id: "sess-2",
         current: false,
         authentication: "oidc",
-        created_at: "2026-09-27T09:00:00.000Z",
+        // Relative to the real clock: the row renders "Signed in 3 days ago" whenever the suite runs.
+        created_at: new Date(Date.now() - 3.5 * 86_400_000).toISOString(),
       }),
     ],
   });

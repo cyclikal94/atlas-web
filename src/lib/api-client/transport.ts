@@ -37,13 +37,15 @@ export interface RawAnswer {
   atlasError: AtlasError | null;
 }
 
-/** The small unstamped surface: login-family exchanges, activate, activate/cancel and /health. */
+/** The small unstamped surface: login-family exchanges, the invitation preview, activate, activate/cancel and /health. */
 export interface UnstampedApi {
   exchange(
-    path: "/browser-sessions" | "/browser-registration",
+    path: "/browser-sessions" | "/browser-registration" | "/oidc/start",
     body: unknown,
     signal: AbortSignal,
   ): Promise<RawAnswer>;
+  /** `POST /registration/preview`: the invitation token travels in the body, never in a URL. */
+  preview(body: { token: string }, signal: AbortSignal): Promise<RawAnswer>;
   activate(
     body: { grant: string; verifier: string },
     signal: AbortSignal,

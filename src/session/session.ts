@@ -9,6 +9,7 @@ import type {
   Wipe,
 } from "./api";
 import { DEFAULT_CONFIG, type SessionConfig } from "./constants";
+import { probeAdmission } from "./kernel/admission";
 import { AttemptService } from "./kernel/attempts";
 import { checkApiCompatibility } from "./kernel/compat";
 import { evaluate } from "./kernel/evaluate";
@@ -28,8 +29,9 @@ import { recordAndHold } from "./kernel/observation";
 import { OperationService } from "./kernel/operations";
 import { holdForPersistence } from "./kernel/persistence";
 import { RecoveryService } from "./kernel/recovery";
-import { createStampedFetch } from "./kernel/send";
+import { createStampedFetch, sealResult } from "./kernel/send";
 import { Kernel, MutableStore, type SessionPorts } from "./kernel/state";
+import { StampedRequestError } from "./kernel/types";
 import { WipeService } from "./kernel/wipe";
 import { formatRange, type VersionRange } from "./model/api-version";
 import type { AuthRecords } from "./model/types";
@@ -203,6 +205,14 @@ export function createSessionWithKernel(
       createStampedFetch(k, klass, account, epoch),
     client: (klass, account, epoch) =>
       createStampedClient(k, klass, account, epoch),
+    seal: async (account, epoch, pending) => {
+      const result = await sealResult(k, account, epoch, pending);
+      // A disposed session hands nothing back (synchronous: nothing asynchronous follows the verdict).
+      if (k.disposed) throw new StampedRequestError("stale");
+      return result;
+    },
+    admission: (klass, account, epoch) =>
+      probeAdmission(k, klass, account, epoch),
   };
 
   const actions: NeutralActions = {
@@ -212,6 +222,8 @@ export function createSessionWithKernel(
       void evaluate(k, "user_retry");
       void attempts.resolve();
       operations.resume({ force: true });
+      // WEB-09b: state 3's "Try again" is the recovery job's own act as well (R2 of the review of 10 October 2026).
+      recovery.retried();
     },
     reload: () => options.onReload?.(),
     reviewDevice: () => {

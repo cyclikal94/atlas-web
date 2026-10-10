@@ -6,6 +6,8 @@ export interface LoadError {
   reason: "offline" | "failed";
   /** Copyable, from the Atlas error body when there was one. */
   requestId?: string;
+  /** The result's own error, for a screen that must tell "the session ended" (the neutral state takes over) from a failure. */
+  cause?: Extract<Result<unknown>, { ok: false }>["error"];
 }
 export type Load<T> =
   | { status: "loading" }
@@ -17,6 +19,7 @@ export const toLoadError = (
 ): LoadError => ({
   reason: result.error === "offline" ? "offline" : "failed",
   requestId: result.atlasError?.request_id,
+  cause: result.error,
 });
 
 /**

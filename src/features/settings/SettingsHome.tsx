@@ -2,15 +2,20 @@ import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
 import { List } from "../../components/ui/list";
 import { PageHeading } from "../../components/ui/page-heading";
+import { AccountCard } from "./account/AccountCard";
 import { useOpenedByLink } from "./focus";
 import { sectionPath, settingsSections } from "./sections";
 
-/** WF-SETTINGS-01's list, rendered from the registry (plan 8.3). The descriptions are static: they need no request. */
+/**
+ * WF-SETTINGS-01: the account card (WEB-08b), then the list, rendered from the registry (plan 8.3). The descriptions are static:
+ * they need no request, so the list paints at once and only the account card shows a skeleton.
+ */
 export function SettingsHome() {
   const openedByLink = useOpenedByLink();
   return (
     <div className="flex max-w-[620px] flex-col gap-4">
       <PageHeading>Settings</PageHeading>
+      <AccountCard />
       <List className="flex flex-col gap-2">
         {settingsSections().map((section) => (
           <li key={section.id} className="list-none">

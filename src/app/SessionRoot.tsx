@@ -1,57 +1,123 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { NeutralGate } from "../components/ui/neutral-gate";
 import { NeutralState } from "../components/ui/neutral-state";
-import { useApiCompatibility, useSession, useSessionView } from "../session";
+import { authFeedback } from "../features/authentication/feedback";
+import { invitationMemory } from "../features/authentication/handoff";
+import { JoinSurface } from "../features/authentication/JoinSurface";
+import { publicSurfaceFor } from "../features/authentication/public-route";
+import { SignInSurface } from "../features/authentication/SignInSurface";
+import { signInRequest } from "../features/authentication/sign-in-request";
+import {
+  type NeutralStateId,
+  useApiCompatibility,
+  useSession,
+  useSessionView,
+} from "../session";
 import { CompatibilityScreen, isApiRefusal } from "./CompatibilityScreen";
-import { NeutralEntry } from "./NeutralEntry";
-import { SIGN_IN_UNAVAILABLE, signInStub } from "./sign-in-stub";
+
+/**
+ * The neutral states whose button ("Sign in again", "Reconnect") leads to the sign-in form. Every other state (all the gating
+ * cards, 1e.*, 2, 3 and the consent prompt) NEVER shows a form: they are resolving something the person cannot answer with a
+ * password (decision D-8b-02).
+ */
+export const SIGN_IN_STATES: ReadonlySet<NeutralStateId> = new Set([
+  "1a.confirming",
+  "1a.ended_elsewhere",
+  "1b",
+  "1d",
+  "1c.ended",
+]);
 
 /**
  * The one neutral React root (`#neutral-root`), subscribed to `session.view`:
  *  - `booting`: the boot gate;
  *  - `incompatible`: the compatibility screen;
- *  - `signed_out`: the neutral entry (or the compatibility screen when the server's `api_version` refuses it, or the
- *    consent prompt when a confirmed wipe is waiting for the person's choice);
- *  - `neutral`: the neutral state named by the record, with the actions the composition root supplies;
+ *  - `signed_out` with no state: the compatibility screen when the server's `api_version` refuses it, otherwise the public
+ *    surface for the path (`/join`, else the sign-in page);
+ *  - a neutral state (signed out or not): its card, or, when its button asked to sign in and the state is one of
+ *    `SIGN_IN_STATES`, the sign-in form with a Back control to that card;
  *  - `displaying`: nothing. The gate is lifted over the protected tree by `act`, and only by `act`.
  * It renders nothing about any account.
  */
-export function SessionRoot() {
+export function SessionRoot({
+  pathname = location.pathname,
+}: {
+  pathname?: string;
+} = {}) {
   const view = useSessionView();
   const api = useApiCompatibility();
   const session = useSession();
-  const signInRequested = useSyncExternalStore(
-    signInStub.subscribe,
-    signInStub.get,
-    signInStub.get,
+  const request = useSyncExternalStore(
+    signInRequest.subscribe,
+    signInRequest.get,
+    signInRequest.get,
   );
-  const unavailable = signInRequested ? SIGN_IN_UNAVAILABLE : null;
+  // A NEW invitation link (a fragment-only navigation while this page is open) restarts the join page for it.
+  const linkVersion = useSyncExternalStore(
+    invitationMemory.subscribe,
+    invitationMemory.version,
+    invitationMemory.version,
+  );
+  const state =
+    view.kind === "signed_out" || view.kind === "neutral" ? view.state : null;
+  // The request holds only while it can be answered: for a sign-in state, or for the join page's "Sign in".
+  const answerable =
+    (view.kind === "signed_out" && state === null) ||
+    (state !== null && SIGN_IN_STATES.has(state));
+  useEffect(() => {
+    if (request.requested && !answerable) signInRequest.clear();
+  }, [request.requested, answerable]);
+  // Page-memory notices belong to the account that was displaying when they were raised. They go when a DIFFERENT account displays
+  // or the person signs out. They do NOT go when the view merely flickers out of `displaying` for a moment (the resume verification
+  // does that), which would swallow a notice the person has not seen yet. This component is always mounted, so React StrictMode's
+  // double effect on mount cannot clear one early.
+  const lastShown = useRef<string | null>(null);
+  const shownAccount = view.kind === "displaying" ? view.account_id : null;
+  const signedOut = view.kind === "signed_out" && view.state === null;
+  useEffect(() => {
+    if (shownAccount !== null) {
+      if (lastShown.current !== null && lastShown.current !== shownAccount)
+        authFeedback.clearOnBegin();
+      lastShown.current = shownAccount;
+      // What the public surfaces carried across the neutral gate (a refusal for the sign-in form, a submitted invitation for the
+      // join page) is only for them: once an account displays it is not news, and must not greet the next person to sign out.
+      authFeedback.takeFailure();
+      invitationMemory.forgetSpent();
+    } else if (signedOut && lastShown.current !== null) {
+      authFeedback.clearOnBegin();
+      lastShown.current = null;
+    }
+  }, [shownAccount, signedOut]);
+
   switch (view.kind) {
     case "booting":
       return <NeutralGate heading="Atlas" message="Opening Atlas…" />;
     case "incompatible":
       return <CompatibilityScreen issues={view.issues} api={view.api} />;
     case "signed_out":
-      if (view.state)
+    case "neutral": {
+      if (state === null) {
+        if (isApiRefusal(api))
+          return <CompatibilityScreen issues={[]} api={api} />;
+        if (request.requested || publicSurfaceFor(pathname) === "sign-in")
+          return <SignInSurface mode="signed_out" />;
+        return <JoinSurface key={linkVersion} />;
+      }
+      if (SIGN_IN_STATES.has(state) && request.requested)
         return (
-          <NeutralState
-            state={view.state}
-            actions={session.actions}
-            unavailable={unavailable}
+          <SignInSurface
+            mode="reauthenticate"
+            onBack={() => signInRequest.clear()}
           />
         );
-      if (isApiRefusal(api))
-        return <CompatibilityScreen issues={[]} api={api} />;
-      return <NeutralEntry />;
-    case "neutral":
       return (
         <NeutralState
-          state={view.state}
-          consent={view.consent}
+          state={state}
+          consent={view.kind === "neutral" ? view.consent : undefined}
           actions={session.actions}
-          unavailable={unavailable}
         />
       );
+    }
     case "displaying":
       return null;
   }
