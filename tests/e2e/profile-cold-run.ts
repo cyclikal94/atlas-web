@@ -50,6 +50,7 @@ export async function oneColdRun(
   let elapsed: number | null = null;
   let requests: number | null = null;
   let heapBaseline: number | null = null;
+  let heapSamples: number[] = [];
   let heapPeak: number | null = null;
   let heapAfter: number | null = null;
   let commit: Commit | undefined;
@@ -90,7 +91,7 @@ export async function oneColdRun(
       detail = String(error).slice(0, 200);
     }
     elapsed = Date.now() - started;
-    const heapSamples = await heapSampler.stop();
+    heapSamples = await heapSampler.stop();
     await memory.stop();
     heapPeak = heapSamples.length ? Math.max(...heapSamples) : null;
     await heap.gc();
@@ -119,6 +120,8 @@ export async function oneColdRun(
     commit_ms: commit?.commit_ms ?? null,
     requests,
     heap_baseline_bytes: heapBaseline,
+    // Every heap sample (Chromium; empty where the engine has none): the peak is the largest of them (revision 3).
+    heap_samples_bytes: heapSamples,
     heap_peak_bytes: heapPeak,
     heap_after_gc_bytes: heapAfter,
     rss_baseline_kib: rss.baseline_kib,

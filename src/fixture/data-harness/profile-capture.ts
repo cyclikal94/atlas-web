@@ -105,8 +105,52 @@ export function sessionStore(
 }
 
 /**
+ * Why keeping a capture failed, and what that means for what the tab keeps (revision 3, design assessment B5/D7): `write` - the write
+ * itself was refused (or the bytes were refused before it), so the previous capture is exactly as it was; `verify` - the write went
+ * through but the record did not read back as the picked bytes, so what the tab now keeps is UNCERTAIN.
+ */
+export class CaptureKeepError extends Error {
+  constructor(
+    readonly phase: "write" | "verify",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Keeps bytes already read and hashed (the selection is separate from the commit, so a caller can check its authority between them) and
+ * returns what was kept. The answer is given only after the kept record has been read back and hashes to the picked bytes.
+ */
+export async function keepCapture(
+  bytes: Uint8Array,
+  sha256: string,
+  name: string,
+  store: CaptureStore = sessionStore(),
+): Promise<{ name: string; bytes: number; sha256: string }> {
+  try {
+    await store.put(bytes, name);
+  } catch (error) {
+    throw new CaptureKeepError("write", String(error).slice(0, 160));
+  }
+  let back: { bytes: Uint8Array; name: string } | null;
+  try {
+    back = await store.get();
+  } catch (error) {
+    throw new CaptureKeepError("verify", String(error).slice(0, 160));
+  }
+  if (!back || back.name !== name || (await sha256Bytes(back.bytes)) !== sha256)
+    throw new CaptureKeepError(
+      "verify",
+      "the capture read back is not the one picked",
+    );
+  return { name, bytes: bytes.length, sha256 };
+}
+
+/**
  * Keeps the picked file and returns what was kept: its name, size and SHA-256. The answer is given only after the kept record has been
- * read back and hashes to the picked bytes; any failure throws, and the page then says the capture was NOT kept.
+ * read back and hashes to the picked bytes; any failure throws (a `CaptureKeepError` naming its phase), and the page then says the
+ * capture was NOT kept, or that what is kept is uncertain.
  */
 export async function storeCapture(
   file: Blob,
@@ -115,11 +159,7 @@ export async function storeCapture(
 ): Promise<{ name: string; bytes: number; sha256: string }> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const sha256 = await sha256Bytes(bytes);
-  await store.put(bytes, name);
-  const back = await store.get();
-  if (!back || back.name !== name || (await sha256Bytes(back.bytes)) !== sha256)
-    throw new Error("the capture read back is not the one picked");
-  return { name, bytes: bytes.length, sha256 };
+  return keepCapture(bytes, sha256, name, store);
 }
 
 /** Reads the kept capture afresh and hashes what was read. No capture kept is an unsuccessful load with its reason, never a substitute. */

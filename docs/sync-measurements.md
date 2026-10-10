@@ -19,6 +19,14 @@ is a pass mark, none stands for a device class, and BE-B1 and BE-Q23 remain bloc
 > carries the evidence inside the hand-over so the validator resolves it again, and attributes WebKit's WebContent, Networking and GPU processes through its host's
 > launchd PID domain. **Every RSS figure of attempt 4 below is descendant-only**: for WebKit it omits the renderer and is withdrawn as browser memory; for
 > Chromium and Firefox it is indicative only. No figure below is current-tree evidence; the final run's hand-over is.
+>
+> **Status after review 3 (revision 3, 10 October 2026).** Review 3 found that the contract still accepted observations by their cardinality alone (60 null quota
+> outcomes, empty ladder rows and retirement conditions, a per-run memory peak disagreeing with its series) and that the hand-over's published figures were not
+> reconciled with its evidence (R2), and that the device page let a manual run collect beside an active protocol and could not restore a lost tab's capture (R5).
+> Revision 3 makes the contract (version 2) check every observation's **contents** and recompute every derived figure from its retained support, builds every
+> field of `results.json` and `report.md` by one **projection** of the carried evidence that the validator repeats field for field, and gives the device page **one
+> collector per origin** with owner-only restoration of the pinned capture. Version-1 evidence (every attempt so far) resolves incomplete under version 2: it lacks
+> the support the contract now recomputes from, and stays history, unchanged.
 
 ## Read this first
 
@@ -58,6 +66,13 @@ results, the contention files, the shell runs, the stage records and the load sa
 reasons, and `results.json` (`schema: 3`) takes every completeness, isolation, item status and desktop conclusion from that resolution. The validator resolves
 `evidence/` again and refuses a hand-over whose statements differ from it, whatever `SHA256SUMS` says. One invocation at a time holds an evidence directory
 (`writer.lock`, created exclusively; released into `writers/`); an interrupted invocation leaves it held, and a fresh directory is then the only route.
+
+From revision 3 (review 3 R2) every field of `results.json` and the whole of `report.md` come from one projection of the carried evidence and its resolution
+(`scripts/lib/profile-projection.mjs`), with a small recorded context (the candidate at hand-over, the machine, the API-types pin, the provisional constants).
+The validator projects them again and refuses any difference, so a published figure, admission list, failure, count, consumer status or identity cannot
+disagree with the evidence even when `SHA256SUMS` was regenerated; the context itself is checked (the pin is the candidate's, every stage ran on the candidate
+named, the constants are those `constants.md` shows). An invalid cell or an unfulfilled control exits 1 even with `--allow-partial`; only a consistent
+programme that is merely incomplete or not isolated is a partial hand-over (2 when allowed).
 
 ## The decisions, and what the desktop evidence can and cannot settle
 
@@ -270,6 +285,23 @@ From revision 2 (review 2, design assessment), the unit of evidence is a **cell*
   judges its cells `unknown`; only `clean` is isolated, and there is still no CPU tolerance;
 * a 5 s poll cannot prove that no short foreign job ran between two samples: final timings need a protected controller.
 
+From revision 3 (review 3 R2; contract version 2) a cell is complete only when its observation's **contents** are, and every representation of it agrees:
+
+* P-Q2: the burst's idle, during and after readings, every request's outcome, the estimate ladder from its initial usage (each write's size, cumulative total,
+  usage and delta), the ledger's readings before and after its 100 typed verdicts, the growths, the first estimate step and the recommendation
+  `max(burst x 4, step x 2)` are recomputed (a coarse or absent estimate stays an explicit `null`; nothing is assumed); P-Q uses the writer's reading shape;
+* P-8: both named conditions, every counter recounted from the trace events kept beside it (`contention/retirements-trace.<engine>.json`), the rate from its pages
+  and duration, the value row the same; P-6: the by-cause summary recomputed from the scenario rows (the precondition and the later covers stay two different
+  observations); P-7 and P-9: every wait series the samples of its JSONL support, give-ups their outcomes, throughput the copies'; P-13: every figure recomputed
+  from the observed hints and transactions (`contention/follower-reads-raw.<engine>.json`), the read series those very reads;
+* memory: every sample is kept, the peak is the largest of them, the processes at the peak add up to it, the top-level copies and the P-11/P-W2 series are the
+  per-run figures in run order, and the heap peak is the largest heap sample;
+* W2: the captured bytes are parsed and their phase, batches, changes and shapes recomputed against the seeded person, so metadata cannot make a small batch dense;
+  the bound and the limits ladder have their recorded forms; the live application and the cold outcomes agree with their copies;
+* P-4: each sync-page total is the sum of its segments (a draft total at least theirs); the shell's medians and every derived figure follow from its runs;
+* the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures;
+* every row lies in the lines its stage sealed; malformed nested evidence is a named finding of its cell, never a crash or an empty success.
+
 ## What the released backend does (read from its source at the pinned commit, then measured)
 
 * **Sharing gates fields by their person.** A field is visible only while it is shared **and** every ancestor is visible. A field may be shared only with an account that can
@@ -335,3 +367,7 @@ Review 2 found that the shell boot was outside the isolation check (R1), that th
 negative control (R2), and that WebKit's RSS omitted its renderer (R4); the design assessment added the device page's persistence and ownership (DA-1) and concurrent
 writers of one evidence directory (DA-2). Revision 2 corrected all five (`.agtx/execute.md`). Attempt 4 remains history: its rows carry no stage, invocation or raw
 linkage, so the evidence contract resolves none of its cells, and its memory is descendant-only.
+
+Review 3 found that observation contents and published figures were still not part of completeness (R2) and that the device page's ownership did not cover manual
+runs or a lost tab's capture (R5). Revision 3 corrected both (`.agtx/execute.md`); the complete desktop programme then runs on the MacBook Air under the
+operator's hand-over of 10 October 2026, after an independent source assessment. Nothing measured so far is evidence under contract version 2.

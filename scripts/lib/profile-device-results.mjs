@@ -9,6 +9,12 @@
 // stays in the file as recorded and fails the control. A valid workload that failed is a FACT (reported), not a malformed file.
 //
 // Schema 1 files (before revision 2) are historical: they are refused here, and remain unchanged where they were recorded.
+//
+// Revision 3 (review 3 R2, design assessment E12): the file's lifecycle and every run's payload are checked as well. A protocol file holds
+// the protocol's attempts in plan order (its planned count is the plan's, with or without W2), its terminal state agrees with how many it
+// holds, and each run carries the figures its path and outcome produce: an engine run that was admitted or refused made its request and
+// has its timings, W5 (processing only) made none and committed nothing, a killed attempt measured nothing, an error may lack figures but
+// says so. Absence is explicit (null), never a missing field, and never successful processing evidence.
 
 export const DEVICE_SCHEMA = 2;
 export const MUST_HAVE_RUNS = ["W1", "W2", "W3", "W4", "W6"];
@@ -28,6 +34,92 @@ export function protocolWorkloads(recorded) {
 /** How many distinct cold runs each workload of the protocol needs. */
 export const runsRequired = (workload) =>
   MUST_HAVE_RUNS.includes(workload) ? REQUIRED_COLD_RUNS : 1;
+
+/** The protocol's attempts in the page's order (src/fixture/data-harness/profile-capture.ts `protocolPlan`): W2 after W1 when named. */
+export function protocolOrder(recorded, withW2) {
+  const names = recorded.workloads.map((w) => w.name);
+  const order = withW2
+    ? names.flatMap((name) => (name === "W1" ? [name, W2] : [name]))
+    : names;
+  return order.flatMap((name) =>
+    Array.from({ length: runsRequired(name) }, (_, i) => ({
+      name,
+      run: i + 1,
+    })),
+  );
+}
+
+const isNum = (x) => typeof x === "number" && Number.isFinite(x);
+const nonNeg = (x) => isNum(x) && x >= 0;
+const count = (x) => Number.isInteger(x) && x >= 0;
+const nullOr = (test) => (x) => x === null || test(x);
+/** What one run must carry for its path and outcome; returns the problems (each names the field). */
+function payloadProblems(run, bytesOf) {
+  const problems = [];
+  for (const key of ["bytes", "request_count"])
+    if (!count(run[key])) problems.push(`${key} is not a count`);
+  if (!nonNeg(run.elapsed_ms)) problems.push("elapsed_ms is missing");
+  if (typeof run.detail !== "string") problems.push("detail is missing");
+  if (typeof run.at !== "string") problems.push("at is missing");
+  if (typeof run.sha256_verified !== "boolean")
+    problems.push("sha256_verified is not recorded");
+  for (const key of [
+    "scan_ms",
+    "commit_ms",
+    "heap_baseline_bytes",
+    "heap_peak_bytes",
+    "heap_after_bytes",
+  ])
+    if (!(key in run) || !nullOr(nonNeg)(run[key]))
+      problems.push(`${key} is neither a figure nor an explicit null`);
+  for (const [key, test] of [
+    ["limit", nullOr(count)],
+    ["changes_written", nullOr(count)],
+    ["cursor_after", nullOr((x) => typeof x === "string")],
+  ])
+    if (!(key in run) || !test(run[key]))
+      problems.push(`${key} is neither a value nor an explicit null`);
+  const processingOnly = String(run.workload).startsWith("W5-");
+  if (run.outcome === "killed") {
+    if (run.elapsed_ms !== 0 || run.request_count !== 0 || run.sha256_verified)
+      problems.push(
+        "a killed attempt cannot have measured or verified anything",
+      );
+  } else if (processingOnly) {
+    if (run.request_count !== 0 || run.commit_ms !== null || run.limit !== null)
+      problems.push("W5 is the processing path only: no request, no commit");
+    if (
+      run.outcome === "admitted" &&
+      (!nonNeg(run.scan_ms) || !count(run.changes_written))
+    )
+      problems.push(
+        "an admitted W5 run without its scan time and decoded count",
+      );
+  } else if (run.outcome === "admitted" || run.outcome === "refused") {
+    if (!(run.request_count >= 1) || !count(run.limit))
+      problems.push(
+        `an ${run.outcome} engine run without its request and limit`,
+      );
+    if (
+      run.outcome === "admitted" &&
+      (!nonNeg(run.scan_ms) ||
+        !nonNeg(run.commit_ms) ||
+        !count(run.changes_written))
+    )
+      problems.push(
+        "an admitted engine run without its scan, commit and written count",
+      );
+  }
+  if (run.sha256_verified === true && bytesOf !== null && run.bytes !== bytesOf)
+    problems.push(`${run.bytes} bytes, not the workload's ${bytesOf}`);
+  if (
+    run.workload === W2 &&
+    run.sha256_verified === true &&
+    typeof run.source !== "string"
+  )
+    problems.push("a verified W2 run does not name the capture file it read");
+  return problems;
+}
 
 /**
  * Checks one results file. `recorded` is scripts/lib/profile-workload-hashes.json; `w2Hashes` the hand-over's captured W2 hashes (a Set) or
@@ -91,6 +183,45 @@ export function checkDeviceResults(
     );
   if (!Array.isArray(data.runs) || data.runs.length === 0)
     errors.push("runs is empty");
+  // The lifecycle: a protocol's file, its planned count the plan's, its attempts the plan's in order, its terminal state their count's.
+  const plan = protocolOrder(recorded, w2sha256 !== null);
+  const held = Array.isArray(data.runs) ? data.runs.length : 0;
+  if (data.kind !== "protocol")
+    errors.push(
+      `kind ${data.kind}: only a protocol's results are a results file (a manual collection is not)`,
+    );
+  if (data.planned_runs !== plan.length)
+    errors.push(
+      `planned_runs ${data.planned_runs} is not the protocol's ${plan.length} attempts`,
+    );
+  if (held > plan.length)
+    errors.push(`${held} runs for a plan of ${plan.length}`);
+  if (data.terminal === "complete" && held !== plan.length)
+    errors.push(`terminal "complete" with ${held} of ${plan.length} attempts`);
+  else if (data.terminal === null && held === plan.length)
+    errors.push(
+      "every attempt is held but the protocol is not marked complete",
+    );
+  else if (data.terminal === "error")
+    warnings.push(
+      `the protocol stopped with an error: ${String(data.error).slice(0, 160)}`,
+    );
+  else if (
+    !(
+      data.terminal === null ||
+      data.terminal === "complete" ||
+      data.terminal === "error"
+    )
+  )
+    errors.push(`terminal ${data.terminal} is not a lifecycle state`);
+  if (
+    !Array.isArray(data.takeovers) ||
+    !data.takeovers.every((t) =>
+      ["at", "from", "to"].every((k) => typeof t?.[k] === "string"),
+    )
+  )
+    errors.push("the take-over record is missing or malformed");
+  const bytesOf = new Map(recorded.workloads.map((w) => [w.name, w.bytes]));
 
   const seen = new Map();
   const distinct = new Map();
@@ -173,10 +304,18 @@ export function checkDeviceResults(
       });
       warnings.push(`${where}: outcome ${run.outcome} (${run.detail})`);
     }
-    if (typeof run.elapsed_ms !== "number" || !Number.isFinite(run.elapsed_ms))
-      errors.push(`${where}: elapsed_ms is missing`);
     if (typeof run.user_agent !== "string")
       errors.push(`${where}: user_agent is missing`);
+    for (const problem of payloadProblems(
+      run,
+      bytesOf.get(run.workload) ?? null,
+    ))
+      errors.push(`${where}: ${problem}`);
+    const planned = plan[i];
+    if (planned && (planned.name !== run.workload || planned.run !== run.run))
+      errors.push(
+        `${where}: attempt ${i + 1} of the plan is ${planned.name} run ${planned.run}`,
+      );
     distinct.set(run.workload, [
       ...(distinct.get(run.workload) ?? []),
       run.run,

@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { ProfileRun } from "../../src/fixture/data-harness/profile-page";
 import {
+  admission,
   compareAndSet,
   complete,
   decide,
   type Envelope,
   exportResults,
   type KeyValue,
+  MANUAL_KEY,
   mayClear,
   newEnvelope,
+  type Permit,
   PROTOCOL_KEY,
+  permitProblem,
   readEnvelope,
   recoverInterrupted,
   reserve,
@@ -62,10 +66,11 @@ const start = (s: KeyValue, owner = "tab-a") =>
     }),
   );
 const read = (s: KeyValue) => readEnvelope(s, PROTOCOL_KEY);
+// Revision 3: an unexpected state is an assertion failure of the case (never a thrown error that hides which expectation failed).
 const present = (s: KeyValue) => {
   const r = read(s);
-  if (r.state !== "present") throw new Error(`state ${r.state}`);
-  return r;
+  expect(r.state, JSON.stringify(r).slice(0, 200)).toBe("present");
+  return r as Extract<ReturnType<typeof read>, { state: "present" }>;
 };
 /** One attempt as the page drives it: reserve (one write), run, store (one write). `dieAfter` stops after a write. */
 function attempt(
@@ -275,6 +280,188 @@ describe("the device page's protocol state", () => {
     const e: Envelope = present(s).envelope;
     expect(e.takeovers).toEqual([{ at: "t5", from: "tab-a", to: "tab-b" }]);
     expect(e.runs.map((x) => x.outcome)).toEqual(["killed"]);
+  });
+
+  // ---- revision 3 (review 3 R5; design assessment B1-B4, D1, D4, D9) --------------------------------------------------------------
+  it("case: an active protocol refuses every manual run, a reserved manual attempt refuses a protocol start, and an unreadable envelope blocks both", () => {
+    const s = store();
+    const manualRead = () => readEnvelope(s, MANUAL_KEY);
+    expect(admission("manual", read(s), manualRead())).toEqual({ ok: true });
+    expect(admission("protocol", read(s), manualRead())).toEqual({
+      ok: true,
+    });
+    start(s, "tab-a");
+    // Whoever asks (the owner's own tab, or a copy of its token): an active protocol admits no manual run.
+    expect(admission("manual", read(s), manualRead())).toMatchObject({
+      ok: false,
+      why: expect.stringContaining("p-1 is active on this origin"),
+    });
+    // A finished protocol does not block a manual run.
+    for (let i = 0; i < 3; i += 1) attempt(s, "tab-a");
+    expect(admission("manual", read(s), manualRead())).toEqual({ ok: true });
+    // A manual attempt still reserved (running, or interrupted and not yet recorded) refuses a protocol start; an idle history does not.
+    const m = store();
+    const manual = newEnvelope({
+      kind: "manual",
+      protocolId: "manual-1",
+      owner: "tab-a",
+      workloadVersion: 1,
+      w2sha256: null,
+      plan: [],
+      machine: {},
+      now: "t0",
+    });
+    m.setItem(MANUAL_KEY, JSON.stringify(manual));
+    expect(admission("protocol", read(m), readEnvelope(m, MANUAL_KEY))).toEqual(
+      { ok: true },
+    );
+    m.setItem(
+      MANUAL_KEY,
+      JSON.stringify(reserve(manual, 0, { name: "W3", run: 1 }, "p", "t1")),
+    );
+    expect(
+      admission("protocol", read(m), readEnvelope(m, MANUAL_KEY)),
+    ).toMatchObject({
+      ok: false,
+      why: expect.stringContaining("manual attempt (W3 run 1) is reserved"),
+    });
+    // An unreadable envelope of either kind blocks both routes until it is cleared explicitly.
+    const c = store();
+    c.setItem(MANUAL_KEY, "{torn");
+    for (const route of ["protocol", "manual"] as const)
+      expect(
+        admission(route, read(c), readEnvelope(c, MANUAL_KEY)),
+      ).toMatchObject({
+        ok: false,
+        why: expect.stringContaining("manual collection is unreadable"),
+      });
+  });
+
+  it("case: a result is stored only into the very reservation its page made: a clear, a re-creation, a take-over or another reservation in between leaves it unstored", () => {
+    const reserved = () => {
+      const s = store();
+      start(s, "tab-a");
+      const r = present(s);
+      const e = reserve(
+        r.envelope,
+        0,
+        PLAN[0] as { name: string; run: number },
+        "page-1",
+        "t1",
+      );
+      expect(compareAndSet(s, PROTOCOL_KEY, r.raw, e).ok).toBe(true);
+      const permit: Permit = {
+        protocol_id: e.protocol_id,
+        owner: "tab-a",
+        reservation: e.reserved as NonNullable<Envelope["reserved"]>,
+      };
+      return { s, permit };
+    };
+    // Control: nothing changed in between, so the permit holds and the result is stored once.
+    const ok = reserved();
+    expect(permitProblem(read(ok.s), ok.permit)).toBeNull();
+    // Cleared.
+    const cleared = reserved();
+    cleared.s.removeItem(PROTOCOL_KEY);
+    expect(permitProblem(read(cleared.s), cleared.permit) ?? "").toMatch(
+      /cleared/,
+    );
+    // Cleared and created again (another collection in its place).
+    const again = reserved();
+    again.s.removeItem(PROTOCOL_KEY);
+    start(again.s, "tab-a");
+    const other = present(again.s);
+    again.s.setItem(
+      PROTOCOL_KEY,
+      JSON.stringify({ ...other.envelope, protocol_id: "p-2" }),
+    );
+    expect(permitProblem(read(again.s), again.permit) ?? "").toMatch(
+      /another collection/,
+    );
+    // Taken over (the reservation itself is unchanged, the owner is not).
+    const taken = reserved();
+    const t = present(taken.s);
+    taken.s.setItem(
+      PROTOCOL_KEY,
+      JSON.stringify(takeOver(t.envelope, "tab-b", "t5")),
+    );
+    expect(permitProblem(read(taken.s), taken.permit) ?? "").toMatch(
+      /owner changed/,
+    );
+    // The reservation recovered by another load and the same attempt reserved again by another page.
+    const moved = reserved();
+    const mv = present(moved.s);
+    moved.s.setItem(
+      PROTOCOL_KEY,
+      JSON.stringify({
+        ...mv.envelope,
+        reserved: { ...mv.envelope.reserved, page: "page-2", at: "t2" },
+      }),
+    );
+    expect(permitProblem(read(moved.s), moved.permit) ?? "").toMatch(
+      /no longer holds the reservation/,
+    );
+  });
+
+  it("case: a result is never appended to a collection that holds no reservation (no unreserved fallback)", () => {
+    const s = store();
+    start(s);
+    const e = present(s).envelope;
+    expect(() => complete(e, result("W1", 1), "t2")).toThrow(
+      /no reserved attempt/,
+    );
+  });
+
+  it("case: a structurally inconsistent schema-2 envelope is corrupt: nothing runs, nothing is started over it", () => {
+    const s = store();
+    start(s);
+    attempt(s, "tab-a");
+    const good = present(s).envelope;
+    const variants: Array<[string, Partial<Envelope>]> = [
+      ["next past its results", { next: 2 }],
+      [
+        "a result that is not the planned attempt",
+        {
+          runs: [result("W7-truncated", 1)],
+        },
+      ],
+      [
+        "a result stored twice",
+        {
+          runs: [result("W1", 1), result("W1", 1)],
+          next: 2,
+        },
+      ],
+      [
+        "a reservation that is not the next attempt",
+        {
+          reserved: { name: "W1", run: 1, index: 0, at: "t", page: "p" },
+        },
+      ],
+      ["a finished protocol with attempts left", { terminal: "complete" }],
+      [
+        "an unfinished protocol with none left",
+        {
+          plan: [{ name: "W1", run: 1 }],
+        },
+      ],
+      [
+        "a malformed take-over record",
+        {
+          takeovers: [{ at: "t" } as never],
+        },
+      ],
+      ["a capture that is not a SHA-256", { w2sha256: "abc" }],
+    ];
+    for (const [what, patch] of variants) {
+      s.setItem(PROTOCOL_KEY, JSON.stringify({ ...good, ...patch }));
+      const r = read(s);
+      expect(r, what).toMatchObject({
+        state: "corrupt",
+        error: expect.stringContaining("inconsistent schema-2 envelope"),
+      });
+      expect(decide(r, "tab-a").action, what).toBe("corrupt");
+    }
   });
 
   it("the owner token is the tab's own: kept across its reloads, never another tab's", () => {

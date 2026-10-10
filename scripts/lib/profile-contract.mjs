@@ -35,13 +35,15 @@ import {
 } from "./profile-device-results.mjs";
 import {
   COLLECTION_LOG,
+  CONTRACT_VERSION,
   ENGINES,
   PROGRAMME_STAGES,
   REQUIRED_CASES,
+  SHARED_ROWS,
 } from "./profile-evidence.mjs";
 import { classifyWindow, SAMPLE_INTERVAL_MS } from "./profile-isolation.mjs";
 
-export const CONTRACT_VERSION = 1;
+export { CONTRACT_VERSION };
 export const CELL_STATUSES = [
   "ok",
   "unavailable",
@@ -494,8 +496,54 @@ function memoryCell(item, stage, engine, source, workload, run) {
 }
 
 // ---- value and file checks: each returns the problems it found (an empty list is a pass) ----------------------------------------------------
+// Revision 3 (review 3 R2; design assessment A1-A8, E1-E12): a check validates the observation's CONTENTS (identity, units, domain,
+// capability state, cardinality) and recomputes every derived figure from the observations it was derived from, so a row that keeps its
+// counts but loses its contents, or a summary that disagrees with its own raw support, is never complete. `opts.counts` (default true)
+// gates the programme's sample counts only: a qualification run of a real writer with shortened samples checks the same contents.
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
-const isNumOrNull = (x) => x === null || isNum(x);
+const isCount = (x) => Number.isInteger(x) && x >= 0;
+const isNonNeg = (x) => isNum(x) && x >= 0;
+const isObj = (x) => typeof x === "object" && x !== null && !Array.isArray(x);
+const isText = (x) => typeof x === "string" && x.trim().length > 0;
+/** JSON with sorted keys: two representations of one observation are the same only if this text is. */
+export function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (isObj(value))
+    return `{${Object.keys(value)
+      .filter((k) => value[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+      .join(",")}}`;
+  return JSON.stringify(value);
+}
+const same = (a, b) => canonical(a) === canonical(b);
+const countsOn = (opts) => opts?.counts !== false;
+/** One value row (not a required cell itself) that another representation must agree with. */
+const oneValue = (ev, name, engine) =>
+  ev.values.rows.filter((r) => r.name === name && r.engine === engine);
+const stripIdentity = (row) => {
+  const {
+    id: _id,
+    name: _name,
+    engine: _engine,
+    stage: _stage,
+    invocation: _invocation,
+    at: _at,
+    collection: _collection,
+    __line: _line,
+    __ordinal: _ordinal,
+    __file: _file,
+    ...rest
+  } = row;
+  return rest;
+};
+const rawSamples = (ev, name, engine) => {
+  const row = rowsNamed(ev.measurements, name, engine)[0];
+  if (!row || typeof row.raw !== "string") return null;
+  const raw = ev.readJson(row.raw);
+  return Array.isArray(raw.value?.samples) ? raw.value.samples : null;
+};
+
 function checkDeclaredOmission(value) {
   return value.status === "not_run" &&
     typeof value.reason === "string" &&
@@ -505,6 +553,28 @@ function checkDeclaredOmission(value) {
         "the declared omission (D-18 fixes maxInFlight at 1) has no not_run status and reason",
       ];
 }
+
+/** A storage reading: every figure present, a byte count or an explicit null (a capability the engine lacks), Chromium's exact one. */
+function footprintProblems(f, where, engine, flat) {
+  if (!isObj(f)) return [`${where} is missing`];
+  const problems = [];
+  const estimate = flat ? f : f.estimate;
+  if (!isObj(estimate)) return [`${where}.estimate is missing`];
+  for (const field of ["usage", "quota"])
+    if (
+      !(field in estimate) ||
+      !(estimate[field] === null || isNonNeg(estimate[field]))
+    )
+      problems.push(
+        `${where}${flat ? "" : ".estimate"}.${field} is not a byte count or an explicit null`,
+      );
+  if (!("indexeddb" in f) || !(f.indexeddb === null || isNonNeg(f.indexeddb)))
+    problems.push(`${where}.indexeddb is not a byte count or an explicit null`);
+  if (engine === "chromium" && !isNonNeg(f.indexeddb))
+    problems.push(`${where}.indexeddb: Chromium's exact CDP figure is missing`);
+  return problems;
+}
+/** P-Q: the writer's readings ({estimate: {usage, quota}, indexeddb}), and the per-draft figure derived from two of them. */
 function checkFootprints(value, cell) {
   const problems = [];
   for (const key of [
@@ -514,135 +584,603 @@ function checkFootprints(value, cell) {
     "one_draft_with_1_mib_payload",
     "atlas_auth_steady",
     "atlas_auth_100_fences_200_leases",
-  ]) {
-    const f = value[key];
-    if (typeof f !== "object" || f === null) {
-      problems.push(`${key} is missing`);
-      continue;
-    }
-    for (const field of ["usage", "quota", "indexeddb"])
-      if (!(field in f) || !isNumOrNull(f[field]))
-        problems.push(`${key}.${field} is not a number or an explicit null`);
-    if (cell.engine === "chromium" && !isNum(f.indexeddb))
-      problems.push(`${key}.indexeddb: Chromium's exact CDP figure is missing`);
-  }
+  ])
+    problems.push(...footprintProblems(value[key], key, cell.engine, false));
+  if (!isText(value.one_draft_with_1_mib_payload?.outcome))
+    problems.push("the 1 MiB import draft's enqueue outcome is not recorded");
+  const empty = value.empty_account_database?.indexeddb ?? null;
+  const drafts = value.with_200_drafts?.indexeddb ?? null;
+  const perDraft =
+    isNum(empty) && isNum(drafts) ? Math.round((drafts - empty) / 200) : null;
+  if (value.per_draft_bytes_chromium !== perDraft)
+    problems.push(
+      `per_draft_bytes_chromium ${value.per_draft_bytes_chromium} does not follow from its readings (${perDraft})`,
+    );
   if (typeof value.note !== "string")
     problems.push("the estimate method is not stated");
   return problems;
 }
-function checkQuotaInputs(value) {
+
+/**
+ * P-Q2 (C8): the burst's footprints and every request's outcome, the estimate ladder from its initial usage, the ledger's readings before
+ * and after its 100 reservations, and the desktop recommendation recomputed from them (nullable estimates stay null; nothing is assumed).
+ */
+function checkQuotaInputs(value, cell) {
   const problems = [];
-  const burst = value.atlas_auth_burst ?? {};
+  const engine = cell.engine;
+  const burst = value.atlas_auth_burst;
+  if (!isObj(burst)) return ["the atlas-auth burst is not recorded"];
   if (burst.pages !== 3 || burst.requests_per_page !== 20)
     problems.push("the burst is not three pages of twenty stamped requests");
   if (
     !Number.isInteger(burst.held_at_once) ||
-    burst.held_at_once < 1 ||
+    burst.held_at_once < 20 ||
     burst.held_at_once > 60
   )
-    problems.push("held_at_once (the requests out together) is not recorded");
+    problems.push(
+      `held_at_once ${burst.held_at_once}: the writer holds at least one page's twenty requests out together (20 to 60)`,
+    );
   if (!Array.isArray(burst.outcomes) || burst.outcomes.length !== 60)
     problems.push(
-      `${burst.outcomes?.length ?? 0} of 60 request outcomes recorded`,
+      `${Array.isArray(burst.outcomes) ? burst.outcomes.length : 0} of 60 request outcomes recorded`,
     );
-  const rows = value.estimate_granularity?.rows;
-  if (!Array.isArray(rows) || rows.length !== 15)
-    problems.push(`${rows?.length ?? 0} of 15 estimate-ladder writes recorded`);
-  const ledger = value.ledger ?? {};
-  const verdicts = Object.values(ledger.verdicts ?? {}).reduce(
-    (n, x) => n + x,
-    0,
-  );
-  if (
-    ledger.reservations !== 100 ||
-    ledger.bytes_each !== 1024 ||
-    verdicts !== 100
-  )
+  else if (!burst.outcomes.every(isText))
     problems.push(
-      `the ledger holds ${verdicts} of 100 reservation verdicts of 1,024 bytes`,
+      "a request outcome is not one the writer records ('released' or the stamped wrapper's error kind)",
+    );
+  for (const key of ["idle", "during", "after"])
+    problems.push(
+      ...footprintProblems(burst[key], `atlas_auth_burst.${key}`, engine, true),
+    );
+  const growth = (from, to) => ({
+    estimate:
+      isNum(to?.usage) && isNum(from?.usage) ? to.usage - from.usage : null,
+    indexeddb_exact:
+      isNum(to?.indexeddb) && isNum(from?.indexeddb)
+        ? to.indexeddb - from.indexeddb
+        : null,
+  });
+  if (!same(burst.growth_during, growth(burst.idle, burst.during)))
+    problems.push(
+      "growth_during does not follow from the idle and during readings",
+    );
+  if (!same(burst.growth_after, growth(burst.idle, burst.after)))
+    problems.push(
+      "growth_after does not follow from the idle and after readings",
+    );
+  const ladder = value.estimate_granularity;
+  let firstChange;
+  if (!isObj(ladder)) problems.push("the estimate ladder is not recorded");
+  else {
+    if (
+      !("initial_usage" in ladder) ||
+      !(ladder.initial_usage === null || isNonNeg(ladder.initial_usage))
+    )
+      problems.push(
+        "the ladder's initial usage is not a byte count or an explicit null",
+      );
+    const rows = ladder.rows;
+    if (!Array.isArray(rows) || rows.length !== 15)
+      problems.push(
+        `${Array.isArray(rows) ? rows.length : 0} of 15 estimate-ladder writes recorded`,
+      );
+    else {
+      let previous = ladder.initial_usage ?? null;
+      let written = 0;
+      for (const [k, row] of rows.entries()) {
+        if (!isObj(row)) {
+          problems.push(`ladder write ${k + 1} is not a reading`);
+          previous = null;
+          continue;
+        }
+        written += 1024 * 2 ** k;
+        if (row.added_bytes !== 1024 * 2 ** k)
+          problems.push(
+            `ladder write ${k + 1}: added ${row.added_bytes} bytes, not 1 KiB x 2^${k}`,
+          );
+        if (row.total_written !== written)
+          problems.push(
+            `ladder write ${k + 1}: total_written ${row.total_written}, not ${written}`,
+          );
+        if (!("usage" in row) || !(row.usage === null || isNonNeg(row.usage)))
+          problems.push(
+            `ladder write ${k + 1}: usage is not a byte count or an explicit null`,
+          );
+        const delta =
+          isNum(row.usage) && isNum(previous) ? row.usage - previous : null;
+        if (row.delta !== delta)
+          problems.push(
+            `ladder write ${k + 1}: delta ${row.delta} does not follow from the usage readings (${delta})`,
+          );
+        previous = row.usage ?? null;
+      }
+      firstChange = rows.find((row) => (row?.delta ?? 0) > 0);
+      if (
+        ladder.smallest_write_that_moved_the_estimate !==
+        (firstChange?.added_bytes ?? null)
+      )
+        problems.push(
+          "the smallest write that moved the estimate does not follow from the ladder",
+        );
+      if (ladder.estimate_step_bytes !== (firstChange?.delta ?? null))
+        problems.push("the estimate step does not follow from the ladder");
+    }
+  }
+  const ledger = value.ledger;
+  if (!isObj(ledger)) problems.push("the ledger is not recorded");
+  else {
+    if (ledger.reservations !== 100 || ledger.bytes_each !== 1024)
+      problems.push("the ledger is not 100 reservations of 1,024 bytes");
+    const verdicts = isObj(ledger.verdicts)
+      ? Object.entries(ledger.verdicts)
+      : null;
+    if (
+      !verdicts?.every(([k, n]) => isText(k) && isCount(n)) ||
+      verdicts.reduce((n, [, x]) => n + (isCount(x) ? x : 0), 0) !== 100
+    )
+      problems.push("the ledger does not hold 100 typed reservation verdicts");
+    problems.push(
+      ...footprintProblems(ledger.before, "ledger.before", engine, true),
+      ...footprintProblems(ledger.after, "ledger.after", engine, true),
+    );
+    if (!same(ledger.growth, growth(ledger.before, ledger.after)))
+      problems.push(
+        "the ledger's growth does not follow from its before and after readings",
+      );
+  }
+  const during = growth(burst.idle, burst.during);
+  const burstBytes = during.indexeddb_exact ?? during.estimate ?? null;
+  const step = firstChange?.delta ?? null;
+  const recommendation =
+    burstBytes === null || step === null
+      ? null
+      : Math.max(burstBytes * 4, step * 2);
+  if (value.derived_desktop_recommendation_bytes !== recommendation)
+    problems.push(
+      `the derived recommendation ${value.derived_desktop_recommendation_bytes} does not follow from the burst and the estimate step (${recommendation})`,
     );
   if (value.quota_reserve_bytes_in_use !== 8 * 1024 * 1024)
     problems.push("the reserve in use (8 MiB) is not recorded");
   return problems;
 }
+
 function checkBackend(value) {
-  return value.health?.status === 200
-    ? []
-    : [`the backend's /health answered ${value.health?.status}`];
-}
-function checkBound(value) {
   const problems = [];
-  if (!isNum(value.revoke?.status))
-    problems.push("the bound write's answer is not recorded");
-  if (typeof value.delivered !== "object" || value.delivered === null)
-    problems.push("what the server then delivered is not recorded");
+  if (value.health?.status !== 200)
+    problems.push(`the backend's /health answered ${value.health?.status}`);
+  if (!isObj(value.health?.body))
+    problems.push("the /health body is not recorded");
+  if (!isObj(value.revision))
+    problems.push(
+      "the backend revision the integration runner verified is not recorded",
+    );
   return problems;
 }
-function checkLimits(value) {
-  return value.status === "measured" &&
-    typeof value.probe === "object" &&
-    value.probe !== null
-    ? []
-    : ["the limits probe is not recorded"];
-}
-function checkRetirements(file) {
-  return Array.isArray(file.conditions) &&
-    file.conditions.length === P7_CONDITIONS.length
+
+const shapeProblems = (shape, where) =>
+  isObj(shape) &&
+  isCount(shape.changes) &&
+  isCount(shape.checklist_upserts) &&
+  shape.checklist_upserts <= shape.changes &&
+  typeof shape.person_ancestor === "boolean"
     ? []
     : [
-        `${file.conditions?.length ?? 0} of ${P7_CONDITIONS.length} retirement conditions`,
+        `${where} is not a batch shape (changes, checklist upserts, the person present)`,
       ];
-}
-function checkFrozenOwner(file) {
+/** The bound write's answer and what the reader was then delivered: one of the writer's three recorded forms. */
+function checkBound(value) {
   const problems = [];
-  const rows = Array.isArray(file.rows) ? file.rows : [];
-  for (const freeze of P7_FREEZES) {
-    const n = rows.filter((r) => r.freeze_ms === freeze).length;
-    if (n !== 15) problems.push(`freeze ${freeze} ms: ${n} of 15 samples`);
-  }
-  if (rows.length !== P7_FREEZES.length * 15)
-    problems.push(`${rows.length} of 105 rows`);
-  if (file.scaled_lock_wait_ms !== 1000)
-    problems.push("the scaled lock wait is not 1 s");
+  if (!isText(value.bound_person))
+    problems.push("the bound's person is not recorded");
+  if (!isObj(value.revoke) || !Number.isInteger(value.revoke.status))
+    return [...problems, "the bound write's answer is not recorded"];
+  const d = value.delivered;
+  if (!isObj(d))
+    return [...problems, "what the server then delivered is not recorded"];
+  if (value.revoke.status !== 200) {
+    if (!same(d, { status: "not_read" }))
+      problems.push(
+        "a refused bound write cannot have been followed by a read",
+      );
+  } else if (d.status === 200) {
+    if (!Array.isArray(d.batch_shapes))
+      problems.push("the delivered batch shapes are not recorded");
+    else
+      for (const [i, shape] of d.batch_shapes.entries())
+        problems.push(...shapeProblems(shape, `delivered batch ${i + 1}`));
+    if (typeof d.has_more !== "boolean")
+      problems.push("has_more is not recorded");
+    if (!isCount(d.bytes)) problems.push("the delivered size is not recorded");
+  } else if (!Number.isInteger(d.status) || typeof d.body !== "string")
+    problems.push(
+      "the read's refusal is not recorded with its status and body",
+    );
   return problems;
 }
-function checkProductionWait(file) {
+
+const LIMIT_COMMANDS = [800, 400, 200, 100, 40, 21, 20];
+const answerOf = (x) =>
+  isObj(x) && Number.isInteger(x.status) && typeof x.body === "string";
+/** The finite limits probe: the legacy answer, the value-length ladder, and the command-count ladder in its order (proxy and direct). */
+function checkLimits(value) {
+  const problems = [];
+  if (value.status !== "measured" || !isObj(value.probe))
+    return ["the limits probe is not recorded"];
+  const p = value.probe;
+  if (!answerOf(p.legacy_create_field_checklist))
+    problems.push("the legacy create_field answer is not recorded");
+  if (
+    ![0, 4096, 2000, 1000, 500, 100].includes(
+      p.largest_text_value_accepted_of_tried,
+    )
+  )
+    problems.push(
+      "the largest accepted text value is not one of the lengths tried",
+    );
+  const rows = p.command_count_rows;
+  if (
+    !Array.isArray(rows) ||
+    rows.length === 0 ||
+    rows.length > LIMIT_COMMANDS.length
+  )
+    return [...problems, "the command-count ladder is not recorded"];
+  for (const [i, row] of rows.entries()) {
+    const where = `command-count row ${i + 1}`;
+    if (!isObj(row)) {
+      problems.push(`${where} is not a row`);
+      continue;
+    }
+    if (row.commands !== LIMIT_COMMANDS[i])
+      problems.push(
+        `${where}: ${row.commands} commands, not the ladder's ${LIMIT_COMMANDS[i]}`,
+      );
+    if (!isCount(row.body_bytes) || row.body_bytes === 0)
+      problems.push(`${where}: no body size`);
+    if (!answerOf(row.proxied))
+      problems.push(`${where}: the proxied answer is not recorded`);
+    else if (row.proxied.status === 200) {
+      if (row.direct !== null)
+        problems.push(`${where}: an accepted body has no direct probe`);
+      if (i !== rows.length - 1)
+        problems.push(`${where}: the ladder goes on after an accepted body`);
+    } else if (!answerOf(row.direct))
+      problems.push(
+        `${where}: a refused body has no direct answer (proxy and backend cannot be told apart)`,
+      );
+  }
+  if (
+    rows.length < LIMIT_COMMANDS.length &&
+    rows.at(-1)?.proxied?.status !== 200
+  )
+    problems.push("the ladder stopped before an accepted body or its end");
+  return problems;
+}
+
+const RETIREMENT_COUNTS = {
+  leader_cover_commits: ["leader", "cover.committed"],
+  leader_requests_issued: ["leader", "request.issued"],
+  leader_leases_retired: ["leader", "lease.retired"],
+  leader_activity_cancelled: ["leader", "activity.cancel"],
+  probe_activity_cancelled: ["probe", "activity.cancel"],
+  probe_leases_retired: ["probe", "lease.retired"],
+  probe_retire_failed: ["probe", "lease.retire_failed"],
+  probe_closing_gave_up: ["probe", "closing.gave_up"],
+};
+/** P-8: both conditions with every counter, the rate from its pages and duration, every counter recounted from its trace support. */
+function checkRetirements(file, cell, ev) {
+  const problems = [];
+  const conditions = file.conditions;
+  if (!Array.isArray(conditions) || conditions.length !== P7_CONDITIONS.length)
+    return [
+      `${Array.isArray(conditions) ? conditions.length : 0} of ${P7_CONDITIONS.length} retirement conditions`,
+    ];
+  const trace = ev.readJson(`contention/retirements-trace.${cell.engine}.json`);
+  const support =
+    trace.present && !trace.error && Array.isArray(trace.value?.conditions)
+      ? trace.value.conditions
+      : null;
+  if (!support)
+    problems.push("the retirements' trace support is missing or malformed");
+  for (const [i, c] of conditions.entries()) {
+    const where = `retirements, ${P7_CONDITIONS[i]}`;
+    if (!isObj(c) || c.condition !== P7_CONDITIONS[i]) {
+      problems.push(`${where}: the condition is not recorded under its name`);
+      continue;
+    }
+    if (!isCount(c.leader_pages))
+      problems.push(`${where}: leader_pages is not a count`);
+    if (!isNum(c.elapsed_s) || c.elapsed_s <= 0)
+      problems.push(`${where}: the duration is not recorded`);
+    else if (
+      c.leader_pages_per_second !== +(c.leader_pages / c.elapsed_s).toFixed(1)
+    )
+      problems.push(
+        `${where}: leader_pages_per_second does not follow from its pages and duration`,
+      );
+    const slice = support?.find((s) => s?.condition === c.condition);
+    if (
+      support &&
+      (!slice || !Array.isArray(slice.leader) || !Array.isArray(slice.probe))
+    )
+      problems.push(`${where}: no trace support for the condition`);
+    for (const [key, [page, event]] of Object.entries(RETIREMENT_COUNTS)) {
+      if (!isCount(c[key])) {
+        problems.push(`${where}: ${key} is not a count`);
+        continue;
+      }
+      if (slice && Array.isArray(slice[page])) {
+        const counted = slice[page].filter((e) => e?.event === event).length;
+        if (counted !== c[key])
+          problems.push(
+            `${where}: ${key} ${c[key]} is not what its trace support counts (${counted})`,
+          );
+      }
+    }
+  }
+  const row = oneValue(ev, "P-8 retirements", cell.engine);
+  if (row.length !== 1 || !same(row[0].conditions, conditions))
+    problems.push("the P-8 value row does not hold the file's conditions");
+  return problems;
+}
+
+/** P-7 frozen owner: every row's give-up is its outcome, the summary counts the rows, and the wait series is the rows' waits. */
+function checkFrozenOwner(file, cell, ev, opts) {
+  const problems = [];
+  const rows = Array.isArray(file.rows) ? file.rows : null;
+  if (!rows) return ["the frozen-owner rows are not recorded"];
+  const per = countsOn(opts) ? 15 : file.samples_per_freeze;
+  if (!isCount(per) || per === 0)
+    problems.push("the samples per freeze are not recorded");
+  for (const [i, freeze] of P7_FREEZES.entries()) {
+    const block = rows.slice(i * per, (i + 1) * per);
+    if (block.length !== per || !block.every((r) => r?.freeze_ms === freeze))
+      problems.push(
+        `freeze ${freeze} ms: not ${per} samples in the ladder's order`,
+      );
+  }
+  if (rows.length !== P7_FREEZES.length * per)
+    problems.push(`${rows.length} of ${P7_FREEZES.length * per} rows`);
+  for (const [i, r] of rows.entries()) {
+    if (!isObj(r) || !isText(r.outcome) || !isNonNeg(r.waited_ms)) {
+      problems.push(`row ${i + 1} has no outcome or wait`);
+      continue;
+    }
+    if (r.gave_up !== (r.outcome === "lock_timeout"))
+      problems.push(
+        `row ${i + 1}: gave_up ${r.gave_up} does not follow from its outcome ${r.outcome}`,
+      );
+  }
+  const gaveUp = rows.filter((r) => r?.gave_up === true).length;
+  if (file.gave_up !== gaveUp || file.of !== rows.length)
+    problems.push("the give-up count does not follow from the rows");
+  if (file.scaled_lock_wait_ms !== 1000)
+    problems.push("the scaled lock wait is not 1 s");
+  if (!same(file.freezes_ms, P7_FREEZES))
+    problems.push("the freeze ladder is not recorded");
+  if (file.samples_per_freeze !== per)
+    problems.push("samples_per_freeze is not the rows'");
+  const series = rawSamples(
+    ev,
+    "P-7 frozen owner: writer wait (scaled 1 s)",
+    cell.engine,
+  );
+  // A representation that is itself an absent required cell is that cell's finding; one that is there must agree.
+  if (
+    series &&
+    !same(
+      series,
+      rows.map((r) => r?.waited_ms),
+    )
+  )
+    problems.push("the scaled writer-wait series is not the rows' waits");
+  const value = oneValue(ev, "P-7 frozen owner give-ups", cell.engine);
+  if (
+    value.length !== 1 ||
+    !same(stripIdentity(value[0]), {
+      gave_up: gaveUp,
+      of: rows.length,
+      scaled_lock_wait_ms: 1000,
+    })
+  )
+    problems.push("the give-ups value row does not agree with the rows");
+  return problems;
+}
+function checkProductionWait(file, _cell, _ev, opts) {
   const problems = [];
   if (file.lock_wait_ms !== 20_000 || file.freeze_ms !== 23_000)
     problems.push("not the production 20 s wait against a 23 s freeze");
   const rows = Array.isArray(file.rows) ? file.rows : [];
-  if (rows.length !== 2)
+  if (countsOn(opts) ? rows.length !== 2 : rows.length === 0)
     problems.push(`${rows.length} of 2 production-wait runs`);
   for (const [i, row] of rows.entries())
-    if (row.outcome !== "lock_timeout" || !(row.waited_ms >= 19_500))
+    if (
+      !isObj(row) ||
+      row.outcome !== "lock_timeout" ||
+      !(isNum(row.waited_ms) && row.waited_ms >= 19_500)
+    )
       problems.push(
-        `run ${i + 1}: ${row.outcome} after ${row.waited_ms} ms (the writer must give up at the bound, never earlier)`,
+        `run ${i + 1}: ${row?.outcome} after ${row?.waited_ms} ms (the writer must give up at the bound, never earlier)`,
       );
   return problems;
 }
-function checkYieldPolicy(file) {
+/** P-9: the engine's support, every policy in order, and each policy's throughput the very samples of its series. */
+function checkYieldPolicy(file, cell, ev) {
   const problems = [];
-  if (typeof file.engine_support !== "object" || file.engine_support === null)
+  const support = file.engine_support;
+  if (
+    !isObj(support) ||
+    typeof support.scheduler_yield !== "boolean" ||
+    typeof support.request_idle_callback !== "boolean"
+  )
     problems.push("the engine's yield support is not recorded");
-  const policies = (file.rows ?? []).map((r) => r.policy);
-  if (JSON.stringify(policies) !== JSON.stringify(P9_POLICIES))
-    problems.push(`policies ${policies.join(", ")}`);
+  const rows = Array.isArray(file.rows) ? file.rows : [];
+  if (
+    !same(
+      rows.map((r) => r?.policy),
+      P9_POLICIES,
+    )
+  )
+    problems.push(`policies ${rows.map((r) => r?.policy).join(", ")}`);
+  for (const row of rows) {
+    const t = row?.throughput_pages_per_second;
+    if (!Array.isArray(t) || !t.every((x) => isNum(x) && x > 0)) {
+      problems.push(`${row?.policy}: the throughput samples are not recorded`);
+      continue;
+    }
+    const series = rawSamples(
+      ev,
+      `P-9 ${row.policy}: catch-up throughput (pages/s, 200 pages, no probe)`,
+      cell.engine,
+    );
+    if (series && !same(series, t))
+      problems.push(`${row.policy}: the throughput is not its series' samples`);
+  }
   return problems;
 }
 
+/** What a JSONL support file says about one series: exactly one row, its samples and outcome counts those of the series' raw file. */
+function jsonlAgrees(ev, file, match, samples, row) {
+  const read = ev.jsonl(file);
+  if (!read.present) return [`${file} is missing`];
+  if (read.errors.length) return [`${file} is malformed (${read.errors[0]})`];
+  const found = read.rows.filter((r) =>
+    Object.entries(match).every(([k, v]) => r[k] === v),
+  );
+  if (found.length !== 1)
+    return [`${found.length} rows of ${file} for this series`];
+  const f = found[0];
+  const problems = [];
+  if (f.n !== samples.length || !same(f.ms, samples))
+    problems.push(`its samples in ${file} are not the series' raw samples`);
+  const outcomes = isObj(f.outcomes) ? Object.values(f.outcomes) : null;
+  if (
+    !outcomes?.every(isCount) ||
+    outcomes.reduce((n, x) => n + x, 0) !== samples.length
+  )
+    problems.push(`its outcomes in ${file} do not count its samples`);
+  if (!same(f.outcomes, row.outcomes))
+    problems.push("the series' outcomes are not those of its support file");
+  return problems;
+}
+
+/**
+ * Cross-representation checks of a measurement series (design assessment A4/A6, E5-E7): the same observation recorded elsewhere must be
+ * the same samples, in the same order. Keyed by the series name.
+ */
+function crossChecks(ev, cell, samples, row) {
+  const name = cell.name;
+  const engine = cell.engine;
+  let m =
+    /^P-7 (.*), (no leader|back-to-back leader, 5 ms apart \(platform yield\))$/.exec(
+      name,
+    );
+  if (m)
+    return jsonlAgrees(
+      ev,
+      "contention/waits.jsonl",
+      { probe: m[1], condition: m[2], engine },
+      samples,
+      row,
+    );
+  m =
+    /^P-9 (none|macrotask|scheduler_yield|idle): (ordinary request|exposure|atlas-auth writer) wait$/.exec(
+      name,
+    );
+  if (m)
+    return jsonlAgrees(
+      ev,
+      "contention/yield-policy.jsonl",
+      { policy: m[1], probe: m[2], engine },
+      samples,
+      row,
+    );
+  m =
+    /^P-13 leader catch-up throughput \(pages\/s, \d+ pages\), (\d) follower\(s\)$/.exec(
+      name,
+    );
+  if (m) {
+    const file = ev.readJson(`contention/follower-reads.${engine}.json`).value;
+    if (!isObj(file)) return [];
+    return same(file.leader_throughput_pages_per_second?.[m[1]], samples)
+      ? []
+      : ["the follower file's throughput is not this series' samples"];
+  }
+  m = /^(P-11 (\S+)|P-W2) (elapsed_ms|rss_peak_kib|heap_peak_bytes)$/.exec(
+    name,
+  );
+  if (m) {
+    const path = m[2] ? `memory/P-11.${engine}.json` : `w2/P-W2.${engine}.json`;
+    const workload = m[2] ?? "W2";
+    const file = ev.readJson(path).value;
+    if (!isObj(file)) return [];
+    const runs = (Array.isArray(file.rows) ? file.rows : []).filter(
+      (r) => r?.workload === workload,
+    )[0]?.runs;
+    return Array.isArray(runs) &&
+      same(
+        runs.map((r) => r?.[m[3]]),
+        samples,
+      )
+      ? []
+      : [`its samples are not the per-run ${m[3]} of ${path}, in run order`];
+  }
+  if (name === "P-4 sync page total_ms") {
+    const parts = ["pre_issue_ms", "request_ms", "post_response_ms"].map((s) =>
+      rawSamples(ev, `P-4 sync page ${s}`, engine),
+    );
+    if (parts.some((p) => !p)) return [];
+    if (parts.some((p) => p.length !== samples.length))
+      return ["its segment series do not match it sample for sample"];
+    return samples.every(
+      (t, i) =>
+        Math.abs(parts.reduce((n, p) => n + p[i], 0) - t) <=
+        1e-6 * Math.max(1, Math.abs(t)),
+    )
+      ? []
+      : [
+          "a total is not the sum of its pre-issue, request and post-response segments",
+        ];
+  }
+  if (name === "P-4 draft total_ms") {
+    const parts = [
+      "enqueue_ms",
+      "claim_ms",
+      "stamping_ms",
+      "request_ms",
+      "record_ms",
+    ].map((s) => rawSamples(ev, `P-4 draft ${s}`, engine));
+    if (parts.some((p) => !p)) return [];
+    if (parts.some((p) => p.length !== samples.length))
+      return ["its segment series do not match it sample for sample"];
+    // The draft total runs to after the answer was read, so it is at least the sum of the segments that lie inside it.
+    return samples.every(
+      (t, i) =>
+        parts.reduce((n, p) => n + p[i], 0) <=
+        t + 1e-6 * Math.max(1, Math.abs(t)),
+    )
+      ? []
+      : ["a total is shorter than the segments inside it"];
+  }
+  return [];
+}
+
 // ---- reading an evidence directory ---------------------------------------------------------------------------------------------------------
-function readJsonl(file) {
+function readJsonl(file, name) {
   const rows = [];
   const errors = [];
   if (!existsSync(file)) return { rows, errors, present: false };
   const lines = readFileSync(file, "utf8").split("\n");
+  let ordinal = 0;
   for (const [i, line] of lines.entries()) {
     if (!line.trim()) continue;
     try {
-      rows.push({ ...JSON.parse(line), __line: i });
+      const row = JSON.parse(line);
+      if (!isObj(row)) throw new Error("not a JSON object");
+      rows.push({ ...row, __line: i, __ordinal: ordinal, __file: name });
     } catch (error) {
       errors.push(`line ${i + 1}: ${error.message}`);
     }
+    ordinal += 1;
   }
   return { rows, errors, present: true };
 }
@@ -669,6 +1207,11 @@ export function loadEvidence(dir) {
     json.set(rel, entry);
     return entry;
   };
+  const jsonl = new Map();
+  const readRows = (rel) => {
+    if (!jsonl.has(rel)) jsonl.set(rel, readJsonl(join(dir, rel), rel));
+    return jsonl.get(rel);
+  };
   const stages = {};
   const stageDir = join(dir, "stages");
   if (existsSync(stageDir))
@@ -679,7 +1222,7 @@ export function loadEvidence(dir) {
   const samples = new Map();
   const stageSamples = (stage) => {
     if (samples.has(stage)) return samples.get(stage);
-    const read = readJsonl(join(dir, "isolation", `${stage}.jsonl`));
+    const read = readRows(`isolation/${stage}.jsonl`);
     const record = stages[stage]?.value;
     let problem = null;
     if (!read.present) problem = "no load samples were recorded for this stage";
@@ -709,9 +1252,10 @@ export function loadEvidence(dir) {
   return {
     dir,
     stages,
-    measurements: readJsonl(join(dir, "measurements.jsonl")),
-    values: readJsonl(join(dir, "values.jsonl")),
-    collection: readJsonl(join(dir, COLLECTION_LOG)),
+    measurements: readRows("measurements.jsonl"),
+    values: readRows("values.jsonl"),
+    collection: readRows(COLLECTION_LOG),
+    jsonl: readRows,
     readJson,
     stageSamples,
     exists: (rel) => existsSync(join(dir, rel)),
@@ -752,8 +1296,12 @@ function stageOf(ev, stage) {
   return entry?.present && !entry.error ? entry.value : null;
 }
 
-/** The problems of a row's identity and collection window: its stage, its invocation, its case, and the window inside the stage. */
+/**
+ * The problems of a row's identity and collection window: its stage, its invocation, its case, the window inside the stage, and (a row
+ * of a shared file) its line inside the range its stage sealed as its own (design assessment E11).
+ */
 function windowProblems(ev, cell, row, window) {
+  if (ev.relaxed) return [];
   const problems = [];
   const stage = stageOf(ev, cell.stage);
   if (row && row.stage !== cell.stage)
@@ -762,6 +1310,16 @@ function windowProblems(ev, cell, row, window) {
     problems.push(
       `written by invocation ${row.invocation}, not the stage's ${stage.invocation}`,
     );
+  if (row && stage && row.__file && Number.isInteger(row.__ordinal)) {
+    const from = stage.rows_at_start?.[row.__file];
+    const to = stage.rows_at_end?.[row.__file];
+    if (!isCount(from) || !isCount(to))
+      problems.push(`the stage did not seal its range of ${row.__file}`);
+    else if (!(row.__ordinal >= from && row.__ordinal < to))
+      problems.push(
+        `line ${row.__ordinal + 1} of ${row.__file} lies outside the lines its stage sealed (${from + 1} to ${to})`,
+      );
+  }
   if (!window?.from || !window.to) return [...problems, "no collection window"];
   const from = Date.parse(window.from);
   const to = Date.parse(window.to);
@@ -795,9 +1353,10 @@ function isolationOf(ev, cell, window) {
 function judged(cell, problems, ev, window, extra = {}) {
   if (problems.length) return result(cell, "invalid", problems, extra);
   if (
-    !cell.isolation &&
-    cell.kind !== "measurement" &&
-    cell.kind !== "shell-run"
+    ev.relaxed ||
+    (!cell.isolation &&
+      cell.kind !== "measurement" &&
+      cell.kind !== "shell-run")
   )
     return result(cell, "ok", [], extra);
   const isolation = isolationOf(ev, cell, window);
@@ -826,7 +1385,7 @@ function resolveMeasurement(ev, cell) {
       if (
         declared.length === 1 &&
         declared[0].capability === "unavailable" &&
-        typeof declared[0].reason === "string" &&
+        isText(declared[0].reason) &&
         (cell.capability !== "heap" || cell.engine !== "chromium") &&
         (cell.capability !== "longtask" || cell.engine !== "chromium")
       ) {
@@ -849,7 +1408,7 @@ function resolveMeasurement(ev, cell) {
     ]);
   const row = rows[0];
   const problems = windowProblems(ev, cell, row, row.collection);
-  if (row.n !== cell.n)
+  if (countsOn(ev.opts) && row.n !== cell.n)
     problems.push(`n ${row.n}; the programme takes ${cell.n}`);
   let samples = null;
   if (typeof row.raw !== "string") problems.push("no raw samples are linked");
@@ -867,9 +1426,10 @@ function resolveMeasurement(ev, cell) {
         );
       if (raw.value.name !== cell.name || raw.value.engine !== cell.engine)
         problems.push("the raw file is another series'");
-      if (!samples.every(isNum))
+      if (!samples.every(isNum)) {
         problems.push("a raw sample is not a finite number");
-      else {
+        samples = null;
+      } else {
         const again = summarise(samples);
         for (const key of ["n", "min", "p50", "p95", "p99", "max"])
           if (row[key] !== again[key])
@@ -880,26 +1440,14 @@ function resolveMeasurement(ev, cell) {
     }
   }
   if (samples && cell.same_samples_as) {
-    const other = rowsNamed(
-      ev.measurements,
-      cell.same_samples_as,
-      cell.engine,
-    )[0];
-    const otherRaw =
-      other && typeof other.raw === "string"
-        ? ev.readJson(other.raw).value
-        : null;
-    if (JSON.stringify(otherRaw?.samples) !== JSON.stringify(samples))
+    const other = rawSamples(ev, cell.same_samples_as, cell.engine);
+    if (!same(other, samples))
       problems.push(
         `its samples are not the ones of "${cell.same_samples_as}"`,
       );
   }
   if (samples && cell.derived) {
-    const from = rowsNamed(ev.measurements, cell.derived.from, cell.engine)[0];
-    const base =
-      from && typeof from.raw === "string"
-        ? ev.readJson(from.raw).value?.samples
-        : null;
+    const base = rawSamples(ev, cell.derived.from, cell.engine);
     if (
       !Array.isArray(base) ||
       base.length !== samples.length ||
@@ -909,6 +1457,7 @@ function resolveMeasurement(ev, cell) {
         `its samples are not "${cell.derived.from}" / ${cell.derived.divide}`,
       );
   }
+  if (samples) problems.push(...crossChecks(ev, cell, samples, row));
   return judged(cell, problems, ev, row.collection);
 }
 
@@ -925,7 +1474,7 @@ function resolveValue(ev, cell) {
     ]);
   const problems = [
     ...windowProblems(ev, cell, rows[0], rows[0].collection),
-    ...cell.check(rows[0], cell),
+    ...cell.check(rows[0], cell, ev, ev.opts),
   ];
   return judged(cell, problems, ev, rows[0].collection);
 }
@@ -947,12 +1496,14 @@ function resolveJsonFile(ev, cell) {
     return result(cell, "invalid", [
       `${cell.path} is malformed: ${entry.error}`,
     ]);
+  if (!isObj(entry.value))
+    return result(cell, "invalid", [`${cell.path} is not a JSON object`]);
   const window = caseWindow(ev, cell);
   const problems = [
     ...windowProblems(ev, cell, entry.value.evidence ?? {}, window),
-    ...(cell.check ? cell.check(entry.value, cell) : []),
+    ...(cell.check ? cell.check(entry.value, cell, ev, ev.opts) : []),
   ];
-  if (!window)
+  if (!window && !ev.relaxed)
     problems.push(`its case "${cell.case}" is not collected exactly once`);
   return judged(cell, problems, ev, window);
 }
@@ -973,6 +1524,8 @@ function resolveStage(ev, cell) {
       `the stage record is malformed: ${entry.error}`,
     ]);
   const r = entry.value;
+  if (!isObj(r))
+    return result(cell, "invalid", ["the stage record is not an object"]);
   const problems = [];
   if (!r.finished_at)
     return result(cell, "failed", [
@@ -987,6 +1540,13 @@ function resolveStage(ev, cell) {
     );
   if (!r.action_started_at || !r.action_finished_at)
     problems.push("the stage's action interval is not recorded");
+  for (const file of SHARED_ROWS)
+    if (
+      !isCount(r.rows_at_start?.[file]) ||
+      !isCount(r.rows_at_end?.[file]) ||
+      r.rows_at_end[file] < r.rows_at_start[file]
+    )
+      problems.push(`the stage's range of ${file} is not recorded`);
   if (r.debugging_samples)
     problems.push("a shortened DEBUGGING run is never evidence");
   return problems.length
@@ -995,13 +1555,13 @@ function resolveStage(ev, cell) {
 }
 
 function resolveCase(ev, cell) {
-  const found = ev.collection.rows.filter(
-    (t) => t.engine === cell.engine && String(t.test).startsWith(cell.prefix),
-  );
   if (ev.collection.errors.length)
     return result(cell, "invalid", [
       `the collection log is malformed (${ev.collection.errors[0]})`,
     ]);
+  const found = ev.collection.rows.filter(
+    (t) => t.engine === cell.engine && String(t.test).startsWith(cell.prefix),
+  );
   if (found.length === 0) return result(cell, "missing", ["not collected"]);
   if (found.length > 1)
     return result(cell, "failed", [`collected ${found.length} times`]);
@@ -1019,22 +1579,23 @@ function resolveBudget(ev, cell) {
     return result(cell, "missing", ["bundle-delta.json is missing"]);
   if (delta.error)
     return result(cell, "invalid", [`bundle-delta.json: ${delta.error}`]);
-  const b = delta.value.budgets?.[cell.build];
-  if (!b) return result(cell, "missing", [`no budget check of ${cell.build}`]);
+  const b = delta.value?.budgets?.[cell.build];
+  if (!isObj(b))
+    return result(cell, "missing", [`no budget check of ${cell.build}`]);
   const problems = [];
   if (b.exit !== 0)
     return result(cell, "failed", [
       `the budget check of ${cell.build} exited ${b.exit}`,
     ]);
-  const file = ev.readJson(b.file ?? "");
-  if (!file.present || file.error)
+  const file = ev.readJson(typeof b.file === "string" ? b.file : "");
+  if (!file.present || file.error || !isObj(file.value))
     problems.push(`its profile ${b.file} is missing or malformed`);
   else {
     if (file.sha256 !== b.sha256)
       problems.push("its profile is not the one recorded");
     for (const key of ["initial_js_gzip", "css_gzip", "fonts"])
-      if (!isNum(file.value.measured?.[key]))
-        problems.push(`measured.${key} is missing`);
+      if (!isCount(file.value.measured?.[key]))
+        problems.push(`measured.${key} is not a byte count`);
     if (Array.isArray(file.value.failures) && file.value.failures.length)
       problems.push(
         `the profile records failures: ${file.value.failures.join("; ")}`,
@@ -1052,18 +1613,35 @@ function resolveComposition(ev, cell) {
   if (delta.error) return result(cell, "invalid", [delta.error]);
   const d = delta.value;
   const problems = [];
-  if (!Array.isArray(d.initial_chunks) || d.initial_chunks.length === 0)
+  if (
+    !Array.isArray(d?.initial_chunks) ||
+    d.initial_chunks.length === 0 ||
+    !d.initial_chunks.every(isText)
+  )
     problems.push("the production initial chunk is not listed");
-  if (typeof d.dexie_in_initial_chunk !== "boolean")
+  if (typeof d?.dexie_in_initial_chunk !== "boolean")
     problems.push("whether Dexie is in the initial chunk is not recorded");
-  if (!isNum(d.initial_js_gzip))
-    problems.push("the initial JS size is missing");
+  if (!isCount(d?.initial_js_gzip))
+    problems.push("the initial JS size is not a byte count");
   return problems.length
     ? result(cell, "invalid", problems)
     : result(cell, "ok");
 }
 
-/** One cold run of the throttled shell boot: its figures, and its own window inside the shell stage. */
+const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+const SHELL_RUN_FIGURES = [
+  "lcp",
+  "fcp",
+  "cls",
+  "transferBytes",
+  "requests",
+  "fonts",
+  "fontsLoaded",
+  "fontsStart",
+  "fontsDone",
+  "fout",
+];
+/** One cold run of the throttled shell boot: its figures, and its own window inside the shell stage; the cell's medians from its runs. */
 function resolveShellRun(ev, cell) {
   const entry = ev.readJson(`shell/${cell.build}.json`);
   if (!entry.present)
@@ -1073,31 +1651,55 @@ function resolveShellRun(ev, cell) {
   const problems = [];
   if (file.build !== cell.build)
     problems.push(`the file measures ${file.build}`);
-  const row = (file.results ?? []).filter(
-    (r) => r.viewport === cell.viewport && r.network === cell.network,
+  const row = (Array.isArray(file.results) ? file.results : []).filter(
+    (r) => r?.viewport === cell.viewport && r?.network === cell.network,
   );
   if (row.length !== 1)
     return result(cell, row.length ? "invalid" : "missing", [
       `${row.length} rows for ${cell.viewport} ${cell.network}`,
     ]);
-  const runs = (row[0].raw ?? []).filter((r) => r.run === cell.run);
+  const raw = Array.isArray(row[0].raw) ? row[0].raw : [];
+  const runs = raw.filter((r) => r?.run === cell.run);
   if (runs.length === 0) return result(cell, "missing", ["no such cold run"]);
   if (runs.length > 1)
     return result(cell, "invalid", ["the cold run is recorded twice"]);
   const run = runs[0];
-  for (const key of ["lcp", "fcp", "cls", "transferBytes", "requests"])
-    if (!isNum(run[key])) problems.push(`${key} is not a finite number`);
-  // The cell's medians must follow from its runs once all three are there (a missing run is its own cell's finding).
+  if (run.error) problems.push(`the cold run failed: ${run.error}`);
+  for (const key of SHELL_RUN_FIGURES)
+    if (!isNonNeg(run[key]))
+      problems.push(`${key} is not a non-negative number`);
   if (
-    (row[0].raw ?? []).length === SHELL.runs &&
-    row[0].raw.every((r) => isNum(r.lcp) && isNum(r.fcp))
+    isNum(run.fontsDone) &&
+    isNum(run.fcp) &&
+    run.fout !== Math.max(0, run.fontsDone - run.fcp)
+  )
+    problems.push("fout does not follow from fontsDone and fcp");
+  if (!isObj(run.script_encodings))
+    problems.push("the scripts' encodings are not recorded");
+  // The cell's published figures must follow from its runs once all three are there (a missing run is its own cell's finding).
+  const r = row[0];
+  if (
+    raw.length === SHELL.runs &&
+    raw.every((x) => !x?.error && SHELL_RUN_FIGURES.every((k) => isNum(x?.[k])))
   ) {
-    const median = (xs) =>
-      [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-    if (row[0].lcp_ms !== Math.round(median(row[0].raw.map((r) => r.lcp))))
-      problems.push("the cell's median LCP does not follow from its runs");
-    if (row[0].fcp_ms !== Math.round(median(row[0].raw.map((r) => r.fcp))))
-      problems.push("the cell's median FCP does not follow from its runs");
+    const m = (key) => median(raw.map((x) => x[key]));
+    const derived = {
+      runs: SHELL.runs,
+      runs_completed: SHELL.runs,
+      cpuThrottle: 4,
+      lcp_ms: Math.round(m("lcp")),
+      fcp_ms: Math.round(m("fcp")),
+      cls: Number(m("cls").toFixed(4)),
+      fout_window_ms: Math.round(m("fout")),
+      transfer_kb: Math.round(m("transferBytes") / 1024),
+      requests: m("requests"),
+      fonts_loaded: `${m("fontsLoaded")}/${m("fonts")}`,
+    };
+    for (const [key, want] of Object.entries(derived))
+      if (r[key] !== want)
+        problems.push(
+          `the cell's ${key} ${r[key]} does not follow from its runs (${want})`,
+        );
   }
   const window = { test: null, from: run.from, to: run.to };
   problems.push(
@@ -1106,39 +1708,162 @@ function resolveShellRun(ev, cell) {
   return judged(cell, problems, ev, window);
 }
 
+const P6_KNOWN = new Set([
+  ...Object.keys(P6_CAUSES),
+  ...Object.keys(P6_CHROMIUM_ONLY),
+]);
+/** P-6's summary per cause, exactly as the writer derives it from its scenario rows (tests/e2e/fixture.profile-contention.spec.ts). */
+function p6ByCause(rows) {
+  const byCause = {};
+  for (const row of rows) {
+    const entry = byCause[row.cause] ?? {
+      n: 0,
+      precondition_met: 0,
+      injection_took_effect: 0,
+      saw_unresolved: 0,
+      first: {},
+      unresolved_then_resolved: 0,
+      never_resolved: 0,
+      resolve_ms: [],
+    };
+    byCause[row.cause] = entry;
+    entry.n += 1;
+    if (row.foreign_leases > 0) entry.precondition_met += 1;
+    if (row.sender_retire_failed > 0) entry.injection_took_effect += 1;
+    if (row.covers_with_unresolved > 0) entry.saw_unresolved += 1;
+    entry.first[row.first] = (entry.first[row.first] ?? 0) + 1;
+    if (row.first !== "released" && row.resolved)
+      entry.unresolved_then_resolved += 1;
+    if (!row.resolved) entry.never_resolved += 1;
+    if (row.resolve_ms !== null && row.first !== "released")
+      entry.resolve_ms.push(row.resolve_ms);
+  }
+  return byCause;
+}
+const p6RowProblems = (row, i) => {
+  const where = `scenario ${i + 1}`;
+  if (!isObj(row)) return [`${where} is not a row`];
+  const problems = [];
+  if (!P6_KNOWN.has(row.cause)) problems.push(`${where}: cause ${row.cause}`);
+  for (const key of [
+    "foreign_leases",
+    "sender_retire_failed",
+    "covers_with_unresolved",
+    "retired_by_observer",
+  ])
+    if (!isCount(row[key])) problems.push(`${where}: ${key} is not a count`);
+  if (!isText(row.first)) problems.push(`${where}: no first verdict`);
+  if (typeof row.resolved !== "boolean")
+    problems.push(`${where}: resolved is not recorded`);
+  else if (
+    row.resolved
+      ? !(row.resolve_ms === null && row.first === "released") &&
+        !isNonNeg(row.resolve_ms)
+      : row.resolve_ms !== null
+  )
+    problems.push(`${where}: resolve_ms does not agree with resolved`);
+  if (row.first === "released" && row.resolved !== true)
+    problems.push(`${where}: a request released at once is resolved`);
+  return problems;
+};
+/** P-6 per cause: the scenario rows typed, the by-cause summary recomputed from them, the value row the same, the programme's count. */
 function resolveP6(ev, cell) {
   const value = resolveValue(ev, { ...cell, check: () => [] });
   if (value.status === "missing" || value.status === "invalid") return value;
   const row = rowsNamed(ev.values, cell.name, cell.engine)[0];
   const problems = [];
-  if (row.n !== cell.n)
-    problems.push(`${row.n} scenarios; the programme takes ${cell.n}`);
   const file = ev.readJson(`contention/unresolved-leases.${cell.engine}.json`);
-  if (!file.present || file.error)
+  if (!file.present || file.error || !isObj(file.value))
     problems.push("contention/unresolved-leases file is missing or malformed");
   else {
-    const raw = (file.value.rows ?? []).filter(
-      (r) => r.cause === cell.cause,
-    ).length;
-    if (raw !== row.n || file.value.by_cause?.[cell.cause]?.n !== row.n)
-      problems.push(
-        `the raw scenarios (${raw}) and the by-cause count (${file.value.by_cause?.[cell.cause]?.n}) do not agree with ${row.n}`,
-      );
-    for (const key of ["precondition_met", "saw_unresolved", "never_resolved"])
-      if (file.value.by_cause?.[cell.cause]?.[key] !== row[key])
-        problems.push(`${key} differs between the summary and the raw file`);
+    const rows = Array.isArray(file.value.rows) ? file.value.rows : null;
+    if (!rows) problems.push("the scenario rows are not recorded");
+    else {
+      // A scenario's typing is its own cause's finding (a row of no known cause is every cause's).
+      for (const [i, r] of rows.entries())
+        if (!isObj(r) || !P6_KNOWN.has(r.cause) || r.cause === cell.cause)
+          problems.push(...p6RowProblems(r, i));
+      const byCause = p6ByCause(rows.filter(isObj));
+      if (file.value.scenarios !== rows.length)
+        problems.push("the scenario count is not the rows'");
+      if (!same(file.value.by_cause?.[cell.cause], byCause[cell.cause]))
+        problems.push(
+          "the by-cause summary does not follow from the scenario rows",
+        );
+      if (
+        !same(
+          Object.keys(file.value.by_cause ?? {}).sort(),
+          Object.keys(byCause).sort(),
+        )
+      )
+        problems.push(
+          "the by-cause summary names causes the scenario rows do not",
+        );
+      const mine = byCause[cell.cause];
+      const want = mine
+        ? {
+            n: mine.n,
+            precondition_met: mine.precondition_met,
+            injection_took_effect: mine.injection_took_effect,
+            saw_unresolved: mine.saw_unresolved,
+            first_verdicts: mine.first,
+            unresolved_then_resolved: mine.unresolved_then_resolved,
+            never_resolved: mine.never_resolved,
+          }
+        : null;
+      if (!want || !same(stripIdentity(row), want))
+        problems.push("the value row does not follow from the scenario rows");
+      if (countsOn(ev.opts) && mine?.n !== cell.n)
+        problems.push(
+          `${mine?.n ?? 0} scenarios; the programme takes ${cell.n}`,
+        );
+    }
   }
   return judged(cell, problems, ev, row.collection);
 }
 
+/** P-13's figures of one condition, exactly as the writer derives them from the hints and transactions it observed. */
+function p13Summary(hints, tx) {
+  const byHintKind = {};
+  for (const h of hints) byHintKind[h.stores] = (byHintKind[h.stores] ?? 0) + 1;
+  const byStores = {};
+  for (const t of tx) byStores[t.stores] = (byStores[t.stores] ?? 0) + 1;
+  const readMs = [];
+  let hintsWithReads = 0;
+  for (const [i, h] of hints.entries()) {
+    const until = hints[i + 1]?.at ?? Number.POSITIVE_INFINITY;
+    const started = tx.filter((t) => t.at >= h.at && t.at < until);
+    if (started.length === 0) continue;
+    hintsWithReads += 1;
+    readMs.push(Math.max(...started.map((t) => t.done ?? t.at)) - h.at);
+  }
+  return {
+    summary: {
+      hints: hints.length,
+      hints_by_kind: byHintKind,
+      transactions: tx.length,
+      transactions_by_stores: byStores,
+      sync_state_transactions: tx.filter((t) =>
+        t.stores.split(",").includes("sync_state"),
+      ).length,
+      transactions_per_hint: hints.length
+        ? +(tx.length / hints.length).toFixed(3)
+        : null,
+      hints_followed_by_reads: hintsWithReads,
+    },
+    readMs,
+  };
+}
+/** P-13, one condition: every figure recomputed from the observed hints and transactions, and the read series those very reads. */
 function resolveP13(ev, cell) {
   const entry = ev.readJson(`contention/follower-reads.${cell.engine}.json`);
   if (!entry.present)
     return result(cell, "missing", ["follower-reads file is missing"]);
-  if (entry.error) return result(cell, "invalid", [entry.error]);
-  const conditions = (entry.value.conditions ?? []).filter(
-    (c) => c.condition === cell.condition,
-  );
+  if (entry.error || !isObj(entry.value))
+    return result(cell, "invalid", [entry.error ?? "not a JSON object"]);
+  const conditions = (
+    Array.isArray(entry.value.conditions) ? entry.value.conditions : []
+  ).filter((c) => c?.condition === cell.condition);
   if (conditions.length !== 1)
     return result(cell, "missing", [
       `${conditions.length} records of the condition`,
@@ -1150,24 +1875,92 @@ function resolveP13(ev, cell) {
     entry.value.evidence ?? {},
     caseWindow(ev, cell),
   );
-  if (!isNum(c.hints) || !isNum(c.hints_followed_by_reads))
-    problems.push("the hint and read counts are not recorded");
-  if (cell.condition === "none (control)" && c.hints !== 0)
-    problems.push(`the no-hint control heard ${c.hints} hint(s)`);
+  const support = ev.readJson(
+    `contention/follower-reads-raw.${cell.engine}.json`,
+  );
+  const raw = (
+    support.present &&
+    !support.error &&
+    Array.isArray(support.value?.conditions)
+      ? support.value.conditions
+      : []
+  ).filter((x) => x?.condition === cell.condition);
+  let readMs = null;
   if (
+    raw.length !== 1 ||
+    !Array.isArray(raw[0].hints) ||
+    !Array.isArray(raw[0].tx)
+  )
+    problems.push(
+      "the observed hints and transactions of the condition are not retained",
+    );
+  else if (
+    !raw[0].hints.every((h) => isNum(h?.at) && typeof h?.stores === "string") ||
+    !raw[0].tx.every(
+      (t) =>
+        isNum(t?.at) &&
+        typeof t?.stores === "string" &&
+        isText(t?.mode) &&
+        (t?.done === null || isNum(t?.done)),
+    )
+  )
+    problems.push("an observed hint or transaction is malformed");
+  else {
+    const again = p13Summary(raw[0].hints, raw[0].tx);
+    readMs = again.readMs;
+    for (const [key, want] of Object.entries(again.summary))
+      if (!same(c[key], want))
+        problems.push(
+          `${key} does not follow from the observed hints and transactions`,
+        );
+  }
+  if (!isCount(c.own_posts))
+    problems.push("the follower's own posts are not counted");
+  if (!isNonNeg(c.elapsed_ms))
+    problems.push("the condition's duration is not recorded");
+  if (
+    !(
+      c.controller_reads === null ||
+      (isObj(c.controller_reads) &&
+        ["starts", "emissions", "calls"].every((k) =>
+          isCount(c.controller_reads[k]),
+        ))
+    )
+  )
+    problems.push(
+      "the controller's reads are neither counted nor an explicit null",
+    );
+  if (cell.condition === "none (control)") {
+    if (c.hints !== 0)
+      problems.push(`the no-hint control heard ${c.hints} hint(s)`);
+    if (!(c.elapsed_ms >= 5000))
+      problems.push("the no-hint control did not last its five seconds");
+  }
+  if (
+    countsOn(ev.opts) &&
     ["leader pages", "stop-record hints (synthetic)"].includes(
       cell.condition,
     ) &&
     !(c.hints >= 200)
   )
     problems.push(`${c.hints} of 200 hints reached the follower`);
+  const value = oneValue(ev, "P-13 follower reads", cell.engine);
+  if (
+    value.length !== 1 ||
+    !same(value[0].conditions, entry.value.conditions) ||
+    !same(
+      value[0].leader_throughput_pages_per_second,
+      entry.value.leader_throughput_pages_per_second,
+    )
+  )
+    problems.push("the P-13 value row does not hold the file's figures");
   const rows = rowsNamed(
     ev.measurements,
     `P-13 ${cell.condition}: follower read_ms per hint`,
     cell.engine,
   );
   if (problems.length) return result(cell, "invalid", problems);
-  // Observations exist: their distribution must be recorded with exactly that many samples. None: the explicit zero, and no row.
+  // Observations exist: their distribution must be recorded with exactly those samples. None: the explicit zero, and no row.
   if (c.hints_followed_by_reads === 0)
     return rows.length === 0
       ? judged({ ...cell, isolation: true }, [], ev, caseWindow(ev, cell), {
@@ -1176,12 +1969,23 @@ function resolveP13(ev, cell) {
       : result(cell, "invalid", [
           "a read distribution is recorded for a condition with no reads",
         ]);
-  return resolveMeasurement(ev, {
+  const measured = resolveMeasurement(ev, {
     ...cell,
     kind: "measurement",
     name: `P-13 ${cell.condition}: follower read_ms per hint`,
     n: c.hints_followed_by_reads,
   });
+  const samples = rawSamples(
+    ev,
+    `P-13 ${cell.condition}: follower read_ms per hint`,
+    cell.engine,
+  );
+  if (measured.status !== "missing" && !same(samples, readMs))
+    return result(cell, "invalid", [
+      ...measured.reasons.filter(Boolean),
+      "the read series is not the reads the observed transactions give",
+    ]);
+  return measured;
 }
 
 /** The cold-run file of an outcome or memory cell, and its row for the workload. */
@@ -1194,6 +1998,7 @@ function runsSource(ev, cell) {
   if (!entry.present) return { missing: `${path} is missing` };
   if (entry.error) return { invalid: `${path} is malformed: ${entry.error}` };
   const file = entry.value;
+  if (!isObj(file)) return { invalid: `${path} is not a JSON object` };
   const caseKey = cell.source === "p11" ? CASE.p11 : CASE.w2;
   const identity = windowProblems(
     ev,
@@ -1202,24 +2007,41 @@ function runsSource(ev, cell) {
     caseWindow(ev, { ...cell, case: caseKey }),
   );
   if (cell.source === "w2-live")
-    return file.live
+    return isObj(file.live)
       ? { run: file.live, identity }
       : { missing: "no live application recorded" };
-  const rows = (file.rows ?? []).filter((r) => r.workload === cell.workload);
+  const rows = (Array.isArray(file.rows) ? file.rows : []).filter(
+    (r) => r?.workload === cell.workload,
+  );
   if (rows.length !== 1)
     return { missing: `${rows.length} rows for ${cell.workload}` };
-  const runs = rows[0].runs ?? [];
+  const runs = Array.isArray(rows[0].runs) ? rows[0].runs : [];
   const want =
     cell.source === "p11" && !P11_VALID.includes(cell.workload) ? 1 : 5;
-  if (runs.length !== want)
+  if (countsOn(ev.opts) && runs.length !== want)
     return {
       invalid: `${runs.length} cold runs recorded; the programme takes ${want}`,
       identity,
     };
   const run = runs[cell.run - 1];
-  return run
+  return isObj(run)
     ? { run, identity }
     : { missing: `cold run ${cell.run} is missing` };
+}
+
+/** W2's capture value row repeats the live application and the cold outcomes: the same, or the representations disagree. */
+function w2Duplicates(ev, cell, run) {
+  if (cell.item !== "P-W2") return [];
+  const value = oneValue(ev, "P-W2 capture", cell.engine);
+  if (value.length === 0) return [];
+  if (value.length !== 1) return [`${value.length} "P-W2 capture" rows`];
+  if (cell.source === "w2-live")
+    return same(value[0].live, run)
+      ? []
+      : ["the capture row's live application is not the file's"];
+  return value[0].cold_outcomes?.[cell.run - 1] === run.outcome
+    ? []
+    : ["the capture row's cold outcome is not the file's"];
 }
 
 function resolveOutcome(ev, cell) {
@@ -1227,13 +2049,23 @@ function resolveOutcome(ev, cell) {
   if (source.missing) return result(cell, "missing", [source.missing]);
   if (source.invalid) return result(cell, "invalid", [source.invalid]);
   const run = source.run;
-  const problems = [...source.identity];
+  const problems = [...source.identity, ...w2Duplicates(ev, cell, run)];
   if (!OUTCOMES.includes(run.outcome)) problems.push(`outcome ${run.outcome}`);
-  if (!isNum(run.elapsed_ms)) problems.push("elapsed_ms is missing");
-  if (run.outcome === "admitted" && cell.source !== "w2-live")
-    for (const key of ["scan_ms", "commit_ms"])
-      if (!isNum(run[key]))
-        problems.push(`an admitted run without its engine ${key}`);
+  if (!isNonNeg(run.elapsed_ms)) problems.push("elapsed_ms is missing");
+  if (cell.source !== "w2-live") {
+    if (typeof run.detail !== "string")
+      problems.push("the outcome's detail is not recorded");
+    if (!(run.requests === null || isCount(run.requests)))
+      problems.push("the request count is not recorded");
+    if (run.outcome === "admitted")
+      for (const key of ["scan_ms", "commit_ms"])
+        if (!isNonNeg(run[key]))
+          problems.push(`an admitted run without its engine ${key}`);
+  } else if (
+    run.outcome === "admitted" &&
+    (!Array.isArray(run.commits) || run.commits.length === 0)
+  )
+    problems.push("an admitted live application without its commits");
   if (problems.length) return result(cell, "invalid", problems);
   if (cell.control && run.outcome !== "refused")
     return result(
@@ -1247,14 +2079,19 @@ function resolveOutcome(ev, cell) {
   return result(cell, "ok", [], { outcome: run.outcome });
 }
 
-/** A run's browser memory: renderer-inclusive attribution, complete in every sample, at least one sample, and its declared scope. */
+/**
+ * A run's browser memory: renderer-inclusive attribution, complete in every sample, and its figures one observation: the peak is the
+ * largest retained sample, the processes at the peak add up to it, the top-level copies equal the attributed record, and the heap peak
+ * is the largest heap sample (design assessment A6/E7).
+ */
 function resolveMemory(ev, cell) {
   const source = runsSource(ev, cell);
   if (source.missing) return result(cell, "missing", [source.missing]);
   if (source.invalid) return result(cell, "invalid", [source.invalid]);
-  const rss = source.run.rss;
+  const run = source.run;
+  const rss = run.rss;
   const problems = [...source.identity];
-  if (typeof rss !== "object" || rss === null)
+  if (!isObj(rss))
     return result(cell, "invalid", [
       ...problems,
       "no attributed browser memory (rss) record: descendant-only figures are not browser memory",
@@ -1264,10 +2101,52 @@ function resolveMemory(ev, cell) {
     problems.push(`${rss.failed_samples} memory sample(s) failed`);
   if (rss.complete !== true)
     problems.push(
-      `the browser's processes were not all attributed (${(rss.errors ?? []).join("; ") || "incomplete"})`,
+      `the browser's processes were not all attributed (${(Array.isArray(rss.errors) ? rss.errors : []).join("; ") || "incomplete"})`,
     );
-  if (!isNum(rss.peak_kib) || !isNum(rss.baseline_kib))
+  if (!isNonNeg(rss.peak_kib) || !isNonNeg(rss.baseline_kib))
     problems.push("the peak or baseline is missing");
+  if (
+    !Array.isArray(rss.series_kib) ||
+    rss.series_kib.length !== rss.samples ||
+    !rss.series_kib.every(isNonNeg)
+  )
+    problems.push(
+      "the memory samples themselves are not retained (one figure per sample)",
+    );
+  else if (
+    rss.series_kib.length &&
+    rss.peak_kib !== Math.max(...rss.series_kib)
+  )
+    problems.push(
+      `the peak ${rss.peak_kib} KiB is not the largest retained sample (${Math.max(...rss.series_kib)})`,
+    );
+  const atPeak = Array.isArray(rss.processes_at_peak)
+    ? rss.processes_at_peak
+    : null;
+  if (
+    !atPeak ||
+    atPeak.length === 0 ||
+    !atPeak.every((p) => isNonNeg(p?.rss_kib) && Number.isInteger(p?.pid))
+  )
+    problems.push("the processes at the peak are not recorded");
+  else {
+    if (atPeak.reduce((n, p) => n + p.rss_kib, 0) !== rss.peak_kib)
+      problems.push("the processes at the peak do not add up to the peak");
+    const identities = new Set(
+      Array.isArray(rss.process_identities) ? rss.process_identities : [],
+    );
+    if (!atPeak.every((p) => identities.has(`${p.pid}@${p.start}`)))
+      problems.push(
+        "a process at the peak is not among the run's recorded identities",
+      );
+  }
+  for (const [top, nested] of [
+    ["rss_peak_kib", "peak_kib"],
+    ["rss_baseline_kib", "baseline_kib"],
+    ...(cell.source === "w2-live" ? [] : [["rss_after_kib", "after_kib"]]),
+  ])
+    if (run[top] !== rss[nested])
+      problems.push(`${top} is not the attributed record's ${nested}`);
   if (
     cell.engine === "webkit" &&
     rss.platform === "darwin" &&
@@ -1276,13 +2155,40 @@ function resolveMemory(ev, cell) {
     problems.push(
       "WebKit on macOS without its host's launchd services: the renderer is not counted",
     );
-  if (cell.engine === "chromium" && !isNum(source.run.heap_peak_bytes))
+  const heap = run.heap_samples_bytes;
+  if (!Array.isArray(heap) || !heap.every(isNonNeg))
+    problems.push(
+      "the heap samples are not retained (an empty list where the engine has none)",
+    );
+  else if (run.heap_peak_bytes !== (heap.length ? Math.max(...heap) : null))
+    problems.push("the heap peak is not the largest heap sample");
+  if (cell.engine === "chromium" && !isNonNeg(run.heap_peak_bytes))
     problems.push("Chromium's JS heap peak is missing");
   return problems.length
     ? result(cell, "invalid", problems)
     : result(cell, "ok");
 }
 
+/** The shape of one batch as the integration writer measures it: changes, dense checklist field upserts, and whether `person` is in it. */
+function batchShape(batch, person) {
+  const changes = Array.isArray(batch?.changes) ? batch.changes : [];
+  return {
+    changes: changes.length,
+    checklist_upserts: changes.filter(
+      (c) =>
+        c?.kind === "upsert" &&
+        c.resource?.kind === "field" &&
+        c.resource.value?.kind === "checklist",
+    ).length,
+    person_ancestor: changes.some(
+      (c) => c?.kind === "upsert" && c.resource?.id === person,
+    ),
+  };
+}
+/**
+ * A W2 capture: its bytes parsed, and phase, batch count, change count, batch shapes (dense checklists and THE seeded person), size and
+ * hash recomputed from them and compared with what was recorded; a matching hash alone never makes a capture dense (assessment A5/E8).
+ */
 function resolveCapture(ev, cell) {
   const path = `w2/W2-captured.${cell.engine}.limit-${cell.limit}.json`;
   if (!ev.exists(path)) return result(cell, "missing", [`${path} is missing`]);
@@ -1292,20 +2198,55 @@ function resolveCapture(ev, cell) {
   const recorded = value[0].captures?.[`limit_${cell.limit}`];
   const bytes = ev.bytes(path);
   const problems = windowProblems(ev, cell, value[0], value[0].collection);
-  if (!recorded) problems.push("the capture is not recorded in its value row");
+  const person = value[0].seeding?.person;
+  if (!isText(person))
+    problems.push("the seeded person's identity is not recorded");
+  let body = null;
+  try {
+    body = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    problems.push(`the capture is not JSON: ${error.message}`);
+  }
+  if (!isObj(recorded))
+    problems.push("the capture is not recorded in its value row");
   else {
     if (recorded.sha256 !== sha256(bytes))
       problems.push("the capture's SHA-256 is not the recorded one");
     if (recorded.bytes !== bytes.length)
       problems.push("the capture's size is not the recorded one");
-    if (!(recorded.changes >= 200))
-      problems.push(`${recorded.changes} changes: not the dense batch`);
-    if (
-      !(recorded.batch_shapes ?? []).some(
-        (b) => b.checklist_upserts >= 199 && b.person_ancestor,
-      )
-    )
-      problems.push("no batch of 199 dense checklists with their person");
+    if (recorded.mib !== +(bytes.length / 1_048_576).toFixed(3))
+      problems.push("the capture's MiB does not follow from its size");
+    if (recorded.file !== path)
+      problems.push(`the recorded file is ${recorded.file}, not ${path}`);
+  }
+  if (isObj(body) && isObj(recorded) && isText(person)) {
+    const batches = Array.isArray(body.batches) ? body.batches : null;
+    if (!batches) problems.push("the captured body has no batches");
+    else {
+      const shapes = batches.map((b) => batchShape(b, person));
+      const derived = {
+        phase: body.phase,
+        batches: batches.length,
+        changes: shapes.reduce((n, s) => n + s.changes, 0),
+        has_more: body.has_more,
+        batch_shapes: shapes,
+      };
+      for (const [key, want] of Object.entries(derived))
+        if (!same(recorded[key], want))
+          problems.push(
+            `the recorded ${key} does not follow from the captured bytes`,
+          );
+      if (body.phase !== "delta")
+        problems.push(
+          `the captured page is phase ${body.phase}, not a delta page`,
+        );
+      if (!shapes.some((s) => s.checklist_upserts >= 199 && s.person_ancestor))
+        problems.push(
+          "the captured bytes hold no batch of 199 dense checklists with the seeded person",
+        );
+      if (!(derived.changes >= 200))
+        problems.push(`${derived.changes} changes: not the dense batch`);
+    }
   }
   return problems.length
     ? result(cell, "invalid", problems)
@@ -1337,8 +2278,29 @@ function deviceCheck(ev, engine) {
       invalid.push(
         `${binder.length} "P-11 device page" rows bind the file to its run`,
       );
-    else if (binder[0].results_sha256 !== entry.sha256)
-      invalid.push("the results file is not the one its run recorded");
+    else {
+      const b = binder[0];
+      if (b.results_sha256 !== entry.sha256)
+        invalid.push("the results file is not the one its run recorded");
+      if (b.results_file !== path)
+        invalid.push("the binder names another results file");
+      if (b.protocol_id !== entry.value?.protocol_id)
+        invalid.push("the binder names another protocol");
+      if (
+        b.runs !==
+        (Array.isArray(entry.value?.runs) ? entry.value.runs.length : null)
+      )
+        invalid.push("the binder's run count is not the file's");
+      if (b.w2_capture?.sha256 !== w2 || b.w2_capture?.file !== capture)
+        invalid.push(
+          "the binder's capture is not this engine's limit-1 capture",
+        );
+      if (
+        !isObj(b.browser_memory_whole_protocol) ||
+        typeof b.browser_memory_whole_protocol.complete !== "boolean"
+      )
+        invalid.push("the protocol's aggregate memory record is not recorded");
+    }
     out = { checked, data: entry.value, binder: binder[0], invalid };
   }
   ev[cacheKey] = out;
@@ -1361,8 +2323,8 @@ function resolveDeviceRun(ev, cell) {
     return result(cell, "invalid", [
       "the engine's results file is refused (see its file cell)",
     ]);
-  const runs = (d.data.runs ?? []).filter(
-    (r) => r.workload === cell.workload && r.run === cell.run,
+  const runs = (Array.isArray(d.data.runs) ? d.data.runs : []).filter(
+    (r) => r?.workload === cell.workload && r?.run === cell.run,
   );
   if (runs.length === 0) return result(cell, "missing", ["no such run"]);
   const run = runs[0];
@@ -1397,8 +2359,19 @@ const RESOLVERS = {
   "device-run": resolveDeviceRun,
 };
 
+/** Malformed evidence is a finding of its cell, with its path, never an exception that stops the resolution (assessment A8/E10). */
+function resolveCell(ev, cell) {
+  try {
+    return RESOLVERS[cell.kind](ev, cell);
+  } catch (error) {
+    return result(cell, "invalid", [
+      `malformed evidence: ${String(error?.message ?? error).slice(0, 200)}`,
+    ]);
+  }
+}
+
 /** The valid-workload outcomes that were not `admitted`: facts, whatever else is missing. */
-function failuresOf(ev, cells) {
+function failuresOf(cells) {
   const failures = [];
   for (const c of cells)
     if (
@@ -1430,19 +2403,26 @@ function failuresOf(ev, cells) {
         run: c.run,
         outcome: c.outcome,
       });
-  void ev;
   return failures;
 }
 
 /**
  * Resolves the whole contract against an evidence directory: one status per required cell, the lists by status, the derived desktop
  * conclusions and the item statuses. Unknown or duplicate evidence never substitutes for a required cell.
+ *
+ * `relaxed` (qualification of a real writer with shortened samples, never a programme's evidence): sample counts, stage/invocation/window
+ * identity and isolation are not judged; every content and cross-representation check still is.
  */
-export function resolveEvidence(dir, { engines = ENGINES } = {}) {
+export function resolveEvidence(
+  dir,
+  { engines = ENGINES, relaxed = false } = {},
+) {
   const ev = loadEvidence(dir);
+  ev.relaxed = relaxed;
+  ev.opts = { counts: !relaxed };
   const required = requiredCells(engines);
   const cells = required.map((cell) => {
-    const resolved = RESOLVERS[cell.kind](ev, cell);
+    const resolved = resolveCell(ev, cell);
     return {
       ...resolved,
       kind: cell.kind,
@@ -1451,7 +2431,7 @@ export function resolveEvidence(dir, { engines = ENGINES } = {}) {
   });
   const ids = (status) =>
     cells.filter((c) => c.status === status).map((c) => c.id);
-  const failures = failuresOf(ev, cells);
+  const failures = failuresOf(cells);
   const outcomesComplete = cells.every(
     (c) => SATISFIED.has(c.status) || c.status === "not_isolated",
   );

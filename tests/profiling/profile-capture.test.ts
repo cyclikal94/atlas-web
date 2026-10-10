@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CaptureKeepError,
   type CaptureStore,
   captureFrom,
   captureQuery,
@@ -143,6 +144,41 @@ describe("profile capture (W2 on the device page)", () => {
     await expect(
       storeCapture(new Blob([BYTES]), "x.json", lying),
     ).rejects.toThrow(/not the one picked/);
+  });
+
+  it("case: a refused write says the previous capture is unchanged; a write that went through but does not read back says what is kept is UNCERTAIN", async () => {
+    const refused: CaptureStore = {
+      put: async () => {
+        throw new DOMException("quota", "QuotaExceededError");
+      },
+      get: async () => null,
+    };
+    const writeFailure = await storeCapture(
+      new Blob([BYTES]),
+      "x.json",
+      refused,
+    ).catch((error: unknown) => error);
+    expect(writeFailure).toBeInstanceOf(CaptureKeepError);
+    expect((writeFailure as CaptureKeepError).phase).toBe("write");
+    const unreadable: CaptureStore = {
+      put: async () => undefined,
+      get: async () => {
+        throw new Error("denied");
+      },
+    };
+    const lying: CaptureStore = {
+      put: async () => undefined,
+      get: async () => ({ bytes: new Uint8Array([1]), name: "x.json" }),
+    };
+    for (const store of [unreadable, lying]) {
+      const failure = await storeCapture(
+        new Blob([BYTES]),
+        "x.json",
+        store,
+      ).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(CaptureKeepError);
+      expect((failure as CaptureKeepError).phase).toBe("verify");
+    }
   });
 
   it("case: a malformed kept record is an unsuccessful load, never a capture", async () => {

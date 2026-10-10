@@ -12,16 +12,19 @@ import {
 } from "../../data/scan/validate";
 import type { DataHarness } from "./main";
 import {
+  CaptureKeepError,
   type CaptureSource,
   captureFrom,
   captureQuery,
+  keepCapture,
   loadCapture,
   protocolPlan,
-  storeCapture,
+  sha256Bytes,
   W2,
 } from "./profile-capture";
 import {
   type Attempt,
+  admission,
   compareAndSet,
   complete,
   decide,
@@ -30,8 +33,11 @@ import {
   MANUAL_KEY,
   mayClear,
   newEnvelope,
+  type Permit,
   PROTOCOL_KEY,
+  permitProblem,
   type Read,
+  type Reservation,
   readEnvelope,
   recoverInterrupted,
   reserve,
@@ -59,8 +65,15 @@ import {
  *
  * The protocol's state (revision 2, design assessment DA-1; profile-protocol.ts): one envelope, owned by the tab that started it, changed
  * by one whole write per transition. An attempt is reserved before it runs and its result stored with the end of the reservation, so a
- * killed tab's attempt is recorded once, as `killed`, by the owner's next load, and nothing is skipped. Another tab (or a duplicate of the
- * owner's tab, which the page's Web Lock refuses) only reads and says why. The results file is the envelope's runs, all of one protocol.
+ * killed tab's attempt is recorded once, as `killed`, by the owner's next load, and nothing is skipped. Another tab only reads and says
+ * why. The results file is the envelope's runs, all of one protocol.
+ *
+ * Revision 3 (review 3 R5): ONE collector per origin. A collecting page (the protocol or a manual run) takes the origin-wide collector
+ * guard before it reads or creates either collection and keeps it until it is navigated away; restoring a capture, a take-over, clear
+ * and delete run under it too. An active protocol refuses every manual run (a copied owner token included), a reserved manual attempt
+ * refuses a protocol start, a duplicate of a collecting tab only reads, and a page without Web Locks collects nothing. A result is stored
+ * only into the reservation its page made. After a lost tab, the new owner restores the collection's capture by picking the very file
+ * whose SHA-256 the collection pins (any other file, or another tab, changes nothing); earlier attempts and the take-over stay recorded.
  */
 const RUNS = 5;
 const VALID_ENGINE_RUNS = ["W1", "W3", "W4", "W6"];
@@ -431,15 +444,21 @@ function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 /** Removes the throw-away profiling databases through the data layer's own host (the one place a database is deleted: rule R16). */
-async function deleteProfileDatabases(data: DataHarness): Promise<number> {
+async function deleteProfileDatabases(
+  data: DataHarness,
+): Promise<{ n: number; error: string | null }> {
   let n = 0;
-  for (const name of await data.list())
-    if (name.startsWith(`atlas-${PROFILE_ACCOUNT_PREFIX}`)) {
-      data.close(name.slice("atlas-".length));
-      await data.host.delete(name);
-      n += 1;
-    }
-  return n;
+  try {
+    for (const name of await data.list())
+      if (name.startsWith(`atlas-${PROFILE_ACCOUNT_PREFIX}`)) {
+        data.close(name.slice("atlas-".length));
+        await data.host.delete(name);
+        n += 1;
+      }
+    return { n, error: null };
+  } catch (error) {
+    return { n, error: String(error).slice(0, 160) };
+  }
 }
 
 /** An interrupted attempt, recorded as `killed` with the identity its reservation held (its capture's hash for W2). */
@@ -474,28 +493,97 @@ function killedRun(
   };
 }
 
+/** A run whose own work threw: recorded as an `error` attempt with what it threw (its reservation ends with it, never left dangling). */
+function thrownRun(e: Envelope, attempt: Attempt, error: unknown): ProfileRun {
+  return {
+    ...killedRun(e, attempt.name, attempt.run, ""),
+    outcome: "error",
+    detail: `the run threw: ${String(error).slice(0, 200)}`,
+  };
+}
+
+/** The origin-wide collector guard (review 3 R5): ONE Web Lock for every page of this origin, whatever collection it would touch. */
+export const COLLECTOR_LOCK = "atlas-profile-collector";
+const NO_LOCKS =
+  "this browser has no Web Locks (navigator.locks), so the page cannot establish that it is the only collector on this origin: it collects and changes nothing";
+const BUSY =
+  "another live page is collecting on this origin (another tab, or a duplicate of this one): this page only reads.";
+const BUSY_ACTION =
+  "a live page is collecting on this origin (another tab, or a duplicate of this one): wait for it to finish, or close it";
+
+interface Guard {
+  available: boolean;
+  held(): boolean;
+  hold(): Promise<boolean>;
+  release(): void;
+  scoped<T>(
+    action: () => Promise<T>,
+  ): Promise<{ ok: true; value: T } | { ok: false }>;
+}
+
 /**
- * Holds a Web Lock named for the collection for this page's whole life: a second live page with the same owner token (a duplicated tab
- * copies sessionStorage) does not get it and only reads. A reload releases the old page's lock; the new page waits briefly for it.
+ * A collecting page HOLDS the guard from before it reads or creates either envelope until it is navigated away or closed (a reload
+ * releases it; the next page waits briefly for it), so a second live page (another tab, or a duplicate of this one carrying the same
+ * owner token) never collects beside it. A discrete action (restoring a capture, a take-over, clear, delete) runs under the guard for its
+ * whole duration: the page's own when it holds it, otherwise one taken for that action alone. Without Web Locks nothing is collected or
+ * changed: exclusion cannot be established, and it is never assumed.
  */
-async function holdPageLock(id: string): Promise<boolean> {
+function collectorGuard(): Guard {
   const locks = (navigator as Navigator & { locks?: LockManager }).locks;
-  if (!locks) return true;
-  for (let i = 0; i < 20; i += 1) {
-    const granted = await new Promise<boolean>((resolve) => {
-      void locks.request(
-        `atlas-profile-${id}`,
+  let release: (() => void) | null = null;
+  const take = () =>
+    new Promise<boolean>((resolve) => {
+      if (!locks) {
+        resolve(false);
+        return;
+      }
+      locks
+        .request(COLLECTOR_LOCK, { ifAvailable: true }, (lock) => {
+          if (!lock) {
+            resolve(false);
+            return undefined;
+          }
+          return new Promise<void>((done) => {
+            release = done;
+            resolve(true);
+          });
+        })
+        .catch(() => resolve(false));
+    });
+  return {
+    available: Boolean(locks),
+    held: () => release !== null,
+    async hold() {
+      if (release) return true;
+      for (let i = 0; i < 20; i += 1) {
+        if (await take()) return true;
+        await sleep(150);
+      }
+      return false;
+    },
+    release() {
+      const done = release;
+      release = null;
+      done?.();
+    },
+    async scoped<T>(action: () => Promise<T>) {
+      if (release) return { ok: true as const, value: await action() };
+      if (!locks) return { ok: false as const };
+      let value: T | undefined;
+      const granted = await locks.request(
+        COLLECTOR_LOCK,
         { ifAvailable: true },
-        (lock) => {
-          resolve(lock !== null);
-          return lock ? new Promise<void>(() => undefined) : undefined;
+        async (lock) => {
+          if (!lock) return false;
+          value = await action();
+          return true;
         },
       );
-    });
-    if (granted) return true;
-    await sleep(150);
-  }
-  return false;
+      return granted
+        ? { ok: true as const, value: value as T }
+        : { ok: false as const };
+    },
+  };
 }
 
 export async function mountProfilePage(data: DataHarness): Promise<void> {
@@ -505,8 +593,25 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
   const status = el("p", { id: "profile-status" }, "Ready.");
   const ownership = el("p", { id: "profile-ownership" });
   const out = el("pre", { id: "profile-results" });
-  const owner = tabToken(sessionStorage, () => crypto.randomUUID());
+  // The tab's owner token: a tab whose sessionStorage refuses it only reads (nothing it does could be told apart from another tab's).
+  let owner = "";
+  let ownerError = "";
+  try {
+    owner = tabToken(sessionStorage, () => crypto.randomUUID());
+  } catch (error) {
+    ownerError = String(error).slice(0, 160);
+  }
   const page = crypto.randomUUID();
+  const guard = collectorGuard();
+  // Results of runs whose reservation was gone when they finished: shown, never stored (design assessment D4).
+  const stale: unknown[] = [];
+  // One operation of this page at a time (its collection and its buttons), so none interleaves with another of the same page.
+  let chain: Promise<unknown> = Promise.resolve();
+  const serial = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = chain.then(task, task);
+    chain = run.catch(() => undefined);
+    return run;
+  };
   const now = () => new Date().toISOString();
   const readProtocol = () => readEnvelope(localStorage, PROTOCOL_KEY);
   const readManual = () => readEnvelope(localStorage, MANUAL_KEY);
@@ -523,11 +628,23 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
       2,
     );
   };
+  // Who owns what: a page that does not own the active collection says so and offers only reading (and the explicit take-over).
+  const showOwnership = () => {
+    const active = readProtocol();
+    ownership.textContent =
+      active.state === "present" && !active.envelope.terminal
+        ? active.envelope.owner === owner
+          ? `This tab owns collection ${active.envelope.protocol_id} (${active.envelope.runs.length} of ${active.envelope.plan.length} attempts recorded).`
+          : `Collection ${active.envelope.protocol_id} is owned by another tab (${active.envelope.runs.length} of ${active.envelope.plan.length} attempts recorded). This page does not run, recover, clear or delete anything.`
+        : "";
+  };
   // The collected results are readable from the moment the page mounts (a run in progress included); `done` once the page settled.
   (window as unknown as { __profile: unknown }).__profile = {
     results: () => shown(readProtocol()),
     manual: () => shown(readManual()),
     owner: () => owner,
+    collecting: () => guard.held(),
+    stale: () => stale,
     done: false,
   };
   root.append(
@@ -540,6 +657,13 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
     status,
     ownership,
   );
+  // Another tab's writes show here as they happen (a display only: every action still decides on what is stored when it runs).
+  window.addEventListener("storage", (event) => {
+    if (event.key === null || event.key.startsWith("atlas-profile")) {
+      refresh();
+      showOwnership();
+    }
+  });
 
   const protocol = params.get("protocol") === "1";
   const wanted = params.get("w");
@@ -549,18 +673,21 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
     (name) => (name === W2 || VALID_ENGINE_RUNS.includes(name) ? RUNS : 1),
     capture !== null,
   );
+  const stop = (why: string) => {
+    status.textContent = `Stopped: ${why}`;
+    return null;
+  };
 
-  /** Runs this page's attempt of a collection the page owns: recover an interrupted one first, reserve, run, store. */
+  /**
+   * Runs this page's attempt of a collection the page owns, under the collector guard: recover an interrupted one first, reserve, run,
+   * and store the result only into the reservation this page made (its permit), never into whatever is stored by then.
+   */
   const drive = async (
     key: string,
     first: Read,
     attemptOf: (e: Envelope) => { attempt: Attempt; index: number } | null,
   ): Promise<Envelope | null> => {
     let read = first;
-    const stop = (why: string) => {
-      status.textContent = `Stopped: ${why}`;
-      return null;
-    };
     const decision = decide(read, owner);
     if (decision.action === "corrupt")
       return stop(
@@ -572,12 +699,8 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
       );
     if (decision.action === "terminal") return decision.envelope;
     if (decision.action === "start") return stop("no collection to run");
-    // "recover" or "ready": this tab owns the collection.
+    // "recover" or "ready": this tab owns the collection, and this page holds the collector guard.
     let e = decision.envelope;
-    if (!(await holdPageLock(e.protocol_id)))
-      return stop(
-        "another live page of this tab's collection holds it (a duplicated tab?): this page only reads.",
-      );
     if (read.state !== "present") return stop("the collection vanished");
     if (e.reserved) {
       const r = e.reserved;
@@ -594,26 +717,37 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
     }
     const next = attemptOf(e);
     if (!next || e.terminal) return e;
+    const reservedEnvelope = reserve(e, next.index, next.attempt, page, now());
     const reserved = compareAndSet(
       localStorage,
       key,
       read.raw,
-      reserve(e, next.index, next.attempt, page, now()),
+      reservedEnvelope,
     );
     if (!reserved.ok) return stop(reserved.error);
+    const permit: Permit = {
+      protocol_id: e.protocol_id,
+      owner,
+      reservation: reservedEnvelope.reserved as Reservation,
+    };
     status.textContent = `Running ${next.attempt.name} (run ${next.attempt.run}) ...`;
     const source: CaptureSource | null = e.w2sha256
       ? { sha256: e.w2sha256 }
       : null;
-    const record = await runOne(
-      data,
-      next.attempt.name,
-      next.attempt.run,
-      source,
-    );
+    let record: ProfileRun;
+    try {
+      record = await runOne(data, next.attempt.name, next.attempt.run, source);
+    } catch (error) {
+      record = thrownRun(e, next.attempt, error);
+    }
     const before = readEnvelope(localStorage, key);
-    if (before.state !== "present")
-      return stop("the collection vanished during the run");
+    const late = permitProblem(before, permit);
+    if (late !== null || before.state !== "present") {
+      stale.push({ permit, record, why: late });
+      return stop(
+        `the result of ${record.workload} run ${record.run} was NOT stored: ${late}. It is kept on this page only (window.__profile.stale()), never added to what is stored now.`,
+      );
+    }
     const stored = compareAndSet(
       localStorage,
       key,
@@ -625,7 +759,39 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
     return stored.envelope;
   };
 
-  if (protocol) {
+  /** Takes the collector guard for this page's life, or says why not (nothing is read for a decision, or written, before it). */
+  const becomeCollector = async (): Promise<boolean> => {
+    if (!guard.available) return stop(NO_LOCKS) ?? false;
+    if (!(await guard.hold())) return stop(BUSY) ?? false;
+    return true;
+  };
+  /** A collecting page that stopped (or finished) lets go of the guard: it will do nothing more. */
+  const finish = (): void => guard.release();
+
+  const protocolRoute = async (): Promise<void> => {
+    // A first look, read only, for the refusals a reader can be given at once.
+    const look = readProtocol();
+    if (
+      look.state === "present" &&
+      !look.envelope.terminal &&
+      look.envelope.owner !== owner
+    ) {
+      stop(
+        `collection ${look.envelope.protocol_id} belongs to another tab: this page does not run, recover or change it (use "Take over" only if that tab is gone).`,
+      );
+      return;
+    }
+    if (look.state === "present" && look.envelope.terminal) {
+      status.textContent = `Collection ${look.envelope.protocol_id} is ${look.envelope.terminal}: copy its results, then clear them before starting another.${look.envelope.terminal === "complete" ? " Protocol complete: copy the results below." : ""}`;
+      return;
+    }
+    if (!(await becomeCollector())) return;
+    // Under the guard, what is stored NOW decides (both collections).
+    const admitted = admission("protocol", readProtocol(), readManual());
+    if (!admitted.ok) {
+      stop(admitted.why);
+      return finish();
+    }
     let read = readProtocol();
     if (read.state === "absent") {
       const started = compareAndSet(
@@ -643,33 +809,71 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
           now: now(),
         }),
       );
-      if (!started.ok) status.textContent = `Stopped: ${started.error}`;
+      if (!started.ok) {
+        stop(started.error);
+        return finish();
+      }
       read = readProtocol();
     }
+    if (read.state !== "present") {
+      stop("the collection vanished");
+      return finish();
+    }
     if (
-      read.state === "present" &&
       read.envelope.owner === owner &&
       (capture?.sha256 ?? null) !== read.envelope.w2sha256
-    )
+    ) {
       status.textContent = `Stopped: this collection runs W2 capture ${read.envelope.w2sha256 ?? "(none)"}; the URL names ${capture?.sha256 ?? "none"}. The plan and capture never change after it starts.`;
-    else if (read.state === "present" && read.envelope.terminal) {
-      status.textContent = `Collection ${read.envelope.protocol_id} is ${read.envelope.terminal}: copy its results, then clear them before starting another.${read.envelope.terminal === "complete" ? " Protocol complete: copy the results below." : ""}`;
-    } else if (read.state !== "absent") {
-      const after = await drive(PROTOCOL_KEY, read, (e) =>
-        e.plan[e.next]
-          ? { attempt: e.plan[e.next] as Attempt, index: e.next }
-          : null,
-      );
-      if (after?.terminal === "complete")
-        status.textContent += " Protocol complete: copy the results below.";
-      else if (after && !after.terminal)
-        // A fresh page load for the next run, so every run is cold.
-        setTimeout(() => location.reload(), 600);
+      return finish();
     }
-  } else if (wanted) {
+    if (read.envelope.terminal) {
+      status.textContent = `Collection ${read.envelope.protocol_id} is ${read.envelope.terminal}: copy its results, then clear them before starting another.`;
+      return finish();
+    }
+    const after = await drive(PROTOCOL_KEY, read, (e) =>
+      e.plan[e.next]
+        ? { attempt: e.plan[e.next] as Attempt, index: e.next }
+        : null,
+    );
+    if (after?.terminal === "complete") {
+      status.textContent += " Protocol complete: copy the results below.";
+      finish();
+    } else if (after && !after.terminal)
+      // A fresh page load for the next run, so every run is cold; this page keeps the guard until it is replaced.
+      setTimeout(() => location.reload(), 600);
+    else finish();
+  };
+
+  const manualRoute = async (name: string): Promise<void> => {
+    // The attempt's identity is checked before anything is reserved: a workload of this page and a run number.
+    const runParam = params.get("run") ?? "1";
+    if (!NAMES.includes(name) && name !== W2) {
+      stop(
+        `"${name}" is not a workload of this page: nothing was run or written.`,
+      );
+      return;
+    }
+    if (!/^[1-9][0-9]{0,3}$/.test(runParam)) {
+      stop(
+        `run "${runParam}" is not a run number: nothing was run or written.`,
+      );
+      return;
+    }
+    const run = Number(runParam);
+    const look = admission("manual", readProtocol(), readManual());
+    if (!look.ok) {
+      stop(look.why);
+      return;
+    }
+    if (!(await becomeCollector())) return;
+    const admitted = admission("manual", readProtocol(), readManual());
+    if (!admitted.ok) {
+      stop(admitted.why);
+      return finish();
+    }
     let read = readManual();
     if (read.state === "absent") {
-      compareAndSet(
+      const started = compareAndSet(
         localStorage,
         MANUAL_KEY,
         null,
@@ -684,35 +888,56 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
           now: now(),
         }),
       );
+      if (!started.ok) {
+        stop(started.error);
+        return finish();
+      }
       read = readManual();
     }
-    if (
-      read.state === "present" &&
-      read.envelope.owner === owner &&
-      (capture?.sha256 ?? null) !== read.envelope.w2sha256 &&
-      wanted === W2
-    )
-      status.textContent = `Stopped: this manual collection runs W2 capture ${read.envelope.w2sha256 ?? "(none)"}; the URL names ${capture?.sha256 ?? "none"}.`;
-    else {
-      const once = {
-        attempt: { name: wanted, run: Number(params.get("run") ?? "1") },
-      };
-      let used = false;
-      await drive(MANUAL_KEY, read, (e) => {
-        if (used) return null;
-        used = true;
-        return { ...once, index: e.next };
-      });
+    if (read.state !== "present") {
+      stop("the collection vanished");
+      return finish();
     }
-  }
+    const e0 = read.envelope;
+    if (
+      e0.owner === owner &&
+      (capture?.sha256 ?? null) !== e0.w2sha256 &&
+      name === W2
+    ) {
+      status.textContent = `Stopped: this manual collection runs W2 capture ${e0.w2sha256 ?? "(none)"}; the URL names ${capture?.sha256 ?? "none"}.`;
+      return finish();
+    }
+    if (
+      e0.owner === owner &&
+      e0.runs.some((r) => r.workload === name && r.run === run)
+    ) {
+      stop(
+        `${name} run ${run} is already recorded in this collection (the next is run ${e0.runs.filter((r) => r.workload === name).length + 1}): nothing was run or written.`,
+      );
+      return finish();
+    }
+    let used = false;
+    const after = await drive(MANUAL_KEY, read, (e) => {
+      if (used) return null;
+      used = true;
+      return { attempt: { name, run }, index: e.next };
+    });
+    // A manual page that ran keeps the guard until it is navigated away (the operator's next link); one that stopped lets it go.
+    if (!after) finish();
+  };
 
-  // Who owns what: a page that does not own the active collection says so and offers only reading (and the explicit take-over).
-  const active = readProtocol();
-  if (active.state === "present" && !active.envelope.terminal)
-    ownership.textContent =
-      active.envelope.owner === owner
-        ? `This tab owns collection ${active.envelope.protocol_id} (${active.envelope.runs.length} of ${active.envelope.plan.length} attempts recorded).`
-        : `Collection ${active.envelope.protocol_id} is owned by another tab (${active.envelope.runs.length} of ${active.envelope.plan.length} attempts recorded). This page does not run, recover, clear or delete anything.`;
+  await serial(async () => {
+    if (!protocol && !wanted) return;
+    if (!owner) {
+      stop(
+        `this tab's owner token cannot be kept in sessionStorage (${ownerError}): this page only reads.`,
+      );
+      return;
+    }
+    if (protocol) await protocolRoute();
+    else if (wanted) await manualRoute(wanted);
+  });
+  showOwnership();
 
   const menu = el("ul", {});
   const manual = readManual();
@@ -731,16 +956,144 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
         ),
       ),
     );
-  const guarded = (action: () => void | Promise<void>) => async () => {
+  /** Why this page may not clear or delete now (null: it may), from what is stored. */
+  const refusal = (): string | null => {
+    if (!owner) return "this tab has no owner token";
     for (const read of [readProtocol(), readManual()]) {
       const may = mayClear(read, owner);
-      if (!may.ok) {
-        status.textContent = `Refused: ${may.why}.`;
+      if (!may.ok) return may.why;
+    }
+    return null;
+  };
+  /** A clear or delete: refused at once if ownership says so, then done under the guard after looking again. */
+  const guardedClean = (action: () => Promise<string>) => (): Promise<void> =>
+    serial(async () => {
+      const refused = refusal();
+      if (refused) {
+        status.textContent = `Refused: ${refused}.`;
         return;
       }
-    }
-    await action();
-  };
+      if (!guard.available) {
+        status.textContent = `Refused: ${NO_LOCKS}.`;
+        return;
+      }
+      const done = await guard.scoped(async () => {
+        const again = refusal();
+        return again ? `Refused: ${again}.` : action();
+      });
+      status.textContent = done.ok ? done.value : `Refused: ${BUSY_ACTION}.`;
+    });
+
+  /**
+   * The W2 capture. The file is read and hashed first; then, under the guard, what is stored decides: with no active collection the capture
+   * is kept for this tab; during an active collection only its OWNER may restore exactly its pinned capture (after a lost tab and a
+   * recorded take-over), and any other file, or another tab, changes nothing. Acknowledged only after the kept record reads back.
+   */
+  const pickCapture = (file: File): Promise<void> =>
+    serial(async () => {
+      let bytes: Uint8Array;
+      let sha256: string;
+      try {
+        bytes = new Uint8Array(await file.arrayBuffer());
+        sha256 = await sha256Bytes(bytes);
+      } catch (error) {
+        status.textContent = `The W2 capture could not be read (the kept one, if any, is unchanged): ${String(error).slice(0, 160)}`;
+        return;
+      }
+      if (!owner) {
+        status.textContent =
+          "The W2 capture was NOT kept: this tab has no owner token.";
+        return;
+      }
+      if (!guard.available) {
+        status.textContent = `The W2 capture was NOT kept: ${NO_LOCKS}.`;
+        return;
+      }
+      const done = await guard.scoped(async () => {
+        const read = readProtocol();
+        if (read.state === "corrupt")
+          return `The W2 capture was NOT kept: the stored protocol is unreadable (${read.error}); copy it, then clear it explicitly.`;
+        const active =
+          read.state === "present" && !read.envelope.terminal
+            ? read.envelope
+            : null;
+        if (active) {
+          if (active.owner !== owner)
+            return "The W2 capture was NOT replaced: another tab owns the active collection; only its owner (or this tab after a recorded take-over) restores its capture.";
+          if (active.w2sha256 === null)
+            return "The W2 capture was NOT replaced: the active collection has no W2, and its plan never changes after it starts.";
+          if (sha256 !== active.w2sha256)
+            return `The W2 capture was NOT replaced: a collection is active, and its capture never changes after it starts (this file's SHA-256 is ${sha256}; the collection's is ${active.w2sha256}).`;
+        }
+        try {
+          const kept = await keepCapture(bytes, sha256, file.name);
+          if (!active)
+            return `W2 capture kept: ${kept.name}, ${kept.bytes} bytes, SHA-256 ${kept.sha256}`;
+          // After the read-back, the collection must still be the one whose capture this restores.
+          const after = readProtocol();
+          if (
+            after.state !== "present" ||
+            after.envelope.protocol_id !== active.protocol_id ||
+            after.envelope.owner !== owner ||
+            after.envelope.w2sha256 !== sha256
+          )
+            return `The W2 capture was written, but the active collection changed meanwhile: this tab keeps ${kept.name} (SHA-256 ${kept.sha256}); look at the collection again before a W2 run.`;
+          return `W2 capture restored for collection ${active.protocol_id}: ${kept.name}, ${kept.bytes} bytes, SHA-256 ${kept.sha256} (exactly the collection's capture; its plan, results and take-overs are unchanged). Open the protocol link to continue.`;
+        } catch (error) {
+          if (error instanceof CaptureKeepError && error.phase === "verify")
+            return `The W2 capture was written but did NOT read back as picked: what this tab keeps is now UNCERTAIN (${error.message}); pick the file again before a W2 run.`;
+          return `The W2 capture could not be kept (the previous one, if any, is unchanged): ${String(error).slice(0, 160)}`;
+        }
+      });
+      status.textContent = done.ok
+        ? done.value
+        : `The W2 capture was NOT kept: ${BUSY_ACTION}.`;
+    });
+
+  const takeOverActive = (): Promise<void> =>
+    serial(async () => {
+      if (!owner) {
+        status.textContent = "Not taken over: this tab has no owner token.";
+        return;
+      }
+      const read = readProtocol();
+      if (read.state !== "present" || read.envelope.terminal) {
+        status.textContent = "Nothing to take over: no collection is active.";
+        return;
+      }
+      if (read.envelope.owner === owner) {
+        status.textContent = "This tab already owns the active collection.";
+        return;
+      }
+      if (!guard.available) {
+        status.textContent = `Not taken over: ${NO_LOCKS}.`;
+        return;
+      }
+      const done = await guard.scoped(async () => {
+        const again = readProtocol();
+        if (again.state !== "present" || again.raw !== read.raw)
+          return "Not taken over: the stored collection changed; look at it again.";
+        const moved = compareAndSet(
+          localStorage,
+          PROTOCOL_KEY,
+          again.raw,
+          takeOver(again.envelope, owner, now()),
+        );
+        if (!moved.ok) return `Not taken over: ${moved.error}`;
+        refresh();
+        showOwnership();
+        const w2 = moved.envelope.w2sha256;
+        return `This tab now owns collection ${moved.envelope.protocol_id} (recorded). ${
+          w2
+            ? `Its W2 capture was kept only in the lost tab: choose the same file again (SHA-256 ${w2}) to restore it here, then open the protocol link to continue.`
+            : "Open the protocol link to continue."
+        }`;
+      });
+      status.textContent = done.ok
+        ? done.value
+        : "Not taken over: a live page is collecting on this origin (the collection's own page, or another tab); a take-over is only for a tab that is gone. Close or navigate that page first.";
+    });
+
   root.append(
     el("h2", {}, "Run"),
     el(
@@ -760,22 +1113,9 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
       type: "file",
       id: "w2-capture",
       accept: "application/json,.json",
-      onchange: async (event: Event) => {
+      onchange: (event: Event) => {
         const file = (event.target as HTMLInputElement).files?.[0];
-        if (!file) return;
-        // The capture of an active collection never changes after it starts.
-        const read = readProtocol();
-        if (read.state === "present" && !read.envelope.terminal) {
-          status.textContent =
-            "The W2 capture was NOT replaced: a collection is active, and its capture never changes after it starts.";
-          return;
-        }
-        try {
-          const kept = await storeCapture(file, file.name);
-          status.textContent = `W2 capture kept: ${kept.name}, ${kept.bytes} bytes, SHA-256 ${kept.sha256}`;
-        } catch (error) {
-          status.textContent = `The W2 capture could not be kept (the previous one, if any, is unchanged): ${String(error).slice(0, 160)}`;
-        }
+        if (file) void pickCapture(file);
       },
     }),
     menu,
@@ -799,11 +1139,19 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
       {
         type: "button",
         id: "profile-clear",
-        onclick: guarded(() => {
-          localStorage.removeItem(PROTOCOL_KEY);
-          localStorage.removeItem(MANUAL_KEY);
+        onclick: guardedClean(async () => {
+          const failures: string[] = [];
+          for (const key of [PROTOCOL_KEY, MANUAL_KEY])
+            try {
+              localStorage.removeItem(key);
+            } catch (error) {
+              failures.push(`${key}: ${String(error).slice(0, 120)}`);
+            }
           refresh();
-          status.textContent = "Results cleared.";
+          showOwnership();
+          return failures.length
+            ? `NOT fully cleared: ${failures.join("; ")}`
+            : "Results cleared.";
         }),
       },
       "Clear results",
@@ -813,8 +1161,11 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
       {
         type: "button",
         id: "profile-delete-databases",
-        onclick: guarded(async () => {
-          status.textContent = `Deleted ${await deleteProfileDatabases(data)} profiling database(s).`;
+        onclick: guardedClean(async () => {
+          const deleted = await deleteProfileDatabases(data);
+          return deleted.error
+            ? `Deleting stopped after ${deleted.n} profiling database(s): ${deleted.error}`
+            : `Deleted ${deleted.n} profiling database(s).`;
         }),
       },
       "Delete profiling databases",
@@ -824,20 +1175,7 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
       {
         type: "button",
         id: "profile-take-over",
-        onclick: () => {
-          const read = readProtocol();
-          if (read.state !== "present" || read.envelope.terminal) return;
-          if (read.envelope.owner === owner) return;
-          const moved = compareAndSet(
-            localStorage,
-            PROTOCOL_KEY,
-            read.raw,
-            takeOver(read.envelope, owner, now()),
-          );
-          status.textContent = moved.ok
-            ? "This tab now owns the collection (recorded). Open the protocol link to continue."
-            : `Not taken over: ${moved.error}`;
-        },
+        onclick: () => void takeOverActive(),
       },
       "Take over the active collection (only if its tab is gone)",
     ),

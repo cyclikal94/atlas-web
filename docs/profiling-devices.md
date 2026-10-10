@@ -28,11 +28,30 @@ Each page load is **one cold run of one workload**. The page:
 **One tab owns a protocol** (WEB-09c revision 2). The tab that starts it owns it: its token is in that tab's `sessionStorage`, which survives the protocol's
 reloads. Every attempt is **reserved** in one write before it runs and its result is stored, with the end of the reservation, in one more write, so a reload or a
 killed tab never skips an attempt or records one twice. Any other tab, including a plain `/profile-harness` page, only reads: it does not run, recover, clear or
-delete anything, and says which tab owns the protocol. A duplicate of the owning tab (browsers copy `sessionStorage` when a tab is duplicated) does not act while
-the owning page is alive (it holds a Web Lock). If the owning tab is lost for good, **Take over the active collection** moves ownership to the current tab, and the
-take-over is recorded in the results. A storage error or an unreadable state stops the protocol with its message; nothing is reset or started over silently. A
-completed protocol is never overwritten: copy its results, then **Clear results** before starting another. The W2 capture and the plan never change after a
-protocol starts.
+delete anything, and says which tab owns the protocol. A storage error or an unreadable state stops the protocol with its message; nothing is reset or started
+over silently. A completed protocol is never overwritten: copy its results, then **Clear results** before starting another. The W2 capture and the plan never
+change after a protocol starts.
+
+**One collector per origin** (revision 3). A page that collects (the protocol, or a single manual run such as `?w=W3&run=1`) first takes the origin's collector
+lock (a Web Lock) and keeps it until it is navigated away or closed; restoring a capture, a take-over, **Clear results** and **Delete profiling databases** run
+under the same lock. So:
+
+* while a protocol is active (not yet complete), **every manual run is refused**, in another tab and in the owning tab alike, and nothing is run or written;
+* while a manual run is in progress, or a manual attempt was left reserved by a closed tab, a protocol does not start (open the manual run's link again in its tab,
+  or clear, first);
+* of two tabs started at the same moment, exactly one collects; the other says "another live page is collecting on this origin" and writes nothing;
+* a duplicate of a collecting tab (browsers copy `sessionStorage` when a tab is duplicated) only reads;
+* a browser without Web Locks collects and changes nothing (the page cannot establish that it is the only collector, so it never assumes it);
+* an unknown workload, a run number that is not one, or a run already recorded is refused before anything is reserved;
+* a result is stored only into the reservation its page made: if the collection was cleared, re-created or taken over while the run was going on, the result is
+  shown on that page and **not** stored.
+
+**A lost owning tab.** If the owning tab is lost for good (closed, crashed, the device restarted), open `/profile-harness` in a new tab and tap **Take over the
+active collection**. A take-over is refused while the collection's own page is still alive. The take-over is recorded in the results, and every earlier attempt
+stays as it was (an attempt the lost tab had reserved is recorded once as `killed` by the next protocol load). The W2 capture was kept only in the lost tab: the
+page then asks you to **choose the same capture file again**. Only the new owner can restore it, and only the very file whose SHA-256 the collection pins is
+accepted ("W2 capture restored for collection …"); any other file, or another tab, changes nothing. Then open the protocol link (with the same `w2sha256`) to go on.
+If the page says a capture was written but did not read back, what the tab keeps is uncertain: choose the file again before a W2 run.
 
 What it does **not** do, and the figures must not be read as if it did:
 
@@ -83,7 +102,9 @@ are **incomplete**.
 The desktop programme runs this exact route: its `device` stage (`node scripts/profile-sync.mjs --evidence <dir> --only device`, after the `integration` stage that
 captures W2 into the same directory) picks each engine's own capture on the page and runs the whole protocol in Chromium, Firefox and WebKit, and the hand-over
 validates each engine's results with its `W2-hashes.json`. `tests/e2e/fixture.profile-harness.spec.ts` holds the route's controls (a stand-in capture kept, read
-back, verified and run; other bytes not verified; no capture kept is an error run; no W2 without a named capture). None of this is a device run.
+back, verified and run; other bytes not verified; no capture kept is an error run; no W2 without a named capture) and, since revision 3, the forced schedules of
+one collector per origin (manual runs refused during a protocol, simultaneous starts, no Web Locks, a stale result not stored, a lost tab's capture restored
+only from the pinned file, clear and delete serialised, illegal identities refused). None of this is a device run.
 
 ## Running a device
 
@@ -104,7 +125,10 @@ back, verified and run; other bytes not verified; no capture kept is an error ru
 
    Exit code 0 means complete and consistent; 1 means a rule was broken, a negative control was not fulfilled, or the results are incomplete (the messages say
    which: a file without five distinct W2 runs is incomplete); `--allow-partial` turns "valid but incomplete" into exit code 2, never a broken rule or a failed
-   control. Runs are counted as distinct run numbers of ONE protocol (a duplicated run, a run of another protocol or a schema-1 file is refused). A W7 control
+   control. Runs are counted as distinct run numbers of ONE protocol (a duplicated run, a run of another protocol or a schema-1 file is refused). Revision 3:
+   the file must be a protocol's (not a manual collection), hold its attempts in plan order with its planned count, and say `complete` exactly when it holds
+   every attempt; every run must carry the figures its path and outcome produce (an engine run that was admitted has its request, limit, scan and commit times
+   and written count; W5 makes no request and commits nothing; a killed attempt measured nothing). A missing figure is an explicit `null`. A W7 control
    fulfils its control only when it was **refused**: an admitted, timed-out, failed or killed control stays in the file and is reported as `FAILED CONTROL`.
    What a run is expected to do comes from the workload, never from the file. A W2 run is checked against `W2-hashes.json` and cannot be validated without it;
    a W2 capture whose bytes are not the ones the protocol names is an `error` run and is not processed.

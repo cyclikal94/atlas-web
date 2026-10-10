@@ -895,7 +895,7 @@ test("P-Q2: the quota reserve's inputs: the atlas-auth burst of three pages' sta
   });
 
   // (b) The estimate's step: incompressible writes of 1 KiB x 2^k into a scratch database of this origin, deleted afterwards.
-  const steps = await first.evaluate(async () => {
+  const ladder = await first.evaluate(async () => {
     const open = () =>
       new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open("atlas-pq2-scratch", 1);
@@ -921,7 +921,8 @@ test("P-Q2: the quota reserve's inputs: the atlas-auth burst of three pages' sta
       usage: number | null;
       delta: number | null;
     }> = [];
-    let previous = await usage();
+    const initial = await usage();
+    let previous = initial;
     let written = 0;
     for (let k = 0; k <= 14; k += 1) {
       const size = 1024 * 2 ** k;
@@ -951,8 +952,9 @@ test("P-Q2: the quota reserve's inputs: the atlas-auth burst of three pages' sta
       request.onerror = () => resolve();
       request.onblocked = () => resolve();
     });
-    return rows;
+    return { initial, rows };
   });
+  const steps = ladder.rows;
   const firstChange = steps.find((row) => (row.delta ?? 0) > 0);
 
   // (c) The ledger: what one reservation of the outbox's quota guard costs in the origin, over 100 reservations never settled.
@@ -994,6 +996,8 @@ test("P-Q2: the quota reserve's inputs: the atlas-auth burst of three pages' sta
       growth_after: growth(after),
     },
     estimate_granularity: {
+      // The usage before the first write: the first write's delta is measured from it (revision 3: kept, so the ladder can be checked).
+      initial_usage: ladder.initial,
       rows: steps,
       smallest_write_that_moved_the_estimate: firstChange?.added_bytes ?? null,
       estimate_step_bytes: step,
@@ -1006,6 +1010,9 @@ test("P-Q2: the quota reserve's inputs: the atlas-auth burst of three pages' sta
       reservations: 100,
       bytes_each: 1024,
       verdicts,
+      // The readings the growth is taken from (revision 3: kept, so the growth can be checked).
+      before: ledgerBefore,
+      after: ledgerAfter,
       growth: {
         estimate:
           ledgerAfter.usage !== null && ledgerBefore.usage !== null

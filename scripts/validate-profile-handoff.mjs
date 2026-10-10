@@ -16,12 +16,21 @@
 // failed or killed control is kept in the file and fails the control). Exit 0: complete and consistent; 1: a violation, a control that was
 // not fulfilled, or incomplete; 2 with `--allow-partial`: valid but incomplete. Invalid evidence or a failed control exits 1 even with
 // `--allow-partial`.
+//
+// Revision 3 (review 3 R2, design assessment A7/E9/E10): the hand-over's `results.json` and `report.md` are projected AGAIN from the carried
+// evidence and its fresh resolution (scripts/lib/profile-projection.mjs) with the context `results.json` records, and must be identical,
+// field for field and byte for byte: a published figure, admission list, failure, count, consumer status or candidate identity that
+// disagrees with the evidence is refused even when SHA256SUMS was regenerated after the edit. The recorded context is itself checked (the
+// pin is this candidate's, every stage ran on the candidate named at hand-over, the constants are the ones constants.md shows). In both
+// modes an INVALID cell or a failed control exits 1, `--allow-partial` or not: only a consistent programme that is merely incomplete or
+// not isolated is a partial hand-over (2 when allowed).
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONTRACT_VERSION,
+  canonical,
   RECORDED,
   resolveEvidence,
 } from "./lib/profile-contract.mjs";
@@ -33,6 +42,11 @@ import {
   EVIDENCE_KEY,
   EVIDENCE_OWNER,
 } from "./lib/profile-evidence.mjs";
+import {
+  contextOf,
+  projectResults,
+  renderReport,
+} from "./lib/profile-projection.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -227,6 +241,20 @@ function validateHandoff(dir, allowPartialHandoff) {
     `${files.length} file(s), ${Object.keys(results?.consumer_map ?? {}).length} consumer-map row(s); ${problems.length} error(s)`,
   );
   if (problems.length > 0) return 1;
+  // Invalid evidence and unfulfilled controls are never a partial hand-over: they are findings, whatever --allow-partial says.
+  const refused = recomputed.cells.filter(
+    (c) => c.status === "invalid" || c.status === "failed_control",
+  );
+  if (refused.length > 0) {
+    for (const c of refused.slice(0, 40))
+      console.error(
+        `${c.status === "invalid" ? "INVALID" : "FAILED CONTROL"} ${c.id}: ${c.reasons.join("; ")}`,
+      );
+    console.log(
+      `REFUSED: ${recomputed.counts.invalid} invalid cell(s) and ${recomputed.counts.failed_control} failed control(s) in the carried evidence${refused.length > 40 ? ` (first 40 shown; resolution.json lists all)` : ""}`,
+    );
+    return 1;
+  }
   if (!recomputed.complete) {
     const c = recomputed.counts;
     console.log(
@@ -352,5 +380,102 @@ function programmeProblems(results, recomputed, at) {
         `device_page_validation: results.${c.engine}.json is ${stated?.status}; the evidence resolves to ${c.status}`,
       );
   }
+  problems.push(...publicationProblems(results, recomputed, at));
+  return problems;
+}
+
+/** The paths (up to `limit`) at which two JSON values differ. */
+function differences(a, b, path = "", out = [], limit = 12) {
+  if (out.length >= limit) return out;
+  if (canonical(a) === canonical(b)) return out;
+  const isObject = (x) => typeof x === "object" && x !== null;
+  if (Array.isArray(a) && Array.isArray(b) && a.length === b.length)
+    for (let i = 0; i < a.length; i += 1)
+      differences(a[i], b[i], `${path}[${i}]`, out, limit);
+  else if (isObject(a) && isObject(b) && !Array.isArray(a) && !Array.isArray(b))
+    for (const key of [
+      ...new Set([...Object.keys(a), ...Object.keys(b)]),
+    ].sort())
+      differences(a[key], b[key], path ? `${path}.${key}` : key, out, limit);
+  else out.push(path || "(the whole document)");
+  return out;
+}
+
+/**
+ * Every published field against the projection of the carried evidence (review 3 R2; design assessment A7/E9), the report against its
+ * regeneration, and the recorded context against what can be checked of it.
+ */
+function publicationProblems(results, recomputed, at) {
+  const problems = [];
+  const context = contextOf(results);
+  const pin = JSON.parse(readFileSync(join(root, "contract-pin.json"), "utf8"));
+  if (canonical(context.pinned) !== canonical(pin))
+    problems.push("backend.pin is not this candidate's contract-pin.json");
+  const fingerprint = context.now?.source_fingerprint;
+  const stagesDir = join(at, "evidence", "stages");
+  if (existsSync(stagesDir))
+    for (const f of readdirSync(stagesDir).filter((x) => x.endsWith(".json"))) {
+      let record = null;
+      try {
+        record = JSON.parse(readFileSync(join(stagesDir, f), "utf8"));
+      } catch {
+        continue;
+      }
+      if (record?.candidate?.source_fingerprint !== fingerprint)
+        problems.push(
+          `candidate: stage ${f.replace(/\.json$/, "")} ran on ${record?.candidate?.source_fingerprint}, not the candidate named at hand-over (${fingerprint})`,
+        );
+    }
+  let shown = null;
+  try {
+    const text = readFileSync(join(at, "constants.md"), "utf8");
+    shown = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(text)?.[1] ?? "null");
+  } catch (error) {
+    problems.push(`constants.md cannot be read: ${error.message}`);
+  }
+  if (canonical(shown) !== canonical(context.configValues))
+    problems.push(
+      "programme.P-12.values are not the constants constants.md shows",
+    );
+  let projected = null;
+  try {
+    projected = JSON.parse(
+      JSON.stringify(
+        projectResults({
+          evidenceDir: join(at, "evidence"),
+          resolution: recomputed,
+          context,
+        }),
+      ),
+    );
+  } catch (error) {
+    return [
+      ...problems,
+      `results.json cannot be projected from its evidence: ${error.message}`,
+    ];
+  }
+  const differing = differences(results, projected);
+  if (differing.length)
+    problems.push(
+      `results.json is not what its evidence projects to, at ${differing.join(", ")}`,
+    );
+  let report = null;
+  try {
+    report = readFileSync(join(at, "report.md"), "utf8");
+  } catch (error) {
+    problems.push(`report.md cannot be read: ${error.message}`);
+  }
+  if (
+    report !== null &&
+    report !==
+      renderReport({
+        results: projected,
+        resolution: recomputed,
+        evidenceDir: join(at, "evidence"),
+      })
+  )
+    problems.push(
+      "report.md is not the report its evidence and results generate",
+    );
   return problems;
 }

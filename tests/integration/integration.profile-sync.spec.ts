@@ -682,6 +682,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     commits,
     limits_the_engine_asked_for: limitsAsked,
     heap_baseline_bytes: heapBaseline,
+    heap_samples_bytes: heapSamples,
     heap_peak_bytes: heapSamples.length ? Math.max(...heapSamples) : null,
     rss_baseline_kib: liveMemory.baseline_kib,
     rss_peak_kib: liveMemory.peak_kib,
@@ -750,6 +751,8 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     seeding: {
       writer: "dave (raw HTTP)",
       reader: "carol (this page)",
+      // The seeded person: the capture's dense batch is recomputed from the bytes against THIS identity (revision 3, review 3 R2).
+      person,
       dense_fields: 199,
       value_bytes: valueBytes,
       seeding_ms: seedingMs,
@@ -783,6 +786,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
         : { status: r.status, error: r.error, body: r.text.slice(0, 400) };
   }
   recordValue("P-W2 observed bound", engine, {
+    bound_person: bound.person,
     write:
       "one revocation of a person holding 200 dense checklist fields shared with the reader (201 changes for the reader in one revision)",
     revoke: { status: boundRevoke.status, body: boundRevoke.body },

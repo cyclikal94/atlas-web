@@ -24,43 +24,79 @@ const hash = (name: string) =>
   name === "W2"
     ? W2_SHA
     : (hashes.workloads.find((w) => w.name === name)?.sha256 as string);
+// Revision 3 (review 3 R2, design assessment E12): a run carries the payload its path and outcome produce, and the file holds the
+// protocol's attempts in plan order (W2 after W1) with a planned count and a terminal state that agree with them.
+const bytesOf = (name: string) =>
+  name === "W2"
+    ? 1_234
+    : (hashes.workloads.find((w) => w.name === name)?.bytes as number);
 const run = (
   workload: string,
   n: number,
   extra: Record<string, unknown> = {},
-) => ({
-  protocol_id: "protocol-1",
-  workload,
-  run: n,
-  cold: true,
-  expected: workload.startsWith("W7-") ? "refused" : "admitted",
-  outcome: workload.startsWith("W7-") ? "refused" : "admitted",
-  detail: "",
-  sha256: hash(workload),
-  sha256_verified: true,
-  bytes: 1,
-  elapsed_ms: 10,
-  user_agent: "test",
-  ...extra,
-});
-const complete = () => ({
-  schema: 2,
-  protocol_id: "protocol-1",
-  w2sha256: W2_SHA,
-  workload_version: hashes.version,
-  machine: {
+) => {
+  const control = workload.startsWith("W7-");
+  const processing = workload.startsWith("W5-");
+  return {
+    protocol_id: "protocol-1",
+    workload,
+    run: n,
+    cold: true,
+    expected: control ? "refused" : "admitted",
+    outcome: control ? "refused" : "admitted",
+    detail: "",
+    sha256: hash(workload),
+    sha256_verified: true,
+    ...(workload === "W2"
+      ? { source: "W2-captured.chromium.limit-1.json" }
+      : {}),
+    bytes: bytesOf(workload),
+    elapsed_ms: 10,
+    scan_ms: control ? null : 3,
+    commit_ms: control || processing ? null : 20,
+    request_count: processing ? 0 : 1,
+    limit: processing ? null : 1,
+    changes_written: control ? null : 100,
+    cursor_after: processing ? null : "after",
+    heap_baseline_bytes: null,
+    heap_peak_bytes: null,
+    heap_after_bytes: null,
     user_agent: "test",
-    device_memory_gib: 8,
-    hardware_concurrency: 8,
-    platform: "test",
-    secure_context: true,
-  },
-  runs: [...hashes.workloads, { name: "W2" }].flatMap((w) =>
-    ["W1", "W2", "W3", "W4", "W6"].includes(w.name)
-      ? [1, 2, 3, 4, 5].map((n) => run(w.name, n))
-      : [run(w.name, 1)],
-  ),
-});
+    at: "2026-10-10T00:00:00.000Z",
+    ...extra,
+  };
+};
+/** The page's protocol order, written out again: every workload, W2 after W1 when a capture is named, five cold runs of the valid ones. */
+const planOf = (withW2: boolean) =>
+  hashes.workloads
+    .flatMap((w) => (w.name === "W1" && withW2 ? ["W1", "W2"] : [w.name]))
+    .flatMap((name) =>
+      ["W1", "W2", "W3", "W4", "W6"].includes(name)
+        ? [1, 2, 3, 4, 5].map((n) => run(name, n))
+        : [run(name, 1)],
+    );
+const complete = () => {
+  const runs = planOf(true);
+  return {
+    schema: 2,
+    kind: "protocol",
+    protocol_id: "protocol-1",
+    w2sha256: W2_SHA as string | null,
+    workload_version: hashes.version,
+    machine: {
+      user_agent: "test",
+      device_memory_gib: 8,
+      hardware_concurrency: 8,
+      platform: "test",
+      secure_context: true,
+    },
+    planned_runs: runs.length,
+    terminal: "complete" as string | null,
+    error: null,
+    takeovers: [] as unknown[],
+    runs,
+  };
+};
 
 function validate(
   data: unknown,
@@ -94,8 +130,10 @@ describe("validate-profile-handoff", () => {
     expect(unchecked.text).toContain("cannot be verified without --w2-hashes");
   });
   it("refuses results without W2 as incomplete, and reports 2 when partial results are allowed", () => {
+    // A protocol started without a named capture: no W2 in its plan, so its results are incomplete (revision 3: the realistic file).
     const data = complete();
-    data.runs = data.runs.filter((r) => r.workload !== "W2");
+    data.runs = planOf(false);
+    Object.assign(data, { w2sha256: null, planned_runs: data.runs.length });
     const refused = validate(data);
     expect(refused.status).toBe(1);
     expect(refused.text).toContain("W2: no run recorded");
@@ -177,8 +215,10 @@ describe("validate-profile-handoff", () => {
     expect(out.text).toContain("is not the protocol's capture");
   });
   it("refuses fewer than five cold runs of W1, and reports 2 when partial results are allowed", () => {
+    // A protocol stopped after W1 run 2 (revision 3: attempts are recorded in plan order, so that is where it is still running).
     const data = complete();
-    data.runs = data.runs.filter((r) => !(r.workload === "W1" && r.run > 2));
+    data.runs = data.runs.slice(0, 2);
+    data.terminal = null;
     expect(validate(data).status).toBe(1);
     const allowed = validate(data, ["--allow-partial"]);
     expect(allowed.status).toBe(2);

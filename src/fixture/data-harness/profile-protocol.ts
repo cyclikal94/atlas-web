@@ -13,6 +13,14 @@
  * - **Errors stop, they do not reset.** An unreadable envelope or a refused write stops the protocol with its error shown; the stored
  *   evidence is left as it is, never replaced by an empty collection.
  *
+ * Revision 3 (review 3 R5, design assessment section B): compare-and-set is only a stale-state check, not an atomic swap. The page takes
+ * ONE origin-wide collector guard (a Web Lock, `profile-page.ts`) before it reads or creates either envelope, and every mutating entry
+ * point (protocol, manual run, recovery, capture restoration, take-over, clear, delete) runs under it. Here: `admission` (an active
+ * protocol excludes every manual run, a manual attempt still reserved excludes a protocol start, an unreadable envelope blocks both),
+ * `permitProblem` (an attempt's result is stored only into the very reservation its page made: same collection, owner and reservation;
+ * a freshly read envelope never authorises old work) and the structural invariants `readEnvelope` checks (plan, next, reservation,
+ * results, terminal and take-overs agree).
+ *
  * A results file is the envelope's runs with its identity (schema 2): one `protocol_id` on every run, every (workload, run) once.
  */
 import type { ProfileRun } from "./profile-page";
@@ -88,10 +96,95 @@ export function readEnvelope(store: KeyValue, key: string): Read {
         raw,
         error: "not a schema-2 protocol envelope",
       };
+    const problem = structuralProblem(envelope);
+    if (problem)
+      return {
+        state: "corrupt",
+        raw,
+        error: `an inconsistent schema-2 envelope: ${problem}`,
+      };
     return { state: "present", envelope, raw };
   } catch (error) {
     return { state: "corrupt", raw, error: String(error).slice(0, 160) };
   }
+}
+
+const isText = (x: unknown): x is string =>
+  typeof x === "string" && x.length > 0;
+const isRun = (x: unknown): x is number =>
+  typeof x === "number" && Number.isInteger(x) && x >= 1;
+
+/**
+ * What makes a schema-2 envelope inconsistent (design assessment D9): its kind, plan, next, reservation, results, terminal state and
+ * take-overs must agree, so a hand-edited, truncated or mixed record is never driven as if it were a collection.
+ */
+export function structuralProblem(e: Envelope): string | null {
+  if (e.kind !== "protocol" && e.kind !== "manual")
+    return `kind ${String(e.kind)}`;
+  if (!isText(e.protocol_id) || !isText(e.owner))
+    return "no collection id or owner";
+  if (!Number.isInteger(e.workload_version)) return "no workload version";
+  if (e.w2sha256 !== null && !/^[0-9a-f]{64}$/.test(String(e.w2sha256)))
+    return "its W2 capture is not a SHA-256";
+  if (!e.plan.every((a) => isText(a?.name) && isRun(a?.run)))
+    return "a planned attempt has no workload or run";
+  if (e.kind === "manual" && e.plan.length !== 0)
+    return "a manual collection has a plan";
+  const seen = new Set<string>();
+  for (const r of e.runs) {
+    if (!isText(r?.workload) || !isRun(r?.run))
+      return "a stored result has no workload or run";
+    const key = `${r.workload}#${r.run}`;
+    if (seen.has(key)) return `the result ${key} is stored twice`;
+    seen.add(key);
+  }
+  if (e.next !== e.runs.length)
+    return `next is ${e.next} but ${e.runs.length} results are stored`;
+  if (e.kind === "protocol") {
+    if (e.next > e.plan.length) return "next is past the plan";
+    for (const [i, r] of e.runs.entries())
+      if (r.workload !== e.plan[i]?.name || r.run !== e.plan[i]?.run)
+        return `result ${i + 1} is not the planned attempt`;
+  }
+  const r = e.reserved;
+  if (r !== null) {
+    if (
+      typeof r !== "object" ||
+      !isText(r.name) ||
+      !isRun(r.run) ||
+      r.index !== e.next ||
+      !isText(r.at) ||
+      !isText(r.page)
+    )
+      return "the reservation is not the next attempt's";
+    if (
+      e.kind === "protocol" &&
+      (r.name !== e.plan[e.next]?.name || r.run !== e.plan[e.next]?.run)
+    )
+      return "the reservation is not the planned attempt";
+    if (e.terminal) return "a finished collection holds a reservation";
+  }
+  if (
+    e.terminal !== null &&
+    e.terminal !== "complete" &&
+    e.terminal !== "error"
+  )
+    return `terminal ${String(e.terminal)}`;
+  if (
+    e.kind === "protocol" &&
+    (e.terminal === "complete") !== (e.next === e.plan.length) &&
+    e.terminal !== "error"
+  )
+    return "its completion does not agree with its plan";
+  if (e.kind === "manual" && e.terminal === "complete")
+    return "a manual collection cannot be complete";
+  if (e.error !== null && typeof e.error !== "string") return "error";
+  if (
+    !Array.isArray(e.takeovers) ||
+    !e.takeovers.every((t) => isText(t?.at) && isText(t?.from) && isText(t?.to))
+  )
+    return "the take-over record is malformed";
+  return null;
 }
 
 export type Written =
@@ -215,14 +308,20 @@ export function reserve(
 const done = (e: Envelope, next: number): Envelope["terminal"] =>
   e.kind === "protocol" && next >= e.plan.length ? "complete" : null;
 
-/** Stores the reserved attempt's result and ends its reservation in the same write; the protocol moves on (or is complete). */
+/**
+ * Stores the reserved attempt's result and ends its reservation in the same write; the protocol moves on (or is complete). There must be
+ * a reservation: a result is never appended to a collection that holds none (revision 3: no unreserved fallback).
+ */
 export function complete(
   e: Envelope,
   result: ProfileRun,
   now: string,
 ): Envelope {
-  const index = e.reserved?.index ?? e.next;
-  const next = e.kind === "protocol" ? index + 1 : e.next + 1;
+  if (!e.reserved)
+    throw new Error(
+      "no reserved attempt: a result is stored only into its own reservation",
+    );
+  const next = e.reserved.index + 1;
   return {
     ...e,
     runs: [...e.runs, { ...result, protocol_id: e.protocol_id }],
@@ -274,6 +373,86 @@ export function exportResults(e: Envelope) {
     takeovers: e.takeovers,
     runs: e.runs,
   };
+}
+
+/** The identity of the attempt a page reserved: the only reservation its result may be stored into. */
+export interface Permit {
+  protocol_id: string;
+  owner: string;
+  reservation: Reservation;
+}
+
+/**
+ * Why a result may NOT be stored now (null: it may). After the run's asynchronous work the page reads the envelope again; it stores its
+ * result only if that envelope is still the same collection, with the same owner, unfinished, and still holds exactly the reservation the
+ * page made. A clear, a re-creation, a take-over or another page's reservation in between makes the late result a diagnostic, never an
+ * append to whatever is stored now.
+ */
+export function permitProblem(read: Read, permit: Permit): string | null {
+  if (read.state === "absent")
+    return "the collection is no longer stored (cleared)";
+  if (read.state === "corrupt")
+    return `the stored collection is unreadable (${read.error})`;
+  const e = read.envelope;
+  if (e.protocol_id !== permit.protocol_id)
+    return `another collection (${e.protocol_id}) is stored in its place`;
+  if (e.owner !== permit.owner) return "its owner changed (a take-over)";
+  if (e.terminal) return `it is ${e.terminal}`;
+  const r = e.reserved;
+  const p = permit.reservation;
+  if (
+    !r ||
+    r.index !== p.index ||
+    r.name !== p.name ||
+    r.run !== p.run ||
+    r.at !== p.at ||
+    r.page !== p.page
+  )
+    return "it no longer holds the reservation this page made";
+  return null;
+}
+
+export type Route = "protocol" | "manual";
+
+/**
+ * Whether a collecting route may proceed with what is stored, across BOTH collections (review 3 R5): an active protocol excludes every
+ * manual run (whoever owns either, a copied owner token included); a manual attempt still reserved (running, or interrupted and not yet
+ * recorded) excludes a protocol start; an unreadable envelope blocks both until it is copied and cleared explicitly. An idle manual
+ * history may stay beside a protocol; it authorises nothing during it.
+ */
+export function admission(
+  route: Route,
+  protocol: Read,
+  manual: Read,
+): { ok: true } | { ok: false; why: string } {
+  for (const [name, read] of [
+    ["protocol", protocol],
+    ["manual", manual],
+  ] as const)
+    if (read.state === "corrupt")
+      return {
+        ok: false,
+        why: `the stored ${name} collection is unreadable (${read.error}); copy it below, then clear it explicitly. Nothing was changed`,
+      };
+  if (
+    route === "manual" &&
+    protocol.state === "present" &&
+    !protocol.envelope.terminal
+  )
+    return {
+      ok: false,
+      why: `protocol ${protocol.envelope.protocol_id} is active on this origin: a manual run is refused until it is complete or cleared (one collector at a time)`,
+    };
+  if (
+    route === "protocol" &&
+    manual.state === "present" &&
+    manual.envelope.reserved !== null
+  )
+    return {
+      ok: false,
+      why: `a manual attempt (${manual.envelope.reserved.name} run ${manual.envelope.reserved.run}) is reserved: let its page record it (or reopen its link in its tab), or clear, before a protocol starts`,
+    };
+  return { ok: true };
 }
 
 /** Whether a page holding `owner` may clear this collection or delete the profiling databases now. */

@@ -29,8 +29,13 @@ import { fingerprint } from "../validation/runtime.mjs";
 
 export const EVIDENCE_KEY = "WEB-09a:sync-profiling";
 export const EVIDENCE_OWNER = "WEB-09c";
-/** The version of the evidence contract (scripts/lib/profile-contract.mjs) a stage was recorded under. */
-export const CONTRACT_VERSION = 1;
+/**
+ * The version of the evidence contract (scripts/lib/profile-contract.mjs) a stage was recorded under. Version 2 (WEB-09c revision 3,
+ * review 3 R2): the contents of every observation and the support its derived figures are recomputed from (P-Q2's initial and ledger
+ * readings, P-8's trace support, P-13's observed hints and transactions, memory and heap samples, W2's seeded person) are required, so
+ * version 1 evidence is historical and resolves incomplete; it is never rewritten.
+ */
+export const CONTRACT_VERSION = 2;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [

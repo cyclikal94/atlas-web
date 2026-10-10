@@ -139,4 +139,21 @@ describe("the profiling writers", () => {
     expect(samples.length).toBeGreaterThan(0);
     expect(s.failed()).toBeGreaterThan(0);
   });
+
+  it("control: the attributed memory record keeps every sample's RSS in order, its peak the largest of them, and the processes at the peak add up to it (revision 3)", async () => {
+    // A real collector over this test process's own tree (ps on this machine): the record's figures must be one observation.
+    const memory = helpers.browserMemory();
+    await memory.baseline();
+    memory.start(5);
+    await new Promise((r) => setTimeout(r, 250));
+    await memory.stop();
+    await memory.after();
+    const record = memory.record();
+    expect(record.samples).toBeGreaterThan(0);
+    expect(record.series_kib).toHaveLength(record.samples);
+    expect(record.peak_kib).toBe(Math.max(...record.series_kib));
+    expect(record.processes_at_peak.reduce((n, p) => n + p.rss_kib, 0)).toBe(
+      record.peak_kib,
+    );
+  });
 });

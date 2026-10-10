@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
@@ -233,13 +233,32 @@ const cell = (r, id) => {
   assert.ok(found, `no cell ${id}`);
   return found;
 };
+// Revision 3 (design assessment E11): every stage seals the range of lines it added to each shared row file, and a row outside its stage's
+// range is not that stage's evidence. A case that removes rows simulates observations that were never recorded, so the stages are
+// re-sealed as such a run would have sealed them: each row read keeps its original line (ORDINAL), and writing a shared file recounts
+// every stage's range from the rows that remain. A row a case adds (no ordinal) lies outside every range, as an appended row does.
+const ORDINAL = Symbol("ordinal");
+const SHARED_FILES = ["measurements.jsonl", "values.jsonl", "collection.jsonl"];
 const readLines = (file) =>
   readFileSync(file, "utf8")
     .split("\n")
     .filter((l) => l.trim())
-    .map((l) => JSON.parse(l));
-const writeLines = (file, rows) =>
+    .map((l, i) => Object.assign(JSON.parse(l), { [ORDINAL]: i }));
+const writeLines = (file, rows) => {
   writeFileSync(file, `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`);
+  const name = basename(file);
+  const stages = join(dirname(file), "stages");
+  if (!SHARED_FILES.includes(name) || !existsSync(stages)) return;
+  const kept = rows.map((r) => r[ORDINAL]).filter((o) => o !== undefined);
+  const before = (line) => kept.filter((o) => o < line).length;
+  for (const f of readdirSync(stages).filter((x) => x.endsWith(".json"))) {
+    const record = JSON.parse(readFileSync(join(stages, f), "utf8"));
+    if (!record.rows_at_start || !record.rows_at_end) continue;
+    record.rows_at_start[name] = before(record.rows_at_start[name]);
+    record.rows_at_end[name] = before(record.rows_at_end[name]);
+    writeFileSync(join(stages, f), `${JSON.stringify(record, null, 2)}\n`);
+  }
+};
 const editJson = (file, change) => {
   const value = JSON.parse(readFileSync(file, "utf8"));
   writeFileSync(file, `${JSON.stringify(change(value) ?? value, null, 2)}\n`);
@@ -439,10 +458,18 @@ test("case: foreign work during ONE shell run's window (quiet at its end) disqua
   assert.deepEqual(r.not_isolated, [
     "P-1S:dist:mobile:fast-4g:run-2[chromium]",
   ]);
-  writeLines(
-    join(dir, "measurements.jsonl"),
-    readLines(join(dir, "measurements.jsonl")).reverse(),
+  // Revision 3: rows are reordered within the lines their stage sealed (a row moved into another stage's lines is another case's subject).
+  const stage = JSON.parse(
+    readFileSync(join(dir, "stages/fixture.json"), "utf8"),
   );
+  const rows = readLines(join(dir, "measurements.jsonl"));
+  const from = stage.rows_at_start["measurements.jsonl"];
+  const to = stage.rows_at_end["measurements.jsonl"];
+  writeLines(join(dir, "measurements.jsonl"), [
+    ...rows.slice(0, from),
+    ...rows.slice(from, to).reverse(),
+    ...rows.slice(to),
+  ]);
   const again = resolveDir(dir);
   assert.deepEqual(
     again.cells.map((c) => [c.id, c.status]),
@@ -695,23 +722,26 @@ test("case: removing one observation of each writer class names exactly that cel
       "P-1S:dist-fixture:desktop:slow-4g:run-2[chromium]",
     ],
     [
+      // Revision 3: a protocol records its attempts in plan order, so an attempt never recorded is the protocol's LAST one, not yet
+      // done (terminal null); a run missing from the middle of a "complete" file contradicts its plan (a case of its own below).
       "a device-page run",
       (dir) => {
         const file = join(dir, "device-page/results.webkit.json");
         const v = JSON.parse(readFileSync(file, "utf8"));
-        v.runs = v.runs.filter((r) => !(r.workload === "W4" && r.run === 5));
+        v.runs = v.runs.slice(0, -1);
+        v.terminal = null;
         const text = `${JSON.stringify(v, null, 2)}\n`;
         writeFileSync(file, text);
         writeLines(
           join(dir, "values.jsonl"),
           readLines(join(dir, "values.jsonl")).map((r) =>
             r.name === "P-11 device page" && r.engine === "webkit"
-              ? { ...r, results_sha256: sha(text) }
+              ? { ...r, results_sha256: sha(text), runs: v.runs.length }
               : r,
           ),
         );
       },
-      "device W4 run 5[webkit]",
+      "device W7-oversize_change run 1[webkit]",
     ],
     [
       "the budget profile of dist",
@@ -999,8 +1029,13 @@ test("case: the review's W7-timeout schedule assembles with every control unfulf
   assert.equal(results.desktop_programme.failed_controls.length, 36);
   assert.equal(results.H8.negative_controls_not_fulfilled.length, 36);
   assert.equal(results.desktop_programme.complete, false);
+  // Revision 3 (design assessment E10): an unfulfilled control is a finding, never a partial hand-over: 1 even with --allow-partial.
   const checked = validate(join(dir, "handoff"), "--allow-partial");
-  assert.equal(checked.status, 2, `${checked.stdout}${checked.stderr}`);
+  assert.equal(checked.status, 1, `${checked.stdout}${checked.stderr}`);
+  assert.match(
+    checked.stdout,
+    /REFUSED: 0 invalid cell\(s\) and 36 failed control\(s\)/,
+  );
   assert.equal(validate(join(dir, "handoff")).status, 1);
 });
 
@@ -1011,6 +1046,15 @@ test("case: W2's LIVE outcome is a desktop outcome: a live time-out is a failure
   editJson(join(dir, "w2/P-W2.webkit.json"), (v) => {
     v.live.outcome = "timeout";
   });
+  // Revision 3: the writer records the live application twice (the file and the capture's value row); both say what happened.
+  writeLines(
+    join(dir, "values.jsonl"),
+    readLines(join(dir, "values.jsonl")).map((r) =>
+      r.name === "P-W2 capture" && r.engine === "webkit"
+        ? { ...r, live: { ...r.live, outcome: "timeout" } }
+        : r,
+    ),
+  );
   assert.equal(assemble(dir).status, 0);
   const results = resultsOf(dir);
   assert.equal(results.H8.desktop_valid_workload_failure, true);
@@ -1762,4 +1806,985 @@ test("case: the budget checker writes a programme's profile only where it is tol
   assert.notEqual(again.status, 0);
   assert.match(again.stderr, /EEXIST/);
   assert.equal(readFileSync(target, "utf8"), before);
+});
+
+// ---- revision 3 (review 3 R2; design assessment E1-E12): observation CONTENTS and every representation of them ---------------------
+// Each case alters ONE thing in a complete synthetic programme while keeping every count (and, where it matters, regenerating the hashes
+// that identify the bytes), so a failure proves the contents or a relationship is checked, not that a row or a checksum went missing.
+const editValue = (dir, name, engine, change) =>
+  writeLines(
+    join(dir, "values.jsonl"),
+    readLines(join(dir, "values.jsonl")).map((r) =>
+      r.name === name && (engine === null || r.engine === engine)
+        ? (change(r) ?? r)
+        : r,
+    ),
+  );
+/** Rewrites a series as `record()` would have written it: new samples, its raw file, its summary and the raw file's hash together. */
+const rewriteSeries = (dir, name, engine, change) => {
+  const rows = readLines(join(dir, "measurements.jsonl"));
+  const row = rows.find((r) => r.name === name && r.engine === engine);
+  assert.ok(row, `no series ${name}`);
+  const raw = JSON.parse(readFileSync(join(dir, row.raw), "utf8"));
+  raw.samples = change(raw.samples);
+  const text = `${JSON.stringify(raw)}\n`;
+  writeFileSync(join(dir, row.raw), text);
+  const s = [...raw.samples].sort((a, b) => a - b);
+  const q = (p) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
+  Object.assign(row, {
+    n: raw.samples.length,
+    min: +s[0].toFixed(3),
+    p50: +q(0.5).toFixed(3),
+    p95: +q(0.95).toFixed(3),
+    p99: +q(0.99).toFixed(3),
+    max: +s.at(-1).toFixed(3),
+    raw_sha256: sha(text),
+  });
+  writeLines(join(dir, "measurements.jsonl"), rows);
+};
+const statusOf = (r, id) => cell(r, id).status;
+const reasonsOf = (r, id) => cell(r, id).reasons.join(" | ");
+/** Runs each variant on a fresh complete programme and expects exactly the named cells invalid, each with its reason. */
+const expectInvalid = (t, variants) => {
+  for (const [what, change, expected] of variants) {
+    const dir = join(scratch(t), "p");
+    writeComplete(dir);
+    change(dir);
+    const r = resolveDir(dir);
+    const bad = r.cells.filter(
+      (c) => !["ok", "unavailable"].includes(c.status),
+    );
+    assert.deepEqual(
+      bad.map((c) => c.id).sort(),
+      Object.keys(expected).sort(),
+      `${what}: ${JSON.stringify(bad.map((c) => [c.id, c.reasons]))}`,
+    );
+    for (const [id, pattern] of Object.entries(expected)) {
+      assert.equal(statusOf(r, id), "invalid", `${what}: ${id}`);
+      assert.match(reasonsOf(r, id), pattern, `${what}: ${id}`);
+    }
+    assert.equal(r.complete, false, what);
+  }
+};
+
+test("case (E1/E2/E4): review 3's schedule - every quota outcome null, every ladder row empty and both retirement conditions empty, counts kept - is invalid, never complete, and refused", (t) => {
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  editValue(dir, "P-Q2 quota reserve inputs", null, (r) => {
+    r.atlas_auth_burst.outcomes = Array.from({ length: 60 }, () => null);
+    r.estimate_granularity.rows = Array.from({ length: 15 }, () => ({}));
+  });
+  for (const engine of ["chromium", "firefox", "webkit"])
+    editJson(join(dir, `contention/retirements.${engine}.json`), (v) => {
+      v.conditions = [{}, {}];
+    });
+  const r = resolveDir(dir);
+  for (const engine of ["chromium", "firefox", "webkit"]) {
+    assert.equal(
+      statusOf(r, `P-Q2 quota reserve inputs[${engine}]`),
+      "invalid",
+    );
+    assert.match(
+      reasonsOf(r, `P-Q2 quota reserve inputs[${engine}]`),
+      /a request outcome is not one the writer records.*ladder write 1 is not a reading|a request outcome is not one the writer records/,
+    );
+    assert.equal(statusOf(r, `P-8 retirements[${engine}]`), "invalid");
+    assert.match(
+      reasonsOf(r, `P-8 retirements[${engine}]`),
+      /the condition is not recorded under its name/,
+    );
+  }
+  assert.equal(r.complete, false);
+  assert.equal(r.items["P-Q2"].status, "partial");
+  assert.equal(r.items["P-8"].status, "partial");
+  assert.equal(assemble(dir).status, 0);
+  const checked = validate(join(dir, "handoff"), "--allow-partial");
+  assert.equal(checked.status, 1, `${checked.stdout}${checked.stderr}`);
+  assert.match(checked.stdout, /REFUSED: 6 invalid cell\(s\)/);
+});
+
+test("case (E2): P-Q2's contents are checked and its figures recomputed: outcomes, ladder, readings, verdicts, growth, step and recommendation", (t) => {
+  const pq2 = (change) => (dir) =>
+    editValue(dir, "P-Q2 quota reserve inputs", "firefox", (r) => {
+      change(r);
+    });
+  const id = "P-Q2 quota reserve inputs[firefox]";
+  expectInvalid(t, [
+    [
+      "an outcome outside the writer's domain",
+      pq2((r) => {
+        r.atlas_auth_burst.outcomes[7] = { kind: "x" };
+      }),
+      { [id]: /a request outcome is not one the writer records/ },
+    ],
+    [
+      "held_at_once below the writer's own assertion",
+      pq2((r) => {
+        r.atlas_auth_burst.held_at_once = 1;
+      }),
+      { [id]: /held_at_once 1/ },
+    ],
+    [
+      "an empty ladder row",
+      pq2((r) => {
+        r.estimate_granularity.rows[3] = {};
+      }),
+      { [id]: /ladder write 4/ },
+    ],
+    [
+      "the ladder's initial usage removed",
+      pq2((r) => {
+        delete r.estimate_granularity.initial_usage;
+      }),
+      { [id]: /initial usage/ },
+    ],
+    [
+      "a wrong cumulative total",
+      pq2((r) => {
+        r.estimate_granularity.rows[5].total_written += 1;
+      }),
+      { [id]: /ladder write 6: total_written/ },
+    ],
+    [
+      "a later ladder delta that does not follow from its usage readings (the first step unchanged)",
+      pq2((r) => {
+        r.estimate_granularity.rows[12].delta += 1;
+      }),
+      {
+        [id]: /ladder write 13: delta .* does not follow from the usage readings/,
+      },
+    ],
+    [
+      "a fractional verdict count",
+      pq2((r) => {
+        r.ledger.verdicts = { reserved: 96.5, refused: 3.5 };
+      }),
+      { [id]: /100 typed reservation verdicts/ },
+    ],
+    [
+      "the ledger's before reading removed",
+      pq2((r) => {
+        delete r.ledger.before;
+      }),
+      { [id]: /ledger\.before is missing/ },
+    ],
+    [
+      "a changed growth",
+      pq2((r) => {
+        r.atlas_auth_burst.growth_during.estimate += 4096;
+      }),
+      { [id]: /growth_during does not follow/ },
+    ],
+    [
+      "another first step selected",
+      pq2((r) => {
+        r.estimate_granularity.estimate_step_bytes = 32_768;
+      }),
+      { [id]: /the estimate step does not follow/ },
+    ],
+    [
+      "a changed recommendation",
+      pq2((r) => {
+        r.derived_desktop_recommendation_bytes += 1;
+      }),
+      { [id]: /the derived recommendation .* does not follow/ },
+    ],
+  ]);
+});
+
+test("control (E2/E3): P-Q2's recommendation is the hand-computed figure, and a coarse estimate that never moves keeps explicit nulls without invented precision", (t) => {
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  const rows = readLines(join(dir, "values.jsonl")).filter(
+    (r) => r.name === "P-Q2 quota reserve inputs",
+  );
+  const by = Object.fromEntries(rows.map((r) => [r.engine, r]));
+  // Hand-computed: Chromium's burst is its exact IndexedDB growth 52,288 - 40,000 = 12,288 B; elsewhere the estimate's 66,384 - 50,000 =
+  // 16,384 B. The estimate first moves by 16,384 B. max(12,288 x 4, 16,384 x 2) = 49,152; max(16,384 x 4, 16,384 x 2) = 65,536.
+  assert.equal(by.chromium.derived_desktop_recommendation_bytes, 49_152);
+  assert.equal(by.firefox.derived_desktop_recommendation_bytes, 65_536);
+  assert.equal(by.webkit.derived_desktop_recommendation_bytes, 65_536);
+  assert.equal(by.firefox.estimate_granularity.estimate_step_bytes, 16_384);
+  // A coarse estimate that never moved: every delta 0, no step, no recommendation, and that is a valid observation.
+  editValue(dir, "P-Q2 quota reserve inputs", "webkit", (r) => {
+    const initial = r.estimate_granularity.initial_usage;
+    for (const row of r.estimate_granularity.rows) {
+      row.usage = initial;
+      row.delta = 0;
+    }
+    r.estimate_granularity.smallest_write_that_moved_the_estimate = null;
+    r.estimate_granularity.estimate_step_bytes = null;
+    r.derived_desktop_recommendation_bytes = null;
+  });
+  // Explicit nulls (an engine that gives no estimate) are a capability record, not a missing field.
+  editValue(dir, "P-Q2 quota reserve inputs", "firefox", (r) => {
+    r.estimate_granularity.initial_usage = null;
+    for (const row of r.estimate_granularity.rows) {
+      row.usage = null;
+      row.delta = null;
+    }
+    r.estimate_granularity.smallest_write_that_moved_the_estimate = null;
+    r.estimate_granularity.estimate_step_bytes = null;
+    r.derived_desktop_recommendation_bytes = null;
+  });
+  const r = resolveDir(dir);
+  assert.equal(statusOf(r, "P-Q2 quota reserve inputs[webkit]"), "ok");
+  assert.equal(statusOf(r, "P-Q2 quota reserve inputs[firefox]"), "ok");
+  assert.equal(r.complete, true);
+});
+
+test("case (E3): P-Q footprints are the writer's readings: an explicit null is a capability, a missing field or a flat (revision-2 fixture) shape is not, and the per-draft figure follows", (t) => {
+  const id = (engine) => `P-Q footprints[${engine}]`;
+  expectInvalid(t, [
+    [
+      "a reading's indexeddb field removed (not an explicit null)",
+      (dir) =>
+        editValue(dir, "P-Q footprints", "firefox", (r) => {
+          delete r.with_200_drafts.indexeddb;
+        }),
+      {
+        [id("firefox")]:
+          /with_200_drafts\.indexeddb is not a byte count or an explicit null/,
+      },
+    ],
+    [
+      "Chromium's exact figure null",
+      (dir) =>
+        editValue(dir, "P-Q footprints", "chromium", (r) => {
+          r.baseline.indexeddb = null;
+        }),
+      {
+        [id("chromium")]:
+          /baseline\.indexeddb: Chromium's exact CDP figure is missing/,
+      },
+    ],
+    [
+      "the flat shape the revision-2 fixture used ({usage, quota, indexeddb})",
+      (dir) =>
+        editValue(dir, "P-Q footprints", "webkit", (r) => {
+          for (const key of ["baseline", "empty_account_database"])
+            r[key] = { usage: 1, quota: 2, indexeddb: null };
+        }),
+      { [id("webkit")]: /baseline\.estimate is missing/ },
+    ],
+    [
+      "a per-draft figure that does not follow",
+      (dir) =>
+        editValue(dir, "P-Q footprints", "chromium", (r) => {
+          r.per_draft_bytes_chromium += 1;
+        }),
+      { [id("chromium")]: /per_draft_bytes_chromium .* does not follow/ },
+    ],
+  ]);
+});
+
+test("case (E4): P-8 needs both named conditions, every counter recounted from its trace support, its rate from pages and duration, and the value row the same", (t) => {
+  const id = "P-8 retirements[webkit]";
+  const file = (dir) => join(dir, "contention/retirements.webkit.json");
+  expectInvalid(t, [
+    [
+      "the conditions swapped",
+      (dir) =>
+        editJson(file(dir), (v) => {
+          v.conditions.reverse();
+        }),
+      { [id]: /not recorded under its name|value row/ },
+    ],
+    [
+      "one counter absent",
+      (dir) =>
+        editJson(file(dir), (v) => {
+          delete v.conditions[1].probe_retire_failed;
+        }),
+      { [id]: /probe_retire_failed is not a count/ },
+    ],
+    [
+      "a counter that is not what its trace counts (value row changed too)",
+      (dir) => {
+        editJson(file(dir), (v) => {
+          v.conditions[1].leader_leases_retired += 1;
+        });
+        editValue(dir, "P-8 retirements", "webkit", (r) => {
+          r.conditions[1].leader_leases_retired += 1;
+        });
+      },
+      { [id]: /leader_leases_retired .* is not what its trace support counts/ },
+    ],
+    [
+      "a rate that does not follow from pages and duration",
+      (dir) => {
+        editJson(file(dir), (v) => {
+          v.conditions[1].leader_pages_per_second += 0.1;
+        });
+        editValue(dir, "P-8 retirements", "webkit", (r) => {
+          r.conditions[1].leader_pages_per_second += 0.1;
+        });
+      },
+      { [id]: /leader_pages_per_second does not follow/ },
+    ],
+    [
+      "the value row disagreeing with the file",
+      (dir) =>
+        editValue(dir, "P-8 retirements", "webkit", (r) => {
+          r.conditions[0].probe_closing_gave_up += 1;
+        }),
+      { [id]: /the P-8 value row does not hold the file's conditions/ },
+    ],
+    [
+      "the trace support removed",
+      (dir) => rmSync(join(dir, "contention/retirements-trace.webkit.json")),
+      { [id]: /trace support is missing/ },
+    ],
+  ]);
+  // Control: legitimate zero counts (the no-leader condition has no leader events at all) are a valid observation.
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  const v = JSON.parse(readFileSync(file(dir), "utf8"));
+  assert.equal(v.conditions[0].leader_cover_commits, 0);
+  assert.equal(statusOf(resolveDir(dir), id), "ok");
+});
+
+test("case (E5): P-6's by-cause summary is recomputed from its scenario rows; two summaries agreeing with each other cannot outvote the rows", (t) => {
+  const file = (dir) => join(dir, "contention/unresolved-leases.firefox.json");
+  const cause = "slow_handling_injected";
+  const id = `P-6 ${cause}[firefox]`;
+  expectInvalid(t, [
+    [
+      "a precondition changed in one row, count kept",
+      (dir) =>
+        editJson(file(dir), (v) => {
+          const row = v.rows.find(
+            (r) => r.cause === cause && r.foreign_leases === 0,
+          );
+          row.foreign_leases = 2;
+        }),
+      { [id]: /by-cause summary does not follow from the scenario rows/ },
+    ],
+    [
+      "both summaries changed together, the rows not",
+      (dir) => {
+        editJson(file(dir), (v) => {
+          v.by_cause[cause].never_resolved += 1;
+        });
+        editValue(dir, `P-6 ${cause}`, "firefox", (r) => {
+          r.never_resolved += 1;
+        });
+      },
+      { [id]: /by-cause summary does not follow|value row does not follow/ },
+    ],
+    [
+      "a first-verdict histogram changed in the value row only",
+      (dir) =>
+        editValue(dir, `P-6 ${cause}`, "firefox", (r) => {
+          r.first_verdicts = { released: r.n };
+        }),
+      { [id]: /the value row does not follow from the scenario rows/ },
+    ],
+    [
+      "an unresolved scenario with a resolution time",
+      (dir) =>
+        editJson(file(dir), (v) => {
+          const row = v.rows.find(
+            (r) => r.cause === cause && r.resolved === false,
+          );
+          row.resolve_ms = 10;
+        }),
+      { [id]: /resolve_ms does not agree with resolved/ },
+    ],
+  ]);
+  // Control: the observations taken at different moments differ (no subset relation is imposed), and that is valid.
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  const v = JSON.parse(readFileSync(file(dir), "utf8"));
+  assert.ok(
+    Object.values(v.by_cause).some(
+      (e) => e.saw_unresolved !== e.precondition_met,
+    ),
+  );
+  assert.equal(statusOf(resolveDir(dir), id), "ok");
+});
+
+test("case (E6): P-7, P-9 and P-13 representations agree: give-ups with outcomes, waits with their JSONL, throughput with its copies, follower figures with the observed hints and transactions", (t) => {
+  expectInvalid(t, [
+    [
+      "a frozen-owner give-up flipped against its outcome",
+      (dir) =>
+        editJson(join(dir, "contention/frozen-owner.chromium.json"), (v) => {
+          v.rows[3].gave_up = !v.rows[3].gave_up;
+        }),
+      {
+        "P-7 frozen owner rows[chromium]":
+          /row 4: gave_up .* does not follow from its outcome/,
+      },
+    ],
+    [
+      "a P-7 wait sample changed in waits.jsonl only",
+      (dir) =>
+        writeLines(
+          join(dir, "contention/waits.jsonl"),
+          readLines(join(dir, "contention/waits.jsonl")).map((r, i) =>
+            i === 0 ? { ...r, ms: [r.ms[0] + 1, ...r.ms.slice(1)] } : r,
+          ),
+        ),
+      {
+        "P-7 ordinary request, no leader[chromium]":
+          /not the series' raw samples/,
+      },
+    ],
+    [
+      "a P-9 throughput copy changed in the policy file only",
+      (dir) =>
+        editJson(join(dir, "contention/yield-policy.webkit.json"), (v) => {
+          v.rows[2].throughput_pages_per_second[0] += 1;
+        }),
+      {
+        "P-9 engine support[webkit]":
+          /scheduler_yield: the throughput is not its series' samples/,
+      },
+    ],
+    [
+      "the engine's yield support not a boolean",
+      (dir) =>
+        editJson(join(dir, "contention/yield-policy.firefox.json"), (v) => {
+          v.engine_support.scheduler_yield = "maybe";
+        }),
+      { "P-9 engine support[firefox]": /yield support is not recorded/ },
+    ],
+    [
+      "the no-hint control shorter than its five seconds (both representations)",
+      (dir) => {
+        editJson(join(dir, "contention/follower-reads.firefox.json"), (v) => {
+          v.conditions[0].elapsed_ms = 4_000;
+        });
+        editValue(dir, "P-13 follower reads", "firefox", (r) => {
+          r.conditions[0].elapsed_ms = 4_000;
+        });
+      },
+      {
+        "P-13 reads, none (control)[firefox]": /did not last its five seconds/,
+      },
+    ],
+    [
+      "one observed transaction removed from the support",
+      (dir) =>
+        editJson(
+          join(dir, "contention/follower-reads-raw.chromium.json"),
+          (v) => {
+            v.conditions[1].tx.splice(5, 1);
+          },
+        ),
+      {
+        "P-13 reads, leader pages[chromium]":
+          /does not follow from the observed hints and transactions/,
+      },
+    ],
+    [
+      "the follower file's throughput differing from its series",
+      (dir) => {
+        editJson(join(dir, "contention/follower-reads.webkit.json"), (v) => {
+          v.leader_throughput_pages_per_second["1"][2] += 1;
+        });
+        editValue(dir, "P-13 follower reads", "webkit", (r) => {
+          r.leader_throughput_pages_per_second["1"][2] += 1;
+        });
+      },
+      {
+        "P-13 leader catch-up throughput (pages/s, 200 pages), 1 follower(s)[webkit]":
+          /throughput is not this series' samples/,
+      },
+    ],
+  ]);
+  // Control: a condition with no reads is the explicit zero and resolves (no distribution recorded for it).
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  const r = resolveDir(dir);
+  assert.equal(statusOf(r, "P-13 reads, none (control)[chromium]"), "ok");
+  assert.equal(
+    cell(r, "P-13 reads, none (control)[chromium]").zero_reads,
+    true,
+  );
+});
+
+test("case (E7): a run's memory figures are one observation: the peak is its largest kept sample, its processes add up to it, its copies and the series agree, in run order", (t) => {
+  const p11 = (dir, engine, change) =>
+    editJson(join(dir, `memory/P-11.${engine}.json`), (v) => {
+      change(v);
+    });
+  const W1 = (v) => v.rows.find((r) => r.workload === "W1");
+  expectInvalid(t, [
+    [
+      "review 3's 9,000,000 KiB peak, nested and top level, series kept",
+      (dir) =>
+        p11(dir, "webkit", (v) => {
+          for (const run of W1(v).runs) {
+            run.rss.peak_kib = 9_000_000;
+            run.rss_peak_kib = 9_000_000;
+          }
+        }),
+      {
+        ...Object.fromEntries(
+          [1, 2, 3, 4, 5].map((n) => [
+            `P-11 W1 memory, cold run ${n}[webkit]`,
+            /not the largest retained sample/,
+          ]),
+        ),
+        "P-11 W1 rss_peak_kib[webkit]": /not the per-run rss_peak_kib/,
+      },
+    ],
+    [
+      "the nested peak only",
+      (dir) =>
+        p11(dir, "chromium", (v) => {
+          W1(v).runs[2].rss.peak_kib += 1;
+        }),
+      {
+        "P-11 W1 memory, cold run 3[chromium]":
+          /rss_peak_kib is not the attributed record's peak_kib/,
+      },
+    ],
+    [
+      "the top-level copy only",
+      (dir) =>
+        p11(dir, "chromium", (v) => {
+          W1(v).runs[0].rss_baseline_kib += 1;
+        }),
+      {
+        "P-11 W1 memory, cold run 1[chromium]":
+          /rss_baseline_kib is not the attributed record's baseline_kib/,
+      },
+    ],
+    [
+      "the aggregate series only (rehashed)",
+      (dir) =>
+        rewriteSeries(dir, "P-11 W3 rss_peak_kib", "firefox", (s) => [
+          s[0] + 10,
+          ...s.slice(1),
+        ]),
+      { "P-11 W3 rss_peak_kib[firefox]": /not the per-run rss_peak_kib/ },
+    ],
+    [
+      "two runs swapped in the file",
+      (dir) =>
+        p11(dir, "webkit", (v) => {
+          const runs = v.rows.find((r) => r.workload === "W4").runs;
+          [runs[0], runs[1]] = [runs[1], runs[0]];
+        }),
+      {
+        "P-11 W4 elapsed_ms[webkit]": /in run order/,
+        "P-11 W4 rss_peak_kib[webkit]": /in run order/,
+      },
+    ],
+    [
+      "the processes at the peak not adding up to it",
+      (dir) =>
+        p11(dir, "firefox", (v) => {
+          W1(v).runs[4].rss.processes_at_peak[1].rss_kib += 3;
+        }),
+      {
+        "P-11 W1 memory, cold run 5[firefox]": /do not add up to the peak/,
+      },
+    ],
+    [
+      "a heap peak that is not its largest sample",
+      (dir) =>
+        p11(dir, "chromium", (v) => {
+          W1(v).runs[1].heap_samples_bytes[0] =
+            W1(v).runs[1].heap_peak_bytes + 1;
+        }),
+      {
+        "P-11 W1 memory, cold run 2[chromium]":
+          /heap peak is not the largest heap sample/,
+      },
+    ],
+  ]);
+});
+
+test("case (E8): a W2 capture is checked from its bytes: small or other-person bytes under dense metadata, a wrong phase, a missing person, a malformed bound or limits ladder are refused", (t) => {
+  const capture = (engine, limit) =>
+    `w2/W2-captured.${engine}.limit-${limit}.json`;
+  /** Replaces the bytes and regenerates their identity in the value row (hash, size, MiB): only the meaning can fail. */
+  const replaceBytes = (dir, engine, limit, text) => {
+    writeFileSync(join(dir, capture(engine, limit)), text);
+    editValue(dir, "P-W2 capture", engine, (r) => {
+      Object.assign(r.captures[`limit_${limit}`], {
+        sha256: sha(text),
+        bytes: Buffer.byteLength(text),
+        mib: +(Buffer.byteLength(text) / 1_048_576).toFixed(3),
+      });
+    });
+  };
+  const device = (engine) => [
+    `device page results[${engine}]`,
+    /capture|sha256|binder/,
+  ];
+  const small = JSON.stringify({
+    phase: "delta",
+    batches: [
+      {
+        revision: 1,
+        changes: [
+          {
+            kind: "upsert",
+            resource: { id: programme.PERSON, kind: "person" },
+          },
+        ],
+      },
+    ],
+    next_cursor: "c",
+    has_more: false,
+  });
+  expectInvalid(t, [
+    [
+      "a small batch under metadata claiming 200 changes (rehashed)",
+      (dir) => replaceBytes(dir, "chromium", 80, small),
+      {
+        "P-W2 capture limit 80[chromium]":
+          /does not follow from the captured bytes.*no batch of 199|no batch of 199/,
+      },
+    ],
+    [
+      "the dense batch of ANOTHER person (rehashed)",
+      (dir) =>
+        replaceBytes(
+          dir,
+          "firefox",
+          80,
+          programme.captureBody("firefox", 80, programme.BOUND_PERSON),
+        ),
+      {
+        "P-W2 capture limit 80[firefox]":
+          /no batch of 199 dense checklists with the seeded person/,
+      },
+    ],
+    [
+      "a snapshot phase",
+      (dir) =>
+        replaceBytes(
+          dir,
+          "webkit",
+          80,
+          programme
+            .captureBody("webkit", 80)
+            .replace('"phase":"delta"', '"phase":"snapshot"'),
+        ),
+      { "P-W2 capture limit 80[webkit]": /phase snapshot, not a delta page/ },
+    ],
+    [
+      "the recorded shape altered while the bytes are the dense batch (metadata only)",
+      (dir) =>
+        editValue(dir, "P-W2 capture", "webkit", (r) => {
+          r.captures.limit_1.changes = 300;
+          r.captures.limit_1.batch_shapes[0].checklist_upserts = 250;
+        }),
+      {
+        "P-W2 capture limit 1[webkit]":
+          /the recorded changes does not follow from the captured bytes/,
+      },
+    ],
+    [
+      "the seeded person not recorded",
+      (dir) =>
+        editValue(dir, "P-W2 capture", "chromium", (r) => {
+          delete r.seeding.person;
+        }),
+      {
+        "P-W2 capture limit 1[chromium]":
+          /seeded person's identity is not recorded/,
+        "P-W2 capture limit 80[chromium]":
+          /seeded person's identity is not recorded/,
+      },
+    ],
+    [
+      "a delivered bound without its shapes",
+      (dir) =>
+        editValue(dir, "P-W2 observed bound", "webkit", (r) => {
+          delete r.delivered.batch_shapes;
+        }),
+      {
+        "P-W2 observed bound[webkit]":
+          /delivered batch shapes are not recorded/,
+      },
+    ],
+    [
+      "the limits ladder out of order",
+      (dir) =>
+        editValue(dir, "W2-limits", "firefox", (r) => {
+          const rows = r.probe.command_count_rows;
+          [rows[1], rows[2]] = [rows[2], rows[1]];
+        }),
+      { "W2-limits[firefox]": /not the ladder's/ },
+    ],
+  ]);
+  void device;
+});
+
+test("case (E9): every published figure is projected from the carried evidence: a published shell figure, admission list, quota copy, consumer status, report line, candidate identity or constant altered alone is refused even with SHA256SUMS regenerated", (t) => {
+  const tamper = [
+    [
+      "the published shell LCP",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          for (const c of d.programme["P-1S"].results.dist.results)
+            c.lcp_ms = 1;
+        }),
+      /results\.json is not what its evidence projects to, at programme\.P-1S/,
+    ],
+    [
+      "H9's W1 admission list",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          d.H9.w1_outcomes_at_limit_1.chromium = ["refused"];
+        }),
+      /at H9\.w1_outcomes_at_limit_1/,
+    ],
+    [
+      "H9's live W2 outcome",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          d.H9.w2_live_outcome.webkit = "timeout";
+        }),
+      /at H9\.w2_live_outcome/,
+    ],
+    [
+      "a published P-Q2 copy",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          d.programme[
+            "P-Q2"
+          ].by_engine.firefox.derived_desktop_recommendation_bytes = 1;
+        }),
+      /at programme\.P-Q2/,
+    ],
+    [
+      "a consumer-map status",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          d.consumer_map["BE-Q23:M3 fixtures"].status = "partial";
+        }),
+      /at consumer_map/,
+    ],
+    [
+      "a stage's candidate identity",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          d.candidate.stages.fixture.invocation = "another";
+        }),
+      /at candidate\.stages\.fixture\.invocation/,
+    ],
+    [
+      "a report figure only",
+      (h) =>
+        writeFileSync(
+          join(h, "report.md"),
+          readFileSync(join(h, "report.md"), "utf8").replace(
+            /\| P-2 ordinary-100 wall_ms \| chromium \| 300 \| [^|]+ \|/,
+            "| P-2 ordinary-100 wall_ms | chromium | 300 | 0.001 |",
+          ),
+        ),
+      /report\.md is not the report its evidence and results generate/,
+    ],
+    [
+      "the recorded constants against constants.md",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          d.programme["P-12"].values = { config: { syncLimitMax: 1 } };
+        }),
+      /programme\.P-12\.values are not the constants constants\.md shows/,
+    ],
+    [
+      "the recorded pin",
+      (h) =>
+        editJson(join(h, "results.json"), (d) => {
+          d.backend.pin = { ...d.backend.pin, backend_tag: "v0.0.0" };
+        }),
+      /backend\.pin is not this candidate's contract-pin\.json/,
+    ],
+  ];
+  for (const [what, change, pattern] of tamper) {
+    const dir = assembledCopy(t);
+    const handoff = join(dir, "handoff");
+    change(handoff);
+    resum(handoff);
+    const checked = validate(handoff);
+    assert.equal(checked.status, 1, `${what}: ${checked.stdout}`);
+    assert.match(checked.stderr, pattern, what);
+  }
+  // Control: the untouched copy validates (exit 0), so each refusal above is the tampered field's.
+  const control = validate(join(assembledCopy(t), "handoff"));
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+});
+
+test("case (E10): malformed nested evidence is a named finding of its cell, never a crash or an empty success; --allow-partial never accepts invalid evidence", (t) => {
+  expectInvalid(t, [
+    [
+      "a frozen-owner row that is null",
+      (dir) =>
+        editJson(join(dir, "contention/frozen-owner.webkit.json"), (v) => {
+          v.rows[10] = null;
+        }),
+      {
+        "P-7 frozen owner rows[webkit]":
+          /row 11 has no outcome or wait|ladder's order/,
+      },
+    ],
+    [
+      "retirement conditions that are strings",
+      (dir) =>
+        editJson(join(dir, "contention/retirements.firefox.json"), (v) => {
+          v.conditions = ["no leader", "leader"];
+        }),
+      { "P-8 retirements[firefox]": /not recorded under its name/ },
+    ],
+    [
+      "a memory record whose process list is a string",
+      (dir) =>
+        editJson(join(dir, "memory/P-11.chromium.json"), (v) => {
+          v.rows[0].runs[0].rss.processes_at_peak = "pids";
+        }),
+      {
+        "P-11 W1 memory, cold run 1[chromium]":
+          /processes at the peak are not recorded/,
+      },
+    ],
+  ]);
+  // A torn last line of values.jsonl is a malformed file: every value cell says so (none is read as absent).
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  writeFileSync(
+    join(dir, "values.jsonl"),
+    `${readFileSync(join(dir, "values.jsonl"), "utf8")}{"name":"P-Q`,
+  );
+  const r = resolveDir(dir);
+  assert.equal(statusOf(r, "P-Q footprints[webkit]"), "invalid");
+  assert.match(
+    reasonsOf(r, "P-Q footprints[webkit]"),
+    /values\.jsonl is malformed/,
+  );
+  // --allow-partial: invalid evidence exits 1; a merely incomplete programme exits 2.
+  assert.equal(assemble(dir).status, 0);
+  const refused = validate(join(dir, "handoff"), "--allow-partial");
+  assert.equal(refused.status, 1, `${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stdout, /REFUSED: \d+ invalid cell\(s\)/);
+  const partial = join(scratch(t), "p");
+  writeComplete(partial);
+  rmSync(join(partial, "shell"), { recursive: true });
+  assert.equal(assemble(partial).status, 0);
+  const allowed = validate(join(partial, "handoff"), "--allow-partial");
+  assert.equal(allowed.status, 2, `${allowed.stdout}${allowed.stderr}`);
+  assert.match(
+    allowed.stdout,
+    /PARTIAL hand-over: the desktop programme is incomplete/,
+  );
+});
+
+test("case (E11): a row outside the lines its stage sealed, or a stage that sealed no range, is not that stage's evidence", (t) => {
+  expectInvalid(t, [
+    [
+      "a fixture row appended after every stage sealed (a direct spec run copied in)",
+      (dir) => {
+        const rows = readLines(join(dir, "values.jsonl"));
+        const moved = rows.find(
+          (r) => r.name === "P-Q footprints" && r.engine === "firefox",
+        );
+        // The same row, moved to the end of the file: no stage sealed that line (the copy carries no original line).
+        const { [ORDINAL]: _line, ...copy } = moved;
+        writeLines(join(dir, "values.jsonl"), [
+          ...rows.filter((r) => r !== moved),
+          copy,
+        ]);
+      },
+      {
+        "P-Q footprints[firefox]": /lies outside the lines its stage sealed/,
+      },
+    ],
+  ]);
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  editJson(join(dir, "stages/device.json"), (v) => {
+    delete v.rows_at_end;
+  });
+  const r = resolveDir(dir);
+  assert.equal(statusOf(r, "stage:device"), "invalid");
+  assert.match(
+    reasonsOf(r, "stage:device"),
+    /range of values\.jsonl is not recorded/,
+  );
+  assert.match(
+    reasonsOf(r, "device page results[chromium]"),
+    /did not seal its range of values\.jsonl/,
+  );
+});
+
+test("case (E12): a device results file's lifecycle and every run's payload are checked, in the hand-over and in the operator's file mode alike", (t) => {
+  const variants = [
+    [
+      "an admitted engine run without its commit time",
+      (v) => {
+        v.runs[0].commit_ms = null;
+      },
+      /runs\[0\] \(W1 run 1\): an admitted engine run without its scan, commit and written count/,
+    ],
+    [
+      "a planned count that is not the plan's",
+      (v) => {
+        v.planned_runs = 38;
+      },
+      /planned_runs 38 is not the protocol's 39 attempts/,
+    ],
+    [
+      "a manual collection presented as a protocol's results",
+      (v) => {
+        v.kind = "manual";
+      },
+      /kind manual: only a protocol's results are a results file/,
+    ],
+    [
+      "a killed attempt that claims a measurement",
+      (v) => {
+        Object.assign(v.runs[3], { outcome: "killed", elapsed_ms: 5 });
+      },
+      /runs\[3\] \(W1 run 4\): a killed attempt cannot have measured or verified anything/,
+    ],
+    [
+      "two attempts out of plan order",
+      (v) => {
+        [v.runs[5], v.runs[6]] = [v.runs[6], v.runs[5]];
+      },
+      /attempt 6 of the plan is W2 run 1/,
+    ],
+  ];
+  for (const [what, change, pattern] of variants) {
+    const dir = join(scratch(t), "p");
+    writeComplete(dir);
+    const file = join(dir, "device-page/results.firefox.json");
+    const v = JSON.parse(readFileSync(file, "utf8"));
+    change(v);
+    const text = `${JSON.stringify(v, null, 2)}\n`;
+    writeFileSync(file, text);
+    editValue(dir, "P-11 device page", "firefox", (r) => {
+      r.results_sha256 = sha(text);
+    });
+    const r = resolveDir(dir);
+    assert.equal(statusOf(r, "device page results[firefox]"), "invalid", what);
+    assert.match(reasonsOf(r, "device page results[firefox]"), pattern, what);
+    // The operator's file mode says the same of the same file.
+    const hashes = join(dir, "W2-hashes.json");
+    writeFileSync(
+      hashes,
+      JSON.stringify({
+        "W2-captured.firefox.limit-1.json": sha(
+          readFileSync(join(dir, "w2/W2-captured.firefox.limit-1.json")),
+        ),
+      }),
+    );
+    const fileMode = node([
+      join(root, "scripts/validate-profile-handoff.mjs"),
+      file,
+      "--w2-hashes",
+      hashes,
+      "--allow-partial",
+    ]);
+    assert.equal(fileMode.status, 1, `${what}: ${fileMode.stdout}`);
+    assert.match(fileMode.stderr, pattern, `${what} (file mode)`);
+  }
 });

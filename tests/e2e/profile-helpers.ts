@@ -219,6 +219,8 @@ export interface BrowserMemory {
   peak_kib: number | null;
   after_kib: number | null;
   samples: number;
+  /** Every successful sample's attributed RSS in order (revision 3): the peak is the largest of them, and can be checked against them. */
+  series_kib: number[];
   failed_samples: number;
   complete: boolean;
   errors: string[];
@@ -237,6 +239,7 @@ export function browserMemory() {
   let after: Inventory | null = null;
   let peak: Inventory | null = null;
   let samples = 0;
+  const series: number[] = [];
   let failed = 0;
   let scope = "";
   let hosts = 0;
@@ -270,6 +273,7 @@ export function browserMemory() {
           const now = await take();
           if (now) {
             samples += 1;
+            series.push(now.rss_kib);
             if (!peak || now.rss_kib > peak.rss_kib) peak = now;
           }
           await sleep(everyMs);
@@ -292,6 +296,7 @@ export function browserMemory() {
         peak_kib: peak?.rss_kib ?? null,
         after_kib: after?.rss_kib ?? null,
         samples,
+        series_kib: [...series],
         failed_samples: failed,
         complete: failed === 0 && baseline !== null && samples > 0,
         errors: [...errors].slice(0, 10),

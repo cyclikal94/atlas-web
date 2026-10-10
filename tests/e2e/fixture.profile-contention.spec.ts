@@ -315,6 +315,12 @@ test("P-7 and P-8: the wait for another page's activity against a back-to-back s
   const leaderPage = await sessionPage(context);
   const probe = await sessionPage(context);
   const results: Record<string, unknown>[] = [];
+  // The trace events every counter below is counted from, kept per condition (revision 3, review 3 R2: the counts can be recounted).
+  const support: Record<string, unknown>[] = [];
+  const counted = (entries: TraceEntry[], events: string[]) =>
+    entries
+      .filter((entry) => events.includes(entry.event))
+      .map((entry) => ({ event: entry.event, at: entry.at }));
   for (const condition of CONDITIONS) {
     if (condition.leader) {
       server.catchingUp = true;
@@ -352,9 +358,25 @@ test("P-7 and P-8: the wait for another page's activity against a back-to-back s
         ms: samples.ms,
       });
     }
+    support.push({
+      condition: condition.name,
+      leader: counted(leaderTrace, [
+        "cover.committed",
+        "request.issued",
+        "lease.retired",
+        "activity.cancel",
+      ]),
+      probe: counted(probeTrace, [
+        "activity.cancel",
+        "lease.retired",
+        "lease.retire_failed",
+        "closing.gave_up",
+      ]),
+    });
     results.push({
       condition: condition.name,
       leader_pages: pages,
+      elapsed_s: elapsed,
       leader_pages_per_second: +(pages / elapsed).toFixed(1),
       leader_cover_commits: countOf(leaderTrace, "cover.committed"),
       leader_requests_issued: countOf(leaderTrace, "request.issued"),
@@ -411,6 +433,13 @@ test("P-7 and P-8: the wait for another page's activity against a back-to-back s
     label:
       "counted from the kernel's own trace in each page (activity.cancel, lease.retired, lease.retire_failed); the cost of one retirement is one small write",
     conditions: results,
+  });
+  write(`retirements-trace.${engine}.json`, {
+    id: "P-8 trace support",
+    engine,
+    label:
+      "the trace events each P-8 counter counts, per condition and page (leader: cover.committed, request.issued, lease.retired, activity.cancel; probe: activity.cancel, lease.retired, lease.retire_failed, closing.gave_up)",
+    conditions: support,
   });
   recordValue("P-8 retirements", engine, { conditions: results });
   expect(results.length).toBe(CONDITIONS.length);
@@ -1078,6 +1107,8 @@ async function followerReads(
           }
         : null,
     read_ms: readMs,
+    // What every figure above is derived from (revision 3, review 3 R2): the hints and transactions themselves, kept as support.
+    observed: { hints, tx },
   };
 }
 
@@ -1136,6 +1167,7 @@ test("P-13: a healthy follower's reads on `atlas-sync` hints (a back-to-back lea
   };
 
   const conditions: Array<Record<string, unknown>> = [];
+  const observed: Array<Record<string, unknown>> = [];
   const measure = async (
     name: string,
     label: string,
@@ -1156,7 +1188,8 @@ test("P-13: a healthy follower's reads on `atlas-sync` hints (a back-to-back lea
         method:
           "for each hint the follower page received, the IndexedDB transactions it started before the next hint, ended this long after the hint (overlapping reads under back-to-back hints are attributed to the hint they followed)",
       });
-    const { read_ms: _samples, ...summary } = reads;
+    const { read_ms: _samples, observed: raw, ...summary } = reads;
+    observed.push({ condition: name, ...raw });
     conditions.push({
       condition: name,
       label,
@@ -1287,6 +1320,13 @@ test("P-13: a healthy follower's reads on `atlas-sync` hints (a back-to-back lea
     follower_cache_state_at_start: cacheShown,
     conditions,
     leader_throughput_pages_per_second: throughput,
+  });
+  write(`follower-reads-raw.${engine}.json`, {
+    id: "P-13 observed hints and transactions",
+    engine,
+    label:
+      "per condition, every atlas-sync hint the follower received (when, which stores) and every IndexedDB transaction it started (when, stores, mode, when it ended): the support each P-13 figure is recomputed from",
+    conditions: observed,
   });
   recordValue("P-13 follower reads", engine, {
     conditions,

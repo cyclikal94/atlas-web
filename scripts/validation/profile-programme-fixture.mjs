@@ -1,7 +1,15 @@
 // A COMPLETE synthetic sync-profiling programme, for the qualification of the evidence contract (WEB-09c revision 2, design assessment
-// Q1). SYNTHETIC: no browser, backend or measurement ran; every figure is made up. It is written from what the programme's WRITERS produce
-// (the specs, the shell boot, the drivers), independently of scripts/lib/profile-contract.mjs: it imports nothing from the contract, so a
-// requirement dropped from the contract, or a check that stops looking, is caught by the qualification cases rather than mirrored here.
+// Q1; revision 3, review 3 R2 and design assessment E1). SYNTHETIC: no browser, backend or measurement ran; every figure is made up. It is
+// written from what the programme's WRITERS produce (the specs, the shell boot, the drivers), independently of
+// scripts/lib/profile-contract.mjs and scripts/lib/profile-projection.mjs: it imports neither, so a requirement dropped from the contract, or
+// a check that stops looking, is caught by the qualification cases rather than mirrored here.
+//
+// Revision 3: every observation carries its CONTENTS, not only its cardinality (review 3 R2: the revision-2 fixture held 60 null quota
+// outcomes, empty ladder rows, condition names without retirement counts and metadata-only captures, and was accepted as complete). Related
+// samples carry deliberately distinct values (every series, run, engine and condition differs), so a swapped run, engine or condition, a
+// unit error or a mismatched copy cannot hide behind constant arrays. Derived figures are computed here the way each writer computes them
+// (written out again, not imported), and the support each is recomputed from is kept: P-Q2's readings, P-8's trace events, P-13's
+// hints and transactions, every memory and heap sample, the W2 capture's real-shaped bytes and its seeded person.
 //
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
@@ -25,10 +33,13 @@ const STAGE_ORDER = [
   "integration",
   "device",
 ];
+const SHARED = ["measurements.jsonl", "values.jsonl", "collection.jsonl"];
 const INTERVAL = 5_000;
 const W7 = recorded.workloads
   .map((w) => w.name)
   .filter((n) => n.startsWith("W7-"));
+export const PERSON = "5eed0000-0000-4000-8000-000000000001";
+export const BOUND_PERSON = "5eed0000-0000-4000-8000-000000000002";
 
 // The writers' own quantile (tests/e2e/profile-helpers.ts `record`), written out again here.
 const pick = (sorted, p) =>
@@ -45,6 +56,83 @@ function summaryOf(samples) {
     max: three(s.at(-1)),
   };
 }
+/** A number of its own for every (name, index): distinct series, distinct samples, reproducible. */
+function seeded(name) {
+  let h = 2166136261;
+  for (const ch of name) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  return h;
+}
+const sampleOf = (name, i, base = 5) =>
+  base + ((seeded(name) + i * 7919) % 997) / 10;
+const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+
+/** The page's protocol order (src/fixture/data-harness/profile-capture.ts `protocolPlan`), written out again: W2 after W1. */
+function plan() {
+  const names = recorded.workloads.flatMap((w) =>
+    w.name === "W1" ? ["W1", "W2"] : [w.name],
+  );
+  return names.flatMap((name) =>
+    Array.from(
+      { length: ["W1", "W2", "W3", "W4", "W6"].includes(name) ? 5 : 1 },
+      (_, i) => ({ name, run: i + 1 }),
+    ),
+  );
+}
+
+/** A real-shaped `/sync` delta page holding the server-maximal dense batch: the person and 199 dense checklist fields. */
+export function captureBody(engine, limit, person = PERSON) {
+  const field = (i) => ({
+    kind: "upsert",
+    resource: {
+      id: `f-${engine}-${limit}-${String(i).padStart(3, "0")}`,
+      kind: "field",
+      parent_id: person,
+      value: {
+        kind: "checklist",
+        items: [{ id: `i-${i}`, text: `item ${i}`, checked: i % 2 === 0 }],
+      },
+    },
+  });
+  const dense = {
+    revision: 40 + limit,
+    changes: [
+      { kind: "upsert", resource: { id: person, kind: "person" } },
+      ...Array.from({ length: 199 }, (_, i) => field(i)),
+    ],
+  };
+  // At limit 80 the page also carries an earlier, ordinary batch (a removal), so the two captures differ in shape as real ones can.
+  const batches =
+    limit === 80
+      ? [
+          {
+            revision: 39,
+            changes: [
+              { kind: "remove", id: `old-${engine}`, resource_kind: "field" },
+            ],
+          },
+          dense,
+        ]
+      : [dense];
+  return JSON.stringify({
+    phase: "delta",
+    batches,
+    next_cursor: `cursor-${engine}-${limit}`,
+    has_more: false,
+  });
+}
+/** The integration writer's batch shape (tests/integration/integration.profile-sync.spec.ts `shapeOf`), written out again. */
+const shapeOf = (batch, person) => ({
+  changes: batch.changes.length,
+  checklist_upserts: batch.changes.filter(
+    (c) =>
+      c.kind === "upsert" &&
+      c.resource?.kind === "field" &&
+      c.resource.value?.kind === "checklist",
+  ).length,
+  person_ancestor: batch.changes.some(
+    (c) => c.kind === "upsert" && c.resource?.id === person,
+  ),
+});
 
 /**
  * Writes the programme. `candidate`: the stage records' candidate (the hand-over refuses another source fingerprint). `busy(stage, s)`:
@@ -69,46 +157,17 @@ export function writeProgramme(
     new Date(
       base + STAGE_ORDER.indexOf(stage) * 3600_000 + s * 1000,
     ).toISOString();
-  const measurements = [];
-  const values = [];
-  const collection = [];
-  const caseWindow = new Map();
-
-  for (const stage of STAGE_ORDER) {
-    json(`stages/${stage}.json`, {
-      evidence_key: "WEB-09a:sync-profiling",
-      owner: "WEB-09c",
+  // Shared rows are appended stage by stage, as the drivers' serial stages do, so each stage's lines form its sealed range.
+  const shared = Object.fromEntries(
+    STAGE_ORDER.map((stage) => [
       stage,
-      contract_version: 1,
-      invocation,
-      started_at: t(stage, -10),
-      candidate,
-      debugging_samples: null,
-      action_started_at: t(stage, 0),
-      action_finished_at: t(stage, 3000),
-      finished_at: t(stage, 3010),
-      exit_status: 0,
-      sealed: true,
-      sampler: { ready: true, final_sample: true, exit_code: 0, samples: 603 },
-      failure: null,
-    });
-    const samples = [];
-    for (let s = -5; s <= 3005; s += INTERVAL / 1000) {
-      const foreign = busy(stage, s);
-      samples.push({
-        at: t(stage, s),
-        interval_ms: INTERVAL,
-        foreign_heavy: foreign,
-        foreign_heavy_cpu_percent: foreign.length ? 180 : 0,
-        other_cpu_percent: 10,
-      });
-    }
-    samples[samples.length - 1].final = true;
-    put(
-      `isolation/${stage}.jsonl`,
-      `${samples.map((x) => JSON.stringify(x)).join("\n")}\n`,
-    );
-  }
+      Object.fromEntries(SHARED.map((f) => [f, []])),
+    ]),
+  );
+  const caseWindow = new Map();
+  // The JSONL support files of P-7 (contention/waits.jsonl) and P-9 (contention/yield-policy.jsonl).
+  const waitsJsonl = [];
+  const policyJsonl = [];
 
   // The cases each spec runs, per engine, each in its own window of its stage.
   const CASES = {
@@ -144,7 +203,7 @@ export function writeProgramme(
         const from = 10 + (e * titles.length + i) * 100;
         const window = { test, from: t(stage, from), to: t(stage, from + 90) };
         caseWindow.set(`${engine}|${test.split(" synthetic")[0]}`, window);
-        collection.push({
+        shared[stage]["collection.jsonl"].push({
           ...window,
           engine,
           status: "passed",
@@ -168,19 +227,13 @@ export function writeProgramme(
     at: windowOf(engine, title).to,
     collection: windowOf(engine, title),
   });
-  const series = (
-    stage,
-    engine,
-    title,
-    name,
-    n,
-    value = (i) => 10 + (i % 7),
-  ) => {
-    const samples = Array.from({ length: n }, (_, i) => value(i));
+  /** A distribution as `record()` writes it: the raw samples in their file, the summary row linked by path and hash. */
+  const series = (stage, engine, title, name, samples, extra = {}) => {
     const safe = `${name}.${engine}`.replace(/[^A-Za-z0-9._-]/g, "_");
-    const raw = `${JSON.stringify({ name, engine, samples })}\n`;
+    const raw = `${JSON.stringify({ ...extra, name, engine, samples })}\n`;
     put(`raw/${safe}.json`, raw);
-    measurements.push({
+    shared[stage]["measurements.jsonl"].push({
+      ...extra,
       ...summaryOf(samples),
       raw: `raw/${safe}.json`,
       raw_sha256: sha(raw),
@@ -188,47 +241,97 @@ export function writeProgramme(
     });
     return samples;
   };
+  const distinct = (name, engine, n, baseValue = 5) =>
+    Array.from({ length: n }, (_, i) =>
+      three(sampleOf(`${name}|${engine}`, i, baseValue)),
+    );
   const value = (stage, engine, title, name, v) =>
-    values.push({ ...v, ...ident(stage, engine, name, title) });
+    shared[stage]["values.jsonl"].push({
+      ...v,
+      ...ident(stage, engine, name, title),
+    });
   const stamp = (stage, engine, title) => ({
     stage,
     invocation,
     collection: windowOf(engine, title),
   });
-  const rss = (engine) => ({
-    scope: "synthetic",
-    platform: "darwin",
-    webkit_hosts: engine === "webkit" ? 1 : 0,
-    baseline_kib: 200_000,
-    peak_kib: 300_000,
-    after_kib: 210_000,
-    samples: 40,
-    failed_samples: 0,
-    complete: true,
-    errors: [],
-    processes_at_peak: [],
-    process_identities: [],
-  });
-  const coldRun = (engine, outcome = "admitted") => ({
-    outcome,
-    detail: "",
-    elapsed_ms: 1200,
-    scan_ms: outcome === "admitted" ? 40 : null,
-    commit_ms: outcome === "admitted" ? 300 : null,
-    requests: 2,
-    heap_baseline_bytes: engine === "chromium" ? 1e7 : null,
-    heap_peak_bytes: engine === "chromium" ? 5e7 : null,
-    heap_after_gc_bytes: engine === "chromium" ? 1.1e7 : null,
-    rss_baseline_kib: 200_000,
-    rss_peak_kib: 300_000,
-    rss_after_kib: 210_000,
-    rss: rss(engine),
-  });
+
+  /** The attributed memory of one run as `browserMemory().record()` writes it: every sample kept, the peak among them. */
+  const rssOf = (engine, key) => {
+    const s = seeded(key);
+    const series_kib = Array.from(
+      { length: 6 + (s % 5) },
+      (_, i) => 200_000 + ((s >> 3) % 50_000) + i * 1_111 + (s % 7) * i,
+    );
+    const peak = Math.max(...series_kib);
+    const procs = [
+      {
+        pid: 1000 + (s % 500),
+        start: "Sat Oct 10 08:00:00 2026",
+        role: "browser",
+      },
+      {
+        pid: 2000 + (s % 500),
+        start: "Sat Oct 10 08:00:01 2026",
+        role: "renderer",
+      },
+    ];
+    const first = Math.floor(peak * 0.6);
+    return {
+      scope:
+        "synthetic: the worker's descendants (and, for WebKit on macOS, its host's launchd services)",
+      platform: "darwin",
+      webkit_hosts: engine === "webkit" ? 1 : 0,
+      baseline_kib: 190_000 + (s % 9_000),
+      peak_kib: peak,
+      after_kib: 195_000 + (s % 8_000),
+      samples: series_kib.length,
+      series_kib,
+      failed_samples: 0,
+      complete: true,
+      errors: [],
+      processes_at_peak: [
+        { ...procs[0], rss_kib: first },
+        { ...procs[1], rss_kib: peak - first },
+      ],
+      process_identities: procs.map((p) => `${p.pid}@${p.start}`).sort(),
+    };
+  };
+  /** One cold run as `oneColdRun` returns it, every figure its own; heap samples where the engine has them. */
+  const coldRun = (engine, key, outcome = "admitted") => {
+    const s = seeded(key);
+    const rss = rssOf(engine, key);
+    const heap =
+      engine === "chromium"
+        ? Array.from(
+            { length: 5 + (s % 4) },
+            (_, i) => 1e7 + (s % 1e6) + i * 3_333,
+          )
+        : [];
+    return {
+      outcome,
+      detail: JSON.stringify({
+        kind: outcome === "admitted" ? "idle" : "stopped",
+      }),
+      elapsed_ms: 1_000 + (s % 900),
+      scan_ms: outcome === "admitted" ? 30 + (s % 40) : null,
+      commit_ms: outcome === "admitted" ? 200 + (s % 300) : null,
+      requests: 2,
+      heap_baseline_bytes: engine === "chromium" ? 9e6 : null,
+      heap_samples_bytes: heap,
+      heap_peak_bytes: heap.length ? Math.max(...heap) : null,
+      heap_after_gc_bytes: engine === "chromium" ? 9.5e6 : null,
+      rss_baseline_kib: rss.baseline_kib,
+      rss_peak_kib: rss.peak_kib,
+      rss_after_kib: rss.after_kib,
+      rss,
+    };
+  };
 
   // ---- bundle (P-1) ----
   const budgets = {};
-  for (const build of ["dist", "dist-fixture"]) {
-    const profile = `${JSON.stringify({ measured: { initial_js_gzip: 100_000, css_gzip: 7000, fonts: 80_000 }, failures: [] })}\n`;
+  for (const [i, build] of ["dist", "dist-fixture"].entries()) {
+    const profile = `${JSON.stringify({ measured: { initial_js_gzip: 107_948 + i * 111_641, css_gzip: 6_873 + i, fonts: 83_736 + i }, failures: [] })}\n`;
     put(`bundle/bundle-profile-${build}.json`, profile);
     budgets[build] = {
       exit: 0,
@@ -240,47 +343,55 @@ export function writeProgramme(
   json("bundle-delta.json", {
     id: "P-1",
     status: "measured",
-    initial_js_gzip: 100_000,
-    initial_chunks: ["assets/index.js"],
+    initial_js_gzip: 107_948,
+    initial_chunks: ["assets/index-synthetic.js"],
     dexie_in_initial_chunk: false,
     budgets,
   });
 
-  // ---- shell (P-1S): two builds x two viewports x two networks x three runs, each with its window ----
+  // ---- shell (P-1S): two builds x two viewports x two networks x three runs, each with its window, every figure its own ----
   let shellSecond = 20;
   for (const build of ["dist", "dist-fixture"]) {
     const results = [];
     for (const viewport of ["mobile", "desktop"])
       for (const network of ["fast-4g", "slow-4g"]) {
         const raw = [1, 2, 3].map((run) => {
+          const s = seeded(`${build}|${viewport}|${network}|${run}`);
           const from = t("shell", shellSecond);
           shellSecond += 30;
+          const fcp = 600 + (s % 300) + run * 0.25;
+          const fontsDone = fcp + 50 + (s % 120);
           return {
             run,
-            lcp: 900 + run,
-            cls: 0,
-            fcp: 700 + run,
-            fontsStart: 1,
-            fontsDone: 800,
-            transferBytes: 200_000,
-            requests: 12,
+            lcp: fcp + 100 + (s % 200),
+            cls: (s % 10) / 1000,
+            fcp,
+            fontsStart: 10 + (s % 20),
+            fontsDone,
+            transferBytes: 190_000 + (s % 20_000),
+            requests: 10 + (s % 4),
             fonts: 2,
             fontsLoaded: 2,
-            fout: 100,
+            fout: Math.max(0, fontsDone - fcp),
             script_encodings: { gzip: 3 },
             from,
             to: t("shell", shellSecond - 5),
           };
         });
+        const m = (key) => median(raw.map((r) => r[key]));
         results.push({
           viewport,
           network,
           cpuThrottle: 4,
           runs: 3,
           runs_completed: 3,
-          lcp_ms: 902,
-          fcp_ms: 702,
-          cls: 0,
+          lcp_ms: Math.round(m("lcp")),
+          fcp_ms: Math.round(m("fcp")),
+          cls: Number(m("cls").toFixed(4)),
+          fout_window_ms: Math.round(m("fout")),
+          transfer_kb: Math.round(m("transferBytes") / 1024),
+          requests: m("requests"),
+          fonts_loaded: `${m("fontsLoaded")}/${m("fonts")}`,
           raw,
         });
       }
@@ -288,9 +399,19 @@ export function writeProgramme(
       url: "http://127.0.0.1:1/",
       build,
       evidence: { stage: "shell", invocation },
+      note: "synthetic",
+      browser: "synthetic-chromium",
       results,
     });
   }
+
+  json("integration-run/summary.json", {
+    backend: {
+      tag: "v0.27.0-rc.1",
+      sha256: "b".repeat(64),
+      note: "synthetic",
+    },
+  });
 
   for (const engine of ENGINES) {
     // ---- fixture: P-2, P-3, P-5, P-11, P-Q, P-Q2 ----
@@ -304,41 +425,44 @@ export function writeProgramme(
       ["dense-400", 25],
       ["dense-800-W1", 15],
     ]) {
-      for (const metric of ["wall_ms", "scan_ms", "commit_ms"])
-        series("fixture", engine, "P-2:", `P-2 ${shape} ${metric}`, n);
+      for (const metric of ["wall_ms", "scan_ms", "commit_ms"]) {
+        const name = `P-2 ${shape} ${metric}`;
+        series("fixture", engine, "P-2:", name, distinct(name, engine, n));
+      }
+      const longTasks = `P-2 ${shape} long_task_ms_per_page`;
       if (engine === "chromium")
         series(
           "fixture",
           engine,
           "P-2:",
-          `P-2 ${shape} long_task_ms_per_page`,
-          n,
+          longTasks,
+          distinct(longTasks, engine, n, 0),
         );
       else
-        value("fixture", engine, "P-2:", `P-2 ${shape} long_task_ms_per_page`, {
+        value("fixture", engine, "P-2:", longTasks, {
           capability: "unavailable",
           reason: "this engine has no longtask observer",
         });
     }
     put(`raw/P-2.trace.${engine}.txt`, "0ms data.sync_commit {}\n");
     for (const kind of ["draft", "fence", "form_recovery"])
-      for (const d of ["strict", "default"])
-        series("fixture", engine, "P-3:", `P-3 ${kind} ${d} write_ms`, 300);
+      for (const d of ["strict", "default"]) {
+        const name = `P-3 ${kind} ${d} write_ms`;
+        series("fixture", engine, "P-3:", name, distinct(name, engine, 300));
+      }
     const drains = series(
       "fixture",
       engine,
       "P-5:",
       "P-5 drain_200_ms",
-      20,
-      (i) => 2000 + i,
+      distinct("P-5 drain_200_ms", engine, 20, 2000),
     );
     series(
       "fixture",
       engine,
       "P-5:",
       "P-5 per_draft_ms",
-      20,
-      (i) => drains[i] / 200,
+      drains.map((x) => x / 200),
     );
     value("fixture", engine, "P-5:", "P-5 maxInFlight_2_and_3", {
       status: "not_run",
@@ -349,29 +473,29 @@ export function writeProgramme(
       engine,
       "P-5 (dense):",
       "P-5 dense drain_201_ms",
-      20,
-      (i) => 4000 + i,
+      distinct("P-5 dense drain_201_ms", engine, 20, 4000),
     );
     series(
       "fixture",
       engine,
       "P-5 (dense):",
       "P-5 dense per_draft_ms",
-      20,
-      (i) => dense[i] / 201,
+      dense.map((x) => x / 201),
     );
     const rows = [];
     for (const workload of ["W1", "W3", "W4", "W6"])
       rows.push({
         workload,
         expected: "admitted",
-        runs: [1, 2, 3, 4, 5].map(() => coldRun(engine)),
+        runs: [1, 2, 3, 4, 5].map((run) =>
+          coldRun(engine, `P-11|${engine}|${workload}|${run}`),
+        ),
       });
     for (const workload of W7)
       rows.push({
         workload,
         expected: "refused",
-        runs: [coldRun(engine, controlOutcome)],
+        runs: [coldRun(engine, `P-11|${engine}|${workload}|1`, controlOutcome)],
       });
     json(`memory/P-11.${engine}.json`, {
       engine,
@@ -384,16 +508,14 @@ export function writeProgramme(
         engine,
         "P-11:",
         `P-11 ${row.workload} elapsed_ms`,
-        row.runs.length,
-        () => 1200,
+        row.runs.map((r) => r.elapsed_ms),
       );
       series(
         "fixture",
         engine,
         "P-11:",
         `P-11 ${row.workload} rss_peak_kib`,
-        row.runs.length,
-        () => 300_000,
+        row.runs.map((r) => r.rss_peak_kib),
       );
       if (engine === "chromium")
         series(
@@ -401,8 +523,7 @@ export function writeProgramme(
           engine,
           "P-11:",
           `P-11 ${row.workload} heap_peak_bytes`,
-          row.runs.length,
-          () => 5e7,
+          row.runs.map((r) => r.heap_peak_bytes),
         );
       else
         value(
@@ -416,37 +537,107 @@ export function writeProgramme(
           },
         );
     }
-    const footprint = {
-      usage: 1000,
-      quota: 1e9,
-      indexeddb: engine === "chromium" ? 900 : null,
+    // P-Q: the writer's readings ({estimate: {usage, quota}, indexeddb}); Chromium's exact figure, an explicit null elsewhere.
+    const reading = (k) => ({
+      estimate: { usage: 10_000 + k * 4_096, quota: 2e9 },
+      indexeddb: engine === "chromium" ? 8_000 + k * 3_000 : null,
+    });
+    const pq = {
+      baseline: reading(0),
+      empty_account_database: reading(1),
+      with_200_drafts: reading(3),
+      one_draft_with_1_mib_payload: { outcome: "queued", ...reading(9) },
+      atlas_auth_steady: reading(10),
+      atlas_auth_100_fences_200_leases: reading(12),
     };
     value("fixture", engine, "P-Q:", "P-Q footprints", {
-      note: "synthetic",
-      baseline: footprint,
-      empty_account_database: footprint,
-      with_200_drafts: footprint,
-      one_draft_with_1_mib_payload: footprint,
-      atlas_auth_steady: footprint,
-      atlas_auth_100_fences_200_leases: footprint,
+      note: "synthetic: Chromium's indexeddb is exact, the estimate is obfuscated elsewhere",
+      ...pq,
+      per_draft_bytes_chromium:
+        engine === "chromium"
+          ? Math.round(
+              (pq.with_200_drafts.indexeddb -
+                pq.empty_account_database.indexeddb) /
+                200,
+            )
+          : null,
     });
+    // P-Q2: the burst, the estimate ladder and the ledger, every reading kept, every derived figure computed as the writer does.
+    const flat = (usage, indexeddb) => ({
+      usage,
+      quota: 2e9,
+      indexeddb: engine === "chromium" ? indexeddb : null,
+    });
+    const idle = flat(50_000, 40_000);
+    const during = flat(66_384, 52_288);
+    const after = flat(58_192, 44_100);
+    const growth = (from, to) => ({
+      estimate:
+        to.usage !== null && from.usage !== null ? to.usage - from.usage : null,
+      indexeddb_exact:
+        to.indexeddb !== null && from.indexeddb !== null
+          ? to.indexeddb - from.indexeddb
+          : null,
+    });
+    // The estimate does not move until 16 KiB has been written, then moves in 16 KiB steps (a coarse but moving estimate).
+    const initial = 60_000;
+    let written = 0;
+    let previous = initial;
+    const ladder = [];
+    for (let k = 0; k <= 14; k += 1) {
+      written += 1024 * 2 ** k;
+      const usage = initial + Math.floor(written / 16_384) * 16_384;
+      ladder.push({
+        added_bytes: 1024 * 2 ** k,
+        total_written: written,
+        usage,
+        delta: usage - previous,
+      });
+      previous = usage;
+    }
+    const firstChange = ladder.find((r) => (r.delta ?? 0) > 0);
+    const before = flat(70_000, 61_000);
+    const ledgerAfter = flat(86_384, 64_500);
+    const burstGrowth = growth(idle, during);
+    const burstBytes =
+      burstGrowth.indexeddb_exact ?? burstGrowth.estimate ?? null;
     value("fixture", engine, "P-Q2:", "P-Q2 quota reserve inputs", {
+      note: "synthetic",
       atlas_auth_burst: {
         pages: 3,
         requests_per_page: 20,
-        held_at_once: 20,
-        outcomes: Array.from({ length: 60 }, () => "sent"),
+        held_at_once: 20 + (seeded(engine) % 41),
+        held_at_once_reading: "synthetic",
+        outcomes: Array.from({ length: 60 }, (_, i) =>
+          i % 29 === 0 ? "not_sent" : "released",
+        ),
+        idle,
+        during,
+        after,
+        growth_during: burstGrowth,
+        growth_after: growth(idle, after),
       },
       estimate_granularity: {
-        rows: Array.from({ length: 15 }, (_, i) => ({
-          added_bytes: 1024 * 2 ** i,
-        })),
+        initial_usage: initial,
+        rows: ladder,
+        smallest_write_that_moved_the_estimate:
+          firstChange?.added_bytes ?? null,
+        estimate_step_bytes: firstChange?.delta ?? null,
+        reading: "the first write that changed the estimate, and by how much",
       },
       ledger: {
         reservations: 100,
         bytes_each: 1024,
-        verdicts: { granted: 100 },
+        verdicts: { reserved: 97, refused: 3 },
+        before,
+        after: ledgerAfter,
+        growth: growth(before, ledgerAfter),
       },
+      derived_desktop_recommendation_bytes:
+        burstBytes === null || firstChange === undefined
+          ? null
+          : Math.max(burstBytes * 4, firstChange.delta * 2),
+      derivation: "max(burst x 4, estimate step x 2)",
       quota_reserve_bytes_in_use: 8 * 1024 * 1024,
     });
 
@@ -460,70 +651,179 @@ export function writeProgramme(
         ? { tab_crashed_mid_request_chromium: 60 }
         : {}),
     };
+    // Scenario rows with varied facts: the precondition read before the first request and the covers seen after it differ on purpose.
     const p6rows = [];
+    for (const [cause, n] of Object.entries(causes))
+      for (let i = 0; i < n; i += 1) {
+        const s = seeded(`${engine}|${cause}|${i}`);
+        const first = ["released", "lease_unresolved", "verify_pending"][s % 3];
+        const resolved = first === "released" || s % 11 !== 0;
+        p6rows.push({
+          cause,
+          foreign_leases: s % 4 === 0 ? 0 : 1 + (s % 3),
+          sender_retire_failed:
+            cause === "failing_recording_injected" && s % 5 !== 0 ? 1 : 0,
+          covers_with_unresolved: s % 3 === 0 ? 0 : s % 5,
+          first,
+          resolved,
+          resolve_ms: resolved ? 40 + (s % 400) : null,
+          retired_by_observer: s % 2,
+        });
+      }
+    // The writer's by-cause summary (tests/e2e/fixture.profile-contention.spec.ts), written out again.
     const byCause = {};
-    for (const [cause, n] of Object.entries(causes)) {
-      for (let i = 0; i < n; i += 1) p6rows.push({ cause, first: "released" });
-      byCause[cause] = {
-        n,
-        precondition_met: n,
+    for (const row of p6rows) {
+      const e = byCause[row.cause] ?? {
+        n: 0,
+        precondition_met: 0,
+        injection_took_effect: 0,
         saw_unresolved: 0,
+        first: {},
+        unresolved_then_resolved: 0,
         never_resolved: 0,
+        resolve_ms: [],
       };
-      value("contention", engine, "P-6:", `P-6 ${cause}`, {
-        ...byCause[cause],
-      });
+      byCause[row.cause] = e;
+      e.n += 1;
+      if (row.foreign_leases > 0) e.precondition_met += 1;
+      if (row.sender_retire_failed > 0) e.injection_took_effect += 1;
+      if (row.covers_with_unresolved > 0) e.saw_unresolved += 1;
+      e.first[row.first] = (e.first[row.first] ?? 0) + 1;
+      if (row.first !== "released" && row.resolved)
+        e.unresolved_then_resolved += 1;
+      if (!row.resolved) e.never_resolved += 1;
+      if (row.resolve_ms !== null && row.first !== "released")
+        e.resolve_ms.push(row.resolve_ms);
     }
     json(`contention/unresolved-leases.${engine}.json`, {
       id: "P-6",
       engine,
+      status: "measured, with INJECTED causes labelled",
       scenarios: p6rows.length,
       by_cause: byCause,
       rows: p6rows,
       evidence: stamp("contention", engine, "P-6:"),
     });
-    for (const condition of [
+    for (const [cause, e] of Object.entries(byCause))
+      value("contention", engine, "P-6:", `P-6 ${cause}`, {
+        n: e.n,
+        precondition_met: e.precondition_met,
+        injection_took_effect: e.injection_took_effect,
+        saw_unresolved: e.saw_unresolved,
+        first_verdicts: e.first,
+        unresolved_then_resolved: e.unresolved_then_resolved,
+        never_resolved: e.never_resolved,
+      });
+    // P-7 waits (series and waits.jsonl) and P-8 (counters with their trace support).
+    const outcomesOf = (n, key) => {
+      const timeouts = seeded(key) % 3;
+      return timeouts
+        ? { released: n - timeouts, lock_timeout: timeouts }
+        : { released: n };
+    };
+    const retirements = [];
+    const trace = [];
+    for (const [c, condition] of [
       "no leader",
       "back-to-back leader, 5 ms apart (platform yield)",
-    ]) {
-      for (const wait of [
-        "ordinary request",
-        "exposure (visible to lifted)",
-        "atlas-auth writer (begin)",
-      ])
-        series(
-          "contention",
-          engine,
-          "P-7 and P-8:",
-          `P-7 ${wait}, ${condition}`,
-          100,
+    ].entries()) {
+      for (const [probe, n] of [
+        ["ordinary request", 100],
+        ["exposure (visible to lifted)", 100],
+        ["atlas-auth writer (begin)", 100],
+        ["closing write (logout initiation)", 30],
+      ]) {
+        const name = `P-7 ${probe}, ${condition}`;
+        const ms = distinct(name, engine, n, 2);
+        const outcomes = outcomesOf(n, `${name}|${engine}`);
+        series("contention", engine, "P-7 and P-8:", name, ms, {
+          outcomes,
+          condition,
+        });
+        waitsJsonl.push({ probe, condition, engine, n, outcomes, ms });
+      }
+      const events = (counts) =>
+        Object.entries(counts).flatMap(([event, k]) =>
+          Array.from({ length: k }, (_, i) => ({
+            event,
+            at: 1_000 * (c + 1) + i * 3 + event.length,
+          })),
         );
-      series(
-        "contention",
-        engine,
-        "P-7 and P-8:",
-        `P-7 closing write (logout initiation), ${condition}`,
-        30,
-      );
+      const s = seeded(`${engine}|${condition}`);
+      const leaderCounts = c
+        ? {
+            "cover.committed": 400 + (s % 50),
+            "request.issued": 410 + (s % 50),
+            "lease.retired": 405 + (s % 50),
+            "activity.cancel": s % 4,
+          }
+        : {};
+      const probeCounts = {
+        "activity.cancel": c * 3 + (s % 2),
+        "lease.retired": 300 + c * 2,
+        "lease.retire_failed": c,
+        "closing.gave_up": s % 2,
+      };
+      const leaderPages = c ? 420 + (s % 40) : 0;
+      const elapsed = 61.25 + c * 3.5;
+      trace.push({
+        condition,
+        leader: events(leaderCounts),
+        probe: events(probeCounts),
+      });
+      retirements.push({
+        condition,
+        leader_pages: leaderPages,
+        elapsed_s: elapsed,
+        leader_pages_per_second: +(leaderPages / elapsed).toFixed(1),
+        leader_cover_commits: leaderCounts["cover.committed"] ?? 0,
+        leader_requests_issued: leaderCounts["request.issued"] ?? 0,
+        leader_leases_retired: leaderCounts["lease.retired"] ?? 0,
+        leader_activity_cancelled: leaderCounts["activity.cancel"] ?? 0,
+        probe_activity_cancelled: probeCounts["activity.cancel"],
+        probe_leases_retired: probeCounts["lease.retired"],
+        probe_retire_failed: probeCounts["lease.retire_failed"],
+        probe_closing_gave_up: probeCounts["closing.gave_up"],
+      });
     }
     json(`contention/retirements.${engine}.json`, {
       id: "P-8",
       engine,
-      conditions: [{ condition: "no leader" }, { condition: "leader" }],
+      status: "measured",
+      conditions: retirements,
       evidence: stamp("contention", engine, "P-7 and P-8:"),
     });
+    json(`contention/retirements-trace.${engine}.json`, {
+      id: "P-8 trace support",
+      engine,
+      conditions: trace,
+      evidence: stamp("contention", engine, "P-7 and P-8:"),
+    });
+    value("contention", engine, "P-7 and P-8:", "P-8 retirements", {
+      conditions: retirements,
+    });
+    // P-7 frozen owner (scaled) and the production wait.
     const frozen = [100, 250, 500, 750, 1000, 1500, 2500].flatMap((freeze_ms) =>
-      Array.from({ length: 15 }, () => ({
-        freeze_ms,
-        gave_up: freeze_ms > 1000,
-        waited_ms: 900,
-        outcome: "x",
-      })),
+      Array.from({ length: 15 }, (_, i) => {
+        const gaveUp = freeze_ms > 1000 || (freeze_ms === 1000 && i % 4 === 0);
+        return {
+          freeze_ms,
+          gave_up: gaveUp,
+          waited_ms: gaveUp ? 1000 + i : freeze_ms - 20 + i,
+          outcome: gaveUp ? "lock_timeout" : "released",
+        };
+      }),
     );
+    const gaveUp = frozen.filter((r) => r.gave_up).length;
     json(`contention/frozen-owner.${engine}.json`, {
       id: "P-7 frozen owner",
       engine,
+      status: "measured, SYNTHETIC",
       scaled_lock_wait_ms: 1000,
+      freezes_ms: [100, 250, 500, 750, 1000, 1500, 2500],
+      samples_per_freeze: 15,
+      gave_up: gaveUp,
+      of: frozen.length,
       rows: frozen,
       evidence: stamp("contention", engine, "P-7: a frozen owner"),
     });
@@ -532,229 +832,483 @@ export function writeProgramme(
       engine,
       "P-7: a frozen owner",
       "P-7 frozen owner: writer wait (scaled 1 s)",
-      105,
+      frozen.map((r) => r.waited_ms),
+      { gave_up: gaveUp, synthetic: true },
+    );
+    value(
+      "contention",
+      engine,
+      "P-7: a frozen owner",
+      "P-7 frozen owner give-ups",
+      {
+        gave_up: gaveUp,
+        of: frozen.length,
+        scaled_lock_wait_ms: 1000,
+      },
     );
     json(`contention/frozen-owner-production-wait.${engine}.json`, {
+      id: "P-7 frozen owner, production lock wait",
       engine,
       lock_wait_ms: 20_000,
       freeze_ms: 23_000,
       rows: [
-        { outcome: "lock_timeout", waited_ms: 20_010 },
-        { outcome: "lock_timeout", waited_ms: 20_020 },
+        { outcome: "lock_timeout", waited_ms: 20_010 + (seeded(engine) % 30) },
+        { outcome: "lock_timeout", waited_ms: 20_020 + (seeded(engine) % 40) },
       ],
       evidence: stamp("contention", engine, "P-7: the PRODUCTION lock wait"),
     });
+    // P-9: waits per policy (series and yield-policy.jsonl) and throughput (series and the policy file).
+    const policyRows = [];
     for (const policy of ["none", "macrotask", "scheduler_yield", "idle"]) {
-      for (const wait of ["ordinary request", "exposure", "atlas-auth writer"])
-        series("contention", engine, "P-9:", `P-9 ${policy}: ${wait} wait`, 50);
-      series(
-        "contention",
-        engine,
-        "P-9:",
-        `P-9 ${policy}: catch-up throughput (pages/s, 200 pages, no probe)`,
-        5,
-      );
+      for (const probe of [
+        "ordinary request",
+        "exposure",
+        "atlas-auth writer",
+      ]) {
+        const name = `P-9 ${policy}: ${probe} wait`;
+        const ms = distinct(name, engine, 50, 1);
+        const outcomes = outcomesOf(50, `${name}|${engine}`);
+        series("contention", engine, "P-9:", name, ms, { policy, outcomes });
+        policyJsonl.push({
+          policy,
+          engine,
+          probe,
+          n: 50,
+          outcomes,
+          ms,
+        });
+      }
+      const throughputName = `P-9 ${policy}: catch-up throughput (pages/s, 200 pages, no probe)`;
+      const throughput = distinct(throughputName, engine, 5, 150);
+      series("contention", engine, "P-9:", throughputName, throughput, {
+        policy,
+      });
+      policyRows.push({ policy, throughput_pages_per_second: throughput });
     }
     json(`contention/yield-policy.${engine}.json`, {
+      id: "P-9",
       engine,
+      status: "measured",
       engine_support: {
         scheduler_yield: engine === "chromium",
-        request_idle_callback: true,
+        request_idle_callback: engine !== "webkit",
       },
-      rows: ["none", "macrotask", "scheduler_yield", "idle"].map((policy) => ({
-        policy,
-      })),
+      rows: policyRows,
       evidence: stamp("contention", engine, "P-9:"),
     });
-    const reads = {
-      "none (control)": [0, 0],
-      "leader pages": [200, 150],
-      "stop-record hints (synthetic)": [200, 120],
-      "drafts and receipts": [400, 100],
+    // P-13: observed hints and transactions per condition; every figure computed from them as the writer does.
+    const observedOf = (condition) => {
+      const hints = [];
+      const tx = [];
+      const s = seeded(`${engine}|${condition}`);
+      const nHints = {
+        "none (control)": 0,
+        "leader pages": 200 + (s % 5),
+        "stop-record hints (synthetic)": 200 + (s % 3),
+        "drafts and receipts": 120 + (s % 7),
+      }[condition];
+      // Background reads before any hint (the control's own reads are not hint-caused).
+      tx.push({ at: 1, stores: "drafts", mode: "readonly", done: 2.5 });
+      for (let i = 0; i < nHints; i += 1) {
+        const at = 10 + i * 5;
+        hints.push({
+          at,
+          stores:
+            condition === "drafts and receipts"
+              ? "drafts,pending_effects"
+              : "cache,sync_state",
+        });
+        const reads = seeded(`${condition}|${i}`) % 3 === 0 ? 0 : 1 + (i % 3);
+        for (let k = 0; k < reads; k += 1)
+          tx.push({
+            at: at + 0.5 + k * 0.25,
+            stores: k % 2 ? "drafts" : "sync_state",
+            mode: "readonly",
+            done: i % 17 === 0 && k === 0 ? null : at + 1.5 + k * 0.5,
+          });
+      }
+      return { hints, tx };
     };
-    json(`contention/follower-reads.${engine}.json`, {
-      engine,
-      conditions: Object.entries(reads).map(
-        ([condition, [hints, withReads]]) => ({
-          condition,
-          hints,
+    const summaryFrom = ({ hints, tx }) => {
+      const byHintKind = {};
+      for (const h of hints)
+        byHintKind[h.stores] = (byHintKind[h.stores] ?? 0) + 1;
+      const byStores = {};
+      for (const x of tx) byStores[x.stores] = (byStores[x.stores] ?? 0) + 1;
+      const readMs = [];
+      let withReads = 0;
+      for (const [i, h] of hints.entries()) {
+        const until = hints[i + 1]?.at ?? Number.POSITIVE_INFINITY;
+        const started = tx.filter((x) => x.at >= h.at && x.at < until);
+        if (!started.length) continue;
+        withReads += 1;
+        readMs.push(Math.max(...started.map((x) => x.done ?? x.at)) - h.at);
+      }
+      return {
+        summary: {
+          hints: hints.length,
+          hints_by_kind: byHintKind,
+          own_posts: 0,
+          transactions: tx.length,
+          transactions_by_stores: byStores,
+          sync_state_transactions: tx.filter((x) =>
+            x.stores.split(",").includes("sync_state"),
+          ).length,
+          transactions_per_hint: hints.length
+            ? +(tx.length / hints.length).toFixed(3)
+            : null,
           hints_followed_by_reads: withReads,
-        }),
-      ),
-      evidence: stamp("contention", engine, "P-13:"),
-    });
-    for (const [condition, [, withReads]] of Object.entries(reads))
-      if (withReads > 0)
+          controller_reads: { starts: 0, emissions: 0, calls: 0 },
+        },
+        readMs,
+      };
+    };
+    const conditions = [];
+    const observed = [];
+    for (const [i, condition] of [
+      "none (control)",
+      "leader pages",
+      "stop-record hints (synthetic)",
+      "drafts and receipts",
+    ].entries()) {
+      const raw = observedOf(condition);
+      const { summary, readMs } = summaryFrom(raw);
+      observed.push({ condition, ...raw });
+      conditions.push({
+        condition,
+        label: "synthetic",
+        elapsed_ms: 5_000 + i * 1_234,
+        ...summary,
+      });
+      if (readMs.length)
         series(
           "contention",
           engine,
           "P-13:",
           `P-13 ${condition}: follower read_ms per hint`,
-          withReads,
+          readMs,
+          { condition, hints: summary.hints },
         );
-    for (const followers of [0, 1, 2])
-      series(
+    }
+    const throughput = {};
+    for (const followers of ["2", "1", "0"]) {
+      const name = `P-13 leader catch-up throughput (pages/s, 200 pages), ${followers} follower(s)`;
+      throughput[followers] = series(
         "contention",
         engine,
         "P-13:",
-        `P-13 leader catch-up throughput (pages/s, 200 pages), ${followers} follower(s)`,
-        3,
+        name,
+        distinct(name, engine, 3, 120),
+        { followers: Number(followers) },
       );
+    }
+    json(`contention/follower-reads.${engine}.json`, {
+      id: "P-13",
+      engine,
+      status: "measured",
+      follower_cache_state_at_start: "current",
+      conditions,
+      leader_throughput_pages_per_second: throughput,
+      evidence: stamp("contention", engine, "P-13:"),
+    });
+    json(`contention/follower-reads-raw.${engine}.json`, {
+      id: "P-13 observed hints and transactions",
+      engine,
+      conditions: observed,
+      evidence: stamp("contention", engine, "P-13:"),
+    });
+    value("contention", engine, "P-13:", "P-13 follower reads", {
+      conditions,
+      leader_throughput_pages_per_second: throughput,
+    });
 
     // ---- integration: P-4, P-10, P-W2, W2-limits ----
-    const syncRequest = Array.from({ length: 300 }, (_, i) => 5 + (i % 3));
-    for (const seg of ["pre_issue_ms", "post_response_ms", "total_ms"])
-      series(
-        "integration",
-        engine,
-        "P-4: what the page does around ONE sync page",
-        `P-4 sync page ${seg}`,
-        300,
-      );
+    const syncTitle = "P-4: what the page does around ONE sync page";
+    const pre = distinct("P-4 sync page pre_issue_ms", engine, 300, 1);
+    const syncRequest = distinct("P-4 sync page request_ms", engine, 300, 3);
+    const post = distinct("P-4 sync page post_response_ms", engine, 300, 20);
+    series("integration", engine, syncTitle, "P-4 sync page pre_issue_ms", pre);
     series(
       "integration",
       engine,
-      "P-4: what the page does around ONE sync page",
+      syncTitle,
       "P-4 sync page request_ms",
-      300,
-      (i) => syncRequest[i],
+      syncRequest,
     );
     series(
       "integration",
       engine,
-      "P-4: what the page does around ONE sync page",
+      syncTitle,
+      "P-4 sync page post_response_ms",
+      post,
+    );
+    series(
+      "integration",
+      engine,
+      syncTitle,
+      "P-4 sync page total_ms",
+      pre.map((x, i) => x + syncRequest[i] + post[i]),
+    );
+    series(
+      "integration",
+      engine,
+      syncTitle,
       "P-10 sync page request_ms (unthrottled loopback)",
-      300,
-      (i) => syncRequest[i],
+      syncRequest,
+      { stampedRequestTimeoutMs: 30_000 },
     );
-    const draftRequest = Array.from({ length: 300 }, (_, i) => 6 + (i % 4));
-    for (const seg of [
-      "enqueue_ms",
-      "claim_ms",
-      "stamping_ms",
-      "record_ms",
-      "total_ms",
-    ])
-      series(
-        "integration",
-        engine,
-        "P-4: what the page does around ONE draft submission",
-        `P-4 draft ${seg}`,
-        300,
-      );
+    const draftTitle = "P-4: what the page does around ONE draft submission";
+    const segments = Object.fromEntries(
+      ["enqueue_ms", "claim_ms", "stamping_ms", "request_ms", "record_ms"].map(
+        (seg) => [seg, distinct(`P-4 draft ${seg}`, engine, 300, 1)],
+      ),
+    );
+    for (const [seg, samples] of Object.entries(segments))
+      series("integration", engine, draftTitle, `P-4 draft ${seg}`, samples);
     series(
       "integration",
       engine,
-      "P-4: what the page does around ONE draft submission",
-      "P-4 draft request_ms",
-      300,
-      (i) => draftRequest[i],
+      draftTitle,
+      "P-4 draft total_ms",
+      segments.enqueue_ms.map(
+        (_, i) =>
+          Object.values(segments).reduce((n, s) => n + s[i], 0) + 0.5 + (i % 3),
+      ),
     );
     series(
       "integration",
       engine,
-      "P-4: what the page does around ONE draft submission",
+      draftTitle,
       "P-10 draft request_ms (unthrottled loopback)",
-      300,
-      (i) => draftRequest[i],
+      segments.request_ms,
+      { stampedRequestTimeoutMs: 30_000 },
     );
     series(
       "integration",
       engine,
       "P-10:",
       "P-10 sync page duration_ms (proxy delay 250 ms)",
-      100,
-      () => 260,
+      distinct("P-10 delayed", engine, 100, 255),
     );
     value("integration", engine, "W2:", "backend", {
-      health: { status: 200, body: {} },
-      revision: null,
+      health: {
+        status: 200,
+        body: { status: "ok", api_version: "0.27.0-rc.1" },
+      },
+      revision: { tag: "v0.27.0-rc.1", commit: "synthetic" },
     });
     const captures = {};
+    let w2Body = "";
     for (const limit of [1, 80]) {
-      const text = `{"phase":"delta","limit":${limit},"engine":"${engine}"}`;
+      const text = captureBody(engine, limit);
       put(`w2/W2-captured.${engine}.limit-${limit}.json`, text);
+      const body = JSON.parse(text);
+      const bytes = Buffer.byteLength(text);
       captures[`limit_${limit}`] = {
-        bytes: Buffer.byteLength(text),
+        phase: body.phase,
+        bytes,
+        mib: +(bytes / 1_048_576).toFixed(3),
+        batches: body.batches.length,
+        batch_shapes: body.batches.map((b) => shapeOf(b, PERSON)),
+        changes: body.batches.reduce((n, b) => n + b.changes.length, 0),
+        has_more: body.has_more,
         sha256: sha(text),
-        changes: 200,
-        batch_shapes: [{ checklist_upserts: 199, person_ancestor: true }],
+        file: `w2/W2-captured.${engine}.limit-${limit}.json`,
       };
+      if (limit === 1) w2Body = text;
     }
+    const liveRun = coldRun(engine, `P-W2|${engine}|live`);
     const live = {
-      ...coldRun(engine),
-      scan_ms: undefined,
-      commit_ms: undefined,
+      outcome: "admitted",
+      elapsed_ms: liveRun.elapsed_ms + 500,
+      commits: [
+        { bytes: Buffer.byteLength(w2Body), scan_ms: 20, commit_ms: 300 },
+      ],
+      limits_the_engine_asked_for: ["1", "1"],
+      heap_baseline_bytes: liveRun.heap_baseline_bytes,
+      heap_samples_bytes: liveRun.heap_samples_bytes,
+      heap_peak_bytes: liveRun.heap_peak_bytes,
+      rss_baseline_kib: liveRun.rss.baseline_kib,
+      rss_peak_kib: liveRun.rss.peak_kib,
+      rss: liveRun.rss,
+      label: "synthetic",
     };
+    const w2Runs = [1, 2, 3, 4, 5].map((run) =>
+      coldRun(engine, `P-W2|${engine}|${run}`),
+    );
     json(`w2/P-W2.${engine}.json`, {
       engine,
       live,
       rows: [
         {
           workload: "W2",
+          bytes: Buffer.byteLength(w2Body),
           expected: "admitted",
-          runs: [1, 2, 3, 4, 5].map(() => coldRun(engine)),
+          runs: w2Runs,
         },
       ],
       evidence: stamp("integration", engine, "W2:"),
     });
     put(`w2/P-W2.${engine}.live-engine-trace.txt`, "trace\n");
-    value("integration", engine, "W2:", "P-W2 capture", {
-      status: "measured",
-      captures,
-    });
-    series("integration", engine, "W2:", "P-W2 elapsed_ms", 5, () => 1500);
-    series("integration", engine, "W2:", "P-W2 rss_peak_kib", 5, () => 300_000);
+    series(
+      "integration",
+      engine,
+      "W2:",
+      "P-W2 elapsed_ms",
+      w2Runs.map((r) => r.elapsed_ms),
+    );
+    series(
+      "integration",
+      engine,
+      "W2:",
+      "P-W2 rss_peak_kib",
+      w2Runs.map((r) => r.rss_peak_kib),
+    );
     if (engine === "chromium")
       series(
         "integration",
         engine,
         "W2:",
         "P-W2 heap_peak_bytes",
-        5,
-        () => 5e7,
+        w2Runs.map((r) => r.heap_peak_bytes),
       );
     else
       value("integration", engine, "W2:", "P-W2 heap_peak_bytes", {
         capability: "unavailable",
         reason: "no heap signal outside Chromium",
       });
+    value("integration", engine, "W2:", "P-W2 capture", {
+      status: "measured",
+      server: "synthetic",
+      seeding: {
+        writer: "dave (raw HTTP)",
+        reader: "carol (this page)",
+        person: PERSON,
+        dense_fields: 199,
+        value_bytes: 7_400,
+        seeding_ms: 12_345,
+        grant_policy_version: 3,
+        revoke_status: 200,
+        batches_before_the_grant: [],
+        capacity_retries: [],
+      },
+      captures,
+      live,
+      cold_outcomes: w2Runs.map((r) => r.outcome),
+    });
     value("integration", engine, "W2:", "P-W2 observed bound", {
-      revoke: { status: 200 },
-      delivered: { status: 200 },
+      bound_person: BOUND_PERSON,
+      write: "synthetic",
+      revoke: { status: 200, body: {} },
+      delivered: {
+        status: 200,
+        batch_shapes: [
+          { changes: 201, checklist_upserts: 200, person_ancestor: true },
+        ],
+        has_more: false,
+        bytes: 1_530_000,
+      },
+      reading: "synthetic",
     });
     value("integration", engine, "W2-limits:", "W2-limits", {
       status: "measured",
-      probe: {},
+      probe: {
+        legacy_create_field_checklist: {
+          status: 400,
+          body: '{"error":"invalid_value"}',
+        },
+        largest_text_value_accepted_of_tried: 4096,
+        command_count_rows: [
+          {
+            commands: 800,
+            body_bytes: 3_400_000,
+            proxied: { status: 502, body: "bad gateway" },
+            direct: { status: 400, body: '{"error":"malformed_request"}' },
+          },
+          {
+            commands: 400,
+            body_bytes: 1_700_000,
+            proxied: { status: 400, body: '{"error":"malformed_request"}' },
+            direct: { status: 400, body: '{"error":"malformed_request"}' },
+          },
+          {
+            commands: 200,
+            body_bytes: 850_000,
+            proxied: { status: 400, body: '{"error":"malformed_request"}' },
+            direct: { status: 400, body: '{"error":"malformed_request"}' },
+          },
+          {
+            commands: 100,
+            body_bytes: 425_000,
+            proxied: { status: 400, body: '{"error":"malformed_request"}' },
+            direct: { status: 400, body: '{"error":"malformed_request"}' },
+          },
+          {
+            commands: 40,
+            body_bytes: 170_000,
+            proxied: { status: 400, body: '{"error":"malformed_request"}' },
+            direct: { status: 400, body: '{"error":"malformed_request"}' },
+          },
+          {
+            commands: 21,
+            body_bytes: 89_000,
+            proxied: { status: 400, body: '{"error":"malformed_request"}' },
+            direct: { status: 400, body: '{"error":"malformed_request"}' },
+          },
+          {
+            commands: 20,
+            body_bytes: 85_000,
+            proxied: { status: 200, body: "{}" },
+            direct: null,
+          },
+        ],
+      },
+      reading: "synthetic",
     });
 
-    // ---- device: the page's whole protocol, schema 2, one protocol, this engine's capture ----
+    // ---- device: the page's whole protocol, schema 2, one protocol, in plan order, every payload its path's ----
     const w2sha = captures.limit_1.sha256;
     const protocolId = `protocol-${engine}`;
-    const runs = [];
-    for (const name of [...recorded.workloads.map((w) => w.name), "W2"]) {
-      const n = ["W1", "W2", "W3", "W4", "W6"].includes(name) ? 5 : 1;
-      for (let run = 1; run <= n; run += 1) {
-        const control = name.startsWith("W7-");
-        runs.push({
-          protocol_id: protocolId,
-          workload: name,
-          run,
-          cold: true,
-          expected: control ? "refused" : "admitted",
-          outcome: control ? controlOutcome : "admitted",
-          detail: "",
-          sha256:
-            name === "W2"
-              ? w2sha
-              : recorded.workloads.find((w) => w.name === name).sha256,
-          sha256_verified: true,
-          bytes: 1,
-          elapsed_ms: 1,
-          user_agent: "synthetic",
-        });
-      }
-    }
+    const runs = plan().map(({ name, run }, i) => {
+      const control = name.startsWith("W7-");
+      const processing = name.startsWith("W5-");
+      const outcome = control ? controlOutcome : "admitted";
+      const engineRun = outcome === "admitted" || outcome === "refused";
+      return {
+        protocol_id: protocolId,
+        workload: name,
+        run,
+        cold: true,
+        expected: control ? "refused" : "admitted",
+        outcome,
+        detail: `synthetic attempt ${i + 1}`,
+        sha256:
+          name === "W2"
+            ? w2sha
+            : recorded.workloads.find((w) => w.name === name).sha256,
+        sha256_verified: outcome !== "killed",
+        ...(name === "W2"
+          ? { source: `W2-captured.${engine}.limit-1.json` }
+          : {}),
+        bytes:
+          name === "W2"
+            ? Buffer.byteLength(w2Body)
+            : recorded.workloads.find((w) => w.name === name).bytes,
+        elapsed_ms: outcome === "killed" ? 0 : 10 + i,
+        scan_ms: engineRun && outcome === "admitted" ? 3 + (i % 5) : null,
+        commit_ms:
+          engineRun && outcome === "admitted" && !processing ? 20 + i : null,
+        request_count: processing || !engineRun ? 0 : 1,
+        limit: processing || !engineRun ? null : 1,
+        changes_written: outcome === "admitted" ? 100 + i : null,
+        cursor_after: processing || !engineRun ? null : "after",
+        heap_baseline_bytes: engine === "chromium" ? 9e6 + i : null,
+        heap_peak_bytes: engine === "chromium" ? 2e7 + i : null,
+        heap_after_bytes: engine === "chromium" ? 1e7 + i : null,
+        user_agent: `synthetic ${engine}`,
+        at: t("device", 20 + i),
+      };
+    });
     const results = `${JSON.stringify(
       {
         schema: 2,
@@ -762,34 +1316,93 @@ export function writeProgramme(
         protocol_id: protocolId,
         workload_version: recorded.version,
         w2sha256: w2sha,
+        recorded_at: t("device", 80),
+        created_at: t("device", 15),
         machine: {
-          user_agent: "synthetic",
-          device_memory_gib: null,
+          user_agent: `synthetic ${engine}`,
+          device_memory_gib: engine === "chromium" ? 8 : null,
           hardware_concurrency: 8,
           platform: "synthetic",
           secure_context: true,
         },
+        planned_runs: runs.length,
+        terminal: "complete",
+        error: null,
+        takeovers: [],
         runs,
       },
       null,
       2,
     )}\n`;
     put(`device-page/results.${engine}.json`, results);
+    const memory = rssOf(engine, `device|${engine}`);
     value("device", engine, "P-11 (device page):", "P-11 device page", {
       runs: runs.length,
       protocol_id: protocolId,
+      results_file: `device-page/results.${engine}.json`,
       results_sha256: sha(results),
+      w2_capture: {
+        file: `w2/W2-captured.${engine}.limit-1.json`,
+        sha256: w2sha,
+      },
+      browser_memory_whole_protocol: { ...memory, reading: "synthetic" },
     });
   }
+
+  // The JSONL support files of P-7 and P-9.
   put(
-    "measurements.jsonl",
-    `${measurements.map((x) => JSON.stringify(x)).join("\n")}\n`,
+    "contention/waits.jsonl",
+    `${waitsJsonl.map((x) => JSON.stringify(x)).join("\n")}\n`,
   );
-  put("values.jsonl", `${values.map((x) => JSON.stringify(x)).join("\n")}\n`);
   put(
-    "collection.jsonl",
-    `${collection.map((x) => JSON.stringify(x)).join("\n")}\n`,
+    "contention/yield-policy.jsonl",
+    `${policyJsonl.map((x) => JSON.stringify(x)).join("\n")}\n`,
   );
+
+  // The shared rows, stage after stage, and each stage's record with the range of lines it sealed as its own.
+  const lines = Object.fromEntries(SHARED.map((f) => [f, []]));
+  for (const stage of STAGE_ORDER) {
+    const start = Object.fromEntries(SHARED.map((f) => [f, lines[f].length]));
+    for (const f of SHARED) lines[f].push(...shared[stage][f]);
+    const end = Object.fromEntries(SHARED.map((f) => [f, lines[f].length]));
+    json(`stages/${stage}.json`, {
+      evidence_key: "WEB-09a:sync-profiling",
+      owner: "WEB-09c",
+      stage,
+      contract_version: 2,
+      invocation,
+      started_at: t(stage, -10),
+      rows_at_start: start,
+      candidate,
+      debugging_samples: null,
+      action_started_at: t(stage, 0),
+      action_finished_at: t(stage, 3000),
+      finished_at: t(stage, 3010),
+      exit_status: 0,
+      sealed: true,
+      rows_at_end: end,
+      sampler: { ready: true, final_sample: true, exit_code: 0, samples: 603 },
+      failure: null,
+    });
+    const samples = [];
+    for (let s = -5; s <= 3005; s += INTERVAL / 1000) {
+      const foreign = busy(stage, s);
+      samples.push({
+        at: t(stage, s),
+        interval_ms: INTERVAL,
+        foreign_heavy: foreign,
+        foreign_heavy_cpu_percent: foreign.length ? 180 : 0,
+        other_cpu_percent: 10,
+      });
+    }
+    samples[samples.length - 1].final = true;
+    put(
+      `isolation/${stage}.jsonl`,
+      `${samples.map((x) => JSON.stringify(x)).join("\n")}\n`,
+    );
+  }
+  for (const f of SHARED)
+    put(f, `${lines[f].map((x) => JSON.stringify(x)).join("\n")}\n`);
   for (const [name, text] of files) {
     mkdirSync(dirname(join(dir, name)), { recursive: true });
     writeFileSync(join(dir, name), text);
