@@ -27,9 +27,13 @@ export type {
   StatusInputs,
 } from "./model/status";
 export type {
+  AccountId,
   CacheRow,
   DraftRow,
   DraftStatus,
+  DraftWithCommand,
+  Epoch,
+  JsonObject,
   LocalId,
   ProjectionPatch,
   ResourceId,
@@ -58,6 +62,10 @@ export type {
   QueuePage,
   ResourcePage,
 } from "./plans/outbox";
+export type {
+  Outstanding,
+  PendingCreatesPage,
+} from "./plans/pending-reads";
 export {
   createDataDeletionPorts,
   type DeletionPortsOptions,
@@ -83,6 +91,8 @@ export {
   useDraftQueue,
   useNotices,
   useOptionalDataEnv,
+  useOutstanding,
+  usePendingCreates,
   useQueueSummary,
   useResourceList,
   useStatusInputs,

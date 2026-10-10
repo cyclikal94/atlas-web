@@ -2,6 +2,7 @@
 import { describe, expect, test } from "vitest";
 import { digestOf } from "../../src/data/model/canonical";
 import {
+  commandKindOf,
   decideDiscard,
   decideSupersede,
   type EnqueueRequest,
@@ -819,5 +820,43 @@ describe("supersede (WEB-04 D:3291-3350)", () => {
         }),
       ),
     ).toEqual({ kind: "refused", reason: "fenced" });
+  });
+});
+
+describe("commandKindOf (D-13a-3): a single wrapped command is recognised", () => {
+  test("the kind of `{command: {kind}}` is the wrapped kind, not the endpoint", () => {
+    expect(
+      commandKindOf(
+        { command: { kind: "create_source", id: "s" } },
+        "/calendar-commands",
+      ),
+    ).toBe("create_source");
+    expect(
+      commandKindOf(
+        { command: { kind: "configure_source", id: "s" } },
+        "/calendar-commands",
+      ),
+    ).toBe("configure_source");
+  });
+  test("the existing cases are unchanged: a top-level kind first, then a group's first member, then the endpoint", () => {
+    expect(
+      commandKindOf({ kind: "edit", command: { kind: "x" } }, "/commands"),
+    ).toBe("edit");
+    expect(commandKindOf({ commands: [{ kind: "first" }] }, "/commands")).toBe(
+      "first",
+    );
+    expect(commandKindOf({ n: 1 }, "/commands")).toBe("/commands");
+  });
+  test("a wrapped value that is not an object with a string kind falls through to the endpoint", () => {
+    for (const command of [
+      { command: null },
+      { command: "create_source" },
+      { command: [{ kind: "create_source" }] },
+      { command: { kind: 3 } },
+      { command: {} },
+    ])
+      expect(commandKindOf(command as never, "/calendar-commands")).toBe(
+        "/calendar-commands",
+      );
   });
 });

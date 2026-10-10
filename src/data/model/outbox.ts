@@ -328,11 +328,22 @@ export class OutboxRequestError extends Error {
 }
 
 /**
- * The kind of a command: `command.kind`, else the first member of a command group, else the endpoint. Derived ONCE, at enqueue, into
- * the draft's header (`DraftRow.kind`), so nothing that lists or describes drafts needs the body. The data layer never branches on it.
+ * The kind of a command: `command.kind`, else the kind of a SINGLE wrapped command (`{command: {kind, ...}}`, the body of
+ * `/calendar-commands`, `/task-commands` and `/reminder-commands`), else the first member of a command group, else the endpoint.
+ * Derived ONCE, at enqueue, into the draft's header (`DraftRow.kind`), so nothing that lists or describes drafts needs the body. The
+ * data layer never branches on it.
  */
 export function commandKindOf(command: JsonObject, endpoint: string): string {
   if (typeof command.kind === "string") return command.kind;
+  const wrapped = command.command;
+  if (
+    typeof wrapped === "object" &&
+    wrapped !== null &&
+    !Array.isArray(wrapped)
+  ) {
+    const kind = (wrapped as Record<string, unknown>).kind;
+    if (typeof kind === "string") return kind;
+  }
   const group = command.commands;
   if (Array.isArray(group) && group.length > 0) {
     const first = group[0] as Record<string, unknown> | null;

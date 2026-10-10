@@ -213,6 +213,9 @@ describe("WF-SETTINGS-05 Appearance", () => {
 
   // WEB-08a: the home list is the registry (src/features/settings/sections.ts). WEB-07's placeholder listed Appearance
   // alone; WEB-08a adds Sessions & devices and Your data, and still no calendar (WEB-13a's entry) or export.
+  // ADAPTED BY WEB-13a (labelled for the reviewer): the original asserted three links and no "calendar" anywhere, because the
+  // calendar entry was WEB-13a's to add. WEB-13a appends exactly that ONE registry entry ("Calendars", owner WEB-13), so the same
+  // intent is now: four links, the calendar settings reached ONLY through that entry, and still no export settings.
   test("Settings home lists the registered sections and does not pull in calendar or export settings", async () => {
     await mount("/settings");
     const main = screen.getByRole("main");
@@ -220,10 +223,15 @@ describe("WF-SETTINGS-05 Appearance", () => {
       within(main)
         .getAllByRole("link")
         .map((link) => link.textContent?.split(/(?<=[a-z])(?=[A-Z])/)[0]),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(
       within(main).getByRole("link", { name: "Appearance" }),
     ).toBeInTheDocument();
-    expect(main.textContent).not.toMatch(/export|calendar/i);
+    const calendars = within(main).getByRole("link", { name: "Calendars" });
+    expect(calendars).toHaveAttribute("data-settings-link", "calendars");
+    expect(main.textContent).not.toMatch(/export/i);
+    expect(
+      (main.textContent ?? "").replace(calendars.textContent ?? "", ""),
+    ).not.toMatch(/calendar/i);
   });
 });

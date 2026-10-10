@@ -9,6 +9,8 @@
 //   hold_request         do NOT forward until POST /release/<id>
 //   delay                deliver the response after `ms`
 //   drop_after_forward   forward, let the backend commit, then destroy the connection (the browser sees it close)
+//   drop_client_after    forward, and after `ms` destroy the BROWSER's connection while the backend request carries on: an answer lost
+//                        while the original is still EXECUTING (WEB-13a, case 6(a)); the backend's eventual answer is discarded
 //   rewrite_status       forward, then answer with `status` and an empty JSON body and NONE of the backend's headers (a gateway's error carries no Set-Cookie)
 //   replace_response     forward, then answer with `status` and the JSON body `json` (for example an Atlas-formatted error with its `code`) and none of the backend's headers
 //   rewrite_json         forward, then set/delete fields of the JSON body: { set: {...}, delete: [...] }
@@ -71,6 +73,15 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
             });
             entry.status = upstreamRes.statusCode;
             const body = Buffer.concat(chunks);
+            if (rule?.action === "drop_client_after") {
+              // The browser's connection is already gone: the backend finished, and nobody receives its answer.
+              entry.events.push({
+                t: Date.now() - entry.at,
+                event: "discarded",
+                status: upstreamRes.statusCode,
+              });
+              return;
+            }
             const deliver = (override) => {
               const status = override?.status ?? upstreamRes.statusCode;
               const headers = override?.headers ?? { ...upstreamRes.headers };
@@ -170,6 +181,16 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
       });
       req.pipe(upstreamReq);
     };
+    if (rule?.action === "drop_client_after") {
+      const timer = setTimeout(() => {
+        entry.events.push({
+          t: Date.now() - entry.at,
+          event: "dropped_client",
+        });
+        req.socket.destroy();
+      }, rule.ms ?? 0);
+      timer.unref?.();
+    }
     if (rule?.action === "hold_request") {
       const list = held.get(rule.id) ?? [];
       list.push({ deliver: forward, entry });

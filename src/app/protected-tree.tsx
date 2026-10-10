@@ -3,6 +3,7 @@ import { type ReactNode, useMemo } from "react";
 import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
 import { type Session, SessionProvider } from "../session";
 import { AccountSlot } from "./AccountSlot";
+import { appCommands } from "./commands";
 import { ProtectedProviders } from "./providers";
 import { createAppRouter } from "./router";
 import { SessionNotices } from "./SessionNotices";
@@ -57,7 +58,7 @@ export function createProtectedTree(session: Session) {
     return (
       <SessionProvider session={session}>
         <ProtectedProviders>
-          <DataProvider session={session}>
+          <DataProvider session={session} commands={appCommands()}>
             <ShellFromData router={router}>
               <RouterProvider router={router} />
               <SessionNotices />

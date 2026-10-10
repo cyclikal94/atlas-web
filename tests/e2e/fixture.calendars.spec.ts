@@ -1,0 +1,1199 @@
+import type { BrowserContext, Page, Route } from "@playwright/test";
+import { serveIdentityReads } from "./data-local-faults";
+import {
+  ACCOUNT,
+  atlasError,
+  dataPage,
+  seedSettled,
+  startOutbox,
+  stubNetwork,
+  untilTreeSettled,
+} from "./data-sync-helpers";
+import { expect, pressTab, runAxe, test } from "./helpers";
+
+/**
+ * E-CAL1 to E-CAL6 (WEB-13a): the Calendars screen in a real engine, through the PRODUCTION composition (`/__session`: the production
+ * session, its adapters, the protected tree with its `DataProvider` and the application's command registry, Dexie and real IndexedDB),
+ * with the network stubbed by `page.route` (`/me` and `/sessions` served, so nothing hot-loops) and the fixture-only test leader of the
+ * data harness sending what the screen queued (production starts no dispatcher until WEB-09b). FIXTURE evidence: there is no backend
+ * behind any of it (the I-CAL specs run the same journeys against the released one).
+ */
+const API = "/api/experimental/v1";
+const ROUTE = "/__session?route=%2Fsettings%2Fcalendars";
+const SOURCE = "00000000-0000-4000-8000-00000000ca11";
+const SENTINEL = "sentinel-e-cal-4242";
+
+interface Wire {
+  method: string;
+  path: string;
+  key: string | null;
+  body: string;
+}
+type Answer =
+  | { status: number; body: unknown }
+  | { abort: true }
+  | ((wire: Wire) => { status: number; body: unknown } | { abort: true });
+
+/** The calendar endpoints, scripted: every request recorded; each path answers from its own queue, then its default. */
+interface CalendarStub {
+  wire: Wire[];
+  answers: Map<string, Answer[]>;
+  /** What `GET /calendar-sources` lists (each item a projection with the read-time flag). */
+  live: Array<Record<string, unknown>>;
+  calendarLinks: boolean;
+}
+
+async function stubCalendars(context: BrowserContext): Promise<CalendarStub> {
+  const stub: CalendarStub = {
+    wire: [],
+    answers: new Map(),
+    live: [],
+    calendarLinks: true,
+  };
+  let revision = 200;
+  const handle = async (route: Route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname.replace(API, "");
+    const wire: Wire = {
+      method: request.method(),
+      path,
+      key: request.headers()["idempotency-key"] ?? null,
+      body: request.postData() ?? "",
+    };
+    stub.wire.push(wire);
+    const queue = stub.answers.get(path) ?? [];
+    let next = queue.shift();
+    if (typeof next === "function") next = next(wire);
+    if (next === undefined) {
+      if (path === "/notification-capabilities")
+        next = {
+          status: 200,
+          body: {
+            calendar_links: stub.calendarLinks,
+            ntfy: false,
+            web_push: false,
+            native_local: false,
+            apns: false,
+            fcm: false,
+            vapid_public_key: null,
+          },
+        };
+      else if (path === "/calendar-sources")
+        next = { status: 200, body: { items: stub.live, next_after: null } };
+      else {
+        revision += 1;
+        next = { status: 200, body: { revision } };
+      }
+    }
+    if ("abort" in next) return route.abort("connectionreset");
+    return route.fulfill({
+      status: next.status,
+      contentType: "application/json",
+      body:
+        typeof next.body === "string" ? next.body : JSON.stringify(next.body),
+    });
+  };
+  await context.route(`**${API}/calendar-commands`, handle);
+  await context.route(`**${API}/calendar-sources`, handle);
+  await context.route(`**${API}/calendar-sources?*`, handle);
+  await context.route(`**${API}/calendar-sources/*/refresh`, handle);
+  await context.route(`**${API}/calendar-sources/*/import`, handle);
+  await context.route(`**${API}/notification-capabilities`, handle);
+  return stub;
+}
+
+const projection = (over: Record<string, unknown> = {}) => ({
+  id: SOURCE,
+  kind: "calendar_source",
+  parent_id: null,
+  label: "Work rota",
+  value: {
+    health: "healthy",
+    last_success: 1_790_000_000,
+    coverage_start: null,
+    coverage_end: null,
+    timezone: "Europe/London",
+  },
+  version: 2,
+  can_edit: true,
+  archived: false,
+  ...over,
+});
+
+/** A booted Calendars page (the production composition), with the network stubbed and identity reads served. */
+async function calendarsPage(
+  context: BrowserContext,
+  options: { database?: boolean; cache?: Array<Record<string, unknown>> } = {},
+) {
+  const net = await stubNetwork(context);
+  await serveIdentityReads(context);
+  const cal = await stubCalendars(context);
+  await seedSettled(context);
+  if (options.database !== false) {
+    // The account's database exists BEFORE the tree looks for it (the tree opens only a database that exists, and nothing tells it
+    // when the fixture leader creates one later): a data-harness page creates it, in the delta phase, and is closed before boot.
+    const setup = await dataPage(context);
+    await setup.evaluate(async (a) => {
+      const data = window.__atlasData;
+      if (!data) throw new Error("no data harness");
+      data.setIdentity(a);
+      const opened = await data.open(a, { create: true });
+      if (opened !== "created" && opened !== "opened")
+        throw new Error(`open: ${opened}`);
+      await data.seedDelta(a, "cursor-0");
+      data.close(a);
+    }, ACCOUNT);
+    await setup.close();
+  }
+  const page = await context.newPage();
+  await page.goto(ROUTE);
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await page.waitForFunction(() => window.__atlasData !== undefined);
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Calendar sources" }),
+  ).toBeVisible();
+  if (options.database === false)
+    await untilTreeSettled(page, { connections: 0 });
+  else {
+    await untilTreeSettled(page, { connections: 2 });
+    // The fixture leader binds the same database (it sends what the screen queues once `beginOutbox` is called).
+    await startOutbox(page, ACCOUNT, { start: false });
+    await untilTreeSettled(page, { connections: 2 });
+    if (options.cache)
+      await page.evaluate(
+        ({ a, rows }) =>
+          window.__atlasData?.put(
+            a,
+            "cache",
+            rows.map((row) => ({ ...row, kind_date: null })),
+          ),
+        { a: ACCOUNT, rows: options.cache },
+      );
+  }
+  return { page, net, cal };
+}
+
+/**
+ * The rows of one store of the account database, read through the data harness. A remount of the protected tree (the session's
+ * re-check of a `403`, a reload) closes the page's shared connection registry and so the harness's own binding (a fixture trait,
+ * WEB-09a): the harness then opens its own handle on the database, which exists, and reads through it.
+ */
+const rows = (page: Page, store: string) =>
+  page.evaluate(
+    async ({ a, s }) => {
+      const data = window.__atlasData;
+      if (!data) throw new Error("no data harness");
+      try {
+        return await data.rows(a, s as never);
+      } catch (error) {
+        if (!String(error).includes("no open store")) throw error;
+        data.setIdentity(a);
+        const opened = await data.open(a, { create: false });
+        if (opened !== "opened") throw new Error(`open: ${opened}`);
+        return await data.rows(a, s as never);
+      }
+    },
+    { a: ACCOUNT, s: store },
+  ) as Promise<Array<Record<string, unknown>>>;
+
+const calendarCommands = (cal: CalendarStub) =>
+  cal.wire.filter((w) => w.path === "/calendar-commands");
+
+test.describe("E-CAL1: Add source, queued offline, sent once by key, then synced", () => {
+  test("queued offline with no secret; a lost response is resent with the SAME key and body; a delta page moves it from pending to the list", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const { page, net, cal } = await calendarsPage(context);
+    await expect(page.getByText("No calendars yet.")).toBeVisible();
+    await context.setOffline(true);
+    await page.getByRole("button", { name: "Add source" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add source" });
+    await dialog.getByLabel("Label").fill("Weekend chores");
+    await dialog.getByLabel("Timezone").fill("Europe/London");
+    await dialog.getByRole("button", { name: "Create source" }).click();
+    await expect(dialog).toBeHidden();
+    const pending = page.locator("[data-pending-source]");
+    await expect(pending).toContainText("Weekend chores");
+    await expect(pending).toContainText(
+      "Pending — will create when back online",
+    );
+    const [draft] = (await rows(page, "drafts")) as Array<{
+      local_id: string;
+      endpoint: string;
+      kind: string;
+      target_resource_ids: string[];
+    }>;
+    expect(draft).toMatchObject({
+      endpoint: "/calendar-commands",
+      kind: "create_source",
+    });
+    const id = draft?.target_resource_ids[0] as string;
+    expect(calendarCommands(cal)).toEqual([]);
+
+    // Back online, the leader sends it; the first answer is lost after the server applied it.
+    cal.answers.set("/calendar-commands", [{ abort: true }]);
+    await context.setOffline(false);
+    await page.evaluate(() => window.__atlasData?.beginOutbox());
+    await expect
+      .poll(() => calendarCommands(cal).length, { timeout: 30_000 })
+      .toBeGreaterThanOrEqual(2);
+    const [first, second] = calendarCommands(cal);
+    expect(first?.key).toBe(draft?.local_id);
+    expect(second?.key).toBe(first?.key);
+    expect(second?.body).toBe(first?.body);
+    expect(JSON.parse(first?.body ?? "")).toEqual({
+      command: {
+        kind: "create_source",
+        id,
+        label: "Weekend chores",
+        timezone: "Europe/London",
+      },
+    });
+    await expect
+      .poll(async () =>
+        ((await rows(page, "drafts")) as Array<{ status: string }>).map(
+          (d) => d.status,
+        ),
+      )
+      .toEqual(["acknowledged"]);
+    await expect(pending).toContainText("Saving — will confirm on next sync");
+
+    // A delta page publishes the source: it leaves "Waiting to be created" and appears once, from the cache.
+    net.script.push(() => ({
+      status: 200,
+      body: JSON.stringify({
+        phase: "delta",
+        batches: [
+          {
+            revision: 300,
+            changes: [
+              {
+                kind: "upsert",
+                resource: projection({
+                  id,
+                  label: "Weekend chores",
+                  version: 1,
+                  value: {
+                    health: "pending",
+                    last_success: null,
+                    coverage_start: null,
+                    coverage_end: null,
+                    timezone: "Europe/London",
+                  },
+                }),
+              },
+            ],
+          },
+        ],
+        next_cursor: "cursor-after-create",
+        has_more: false,
+      }),
+    }));
+    await page.evaluate((a) => window.__atlasData?.startSync(a), ACCOUNT);
+    await expect(page.locator(`[data-source-row="${id}"]`)).toContainText(
+      "Not refreshed yet · Europe/London",
+      { timeout: 30_000 },
+    );
+    await expect(page.locator("[data-pending-source]")).toHaveCount(0);
+    await expect(page.getByText("Weekend chores")).toHaveCount(1);
+    // Nothing secret was ever stored, and nothing but the create went out.
+    expect(
+      cal.wire.filter((w) => w.method === "POST").map((w) => w.path),
+    ).toEqual(["/calendar-commands", "/calendar-commands"]);
+  });
+});
+
+const stores = [
+  "cache",
+  "cache_staging",
+  "pending_effects",
+  "drafts",
+  "draft_commands",
+  "resource_versions",
+  "materialise_sequences",
+  "reminder_firings",
+  "form_recovery",
+  "sync_state",
+];
+
+/** Everything this page could keep or show, as text: every store of the account database, `atlas-auth`, both web storages, Cache Storage keys, the URL and the DOM. */
+async function everywhere(page: Page): Promise<string> {
+  const data: Record<string, unknown> = {};
+  for (const store of stores) data[store] = await rows(page, store);
+  const page_ = await page.evaluate(async () => {
+    const caches_ =
+      typeof caches === "undefined"
+        ? []
+        : await Promise.all(
+            (await caches.keys()).map(async (name) => {
+              const cache = await caches.open(name);
+              return [name, (await cache.keys()).map((r) => r.url)];
+            }),
+          );
+    return {
+      auth: await window.__atlasFixture?.session?.readRecords(),
+      local: { ...localStorage },
+      session: { ...sessionStorage },
+      caches: caches_,
+      url: location.href,
+      dom: document.documentElement.outerHTML,
+    };
+  });
+  return JSON.stringify({ data, page: page_ });
+}
+
+test.describe("E-CAL1: a queued create the cache already holds", () => {
+  test("a create still queued here whose source a delta page has ALREADY published (its answer was lost) is listed once, from the cache, and is not shown as pending", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context);
+    await expect(page.getByText("No calendars yet.")).toBeVisible();
+    await context.setOffline(true);
+    await page.getByRole("button", { name: "Add source" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add source" });
+    await dialog.getByLabel("Label").fill("Already published");
+    await dialog.getByLabel("Timezone").fill("UTC");
+    await dialog.getByRole("button", { name: "Create source" }).click();
+    await expect(dialog).toBeHidden();
+    const pending = page.locator("[data-pending-source]");
+    await expect(pending).toContainText("Already published");
+    const [draft] = (await rows(page, "drafts")) as Array<{
+      target_resource_ids: string[];
+    }>;
+    const id = draft?.target_resource_ids[0] as string;
+    // The server committed this create on an earlier attempt whose answer was lost, and a delta page brought it in: the draft is still
+    // queued here (nothing was sent from this page), and the cache holds its source.
+    await page.evaluate(
+      ({ a, row }) =>
+        window.__atlasData?.put(a, "cache", [{ ...row, kind_date: null }]),
+      {
+        a: ACCOUNT,
+        row: projection({
+          id,
+          label: "Already published",
+          version: 1,
+          value: {
+            health: "pending",
+            last_success: null,
+            coverage_start: null,
+            coverage_end: null,
+            timezone: "UTC",
+          },
+        }),
+      },
+    );
+    await expect(page.locator(`[data-source-row="${id}"]`)).toBeVisible();
+    await expect(pending).toHaveCount(0);
+    await expect(page.getByText("Already published")).toHaveCount(1);
+    expect(
+      ((await rows(page, "drafts")) as Array<{ status: string }>).map(
+        (d) => d.status,
+      ),
+    ).toEqual(["queued"]);
+    expect(calendarCommands(cal)).toEqual([]);
+    await context.setOffline(false);
+  });
+});
+
+test.describe("E-CAL2: queued settings, ordered behind the create, and a conflict reviewed", () => {
+  test("settings changes carry no connection or disconnect, the pending source's change waits for its create, and Review REPLACES a conflicted change", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+    await context.setOffline(true);
+    // A pending source, and a settings change against it.
+    await page.getByRole("button", { name: "Add source" }).click();
+    let dialog = page.getByRole("dialog", { name: "Add source" });
+    await dialog.getByLabel("Label").fill("Gym");
+    await dialog.getByLabel("Timezone").fill("UTC");
+    await dialog.getByRole("button", { name: "Create source" }).click();
+    await expect(dialog).toBeHidden();
+    await page.getByRole("button", { name: "Manage Gym" }).click();
+    dialog = page.getByRole("dialog", { name: "Manage — Gym" });
+    await dialog.getByLabel("Timezone").fill("Asia/Tokyo");
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog).toBeHidden();
+    // A settings change against the cached source: turned off.
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByLabel("Enabled").uncheck();
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog).toBeHidden();
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toContainText("Queued — will apply once synced");
+    await expect(row).toContainText("Turned off");
+    expect(calendarCommands(cal)).toEqual([]);
+
+    cal.answers.set("/calendar-commands", [
+      { status: 200, body: { revision: 1 } },
+      { status: 200, body: { revision: 2 } },
+      { status: 409, body: JSON.parse(atlasError("conflict")) },
+    ]);
+    await context.setOffline(false);
+    await page.evaluate(() => window.__atlasData?.beginOutbox());
+    await expect
+      .poll(() => calendarCommands(cal).length, { timeout: 30_000 })
+      .toBe(3);
+    const bodies = calendarCommands(cal).map(
+      (w) => JSON.parse(w.body).command as Record<string, unknown>,
+    );
+    expect(bodies.map((b) => b.kind)).toEqual([
+      "create_source",
+      "configure_source",
+      "configure_source",
+    ]);
+    expect(bodies[1]).toMatchObject({
+      id: bodies[0]?.id,
+      expected_version: 1,
+      timezone: "Asia/Tokyo",
+      enabled: true,
+    });
+    expect(bodies[2]).toEqual({
+      kind: "configure_source",
+      id: SOURCE,
+      expected_version: 2,
+      timezone: "Europe/London",
+      enabled: false,
+    });
+    for (const body of bodies) {
+      expect(body).not.toHaveProperty("connection");
+      expect(body).not.toHaveProperty("disconnect");
+      expect(body).not.toHaveProperty("initial_policy");
+    }
+    // The conflict needs a decision; Review opens Manage, and Save there supersedes the conflicted draft.
+    await expect(row).toContainText("Needs a decision", { timeout: 15_000 });
+    const conflicted = calendarCommands(cal)[2]?.key;
+    await row.getByRole("button", { name: "Review" }).click();
+    dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByLabel("Timezone").fill("Europe/Paris");
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog).toBeHidden();
+    // The fixture leader is woken by saves of its own facade only; the screen's save posts a hint (WEB-09b's leader wakes on it).
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await expect
+      .poll(() => calendarCommands(cal).length, { timeout: 30_000 })
+      .toBe(4);
+    const replacement = calendarCommands(cal)[3];
+    expect(replacement?.key).not.toBe(conflicted);
+    expect(JSON.parse(replacement?.body ?? "").command).toMatchObject({
+      kind: "configure_source",
+      id: SOURCE,
+      timezone: "Europe/Paris",
+    });
+    const drafts = (await rows(page, "drafts")) as Array<{
+      local_id: string;
+      status: string;
+    }>;
+    expect(drafts.some((d) => d.local_id === conflicted)).toBe(false);
+  });
+});
+
+test.describe("E-CAL3: the online-only connection forms keep secrets out of everything", () => {
+  test("disabled offline; an uncertain Link is retried with the SAME pair and settled by Check; Replace sends the connection; no secret is stored, shown or kept, before or after a reload", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const console_: string[] = [];
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    page.on("console", (message) => console_.push(message.text()));
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+    await context.setOffline(true);
+    const link = page.getByRole("button", { name: "Link a calendar…" });
+    await expect(link).toBeDisabled();
+    await expect(page.getByText("Needs a connection").first()).toBeVisible();
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    let dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await expect(
+      dialog.getByRole("button", { name: "Replace…" }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: "Remove…" }),
+    ).toBeDisabled();
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await context.setOffline(false);
+    await expect(link).toBeEnabled();
+
+    // Link: lost, then refused for the address AFTER the uncertain attempt (still uncertain), then Check finds it.
+    cal.answers.set("/calendar-commands", [
+      { abort: true },
+      { status: 422, body: JSON.parse(atlasError("outbound_denied")) },
+    ]);
+    await link.click();
+    dialog = page.getByRole("dialog", { name: "Link a calendar…" });
+    await dialog.getByLabel("Label").fill("Rota feed");
+    await dialog.getByLabel("Timezone").fill("UTC");
+    await dialog
+      .getByLabel("URL (required)")
+      .fill(`https://feed.example/${SENTINEL}.ics`);
+    await dialog
+      .getByLabel("Bearer token (optional)")
+      .fill(`token-${SENTINEL}`);
+    await dialog.getByRole("button", { name: "Connect" }).click();
+    await expect(
+      dialog.getByText("Couldn't save — check your connection and try again"),
+    ).toBeVisible();
+    await dialog.getByRole("button", { name: "Retry" }).click();
+    await expect.poll(() => calendarCommands(cal).length).toBe(2);
+    const [first, second] = calendarCommands(cal);
+    expect(second?.key).toBe(first?.key);
+    expect(second?.body).toBe(first?.body);
+    const linked = JSON.parse(first?.body ?? "").command;
+    expect(linked).toMatchObject({
+      kind: "create_source",
+      connection: {
+        url: `https://feed.example/${SENTINEL}.ics`,
+        bearer: `token-${SENTINEL}`,
+      },
+    });
+    await expect(
+      dialog.getByText(
+        "This server isn't allowed to fetch calendars from that address.",
+      ),
+    ).toHaveCount(0);
+    cal.live = [
+      projection({
+        id: linked.id,
+        label: "Rota feed",
+        value: {
+          health: "pending",
+          timezone: "UTC",
+          refresh_in_progress: false,
+        },
+      }),
+    ];
+    await dialog.getByRole("button", { name: "Check" }).click();
+    await expect(dialog).toBeHidden();
+    // The secret went on the wire for the direct command, and nowhere else.
+    expect(await everywhere(page)).not.toContain(SENTINEL);
+
+    // Replace on the cached source: an empty form, the connection sent with the current settings.
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByRole("button", { name: "Replace…" }).click();
+    await expect(dialog.getByLabel("URL (required)")).toHaveValue("");
+    await dialog
+      .getByLabel("URL (required)")
+      .fill(`https://feed.example/new-${SENTINEL}.ics`);
+    await dialog.getByRole("button", { name: "Replace connection" }).click();
+    await expect.poll(() => calendarCommands(cal).length).toBe(3);
+    expect(JSON.parse(calendarCommands(cal)[2]?.body ?? "").command).toEqual({
+      kind: "configure_source",
+      id: SOURCE,
+      expected_version: 2,
+      timezone: "Europe/London",
+      enabled: true,
+      connection: {
+        url: `https://feed.example/new-${SENTINEL}.ics`,
+        bearer: null,
+      },
+    });
+    // A refused attempt shows the field's own words and keeps nothing either.
+    await dialog.getByRole("button", { name: "Replace…" }).click();
+    cal.answers.set("/calendar-commands", [
+      { status: 422, body: JSON.parse(atlasError("invalid_endpoint")) },
+    ]);
+    await dialog
+      .getByLabel("URL (required)")
+      .fill(`https://feed.example/bad-${SENTINEL}.ics`);
+    await dialog.getByRole("button", { name: "Replace connection" }).click();
+    await expect(
+      dialog.getByText("Atlas can't fetch a calendar from that address."),
+    ).toBeVisible();
+    expect(await everywhere(page)).not.toContain(SENTINEL);
+    // A reload drops the form with everything typed in it.
+    await page.goto(ROUTE);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+    expect(await everywhere(page)).not.toContain(SENTINEL);
+    expect(console_.join("\n")).not.toContain(SENTINEL);
+  });
+});
+
+/** Presses Refresh on the cached source and returns the refresh requests seen so far. */
+const refreshes = (cal: CalendarStub) =>
+  cal.wire.filter((w) => w.path === `/calendar-sources/${SOURCE}/refresh`);
+
+test.describe("E-CAL4: the manual refresh (online-only, never queued; B8 causes)", () => {
+  test("409 refresh_in_progress is retried with the SAME key after 5 s and ends as refreshed; a new press mints a new key", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      { status: 409, body: JSON.parse(atlasError("refresh_in_progress")) },
+    ]);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect(row).toContainText("Refreshing…");
+    await expect(row).toContainText(
+      "Refreshed. New events appear after the next sync.",
+      { timeout: 15_000 },
+    );
+    const [a, b] = refreshes(cal);
+    expect(b?.key).toBe(a?.key);
+    expect(a?.body).toBe("");
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect.poll(() => refreshes(cal).length).toBe(3);
+    expect(refreshes(cal)[2]?.key).not.toBe(a?.key);
+    // A refresh is never stored.
+    expect(await rows(page, "drafts")).toEqual([]);
+  });
+
+  test("each cause's words and action, with no automatic retry: 1, 3, 6a, 6b and an unreadable feed", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    const cases: Array<[number, string, string, string | null]> = [
+      [
+        422,
+        "connection_unavailable",
+        "This source needs its connection details re-entered.",
+        "Update connection",
+      ],
+      [
+        503,
+        "integration_unconfigured",
+        "This server can't process calendar connections right now — contact your administrator.",
+        null,
+      ],
+      [
+        422,
+        "invalid_value",
+        "This source is turned off — turn it back on to resume refreshing.",
+        "Turn on",
+      ],
+      [
+        404,
+        "not_found",
+        "This calendar source is no longer available to you.",
+        null,
+      ],
+      [
+        422,
+        "invalid_ics",
+        "This calendar's feed couldn't be read: it isn't a valid calendar file. Your existing events are unchanged.",
+        null,
+      ],
+    ];
+    for (const [status, code, words, action] of cases) {
+      const before = refreshes(cal).length;
+      cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+        { status, body: JSON.parse(atlasError(code)) },
+      ]);
+      await row.getByRole("button", { name: "Refresh Work rota" }).click();
+      await expect(row).toContainText(words);
+      if (action)
+        await expect(row.getByRole("button", { name: action })).toBeVisible();
+      // No automatic retry: one request, and still one a moment later.
+      await page.waitForTimeout(1_500);
+      expect(refreshes(cal).length).toBe(before + 1);
+    }
+  });
+
+  test("cause 4 re-reads refresh_in_progress and does not retry; cause 5 with nothing running retries ONCE with the same key", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    cal.live = [
+      projection({
+        value: {
+          health: "healthy",
+          timezone: "Europe/London",
+          refresh_in_progress: false,
+        },
+      }),
+    ];
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      {
+        status: 409,
+        body: {
+          ...JSON.parse(atlasError("stale_refresh")),
+          reason: "generation_changed",
+        },
+      },
+    ]);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect(row).toContainText(
+      "A newer change replaced this refresh — refresh again to get the latest.",
+    );
+    expect(refreshes(cal)).toHaveLength(1);
+    expect(cal.wire.filter((w) => w.path === "/calendar-sources")).toHaveLength(
+      1,
+    );
+    // Health was healthy throughout: it is not read as success.
+    await expect(row).not.toContainText("Refreshed.");
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      {
+        status: 409,
+        body: {
+          ...JSON.parse(atlasError("stale_refresh")),
+          reason: "lease_expired",
+        },
+      },
+      { status: 200, body: { revision: 9 } },
+    ]);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect(row).toContainText(
+      "Refreshed. New events appear after the next sync.",
+    );
+    const [, second, third] = refreshes(cal);
+    expect(third?.key).toBe(second?.key);
+    expect(refreshes(cal)).toHaveLength(3);
+  });
+
+  test("a 502 is not success whatever health says; offline mid-retry stops it and NOTHING is sent on reconnect; a reload mid-uncertainty sends nothing", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      { status: 502, body: JSON.parse(atlasError("fetch_failed")) },
+    ]);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect.poll(() => refreshes(cal).length).toBe(1);
+    await expect(row).not.toContainText("Refreshed.");
+    await context.setOffline(true);
+    await expect(row).toContainText("Needs a connection");
+    await page.waitForTimeout(2_000);
+    await context.setOffline(false);
+    // The retry would have been at 10 s: wait past it.
+    await page.waitForTimeout(12_000);
+    expect(refreshes(cal)).toHaveLength(1);
+    // An uncertain refresh at reload is not resent (D-13a-13).
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      { status: 409, body: JSON.parse(atlasError("refresh_in_progress")) },
+    ]);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect.poll(() => refreshes(cal).length).toBe(2);
+    await page.goto(ROUTE);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+    await page.waitForTimeout(7_000);
+    expect(refreshes(cal)).toHaveLength(2);
+  });
+
+  test("CH3 / 7(f): 503 temporarily_unavailable is generic: retried with the same key after 10 s", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      { status: 503, body: JSON.parse(atlasError("temporarily_unavailable")) },
+    ]);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect(row).toContainText(
+      "Refreshed. New events appear after the next sync.",
+      { timeout: 20_000 },
+    );
+    const [a, b] = refreshes(cal);
+    expect(b?.key).toBe(a?.key);
+  });
+});
+
+/**
+ * The widths of the plan (320, 390, 768, tablet portrait and landscape, 1280). The two phone widths are given the height that shows the
+ * whole screen: axe's `target-size` rule measures the UNOBSCURED part of a target at the current scroll position, and a row that ends
+ * behind the fixed mobile tab bar at scroll 0 would be reported although scrolling reveals it. Horizontal overflow, 44 px targets and
+ * axe are checked at every width as before.
+ */
+const WIDTHS: Array<{ width: number; height: number }> = [
+  { width: 320, height: 1200 },
+  { width: 390, height: 1200 },
+  { width: 768, height: 1024 },
+  { width: 834, height: 1112 },
+  { width: 1112, height: 834 },
+  { width: 1280, height: 900 },
+];
+
+const overflow = (page: Page) =>
+  page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+
+/** Every control a person can press in `main` or an open dialog is at least 44 x 44 (the README's touch-target rule). */
+const smallTargets = (page: Page) =>
+  page.evaluate(() => {
+    const out: string[] = [];
+    const scopes = [
+      document.querySelector("main"),
+      ...document.querySelectorAll('[role="dialog"]'),
+    ].filter(Boolean) as Element[];
+    for (const scope of scopes)
+      for (const element of scope.querySelectorAll<HTMLElement>(
+        'button, a[href], input:not([type="checkbox"]), select, textarea, [role="button"]',
+      )) {
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (rect.width < 43.5 || rect.height < 43.5)
+          out.push(
+            `${element.tagName.toLowerCase()} "${(element.getAttribute("aria-label") ?? element.textContent ?? "").trim().slice(0, 40)}" ${Math.round(rect.width)}x${Math.round(rect.height)}`,
+          );
+      }
+    return out;
+  });
+
+for (const scheme of ["dark", "light"] as const)
+  test.describe(`E-CAL5: layout, axe and keyboard (${scheme})`, () => {
+    test.use({ colorScheme: scheme });
+    test(`every width: axe with contrast, 44 px targets, no horizontal scroll; dialogs are sheets below 768 px`, async ({
+      context,
+    }) => {
+      test.setTimeout(120_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [
+          projection(),
+          projection({
+            id: "00000000-0000-4000-8000-00000000ca12",
+            label: "Turned-off feed",
+            archived: true,
+          }),
+        ],
+      });
+      cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+        { status: 422, body: JSON.parse(atlasError("connection_unavailable")) },
+      ]);
+      const row = page.locator(`[data-source-row="${SOURCE}"]`);
+      await row.getByRole("button", { name: "Refresh Work rota" }).click();
+      await expect(row).toContainText(
+        "This source needs its connection details re-entered.",
+      );
+      for (const size of WIDTHS) {
+        await page.setViewportSize(size);
+        await expect(row).toBeVisible();
+        const violations = await runAxe(page);
+        expect(
+          violations.map((v) => [v.id, v.nodes.map((n) => n.target)]),
+          `${size.width}`,
+        ).toEqual([]);
+        expect(await smallTargets(page), `${size.width}`).toEqual([]);
+        expect(await overflow(page), `${size.width}`).toBeLessThanOrEqual(0);
+        for (const open of ["Manage Work rota", "Link a calendar…"]) {
+          await page.getByRole("button", { name: open }).click();
+          const dialog = page.getByRole("dialog");
+          await expect(dialog).toBeVisible();
+          if (open === "Manage Work rota")
+            await dialog.getByRole("button", { name: "Replace…" }).click();
+          const box = await dialog.boundingBox();
+          if (size.width < 768)
+            expect(box?.width, `${size.width} sheet`).toBeGreaterThanOrEqual(
+              size.width - 1,
+            );
+          else
+            expect(box?.width ?? 0, `${size.width} dialog`).toBeLessThan(
+              size.width,
+            );
+          const inDialog = await runAxe(page);
+          expect(
+            inDialog.map((v) => [v.id, v.nodes.map((n) => n.target)]),
+            `${size.width} ${open}`,
+          ).toEqual([]);
+          expect(await smallTargets(page), `${size.width} ${open}`).toEqual([]);
+          await page.keyboard.press("Escape");
+          await expect(dialog).toBeHidden();
+        }
+      }
+    });
+  });
+
+test.describe("E-CAL5: the keyboard journey", () => {
+  test("Add source by keyboard alone: focus moves into the dialog, Escape returns it to the opener; disabled controls say why", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page } = await calendarsPage(context, { cache: [projection()] });
+    const add = page.getByRole("button", { name: "Add source" });
+    await add.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Add source" });
+    await expect(dialog).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => document.activeElement?.closest('[role="dialog"]') !== null,
+        ),
+      )
+      .toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(add).toBeFocused();
+    await add.focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    // Tab order: the dialog's own controls, then its footer.
+    const names: string[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      await pressTab(page);
+      names.push(
+        await page.evaluate(
+          () =>
+            document.activeElement?.getAttribute("aria-label") ??
+            document.activeElement?.textContent?.trim() ??
+            document.activeElement?.getAttribute("name") ??
+            "",
+        ),
+      );
+    }
+    expect(names).toEqual(expect.arrayContaining(["Create source", "Cancel"]));
+    await page.getByLabel("Label").fill("Keyboard calendar");
+    await page.getByLabel("Label").press("Enter");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("[data-pending-source]")).toContainText(
+      "Keyboard calendar",
+    );
+    await context.setOffline(true);
+    const refresh = page.getByRole("button", { name: "Refresh Work rota" });
+    await expect(refresh).toBeDisabled();
+    await expect(refresh).toHaveAccessibleDescription("Needs a connection");
+    await context.setOffline(false);
+  });
+});
+
+test.describe("E-CAL4: a 403 (the session reclassifies it)", () => {
+  test("cause 6b by 403: the outcome is still shown after the session's re-check, and nothing is resent", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      { status: 403, body: JSON.parse(atlasError("forbidden")) },
+    ]);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toContainText(
+      "This calendar source is no longer available to you.",
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(3_000);
+    expect(refreshes(cal)).toHaveLength(1);
+  });
+
+  test("Remove… refused 403 and Link refused 403: the words outlive the session's re-check (the typed values do not), and nothing is resent", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.answers.set("/calendar-commands", [
+      { status: 403, body: JSON.parse(atlasError("forbidden")) },
+      { status: 403, body: JSON.parse(atlasError("forbidden")) },
+    ]);
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    let dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await dialog.getByRole("button", { name: "Remove connection" }).click();
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row.locator("[data-row-notice]")).toContainText(
+      "You no longer have access to make this change.",
+      { timeout: 15_000 },
+    );
+    await page.getByRole("button", { name: "Link a calendar…" }).click();
+    dialog = page.getByRole("dialog", { name: "Link a calendar…" });
+    await dialog.getByLabel("Label").fill("Not mine");
+    await dialog.getByLabel("Timezone").fill("UTC");
+    await dialog
+      .getByLabel("URL (required)")
+      .fill(`https://feed.example/${SENTINEL}.ics`);
+    await dialog.getByRole("button", { name: "Connect" }).click();
+    await expect(page.locator('[data-row-notice="link"]')).toContainText(
+      "You no longer have access to make this change",
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(2_000);
+    expect(calendarCommands(cal)).toHaveLength(2);
+    expect(await everywhere(page)).not.toContain(SENTINEL);
+    await row.getByRole("button", { name: "Dismiss" }).click();
+    await expect(row.locator("[data-row-notice]")).toHaveCount(0);
+  });
+});
+
+test.describe("E-CAL6: lifetime", () => {
+  test("leaving the screen mid-retry stops the refresh: nothing more is sent, and coming back starts nothing", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+      { status: 409, body: JSON.parse(atlasError("refresh_in_progress")) },
+    ]);
+    await page.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect.poll(() => refreshes(cal).length).toBe(1);
+    // In-app navigation unmounts the screen (and its refresh controller) while the 5 s retry waits.
+    await page
+      .getByRole("main")
+      .getByRole("link", { name: "Settings" })
+      .click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Settings" }),
+    ).toBeVisible();
+    await page.waitForTimeout(7_000);
+    expect(refreshes(cal)).toHaveLength(1);
+    await page.getByRole("link", { name: "Calendars" }).click();
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+    await expect(
+      page.locator(`[data-source-row="${SOURCE}"]`),
+    ).not.toContainText("Refreshing…");
+    await page.waitForTimeout(2_000);
+    expect(refreshes(cal)).toHaveLength(1);
+  });
+});
+
+/**
+ * Revision 1 (R1): once an attempt of Replace… or Remove… was uncertain, Retry resends THAT pair whatever the cache learnt meanwhile
+ * (the backend looks the key up before it checks the version, so an attempt that landed returns its receipt). The dialog is shown to
+ * have taken the newer version (its untouched timezone follows it) before Retry is pressed.
+ */
+test.describe("E-CAL7: Retry repeats the uncertain connection change", () => {
+  const advanced = () =>
+    projection({
+      version: 3,
+      value: {
+        health: "pending",
+        last_success: 1_790_000_000,
+        coverage_start: null,
+        coverage_end: null,
+        timezone: "UTC",
+      },
+    });
+
+  for (const change of ["Remove", "Replace"] as const)
+    test(`${change}: the answer is lost and the cache moves on; Retry sends the SAME key and body, and its receipt ends the change`, async ({
+      context,
+    }, info) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      await page.getByRole("button", { name: "Manage Work rota" }).click();
+      const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+      await dialog.getByRole("button", { name: `${change}…` }).click();
+      cal.answers.set("/calendar-commands", [
+        { abort: true },
+        { status: 200, body: { revision: 301 } },
+      ]);
+      if (change === "Replace") {
+        await dialog
+          .getByLabel("URL (required)")
+          .fill(`https://feed.example/${SENTINEL}.ics`);
+        await dialog
+          .getByRole("button", { name: "Replace connection", exact: true })
+          .click();
+      } else
+        await dialog
+          .getByRole("button", { name: "Remove connection", exact: true })
+          .click();
+      const retry = dialog.getByRole("button", { name: "Retry", exact: true });
+      await expect(retry).toBeVisible();
+      await page.evaluate(
+        async ({ a, row }) => {
+          await window.__atlasData?.put(a, "cache", [row]);
+        },
+        { a: ACCOUNT, row: { ...advanced(), kind_date: null } },
+      );
+      await expect(dialog.getByLabel("Timezone")).toHaveValue("UTC");
+      await retry.click();
+      await expect.poll(() => calendarCommands(cal).length).toBe(2);
+      const [first, second] = calendarCommands(cal);
+      await info.attach("request-pairs", {
+        body: JSON.stringify(calendarCommands(cal), null, 2),
+        contentType: "application/json",
+      });
+      expect(second?.key).toBe(first?.key);
+      expect(second?.body).toBe(first?.body);
+      expect(JSON.parse(first?.body ?? "{}").command).toMatchObject({
+        expected_version: 2,
+        timezone: "Europe/London",
+      });
+      await expect(retry).toHaveCount(0);
+      // The cache already holds what followed the change (version 3 passes the 2 it was built on): Save is not held back.
+      await expect(dialog.getByRole("button", { name: "Save" })).toBeEnabled();
+    });
+});
+
+/**
+ * Revision 1 (R2): an open Manage is cache content. When the cache is invalidated (a recovery), the list goes behind the gate and
+ * Manage closes with it; nothing it showed stays on screen. With the cache valid again the list returns and Manage stays closed.
+ */
+test.describe("E-CAL8: an open Manage follows the cache gate", () => {
+  test("the cache is invalidated: Manage (with Remove… open) closes and its source is nowhere on screen; valid again, the list returns", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await expect(
+      dialog.getByRole("button", { name: "Remove connection", exact: true }),
+    ).toBeVisible();
+    const valid = (await rows(page, "sync_state"))[0] as Record<
+      string,
+      unknown
+    >;
+    await page.evaluate(
+      async ({ a, row }) => {
+        await window.__atlasData?.put(a, "sync_state", [row]);
+      },
+      {
+        a: ACCOUNT,
+        row: {
+          ...valid,
+          cache_status: "invalid",
+          recovery_generation: Number(valid.recovery_generation ?? 0) + 1,
+        },
+      },
+    );
+    await expect(page.locator('[data-cache-gate="refreshing"]')).toHaveCount(1);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator("[data-source-row]")).toHaveCount(0);
+    await expect(page.getByText("Work rota")).toHaveCount(0);
+    await expect(page.getByText("Europe/London")).toHaveCount(0);
+    expect(calendarCommands(cal)).toEqual([]);
+    await page.evaluate(
+      async ({ a, row }) => {
+        await window.__atlasData?.put(a, "sync_state", [row]);
+      },
+      { a: ACCOUNT, row: valid },
+    );
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+});

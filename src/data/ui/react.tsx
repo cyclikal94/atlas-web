@@ -23,13 +23,20 @@ import {
   type Notice,
   type StatusInputs,
 } from "../model/status";
-import type { DraftRow, ResourceKind } from "../model/types";
+import type { DraftRow, ResourceId, ResourceKind } from "../model/types";
+import type { CommandRegistry } from "../outbox/registries";
 import {
   type QueuePage,
   type ResourcePage,
   readMerged,
   readResourceList,
 } from "../plans/outbox";
+import {
+  type Outstanding,
+  type PendingCreatesPage,
+  readOutstanding,
+  readPendingCreates,
+} from "../plans/pending-reads";
 import type { Loadable, Watchable } from "../store/port";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
 import { currentDeviceThrough, readMeThrough } from "./identity-reads";
@@ -67,18 +74,25 @@ export function DataProvider({
   session,
   children,
   loadBrowser = () => import("./browser-env"),
+  commands,
 }: {
   session: Session;
   children: ReactNode;
   /** The lazy load of the browser composition. Only a test names its own, to decide WHEN the import arrives; production leaves the default. */
   loadBrowser?: () => Promise<BrowserComposition>;
+  /**
+   * What the feature slices registered about their commands (descriptions, projected creates). The application passes ONE registry,
+   * built and filled once per module (`src/app/commands.ts`), so a remount or a Strict Mode replay never registers twice. Absent: an
+   * empty registry, as before.
+   */
+  commands?: CommandRegistry;
 }) {
   // CONSTRUCTION IS INERT (R29): a state initialiser runs in render, and development Strict Mode runs it twice and keeps one, so
   // whatever it builds must hold nothing (no subscription, no timer, no channel) and may be dropped without a cleanup. The controller
   // starts in the effect and stops in its cleanup, which is the PAIR React replays (mount, cleanup, mount) and runs at unmount, so a
   // replay leaves the same live controller, never a disposed one, and nothing outlives the tree.
   const [env] = useState<DataEnv>(() =>
-    createProductionEnv(session, loadBrowser),
+    createProductionEnv(session, loadBrowser, commands),
   );
   useEffect(() => {
     env.start();
@@ -95,6 +109,7 @@ export function DataProvider({
 function createProductionEnv(
   session: Session,
   loadBrowser: () => Promise<BrowserComposition>,
+  commands?: CommandRegistry,
 ): DataEnv {
   let browser: { dispose(): void } | null = null;
   /**
@@ -145,6 +160,7 @@ function createProductionEnv(
       },
       channel,
       markers: createWriteFailureMarkers(),
+      ...(commands === undefined ? {} : { commands }),
     },
     { start: false },
   );
@@ -397,5 +413,45 @@ export function useResourceList(options: {
         : null;
     },
     [options.kind, options.parentId, options.after, options.limit],
+  );
+}
+
+/**
+ * This device's saves that CREATE a resource of one command kind which the cache does not hold yet (a queued create has no
+ * overlay until it is claimed, so `useResourceList` cannot show it): the oldest window (100) with the exact total and the cursor of
+ * the next window (`after`). Unsettled drafts only; see `readPendingCreates`.
+ */
+export function usePendingCreates(
+  kind: string,
+  after?: number | null,
+): Loadable<PendingCreatesPage> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readPendingCreates, {
+            incarnationId: service.incarnationId,
+            kind,
+            ...(typeof after === "number" ? { after } : {}),
+          })
+        : null;
+    },
+    [kind, after],
+  );
+}
+
+/** The unsettled drafts that target one resource: exact counts by status and the newest of them (see `readOutstanding`). */
+export function useOutstanding(id: ResourceId): Loadable<Outstanding> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readOutstanding, {
+            incarnationId: service.incarnationId,
+            id,
+          })
+        : null;
+    },
+    [id],
   );
 }

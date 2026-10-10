@@ -23,6 +23,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createCalendarFeed } from "./calendar-feed.mjs";
 import { createProxy } from "./delaying-proxy.mjs";
 import { freePort } from "./free-port.mjs";
 import { startPostgresBackend } from "./postgres-backend.mjs";
@@ -66,7 +67,7 @@ const STACKS =
           suffix: "",
           args: [
             "--grep-invert",
-            "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W)[0-9]",
+            "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W)[0-9]|I-CAL",
           ],
         },
         { suffix: "-i14e", args: ["--grep", "I-14e"] },
@@ -75,12 +76,18 @@ const STACKS =
           suffix: "-data",
           args: ["tests/integration/integration.data.spec.ts"],
         },
+        // WEB-13a's linked-calendar journeys (I-CAL): a stack of their own, with the loopback feed the backend fetches from.
+        {
+          suffix: "-calendar",
+          args: ["tests/integration/integration.calendars.spec.ts"],
+        },
       ];
 
 const children = [];
 let tmp = "";
 const ports = [];
 let proxy = null;
+let feed = null;
 let lastBackend = null;
 let extraCleanup = null;
 
@@ -101,6 +108,7 @@ async function cleanup() {
   for (const child of children)
     if (child.exitCode === null) child.kill("SIGKILL");
   if (proxy) await proxy.stop().catch(() => undefined);
+  if (feed) await feed.stop().catch(() => undefined);
   if (extraCleanup) {
     const left = extraCleanup();
     console.error(
@@ -121,6 +129,7 @@ async function cleanup() {
   children.length = 0;
   ports.length = 0;
   proxy = null;
+  feed = null;
   tmp = "";
 }
 process.on("SIGINT", () => cleanup().finally(() => process.exit(130)));
@@ -155,6 +164,16 @@ async function main(browser, stack) {
   // and the environment only.
   const accounts = {};
   let revision;
+  // WEB-13a: the loopback calendar feed (the "provider" the backend fetches linked calendars from). The SQLite backend is given a
+  // fresh, disposable integration key (64 hex characters, by the environment only, never written anywhere) and an outbound exception
+  // for the feed's exact origin, because it denies plain HTTP and loopback addresses by default. The PostgreSQL repeat runs the
+  // backend in a container, which cannot reach a loopback feed: its I-CAL linked cases skip themselves with that reason.
+  let calendar = null;
+  if (!postgres) {
+    feed = createCalendarFeed();
+    calendar = await feed.start();
+    ports.push(Number(new URL(calendar.origin).port));
+  }
 
   if (postgres) {
     // OPTIONAL repeat: the released backend CONTAINER image against a disposable PostgreSQL (docs/session.md, "Integration").
@@ -211,6 +230,8 @@ async function main(browser, stack) {
         ATLAS_DATABASE_URL: database,
         ATLAS_BIND: `127.0.0.1:${backendPort}`,
         ATLAS_PUBLIC_ORIGIN: origin,
+        ATLAS_SECRET_KEY: randomBytes(32).toString("hex"),
+        ATLAS_OUTBOUND_ALLOW_ORIGINS: calendar?.origin ?? "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -267,6 +288,7 @@ async function main(browser, stack) {
     ATLAS_INTEGRATION_BACKEND: `http://127.0.0.1:${backendPort}`,
     ATLAS_INTEGRATION_ACCOUNTS: JSON.stringify(accounts),
     ATLAS_INTEGRATION_BACKEND_REVISION: JSON.stringify(revision),
+    ...(calendar === null ? {} : { ATLAS_INTEGRATION_FEED: calendar.origin }),
     ATLAS_E2E_BROWSERS: browser === "chromium" ? "" : "all",
   };
   if (serve) {

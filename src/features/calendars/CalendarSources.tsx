@@ -1,0 +1,469 @@
+import { Link } from "@tanstack/react-router";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { Button } from "../../components/ui/button";
+import { List } from "../../components/ui/list";
+import { PageHeading } from "../../components/ui/page-heading";
+import {
+  type CacheRow,
+  type DraftWithCommand,
+  type ListedResource,
+  useDataActions,
+  useOptionalDataEnv,
+  usePendingCreates,
+  useResourceList,
+  useStatusInputs,
+} from "../../data";
+import { useSession } from "../../session";
+import { CacheGate } from "../sync/CacheGate";
+import { AddSourceDialog } from "./AddSourceDialog";
+import { type CalendarApi, useCalendarApi } from "./api";
+import {
+  ADD_SOURCE,
+  ADD_SOURCE_CLASS,
+  DISMISS,
+  EMPTY,
+  LINK_CALENDAR,
+  LOAD_FAILED,
+  LOAD_FAILED_ACTION,
+  LOADING,
+  NO_DATABASE,
+  ONLINE_ONLY,
+  SCREEN_EYEBROW,
+  SCREEN_HEADING,
+  SHOW_NEXT,
+  SHOW_PREVIOUS,
+  WAITING_GROUP,
+} from "./copy";
+import { LinkCalendarDialog } from "./LinkCalendarDialog";
+import { ManageSourceDialog } from "./ManageSourceDialog";
+import { identityMemory } from "./memory";
+import { type Compat, type Environment, headerActions } from "./model/status";
+import {
+  createRefreshController,
+  type RefreshController,
+} from "./refresh-controller";
+import { projectSourceCreate } from "./register";
+import { PendingRow, SourceRow } from "./SourceRow";
+
+/**
+ * "Calendar sources" (WEB-13a; `wireframes/q21/calendar-journeys.html`), the Settings registry's Calendars page. It lists the cached
+ * sources a page at a time, then this device's creates that the server has not confirmed yet, and offers the two entry points the
+ * wireframe separates: "Add source" (credential-free, QUEUED, offline or online) and "Link a calendar…" (with a connection, ONLINE
+ * ONLY, never stored). Every row's status and every enablement comes from `model/status.ts`.
+ *
+ * Production starts no outbox dispatcher until WEB-09b supplies leadership: a queued create is stored and shown as pending, and is sent
+ * by a leader when one runs. The online-only actions work now.
+ */
+export function CalendarSources() {
+  const env = useOptionalDataEnv();
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <Link
+          to="/settings"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13.5px] text-ink-2 hover:text-ink-1"
+        >
+          Settings
+        </Link>
+        <p className="text-[12px] uppercase tracking-[0.06em] text-ink-2">
+          {SCREEN_EYEBROW}
+        </p>
+        <PageHeading>{SCREEN_HEADING}</PageHeading>
+      </div>
+      {env === null ? (
+        <p className="max-w-[700px] text-[13px] leading-[1.6] text-ink-2">
+          {NO_DATABASE}
+        </p>
+      ) : (
+        <Sources />
+      )}
+    </div>
+  );
+}
+
+export type Dialog =
+  | { kind: "add" }
+  | { kind: "link" }
+  | {
+      kind: "manage";
+      row: CacheRow;
+      cached: boolean;
+      /** Open with the connection's Replace… panel showing (cause 1's "Update connection"). */
+      replace?: boolean;
+      /** Open with Enabled on (cause 6a's "Turn on"). */
+      enable?: boolean;
+      /** The conflicted draft a Save replaces (D-13a-12). */
+      supersede?: string;
+    };
+
+/** The online settings changes made on this screen whose result the cache has not caught up with (D-13a-8), by source. */
+export type AwaitingSync = ReadonlyMap<string, number>;
+
+function useCompat(): Compat {
+  const session = useSession();
+  return useSyncExternalStore(
+    (listener) => session.compat.subscribe(listener),
+    () => session.compat.get().status,
+    () => session.compat.get().status,
+  );
+}
+
+/** One refresh controller per calendar client: replaced with the identity, disposed on unmount (Strict Mode safe). */
+function useRefreshController(
+  api: CalendarApi | null,
+): RefreshController | null {
+  const [controller, setController] = useState<RefreshController | null>(null);
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (api === null) {
+      setController(null);
+      return;
+    }
+    const built = createRefreshController({
+      api,
+      mintKey: () => crypto.randomUUID(),
+      // What must outlive a remount of this screen under the same identity (a `403` is re-checked by the session): `memory.ts`.
+      remembered: identityMemory(api.identity.account, api.identity.epoch).runs,
+    });
+    const off = built.subscribe(rerender);
+    setController(built);
+    return () => {
+      off();
+      built.dispose();
+    };
+  }, [api]);
+  return controller;
+}
+
+function Sources() {
+  const env = useOptionalDataEnv();
+  const inputs = useStatusInputs();
+  const compat = useCompat();
+  const api = useCalendarApi();
+  const service = useSyncExternalStore(
+    (listener) => env?.serviceStore.subscribe(listener) ?? (() => undefined),
+    () => env?.serviceStore.get() ?? null,
+    () => env?.serviceStore.get() ?? null,
+  );
+  const online = inputs.online;
+  const controller = useRefreshController(api);
+  const [calendarLinks, setCalendarLinks] = useState<boolean | null>(null);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [awaiting, setAwaiting] = useState<AwaitingSync>(new Map());
+
+  // The capability is read once per client while online (D-13a-10); unknown (offline, or a failed read) pre-disables nothing.
+  useEffect(() => {
+    if (api === null || !online) return;
+    let current = true;
+    void api
+      .capabilities(() => current)
+      .then((result) => {
+        if (current && result.ok) setCalendarLinks(result.value.calendarLinks);
+      });
+    return () => {
+      current = false;
+    };
+  }, [api, online]);
+
+  // Offline stops every refresh and admits no new one; nothing resumes when the page comes back online (a new press may start one).
+  useEffect(() => {
+    if (!online) controller?.offline();
+    else controller?.online();
+  }, [online, controller]);
+
+  const environment: Environment = {
+    online,
+    compat,
+    hasOutbox: service !== null && (env?.outbox() ?? null) !== null,
+    calendarLinks,
+  };
+  const actions = headerActions(environment);
+  const memory =
+    api === null
+      ? null
+      : identityMemory(api.identity.account, api.identity.epoch);
+  const [, dismissedLink] = useReducer((n: number) => n + 1, 0);
+  const linkNotice = memory?.notices.get("link");
+  const markAwaiting = useCallback((id: string, version: number) => {
+    setAwaiting((previous) => new Map(previous).set(id, version));
+  }, []);
+
+  return (
+    <>
+      <section
+        aria-label={SCREEN_HEADING}
+        className="flex max-w-[760px] flex-col gap-4"
+      >
+        <div className="flex flex-wrap items-start gap-3">
+          <EntryPoint label={ADD_SOURCE_CLASS}>
+            {actions.add.enabled ? (
+              <Button
+                variant="primary"
+                onClick={() => setDialog({ kind: "add" })}
+              >
+                {ADD_SOURCE}
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                disabled
+                reason={actions.add.reason ?? ""}
+              >
+                {ADD_SOURCE}
+              </Button>
+            )}
+          </EntryPoint>
+          <EntryPoint label={ONLINE_ONLY}>
+            {actions.link.enabled ? (
+              <Button onClick={() => setDialog({ kind: "link" })}>
+                {LINK_CALENDAR}
+              </Button>
+            ) : (
+              <Button disabled reason={actions.link.reason ?? ""}>
+                {LINK_CALENDAR}
+              </Button>
+            )}
+          </EntryPoint>
+        </div>
+        {linkNotice !== undefined ? (
+          <div
+            data-row-notice="link"
+            className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[1.6] text-ink-1"
+          >
+            <span>{linkNotice}</span>
+            <Button
+              variant="quiet"
+              onClick={() => {
+                memory?.notices.delete("link");
+                dismissedLink();
+              }}
+            >
+              {DISMISS}
+            </Button>
+          </div>
+        ) : null}
+        {service === null ? (
+          <p
+            data-no-database=""
+            className="text-[13px] leading-[1.6] text-ink-2"
+          >
+            {NO_DATABASE}
+          </p>
+        ) : (
+          <>
+            <CacheGate>
+              <CachedSources
+                environment={environment}
+                controller={controller}
+                notices={memory?.notices ?? null}
+                onDialog={setDialog}
+              />
+            </CacheGate>
+            <PendingSources environment={environment} onDialog={setDialog} />
+          </>
+        )}
+      </section>
+      {dialog?.kind === "add" ? (
+        <AddSourceDialog online={online} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog?.kind === "link" && api !== null ? (
+        <LinkCalendarDialog
+          api={api}
+          environment={environment}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+      {dialog?.kind === "manage" ? (
+        <ManageSourceDialog
+          api={api}
+          dialog={dialog}
+          environment={environment}
+          awaiting={awaiting}
+          onAwaiting={markAwaiting}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function EntryPoint({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[11.5px] uppercase tracking-[0.06em] text-ink-2">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function CachedSources({
+  environment,
+  controller,
+  notices,
+  onDialog,
+}: {
+  environment: Environment;
+  controller: RefreshController | null;
+  notices: Map<string, string> | null;
+  onDialog(dialog: Dialog): void;
+}) {
+  const [, dismissed] = useReducer((n: number) => n + 1, 0);
+  const actions = useDataActions();
+  const [cursors, setCursors] = useState<Array<string | null>>([null]);
+  const after = cursors[cursors.length - 1] ?? null;
+  const page = useResourceList({
+    kind: "calendar_source",
+    after,
+    limit: 100,
+  });
+  if (page.status === "loading")
+    return (
+      <div aria-busy="true" className="flex flex-col gap-2">
+        <p className="sr-only">{LOADING}</p>
+        {[0, 1].map((n) => (
+          <div
+            key={n}
+            data-skeleton=""
+            className="h-[68px] rounded-row border border-hairline bg-panel"
+          />
+        ))}
+      </div>
+    );
+  if (page.status === "unavailable")
+    return page.reason === "absent" ? null : (
+      <div
+        data-load-error=""
+        className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+      >
+        <p className="text-[13.5px] text-ink-1">{LOAD_FAILED}</p>
+        <Button onClick={() => actions.retryLoad()}>
+          {LOAD_FAILED_ACTION}
+        </Button>
+      </div>
+    );
+  const rows: ListedResource[] = page.value.rows;
+  const next = page.value.next;
+  return (
+    <div className="flex flex-col gap-2">
+      {rows.length === 0 && cursors.length === 1 ? (
+        <p data-empty="" className="text-[13px] text-ink-2">
+          {EMPTY}
+        </p>
+      ) : (
+        <List className="flex flex-col gap-2">
+          {rows.map((row) => (
+            <SourceRow
+              key={row.base.id}
+              row={row}
+              environment={environment}
+              controller={controller}
+              notice={notices?.get(row.base.id)}
+              onDismissNotice={() => {
+                notices?.delete(row.base.id);
+                dismissed();
+              }}
+              onDialog={onDialog}
+            />
+          ))}
+        </List>
+      )}
+      {cursors.length > 1 || next !== null ? (
+        <div className="flex flex-wrap gap-2">
+          {cursors.length > 1 ? (
+            <Button
+              variant="quiet"
+              onClick={() => setCursors((list) => list.slice(0, -1))}
+            >
+              {SHOW_PREVIOUS}
+            </Button>
+          ) : null}
+          {next !== null ? (
+            <Button
+              variant="quiet"
+              onClick={() => setCursors((list) => [...list, next])}
+            >
+              {SHOW_NEXT}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PendingSources({
+  environment,
+  onDialog,
+}: {
+  environment: Environment;
+  onDialog(dialog: Dialog): void;
+}) {
+  const [cursors, setCursors] = useState<Array<number | null>>([null]);
+  const after = cursors[cursors.length - 1] ?? null;
+  const page = usePendingCreates("create_source", after);
+  const drafts = useMemo(
+    () =>
+      page.status === "ready"
+        ? page.value.drafts.flatMap((draft: DraftWithCommand) => {
+            const row = projectSourceCreate(draft);
+            return row === null ? [] : [{ draft, row }];
+          })
+        : [],
+    [page],
+  );
+  if (page.status !== "ready" || page.value.total === 0) return null;
+  const next = page.value.next;
+  return (
+    <section aria-labelledby="pending-sources" className="flex flex-col gap-2">
+      <h2 id="pending-sources" className="text-[13.5px] font-medium text-ink-1">
+        {WAITING_GROUP}
+      </h2>
+      <List className="flex flex-col gap-2">
+        {drafts.map(({ draft, row }) => (
+          <PendingRow
+            key={draft.local_id}
+            draft={draft}
+            row={row}
+            environment={environment}
+            onDialog={onDialog}
+          />
+        ))}
+      </List>
+      {cursors.length > 1 || next !== null ? (
+        <div className="flex flex-wrap gap-2">
+          {cursors.length > 1 ? (
+            <Button
+              variant="quiet"
+              onClick={() => setCursors((list) => list.slice(0, -1))}
+            >
+              {SHOW_PREVIOUS}
+            </Button>
+          ) : null}
+          {next !== null ? (
+            <Button
+              variant="quiet"
+              onClick={() => setCursors((list) => [...list, next])}
+            >
+              {SHOW_NEXT}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
