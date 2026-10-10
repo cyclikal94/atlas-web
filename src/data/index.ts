@@ -23,10 +23,15 @@ export { OutboxRequestError } from "./model/outbox";
 // ---- status, queue and profile for the UI (plan 5.7, 5.8) -----------------------------------------------------------------------
 export type { MergedResource } from "./model/overlay";
 export type { QueueSummary } from "./model/queue-summary";
-export type { ReviewConfirmation } from "./model/review-confirmation";
+export {
+  type ReviewConfirmation,
+  type ReviewedDraft,
+  reviewedOf,
+} from "./model/review-confirmation";
 export { accountDatabaseName } from "./model/schema";
 // ---- the sharing defaults (WEB-12a, B5): the record, its capture for queued creates and the review's cases --------------------------
 export {
+  type CapturedAccount,
   type CapturedHousehold,
   type CapturedKind,
   captureDefaults,

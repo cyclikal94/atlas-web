@@ -45,6 +45,9 @@ export const POLICY_OWNER_ONLY = "Only the owner can change who can see this.";
 export const POLICY_GONE = "This item is no longer available.";
 export const POLICY_LOADING = "Loading who can see this…";
 export const POLICY_LOAD_FAILED = "Couldn't load this item's sharing.";
+/** Unsaved choices kept through the dialog's sync control (ia.md §1.3.3), shown again when the editor reopens (WEB-12a R5). */
+export const RESTORED_UNSAVED =
+  "Your unsaved changes are shown again. Nothing has been saved yet.";
 export const EFFECTIVE_HEADING = "Effective visibility once saved";
 export const OWNER_KEEPS =
   "You keep management access as owner regardless of these grants.";
@@ -181,6 +184,8 @@ export const SAVE_DEFAULTS = "Save";
 export const SAVED_DEFAULTS = "Default saved.";
 export const TEMPLATE_CONFLICT =
   "This template changed since you opened it. Reload to see the current version before saving.";
+export const DEFAULTS_OFFLINE_EDITING =
+  "You're offline. Your choices below are kept; reconnect to save them.";
 export const DEFAULTS_OFFLINE_READONLY =
   "You're offline: these are the defaults this device last saw, shown read-only.";
 export const TEMPLATES_LOAD_FAILED = "Couldn't load the current templates.";
@@ -216,6 +221,18 @@ export const REVIEW_NOW_NEEDS_CONNECTION =
 export const REVIEW_NOW_LOADING = "Loading the current defaults…";
 export const REVIEW_NOW_FAILED = "Couldn't load the current defaults.";
 export const REVIEW_MEMBERS_UNKNOWN = "Members not known on this device";
+/** One principal of a reviewed audience, with its access (WEB-12a R4: who, and how, never only a count). */
+export const REVIEW_HOUSEHOLD_ACCESS = (
+  name: string,
+  edit: boolean,
+  members: string,
+) => `${name} · ${edit ? EDIT : READ}: ${members}`;
+export const REVIEW_HOUSEHOLD_NO_MEMBERS = "no members listed";
+export const REVIEW_ACCOUNT_ACCESS = (label: string, edit: boolean) =>
+  `${label} · ${edit ? EDIT : READ} (granted directly)`;
+export const REVIEW_EXCLUDED = (label: string) => `${label} · excluded`;
+export const REVIEW_CHANGED =
+  "This change was edited or its review changed while you were reviewing it. Check who it would be shared with again, then confirm.";
 export const REVIEW_CONFIRM = "Confirm and send";
 export const REVIEW_DISCARD = "Discard change";
 export const REVIEW_CONFIRMED = "Change confirmed. It will be sent.";

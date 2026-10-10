@@ -2,6 +2,7 @@
 import { describe, expect, test } from "vitest";
 import { captureDefaults } from "../../src/data";
 import {
+  decideSupersede,
   type EnqueueRequest,
   planEdit,
   planEnqueue,
@@ -11,10 +12,12 @@ import {
   BasesMoved,
   confirmationPath,
   confirmationRequest,
+  isReviewedDraft,
+  reviewedOf,
   targetsOf,
 } from "../../src/data/model/review-confirmation";
 import { initialSyncState } from "../../src/data/model/sync-state";
-import type { SyncStateRow } from "../../src/data/model/types";
+import type { DraftRow, SyncStateRow } from "../../src/data/model/types";
 import { outboxWorld } from "../support/data/outbox-world";
 import { cacheRow, draftRow } from "../support/data/rows";
 import { record, revision, snapshot } from "../support/data/sharing";
@@ -180,6 +183,7 @@ describe("model: the confirmation's rebuild (D-12a-6)", () => {
     defaults_revision: revision(1),
   };
   const confirmed = {
+    reviewed: reviewedOf(stored),
     defaultsRevision: revision(2),
     defaultsContext: { format: "x" },
   };
@@ -242,6 +246,12 @@ describe("model: the confirmation's rebuild (D-12a-6)", () => {
     ).toBe(null);
   });
 });
+
+const draftOf = (w: { drafts(): DraftRow[] }, localId: string): DraftRow => {
+  const found = w.drafts().find((d) => d.local_id === localId);
+  if (found === undefined) throw new Error(`no draft ${localId}`);
+  return found;
+};
 
 async function started() {
   const w = await outboxWorld();
@@ -309,6 +319,7 @@ describe("the facade and dispatcher: a locally blocked draft", () => {
       "person",
     ]);
     const confirmed = await w.outbox.confirmDefaultsReview(out.localId, {
+      reviewed: reviewedOf(draftOf(w, out.localId)),
       defaultsRevision: now.defaultsRevision as string,
       defaultsContext: now.defaultsContext,
     });
@@ -338,6 +349,7 @@ describe("the facade and dispatcher: a locally blocked draft", () => {
     await w.settle();
     if (out.kind !== "queued") throw new Error("setup");
     const confirmation = {
+      reviewed: reviewedOf(draftOf(w, out.localId)),
       defaultsRevision: revision(1),
       defaultsContext: null,
     };
@@ -383,7 +395,9 @@ describe("the facade and dispatcher: a draft refused with defaults_changed", () 
       "person",
     ]);
     const replacementId = "55555555-5555-4555-8555-555555555555";
+    const reviewed = reviewedOf(draftOf(w, out.localId));
     const confirmed = await w.outbox.confirmDefaultsReview(out.localId, {
+      reviewed,
       defaultsRevision: now.defaultsRevision as string,
       defaultsContext: now.defaultsContext,
       replacementId,
@@ -403,10 +417,242 @@ describe("the facade and dispatcher: a draft refused with defaults_changed", () 
     // Confirming again after the supersession landed finds no draft under review: `not_found`, and nothing changes (the review closes).
     expect(
       await w.outbox.confirmDefaultsReview(out.localId, {
+        reviewed,
         defaultsRevision: now.defaultsRevision as string,
         defaultsContext: now.defaultsContext,
         replacementId,
       }),
     ).toEqual({ kind: "refused", reason: "not_found" });
+  });
+});
+
+/**
+ * WEB-12a R2 (review cycle 1): the confirmation is decided on a draft read BEFORE its write, so it is conditional on that draft. Another
+ * page's edit of the same queued draft committed between the confirmation's read and its write must survive, and the confirmation must
+ * be refused (`draft_changed`) so the person reviews the draft as it now is. The forced schedule holds the confirmation after its read
+ * transaction has COMPLETED (a held result, not a live transaction), exactly the reviewer's reproduction.
+ */
+describe("R2: the confirmation never overwrites a newer committed edit", () => {
+  const named = (name: string, blocked = true): EnqueueRequest => ({
+    endpoint: "/commands",
+    targets: [target("p")],
+    build: () => ({
+      command: { commands: [{ kind: "create_person", id: "p", name }] },
+      ...(blocked ? { defaultsReview: ["person"] } : {}),
+    }),
+  });
+  const reviewedNow = captureDefaults(
+    record(snapshot({ revision: revision(2) })),
+    ["person"],
+  );
+  const confirmWith = (reviewed: DraftRow) => ({
+    reviewed: reviewedOf(reviewed),
+    defaultsRevision: reviewedNow.defaultsRevision as string,
+    defaultsContext: reviewedNow.defaultsContext,
+  });
+
+  /** Holds every run of `data.readReviewDraft` after its transaction completed, until released. */
+  function holdReviewRead(w: Awaited<ReturnType<typeof started>>) {
+    const run = w.service.store.run.bind(w.service.store);
+    let release!: () => void;
+    let read!: () => void;
+    const done = new Promise<void>((resolve) => {
+      read = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    w.service.store.run = (async (plan: { name: string }, input: unknown) => {
+      const result = await run(plan as never, input as never);
+      if (plan.name === "data.readReviewDraft") {
+        read();
+        await hold;
+      }
+      return result;
+    }) as typeof w.service.store.run;
+    return { done, release };
+  }
+
+  test("MU-S23: an edit committed after the confirmation's read is KEPT; the confirmation is refused (draft_changed) and the block stays", async () => {
+    const w = await started();
+    const out = await w.outbox.enqueue(named("original"));
+    if (out.kind !== "queued") throw new Error("setup");
+    const shown = draftOf(w, out.localId);
+    const held = holdReviewRead(w);
+    const confirming = w.outbox.confirmDefaultsReview(
+      out.localId,
+      confirmWith(shown),
+    );
+    await held.done;
+    expect((await w.outbox.editQueued(out.localId, named("newer"))).kind).toBe(
+      "edited",
+    );
+    expect(w.commandOf(out.localId)).toEqual({
+      commands: [{ kind: "create_person", id: "p", name: "newer" }],
+    });
+    held.release();
+    expect(await confirming).toEqual({
+      kind: "refused",
+      reason: "draft_changed",
+    });
+    // The newer edit survives, still blocked on review: nothing was approved implicitly, and nothing was sent.
+    expect(w.commandOf(out.localId)).toEqual({
+      commands: [{ kind: "create_person", id: "p", name: "newer" }],
+    });
+    expect(draftOf(w, out.localId).review_block).toEqual({
+      kind: "defaults",
+      kinds: ["person"],
+    });
+    await w.settle();
+    expect(w.sent).toEqual([]);
+  });
+
+  test("MU-S24: the row the review SHOWED is what is checked: an edit before the confirmation's read is refused too, and a renewed review confirms the newer body", async () => {
+    const w = await started();
+    const out = await w.outbox.enqueue(named("original"));
+    if (out.kind !== "queued") throw new Error("setup");
+    const shown = draftOf(w, out.localId);
+    expect((await w.outbox.editQueued(out.localId, named("newer"))).kind).toBe(
+      "edited",
+    );
+    expect(
+      await w.outbox.confirmDefaultsReview(out.localId, confirmWith(shown)),
+    ).toEqual({ kind: "refused", reason: "draft_changed" });
+    expect(w.commandOf(out.localId)).toEqual({
+      commands: [{ kind: "create_person", id: "p", name: "newer" }],
+    });
+    // The person reviews the draft as it now is and confirms: the NEWER body is sent with the reviewed revision.
+    const renewed = draftOf(w, out.localId);
+    expect(
+      await w.outbox.confirmDefaultsReview(out.localId, confirmWith(renewed)),
+    ).toMatchObject({ kind: "confirmed", how: "edited" });
+    await w.settle();
+    expect(JSON.parse(w.sent[0]?.body as string)).toEqual({
+      commands: [{ kind: "create_person", id: "p", name: "newer" }],
+      defaults_revision: revision(2),
+    });
+  });
+
+  test("control: with no edit in between, the held confirmation still confirms the reviewed body", async () => {
+    const w = await started();
+    const out = await w.outbox.enqueue(named("original"));
+    if (out.kind !== "queued") throw new Error("setup");
+    const held = holdReviewRead(w);
+    const confirming = w.outbox.confirmDefaultsReview(
+      out.localId,
+      confirmWith(draftOf(w, out.localId)),
+    );
+    await held.done;
+    held.release();
+    expect(await confirming).toMatchObject({
+      kind: "confirmed",
+      how: "edited",
+    });
+    expect(draftOf(w, out.localId).review_block).toBe(null);
+    expect(w.commandOf(out.localId)).toEqual({
+      commands: [{ kind: "create_person", id: "p", name: "original" }],
+      defaults_revision: revision(2),
+    });
+  });
+
+  test("a change of the review itself (block or context) between the read and the write is refused as well", async () => {
+    const w = await started();
+    const out = await w.outbox.enqueue(named("original"));
+    if (out.kind !== "queued") throw new Error("setup");
+    const shown = draftOf(w, out.localId);
+    const held = holdReviewRead(w);
+    const confirming = w.outbox.confirmDefaultsReview(
+      out.localId,
+      confirmWith(shown),
+    );
+    await held.done;
+    // The same body, re-captured with another kind to review: what the person saw is no longer the whole review.
+    expect(
+      (
+        await w.outbox.editQueued(out.localId, {
+          ...named("original"),
+          build: () => ({
+            command: {
+              commands: [{ kind: "create_person", id: "p", name: "original" }],
+            },
+            defaultsReview: ["person", "progress"],
+          }),
+        })
+      ).kind,
+    ).toBe("edited");
+    held.release();
+    expect(await confirming).toEqual({
+      kind: "refused",
+      reason: "draft_changed",
+    });
+    expect(draftOf(w, out.localId).review_block).toEqual({
+      kind: "defaults",
+      kinds: ["person", "progress"],
+    });
+  });
+
+  test("model: expectDraft is checked against the STORED draft in planEdit and decideSupersede; false writes nothing", () => {
+    const queued = draftRow({
+      local_id: "L1",
+      endpoint: "/commands",
+      target_resource_ids: ["p"],
+      index_targets: ["p"],
+      bases: { p: 1 },
+      review_block: { kind: "defaults", kinds: ["person"] },
+    });
+    const refuse = { ...plain("p"), expectDraft: () => false };
+    expect(planEdit(refuse, queued, sync())).toEqual({
+      kind: "refused",
+      reason: "draft_changed",
+    });
+    expect(
+      planEdit({ ...plain("p"), expectDraft: () => true }, queued, sync()).kind,
+    ).toBe("edited");
+    const inFlight = { ...queued, status: "in_flight" as const };
+    const supersedeFacts = {
+      old: inFlight,
+      existing: undefined,
+      existingPaused: [],
+      direct: [],
+      cascade: [inFlight],
+      effects: [],
+      others: [],
+      cache: new Map(),
+      versions: new Map(),
+      sync: sync(),
+      localId: "L2",
+      accountId: "acc",
+      now: NOW,
+    };
+    expect(decideSupersede(refuse, supersedeFacts)).toEqual({
+      kind: "refused",
+      reason: "draft_changed",
+    });
+    expect(
+      decideSupersede(
+        { ...plain("p"), expectDraft: () => true },
+        supersedeFacts,
+      ).kind,
+    ).toBe("superseded");
+  });
+
+  test("isReviewedDraft compares the body digest, revision, context, block and status, nothing else", () => {
+    const base = draftRow({
+      local_id: "L1",
+      review_block: { kind: "defaults", kinds: ["person"] },
+    });
+    expect(isReviewedDraft(base, reviewedOf(base))).toBe(true);
+    const busier: DraftRow = { ...base, attempts: 3, last_error: null };
+    expect(isReviewedDraft(busier, reviewedOf(base))).toBe(true);
+    for (const changed of [
+      { command_digest: "f".repeat(64) },
+      { defaults_revision: revision(9) },
+      { defaults_context: { other: true } },
+      { review_block: { kind: "defaults" as const, kinds: ["task"] } },
+      { status: "in_flight" as const },
+    ])
+      expect(isReviewedDraft({ ...base, ...changed }, reviewedOf(base))).toBe(
+        false,
+      );
   });
 });

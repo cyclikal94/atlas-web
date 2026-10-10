@@ -39,6 +39,7 @@ import {
 } from "./model/templates";
 import { PolicyGrantsEditor } from "./PolicyGrantsEditor";
 import { Banner, ChoiceGroup, formatWhen, useSharingLoad } from "./parts";
+import { forget, retain, retained } from "./retained";
 
 /**
  * WF-SHARING-03, the defaults and templates editor (D+sheet). The five resource kinds as tabs; the resolution chain application → primary
@@ -48,8 +49,16 @@ import { Banner, ChoiceGroup, formatWhen, useSharingLoad } from "./parts";
  * /defaults/templates`), never another layer's. "Inherit" sends `template: null` at the override's own version. Editing a template never
  * changes existing records.
  *
- * The resolved defaults and member names come from the B5 snapshot only (one record, D-12a-9). Online-only: offline, the last snapshot
- * is shown read-only with its time.
+ * The resolved defaults and member names come from the B5 snapshot only (one record, D-12a-9). Online-only: offline at open, the last
+ * snapshot is shown read-only with its time; going offline while editing keeps the forms and their unsaved choices (Save waits for the
+ * connection), so coming back online loses nothing (WEB-12a R5).
+ *
+ * Each layer's form belongs to ONE target (WEB-12a R1): the displayed identity, the layer, the household (for the household layer, the
+ * primary household it was READ for) and the kind. The household layer is read for the primary household the snapshot names now; when
+ * that changes, the earlier household's template and version are never shown or sent as the new one's (its read is dropped, and the new
+ * household is read before anything can be saved). The in-dialog sync control keeps each form's unsaved choices, with the version they
+ * were composed against and an uncertain attempt, and reopening shows them again (ia.md §1.3.3; R5); Done, Escape and the close icon
+ * discard them. A full-bleed sheet below the desktop breakpoint, like the policy editor (R6).
  */
 export function DefaultsEditor({
   kind,
@@ -95,11 +104,16 @@ function DefaultsDialog({
     null;
   const [personalLoad, reloadPersonal] = useSharingLoad(
     () => env.api.readTemplates(null),
-    { enabled: env.online, now: env.now },
+    { enabled: env.online, now: env.now, target: [env.api] },
   );
+  // Bound to the primary household it is read for (R1): another primary household is another read.
   const [householdLoad, reloadHousehold] = useSharingLoad(
     () => env.api.readTemplates(primaryId),
-    { enabled: env.online && primaryId !== null, now: env.now },
+    {
+      enabled: env.online && primaryId !== null,
+      now: env.now,
+      target: [env.api, primaryId],
+    },
   );
   const personal: LayerRecord | null =
     personalLoad.status === "ready" ? personalLoad.value[kind] : null;
@@ -151,14 +165,37 @@ function DefaultsDialog({
     void defaults.refresh();
   };
 
+  // The open forms, so the sync control can keep them and a discard can forget them (ia.md §1.3.3, §3; R5).
+  const forms = useRef(new Map<string, FormKeeper>());
+  const register = (id: string, keeper: FormKeeper) => {
+    forms.current.set(id, keeper);
+    return () => {
+      if (forms.current.get(id) === keeper) forms.current.delete(id);
+    };
+  };
+  const discardForms = () => {
+    for (const keeper of forms.current.values()) keeper.discard();
+  };
+  const done = () => {
+    discardForms();
+    onClose();
+  };
+  // Offline at open, nothing was read: the last snapshot, read-only. Gone offline after the forms were read: they stay.
+  const formsRead = personalLoad.status === "ready";
+
   return (
     <Dialog
       open
       onClose={onClose}
+      onDiscard={discardForms}
+      onRetainDraft={() => {
+        for (const keeper of forms.current.values()) keeper.keep();
+      }}
       title={copy.DEFAULTS_TITLE(KIND_LABEL[kind])}
       initialFocusSelector='[role="tab"][aria-selected="true"]'
+      sheetBelow="desktop"
       footer={
-        <Button variant="secondary" onClick={onClose}>
+        <Button variant="secondary" onClick={done}>
           {copy.CLOSE}
         </Button>
       }
@@ -206,7 +243,7 @@ function DefaultsDialog({
             resolves={personalLoad.status === "ready" ? resolved.layer : null}
             householdName={primary?.name ?? null}
           />
-          {!env.online ? (
+          {!env.online && !formsRead ? (
             <OfflineDefaults
               kind={kind}
               template={snapshot?.defaults[kind] ?? null}
@@ -216,6 +253,14 @@ function DefaultsDialog({
             />
           ) : (
             <>
+              {!env.online ? (
+                <p
+                  className="text-[12.5px] text-ink-1"
+                  data-defaults-offline-editing=""
+                >
+                  {copy.DEFAULTS_OFFLINE_EDITING}
+                </p>
+              ) : null}
               <section className="flex flex-col gap-2" data-layer="household">
                 {primaryId === null ? (
                   <p className="text-[13px] text-ink-2">{copy.NO_PRIMARY}</p>
@@ -252,10 +297,11 @@ function DefaultsDialog({
                         </p>
                         {primary?.role === "manager" ? (
                           <LayerForm
-                            key={`household:${kind}:${household.version}:${householdLoad.status === "ready" ? householdLoad.at : 0}`}
+                            key={`household:${primaryId}:${kind}:${household.version}:${householdLoad.status === "ready" ? householdLoad.at : 0}`}
                             kind={kind}
                             layer="household"
                             householdId={primaryId}
+                            register={register}
                             record={household}
                             label={copy.HOUSEHOLD_EDIT_LABEL(
                               primary.name,
@@ -318,6 +364,7 @@ function DefaultsDialog({
                       kind={kind}
                       layer="personal"
                       householdId={null}
+                      register={register}
                       record={personal}
                       label={copy.PERSONAL_EDIT_LABEL(KIND_LABEL[kind])}
                       inheritLabel={copy.CHOICE_INHERIT_PERSONAL(
@@ -424,10 +471,28 @@ type Outcome =
   | { kind: "not_sent" }
   | { kind: "refused"; message?: string; requestId?: string };
 
+/** What the dialog asks of an open form: keep its unsaved choices (the sync control), or forget them (a discard). */
+interface FormKeeper {
+  keep(): void;
+  discard(): void;
+}
+
+/** What the sync control keeps of one form (R5): restored only for the same identity, layer, household and kind. */
+interface RetainedForm {
+  choice: ChoiceValue;
+  explicit: PolicyDraftState;
+  learnt: Array<[string, string]>;
+  /** The layer's template version the choices were composed against: Save's `expected_version`. */
+  base: number;
+  attempt: Attempt | null;
+  outcome: Outcome;
+}
+
 function LayerForm({
   kind,
   layer,
   householdId,
+  register,
   record,
   label,
   inheritLabel,
@@ -438,6 +503,7 @@ function LayerForm({
   kind: TemplateKind;
   layer: "personal" | "household";
   householdId: string | null;
+  register(id: string, keeper: FormKeeper): () => void;
   record: LayerRecord;
   label: string;
   inheritLabel: string;
@@ -447,19 +513,31 @@ function LayerForm({
 }) {
   const env = useSharingEnv();
   const announcer = useAnnouncer();
-  const [choice, setChoice] = useState<ChoiceValue>(() => choiceOf(record));
-  const [explicit, setExplicit] = useState<PolicyDraftState>(() => ({
-    policy:
-      record.template?.kind === "explicit"
-        ? record.template.policy
-        : emptyPolicy(),
-    refused: null,
-  }));
-  const [learnt, setLearnt] = useState<Array<[string, string]>>([]);
+  // This form's target: one layer of one kind, for the household it was read for (R1), under the displayed identity.
+  const target = `defaults:${layer}:${householdId ?? "personal"}:${kind}`;
+  const [kept] = useState(() => retained<RetainedForm>(env.identity, target));
+  const [choice, setChoice] = useState<ChoiceValue>(
+    () => kept?.choice ?? choiceOf(record),
+  );
+  const [explicit, setExplicit] = useState<PolicyDraftState>(
+    () =>
+      kept?.explicit ?? {
+        policy:
+          record.template?.kind === "explicit"
+            ? record.template.policy
+            : emptyPolicy(),
+        refused: null,
+      },
+  );
+  const [learnt, setLearnt] = useState<Array<[string, string]>>(
+    () => kept?.learnt ?? [],
+  );
   const [lookup, setLookup] = useState<"grant" | "exclude" | null>(null);
-  const [outcome, setOutcome] = useState<Outcome>(null);
+  const [outcome, setOutcome] = useState<Outcome>(() => kept?.outcome ?? null);
   const [busy, setBusy] = useState(false);
-  const uncertain = useRef<Attempt | null>(null);
+  // The version these choices were composed against: the record's, or the one a kept draft was composed against.
+  const base = kept?.base ?? record.version;
+  const uncertain = useRef<Attempt | null>(kept?.attempt ?? null);
   const mounted = useRef(true);
   useEffect(
     () => () => {
@@ -482,7 +560,34 @@ function LayerForm({
       ? { kind: "explicit", policy: toWirePolicy(template.policy) }
       : template;
   const changed =
+    base !== record.version ||
     canonicalBody(normalise(chosen)) !== canonicalBody(normalise(stored));
+
+  // The sync control keeps what is on screen; a discard forgets it (the dialog asks every open form).
+  const latest = useRef<RetainedForm | null>(null);
+  latest.current =
+    changed || uncertain.current !== null
+      ? {
+          choice,
+          explicit,
+          learnt,
+          base,
+          attempt: uncertain.current,
+          outcome,
+        }
+      : null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: registered once per form; it reads the latest choices through a ref
+  useEffect(
+    () =>
+      register(target, {
+        keep: () => {
+          if (latest.current === null) forget(env.identity, target);
+          else retain(env.identity, target, latest.current);
+        },
+        discard: () => forget(env.identity, target),
+      }),
+    [],
+  );
 
   const edited = () => {
     uncertain.current = null;
@@ -499,8 +604,9 @@ function LayerForm({
         kind: "set_defaults",
         household_id: householdId,
         resource_kind: kind,
-        // THIS layer's stored template version: a stale one is refused, never overwritten (WF-SHARING-03 Er).
-        expected_version: record.version,
+        // THIS layer's stored template version (or the one kept choices were composed against): a stale one is refused, never
+        // overwritten (WF-SHARING-03 Er).
+        expected_version: base,
         template: chosen,
       },
     ];
@@ -516,6 +622,7 @@ function LayerForm({
     setBusy(false);
     if (result.ok) {
       uncertain.current = null;
+      forget(env.identity, target);
       announcer.announce(copy.SAVED_DEFAULTS);
       onSaved();
       return;
@@ -577,6 +684,11 @@ function LayerForm({
   const household = layer === "household";
   return (
     <div className="flex flex-col gap-3" data-layer-form={layer}>
+      {kept !== undefined ? (
+        <p className="text-[12.5px] text-ink-1" data-layer-restored="">
+          {copy.RESTORED_UNSAVED}
+        </p>
+      ) : null}
       <ChoiceGroup<ChoiceValue>
         label={label}
         value={choice}
@@ -626,7 +738,16 @@ function LayerForm({
         <Banner
           message={copy.TEMPLATE_CONFLICT}
           requestId={outcome.requestId}
-          action={<Button onClick={onSaved}>{copy.RELOAD}</Button>}
+          action={
+            <Button
+              onClick={() => {
+                forget(env.identity, target);
+                onSaved();
+              }}
+            >
+              {copy.RELOAD}
+            </Button>
+          }
         />
       ) : outcome?.kind === "uncertain" ? (
         <Banner

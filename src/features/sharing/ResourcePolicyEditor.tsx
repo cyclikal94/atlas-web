@@ -31,6 +31,7 @@ import {
 import { type Attempt, nextAttempt } from "./model/submission";
 import { PolicyGrantsEditor } from "./PolicyGrantsEditor";
 import { Banner, formatWhen, useSharingLoad } from "./parts";
+import { forget, retain, retained } from "./retained";
 
 /**
  * WF-SHARING-04, the resource policy editor: a STANDALONE, resource-kind-agnostic component (WEB-12a's public interface). It opens on any
@@ -38,7 +39,13 @@ import { Banner, formatWhen, useSharingLoad } from "./parts";
  * version read from `GET /policies/{id}` when it opened (D-12a-3). Online-only (D-12a-1): nothing about a policy is stored on the device,
  * nothing is queued, and Save is disabled while offline with the reason beside it. Nothing here knows what kind of resource it is.
  *
- * A dialog on desktop; below the tablet breakpoint the shared dialog is a full-bleed sheet (ia.md §3).
+ * A dialog on desktop; below the desktop breakpoint a full-bleed sheet, as the accepted tablet frames draw it at both orientations
+ * (WEB-05.5 `tablet/sharing-portrait.html` and `sharing-landscape.html`, Q14; WEB-12a R6).
+ *
+ * Everything it reads, edits and sends belongs to ONE target, the `(identity, resource)` it was opened on (WEB-12a R1): another
+ * `resourceId` is another editor (a fresh read, draft and attempt), and an answer for the previous resource never lands in it. The in-dialog
+ * sync control keeps the unsaved draft, with the version it was composed against and its uncertain attempt, and reopening the editor on
+ * the same resource shows it again (ia.md §1.3.3; R5); Cancel, Escape and the close icon discard it.
  */
 export interface ResourcePolicyEditorProps {
   resourceId: ResourceId;
@@ -52,9 +59,31 @@ export function ResourcePolicyEditor(props: ResourcePolicyEditorProps) {
   if (!props.open) return null;
   return (
     <SharingBoundary>
-      <PolicyEditorDialog {...props} />
+      <PolicyEditorFor {...props} />
     </SharingBoundary>
   );
+}
+
+/** One editor per displayed identity and resource: changing either starts a new one, with nothing carried over (R1). */
+function PolicyEditorFor(props: ResourcePolicyEditorProps) {
+  const env = useSharingEnv();
+  return (
+    <PolicyEditorDialog
+      key={`${env.identity}\u0000${props.resourceId}`}
+      {...props}
+    />
+  );
+}
+
+/** The draft being edited: the policy, and the policy version it was composed against (what Save's `expected_version` is). */
+type Draft = PolicyDraftState & { base: number };
+
+/** What the sync control keeps of an unsaved draft (R5): restored only for the same identity and resource. */
+interface RetainedPolicy {
+  draft: Draft;
+  attempt: Attempt | null;
+  outcome: Outcome;
+  learnt: Array<[string, string]>;
 }
 
 type Outcome =
@@ -94,17 +123,24 @@ function PolicyEditorDialog({
   const reading = env.online && merged !== null;
   const [policyLoad, reloadPolicy] = useSharingLoad(
     () => env.api.readPolicy(resourceId),
-    { enabled: reading, now: env.now },
+    { enabled: reading, now: env.now, target: [env.api, resourceId] },
   );
   const [householdsLoad] = useSharingLoad(() => env.api.readHouseholds(), {
     enabled: reading,
     now: env.now,
+    target: [env.api],
   });
   const households: SnapshotHousehold[] =
     householdsLoad.status === "ready" ? householdsLoad.value : [];
 
-  const [draft, setDraft] = useState<PolicyDraftState | null>(null);
+  const retainedAs = `policy:${resourceId}`;
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [learnt, setLearnt] = useState<Array<[string, string]>>([]);
+  // A draft kept by the sync control when this editor was last open on this resource, until the first read lands.
+  const restore = useRef<RetainedPolicy | undefined>(
+    retained<RetainedPolicy>(env.identity, retainedAs),
+  );
+  const [restored, setRestored] = useState(false);
   const [view, setView] = useState<"edit" | "grant" | "exclude">("edit");
   const [outcome, setOutcome] = useState<Outcome>(null);
   const [busy, setBusy] = useState(false);
@@ -117,14 +153,30 @@ function PolicyEditorDialog({
     [],
   );
 
-  // A (re)read of the policy is the base of the edit: the draft starts from it, and a Reload discards the local edits.
-  const loadedAt = policyLoad.status === "ready" ? policyLoad.at : null;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the draft is reset only when a new read lands
+  // A (re)read of the policy is the base of the edit: the draft starts from it, and a Reload discards the local edits. The FIRST read
+  // after reopening shows a draft the sync control kept instead, at the version it was composed against (Save stays guarded by it).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the draft is reset only when a new read lands (a new load object)
   useEffect(() => {
     if (policyLoad.status !== "ready") return;
-    setDraft({ policy: policyLoad.value.policy, refused: null });
+    const kept = restore.current;
+    restore.current = undefined;
+    if (kept !== undefined) {
+      setDraft(kept.draft);
+      setLearnt(kept.learnt);
+      uncertain.current = kept.attempt;
+      setOutcome(kept.outcome);
+      setRestored(true);
+      return;
+    }
+    forget(env.identity, retainedAs);
+    setRestored(false);
+    setDraft({
+      policy: policyLoad.value.policy,
+      refused: null,
+      base: policyLoad.value.version,
+    });
     uncertain.current = null;
-  }, [loadedAt]);
+  }, [policyLoad]);
 
   const labels = useMemo(
     () => labelsFrom(households, learnt),
@@ -135,11 +187,40 @@ function PolicyEditorDialog({
     uncertain.current = null;
     setOutcome(null);
     setDraft((state) =>
-      state === null ? state : reducePolicy(state, action, env.accountId),
+      state === null
+        ? state
+        : { ...reducePolicy(state, action, env.accountId), base: state.base },
     );
   };
 
   const close = () => onOpenChange(false);
+  // Cancel, Escape and the close icon discard the edit on screen; the sync control keeps it (ia.md §1.3.3, §3).
+  const discard = () => {
+    if (draft !== null) forget(env.identity, retainedAs);
+  };
+  const cancel = () => {
+    discard();
+    close();
+  };
+  const keep = () => {
+    if (draft === null) return;
+    const read = policyLoad.status === "ready" ? policyLoad.value : null;
+    const edited =
+      read === null ||
+      draft.base !== read.version ||
+      !samePolicy(draft.policy, read.policy) ||
+      uncertain.current !== null;
+    if (!edited) {
+      forget(env.identity, retainedAs);
+      return;
+    }
+    retain(env.identity, retainedAs, {
+      draft,
+      attempt: uncertain.current,
+      outcome,
+      learnt,
+    } satisfies RetainedPolicy);
+  };
   const title = copy.POLICY_TITLE(merged?.label || copy.POLICY_UNTITLED);
 
   const send = async (policy: Policy, version: number) => {
@@ -163,6 +244,7 @@ function PolicyEditorDialog({
     setBusy(false);
     if (result.ok) {
       uncertain.current = null;
+      forget(env.identity, retainedAs);
       announcer.announce(copy.SAVED_POLICY);
       if (onSaved?.({ revision: result.value.revision }) !== false) close();
       else reloadPolicy();
@@ -272,7 +354,9 @@ function PolicyEditorDialog({
     );
   else {
     const read = policyLoad.value;
-    const changed = !samePolicy(draft.policy, read.policy);
+    // A draft composed against another version (kept through the sync control) is an edit until it is saved or reloaded.
+    const changed =
+      draft.base !== read.version || !samePolicy(draft.policy, read.policy);
     const audience = effectiveAudience({
       ownerId: env.accountId,
       policy: draft.policy,
@@ -300,6 +384,11 @@ function PolicyEditorDialog({
           </strong>{" "}
           {copy.POLICY_ONLINE_ONLY}
         </p>
+        {restored ? (
+          <p className="text-[12.5px] text-ink-1" data-policy-restored="">
+            {copy.RESTORED_UNSAVED}
+          </p>
+        ) : null}
         {behind ? (
           <p className="text-[12.5px] text-ink-2">{copy.CACHE_BEHIND}</p>
         ) : null}
@@ -332,20 +421,20 @@ function PolicyEditorDialog({
             setOutcome(null);
             reloadPolicy();
           }}
-          onRetry={() => void send(draft.policy, read.version)}
+          onRetry={() => void send(draft.policy, draft.base)}
         />
       </div>
     );
     footer = (
       <>
-        <Button variant="secondary" onClick={close}>
+        <Button variant="secondary" onClick={cancel}>
           {copy.CANCEL}
         </Button>
         {reason === null ? (
           <Button
             variant="primary"
             data-save=""
-            onClick={() => void send(draft.policy, read.version)}
+            onClick={() => void send(draft.policy, draft.base)}
           >
             {copy.SAVE_POLICY}
           </Button>
@@ -359,7 +448,15 @@ function PolicyEditorDialog({
   }
 
   return (
-    <Dialog open onClose={close} title={title} footer={footer}>
+    <Dialog
+      open
+      onClose={close}
+      onDiscard={discard}
+      onRetainDraft={keep}
+      title={title}
+      footer={footer}
+      sheetBelow="desktop"
+    >
       {body}
     </Dialog>
   );

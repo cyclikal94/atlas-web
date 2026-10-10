@@ -276,6 +276,17 @@ export interface CapturedKind {
   template: DefaultTemplate;
   /** Every household the template names, from the SAME snapshot (F7a: a membership-only change must be visible in the review). */
   households: CapturedHousehold[];
+  /**
+   * The usernames, as the SAME snapshot lists them among its households' members, of the accounts the template names directly (account
+   * grants and exclusions), so the review can name the captured audience as it was (WEB-12a R4) rather than by today's names. An account
+   * no listed household has as a member is absent (the review shows an abbreviated id). Absent in contexts captured before it existed.
+   */
+  accounts?: CapturedAccount[];
+}
+
+export interface CapturedAccount {
+  account_id: string;
+  username: string;
 }
 
 /** What a draft's `defaults_context` holds: the "Was" side of the defaults review, per template kind the command consumes. */
@@ -322,6 +333,17 @@ export function householdsNamedBy(
   return [];
 }
 
+/** The accounts a template names directly: its account grants, then its exclusions, once each. */
+export function accountsNamedBy(template: DefaultTemplate): string[] {
+  if (template.kind !== "explicit") return [];
+  const ids: string[] = [];
+  for (const grant of template.policy.grants)
+    if (grant.kind === "account" && !ids.includes(grant.id)) ids.push(grant.id);
+  for (const id of template.policy.exclude_accounts)
+    if (!ids.includes(id)) ids.push(id);
+  return ids;
+}
+
 const uniqueKinds = (kinds: readonly TemplateKind[]): TemplateKind[] => {
   const out: TemplateKind[] = [];
   for (const kind of kinds)
@@ -360,7 +382,19 @@ export function captureDefaults(
         },
     );
     if (entries.some((entry) => "unavailable" in entry)) review.push(kind);
-    captured[kind] = { template, households: entries };
+    const accounts: CapturedAccount[] = [];
+    for (const id of accountsNamedBy(template)) {
+      const member = households
+        .flatMap((household) => household.members)
+        .find((m) => m.account_id === id);
+      if (member !== undefined)
+        accounts.push({ account_id: id, username: member.username });
+    }
+    captured[kind] = {
+      template,
+      households: entries,
+      ...(accounts.length === 0 ? {} : { accounts }),
+    };
   }
   return {
     kind: "captured",
@@ -407,7 +441,24 @@ export function parseDefaultsContext(value: unknown): DefaultsContextV1 | null {
       if (parsed === null) return null;
       households.push(parsed);
     }
-    kinds[key as TemplateKind] = { template, households };
+    // The captured names are a label only: an entry that is not one is left out (its account is shown by an abbreviated id).
+    const accounts: CapturedAccount[] = [];
+    if (Array.isArray(entry.accounts))
+      for (const account of entry.accounts)
+        if (
+          isObject(account) &&
+          isUuid(account.account_id) &&
+          typeof account.username === "string"
+        )
+          accounts.push({
+            account_id: account.account_id,
+            username: account.username,
+          });
+    kinds[key as TemplateKind] = {
+      template,
+      households,
+      ...(accounts.length === 0 ? {} : { accounts }),
+    };
   }
   return {
     format: DEFAULTS_CONTEXT_FORMAT,
@@ -446,16 +497,20 @@ export function defaultsReviewCase(
     : "changed_never_sent";
 }
 
-/** The kinds a review covers: those its block names, else those the captured context holds. */
+/**
+ * The kinds a review covers: EVERY kind the draft consumes, that is, every kind its captured context holds AND every kind its block names
+ * (WEB-04 §5.7: each consumed template is reviewed; WEB-12a R3). A block may name only some of them (`captureDefaults` blocks only the
+ * kinds whose household nobody here has seen, and a server refusal names none), but the confirmation replaces the draft's revision of
+ * ALL the defaults, so a kind whose audience was known at capture may have changed too and is reviewed with the others. Never inferred
+ * unchanged. In `TEMPLATE_KINDS` order.
+ */
 export function reviewKinds(
   draft: Pick<DraftRow, "review_block" | "defaults_context">,
 ): TemplateKind[] {
-  const fromBlock = uniqueKinds(
-    (draft.review_block?.kinds ?? []) as TemplateKind[],
-  );
-  if (fromBlock.length > 0) return fromBlock;
   const context = parseDefaultsContext(draft.defaults_context);
-  return context === null
-    ? []
-    : uniqueKinds(Object.keys(context.kinds) as TemplateKind[]);
+  const consumed = new Set<string>([
+    ...(draft.review_block?.kinds ?? []),
+    ...(context === null ? [] : Object.keys(context.kinds)),
+  ]);
+  return TEMPLATE_KINDS.filter((kind) => consumed.has(kind));
 }

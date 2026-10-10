@@ -14,6 +14,7 @@ import {
   FLAT,
   HOME,
   household,
+  ME,
   PRIYA,
   record,
   revision,
@@ -394,7 +395,8 @@ describe("defaultsReviewCase: WEB-04 §5.7's four copies", () => {
 });
 
 describe("reviewKinds", () => {
-  test("the block's kinds first, else the captured context's", () => {
+  // WEB-12a R3: this test used to assert that a block's kinds REPLACE the captured context's, which hid a consumed kind from the review.
+  test("MU-S25: every consumed kind: the captured context's AND the block's, in template order", () => {
     const context = captureDefaults(record(), [
       "person",
       "progress",
@@ -404,7 +406,7 @@ describe("reviewKinds", () => {
         review_block: { kind: "defaults", kinds: ["task"] },
         defaults_context: context,
       }),
-    ).toEqual(["task"]);
+    ).toEqual(["person", "task", "progress"]);
     expect(
       reviewKinds({
         review_block: { kind: "defaults", kinds: [] },
@@ -417,5 +419,76 @@ describe("reviewKinds", () => {
         defaults_context: null,
       }),
     ).toEqual([]);
+    expect(
+      reviewKinds({
+        review_block: { kind: "defaults", kinds: ["progress", "person"] },
+        defaults_context: null,
+      }),
+    ).toEqual(["person", "progress"]);
+  });
+
+  test("MU-S25: a mixed capture (one kind known, one unavailable) is reviewed whole, not only the blocked kind", () => {
+    const capture = captureDefaults(
+      record(
+        snapshot({
+          templates: {
+            person: { kind: "private" },
+            task: {
+              kind: "explicit",
+              policy: {
+                grants: [{ kind: "household", id: ELSEWHERE, edit: false }],
+                exclude_accounts: [],
+              },
+            },
+          },
+        }),
+      ),
+      ["person", "task"],
+    );
+    expect(capture.defaultsReview).toEqual(["task"]);
+    expect(
+      reviewKinds({
+        review_block: { kind: "defaults", kinds: capture.defaultsReview },
+        defaults_context: capture.defaultsContext,
+      }),
+    ).toEqual(["person", "task"]);
+  });
+});
+
+describe("R4: the captured names of the accounts a template names directly", () => {
+  test("MU-S29: grants and exclusions are named from the SAME snapshot's members; an account no household lists is left out; the context round-trips", () => {
+    const capture = captureDefaults(
+      record(
+        snapshot({
+          templates: {
+            person: {
+              kind: "explicit",
+              policy: {
+                grants: [
+                  { kind: "account", id: SAM, edit: false },
+                  { kind: "account", id: FLAT, edit: true },
+                ],
+                exclude_accounts: [ME],
+              },
+            },
+          },
+        }),
+      ),
+      ["person"],
+    );
+    const person = capture.defaultsContext?.kinds.person;
+    expect(person?.accounts).toEqual([
+      { account_id: SAM, username: "sam" },
+      { account_id: ME, username: "me" },
+    ]);
+    expect(parseDefaultsContext(capture.defaultsContext)).toEqual(
+      capture.defaultsContext,
+    );
+    // A context without names (captured before they were recorded) and one with a damaged entry still read; the bad name is dropped.
+    const older = structuredClone(capture.defaultsContext) as unknown as {
+      kinds: { person: { accounts?: unknown } };
+    };
+    older.kinds.person.accounts = [{ account_id: "nope", username: 3 }];
+    expect(parseDefaultsContext(older)?.kinds.person?.accounts).toBeUndefined();
   });
 });

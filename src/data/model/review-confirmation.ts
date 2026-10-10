@@ -1,3 +1,4 @@
+import { canonicalJson } from "./canonical";
 import type { Bases, EnqueueRequest, TargetSpec } from "./outbox";
 import type {
   DraftRow,
@@ -22,6 +23,12 @@ import type {
  * addresses exactly the draft's own targets and is built only on the versions the draft was built on: if the versions the plan hands
  * the build differ from the draft's stored bases, the build REFUSES (`BasesMoved`), because a body this layer did not author must never
  * be sent on a version it was not composed against. That draft is reviewed from its own feature's screen instead.
+ *
+ * The confirmation is CONDITIONAL on the draft the person reviewed (WEB-12a R2). The rebuild is made from a body read before the write,
+ * so it states what it was decided on (`reviewed`: the draft's body digest, revision, captured context, review block and status), and
+ * the edit or supersession re-checks it inside its own transaction (`expectDraft`). A change committed in between, such as another
+ * page's edit of the same queued draft, refuses the confirmation (`draft_changed`): it is never overwritten by the older body, and the
+ * person reviews the draft as it now is.
  */
 export class BasesMoved extends Error {
   constructor() {
@@ -30,7 +37,42 @@ export class BasesMoved extends Error {
   }
 }
 
+/** What the person reviewed of a draft: the confirmation applies only while the stored draft is still exactly this. */
+export type ReviewedDraft = Pick<
+  DraftRow,
+  | "local_id"
+  | "status"
+  | "command_digest"
+  | "defaults_revision"
+  | "defaults_context"
+  | "review_block"
+>;
+
+/** The part of a draft a confirmation was decided on, as it is shown (a queue row is a whole `DraftRow`). */
+export function reviewedOf(draft: ReviewedDraft): ReviewedDraft {
+  return {
+    local_id: draft.local_id,
+    status: draft.status,
+    command_digest: draft.command_digest,
+    defaults_revision: draft.defaults_revision,
+    defaults_context: draft.defaults_context,
+    review_block: draft.review_block,
+  };
+}
+
+/** Whether a stored draft is still the one that was reviewed: its body, revision, captured context, review block and status. */
+export function isReviewedDraft(
+  stored: ReviewedDraft,
+  reviewed: ReviewedDraft,
+): boolean {
+  return (
+    canonicalJson(reviewedOf(stored)) === canonicalJson(reviewedOf(reviewed))
+  );
+}
+
 export interface ReviewConfirmation {
+  /** The draft as the person reviewed it (`reviewedOf` the row the review showed). */
+  reviewed: ReviewedDraft;
   /** The revision of the snapshot the person reviewed (64 hex). */
   defaultsRevision: string;
   /** What that snapshot captures for the draft's kinds: stored as the draft's `defaults_context`. */
@@ -93,6 +135,8 @@ export function confirmationRequest(
     ...(confirmation.replacementId === undefined
       ? {}
       : { localId: confirmation.replacementId }),
+    // Re-checked in the writing transaction: a draft changed since the read above is refused, never rebuilt from the older body.
+    expectDraft: (current) => isReviewedDraft(current, confirmation.reviewed),
     build: (bases) => {
       if (!sameBases(bases, stored)) throw new BasesMoved();
       return {

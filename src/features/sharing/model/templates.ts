@@ -69,14 +69,18 @@ export const KIND_SHARING: Readonly<Record<TemplateKind, string>> = {
 export interface TemplateDescription {
   /** One line: what new records of this kind resolve to. */
   summary: string;
-  /** Every household the template names, with its members as the snapshot lists them (or `unavailable`). */
+  /**
+   * Every household the template names, with the access it gives (`edit`) and its members as the snapshot lists them (or `unavailable`:
+   * nothing on this device names them).
+   */
   households: Array<
     | {
         id: string;
+        edit: boolean;
         name: string;
         members: Array<{ id: string; username: string }>;
       }
-    | { id: string; unavailable: true }
+    | { id: string; edit: boolean; unavailable: true }
   >;
   /** Accounts the template grants directly, by id. */
   accounts: Array<{ id: string; edit: boolean }>;
@@ -90,12 +94,23 @@ export function describeTemplate(
   primaryHouseholdId: string | null,
   households: ReadonlyArray<SnapshotHousehold | CapturedHousehold>,
 ): TemplateDescription {
+  // The access each named household gets: the primary household's from the template, a grant's own otherwise (edit beats read).
+  const accessOf = (id: string): boolean =>
+    template.kind === "primary_household"
+      ? template.edit
+      : template.kind === "explicit" &&
+        template.policy.grants.some(
+          (grant) =>
+            grant.kind === "household" && grant.id === id && grant.edit,
+        );
   const resolve = (id: string): TemplateDescription["households"][number] => {
     const found = households.find((h) => h.id === id);
+    const edit = accessOf(id);
     if (found === undefined || "unavailable" in found)
-      return { id, unavailable: true };
+      return { id, edit, unavailable: true };
     return {
       id,
+      edit,
       name: found.name,
       members: found.members.map((m) => ({
         id: m.account_id,
@@ -147,6 +162,24 @@ export function describeTemplate(
       };
     }
   }
+}
+
+/**
+ * Usernames by account id, from the member lists of the given households ONLY (WEB-12a R4). The defaults review labels the captured
+ * ("Was") audience from what was captured with the draft and the current ("Now") one from the current snapshot: an account neither names
+ * keeps an abbreviated id, never a name looked up today.
+ */
+export function memberLabels(
+  households: ReadonlyArray<SnapshotHousehold | CapturedHousehold>,
+): Map<string, string> {
+  const labels = new Map<string, string>();
+  for (const household of households) {
+    if ("unavailable" in household) continue;
+    for (const member of household.members)
+      if (!labels.has(member.account_id))
+        labels.set(member.account_id, member.username);
+  }
+  return labels;
 }
 
 /** The template that resolves, and its layer: never one layer's value shown as another's. */

@@ -1,6 +1,7 @@
 import {
   type BrowserContext,
   expect,
+  type Locator,
   type Page,
   type Route,
   test,
@@ -30,6 +31,8 @@ import { pressTab } from "./helpers";
  */
 const API = "/api/experimental/v1";
 const RID = "55555555-5555-4555-8555-555555555555";
+/** A second cached resource (E-SH10's target isolation). */
+const OTHER_RID = "66666666-6666-4666-8666-666666666666";
 const SAM = "22222222-2222-4222-8222-222222222222";
 const PRIYA = "33333333-3333-4333-8333-333333333333";
 const JAMIE = "44444444-4444-4444-8444-444444444444";
@@ -183,6 +186,10 @@ async function serveSharing(context: BrowserContext): Promise<Served> {
       );
     if (path === `/policies/${RID}`)
       return route.fulfill(json(200, served.policy));
+    if (path === `/policies/${OTHER_RID}`)
+      return route.fulfill(
+        json(200, { version: 1, policy: { grants: [], exclude_accounts: [] } }),
+      );
     if (path === "/households")
       return route.fulfill(
         json(200, (served.snapshot as { households: unknown }).households),
@@ -227,6 +234,14 @@ async function bootAt(context: BrowserContext, route: string): Promise<Page> {
   return page;
 }
 
+/** In-app navigation to `path` (history and popstate): the page and its memory stay, unlike `reopen`, which loads the page again. */
+async function navigateInApp(page: Page, path: string): Promise<void> {
+  await page.evaluate((to) => {
+    history.pushState(null, "", to);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, path);
+}
+
 /** The same page loaded again on `route` (the harness page: a plain reload would load the application's own route). */
 async function reopen(page: Page, route: string): Promise<void> {
   await page.goto(`/__session?route=${encodeURIComponent(route)}`);
@@ -242,6 +257,7 @@ async function cacheResource(
   page: Page,
   net: SyncStub,
   policyVersion = 2,
+  other = false,
 ): Promise<void> {
   net.script.push(() => ({
     status: 200,
@@ -262,6 +278,24 @@ async function cacheResource(
               archived: false,
             },
           },
+          ...(other
+            ? [
+                {
+                  kind: "upsert",
+                  resource: {
+                    id: OTHER_RID,
+                    kind: "person",
+                    parent_id: null,
+                    label: "Feed the cat",
+                    value: null,
+                    version: 1,
+                    policy_version: 1,
+                    can_edit: true,
+                    archived: false,
+                  },
+                },
+              ]
+            : []),
         ],
       ],
       "cursor-1",
@@ -274,14 +308,19 @@ async function cacheResource(
 async function setup(
   context: BrowserContext,
   route: string,
-  options: { resource?: boolean; arrange?: (served: Served) => void } = {},
+  options: {
+    resource?: boolean;
+    other?: boolean;
+    arrange?: (served: Served) => void;
+  } = {},
 ) {
   const net = await stubNetwork(context);
   const served = await serveSharing(context);
   options.arrange?.(served);
   await seedSettled(context);
   const page = await bootAt(context, route);
-  if (options.resource !== false) await cacheResource(page, net);
+  if (options.resource !== false)
+    await cacheResource(page, net, 2, options.other === true);
   return { net, served, page };
 }
 
@@ -386,7 +425,9 @@ test.describe("E-SH9: a non-owner (A7)", () => {
     await expect(dialog).toContainText(
       "Only the owner can change who can see this.",
     );
-    expect(dialog.locator("[data-audience]")).toHaveCount(0);
+    // Awaited (revision 1): an unawaited locator assertion is cancelled when the test returns first, which failed this case in two
+    // engines of the follow-up campaign without ever checking the count.
+    await expect(dialog.locator("[data-audience]")).toHaveCount(0);
     expect(asked).toBe(1);
   });
 });
@@ -621,7 +662,7 @@ test.describe("E-SH5: a locally blocked draft is never sent until the person con
     const review = page.getByRole("dialog", { name: "Review sharing" });
     await expect(review).toContainText("Your sharing defaults haven't changed");
     const was = review.locator('[data-review-kind="person"] [data-review-was]');
-    await expect(was).toContainText("Home: me, sam");
+    await expect(was).toContainText("Home · Read: me, sam");
     await expect(was).toContainText("Members not known on this device");
     await review.locator("[data-confirm]").click();
     await expect(review).toBeHidden();
@@ -780,42 +821,287 @@ test.describe("E-SH7: keyboard only (A12)", () => {
 });
 
 test.describe("E-SH8: viewports (A13)", () => {
+  /** The panel's geometry, its horizontal overflow and its visible targets under 44 px. */
+  const measure = async (dialog: Locator) => {
+    const box = await dialog.boundingBox();
+    const overflow = await dialog.evaluate(
+      (el) => el.scrollWidth - el.clientWidth,
+    );
+    const small = await dialog.evaluate((el) =>
+      [...el.querySelectorAll<HTMLElement>("button, [role=radio], a, input")]
+        .filter((c) => c.offsetParent !== null)
+        .map((c) => ({
+          name: c.getAttribute("aria-label") ?? c.textContent?.trim() ?? "",
+          h: c.getBoundingClientRect().height,
+        }))
+        .filter((c) => c.h < 44),
+    );
+    return { box, overflow, small };
+  };
+  /**
+   * Below the desktop breakpoint (1280 px) the sharing editors are FULL-BLEED sheets, as the accepted tablet frames draw them at 834×1112
+   * and 1112×834 (WEB-05.5 `tablet/sharing-portrait.html`, `sharing-landscape.html`, Q14) and the mobile sheet at 390 (WEB-12a R6); from
+   * it, the centred 440 px dialog.
+   */
+  const expectPlacement = (
+    box: { x: number; y: number; width: number; height: number } | null,
+    width: number,
+    height: number,
+  ) => {
+    expect(box).not.toBeNull();
+    if (width < 1280) {
+      expect(Math.round(box?.x ?? -1)).toBe(0);
+      expect(Math.round(box?.y ?? -1)).toBe(0);
+      expect(Math.round(box?.width ?? 0)).toBe(width);
+      expect(Math.round(box?.height ?? 0)).toBe(height);
+    } else {
+      expect(Math.round(box?.width ?? 0)).toBe(440);
+      expect(Math.round((box?.x ?? 0) + (box?.width ?? 0) / 2)).toBe(
+        Math.round(width / 2),
+      );
+    }
+  };
   for (const [width, height, name] of [
     [390, 844, "mobile"],
     [834, 1112, "tablet portrait"],
     [1112, 834, "tablet landscape"],
+    [1440, 900, "desktop"],
   ] as const)
-    test(`${name} ${width}×${height}: the editor fits, has no horizontal overflow and keeps 44 px targets; below the tablet breakpoint it is full-bleed`, async ({
+    test(`${name} ${width}×${height}: both editors are full-bleed sheets below 1280 px and the centred dialog from it, with no horizontal overflow and 44 px targets`, async ({
       context,
     }, info) => {
       const { page } = await setup(context, `/sharing/items/${RID}`);
       await page.setViewportSize({ width, height });
-      const dialog = page.getByRole("dialog", { name: editorTitle });
-      await expect(dialog.locator("[data-audience]")).toBeVisible();
-      const box = await dialog.boundingBox();
-      expect(box).not.toBeNull();
-      if (width < 768) {
-        expect(Math.round(box?.width ?? 0)).toBe(width);
-        expect(Math.round(box?.x ?? -1)).toBe(0);
-      } else {
-        expect(
-          (box?.x ?? -1) >= 0 && (box?.x ?? 0) + (box?.width ?? 0) <= width,
-        ).toBe(true);
+      const policy = page.getByRole("dialog", { name: editorTitle });
+      await expect(policy.locator("[data-audience]")).toBeVisible();
+      const policyMeasured = await measure(policy);
+      await reopen(page, "/sharing/defaults?kind=field");
+      const defaults = page.getByRole("dialog", {
+        name: "Sharing defaults — Fields",
+      });
+      await expect(
+        defaults.locator('[data-layer-form="personal"]'),
+      ).toBeVisible();
+      const defaultsMeasured = await measure(defaults);
+      recordEvidence(info, `e-sh8-${width}`, {
+        viewport: { width, height },
+        policy: policyMeasured,
+        defaults: defaultsMeasured,
+      });
+      for (const measured of [policyMeasured, defaultsMeasured]) {
+        expectPlacement(measured.box, width, height);
+        expect(measured.overflow).toBeLessThanOrEqual(0);
+        expect(measured.small).toEqual([]);
       }
-      const overflow = await dialog.evaluate(
-        (el) => el.scrollWidth - el.clientWidth,
-      );
-      expect(overflow).toBeLessThanOrEqual(0);
-      const small = await dialog.evaluate((el) =>
-        [...el.querySelectorAll<HTMLElement>("button, [role=radio], a, input")]
-          .filter((c) => c.offsetParent !== null)
-          .map((c) => ({
-            name: c.getAttribute("aria-label") ?? c.textContent?.trim() ?? "",
-            h: c.getBoundingClientRect().height,
-          }))
-          .filter((c) => c.h < 44),
-      );
-      recordEvidence(info, `e-sh8-${width}`, { box, overflow, small });
-      expect(small).toEqual([]);
     });
+});
+
+test.describe("E-SH10: the policy editor keeps an unsaved draft through the in-dialog sync control (ia.md §1.3.3; R5)", () => {
+  test("Read → Edit, an account grant added and an exclusion removed; the sync control opens the queue, back: all of it is shown again and nothing was saved; another resource never shows it; Save sends it; Cancel discards a draft", async ({
+    context,
+  }, info) => {
+    const { served, page } = await setup(context, `/sharing/items/${RID}`, {
+      other: true,
+    });
+    let dialog = page.getByRole("dialog", { name: editorTitle });
+    const home = () =>
+      dialog.getByRole("radiogroup", { name: "Home: Read or Edit" });
+    await home().getByRole("radio", { name: "Edit" }).click();
+    // An account grant added through the lookup, and the exclusion removed: explicit principals are kept too.
+    await dialog.getByRole("button", { name: "+ Add account grant" }).click();
+    await dialog.getByRole("textbox", { name: "Exact username" }).fill("jamie");
+    await dialog.getByRole("button", { name: "Look up" }).click();
+    await dialog.getByRole("button", { name: "Choose: jamie" }).click();
+    await expect(
+      dialog.locator(`[data-grant="account"][data-principal="${JAMIE}"]`),
+    ).toBeVisible();
+    await dialog
+      .locator(`[data-exclusion="${PRIYA}"]`)
+      .getByRole("button", { name: /^Remove exclusion/ })
+      .click();
+    await expect(dialog.locator(`[data-exclusion="${PRIYA}"]`)).toHaveCount(0);
+    await dialog.locator("[data-sync-tone]").click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sync/);
+    await page.goBack();
+    dialog = page.getByRole("dialog", { name: editorTitle });
+    await expect(dialog.locator("[data-audience]")).toBeVisible();
+    await expect(home().getByRole("radio", { name: "Edit" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(dialog.locator("[data-policy-restored]")).toBeVisible();
+    await expect(
+      dialog.locator(`[data-grant="account"][data-principal="${JAMIE}"]`),
+    ).toBeVisible();
+    await expect(dialog.locator(`[data-exclusion="${PRIYA}"]`)).toHaveCount(0);
+    expect(served.management).toEqual([]);
+    // Target isolation: another resource's editor never shows the draft kept for this one. In-app navigation (the kept draft lives in
+    // this page's memory; a reload forgets it by design).
+    const navigate = (to: string) => navigateInApp(page, to);
+    await navigate(`/sharing/items/${OTHER_RID}`);
+    const other = page.getByRole("dialog", { name: "Sharing — Feed the cat" });
+    await expect(other.locator("[data-audience]")).toBeVisible();
+    await expect(other.locator("[data-policy-restored]")).toHaveCount(0);
+    await expect(
+      other.locator(`[data-grant="account"][data-principal="${JAMIE}"]`),
+    ).toHaveCount(0);
+    await navigate(`/sharing/items/${RID}`);
+    dialog = page.getByRole("dialog", { name: editorTitle });
+    await expect(dialog.locator("[data-policy-restored]")).toBeVisible();
+    await dialog.locator("[data-save]").click();
+    await expect.poll(() => served.management.length).toBe(1);
+    expect(served.management[0]?.body).toEqual({
+      commands: [
+        {
+          kind: "replace_policy",
+          id: RID,
+          expected_version: 3,
+          policy: {
+            grants: [
+              { kind: "household", id: HOME, edit: true },
+              { kind: "account", id: JAMIE, edit: false },
+            ],
+            exclude_accounts: [],
+          },
+        },
+      ],
+    });
+    // The save closed the editor, which navigates to /sharing: wait for that navigation before navigating again (else the router's
+    // pending one can land after ours, as WebKit showed).
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sharing$/);
+    // Control: Cancel discards a KEPT draft. Kept again through the sync control and shown again, then cancelled: reopened IN THE SAME
+    // PAGE (a reload would forget anything kept anyway), the editor starts from the policy read.
+    await navigateInApp(page, `/sharing/items/${RID}`);
+    dialog = page.getByRole("dialog", { name: editorTitle });
+    await home().getByRole("radio", { name: "Edit" }).click();
+    await dialog.locator("[data-sync-tone]").click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sync/);
+    await page.goBack();
+    dialog = page.getByRole("dialog", { name: editorTitle });
+    await expect(dialog.locator("[data-policy-restored]")).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sharing$/);
+    await navigateInApp(page, `/sharing/items/${RID}`);
+    dialog = page.getByRole("dialog", { name: editorTitle });
+    await expect(dialog.locator("[data-audience]")).toBeVisible();
+    await expect(home().getByRole("radio", { name: "Read" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(dialog.locator("[data-policy-restored]")).toHaveCount(0);
+    recordEvidence(info, "e-sh10", { management: served.management });
+  });
+});
+
+test.describe("E-SH11: the defaults editor keeps unsaved choices offline and through the sync control (R5)", () => {
+  test("Inherit → Private survives offline then online; an explicit template with a household grant is kept through the sync control and back shows it (another kind never does); Save sends it; Done discards", async ({
+    context,
+  }, info) => {
+    const { served, page } = await setup(
+      context,
+      "/sharing/defaults?kind=field",
+      {
+        resource: false,
+      },
+    );
+    let dialog = page.getByRole("dialog", {
+      name: "Sharing defaults — Fields",
+    });
+    const personal = () => dialog.locator('[data-layer-form="personal"]');
+    const privateChoice = () =>
+      personal().getByRole("radio", { name: "Private", exact: true });
+    await privateChoice().click();
+    await page.evaluate(() => window.dispatchEvent(new Event("offline")));
+    await expect(
+      dialog.locator("[data-defaults-offline-editing]"),
+    ).toBeVisible();
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "true");
+    await expect(personal().locator('[data-save="personal"]')).toBeDisabled();
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(dialog.locator("[data-defaults-offline-editing]")).toHaveCount(
+      0,
+    );
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "true");
+    expect(served.management).toEqual([]);
+    // An explicit template with a household grant is kept as well.
+    await personal()
+      .getByRole("radio", { name: "Explicit policy…", exact: true })
+      .click();
+    await personal()
+      .getByRole("button", { name: "+ Add household grant" })
+      .click();
+    await personal().getByRole("button", { name: "Home", exact: true }).click();
+    await expect(
+      personal().locator(`[data-grant="household"][data-principal="${HOME}"]`),
+    ).toBeVisible();
+    // The sync control keeps it; back, the editor shows it again.
+    await dialog.locator("[data-sync-tone]").click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sync/);
+    await page.goBack();
+    dialog = page.getByRole("dialog", { name: "Sharing defaults — Fields" });
+    await expect(personal()).toBeVisible();
+    await expect(
+      personal().getByRole("radio", { name: "Explicit policy…", exact: true }),
+    ).toHaveAttribute("aria-checked", "true");
+    await expect(
+      personal().locator(`[data-grant="household"][data-principal="${HOME}"]`),
+    ).toBeVisible();
+    await expect(personal().locator("[data-layer-restored]")).toBeVisible();
+    expect(served.management).toEqual([]);
+    // Target isolation: another kind's form is another target and shows nothing kept; this kind's still has it.
+    dialog = page.getByRole("dialog");
+    await dialog.getByRole("tab", { name: "People" }).click();
+    await expect(dialog).toHaveAccessibleName("Sharing defaults — People");
+    await expect(personal()).toBeVisible();
+    await expect(personal().locator("[data-layer-restored]")).toHaveCount(0);
+    await dialog.getByRole("tab", { name: "Fields" }).click();
+    await expect(dialog).toHaveAccessibleName("Sharing defaults — Fields");
+    dialog = page.getByRole("dialog", { name: "Sharing defaults — Fields" });
+    await expect(personal().locator("[data-layer-restored]")).toBeVisible();
+    await personal().locator('[data-save="personal"]').click();
+    await expect.poll(() => served.management.length).toBe(1);
+    expect(served.management[0]?.body).toEqual({
+      commands: [
+        {
+          kind: "set_defaults",
+          household_id: null,
+          resource_kind: "field",
+          expected_version: 0,
+          template: {
+            kind: "explicit",
+            policy: {
+              grants: [{ kind: "household", id: HOME, edit: false }],
+              exclude_accounts: [],
+            },
+          },
+        },
+      ],
+    });
+    // Control: Done discards KEPT choices. Kept again through the sync control and shown again, then Done: reopened in the same page
+    // (a reload would forget anything kept anyway), nothing kept is shown.
+    await navigateInApp(page, "/sharing/defaults?kind=field");
+    dialog = page.getByRole("dialog", { name: "Sharing defaults — Fields" });
+    await privateChoice().click();
+    await dialog.locator("[data-sync-tone]").click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sync/);
+    await page.goBack();
+    dialog = page.getByRole("dialog", { name: "Sharing defaults — Fields" });
+    await expect(personal().locator("[data-layer-restored]")).toBeVisible();
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "true");
+    await dialog.getByRole("button", { name: "Done" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sharing$/);
+    await navigateInApp(page, "/sharing/defaults?kind=field");
+    dialog = page.getByRole("dialog", { name: "Sharing defaults — Fields" });
+    await expect(personal()).toBeVisible();
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "false");
+    await expect(personal().locator("[data-layer-restored]")).toHaveCount(0);
+    recordEvidence(info, "e-sh11", { management: served.management });
+  });
 });

@@ -20,6 +20,8 @@ import { createSharingApi, type SharingApi } from "./api";
 export interface SharingEnv {
   api: SharingApi;
   accountId: string;
+  /** The displayed `(account, epoch)` as one key: what unsaved editor input is kept for (`retained.ts`), never shown to another. */
+  identity: string;
   online: boolean;
   /** `session.compat` is `supported`. */
   writable: boolean;
@@ -89,12 +91,13 @@ function ProductionSharingEnv({ children }: { children: ReactNode }) {
         : {
             api,
             accountId: account,
+            identity: `${account}:${epoch}`,
             online,
             writable: compat.status === "supported",
             newId: () => crypto.randomUUID(),
             now: () => Date.now(),
           },
-    [api, account, online, compat.status],
+    [api, account, epoch, online, compat.status],
   );
   // No identity is displayed: there is nothing to show (the gate has taken over).
   if (value === null) return null;

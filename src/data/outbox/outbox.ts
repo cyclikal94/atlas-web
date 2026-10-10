@@ -30,6 +30,7 @@ import { draftOperations, operationDraft } from "../model/retry";
 import {
   confirmationPath,
   confirmationRequest,
+  isReviewedDraft,
   type ReviewConfirmation,
 } from "../model/review-confirmation";
 import type { LocalId } from "../model/types";
@@ -82,7 +83,13 @@ export type EditOutcome =
   | { kind: "edited"; localId: LocalId }
   | {
       kind: "refused";
-      reason: RefusalReason | "not_found" | "not_queued" | "retargeted";
+      reason:
+        | RefusalReason
+        | "not_found"
+        | "not_queued"
+        | "retargeted"
+        /** The request's `expectDraft` refused the draft as it is stored now: nothing was written. */
+        | "draft_changed";
     };
 
 export type DiscardOutcome =
@@ -113,6 +120,8 @@ export type SupersedeOutcome =
         | "not_supersedable"
         /** The replacement's `localId` already names a draft (the old one's included): a replacement needs a fresh identity (R24). */
         | "key_in_use"
+        /** The request's `expectDraft` refused the old draft as it is stored now: nothing was written. */
+        | "draft_changed"
         /**
          * No order of the queue lets the replacement and the drafts around it all be sent (R45): it would have to wait for a newer draft
          * (or for one of its own dependants) while another draft waits for it, or it raises a version one of the old draft's dependants
@@ -146,7 +155,9 @@ export type ConfirmReviewOutcome =
         | "retargeted"
         | "not_supersedable"
         | "key_in_use"
-        | "order_conflict";
+        | "order_conflict"
+        /** The draft is no longer the one the person reviewed (edited elsewhere, or its review changed): review it again. */
+        | "draft_changed";
     };
 
 export interface Outbox {
@@ -1208,6 +1219,9 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     if (found === null) return { kind: "refused", reason: "not_found" };
     const path = confirmationPath(found.draft);
     if (path === null) return { kind: "refused", reason: "not_reviewing" };
+    // What the person reviewed must still be what is stored (and is checked again in the writing transaction, `expectDraft`).
+    if (!isReviewedDraft(found.draft, confirmation.reviewed))
+      return { kind: "refused", reason: "draft_changed" };
     const request = confirmationRequest(
       found.draft,
       found.command,

@@ -14394,11 +14394,14 @@ export const UNIT = [
     file: "src/features/sharing/ResourcePolicyEditor.tsx",
     tests: ["tests/features/sharing/policy-editor.test.tsx"],
     expect: /MU-S19/,
+    // ADAPTED in WEB-12a review cycle 1 (R1/R5): Save now sends the draft's own `base` (the version it was composed against, so a draft
+    // kept through the sync control stays guarded by it). A fresh draft takes its base from the read, so the same defect (the cache's
+    // lagging policy_version guarding the save instead of GET /policies') is now made where the base is set.
     patch: (t) =>
       sub(
         t,
-        '            data-save=""\n            onClick={() => void send(draft.policy, read.version)}',
-        '            data-save=""\n            onClick={() => void send(draft.policy, merged.policy_version ?? read.version)}',
+        "      base: policyLoad.value.version,\n",
+        "      base: merged?.policy_version ?? policyLoad.value.version,\n",
       ),
   },
   {
@@ -14432,6 +14435,238 @@ export const UNIT = [
         ),
         "      if (shared !== undefined) return shared;\n",
         "",
+      ),
+  },
+  // ---- WEB-12a review cycle 1: one mutant per corrected defect (R1-R5); R6 is a real-engine mutant (MU-1156) ----------------------------
+  {
+    id: "MU-1142",
+    title:
+      "WEB-12a R2: an edit of a queued draft ignores the request's expectDraft (the confirmation overwrites an edit committed after its read)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-S23/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (request.expectDraft !== undefined && !request.expectDraft(draft))\n    return { kind: "refused", reason: "draft_changed" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1143",
+    title:
+      "WEB-12a R2: any stored draft counts as the one the person reviewed (the confirmation is no longer conditional on it)",
+    file: "src/data/model/review-confirmation.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-S2[34]/,
+    patch: (t) =>
+      sub(
+        t,
+        "    canonicalJson(reviewedOf(stored)) === canonicalJson(reviewedOf(reviewed))\n",
+        "    canonicalJson(reviewedOf(stored)) !== null\n",
+      ),
+  },
+  {
+    id: "MU-1144",
+    title: "WEB-12a R2: the review confirms without naming the draft it showed",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S28/,
+    patch: (t) => sub(t, "        reviewed: reviewedOf(draft),\n", ""),
+  },
+  {
+    id: "MU-1145",
+    title:
+      "WEB-12a R3: a non-empty review block replaces the captured kinds (a consumed kind whose audience was known is never reviewed)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: [
+      "tests/data/defaults-capture.test.ts",
+      "tests/features/sharing/defaults-review.test.tsx",
+    ],
+    expect: /MU-S2[56]/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ...(context === null ? [] : Object.keys(context.kinds)),\n",
+        "    ...((draft.review_block?.kinds ?? []).length > 0 || context === null\n      ? []\n      : Object.keys(context.kinds)),\n",
+      ),
+  },
+  {
+    id: "MU-1146",
+    title:
+      "WEB-12a R4: the review shows a direct grant only as a count (who, and with what access, is hidden)",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S27/,
+    patch: (t) =>
+      sub(
+        t,
+        "              {copy.REVIEW_ACCOUNT_ACCESS(label(account.id), account.edit)}\n",
+        '              {"1 account granted directly"}\n',
+      ),
+  },
+  {
+    id: "MU-1147",
+    title: "WEB-12a R4: the review does not show the audience's exclusions",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S27/,
+    patch: (t) =>
+      sub(
+        t,
+        "              {copy.REVIEW_EXCLUDED(label(id))}\n",
+        "              {null}\n",
+      ),
+  },
+  {
+    id: "MU-1148",
+    title:
+      "WEB-12a R4: a household grant's access is not shown (Read and Edit look the same in the review)",
+    file: "src/features/sharing/model/templates.ts",
+    tests: [
+      "tests/features/sharing/defaults-review.test.tsx",
+      "tests/features/sharing/model.test.ts",
+    ],
+    expect: /MU-S35/,
+    patch: (t) =>
+      sub(
+        t,
+        '            grant.kind === "household" && grant.id === id && grant.edit,\n',
+        '            grant.kind === "household" && grant.id === id && false,\n',
+      ),
+  },
+  {
+    id: "MU-1149",
+    title:
+      "WEB-12a R4: the capture records no names for the accounts a template names directly (the review's Was shows only ids)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: [
+      "tests/data/defaults-capture.test.ts",
+      "tests/features/sharing/defaults-review.test.tsx",
+    ],
+    expect: /MU-S2[79]/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (member !== undefined)\n        accounts.push({ account_id: id, username: member.username });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1150",
+    title:
+      "WEB-12a R1: a sharing read is not bound to its target (the previous primary household's template and version are kept for the next)",
+    file: "src/features/sharing/parts.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S32/,
+    patch: (t) =>
+      sub(
+        t,
+        "  a.length === b.length && a.every((value, at) => Object.is(value, b[at]));\n",
+        "  a.length === b.length;\n",
+      ),
+  },
+  {
+    id: "MU-1151",
+    title:
+      "WEB-12a R1: the policy editor is neither renewed for another resource nor reads it (A's draft and version are saved to B)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S30/,
+    // Both protections go: the editor keyed by its resource and the policy read bound to it (either alone keeps the target).
+    patch: (t) =>
+      sub(
+        sub(t, "      key={`${env.identity}\\u0000${props.resourceId}`}\n", ""),
+        "    { enabled: reading, now: env.now, target: [env.api, resourceId] },\n",
+        "    { enabled: reading, now: env.now, target: [env.api] },\n",
+      ),
+  },
+  {
+    id: "MU-1152",
+    title:
+      "WEB-12a R5: the policy editor's sync control does not keep the unsaved draft",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S31/,
+    patch: (t) => sub(t, "      onRetainDraft={keep}\n", ""),
+  },
+  {
+    id: "MU-1153",
+    title:
+      "WEB-12a R5: going offline replaces the defaults editor's forms with the read-only snapshot (unsaved choices are lost on return)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S33/,
+    patch: (t) =>
+      sub(
+        t,
+        "          {!env.online && !formsRead ? (\n",
+        "          {!env.online ? (\n",
+      ),
+  },
+  {
+    id: "MU-1154",
+    title:
+      "WEB-12a R5: the defaults editor's sync control does not keep the forms' unsaved choices",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S34/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onRetainDraft={() => {\n        for (const keeper of forms.current.values()) keeper.keep();\n      }}\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1155",
+    title:
+      "WEB-12a R5: a kept policy draft is saved at the version just read, not the one it was composed against (a newer policy is overwritten)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S36/,
+    patch: (t) =>
+      sub(
+        t,
+        "            onClick={() => void send(draft.policy, draft.base)}\n",
+        "            onClick={() => void send(draft.policy, read.version)}\n",
+      ),
+  },
+  {
+    id: "MU-1157",
+    title:
+      "WEB-12a R5: Cancel in the policy editor does not discard a draft the sync control kept (it comes back on reopening)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S37/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const cancel = () => {\n    discard();\n    close();\n  };\n",
+        "  const cancel = () => {\n    close();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1158",
+    title:
+      "WEB-12a R5: Escape and the close icon do not discard a draft the sync control kept in the policy editor",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S38/,
+    patch: (t) => sub(t, "      onDiscard={discard}\n", ""),
+  },
+  {
+    id: "MU-1159",
+    title:
+      "WEB-12a R5: Done in the defaults editor does not discard choices the sync control kept",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S39/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const done = () => {\n    discardForms();\n    onClose();\n  };\n",
+        "  const done = () => {\n    onClose();\n  };\n",
       ),
   },
 ];
@@ -16764,5 +16999,15 @@ export const ENGINE = [
         "      if (shared !== undefined) return shared;\n",
         "",
       ),
+  },
+  {
+    id: "MU-1156",
+    title:
+      "WEB-12a R6: (REAL ENGINE) the policy editor is the generic 768 px dialog, not the full-bleed sheet the tablet frames draw",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH8:",
+    expect: /E-SH8:/,
+    patch: (t) => sub(t, '      sheetBelow="desktop"\n', ""),
   },
 ];

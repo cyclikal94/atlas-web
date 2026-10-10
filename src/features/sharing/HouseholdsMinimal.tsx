@@ -31,11 +31,11 @@ export function HouseholdsMinimal() {
   const ids = { heading: useId(), invitations: useId(), create: useId() };
   const [households, reloadHouseholds] = useSharingLoad(
     () => env.api.readHouseholds(),
-    { enabled: env.online, now: env.now },
+    { enabled: env.online, now: env.now, target: [env.api] },
   );
   const [invitations, reloadInvitations] = useSharingLoad(
     () => env.api.readInvitations(),
-    { enabled: env.online, now: env.now },
+    { enabled: env.online, now: env.now, target: [env.api] },
   );
   const [problem, setProblem] = useState<{
     message: string;

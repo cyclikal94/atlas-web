@@ -4,12 +4,14 @@ import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
 import { List } from "../../components/ui/list";
 import {
+  type CapturedAccount,
   type CapturedHousehold,
   captureDefaults,
   type DefaultTemplate,
   type DraftRow,
   defaultsReviewCase,
   parseDefaultsContext,
+  reviewedOf,
   reviewKinds,
   type SnapshotHousehold,
   type TemplateKind,
@@ -18,8 +20,13 @@ import {
 } from "../../data";
 import * as copy from "./copy";
 import { SharingBoundary, useSharingEnv } from "./env";
+import { anonymousLabel } from "./model/audience";
 import { freshForReview } from "./model/review";
-import { describeTemplate, KIND_SHARING } from "./model/templates";
+import {
+  describeTemplate,
+  KIND_SHARING,
+  memberLabels,
+} from "./model/templates";
 import { Banner, formatWhen } from "./parts";
 
 /**
@@ -32,6 +39,12 @@ import { Banner, formatWhen } from "./parts";
  * Confirm is the person's explicit approval and the ONLY thing that releases the draft (a background fetch never does): the stored
  * command is resent with the reviewed revision (an edit in place for a draft never sent; a supersession for one the server refused).
  * Discard removes it (a defaults review is discardable: nothing was applied).
+ *
+ * The review covers EVERY kind the draft consumes, not only those its block names (R3), and each audience is shown principal by
+ * principal: each household with its access and members, each account granted directly with its access, each exclusion (R4). "Was" is
+ * labelled only from what was captured with the draft and "Now" only from the current snapshot; an account neither names is shown by an
+ * abbreviated id. The confirmation is conditional on the draft exactly as shown (R2): edited elsewhere meanwhile, it is refused and the
+ * person reviews it again.
  */
 export function DefaultsReview({
   draft,
@@ -115,6 +128,8 @@ function ReviewDialog({
     setProblem(null);
     const out = await actions
       .confirmDefaultsReview(draft.local_id, {
+        // Exactly the draft this review shows: changed meanwhile, the confirmation is refused (`draft_changed`), never applied to it.
+        reviewed: reviewedOf(draft),
         defaultsRevision: capture.defaultsRevision as string,
         defaultsContext: capture.defaultsContext,
         replacementId,
@@ -133,7 +148,9 @@ function ReviewDialog({
         ? copy.REVIEW_GONE
         : reason === "rebuild_refused"
           ? copy.REVIEW_OWN_SCREEN
-          : copy.REVIEW_FAILED,
+          : reason === "draft_changed"
+            ? copy.REVIEW_CHANGED
+            : copy.REVIEW_FAILED,
     );
   };
 
@@ -254,7 +271,11 @@ function KindSection({
   onRetry,
 }: {
   kind: TemplateKind;
-  was: { template: DefaultTemplate; households: CapturedHousehold[] } | null;
+  was: {
+    template: DefaultTemplate;
+    households: CapturedHousehold[];
+    accounts?: CapturedAccount[];
+  } | null;
   wasRevision: string | null;
   wasPrimary: string | null;
   now: {
@@ -288,6 +309,7 @@ function KindSection({
               template={was.template}
               primary={wasPrimary}
               households={was.households}
+              accounts={was.accounts ?? []}
             />
             {wasRevision ? (
               <p className="text-[12px] text-ink-2">
@@ -333,36 +355,71 @@ function Described({
   template,
   primary,
   households,
+  accounts = [],
 }: {
   template: DefaultTemplate;
   primary: string | null;
   households: ReadonlyArray<SnapshotHousehold | CapturedHousehold>;
+  /** Names captured with the draft for the accounts the template names directly ("Was" only). */
+  accounts?: readonly CapturedAccount[];
 }) {
   const described = describeTemplate(template, primary, households);
+  // Names only from THIS side's own snapshot (captured for "Was", current for "Now"): never today's names on the old audience.
+  const labels = memberLabels(households);
+  for (const account of accounts)
+    if (!labels.has(account.account_id))
+      labels.set(account.account_id, account.username);
+  const label = (id: string) => labels.get(id) ?? anonymousLabel(id);
+  const rows =
+    described.households.length +
+    described.accounts.length +
+    described.excluded.length;
   return (
     <div className="flex flex-col gap-1 text-[13px] text-ink-1">
       <p>{described.summary}</p>
-      {described.households.length > 0 ? (
+      {rows > 0 ? (
         <List className="flex flex-col gap-0.5">
           {described.households.map((household) => (
             <li
-              key={household.id}
+              key={`household:${household.id}`}
               className="list-none text-[12.5px]"
               data-review-household={household.id}
             >
               {"unavailable" in household
-                ? `${copy.HOUSEHOLD_UNKNOWN}: ${copy.REVIEW_MEMBERS_UNKNOWN}`
-                : `${household.name}: ${household.members.map((m) => m.username).join(", ")}`}
+                ? copy.REVIEW_HOUSEHOLD_ACCESS(
+                    copy.HOUSEHOLD_UNKNOWN,
+                    household.edit,
+                    copy.REVIEW_MEMBERS_UNKNOWN,
+                  )
+                : copy.REVIEW_HOUSEHOLD_ACCESS(
+                    household.name,
+                    household.edit,
+                    household.members.length === 0
+                      ? copy.REVIEW_HOUSEHOLD_NO_MEMBERS
+                      : household.members.map((m) => m.username).join(", "),
+                  )}
+            </li>
+          ))}
+          {described.accounts.map((account) => (
+            <li
+              key={`account:${account.id}`}
+              className="list-none text-[12.5px]"
+              data-review-account={account.id}
+              data-review-access={account.edit ? "edit" : "read"}
+            >
+              {copy.REVIEW_ACCOUNT_ACCESS(label(account.id), account.edit)}
+            </li>
+          ))}
+          {described.excluded.map((id) => (
+            <li
+              key={`excluded:${id}`}
+              className="list-none text-[12.5px]"
+              data-review-excluded={id}
+            >
+              {copy.REVIEW_EXCLUDED(label(id))}
             </li>
           ))}
         </List>
-      ) : null}
-      {described.accounts.length > 0 ? (
-        <p className="text-[12.5px] text-ink-2">
-          {described.accounts.length === 1
-            ? "1 account granted directly"
-            : `${described.accounts.length} accounts granted directly`}
-        </p>
       ) : null}
     </div>
   );

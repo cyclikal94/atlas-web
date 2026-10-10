@@ -33,7 +33,21 @@ export interface DialogProps {
    * may not hold focus: Safari and iOS do not focus a button on click or tap.
    */
   returnFocusRef?: RefObject<HTMLElement | null>;
+  /**
+   * Where the full-screen sheet gives way to the centred dialog. `tablet` (the default): from 768 px, the generic rule (ia.md §3 and
+   * design-coverage §6). `desktop`: from 1280 px, for a dialog whose accepted tablet frames draw it as a full-bleed sheet at both
+   * tablet orientations (the sharing editors: WEB-05.5 `tablet/sharing-portrait.html` and `sharing-landscape.html`, Q14; WEB-12a R6).
+   */
+  sheetBelow?: "tablet" | "desktop";
 }
+
+/** The panel's classes: a full-screen sheet below the breakpoint, the centred dialog from it. Written out whole for Tailwind. */
+const PANEL: Readonly<Record<"tablet" | "desktop", string>> = {
+  tablet:
+    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[440px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-dialog tablet:border tablet:border-hairline-strong tablet:shadow-modal",
+  desktop:
+    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[440px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-dialog desktop:border desktop:border-hairline-strong desktop:shadow-modal",
+};
 
 /**
  * The dialog pattern (ia.md 3). Header: title, the in-dialog sync control (inside the focus trap, because the
@@ -52,6 +66,7 @@ export function Dialog({
   onCloseAutoFocus,
   initialFocusSelector,
   returnFocusRef,
+  sheetBelow = "tablet",
 }: DialogProps) {
   const container = useRequiredPortalContainer();
   const opener = useRef<HTMLElement | null>(null);
@@ -119,7 +134,8 @@ export function Dialog({
             target.focus();
           }}
           {...(description ? {} : { "aria-describedby": undefined })}
-          className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[440px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-dialog tablet:border tablet:border-hairline-strong tablet:shadow-modal"
+          data-dialog-sheet-below={sheetBelow}
+          className={PANEL[sheetBelow]}
         >
           <header className="flex items-center gap-3 border-b border-hairline px-[18px] py-4">
             {/* min-w-min: the title never squeezes below its longest word; the sync control gives way instead. */}

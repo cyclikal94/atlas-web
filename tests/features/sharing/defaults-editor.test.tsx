@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   screen,
@@ -10,7 +11,9 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { TemplateKind } from "../../../src/data";
 import * as copy from "../../../src/features/sharing/copy";
 import { DefaultsEditor } from "../../../src/features/sharing/DefaultsEditor";
+import { forgetAllRetained } from "../../../src/features/sharing/retained";
 import {
+  FLAT,
   HOME,
   household,
   ME,
@@ -19,13 +22,21 @@ import {
   snapshot,
 } from "../../support/data/sharing";
 import { stubEnv } from "../../support/data/ui-env";
-import { emptyScope, fakeSharingApi, ok } from "../../support/sharing/fake-api";
+import {
+  type Answer,
+  emptyScope,
+  fakeSharingApi,
+  ok,
+} from "../../support/sharing/fake-api";
 import { mountSharing } from "../../support/sharing/mount";
 
 /**
  * A4, A12 (component layer): WF-SHARING-03 over the data env double (the B5 record) and a scripted sharing API, in jsdom. FIXTURE evidence.
  */
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  forgetAllRetained();
+});
 
 function setup(
   over: {
@@ -314,5 +325,283 @@ describe("the resolution chain and the layers", () => {
         true,
       ),
     );
+  });
+});
+
+// ---- WEB-12a review cycle 1 --------------------------------------------------------------------------------------------------------
+const householdForm = () =>
+  document.querySelector<HTMLElement>('[data-layer-form="household"]');
+/** The layer's own choice group (the first radiogroup of the form; an explicit policy adds its grants' groups after it). */
+const layerGroup = (form: HTMLElement) =>
+  within(form).getAllByRole("radiogroup")[0] as HTMLElement;
+const choose = (form: HTMLElement, name: string) =>
+  fireEvent.click(within(layerGroup(form)).getByRole("radio", { name }));
+const chosen = (form: HTMLElement) =>
+  within(layerGroup(form))
+    .getAllByRole("radio")
+    .find((radio) => radio.getAttribute("aria-checked") === "true")
+    ?.textContent;
+const scopeWith = (field: { template: object | null; version: number }) => {
+  const scope = emptyScope();
+  scope.field = field as never;
+  return scope;
+};
+const snapWith = (primary: string, name: string) =>
+  record(
+    snapshot({
+      primary,
+      households: [
+        household({
+          id: primary,
+          name,
+          role: "manager",
+          members: [{ account_id: ME, username: "me", role: "manager" }],
+        }),
+      ],
+    }),
+    { fetched_at: Date.now(), issued_at: Date.now() },
+  );
+
+/** The editor over a primary household H1, with each household layer read answered in turn, and a fixed clock (equal read times). */
+function householdSetup(
+  householdReads: Answer<ReturnType<typeof emptyScope>>[],
+) {
+  const env = stubEnv();
+  env.setDefaults(snapWith(HOME, "Home"));
+  const api = fakeSharingApi();
+  api.next.templates.push(...[]);
+  const reads = [...householdReads];
+  api.defaults.templates = () => ok(emptyScope());
+  const original = api.readTemplates.bind(api);
+  api.readTemplates = async (householdId) => {
+    if (householdId === null) return original(null);
+    api.calls.push({ op: "readTemplates", args: [householdId] });
+    const next = reads.shift();
+    if (next === undefined) return ok(emptyScope());
+    return typeof next === "function" ? next() : next;
+  };
+  const view = mountSharing(
+    <DefaultsEditor kind="field" onKindChange={vi.fn()} onClose={vi.fn()} />,
+    { env, api, sharing: { now: () => 1_000 } },
+  );
+  return { ...view, env, api };
+}
+const householdReads = (api: ReturnType<typeof fakeSharingApi>) =>
+  api.calls
+    .filter((c) => c.op === "readTemplates" && c.args[0] !== null)
+    .map((c) => c.args[0]);
+
+describe("R1: the household layer belongs to the primary household it was read for", () => {
+  test("MU-S32: H1 → H2 mid-edit (equal versions, equal read times): H2 is read before anything can be saved, and Save sends H2's own version", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const t = householdSetup([
+      ok(scopeWith({ template: { kind: "private" }, version: 3 })),
+      async () => {
+        await gate;
+        return ok(scopeWith({ template: { kind: "private" }, version: 3 }));
+      },
+    ]);
+    const first = await waitFor(() => {
+      const found = householdForm();
+      if (!found) throw new Error("no household form");
+      return found;
+    });
+    choose(first, copy.CHOICE_HOUSEHOLD_EDIT);
+    act(() => t.env.setDefaults(snapWith(FLAT, "Flat")));
+    // While FLAT is being read, nothing of HOME's can be saved for it.
+    await waitFor(() => expect(householdForm()).toBeNull());
+    expect(document.querySelector('[data-save="household"]')).toBeNull();
+    release();
+    const second = await waitFor(() => {
+      const found = householdForm();
+      if (!found) throw new Error("no household form");
+      return found;
+    });
+    expect(householdReads(t.api)).toEqual([HOME, FLAT]);
+    // FLAT's own template, not HOME's unsaved choice.
+    expect(chosen(second)).toBe(copy.CHOICE_PRIVATE);
+    choose(second, copy.CHOICE_HOUSEHOLD_READ);
+    fireEvent.click(save("household"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands).toEqual([
+      {
+        kind: "set_defaults",
+        household_id: FLAT,
+        resource_kind: "field",
+        expected_version: 3,
+        template: { kind: "primary_household", edit: false },
+      },
+    ]);
+  });
+
+  test("MU-S32: H1's read answered AFTER the switch never becomes H2's template or version", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const t = householdSetup([
+      async () => {
+        await gate;
+        return ok(scopeWith({ template: { kind: "private" }, version: 9 }));
+      },
+      ok(scopeWith({ template: null, version: 0 })),
+    ]);
+    await waitFor(() => expect(householdReads(t.api)).toEqual([HOME]));
+    act(() => t.env.setDefaults(snapWith(FLAT, "Flat")));
+    const form = await waitFor(() => {
+      const found = householdForm();
+      if (!found) throw new Error("no household form");
+      return found;
+    });
+    release();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    choose(form, copy.CHOICE_HOUSEHOLD_EDIT);
+    fireEvent.click(save("household"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands[0]).toMatchObject({
+      household_id: FLAT,
+      expected_version: 0,
+    });
+  });
+});
+
+describe("R5: unsaved choices survive going offline and the sync control; Done discards them", () => {
+  test("MU-S33: Inherit → Private, offline, then online: Private is still chosen, and nothing was saved", async () => {
+    const t = setup({ personal: { template: null, version: 0 } });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    t.setSharing({ online: false });
+    // The re-render is synchronous: the forms are still there, with the offline note, never the read-only snapshot in their place.
+    expect(
+      document.querySelector("[data-defaults-offline-editing]"),
+    ).not.toBeNull();
+    expect(document.querySelector("[data-defaults-offline]")).toBeNull();
+    expect(personalForm()).not.toBeNull();
+    expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE);
+    // Offline, Save waits for the connection with the reason beside it.
+    expect(save("personal")).toBeDisabled();
+    t.setSharing({ online: true });
+    await waitFor(() =>
+      expect(screen.queryByText(copy.DEFAULTS_OFFLINE_EDITING)).toBeNull(),
+    );
+    expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE);
+    expect(t.api.sent).toEqual([]);
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands[0]).toMatchObject({
+      household_id: null,
+      expected_version: 0,
+      template: { kind: "private" },
+    });
+  });
+
+  test("MU-S34: the sync control keeps both layers' choices (an explicit policy included) and reopening shows them; nothing is sent until Save", async () => {
+    const t = setup({
+      personal: { template: null, version: 0 },
+      household: { template: { kind: "private" }, version: 3 },
+    });
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    choose(householdForm() as HTMLElement, copy.CHOICE_HOUSEHOLD_EDIT);
+    choose(personalForm(), copy.CHOICE_EXPLICIT);
+    fireEvent.click(
+      within(personalForm()).getByRole("button", { name: copy.ADD_HOUSEHOLD }),
+    );
+    fireEvent.click(
+      await within(personalForm()).findByRole("button", { name: "Home" }),
+    );
+    fireEvent.click(
+      screen.getByRole("dialog").querySelector("[data-sync-tone]") as Element,
+    );
+    expect(t.onClose).toHaveBeenCalled();
+    cleanup();
+    // Reopened (the same identity): both forms come back as they were left.
+    const again = setup({
+      personal: { template: null, version: 0 },
+      household: { template: { kind: "private" }, version: 3 },
+    });
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    expect(chosen(householdForm() as HTMLElement)).toBe(
+      copy.CHOICE_HOUSEHOLD_EDIT,
+    );
+    expect(chosen(personalForm())).toBe(copy.CHOICE_EXPLICIT);
+    expect(
+      within(personalForm()).getByRole("radiogroup", {
+        name: `Home: ${copy.READ} or ${copy.EDIT}`,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(copy.RESTORED_UNSAVED)).toHaveLength(2);
+    expect(again.api.sent).toEqual([]);
+    expect(t.api.sent).toEqual([]);
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(again.api.sent).toHaveLength(1));
+    expect(again.api.sent[0]?.commands[0]).toMatchObject({
+      household_id: null,
+      expected_version: 0,
+      template: {
+        kind: "explicit",
+        policy: {
+          grants: [{ kind: "household", id: HOME, edit: false }],
+          exclude_accounts: [],
+        },
+      },
+    });
+  });
+
+  test("MU-S39: Done discards KEPT choices: reopening shows the stored templates", async () => {
+    const first = setup({ personal: { template: null, version: 0 } });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    fireEvent.click(
+      screen.getByRole("dialog").querySelector("[data-sync-tone]") as Element,
+    );
+    expect(first.onClose).toHaveBeenCalled();
+    cleanup();
+    const t = setup({ personal: { template: null, version: 0 } });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE);
+    fireEvent.click(screen.getByRole("button", { name: copy.CLOSE }));
+    expect(t.onClose).toHaveBeenCalled();
+    cleanup();
+    setup({ personal: { template: null, version: 0 } });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE);
+    expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
+  });
+
+  test("control: kept choices are only for their own target: another household's layer never shows them", async () => {
+    const t = setup({
+      household: { template: { kind: "private" }, version: 3 },
+    });
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    choose(householdForm() as HTMLElement, copy.CHOICE_HOUSEHOLD_EDIT);
+    fireEvent.click(
+      screen.getByRole("dialog").querySelector("[data-sync-tone]") as Element,
+    );
+    expect(t.onClose).toHaveBeenCalled();
+    cleanup();
+    const other = householdSetup([
+      ok(scopeWith({ template: { kind: "private" }, version: 3 })),
+    ]);
+    // Positive control: the same identity and household get their kept choice back.
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    expect(chosen(householdForm() as HTMLElement)).toBe(
+      copy.CHOICE_HOUSEHOLD_EDIT,
+    );
+    act(() => other.env.setDefaults(snapWith(FLAT, "Flat")));
+    await waitFor(() => expect(householdReads(other.api)).toContain(FLAT));
+    await waitFor(() =>
+      expect(
+        householdForm()?.closest("[data-layer]")?.textContent ?? "",
+      ).toContain("Flat"),
+    );
+    expect(chosen(householdForm() as HTMLElement)).not.toBe(
+      copy.CHOICE_HOUSEHOLD_EDIT,
+    );
+    expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
   });
 });

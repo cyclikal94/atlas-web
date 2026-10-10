@@ -127,6 +127,7 @@ export function sharingEnv(
   return {
     api,
     accountId: "11111111-1111-4111-8111-111111111111",
+    identity: "11111111-1111-4111-8111-111111111111:1",
     online: true,
     writable: true,
     newId: () => {

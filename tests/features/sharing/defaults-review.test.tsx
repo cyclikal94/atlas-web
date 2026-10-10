@@ -15,8 +15,10 @@ import { QueuePanel } from "../../../src/features/sync/QueuePanel";
 import { describeRow } from "../../../src/features/sync/rows";
 import { draftRow } from "../../support/data/rows";
 import {
+  ELSEWHERE,
   HOME,
   household,
+  JAMIE,
   ME,
   PRIYA,
   record,
@@ -118,9 +120,9 @@ describe("the four cases (WEB-04 §5.7)", () => {
     // The same template (primary household · edit) both times; only the members differ.
     expect(was).toHaveTextContent("Primary household “Home” · edit");
     expect(now).toHaveTextContent("Primary household “Home” · edit");
-    expect(was).toHaveTextContent("Home: me, sam");
+    expect(was).toHaveTextContent("Home · Edit: me, sam");
     expect(was).not.toHaveTextContent("priya");
-    expect(now).toHaveTextContent("Home: me, sam, priya");
+    expect(now).toHaveTextContent("Home · Edit: me, sam, priya");
     expect(was).toHaveTextContent(copy.REVIEW_WAS_NOTE(revision(1)));
     expect((await axe(document.body)).violations).toEqual([]);
   });
@@ -275,5 +277,236 @@ describe("the /sync queue's defaults-review rows (A11)", () => {
     expect(
       await screen.findByText(copy.REVIEW_BODIES.review_unchanged),
     ).toBeInTheDocument();
+  });
+});
+
+/** WEB-12a review cycle 1: the review covers every consumed kind (R3), shows who and how (R4), and confirms only what it showed (R2). */
+describe("R3: every consumed kind is reviewed, not only the blocked ones", () => {
+  test("MU-S26: a capture of person (known) and task (unavailable household) shows BOTH, and Confirm captures both", async () => {
+    const env = stubEnv();
+    const then = record(
+      snapshot({
+        templates: {
+          person: { kind: "private" },
+          task: {
+            kind: "explicit",
+            policy: {
+              grants: [{ kind: "household", id: ELSEWHERE, edit: false }],
+              exclude_accounts: [],
+            },
+          },
+        },
+      }),
+    );
+    const capture = captureDefaults(then, ["person", "task"]);
+    expect(capture.defaultsReview).toEqual(["task"]);
+    // Before the review, the person default moved from Private to the household: it must be presented for consent.
+    serveNow(
+      env,
+      snapshot({
+        revision: revision(2),
+        templates: { person: { kind: "primary_household", edit: true } },
+      }),
+    );
+    const draft = draftRow({
+      local_id: "aaaaaaaa-0000-4000-8000-000000000002",
+      status: "queued",
+      defaults_revision: capture.defaultsRevision,
+      defaults_context: capture.defaultsContext,
+      review_block: { kind: "defaults", kinds: capture.defaultsReview },
+      kind: "create_task",
+    });
+    mountReview(draft, env);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    expect(
+      [...document.querySelectorAll("[data-review-kind]")].map((e) =>
+        e.getAttribute("data-review-kind"),
+      ),
+    ).toEqual(["person", "task"]);
+    const person = document.querySelector(
+      '[data-review-kind="person"]',
+    ) as HTMLElement;
+    expect(
+      within(person).getByText(copy.REVIEW_WAS).parentElement,
+    ).toHaveTextContent("Private");
+    expect(
+      within(person).getByText(copy.REVIEW_NOW).parentElement,
+    ).toHaveTextContent("Primary household “Home” · edit");
+    fireEvent.click(confirmButton());
+    await waitFor(() =>
+      expect(env.calls.some((c) => c.action === "confirmDefaultsReview")).toBe(
+        true,
+      ),
+    );
+    const sent = env.calls.find((c) => c.action === "confirmDefaultsReview")
+      ?.args[1] as { defaultsContext: { kinds: object } };
+    expect(Object.keys(sent.defaultsContext.kinds).sort()).toEqual([
+      "person",
+      "task",
+    ]);
+  });
+});
+
+describe("R4: each audience shows its principals, their access and its exclusions", () => {
+  const explicit = (
+    grants: Array<{ kind: "account" | "household"; id: string; edit: boolean }>,
+    exclude_accounts: string[],
+  ) => ({
+    kind: "explicit" as const,
+    policy: { grants, exclude_accounts },
+  });
+  /** Was and Now of the person section, after the review's own read landed. */
+  async function sides(
+    was: ReturnType<typeof explicit>,
+    now: ReturnType<typeof explicit>,
+    households = [homeWith("sam", "priya")],
+  ) {
+    const env = stubEnv();
+    const then = record(snapshot({ templates: { person: was }, households }));
+    serveNow(
+      env,
+      snapshot({
+        revision: revision(2),
+        templates: { person: now },
+        households,
+      }),
+    );
+    mountReview(reviewDraft(then, ["person"], true), env);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    const section = document.querySelector(
+      '[data-review-kind="person"]',
+    ) as HTMLElement;
+    return {
+      was: within(section).getByText(copy.REVIEW_WAS)
+        .parentElement as HTMLElement,
+      now: within(section).getByText(copy.REVIEW_NOW)
+        .parentElement as HTMLElement,
+    };
+  }
+
+  test("MU-S27: an equal-count recipient swap with a permission increase and an exclusion swap is visible on both sides", async () => {
+    const { was, now } = await sides(
+      explicit([{ kind: "account", id: SAM, edit: false }], [PRIYA]),
+      explicit([{ kind: "account", id: PRIYA, edit: true }], [SAM]),
+    );
+    expect(was).toHaveTextContent(copy.REVIEW_ACCOUNT_ACCESS("sam", false));
+    expect(was).toHaveTextContent(copy.REVIEW_EXCLUDED("priya"));
+    expect(now).toHaveTextContent(copy.REVIEW_ACCOUNT_ACCESS("priya", true));
+    expect(now).toHaveTextContent(copy.REVIEW_EXCLUDED("sam"));
+    expect(was).not.toHaveTextContent(
+      copy.REVIEW_ACCOUNT_ACCESS("priya", true),
+    );
+    expect(
+      was
+        .querySelector(`[data-review-account="${SAM}"]`)
+        ?.getAttribute("data-review-access"),
+    ).toBe("read");
+    expect(
+      now
+        .querySelector(`[data-review-account="${PRIYA}"]`)
+        ?.getAttribute("data-review-access"),
+    ).toBe("edit");
+  });
+
+  test("MU-S35: a permission-only change of a household grant (Read → Edit) is visible", async () => {
+    const { was, now } = await sides(
+      explicit([{ kind: "household", id: HOME, edit: false }], []),
+      explicit([{ kind: "household", id: HOME, edit: true }], []),
+    );
+    expect(was).toHaveTextContent("Home · Read: me, sam, priya");
+    expect(now).toHaveTextContent("Home · Edit: me, sam, priya");
+  });
+
+  test("an exclusion-only change is visible", async () => {
+    const { was, now } = await sides(
+      explicit([{ kind: "household", id: HOME, edit: false }], []),
+      explicit([{ kind: "household", id: HOME, edit: false }], [SAM]),
+    );
+    expect(was.querySelector("[data-review-excluded]")).toBeNull();
+    expect(now).toHaveTextContent(copy.REVIEW_EXCLUDED("sam"));
+  });
+
+  test("names come only from each side's own households: an account neither names keeps an abbreviated id, never today's name on the old side", async () => {
+    const env = stubEnv();
+    // Was: Home had only me. Now: Home has jamie too. A direct grant to jamie existed then: the old side must not learn the name.
+    const then = record(
+      snapshot({
+        templates: {
+          person: explicit([{ kind: "account", id: JAMIE, edit: false }], []),
+        },
+        households: [homeWith()],
+      }),
+    );
+    serveNow(
+      env,
+      snapshot({
+        revision: revision(2),
+        templates: {
+          person: explicit([{ kind: "account", id: JAMIE, edit: false }], []),
+        },
+        households: [
+          household({
+            id: HOME,
+            members: [
+              { account_id: ME, username: "me", role: "manager" },
+              { account_id: JAMIE, username: "jamie", role: "member" },
+            ],
+          }),
+        ],
+      }),
+    );
+    mountReview(reviewDraft(then, ["person"], true), env);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    const section = document.querySelector(
+      '[data-review-kind="person"]',
+    ) as HTMLElement;
+    const was = within(section).getByText(copy.REVIEW_WAS)
+      .parentElement as HTMLElement;
+    const now = within(section).getByText(copy.REVIEW_NOW)
+      .parentElement as HTMLElement;
+    expect(was).not.toHaveTextContent("jamie");
+    expect(was).toHaveTextContent(`Account ${JAMIE.slice(0, 4)}…`);
+    expect(now).toHaveTextContent(copy.REVIEW_ACCOUNT_ACCESS("jamie", false));
+  });
+});
+
+describe("R2: the confirmation names the draft exactly as the review showed it", () => {
+  test("MU-S28: Confirm passes the shown row (body digest, revision, context, block, status) as `reviewed`", async () => {
+    const env = stubEnv();
+    serveNow(env, snapshot());
+    const draft = reviewDraft(record(), ["person"]);
+    mountReview(draft, env);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    fireEvent.click(confirmButton());
+    await waitFor(() =>
+      expect(env.calls.some((c) => c.action === "confirmDefaultsReview")).toBe(
+        true,
+      ),
+    );
+    const sent = env.calls.find((c) => c.action === "confirmDefaultsReview")
+      ?.args[1] as { reviewed: unknown };
+    expect(sent.reviewed).toEqual({
+      local_id: draft.local_id,
+      status: draft.status,
+      command_digest: draft.command_digest,
+      defaults_revision: draft.defaults_revision,
+      defaults_context: draft.defaults_context,
+      review_block: draft.review_block,
+    });
+  });
+
+  test("a draft changed while it was reviewed is refused, and the person is told to check it again (nothing closes)", async () => {
+    const env = stubEnv();
+    env.confirmResult = { kind: "refused", reason: "draft_changed" };
+    serveNow(env, snapshot());
+    const t = mountReview(reviewDraft(record(), ["person"]), env);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    fireEvent.click(confirmButton());
+    expect(
+      await screen.findByText(copy.REVIEW_CHANGED, {
+        selector: "[data-sharing-banner] p",
+      }),
+    ).toBeInTheDocument();
+    expect(t.onClose).not.toHaveBeenCalled();
   });
 });

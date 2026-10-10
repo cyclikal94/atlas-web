@@ -111,59 +111,88 @@ export type Load<T> =
   | { status: "ready"; value: T; at: number }
   | { status: "failed"; failure: Extract<SharingResult<T>, { ok: false }> };
 
+const IDLE: Load<never> = { status: "idle" };
+const LOADING: Load<never> = { status: "loading" };
+const sameTarget = (a: readonly unknown[], b: readonly unknown[]) =>
+  a.length === b.length && a.every((value, at) => Object.is(value, b[at]));
+
 /**
- * One online read with its own loading and error states. A `not_sent` is asked again quietly (bounded); a stale answer never overwrites a
- * newer one, and nothing is set after unmount. Nothing is read until `enabled` (offline at open: nothing stale is shown).
+ * One online read with its own loading and error states, BOUND TO ITS TARGET (WEB-12a R1). `target` names what is read: the client (one
+ * per displayed account and epoch) and the resource or household. A load is only ever answered for the target it was asked for: when the
+ * target changes, what was read for the old one is no longer returned (the new target is loading or idle), an answer still on its way
+ * for the old one is dropped, and the new target is read on its own. A `not_sent` is asked again quietly (bounded); a stale answer never
+ * overwrites a newer one, and nothing is set after unmount. Nothing is read until `enabled` (offline at open: nothing stale is shown).
  */
 export function useSharingLoad<T>(
   read: () => Promise<SharingResult<T>>,
-  options: { enabled: boolean; now(): number },
+  options: { enabled: boolean; now(): number; target: readonly unknown[] },
 ): [Load<T>, () => void] {
-  const [state, setState] = useState<Load<T>>({ status: "idle" });
+  const [state, setState] = useState<{
+    target: readonly unknown[];
+    load: Load<T>;
+  }>(() => ({ target: options.target, load: IDLE }));
   const generation = useRef(0);
   const reader = useRef(read);
   reader.current = read;
   const now = useRef(options.now);
   now.current = options.now;
+  const target = useRef(options.target);
   const run = useCallback(() => {
     const mine = ++generation.current;
-    setState({ status: "loading" });
+    const asked = target.current;
+    setState({ target: asked, load: LOADING });
     void untilSent(() => reader.current(), {
       isCurrent: () => mine === generation.current,
     }).then(
       (result) => {
         if (mine !== generation.current) return;
-        setState(
-          result.ok
+        setState({
+          target: asked,
+          load: result.ok
             ? { status: "ready", value: result.value, at: now.current() }
             : { status: "failed", failure: result },
-        );
+        });
       },
       () => {
         if (mine !== generation.current) return;
         setState({
-          status: "failed",
-          failure: { ok: false, kind: "uncertain" },
+          target: asked,
+          load: { status: "failed", failure: { ok: false, kind: "uncertain" } },
         });
       },
     );
   }, []);
-  // The first time it is enabled it reads; losing the connection later keeps what was read (an editor keeps its draft), and only an
-  // explicit reload reads again.
-  const started = useRef(false);
+  // The first time it is enabled for a target it reads; losing the connection later keeps what was read (an editor keeps its draft),
+  // and only an explicit reload, or another target, reads again.
+  const started = useRef<readonly unknown[] | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the target's elements are the dependencies (a fixed number per caller)
   useEffect(() => {
-    if (options.enabled && !started.current) {
-      started.current = true;
+    target.current = options.target;
+    if (
+      started.current !== null &&
+      !sameTarget(started.current, options.target)
+    ) {
+      // Another target: nothing asked for the old one may land, and the new one needs its own read.
+      generation.current += 1;
+      started.current = null;
+    }
+    if (options.enabled && started.current === null) {
+      started.current = options.target;
       run();
     }
-  }, [options.enabled, run]);
+  }, [options.enabled, run, ...options.target]);
   useEffect(
     () => () => {
       generation.current += 1;
     },
     [],
   );
-  return [state, run];
+  const current = sameTarget(state.target, options.target)
+    ? state.load
+    : options.enabled
+      ? LOADING
+      : IDLE;
+  return [current, run];
 }
 
 /** "12:04" today, "3 Oct, 12:04" another day. UK English, 24-hour. */

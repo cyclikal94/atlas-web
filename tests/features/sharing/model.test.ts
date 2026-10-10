@@ -266,6 +266,7 @@ describe("the resolution chain (WF-SHARING-03, R4 fix)", () => {
     expect(described.households).toEqual([
       {
         id: HOME,
+        edit: false,
         name: "Home",
         members: [
           { id: ME, username: "me" },
