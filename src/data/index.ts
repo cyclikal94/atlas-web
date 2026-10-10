@@ -9,7 +9,6 @@
  */
 
 export type { ReadResult } from "./engine/identity-task";
-export type { Observation } from "./model/observation";
 export type {
   RecoveryJobState,
   ResyncNotice,
@@ -19,6 +18,7 @@ export type { LeaderRole } from "./leader/election";
 export { getPageDataHost, type PageDataHost } from "./leader/page-host";
 export { markLeaderStarted } from "./leader/presence";
 export { type DataLeaderHandle, startDataLeader } from "./leader/start";
+export type { Observation } from "./model/observation";
 export type {
   Bases,
   BuildResult,
