@@ -41,6 +41,29 @@ export interface BuildResult {
   displayPatch?: Record<ResourceId, ProjectionPatch>;
   defaultsRevision?: string | null;
   defaultsContext?: unknown;
+  /**
+   * The template kinds that need the person's review before this draft may be sent (WEB-12a, WEB-04 §5.7): a queued create that
+   * relies on implicit defaults the device never fetched, or whose captured template names a household nobody here has seen.
+   * Non-empty: the draft is stored with `review_block { kind: "defaults", kinds }`, which the dispatcher never sends and which holds
+   * the queue from it (D-19). On an EDIT of a queued draft the field decides the block: absent keeps the block the draft has (an edit
+   * of the content is not a review of its audience), `[]` clears it (the defaults review's confirmation), a list replaces it.
+   */
+  defaultsReview?: readonly string[];
+}
+
+/** A build's `defaultsReview`, which must be a list of texts: anything else is not what the contract allows (`not_json`). */
+function reviewKindsOf(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.some((kind) => typeof kind !== "string"))
+    throw new TypeError("defaultsReview must be a list of template kinds");
+  return value as string[];
+}
+
+/** The review block a build asks for, or null for none. Kinds are kept once each, in order. */
+function reviewBlockOf(
+  kinds: readonly string[] | undefined,
+): DraftRow["review_block"] {
+  if (kinds === undefined || kinds.length === 0) return null;
+  return { kind: "defaults", kinds: [...new Set(kinds)] };
 }
 
 export interface EnqueueRequest {
@@ -544,8 +567,9 @@ function dependencies(
  * among them, R40) is a `TypeError`, which the callers report as `not_json`.
  */
 function buildSnapshot(request: EnqueueRequest, bases: Bases): BuildResult {
-  const { command, displayPatch, defaultsRevision, defaultsContext } =
+  const { command, displayPatch, defaultsRevision, ...defaults } =
     request.build({ ...bases });
+  const { defaultsContext, defaultsReview } = defaults;
   return {
     command: snapshotPlain(command) as JsonObject,
     ...(displayPatch === undefined
@@ -562,6 +586,9 @@ function buildSnapshot(request: EnqueueRequest, bases: Bases): BuildResult {
     ...(defaultsContext === undefined
       ? {}
       : { defaultsContext: snapshotPlain(defaultsContext) }),
+    ...(defaultsReview === undefined
+      ? {}
+      : { defaultsReview: reviewKindsOf(snapshotPlain(defaultsReview)) }),
   };
 }
 
@@ -611,7 +638,7 @@ function composeDraft(
       ? {}
       : { expected_version: resolved.expectedVersion }),
     defaults_context: built.defaultsContext ?? null,
-    review_block: null,
+    review_block: reviewBlockOf(built.defaultsReview),
     depends_on: dependsOn,
     status: "queued",
     held_pending_cache: false,
@@ -737,6 +764,10 @@ export function planEdit(
       command_digest: digest,
       defaults_revision: built.defaultsRevision ?? draft.defaults_revision,
       defaults_context: built.defaultsContext ?? draft.defaults_context,
+      review_block:
+        built.defaultsReview === undefined
+          ? draft.review_block
+          : reviewBlockOf(built.defaultsReview),
       display_patch: built.displayPatch ?? null,
     },
     command: built.command,

@@ -32,6 +32,14 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Focus ring:** one style everywhere, 2px `action-ink`, 2px offset, and system colours in forced-colours mode.
 - **Forms:** every `Input` requires a label association. A disabled control states its reason beside it.
 
+### The sharing screens (WEB-12a)
+
+- The resource kinds of WF-SHARING-03 are a `role="tablist"` (arrows, Home and End move and select, roving `tabindex`, `aria-controls` to the panel); each template choice and each grant's Read/Edit is a labelled `role="radiogroup"`. The resolution chain marks the resolving layer with `aria-current` and the words "resolves here", not colour alone.
+- The directory lookup's two variants are separate labelled sections in one reading order (not tabs), and "No account found" is plain text, not an error banner.
+- Every disabled Save, Confirm or action states its reason beside it (offline, nothing changed, unsupported server, loading the current defaults). Errors carry a copyable request ID. Announcements (saved, confirmed, an error) go through the announcer only.
+- The editors are dialogs below the tablet breakpoint and full-bleed sheets at or below it (the shared `Dialog`), with 44 px targets; the directory lookup is a view inside the open dialog with Back, never a second stacked dialog.
+- Automated: jest-axe on every sharing screen (`tests/features/sharing/*`) and keyboard, viewport and focus checks in the three engines (`tests/e2e/fixture.sharing.spec.ts`). The manual pass below and the real assistive technology passes of Layer 3 apply to these screens too and are not claimed.
+
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
 For each core journey (open the app, move between destinations, open Appearance and change it, open the More sheet, read the sync status, reach a compatibility screen):

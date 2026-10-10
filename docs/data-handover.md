@@ -13,6 +13,8 @@ Only `src/data/index.ts` (lint rule R15). It provides:
 
 Every outcome type is a closed union. A refusal is a value, never an exception, except `OutboxRequestError` for a request that cannot be built or measured. A warning (`storage_not_responding`, memory-only) is a **display**, never permission to send: the dispatcher's claim and issue checks decide.
 
+**Sharing defaults (WEB-12a).** `useSharingDefaults`, `captureDefaults` and the `BuildResult.defaultsReview` field are the defaults capture a queued create attaches (W14 `writeDefaults` persists the B5 snapshot); `Outbox.confirmDefaultsReview` is the defaults review's confirmation. The consumer contract is `docs/sharing.md`.
+
 ## What a consumer must uphold
 
 * **One database per account, opened only through the runtime.** Never create, open or delete an account database outside `src/data/store` and `account-database` (R13, R16). A binding that ended is **unknown, not absent**: wait for the controller's next look; do not read absence into it and do not reopen through a wipe latch.

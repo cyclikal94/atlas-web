@@ -11,10 +11,12 @@ import {
 } from "react";
 import type { SyncStatusModel } from "../../lib/sync-chip";
 import type { Session } from "../../session";
+import type { RefreshOutcome } from "../engine/defaults-source";
 import { createBroadcastSyncChannel } from "../engine/sync-channel";
 import { createWriteFailureMarkers } from "../engine/write-failure-marker";
 import type { MergedResource } from "../model/overlay";
 import type { QueueSummary } from "../model/queue-summary";
+import type { DefaultsRecord } from "../model/sharing-snapshot";
 import {
   deriveGate,
   deriveNotices,
@@ -32,7 +34,11 @@ import {
 } from "../plans/outbox";
 import type { Loadable, Watchable } from "../store/port";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
-import { currentDeviceThrough, readMeThrough } from "./identity-reads";
+import {
+  currentDeviceThrough,
+  readDefaultsSnapshotThrough,
+  readMeThrough,
+} from "./identity-reads";
 import { createProductionQuota } from "./production-quota";
 
 /**
@@ -138,6 +144,7 @@ function createProductionEnv(
         sessionStarted: true,
       }),
       readMe: readMeThrough(session),
+      readDefaultsSnapshot: readDefaultsSnapshotThrough(session),
       currentDeviceId: currentDeviceThrough(session),
       onOnline: (listener) => {
         window.addEventListener("online", listener);
@@ -316,6 +323,32 @@ export function useAccountLabel(): string | null {
   useStore(env.profile.profile);
   const identity = useStore(env.identity);
   return env.profile.labelFor(identity);
+}
+
+// ---- the sharing defaults (WEB-12a, B5) ------------------------------------------------------------------------------------------
+/**
+ * The displayed account's sharing defaults: the persisted or freshly read B5 record, and `refresh()` (one read now, for an editor or a
+ * review that opened). Using this hook is what makes the data layer read them at all (`DefaultsSource.use`): nothing is asked on the
+ * boot path or by a page that never shows sharing. `status`: `loading` while the account's record is still being looked for, `ready`
+ * with a record, `none` when no record exists (never fetched on this device): a queued create then captures `never_fetched`.
+ */
+export function useSharingDefaults(): {
+  record: DefaultsRecord | null;
+  status: "loading" | "ready" | "none";
+  refresh(): Promise<RefreshOutcome>;
+} {
+  const env = useDataEnv();
+  useEffect(() => env.defaults.use(), [env]);
+  const record = useStore(env.defaults.record);
+  const settled = useStore(env.defaults.settled);
+  return useMemo(
+    () => ({
+      record,
+      status: record !== null ? "ready" : settled ? "none" : "loading",
+      refresh: () => env.defaults.refresh(),
+    }),
+    [record, settled, env],
+  );
 }
 
 // ---- cache reads (never create a database) ------------------------------------------------------------------------------------

@@ -27,7 +27,13 @@ import {
 } from "../model/outbox";
 import type { QueueSummary } from "../model/queue-summary";
 import { draftOperations, operationDraft } from "../model/retry";
+import {
+  confirmationPath,
+  confirmationRequest,
+  type ReviewConfirmation,
+} from "../model/review-confirmation";
 import type { LocalId } from "../model/types";
+import { readReviewDraft } from "../plans/defaults";
 import { reconcileStaleFence } from "../plans/fence";
 import {
   type ConflictPage,
@@ -115,6 +121,34 @@ export type SupersedeOutcome =
         | "order_conflict";
     };
 
+/**
+ * The defaults review's confirmation (WEB-12a, D-12a-6). `confirmed`: the draft was edited in place (`edited`: it was queued and blocked
+ * locally, never sent) or superseded by a new draft (`superseded`: it was sent and refused with `defaults_changed`), carrying the reviewed
+ * revision and context and no review block. A refusal changed nothing: `not_reviewing` (the draft has no defaults review, or is no longer
+ * queued or in flight), `rebuild_refused` (the versions it was built on have moved, or its body cannot be rebuilt generically: it is
+ * reviewed from its own feature's screen), or a refusal of the edit or the supersession itself.
+ */
+export type ConfirmReviewOutcome =
+  | {
+      kind: "confirmed";
+      how: "edited" | "superseded";
+      localId: LocalId;
+      paused: LocalId[];
+    }
+  | {
+      kind: "refused";
+      reason:
+        | RefusalReason
+        | "not_found"
+        | "not_reviewing"
+        | "rebuild_refused"
+        | "not_queued"
+        | "retargeted"
+        | "not_supersedable"
+        | "key_in_use"
+        | "order_conflict";
+    };
+
 export interface Outbox {
   enqueue(request: EnqueueRequest): Promise<EnqueueOutcome>;
   /** The body of a `queued` draft only; the change of anything else is a new draft. */
@@ -135,6 +169,16 @@ export interface Outbox {
     oldLocalId: LocalId,
     next: EnqueueRequest,
   ): Promise<SupersedeOutcome>;
+  /**
+   * The person confirmed the audience in the defaults review (WEB-12a): the draft's stored command is rebuilt with ONLY its top-level
+   * `defaults_revision` replaced by the reviewed revision, its context replaced and its review block cleared, through `editQueued` (a draft
+   * blocked locally) or `supersede` (a draft refused with `defaults_changed`; pass the same `replacementId` on a retry). It never rebuilds a
+   * body on versions the draft was not built on. Nothing else unblocks a defaults review: a background fetch is not approval.
+   */
+  confirmDefaultsReview(
+    localId: LocalId,
+    confirmation: ReviewConfirmation,
+  ): Promise<ConfirmReviewOutcome>;
   /**
    * "Retry now" for a paused draft or a blocked one; without an id, every paused draft. It also lifts the local-write stops of the
    * draft it names (its two operations, matched EXACTLY by id) or, without an id, of every draft, and permits another attempt: it
@@ -1136,11 +1180,78 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     );
   }
 
+  async function confirmDefaultsReview(
+    localId: LocalId,
+    confirmation: ReviewConfirmation,
+  ): Promise<ConfirmReviewOutcome> {
+    if (!service.live)
+      return {
+        kind: "refused",
+        reason: identityChanged() ? "identity_changed" : "closed",
+      };
+    let found: Awaited<ReturnType<typeof readStoredForReview>>;
+    try {
+      found = await readStoredForReview(localId);
+    } catch (error) {
+      // A READ that failed is not a failed save: nothing is counted towards a stop.
+      const closed =
+        isStoreFailure(error) && (error as StoreFailure).cause === "closed";
+      return {
+        kind: "refused",
+        reason: closed
+          ? identityChanged()
+            ? "identity_changed"
+            : "closed"
+          : "storage",
+      };
+    }
+    if (found === null) return { kind: "refused", reason: "not_found" };
+    const path = confirmationPath(found.draft);
+    if (path === null) return { kind: "refused", reason: "not_reviewing" };
+    const request = confirmationRequest(
+      found.draft,
+      found.command,
+      new Map(found.basis),
+      confirmation,
+    );
+    try {
+      if (path === "edit") {
+        const out = await editQueued(localId, request);
+        return out.kind === "edited"
+          ? { kind: "confirmed", how: "edited", localId, paused: [] }
+          : out;
+      }
+      const out = await supersede(localId, request);
+      return out.kind === "superseded"
+        ? {
+            kind: "confirmed",
+            how: "superseded",
+            localId: out.localId,
+            paused: out.paused,
+          }
+        : out;
+    } catch (error) {
+      // The build refused the versions it was handed (they moved since the draft was made), or the body could not be rebuilt: nothing
+      // was written, and the draft is reviewed from its own screen.
+      if (error instanceof TypeError)
+        return { kind: "refused", reason: "rebuild_refused" };
+      throw error;
+    }
+  }
+
+  function readStoredForReview(localId: LocalId) {
+    return service.store.run(readReviewDraft, {
+      incarnationId: service.incarnationId,
+      localId,
+    });
+  }
+
   return {
     enqueue,
     editQueued,
     discard,
     supersede,
+    confirmDefaultsReview,
     retry(localId) {
       // "Try again" lifts the stops of the operations it covers: those of this page's own saves, those the records name (read first: the
       // database, the markers and the page's memory, the dispatcher's included) and those the last look found, the two operations of

@@ -41,8 +41,8 @@ const only = value("--only", "").split(",").filter(Boolean);
 const jobs = Number(value("--jobs", "3"));
 const check = flag("--check");
 
-const EXPECTED_UNIT = 932;
-const EXPECTED_ENGINE = 141;
+const EXPECTED_UNIT = 954;
+const EXPECTED_ENGINE = 143;
 
 const selected = UNIT.filter((m) => only.length === 0 || only.includes(m.id));
 mkdirSync(outDir, { recursive: true });

@@ -1,5 +1,9 @@
 import type { Identity, Store } from "../../session";
 import type { AccountService, DataRuntime } from "../engine/account-service";
+import {
+  createDefaultsSource,
+  type DefaultsSource,
+} from "../engine/defaults-source";
 import { startDeviceMirror } from "../engine/device-mirror";
 import type { ReadResult } from "../engine/identity-task";
 import {
@@ -19,9 +23,11 @@ import type {
 } from "../engine/write-failure-marker";
 import { DATA_CONFIG } from "../model/config";
 import type { QueueSummary } from "../model/queue-summary";
+import type { ReviewConfirmation } from "../model/review-confirmation";
 import type { CacheState, StatusInputs } from "../model/status";
 import type { AccountId, LocalId } from "../model/types";
 import {
+  type ConfirmReviewOutcome,
   createOutbox,
   type DiscardOutcome,
   type Outbox,
@@ -52,6 +58,14 @@ export interface DataActions {
   /** "Retry now" for one draft or for every paused one; "Try again" after local storage stopped answering. */
   retryChanges(localId?: LocalId): void;
   discard(localId: LocalId): Promise<DiscardOutcome>;
+  /**
+   * The defaults review's confirmation (WEB-12a): through the leader's facade when one is attached (its dispatcher sends the released
+   * draft at once), else this page's. `closed` when no database is bound.
+   */
+  confirmDefaultsReview(
+    localId: LocalId,
+    confirmation: ReviewConfirmation,
+  ): Promise<ConfirmReviewOutcome>;
   /** The queue could not be read (the data layer did not start): look again. */
   retryLoad(): void;
   /** The next window of the queue replaces the one shown. */
@@ -74,6 +88,8 @@ export interface DataEnv {
   readonly conflicts: Store<Loadable<ConflictPage>>;
   readonly summary: Store<Loadable<QueueSummary>>;
   readonly profile: ProfileSource;
+  /** The displayed account's sharing defaults (B5, W14; WEB-12a): read only while a screen uses them, persisted as one record. */
+  readonly defaults: DefaultsSource;
   readonly commands: CommandRegistry;
   readonly actions: DataActions;
   /** The facade of the displayed account's outbox, or null (no database yet): for the slices that save drafts. */
@@ -134,6 +150,14 @@ export interface DataEnvDeps {
   readMe(account: AccountId, epoch: number): Promise<ReadResult<unknown>>;
   /** `session.operations.listSessions()`, classified the same way: the `device_id` of the current session's row. */
   currentDeviceId(): Promise<ReadResult<string>>;
+  /**
+   * `GET /defaults/snapshot` through the stamped client, classified the same way (WEB-12a). Absent: the sharing defaults are never
+   * asked for (a test or harness that does not need them), and only a persisted record is shown.
+   */
+  readDefaultsSnapshot?(
+    account: AccountId,
+    epoch: number,
+  ): Promise<ReadResult<unknown>>;
   onOnline(listener: () => void): () => void;
   /** The timers of the paced re-read of the sync facts (R13) and of the profile and device reads' schedules: the page's own when omitted. */
   timers?: {
@@ -810,6 +834,18 @@ export function createDataEnv(
     identity: deps.identity,
     readMe: (account, epoch) => deps.readMe(account, epoch),
   });
+  const readDefaultsSnapshot = deps.readDefaultsSnapshot;
+  const defaults = createDefaultsSource({
+    ...reads,
+    identity: deps.identity,
+    quota: deps.quota,
+    ...(readDefaultsSnapshot
+      ? {
+          readSnapshot: (account: AccountId, epoch: number) =>
+            readDefaultsSnapshot(account, epoch),
+        }
+      : {}),
+  });
 
   /** Subscribes to the attached leader's stores (and drops the subscriptions of the one before): the status follows them. */
   const followLeader = (): void => {
@@ -839,6 +875,7 @@ export function createDataEnv(
     // construction that is discarded holds none.
     void deps.markers?.prepare();
     const stopProfile = profile.start();
+    const stopDefaults = defaults.start();
     const stopMirror = startDeviceMirror({
       ...reads,
       identity: deps.identity,
@@ -856,6 +893,7 @@ export function createDataEnv(
       }) ?? (() => undefined),
       deps.markers?.subscribe(onMarkerChange) ?? (() => undefined),
       stopProfile,
+      stopDefaults,
       stopMirror,
     ];
     followLeader();
@@ -892,6 +930,12 @@ export function createDataEnv(
     },
     showNextQueue: () => outbox?.showNext(),
     showPreviousQueue: () => outbox?.showPrevious(),
+    confirmDefaultsReview: async (localId, confirmation) => {
+      const facade = leader.outbox ?? outbox;
+      if (facade === null)
+        return { kind: "refused", reason: "closed" } as ConfirmReviewOutcome;
+      return facade.confirmDefaultsReview(localId, confirmation);
+    },
     discard: async (localId) => {
       const facade = outbox;
       if (facade === null)
@@ -909,6 +953,7 @@ export function createDataEnv(
     conflicts,
     summary,
     profile,
+    defaults,
     commands,
     actions,
     outbox: () => outbox,

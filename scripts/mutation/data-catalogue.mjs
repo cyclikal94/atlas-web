@@ -14113,6 +14113,327 @@ export const UNIT = [
         "w.outcomes === outcomes;",
       ),
   },
+  // ---- WEB-12a: the sharing defaults (W14, the source, capture), the defaults review and the sharing editors ---------------------------
+  {
+    id: "MU-1118",
+    title:
+      "WEB-12a W14: writeDefaults applies no EPO guard (an answer of an earlier epoch overwrites the record)",
+    file: "src/data/plans/defaults.ts",
+    tests: [
+      "tests/data/defaults-plan.test.ts",
+      "tests/data/plan-inventory.test.ts",
+    ],
+    expect: /MU-D1 EPO/,
+    patch: (t) =>
+      sub(
+        t,
+        'guards: ["INC", "CLS", "EPO"], quota: "cache"',
+        'guards: ["INC", "CLS"], quota: "cache"',
+      ),
+  },
+  {
+    id: "MU-1119",
+    title:
+      "WEB-12a W14: an answer asked for EARLIER replaces a stored record asked for later (two pages' reads out of order)",
+    file: "src/data/plans/defaults.ts",
+    tests: [
+      "tests/data/defaults-plan.test.ts",
+      "tests/data/defaults-source.test.ts",
+    ],
+    expect: /MU-D2/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (stored !== null && stored.issued_at > input.issuedAt)",
+        "if (false)",
+      ),
+  },
+  {
+    id: "MU-1120",
+    title:
+      "WEB-12a: the snapshot parser accepts a revision that is not 64 lower-case hex",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /not 64 lower-case hex/,
+    patch: (t) =>
+      sub(
+        t,
+        "const REVISION = /^[0-9a-f]{64}$/;",
+        "const REVISION = /^[0-9a-zA-Z]{64}$/;",
+      ),
+  },
+  {
+    id: "MU-1121",
+    title: "WEB-12a: the snapshot parser accepts more than 32 households",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /more than 32 households/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (!Array.isArray(households) || households.length > MAX_HOUSEHOLDS)",
+        "if (!Array.isArray(households))",
+      ),
+  },
+  {
+    id: "MU-1122",
+    title:
+      "WEB-12a: the snapshot parser accepts a member whose username is not text",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /a member whose username is not text/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (!isUuid(value.account_id) || typeof value.username !== "string")',
+        "if (!isUuid(value.account_id))",
+      ),
+  },
+  {
+    id: "MU-1123",
+    title:
+      "WEB-12a: a capture names no household of an explicit template (a membership-only change would be invisible, F7a)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /explicit template captures EVERY household/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (grant.kind === "household" && !ids.includes(grant.id))',
+        "if (false)",
+      ),
+  },
+  {
+    id: "MU-1124",
+    title:
+      "WEB-12a: with no record ever fetched the capture asks for no review (the create would be sent with an omitted guard)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: [
+      "tests/data/defaults-capture.test.ts",
+      "tests/data/outbox-defaults-review.test.ts",
+    ],
+    expect: /with no record ever fetched/,
+    patch: (t) =>
+      sub(t, "      defaultsReview: wanted,", "      defaultsReview: [],"),
+  },
+  {
+    id: "MU-1125",
+    title:
+      "WEB-12a D-12a-5: composeDraft ignores defaultsReview (a draft that needs a review is stored unblocked and sent)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-D7/,
+    patch: (t) =>
+      sub(
+        t,
+        "    review_block: reviewBlockOf(built.defaultsReview),",
+        "    review_block: null,",
+      ),
+  },
+  {
+    id: "MU-1126",
+    title:
+      "WEB-12a: an edit that confirms ([]) keeps the review block (a confirmed draft is never released)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-D8/,
+    patch: (t) =>
+      sub(
+        t,
+        "built.defaultsReview === undefined\n          ? draft.review_block\n          : reviewBlockOf(built.defaultsReview),",
+        "draft.review_block,",
+      ),
+  },
+  {
+    id: "MU-1127",
+    title:
+      "WEB-12a D-12a-6: the review's Now accepts a record asked for before the review opened (a persisted one)",
+    file: "src/features/sharing/model/review.ts",
+    tests: [
+      "tests/features/sharing/model.test.ts",
+      "tests/features/sharing/defaults-review.test.tsx",
+    ],
+    expect: /MU-S9/,
+    patch: (t) =>
+      sub(
+        t,
+        "record !== null && record.issued_at >= openedAt",
+        "record !== null",
+      ),
+  },
+  {
+    id: "MU-1128",
+    title:
+      "WEB-12a D-12a-6: the confirmation's rebuild skips the bases check (a body sent on versions it was not built on)",
+    file: "src/data/model/review-confirmation.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-D10/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!sameBases(bases, stored)) throw new BasesMoved();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1129",
+    title:
+      "WEB-12a D-12a-2: Try again mints a new key (a committed command could be made twice)",
+    file: "src/features/sharing/model/submission.ts",
+    tests: [
+      "tests/features/sharing/model.test.ts",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S11/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (uncertain !== null && uncertain.body === body) return uncertain;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1130",
+    title: "WEB-12a D-12a-2: a changed body reuses the uncertain attempt's key",
+    file: "src/features/sharing/model/submission.ts",
+    tests: ["tests/features/sharing/model.test.ts"],
+    expect: /MU-S12/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (uncertain !== null && uncertain.body === body)",
+        "if (uncertain !== null)",
+      ),
+  },
+  {
+    id: "MU-1131",
+    title:
+      "WEB-12a: the effective audience lets a grant reach an excluded account",
+    file: "src/features/sharing/model/audience.ts",
+    tests: ["tests/features/sharing/model.test.ts"],
+    expect: /MU-S13/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (id === input.ownerId || excluded.has(id)) return;",
+        "if (id === input.ownerId) return;",
+      ),
+  },
+  {
+    id: "MU-1132",
+    title: "WEB-12a: the policy reducer grants the owner's own account",
+    file: "src/features/sharing/model/policy-draft.ts",
+    tests: ["tests/features/sharing/model.test.ts"],
+    expect: /MU-S14/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (kind === "account" && action.id === ownerId)\n        return { policy, refused: "owner" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1133",
+    title:
+      "WEB-12a: a personal set_defaults is guarded by another layer's template version",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S15/,
+    patch: (t) =>
+      sub(
+        t,
+        "                      record={personal}",
+        "                      record={household ?? personal}",
+      ),
+  },
+  {
+    id: "MU-1134",
+    title: "WEB-12a: the policy editor's Save stays enabled offline",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S16/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const reason = !env.online\n      ? copy.SAVE_OFFLINE_REASON\n      : !env.writable",
+        "    const reason = !env.writable",
+      ),
+  },
+  {
+    id: "MU-1135",
+    title:
+      "WEB-12a: a policy conflict is resolved by an automatic resend with the server's new version (a silent overwrite)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S17/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (failure.kind === "conflict")\n      setOutcome({ kind: "conflict", requestId: failure.requestId });',
+        '    if (failure.kind === "conflict")\n      void env.api.readPolicy(resourceId).then((read) => read.ok && env.api.management([{ kind: "replace_policy", id: resourceId, expected_version: read.value.version, policy: read.value.policy }], env.newId()));',
+      ),
+  },
+  {
+    id: "MU-1136",
+    title:
+      "WEB-12a: the defaults source keeps a body that is not the contract's snapshot",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D18/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const snapshot = parseSharingSnapshot(result.value);",
+        "    const snapshot = (parseSharingSnapshot(result.value) ?? result.value) as ReturnType<typeof parseSharingSnapshot>;",
+      ),
+  },
+  {
+    id: "MU-1137",
+    title:
+      "WEB-12a D-12a-3: replace_policy is guarded by the cache's (lagging) policy_version instead of GET /policies'",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S19/,
+    patch: (t) =>
+      sub(
+        t,
+        '            data-save=""\n            onClick={() => void send(draft.policy, read.version)}',
+        '            data-save=""\n            onClick={() => void send(draft.policy, merged.policy_version ?? read.version)}',
+      ),
+  },
+  {
+    id: "MU-1138",
+    title:
+      "WEB-12a G5: W14 is committed outside the account service (no persistence hold: a stale session record is not refused)",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D20/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const out = await service.commit(writeDefaults, {",
+        "      const out = await service.store.run(writeDefaults, {",
+      ),
+  },
+  {
+    id: "MU-1139",
+    title:
+      "WEB-12a: a policy read refused with 403 is asked again (the 403 remounts the protected tree: a non-owner's editor loops)",
+    file: "src/features/sharing/api.ts",
+    tests: ["tests/features/sharing/api.test.ts"],
+    expect: /MU-S20/,
+    // Both protections go: the memory of the refusal and the sharing of a read still on its way (either alone can hide the loop).
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      if (refusedPolicies.has(key)) return { ok: false, kind: "forbidden" };\n',
+          "",
+        ),
+        "      if (shared !== undefined) return shared;\n",
+        "",
+      ),
+  },
 ];
 
 /**
@@ -16406,6 +16727,41 @@ export const ENGINE = [
       sub(
         t,
         "        if (endedStreak >= config.localWritePauseAfter) stopsChanged();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1140",
+    title:
+      "WEB-12a: (REAL ENGINE) a queued draft's captured defaults context is not stored (the review's Was cannot show the captured audience)",
+    file: "src/data/model/outbox.ts",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH5:",
+    expect: /E-SH5:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    defaults_context: built.defaultsContext ?? null,",
+        "    defaults_context: null,",
+      ),
+  },
+  {
+    id: "MU-1141",
+    title:
+      "WEB-12a: (REAL ENGINE) a policy read refused with 403 is asked again: the 403 remounts the protected tree and a non-owner's editor loops",
+    file: "src/features/sharing/api.ts",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH9:",
+    expect: /E-SH9:/,
+    // Both protections go: the memory of the refusal and the sharing of a read still on its way (either alone can hide the loop).
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      if (refusedPolicies.has(key)) return { ok: false, kind: "forbidden" };\n',
+          "",
+        ),
+        "      if (shared !== undefined) return shared;\n",
         "",
       ),
   },

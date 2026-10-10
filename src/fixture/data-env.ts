@@ -238,6 +238,14 @@ export function fixtureData(params: URLSearchParams): FixtureData {
       labelFor: (id) => (id === null ? null : label.get()),
       start: () => () => undefined,
     },
+    // No sharing defaults: the sync screens never read them, and a fixture rendered here asks nothing of a server.
+    defaults: {
+      record: new Cell(null),
+      settled: new Cell(true),
+      refresh: async () => "closed",
+      use: () => () => undefined,
+      start: () => () => undefined,
+    },
     commands: createCommandRegistry(),
     actions: {
       retryUpdates: () => calls.push({ action: "retryUpdates", args: [] }),
@@ -250,6 +258,13 @@ export function fixtureData(params: URLSearchParams): FixtureData {
       showPreviousQueue: () => {
         calls.push({ action: "showPreviousQueue", args: [] });
         move(-1);
+      },
+      confirmDefaultsReview: async (id, confirmation) => {
+        calls.push({
+          action: "confirmDefaultsReview",
+          args: [id, confirmation],
+        });
+        return { kind: "refused", reason: "closed" };
       },
       discard: async (id) => {
         calls.push({ action: "discard", args: [id] });
