@@ -1197,3 +1197,300 @@ test.describe("E-CAL8: an open Manage follows the cache gate", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 });
+
+/** The queued settings changes, in the order they were saved (`created_seq`), joined to their bodies by `local_id`. */
+async function queuedSettings(page: Page) {
+  const headers = (await rows(page, "drafts")) as Array<{
+    local_id: string;
+    kind: string;
+    created_seq: number;
+  }>;
+  const bodies = (await rows(page, "draft_commands")) as Array<{
+    local_id: string;
+    command: { command: Record<string, unknown> };
+  }>;
+  return headers
+    .filter((draft) => draft.kind === "configure_source")
+    .sort((a, b) => a.created_seq - b.created_seq)
+    .map(
+      (draft) =>
+        bodies.find((body) => body.local_id === draft.local_id)?.command
+          .command,
+    );
+}
+
+/** A delta page that publishes the source at `version` with `timezone`, through the real sync engine (W1 publishes and retires at once). */
+async function publishSource(
+  page: Page,
+  net: Awaited<ReturnType<typeof stubNetwork>>,
+  over: Record<string, unknown>,
+) {
+  net.script.push(() => ({
+    status: 200,
+    body: JSON.stringify({
+      phase: "delta",
+      batches: [
+        {
+          revision: 400,
+          changes: [{ kind: "upsert", resource: projection(over) }],
+        },
+      ],
+      next_cursor: "cursor-after-publication",
+      has_more: false,
+    }),
+  }));
+  await page.evaluate((a) => window.__atlasData?.startSync(a), ACCOUNT);
+}
+
+const TOKYO = {
+  health: "healthy",
+  last_success: 1_790_000_000,
+  coverage_start: null,
+  coverage_end: null,
+  timezone: "Asia/Tokyo",
+};
+
+test.describe("E-CAL9: Manage opened on a pending source follows it through publication (revision 2, R6)", () => {
+  test("the create is sent, receipted, then published at version 4 by a delta page: Manage stays open as the cached source's, and turning it off keeps the PUBLISHED timezone", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const { page, net, cal } = await calendarsPage(context);
+    await expect(page.getByText("No calendars yet.")).toBeVisible();
+    await page.getByRole("button", { name: "Add source" }).click();
+    const add = page.getByRole("dialog", { name: "Add source" });
+    await add.getByLabel("Label").fill("Work rota");
+    await add.getByLabel("Timezone").fill("Europe/London");
+    await add.getByRole("button", { name: "Create source" }).click();
+    await expect(add).toBeHidden();
+    const pending = page.locator("[data-pending-source]");
+    await expect(pending).toContainText("Work rota");
+    const id = (await pending.getAttribute("data-pending-source")) as string;
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await expect(dialog.getByLabel("Timezone", { exact: true })).toHaveValue(
+      "Europe/London",
+    );
+    await expect(
+      dialog.getByRole("button", { name: "Remove…" }),
+    ).toBeDisabled();
+    // The leader sends the create; the server receipts it.
+    await page.evaluate(() => window.__atlasData?.beginOutbox());
+    await expect
+      .poll(async () =>
+        ((await rows(page, "drafts")) as Array<{ status: string }>).map(
+          (d) => d.status,
+        ),
+      )
+      .toEqual(["acknowledged"]);
+    await publishSource(page, net, {
+      id,
+      version: 4,
+      value: TOKYO,
+    });
+    await expect(page.locator(`[data-source-row="${id}"]`)).toContainText(
+      "Asia/Tokyo",
+      { timeout: 30_000 },
+    );
+    await expect(pending).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Timezone", { exact: true })).toHaveValue(
+      "Asia/Tokyo",
+    );
+    // Its cached rules: the connection can now be changed (online, nothing waiting).
+    await expect(dialog.getByRole("button", { name: "Remove…" })).toBeEnabled();
+    await dialog.getByLabel("Enabled", { exact: true }).uncheck();
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect
+      .poll(() => queuedSettings(page))
+      .toEqual([
+        {
+          kind: "configure_source",
+          id,
+          expected_version: 4,
+          timezone: "Asia/Tokyo",
+          enabled: false,
+        },
+      ]);
+    expect(
+      calendarCommands(cal).map((w) => JSON.parse(w.body).command.kind),
+    ).toContain("create_source");
+  });
+
+  test("control: Manage opened on the cached source, the same publication, the same change", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, net } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await expect(dialog.getByLabel("Timezone", { exact: true })).toHaveValue(
+      "Europe/London",
+    );
+    await publishSource(page, net, { version: 4, value: TOKYO });
+    await expect(dialog.getByLabel("Timezone", { exact: true })).toHaveValue(
+      "Asia/Tokyo",
+      { timeout: 30_000 },
+    );
+    await dialog.getByLabel("Enabled", { exact: true }).uncheck();
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect
+      .poll(() => queuedSettings(page))
+      .toEqual([
+        {
+          kind: "configure_source",
+          id: SOURCE,
+          expected_version: 4,
+          timezone: "Asia/Tokyo",
+          enabled: false,
+        },
+      ]);
+  });
+});
+
+test.describe("E-CAL10: the Enter key is admitted only as Save is (revision 2, R7)", () => {
+  test("after Remove, while the cache has not caught up, Enter in Timezone saves nothing; once it has, the same Enter saves ONE change on the new version", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await dialog
+      .getByRole("button", { name: "Remove connection", exact: true })
+      .click();
+    await expect(dialog.locator("[data-connection-panel]")).toHaveCount(0);
+    expect(calendarCommands(cal)).toHaveLength(1);
+    const save = dialog.getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeDisabled();
+    await expect(
+      dialog.getByText("Waiting for your last change to sync"),
+    ).toBeVisible();
+    const timezone = dialog.getByLabel("Timezone", { exact: true });
+    // Every native submission of a form on the page is counted (a submit event is dispatched synchronously by the key press): the
+    // outcome of the first Enter is established BEFORE the cache changes. (Changing the cache first would let a save already under way
+    // be refused by the observation check, which would hide whether the Enter was admitted at all.)
+    await page.evaluate(() => {
+      const counter = window as unknown as { __submits?: number };
+      counter.__submits = 0;
+      document.addEventListener(
+        "submit",
+        () => {
+          counter.__submits = (counter.__submits ?? 0) + 1;
+        },
+        true,
+      );
+    });
+    const submits = () =>
+      page.evaluate(
+        () => (window as unknown as { __submits?: number }).__submits ?? 0,
+      );
+    await timezone.fill("UTC");
+    await timezone.press("Enter");
+    expect(await submits(), "Enter while Save waits submits nothing").toBe(0);
+    expect(await queuedSettings(page)).toEqual([]);
+    await expect(dialog).toBeVisible();
+    // An explicit submission of the form (the browser's own `requestSubmit`, no submitter) reaches the handler in every engine (WebKit
+    // performs no implicit submission here at all): the handler admits nothing. Read one frame later, in the page: a handler that went
+    // on would show Save as "Saving…", or Manage would already have closed.
+    const explicit = await page.evaluate(async () => {
+      const form =
+        document.querySelector<HTMLFormElement>("[role=dialog] form");
+      form?.requestSubmit();
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const save = [
+        ...document.querySelectorAll<HTMLButtonElement>("[role=dialog] button"),
+      ].find((button) => button.textContent === "Save");
+      return {
+        dialog: document.querySelector("[role=dialog]") !== null,
+        reason:
+          document.getElementById(save?.getAttribute("aria-describedby") ?? "")
+            ?.textContent ?? null,
+      };
+    });
+    expect(await submits()).toBe(1);
+    expect(
+      explicit,
+      "an explicit submission while Save waits is not admitted",
+    ).toEqual({
+      dialog: true,
+      reason: "Waiting for your last change to sync",
+    });
+    // The cache catches up with the removal (version 3); Save is offered, and the SAME key press now saves.
+    await page.evaluate(
+      ({ a, row }) => window.__atlasData?.put(a, "cache", [row]),
+      { a: ACCOUNT, row: { ...projection({ version: 3 }), kind_date: null } },
+    );
+    await expect(save).toBeEnabled();
+    await timezone.press("Enter");
+    await expect(dialog).toBeHidden();
+    expect(await submits()).toBe(2);
+    // Exactly one change: the first Enter, pressed while Save waited, queued nothing.
+    expect(await queuedSettings(page)).toEqual([
+      {
+        kind: "configure_source",
+        id: SOURCE,
+        expected_version: 3,
+        timezone: "UTC",
+        enabled: true,
+      },
+    ]);
+  });
+});
+
+test.describe("E-CAL11: connection details are entered online only (revision 2, R8)", () => {
+  for (const form of ["Link a calendar…", "Replace…"] as const)
+    test(`${form}: offline the URL and token are disabled with the reason; back online what was entered is still there, nothing was sent, and it sends when asked`, async ({
+      context,
+    }) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      let dialog = page.getByRole("dialog");
+      if (form === "Link a calendar…") {
+        await page.getByRole("button", { name: form }).click();
+        dialog = page.getByRole("dialog", { name: form });
+        await dialog.getByLabel("Label").fill("Rota feed");
+      } else {
+        await page.getByRole("button", { name: "Manage Work rota" }).click();
+        dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+        await dialog.getByRole("button", { name: "Replace…" }).click();
+      }
+      const url = dialog.getByLabel("URL (required)");
+      const bearer = dialog.getByLabel("Bearer token (optional)");
+      await url.fill(`https://feed.example/${SENTINEL}.ics`);
+      await bearer.fill(`token-${SENTINEL}`);
+      await context.setOffline(true);
+      for (const field of [url, bearer]) {
+        await expect(field).toBeDisabled();
+        await expect(field).not.toBeEditable();
+        await expect(field).toHaveAccessibleDescription(/Needs a connection/);
+      }
+      await context.setOffline(false);
+      for (const field of [url, bearer]) await expect(field).toBeEnabled();
+      await expect(url).toHaveValue(`https://feed.example/${SENTINEL}.ics`);
+      await expect(bearer).toHaveValue(`token-${SENTINEL}`);
+      expect(calendarCommands(cal)).toEqual([]);
+      await dialog
+        .getByRole("button", {
+          name: form === "Replace…" ? "Replace connection" : "Connect",
+          exact: true,
+        })
+        .click();
+      await expect.poll(() => calendarCommands(cal).length).toBe(1);
+      expect(
+        JSON.parse(calendarCommands(cal)[0]?.body ?? "").command.connection,
+      ).toEqual({
+        url: `https://feed.example/${SENTINEL}.ics`,
+        bearer: `token-${SENTINEL}`,
+      });
+    });
+});

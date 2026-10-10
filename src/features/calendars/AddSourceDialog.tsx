@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
@@ -13,6 +13,7 @@ import {
   LABEL,
   NEEDS_DATABASE,
   NOT_SAVED,
+  NOT_SAVED_CHANGED,
   NOT_SAVED_FENCED,
   NOT_SAVED_QUOTA,
   NOT_SAVED_STORAGE,
@@ -35,6 +36,8 @@ export function refusalMessage(
     case "fenced":
     case "closing":
       return NOT_SAVED_FENCED;
+    case "changed":
+      return NOT_SAVED_CHANGED;
     default:
       return NOT_SAVED;
   }
@@ -71,8 +74,18 @@ export function AddSourceDialog({
     ),
   );
   const sourceIds = useRef(new Map<string, string>());
+  // A synchronous latch (revision 2): a second press before the screen shows the first as busy saves nothing more.
+  const saving = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const submit = async () => {
+    if (saving.current) return;
     const next = {
       label: labelError(label),
       timezone: timezoneError(timezone),
@@ -95,13 +108,15 @@ export function AddSourceDialog({
     }
     setBusy(true);
     setMessage(null);
+    saving.current = true;
     try {
       const outcome = await outbox.enqueue(
         createSourceRequest({ id, ...pair.body, localId: pair.key }),
       );
       if (outcome.kind === "queued") {
         announcer.announce(online ? ADDED : ADDED_OFFLINE);
-        onClose();
+        // A save that finished after the form closed closes nothing: another dialog may be open by then.
+        if (mounted.current) onClose();
         return;
       }
       setMessage(refusalMessage(outcome.reason));
@@ -109,6 +124,7 @@ export function AddSourceDialog({
       // A request the facade refused as built wrongly, or a failure it did not classify: nothing was stored.
       setMessage(NOT_SAVED);
     } finally {
+      saving.current = false;
       setBusy(false);
     }
   };

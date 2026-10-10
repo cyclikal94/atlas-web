@@ -1,12 +1,21 @@
+import type { Observation } from "../model/observation";
+import { applyOverlay } from "../model/overlay";
 import type {
+  CacheRow,
   DraftRow,
   DraftStatus,
   DraftWithCommand,
   ResourceId,
 } from "../model/types";
-import { range } from "../store/port";
-import { bulkGetWindowed, WINDOW, walkIndex } from "./bounded-reads";
+import { type Reader, range } from "../store/port";
+import {
+  bulkGetWindowed,
+  readObservation,
+  WINDOW,
+  walkIndex,
+} from "./bounded-reads";
 import { readPlan } from "./builders";
+import { readOverlays } from "./overlay-windows";
 
 /**
  * Two READ plans a feature screen needs over the outbox that the merged reads deliberately do not give (WEB-13a, D-13a-4):
@@ -122,11 +131,78 @@ export interface Outstanding {
   byStatus: Partial<Record<DraftStatus, number>>;
   /** The NEWEST of them (the largest `created_seq`), with its body, or null when there is none. */
   latest: DraftWithCommand | null;
+  /**
+   * The newest of them of the kind asked for (`OutstandingInput.kind`) that is still expected to APPLY (queued, in flight or
+   * acknowledged; never a conflict, a rejection or a blocked one), whose first primary target is the resource, with its body; null when
+   * there is none or no kind was asked for. A newer draft of another kind (an import queued after a settings change) does not hide it.
+   */
+  latestOfKind: DraftWithCommand | null;
 }
 
 export interface OutstandingInput {
   incarnationId: string;
   id: ResourceId;
+  /** The command kind whose newest applicable draft is wanted as `latestOfKind` (for example `configure_source`). */
+  kind?: string;
+}
+
+/** A draft that is still expected to apply: what a screen may show as the values the person asked for. */
+const applies = (row: DraftRow): boolean =>
+  row.status === "queued" ||
+  row.status === "in_flight" ||
+  row.status === "acknowledged";
+
+/** Folds the drafts that name one resource into exact counts, the newest header, and the newest of each kind asked for. */
+class OutstandingFold {
+  total = 0;
+  byStatus: Partial<Record<DraftStatus, number>> = {};
+  newest: DraftRow | null = null;
+  /** By kind: the newest unsettled draft of that kind whose first primary target is the resource, whatever its status. */
+  readonly newestOf = new Map<string, DraftRow>();
+  /** By kind: the same, among the drafts that still apply (`applies`). */
+  readonly applicableOf = new Map<string, DraftRow>();
+
+  constructor(
+    private readonly id: ResourceId,
+    private readonly kinds: readonly string[],
+  ) {}
+
+  add(row: DraftRow): void {
+    if (!unsettled(row)) return;
+    this.total += 1;
+    this.byStatus[row.status] = (this.byStatus[row.status] ?? 0) + 1;
+    if (this.newest === null || row.created_seq > this.newest.created_seq)
+      this.newest = row;
+    if (
+      !this.kinds.includes(row.kind) ||
+      row.target_resource_ids[0] !== this.id
+    )
+      return;
+    const newer = (held: DraftRow | undefined) =>
+      held === undefined || row.created_seq > held.created_seq;
+    if (newer(this.newestOf.get(row.kind))) this.newestOf.set(row.kind, row);
+    if (applies(row) && newer(this.applicableOf.get(row.kind)))
+      this.applicableOf.set(row.kind, row);
+  }
+}
+
+/** The bodies of `rows` (one bounded read), joined to them by `local_id`; a draft whose body is missing is left out. */
+async function withBodies(
+  reader: Reader,
+  rows: readonly DraftRow[],
+): Promise<Map<string, DraftWithCommand>> {
+  const unique = [...new Map(rows.map((row) => [row.local_id, row])).values()];
+  const bodies = await bulkGetWindowed(
+    reader,
+    "draft_commands",
+    unique.map((row) => row.local_id),
+  );
+  const out = new Map<string, DraftWithCommand>();
+  unique.forEach((row, index) => {
+    const body = bodies[index];
+    if (body) out.set(row.local_id, { ...row, command: body.command });
+  });
+  return out;
 }
 
 /**
@@ -141,34 +217,136 @@ export const readOutstanding = readPlan<
   name: "data.readOutstanding",
   scope: ["drafts", "draft_commands"],
   read: async (reader, input) => {
-    let total = 0;
-    const byStatus: Partial<Record<DraftStatus, number>> = {};
-    let newest: DraftRow | null = null;
+    const fold = new OutstandingFold(
+      input.id,
+      input.kind === undefined ? [] : [input.kind],
+    );
     await walkIndex(
       reader,
       "drafts",
       "index_targets",
       range.only(input.id),
-      (row) => {
-        if (!unsettled(row)) return;
-        total += 1;
-        byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
-        if (newest === null || row.created_seq > newest.created_seq)
-          newest = row;
-      },
+      (row) => fold.add(row),
     );
-    const latest = newest as DraftRow | null;
-    const body =
-      latest === null
+    const { bodies: _, ...outstanding } = await outstandingOf(
+      reader,
+      fold,
+      input.kind,
+    );
+    return outstanding;
+  },
+  decide: ({ reads }) => reads,
+});
+
+/** The fold as an `Outstanding`, reading the bodies of its newest draft and of the newest applicable draft of `kind` (at most two). */
+async function outstandingOf(
+  reader: Reader,
+  fold: OutstandingFold,
+  kind: string | undefined,
+  more: readonly DraftRow[] = [],
+): Promise<Outstanding & { bodies: Map<string, DraftWithCommand> }> {
+  const ofKind = kind === undefined ? undefined : fold.applicableOf.get(kind);
+  const bodies = await withBodies(reader, [
+    ...(fold.newest === null ? [] : [fold.newest]),
+    ...(ofKind === undefined ? [] : [ofKind]),
+    ...more,
+  ]);
+  return {
+    total: fold.total,
+    byStatus: fold.byStatus,
+    latest:
+      fold.newest === null ? null : (bodies.get(fold.newest.local_id) ?? null),
+    latestOfKind:
+      ofKind === undefined ? null : (bodies.get(ofKind.local_id) ?? null),
+    bodies,
+  };
+}
+
+/**
+ * One resource as ONE read transaction saw it (WEB-13a revision 2): what a dialog that edits it needs so that everything it shows and
+ * every value it saves come from the same moment.
+ */
+export interface ResourceView {
+  /** The cached row, or null when the cache does not hold the resource. */
+  base: CacheRow | null;
+  /** `base` with the overlay of its admitted changes (as a list shows it), or null with it. */
+  merged: CacheRow | null;
+  /** The unsettled drafts that name the resource, as `readOutstanding` counts them (`latestOfKind` for `settingsKind`). */
+  outstanding: Outstanding;
+  /**
+   * The newest unsettled draft of `createKind` whose first primary target is the resource, WHATEVER its status (a create waiting, sent,
+   * receipted and not yet published, or refused), with its body; null when there is none or no kind was asked for.
+   */
+  create: DraftWithCommand | null;
+  /** What this read saw, for a save made from it (`EnqueueRequest.observed`): checked again inside the writing transaction. */
+  observation: Observation;
+}
+
+export interface ResourceViewInput {
+  incarnationId: string;
+  id: ResourceId;
+  /** The kind of command that creates the resource (`create_source`). */
+  createKind?: string;
+  /** The kind of command whose newest applicable draft states the resource's settings (`configure_source`). */
+  settingsKind?: string;
+}
+
+/**
+ * The resource view (see above): its cached row and overlay, its outstanding drafts and the observation token, from ONE walk of the
+ * drafts that name it. At most three bodies are read (the newest draft, the newest applicable settings draft, the newest create).
+ */
+export const readResourceView = readPlan<
+  ResourceViewInput,
+  ResourceView,
+  ResourceView
+>({
+  name: "data.readResourceView",
+  scope: [
+    "cache",
+    "pending_effects",
+    "resource_versions",
+    "drafts",
+    "draft_commands",
+  ],
+  read: async (reader, input) => {
+    const kinds = [input.createKind, input.settingsKind].filter(
+      (kind): kind is string => kind !== undefined,
+    );
+    const fold = new OutstandingFold(input.id, kinds);
+    const seen = await readObservation(
+      reader,
+      input.incarnationId,
+      input.id,
+      (row) => fold.add(row),
+    );
+    const create =
+      input.createKind === undefined
         ? undefined
-        : await reader.get("draft_commands", latest.local_id);
+        : fold.newestOf.get(input.createKind);
+    const { bodies, ...outstanding } = await outstandingOf(
+      reader,
+      fold,
+      input.settingsKind,
+      create === undefined ? [] : [create],
+    );
+    const base = seen.base ?? null;
+    const overlay =
+      base === null
+        ? null
+        : ((await readOverlays(reader, [base.id], WINDOW)).get(base.id) ??
+          null);
     return {
-      total,
-      byStatus,
-      latest:
-        latest === null || body === undefined
+      base,
+      merged:
+        base === null
           ? null
-          : { ...latest, command: body.command },
+          : overlay === null
+            ? base
+            : applyOverlay(base, overlay),
+      outstanding,
+      create:
+        create === undefined ? null : (bodies.get(create.local_id) ?? null),
+      observation: { resourceId: input.id, token: seen.token },
     };
   },
   decide: ({ reads }) => reads,

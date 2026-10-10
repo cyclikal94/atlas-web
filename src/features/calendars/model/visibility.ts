@@ -1,46 +1,66 @@
 import type {
   CacheRow,
+  DraftWithCommand,
   GateState,
   Loadable,
-  MergedResource,
+  ResourceView,
 } from "../../../data";
 
 /**
- * Whether an open Manage may still show its source, and as which row (WEB-13a). Pure: the dialog passes in what it read.
+ * What an open Manage may show of its source, and on what authority (WEB-13a; revision 2 replaces revision 1's `shownSource`). Pure:
+ * the dialog passes in what it read. The row the dialog was OPENED with is context for its first moment only; from then on the
+ * source's lifecycle decides, read in ONE transaction (`useResourceView`), so a create, its publication and its retirement are never
+ * seen half-way.
  *
- * A CACHED source is cache content, so it is shown only while the list could show it: the cache gate is open and the source's own
- * read holds it. When the cache is being brought up to date (invalid, unverified, a recovery under way: the gate is closed) the dialog
- * is `gone` for `refreshing`; when the read fails or no longer holds the source (it was removed, or access to it was), it is `gone`
- * for `removed`. Neither falls back to the row the dialog was opened with. Only while the source's FIRST read is still loading is the
- * row it was opened with used: the list showed it a moment ago under the same open gate. A read that starts again later (the account's
- * database was opened again) is `refreshing`: what was shown before cannot stand in for it.
- *
- * A PENDING source (this device's create, not cached yet) is not cache content (drafts are never behind the gate): it is shown from its
- * create, as the "Waiting to be created" group shows it.
+ *  - `cached`: the cache holds the source and the cache gate is open. The row is the merged cached row, and the dialog has now SEEN its
+ *    source cached (`seenCached`, kept by the dialog, never unset): it is cache content from here on, whatever it was opened as. A
+ *    pending source whose create is published is PROMOTED here, without closing, and its untouched fields follow the published values.
+ *  - `pending`: the cache does not hold the source, the dialog has never seen it cached, and this device's create of it is still in the
+ *    outbox (waiting, sent, receipted and not yet published, or refused). The row is that create as it stands NOW (an edit of the
+ *    queued create shows), never the projection the dialog was opened with.
+ *  - `resolving`: no current read yet (the first is loading), or the read of a source never seen cached failed or started again. The
+ *    last row shown stands in, and NOTHING may be saved or sent until a read answers. A cached source is `resolving` only on its
+ *    first read, under an open gate (the list showed it a moment earlier).
+ *  - `gone`: a source seen cached whose cache is being brought up to date (the gate is closed: `refreshing`), or that the cache no
+ *    longer holds, or whose read failed or started again (`removed` / `refreshing`); or a pending source whose create left the outbox
+ *    without the cache holding it (discarded, superseded, or receipted and then not published to this account: `removed`). It never
+ *    falls back to an earlier row.
  */
-export type ShownSource =
-  | { kind: "row"; row: CacheRow }
+export type SourceAuthority =
+  | { kind: "cached"; row: CacheRow; view: ResourceView }
+  | { kind: "pending"; row: CacheRow; view: ResourceView }
+  | { kind: "resolving"; row: CacheRow }
   | { kind: "gone"; reason: "refreshing" | "removed" };
 
-export function shownSource(input: {
-  dialog: { row: CacheRow; cached: boolean };
+export function sourceAuthority(input: {
   gate: GateState;
-  resource: Loadable<MergedResource>;
-  /** Whether this dialog has had an answer of its source's read (ready or unavailable) since it opened. */
+  view: Loadable<ResourceView>;
+  /** The row shown last (at first, the row the dialog was opened with). */
+  last: CacheRow;
+  /** Whether the dialog has seen its source in the cache: it opened on a cached row, or a read since has shown it there. */
+  seenCached: boolean;
+  /** Whether a read of the view has answered since the dialog opened. */
   read: boolean;
-}): ShownSource {
-  const { dialog, resource } = input;
-  if (!dialog.cached) return { kind: "row", row: dialog.row };
-  if (input.gate !== "open") return { kind: "gone", reason: "refreshing" };
-  if (resource.status === "loading")
-    return input.read
-      ? { kind: "gone", reason: "refreshing" }
-      : { kind: "row", row: dialog.row };
-  if (
-    resource.status !== "ready" ||
-    resource.value.base === null ||
-    resource.value.merged === null
-  )
-    return { kind: "gone", reason: "removed" };
-  return { kind: "row", row: resource.value.merged };
+  /** The row a create draft will become, or null when its body is not one. */
+  project(create: DraftWithCommand): CacheRow | null;
+}): SourceAuthority {
+  const { gate, view, last, seenCached } = input;
+  if (view.status === "ready") {
+    const { base, merged, create } = view.value;
+    if (base !== null && merged !== null)
+      return gate === "open"
+        ? { kind: "cached", row: merged, view: view.value }
+        : { kind: "gone", reason: "refreshing" };
+    if (seenCached) return { kind: "gone", reason: "removed" };
+    const row = create === null ? null : input.project(create);
+    return row === null
+      ? { kind: "gone", reason: "removed" }
+      : { kind: "pending", row, view: view.value };
+  }
+  if (!seenCached) return { kind: "resolving", row: last };
+  if (gate !== "open") return { kind: "gone", reason: "refreshing" };
+  if (view.status === "unavailable") return { kind: "gone", reason: "removed" };
+  return input.read
+    ? { kind: "gone", reason: "refreshing" }
+    : { kind: "resolving", row: last };
 }

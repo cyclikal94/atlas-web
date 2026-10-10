@@ -64,7 +64,9 @@ export interface WireCall {
 
 export type WireReply =
   | { status: number; json?: unknown; contentType?: string }
-  | { throws: unknown };
+  | { throws: unknown }
+  /** Revision 2: the answer is HELD until the test resolves the promise (a request already sent whose answer arrives later). */
+  | { wait: Promise<WireReply> };
 
 export const atlasBody = (
   code: string,
@@ -87,7 +89,9 @@ export interface CalendarWorld {
   /** Replies by path, consumed in order; a path with none answers its default. */
   replies: Map<string, WireReply[]>;
   settle(): Promise<void>;
-  rows<K extends "cache" | "drafts" | "draft_commands">(store: K): object[];
+  rows<K extends "cache" | "drafts" | "draft_commands" | "resource_versions">(
+    store: K,
+  ): object[];
   snapshot(): Record<string, object[]> | null;
   /**
    * Commits a change to the account database through the production store, as a sync or a recovery would (one transaction), then
@@ -96,6 +100,12 @@ export interface CalendarWorld {
   commit(change: {
     put?: { store: "cache" | "sync_state"; rows: object[] };
     remove?: string[];
+    /**
+     * Revision 2: rows of `resource_versions` written in the SAME transaction (a publication sets the version the outbox assumes), and
+     * drafts retired with their bodies in it (`local_id`s): what a delta page that publishes a receipted create does at once (W1).
+     */
+    versions?: object[];
+    retire?: string[];
   }): Promise<void>;
 }
 
@@ -184,7 +194,7 @@ export async function calendarWorld(
   const reply = async (call: WireCall) => {
     calls.push(call);
     const queue = replies.get(call.path);
-    const next: WireReply =
+    let next: WireReply =
       queue?.shift() ??
       (call.path === "/notification-capabilities"
         ? {
@@ -194,6 +204,7 @@ export async function calendarWorld(
         : call.path === "/calendar-sources"
           ? { status: 200, json: { items: [], next_after: null } }
           : { status: 200, json: { revision: 1 } });
+    while ("wait" in next) next = await next.wait;
     if ("throws" in next) throw next.throws;
     const response = new Response(null, {
       status: next.status,
@@ -275,6 +286,8 @@ export async function calendarWorld(
       const scope = [
         ...(change.put ? [change.put.store] : []),
         ...(change.remove ? (["cache"] as const) : []),
+        ...(change.versions ? (["resource_versions"] as const) : []),
+        ...(change.retire ? (["drafts", "draft_commands"] as const) : []),
       ];
       await act(async () => {
         await service.store.run(
@@ -292,6 +305,13 @@ export async function calendarWorld(
                 ...(change.remove ?? []).map((id) =>
                   writes.delete("cache", id),
                 ),
+                ...(change.versions ?? []).map((row) =>
+                  writes.put("resource_versions", row as never),
+                ),
+                ...(change.retire ?? []).flatMap((id) => [
+                  writes.delete("drafts", id),
+                  writes.delete("draft_commands", id),
+                ]),
               ],
               result: null,
             }),

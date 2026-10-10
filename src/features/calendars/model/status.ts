@@ -22,6 +22,7 @@ import {
   TURNED_OFF_REASON,
   VIEW_ONLY_REASON,
   WAITING_CHANGES_FIRST,
+  WAITING_CONNECTION_CHANGE,
   WAITING_LAST_CHANGE,
 } from "../copy";
 import { sourceValue } from "./commands";
@@ -48,14 +49,29 @@ export interface Enablement {
 const on: Enablement = { enabled: true };
 const off = (reason: string): Enablement => ({ enabled: false, reason });
 
+type CountedDraft = Pick<DraftRow, "status" | "last_error" | "local_id"> &
+  Partial<Pick<DraftRow, "kind">> & { command?: unknown };
+
 /** The unsettled drafts against a source, as `useOutstanding` counts them. */
 export interface OutstandingCounts {
   total: number;
   byStatus: Partial<Record<DraftStatus, number>>;
-  latest:
-    | (Pick<DraftRow, "status" | "last_error" | "local_id"> &
-        Partial<Pick<DraftRow, "kind">> & { command?: unknown })
-    | null;
+  latest: CountedDraft | null;
+  /**
+   * The newest settings change that still applies (`useOutstanding(id, "configure_source")`), whatever drafts of other kinds were saved
+   * after it (revision 2). Present only when it was asked for; a reader that did not ask falls back to `latest`.
+   */
+  latestOfKind?: CountedDraft | null;
+}
+
+/** The settings change whose values the row shows: the newest that applies when it was read for, else the newest draft of any kind. */
+export function settingsDraft(
+  counts: OutstandingCounts | null,
+): CountedDraft | null {
+  if (counts === null) return null;
+  return counts.latestOfKind !== undefined
+    ? counts.latestOfKind
+    : counts.latest;
 }
 
 /**
@@ -190,7 +206,7 @@ export function sourceStatus(input: {
   refreshing: boolean;
 }): SourceStatus {
   const { env } = input;
-  const merged = displayedRow(input.merged, input.outstanding?.latest ?? null);
+  const merged = displayedRow(input.merged, settingsDraft(input.outstanding));
   const state = outstandingState(input.outstanding);
   const lines = [healthLine(merged)];
   if (merged.archived) lines.push(TURNED_OFF);
@@ -252,33 +268,50 @@ export function pendingStatus(input: {
   };
 }
 
-/** Manage: the queued settings Save, and the online connection changes (D-13a-8). */
+/**
+ * Manage: the queued settings Save, and the online connection changes (D-13a-8). The SAME result disables the controls and is checked
+ * again by every handler that would act (a click, the Enter key's implicit submission, a Retry), so no route acts on less.
+ */
 export function manageActions(input: {
   env: Environment;
   /** Whether the source exists on the server (cached), not only as this device's pending create. */
   cached: boolean;
-  /** The unsettled drafts against the source, or null while they have not been read (nothing is saved or sent until they are). */
+  /**
+   * The unsettled drafts against the source, or null while its current read has not answered (nothing is saved or sent until it has:
+   * the values shown and the observation a save states come from that read).
+   */
   outstandingTotal: number | null;
   awaitingSync: boolean;
+  /** Whether the person may change the source NOW (`can_edit` of the current row; a pending create is this person's). Default true. */
+  canEdit?: boolean;
+  /** Whether a connection change of this dialog is being sent (its answer decides the version the next Save is built on). */
+  connectionBusy?: boolean;
 }): { save: Enablement; replace: Enablement; remove: Enablement } {
   const { env } = input;
+  const canEdit = input.canEdit ?? true;
   // Save restates the values the person last asked for, which include the newest waiting change (`displayedRow`): it waits until the
   // waiting changes have been read, so a second change never reverts a first one that is still queued.
   const save = !env.hasOutbox
     ? off(NEEDS_DATABASE)
-    : input.awaitingSync
-      ? off(WAITING_LAST_CHANGE)
-      : input.outstandingTotal === null
-        ? off(CHECKING_CHANGES)
-        : on;
+    : !canEdit
+      ? off(VIEW_ONLY_REASON)
+      : input.connectionBusy === true
+        ? off(WAITING_CONNECTION_CHANGE)
+        : input.awaitingSync
+          ? off(WAITING_LAST_CHANGE)
+          : input.outstandingTotal === null
+            ? off(CHECKING_CHANGES)
+            : on;
   const base: Enablement = !input.cached
     ? off(NOT_CREATED_REASON)
-    : (direct(env) ??
-      (input.outstandingTotal === null
-        ? off(CHECKING_CHANGES)
-        : input.outstandingTotal > 0
-          ? off(WAITING_CHANGES_FIRST)
-          : on));
+    : !canEdit
+      ? off(VIEW_ONLY_REASON)
+      : (direct(env) ??
+        (input.outstandingTotal === null
+          ? off(CHECKING_CHANGES)
+          : input.outstandingTotal > 0
+            ? off(WAITING_CHANGES_FIRST)
+            : on));
   const replace =
     base.enabled && env.calendarLinks === false
       ? off(CAUSE_UNCONFIGURED)

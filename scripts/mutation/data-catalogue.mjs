@@ -398,7 +398,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        /read: async \(reader, input\) => \(\{\n {4}existing: await reader\.get\("drafts", input\.localId\),\n {4}touched: await readTouched\(\n {6}reader,\n {6}input\.request\.targets\.map\(\(target\) => target\.resourceId\),\n {6}new Set\(\[input\.localId\]\),\n {4}\),\n {2}\}\),/,
+        /read: async \(reader, input\) => \(\{\n {4}existing: await reader\.get\("drafts", input\.localId\),\n {4}touched: await readTouched\(\n {6}reader,\n {6}input\.request\.targets\.map\(\(target\) => target\.resourceId\),\n {6}new Set\(\[input\.localId\]\),\n {4}\),\n {4}observed: await observedNow\(reader, input\.incarnationId, input\.request\),\n {2}\}\),/,
         `read: async (reader, input) => {
     const fresh = {
       existing: await reader.get("drafts", input.localId),
@@ -410,7 +410,11 @@ export const UNIT = [
     };
     const slot = globalThis as unknown as { __stale?: Map<string, never> };
     slot.__stale ??= fresh.touched.versions as Map<string, never>;
-    return { existing: fresh.existing, touched: { ...fresh.touched, versions: slot.__stale as never } };
+    return {
+      existing: fresh.existing,
+      touched: { ...fresh.touched, versions: slot.__stale as never },
+      observed: await observedNow(reader, input.incarnationId, input.request),
+    };
   },`,
       ),
   },
@@ -14204,7 +14208,8 @@ export const UNIT = [
     file: "src/data/plans/pending-reads.ts",
     tests: ["tests/data/pending-reads.test.ts"],
     expect: /counts the unsettled drafts against the resource/,
-    patch: (t) => sub(t, "        if (!unsettled(row)) return;\n", ""),
+    // Re-anchored in WEB-13a revision 2 (the fold moved into \`OutstandingFold\`): the same mutation.
+    patch: (t) => sub(t, "    if (!unsettled(row)) return;\n", ""),
   },
   {
     id: "MU-1307",
@@ -14216,8 +14221,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "row.created_seq > newest.created_seq",
-        "row.created_seq < newest.created_seq",
+        "row.created_seq > this.newest.created_seq",
+        "row.created_seq < this.newest.created_seq",
       ),
   },
   {
@@ -14638,8 +14643,13 @@ export const UNIT = [
     title:
       "WEB-13a D-13a-8: after an online connection change, a queued settings change is offered at once (built on a version the server has passed)",
     file: "src/features/calendars/ManageSourceDialog.tsx",
-    tests: ["tests/features/calendars/connection-dialogs.test.tsx"],
-    expect: /Replace… starts EMPTY/,
+    // Revision 2: the open dialog now also records the version itself (a synchronous latch ahead of the next render), so the screen's
+    // record is what a REOPENED Manage reads: its case is listed beside the original one. The same mutation.
+    tests: [
+      "tests/features/calendars/connection-dialogs.test.tsx",
+      "tests/features/calendars/manage-revision-2.test.tsx",
+    ],
+    expect: /Replace… starts EMPTY|the wait outlives Manage/,
     patch: (t) => sub(t, "              onAwaiting(id, version);\n", ""),
   },
   {
@@ -14698,8 +14708,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      (input.outstandingTotal === null\n        ? off(CHECKING_CHANGES)",
-        "      (input.outstandingTotal === -1\n        ? off(CHECKING_CHANGES)",
+        "        (input.outstandingTotal === null\n          ? off(CHECKING_CHANGES)",
+        "        (input.outstandingTotal === -1\n          ? off(CHECKING_CHANGES)",
       ),
   },
   // ---- WEB-13a revision 1 (R1 to R5 of the first independent review) -----------------------------------------------------------
@@ -14797,14 +14807,14 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '  if (input.gate !== "open") return { kind: "gone", reason: "refreshing" };\n',
-        "",
+        '      return gate === "open"\n        ? { kind: "cached", row: merged, view: view.value }\n        : { kind: "gone", reason: "refreshing" };',
+        '      return { kind: "cached", row: merged, view: view.value };',
       ),
   },
   {
     id: "MU-1351",
     title:
-      "WEB-13a R2: an open Manage falls back to the row it was opened with when its source leaves the cache",
+      "WEB-13a R2: an open Manage falls back to the row it showed last when its source leaves the cache (re-anchored in revision 2)",
     file: "src/features/calendars/model/visibility.ts",
     tests: [
       "tests/features/calendars/status.test.ts",
@@ -14815,8 +14825,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '    return { kind: "gone", reason: "removed" };\n  return { kind: "row", row: resource.value.merged };',
-        '    return { kind: "row", row: dialog.row };\n  return { kind: "row", row: resource.value.merged };',
+        '    if (seenCached) return { kind: "gone", reason: "removed" };',
+        '    if (seenCached) return { kind: "resolving", row: last };',
       ),
   },
   {
@@ -14829,8 +14839,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '  const asked = displayedRow(\n    current,\n    outstanding.status === "ready" ? outstanding.value.latest : null,\n  );',
-        "  const asked = displayedRow(current, null);",
+        "      : displayedRow(current, live.outstanding.latestOfKind);",
+        "      : displayedRow(current, null);",
       ),
   },
   {
@@ -14843,8 +14853,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      : input.outstandingTotal === null\n        ? off(CHECKING_CHANGES)\n        : on;",
-        "      : on;",
+        "          : input.outstandingTotal === null\n            ? off(CHECKING_CHANGES)\n            : on;",
+        "          : on;",
       ),
   },
   {
@@ -14852,13 +14862,17 @@ export const UNIT = [
     title:
       "WEB-13a R4: a connection form's request is admitted after the form closed (its not_sent wait outlives it)",
     file: "src/features/calendars/live.ts",
-    tests: ["tests/features/calendars/connection-dialogs.test.tsx"],
-    expect: /nothing more is sent|cancelling the form/,
+    tests: [
+      "tests/features/calendars/connection-dialogs.test.tsx",
+      "tests/features/calendars/live.test.tsx",
+    ],
+    expect:
+      /nothing more is sent|cancelling the form|each condition alone ends admission/,
     patch: (t) =>
       sub(
         t,
-        "      mounted.current && latest.current.api === api && latest.current.online,",
-        "      latest.current.api === api && latest.current.online,",
+        "      mounted.current &&\n      latest.current.api === api &&",
+        "      latest.current.api === api &&",
       ),
   },
   {
@@ -14875,13 +14889,331 @@ export const UNIT = [
     title:
       "WEB-13a R4: a connection form's request waiting to be sent is admitted after the page went offline",
     file: "src/features/calendars/live.ts",
-    tests: ["tests/features/calendars/connection-dialogs.test.tsx"],
-    expect: /the page going offline: nothing more is sent/,
+    tests: [
+      "tests/features/calendars/connection-dialogs.test.tsx",
+      "tests/features/calendars/live.test.tsx",
+    ],
+    expect:
+      /the page going offline: nothing more is sent|each condition alone ends admission|without a rule of its own/,
     patch: (t) =>
       sub(
         t,
-        "      mounted.current && latest.current.api === api && latest.current.online,",
-        "      mounted.current && latest.current.api === api,",
+        "      latest.current.online &&\n      latest.current.admit(),",
+        "      latest.current.admit(),",
+      ),
+  },
+  // ---- WEB-13a revision 2 (R6 to R8 of review r1, and the design assessment's schedules) ----------------------------------------
+  {
+    id: "MU-1359",
+    title:
+      "WEB-13a R6: a pending source's Manage is never promoted (only a source seen cached may take the cached row)",
+    file: "src/features/calendars/model/visibility.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/manage-revision-2.test.tsx",
+    ],
+    expect: /PROMOTED|stays open as the CACHED source's|promoted too/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (base !== null && merged !== null)\n      return gate === "open"',
+        '    if (seenCached && base !== null && merged !== null)\n      return gate === "open"',
+      ),
+  },
+  {
+    id: "MU-1360",
+    title:
+      "WEB-13a R6: a promoted Manage does not remember it has seen its source cached (a later removal falls back to pending)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /never falls back to pending/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (authority.kind === "cached") seenCached.current = true;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1361",
+    title:
+      "WEB-13a R6/S1: a timezone the person typed gives way to the source's (explicit input discarded)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /a change of Timezone keeps the other published value/,
+    patch: (t) =>
+      sub(
+        t,
+        "    editedTimezone ?? sourceValue(asked.value).timezone ?? defaultTimezone();",
+        "    sourceValue(asked.value).timezone ?? editedTimezone ?? defaultTimezone();",
+      ),
+  },
+  {
+    id: "MU-1362",
+    title:
+      "WEB-13a S6/S8: the enqueue transaction does not check the observation a save states",
+    file: "src/data/plans/outbox.ts",
+    tests: [
+      "tests/data/resource-view.test.ts",
+      "tests/features/calendars/manage-revision-2.test.tsx",
+    ],
+    expect:
+      /refused as changed|another tab saves between Save and its transaction/,
+    patch: (t) =>
+      sub(
+        t,
+        '    // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.\n    if (!stillObserved(input.request, reads.observed))\n      return { result: { kind: "refused", reason: "changed" } };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1363",
+    title:
+      "WEB-13a S8: the supersede transaction does not check the observation a save states",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/resource-view.test.ts"],
+    expect: /a supersession from a conflict states it too/,
+    patch: (t) =>
+      sub(
+        t,
+        '    // Only a supersession that would be written is checked: a retry of one already made, or a refusal, says what it said before.\n    if (!stillObserved(input.request, reads.observed))\n      return { result: { kind: "refused", reason: "changed" } };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1364",
+    title:
+      "WEB-13a S6: Manage's Save does not state what it read (values from one moment paired with a later version)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /another tab saves between Save and its transaction/,
+    patch: (t) => sub(t, "        live.observation,\n", "        undefined,\n"),
+  },
+  {
+    id: "MU-1365",
+    title:
+      "WEB-13a S7/A1: Manage takes its values from the newest draft of ANY kind (an import hides a queued settings change)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /a settings change queued before an import/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : displayedRow(current, live.outstanding.latestOfKind);",
+        "      : displayedRow(current, live.outstanding.latest);",
+      ),
+  },
+  {
+    id: "MU-1366",
+    title:
+      "WEB-13a S7/A1: a row's values come from the newest draft of ANY kind (an import hides a queued settings change)",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /a settings change queued before an import/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const outstanding = useOutstanding(id, CONFIGURE_SOURCE);",
+        "  const outstanding = useOutstanding(id);",
+      ),
+  },
+  {
+    id: "MU-1367",
+    title:
+      "WEB-13a S7: the newest applicable settings change may be one that needs a decision",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/resource-view.test.ts"],
+    expect: /whatever needs a decision/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (applies(row) && newer(this.applicableOf.get(row.kind)))",
+        "    if (newer(this.applicableOf.get(row.kind)))",
+      ),
+  },
+  {
+    id: "MU-1368",
+    title:
+      "WEB-13a R7: Manage's Save handler does not check that Save is admitted (only the button does)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect:
+      /a submission saves nothing|view-only while Manage is open|save ONE change/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!saveAdmitted() || live === null) return;",
+        "    if (live === null) return;",
+      ),
+  },
+  {
+    id: "MU-1369",
+    title:
+      "WEB-13a R7: the disabled Save is no longer the form's submit button (the Enter key submits the form)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /the disabled Save is still the form's submit button/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {...(type === undefined ? {} : { type })}\n      {...(form === undefined ? {} : { form })}\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1370",
+    title:
+      "WEB-13a S10: Manage's Save has no synchronous latch (two submissions before a render save twice)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /two submissions before the screen updates save ONE change/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (saving.current || sending.current > 0) return false;",
+        "    if (sending.current > 0) return false;",
+      ),
+  },
+  {
+    id: "MU-1371",
+    title:
+      "WEB-13a S9: Save is offered while a connection change is being sent",
+    file: "src/features/calendars/model/status.ts",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /while the Remove request is being sent/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : input.connectionBusy === true\n        ? off(WAITING_CONNECTION_CHANGE)\n        : input.awaitingSync",
+        "      : input.awaitingSync",
+      ),
+  },
+  {
+    id: "MU-1372",
+    title: "WEB-13a R8: Link's URL and token stay editable offline",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /link: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = environment.online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
+      ),
+  },
+  {
+    id: "MU-1373",
+    title: "WEB-13a R8: Replace's URL and token stay editable offline",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /replace: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
+      ),
+  },
+  {
+    id: "MU-1374",
+    title: "WEB-13a R8: Link takes a URL or token change that arrives offline",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /link: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!lifetime.online()) {\n      event.target.value = fields[name];\n      return;\n    }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1375",
+    title:
+      "WEB-13a R8: Replace takes a URL or token change that arrives offline",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /replace: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!lifetime.online()) {\n      event.target.value = connection[name];\n      return;\n    }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1376",
+    title:
+      "WEB-13a S10: Link's late answer closes whatever dialog is open by then",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Link's answer arrives after it was cancelled/,
+    patch: (t) =>
+      sub(t, "    if (lifetime.mounted()) onClose();", "    onClose();"),
+  },
+  {
+    id: "MU-1377",
+    title:
+      "WEB-13a S10: a connection change's late answer closes a panel opened since",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Remove's answer arrives after its panel was closed/,
+    patch: (t) =>
+      sub(
+        t,
+        "              if (generation.current === panel.generation) openPanel(null);",
+        "              openPanel(null);",
+      ),
+  },
+  {
+    id: "MU-1378",
+    title:
+      "WEB-13a S13: a connection change waiting to be sent ignores Manage's current admission",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /not admitted again once the source has a waiting change/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const lifetime = useLive(api, online, admit);",
+        "  const lifetime = useLive(api, online);",
+      ),
+  },
+  {
+    id: "MU-1379",
+    title:
+      "WEB-13a S15: Save stays offered when the source becomes view-only while Manage is open",
+    file: "src/features/calendars/model/status.ts",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /becomes view-only while Manage is open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    : !canEdit\n      ? off(VIEW_ONLY_REASON)\n      : input.connectionBusy === true",
+        "    : input.connectionBusy === true",
+      ),
+  },
+  {
+    id: "MU-1380",
+    title:
+      "WEB-13a S10: Add source has no synchronous latch (two submissions before a render save twice)",
+    file: "src/features/calendars/AddSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Add source: two submissions/,
+    patch: (t) => sub(t, "    if (saving.current) return;\n", ""),
+  },
+  {
+    id: "MU-1381",
+    title:
+      "WEB-13a S10: Link has no synchronous latch (two submissions before a render send twice)",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Link a calendar…: two submissions/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const submit = async () => {\n    if (inFlight.current) return;\n",
+        "  const submit = async () => {\n",
       ),
   },
 ];
@@ -17237,8 +17569,72 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        '  if (input.gate !== "open") return { kind: "gone", reason: "refreshing" };\n',
-        "",
+        '      return gate === "open"\n        ? { kind: "cached", row: merged, view: view.value }\n        : { kind: "gone", reason: "refreshing" };',
+        '      return { kind: "cached", row: merged, view: view.value };',
+      ),
+  },
+  {
+    id: "MU-1382",
+    title:
+      "WEB-13a R6: (REAL ENGINE) a pending source's Manage is never promoted when its create is published",
+    file: "src/features/calendars/model/visibility.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL9",
+    expect: /E-CAL9/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (base !== null && merged !== null)\n      return gate === "open"',
+        '    if (seenCached && base !== null && merged !== null)\n      return gate === "open"',
+      ),
+  },
+  {
+    id: "MU-1383",
+    title:
+      "WEB-13a R7: (REAL ENGINE) Manage is submitted while Save waits, by the Enter key (Chromium, Firefox) or an explicit form submission (every engine): the disabled Save leaves the form AND the handler does not check",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL10",
+    expect: /E-CAL10/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      {...(type === undefined ? {} : { type })}\n      {...(form === undefined ? {} : { form })}\n",
+          "",
+        ),
+        "    if (!saveAdmitted() || live === null) return;",
+        "    if (live === null) return;",
+      ),
+  },
+  {
+    id: "MU-1384",
+    title:
+      "WEB-13a R8: (REAL ENGINE) Link's URL and token stay editable offline",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL11",
+    expect: /E-CAL11/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = environment.online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
+      ),
+  },
+  {
+    id: "MU-1385",
+    title:
+      "WEB-13a R8: (REAL ENGINE) Replace's URL and token stay editable offline",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL11",
+    expect: /E-CAL11/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
       ),
   },
 ];

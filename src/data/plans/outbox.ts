@@ -61,6 +61,7 @@ import {
   collectIndex,
   existingDrafts,
   readEarliestSharing,
+  readObservation,
   readTouched,
   type Touched,
   WINDOW,
@@ -205,14 +206,36 @@ function endedStreak(
 // ---- W2: enqueue ---------------------------------------------------------------------------------------------------------------
 export type EnqueueResult =
   | { kind: "queued"; localId: LocalId; createdSeq: number; duplicate: boolean }
-  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" }
+  /** `changed`: the request stated what its caller saw (`observed`), and this transaction read something else; nothing was written. */
+  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" | "changed" }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
 
 interface EnqueueReads {
   existing: DraftRow | undefined;
   touched: Touched;
+  /** The token of what the request said its caller saw, read here (`readObservation`), or null when it said nothing. */
+  observed: string | null;
 }
+
+/** The observation a request states, read again inside the writing transaction (WEB-13a revision 2), or null when it states none. */
+async function observedNow(
+  reader: Reader,
+  incarnationId: string,
+  request: EnqueueRequest,
+): Promise<string | null> {
+  if (request.observed === undefined) return null;
+  return (
+    await readObservation(reader, incarnationId, request.observed.resourceId)
+  ).token;
+}
+
+/** Whether a request that states an observation was made from what the transaction read (always, when it states none). */
+const stillObserved = (
+  request: EnqueueRequest,
+  observed: string | null,
+): boolean =>
+  request.observed === undefined || request.observed.token === observed;
 
 /**
  * ONE atomic read-increment-write over `drafts`, `resource_versions` and `cache` (read): every base is read and every record
@@ -244,6 +267,7 @@ export const enqueueDraft = singletonPlan<
       input.request.targets.map((target) => target.resourceId),
       new Set([input.localId]),
     ),
+    observed: await observedNow(reader, input.incarnationId, input.request),
   }),
   decide: ({ sync, reads, input }) => {
     if (sync === undefined)
@@ -274,6 +298,9 @@ export const enqueueDraft = singletonPlan<
         },
       };
     }
+    // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.
+    if (!stillObserved(input.request, reads.observed))
+      return { result: { kind: "refused", reason: "changed" } };
     const over = overBound(input, {
       draft: planned.draft,
       command: planned.command,
@@ -505,7 +532,9 @@ export type SupersedeResult =
         | "key_in_use"
         | "no_base"
         /** No order of the queue lets the replacement and the drafts around it all be sent (R45, revision 25); nothing was written. */
-        | "order_conflict";
+        | "order_conflict"
+        /** The request stated what its caller saw (`observed`), and this transaction read something else; nothing was written. */
+        | "changed";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -520,6 +549,8 @@ interface SupersedeReads {
   extras: DraftRow[];
   effects: PendingEffectRow[];
   touched: Touched;
+  /** As `EnqueueReads.observed`. */
+  observed: string | null;
 }
 
 export const supersedeDraft = singletonPlan<
@@ -577,6 +608,7 @@ export const supersedeDraft = singletonPlan<
         extras: [],
         effects: [],
         touched: { cache: new Map(), versions: new Map(), others: [] },
+        observed: null,
       };
     }
     const cascade = await readCascade(reader, old);
@@ -603,6 +635,7 @@ export const supersedeDraft = singletonPlan<
         ],
         new Set(cascade.map((member) => member.local_id)),
       ),
+      observed: await observedNow(reader, input.incarnationId, input.request),
     };
   },
   decide: ({ sync, reads, input }) => {
@@ -648,6 +681,9 @@ export const supersedeDraft = singletonPlan<
       };
     }
     if (decision.kind !== "superseded") return { result: decision };
+    // Only a supersession that would be written is checked: a retry of one already made, or a refusal, says what it said before.
+    if (!stillObserved(input.request, reads.observed))
+      return { result: { kind: "refused", reason: "changed" } };
     const over = overBound(input, {
       draft: decision.draft,
       command: decision.command,

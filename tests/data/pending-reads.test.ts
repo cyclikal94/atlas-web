@@ -249,6 +249,12 @@ describe("readOutstanding", () => {
   test("control: nothing against the resource", async () => {
     const w = await pageWorld();
     const out = await outstanding(w, target);
-    expect(out).toEqual({ total: 0, byStatus: {}, latest: null });
+    // Revision 2 adds `latestOfKind` (null when no kind is asked for); the control's assertion is otherwise unchanged.
+    expect(out).toEqual({
+      total: 0,
+      byStatus: {},
+      latest: null,
+      latestOfKind: null,
+    });
   });
 });

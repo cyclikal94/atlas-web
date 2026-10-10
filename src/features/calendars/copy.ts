@@ -43,6 +43,9 @@ export const WAITING_CHANGES_FIRST =
 export const CHECKING_CHANGES = "Checking for changes waiting to send…";
 /** Provisional (D-13a-8). */
 export const WAITING_LAST_CHANGE = "Waiting for your last change to sync";
+/** Provisional (D-13a-8, revision 2): a connection change of this dialog is being sent. */
+export const WAITING_CONNECTION_CHANGE =
+  "Waiting for the connection change to finish";
 /** Provisional. */
 export const TURNED_OFF_REASON = "Turn this calendar on to refresh it";
 /** Provisional. */
@@ -188,6 +191,9 @@ export const NOT_SAVED_STORAGE =
 export const NOT_SAVED_FENCED =
   "Not saved — this device is signing out or retiring.";
 export const NOT_SAVED = "Not saved — try again.";
+/** Provisional (revision 2): the source changed between what Manage showed and the save; nothing was stored. */
+export const NOT_SAVED_CHANGED =
+  "Not saved — this calendar changed while you were saving. Check the values and save again.";
 
 // ---- refresh (online-only; B8's six causes) ----------------------------------------------------------------------------------------
 /** Provisional. */

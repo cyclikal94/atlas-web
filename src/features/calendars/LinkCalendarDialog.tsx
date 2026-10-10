@@ -100,6 +100,11 @@ export function submissionMessage(outcome: SubmissionOutcome): {
  * live in this form's state alone and leave with it (success, close, unmount); a reload requires re-entering them. "Retry" resends the
  * identical pair (key and body), so an answer that was lost is recognised and the source is not created twice; an edit of any field
  * makes the next attempt a new operation. After an uncertain attempt, "Check" asks the server whether the source now exists.
+ *
+ * Revision 2: entering a URL or token is online only as well (Q22): offline, both fields are disabled with the reason and a change that
+ * arrives anyway is put back, while what was entered stays in the open form for the person to send once back online. A request is
+ * admitted only while Link is still available; a second press before the screen shows the first as busy does nothing; and an answer
+ * that arrives after the form has closed closes nothing (another dialog may be open by then).
  */
 export function LinkCalendarDialog({
   api,
@@ -128,8 +133,16 @@ export function LinkCalendarDialog({
   );
   const sourceIds = useRef(new Map<string, string>());
   const available = headerActions(environment).link;
-  // Its requests are admitted only while this form is open, under the client it was opened with, and online.
-  const lifetime = useLive(api, environment.online);
+  const latestAvailable = useRef(available);
+  latestAvailable.current = available;
+  // Its requests are admitted only while this form is open, under the client it was opened with, online, and while Link is available.
+  const lifetime = useLive(
+    api,
+    environment.online,
+    () => latestAvailable.current.enabled,
+  );
+  // A synchronous latch over Connect and Check: one request at a time, whatever arrives before the next render.
+  const inFlight = useRef(false);
 
   const edit = (name: keyof Fields, value: string) => {
     setFields((previous) => ({ ...previous, [name]: value }));
@@ -137,12 +150,25 @@ export function LinkCalendarDialog({
     setUncertain(false);
   };
 
+  /** A connection field: offline it is disabled, and a change that arrives anyway is put back (Q22: entry is online only). */
+  const editSecret = (
+    name: "url" | "bearer",
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    if (!lifetime.online()) {
+      event.target.value = fields[name];
+      return;
+    }
+    edit(name, event.target.value);
+  };
+
   const done = () => {
     announcer.announce(LINKED);
-    onClose();
+    if (lifetime.mounted()) onClose();
   };
 
   const submit = async () => {
+    if (inFlight.current) return;
     const next: Errors = {
       label: labelError(fields.label),
       timezone: timezoneError(fields.timezone),
@@ -169,16 +195,21 @@ export function LinkCalendarDialog({
     const afterUncertain = submission.current.uncertain;
     setBusy(true);
     setMessage(null);
-    const answer = await api.command(
-      linkCommand({
-        id,
-        label: pair.body.label,
-        timezone: pair.body.timezone,
-        connection: { url: pair.body.url, bearer: pair.body.bearer },
-      }),
-      pair.key,
-      lifetime.live,
-    );
+    inFlight.current = true;
+    const answer = await api
+      .command(
+        linkCommand({
+          id,
+          label: pair.body.label,
+          timezone: pair.body.timezone,
+          connection: { url: pair.body.url, bearer: pair.body.bearer },
+        }),
+        pair.key,
+        lifetime.live,
+      )
+      .finally(() => {
+        inFlight.current = false;
+      });
     setBusy(false);
     const outcome =
       !answer.ok && answer.kind === "closed" && !lifetime.online()
@@ -201,11 +232,15 @@ export function LinkCalendarDialog({
   };
 
   const check = async () => {
+    if (inFlight.current || !latestAvailable.current.enabled) return;
     const pair = submission.current.current();
     const id = pair === null ? undefined : sourceIds.current.get(pair.key);
     if (id === undefined) return;
     setBusy(true);
-    const found = await api.liveSources(lifetime.live);
+    inFlight.current = true;
+    const found = await api.liveSources(lifetime.live).finally(() => {
+      inFlight.current = false;
+    });
     setBusy(false);
     if (found.ok && found.value.sources.has(id)) return done();
     setMessage(
@@ -213,6 +248,9 @@ export function LinkCalendarDialog({
     );
   };
 
+  const entry = environment.online
+    ? {}
+    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);
   return (
     <Dialog
       open
@@ -276,7 +314,8 @@ export function LinkCalendarDialog({
           type="url"
           secret
           error={errors.url}
-          onChange={(event) => edit("url", event.target.value)}
+          {...entry}
+          onChange={(event) => editSecret("url", event)}
         />
         <Field
           label={BEARER_LABEL}
@@ -284,7 +323,8 @@ export function LinkCalendarDialog({
           type="password"
           secret
           error={errors.bearer}
-          onChange={(event) => edit("bearer", event.target.value)}
+          {...entry}
+          onChange={(event) => editSecret("bearer", event)}
         />
         <p className="text-[12.5px] leading-[1.6] text-ink-2">{SECRET_HELP}</p>
         <FormMessage message={message} />

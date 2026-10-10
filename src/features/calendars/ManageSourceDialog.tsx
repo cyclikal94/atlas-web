@@ -4,10 +4,9 @@ import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
 import {
   type CacheRow,
-  useCachedResource,
   useCacheGate,
   useOptionalDataEnv,
-  useOutstanding,
+  useResourceView,
 } from "../../data";
 import { refusalMessage } from "./AddSourceDialog";
 import type { CalendarApi } from "./api";
@@ -27,6 +26,7 @@ import {
   MANAGE_CLOSED_REFRESHING,
   MANAGE_HELP,
   manageTitle,
+  NEEDS_CONNECTION,
   NEEDS_DATABASE,
   NOT_SAVED,
   NOTHING_CHANGED,
@@ -52,7 +52,9 @@ import { submissionMessage } from "./LinkCalendarDialog";
 import { useLive } from "./live";
 import { identityMemory } from "./memory";
 import {
+  CONFIGURE_SOURCE,
   type Connection,
+  CREATE_SOURCE,
   type CurrentSettings,
   configureSourceRequest,
   currentSettings,
@@ -74,9 +76,13 @@ import {
   timezoneError,
   urlError,
 } from "./model/validation";
-import { shownSource } from "./model/visibility";
+import { sourceAuthority } from "./model/visibility";
+import { projectSourceCreate } from "./register";
 
-type Panel = "replace" | "remove" | null;
+type Panel = "replace" | "remove";
+
+/** What Manage reads of its source: the create (a pending source's values) and the newest settings change that applies. */
+const VIEW_KINDS = { create: CREATE_SOURCE, settings: CONFIGURE_SOURCE };
 
 /**
  * "Manage — <label>" (WEB-13a; the wireframe's Manage source panel). Two kinds of change, kept apart:
@@ -85,15 +91,25 @@ type Panel = "replace" | "remove" | null;
  *    conflict, Save replaces the conflicted draft (`supersede`) instead of adding another (D-13a-12).
  *  - "Replace…" and "Remove…" change the connection DIRECTLY, online only, with the URL and token in this panel's memory alone.
  *    They restate the current timezone and enabled from the merged row, so they are unavailable while this source has changes
- *    waiting to send (D-13a-8): an online change would make every queued one conflict. After one succeeds, Save waits until the
- *    cache has caught up with it, so the next queued change is not built on a version the server has passed.
+ *    waiting to send (D-13a-8): an online change would make every queued one conflict. While one is being sent, and after one succeeds
+ *    until the cache has caught up with it, Save waits, so the next queued change is not built on a version the server has passed.
  *
  * The label is read-only: the contract has no way to rename a source.
  *
- * A cached source is shown here only while the list could show it (`shownSource`): when the cache is being brought up to date (its
- * content is hidden behind the gate) or the source leaves it, Manage closes and says why, and nothing it showed stays on screen. Its
- * fields start from the values the person last asked for (the newest waiting change over the cached row, as the row shows them), and
- * Save waits until those waiting changes have been read, so a second change never reverts a first that is still queued.
+ * WHAT IT SHOWS AND ON WHAT AUTHORITY (revision 2, `sourceAuthority`): the source as ONE read sees it (`useResourceView`), never the row
+ * the dialog was opened with. A pending source is shown from its create as it stands; when the create is published Manage stays open
+ * and becomes the cached source's (its untouched fields follow the published values, its cached rules apply); a cached source is shown
+ * only while the list could show it, and when the cache is being brought up to date or the source leaves it, Manage closes and says
+ * why. A field the person has not edited follows the values they last asked for (the newest settings change that applies, over the
+ * row); an edited one keeps what was typed.
+ *
+ * WHAT IT SAVES: both values, with the observation of the read they were shown from (`configureSourceRequest`'s `observed`). The outbox
+ * writes the change only if its transaction still reads the same source and drafts; if anything changed in between (another tab's
+ * save, a sync, a publication) nothing is stored and the person sees the new values before saving again.
+ *
+ * WHO MAY ACT: every route that saves or sends (the button, the Enter key's implicit submission of the form, Retry) is admitted by the
+ * same rule that disables the control (`manageActions`), checked again when it acts, with a synchronous latch so a second press before
+ * the screen has updated does nothing.
  */
 export function ManageSourceDialog({
   api,
@@ -116,25 +132,37 @@ export function ManageSourceDialog({
   const zonesId = useId();
   const id = dialog.row.id;
   const gate = useCacheGate();
-  const resource = useCachedResource(id);
-  const outstanding = useOutstanding(id);
-  // The row as the cache and its overlay say it NOW (a conflict re-reads it), or why it can no longer be shown.
+  const view = useResourceView(id, VIEW_KINDS);
+  // Kept across renders: whether the source has been seen cached (never unset), whether its read has answered, and what was shown last.
+  const seenCached = useRef(dialog.cached);
   const read = useRef(false);
-  const shown = shownSource({
-    dialog,
-    gate,
-    resource,
-    read: read.current,
+  const last = useRef<{ row: CacheRow; asked: CacheRow }>({
+    row: dialog.row,
+    asked: dialog.row,
   });
-  if (resource.status !== "loading") read.current = true;
-  const current: CacheRow = shown.kind === "row" ? shown.row : dialog.row;
-  const baseVersion =
-    resource.status === "ready" ? (resource.value.base?.version ?? null) : null;
-  // The values the person last asked for: the newest waiting settings change over the row (`displayedRow`), as the row shows them.
-  const asked = displayedRow(
-    current,
-    outstanding.status === "ready" ? outstanding.value.latest : null,
-  );
+  const authority = sourceAuthority({
+    gate,
+    view,
+    last: last.current.row,
+    seenCached: seenCached.current,
+    read: read.current,
+    project: projectSourceCreate,
+  });
+  if (view.status !== "loading") read.current = true;
+  if (authority.kind === "cached") seenCached.current = true;
+  const current: CacheRow =
+    authority.kind === "gone" ? last.current.row : authority.row;
+  const live =
+    authority.kind === "cached" || authority.kind === "pending"
+      ? authority.view
+      : null;
+  const baseVersion = live?.base?.version ?? null;
+  // The values the person last asked for: the newest settings change that applies, over the row (`displayedRow`), as the row shows them.
+  const asked =
+    live === null
+      ? last.current.asked
+      : displayedRow(current, live.outstanding.latestOfKind);
+  if (authority.kind !== "gone") last.current = { row: current, asked };
   // A field the person has not edited follows `asked`; an edited one keeps what was typed.
   const [editedTimezone, setTimezone] = useState<string | null>(null);
   const [editedEnabled, setEnabled] = useState<boolean | null>(
@@ -146,28 +174,55 @@ export function ManageSourceDialog({
   const [timezoneProblem, setTimezoneProblem] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [panel, setPanel] = useState<Panel>(
-    dialog.replace === true ? "replace" : null,
+  const [panel, setPanel] = useState<{
+    kind: Panel;
+    generation: number;
+  } | null>(
+    dialog.replace === true ? { kind: "replace", generation: 1 } : null,
   );
+  const generation = useRef(panel?.generation ?? 0);
+  const openPanel = (kind: Panel | null) => {
+    generation.current += 1;
+    setPanel(kind === null ? null : { kind, generation: generation.current });
+  };
   const saves = useRef(
     createSubmission<{ timezone: string; enabled: boolean }>(() =>
       crypto.randomUUID(),
     ),
   );
+  // Synchronous latches: a Save under way, connection changes being sent, and the version a connection change of THIS dialog was built
+  // on (the state that disables Save follows a render later; these close the gap before it).
+  const saving = useRef(false);
+  const sending = useRef(0);
+  const [connectionBusy, setConnectionBusy] = useState(false);
+  const awaitedHere = useRef<number | null>(null);
   const recorded = awaiting.get(id);
+  const awaited = Math.max(recorded ?? -1, awaitedHere.current ?? -1);
   const awaitingSync =
-    recorded !== undefined && (baseVersion === null || baseVersion <= recorded);
+    awaited >= 0 && (baseVersion === null || baseVersion <= awaited);
   const actions = manageActions({
     env: environment,
-    cached: dialog.cached,
-    outstandingTotal:
-      outstanding.status === "ready" ? outstanding.value.total : null,
+    cached:
+      authority.kind === "cached" ||
+      (authority.kind === "resolving" && seenCached.current),
+    outstandingTotal: live?.outstanding.total ?? null,
     awaitingSync,
+    canEdit: current.can_edit,
+    connectionBusy,
   });
+  const latestActions = useRef(actions);
+  latestActions.current = actions;
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // Closed once, with the reason announced, when the source can no longer be shown.
   const closed = useRef(false);
-  const gone = shown.kind === "gone" ? shown.reason : null;
+  const gone = authority.kind === "gone" ? authority.reason : null;
   useEffect(() => {
     if (gone === null || closed.current) return;
     closed.current = true;
@@ -177,45 +232,68 @@ export function ManageSourceDialog({
     onClose();
   }, [gone, announcer, onClose]);
 
+  /** Whether Save may act NOW: the rule that disables it, and the latches that run ahead of the next render. */
+  const saveAdmitted = (): boolean => {
+    if (saving.current || sending.current > 0) return false;
+    const held = awaitedHere.current;
+    if (held !== null && (baseVersion === null || baseVersion <= held))
+      return false;
+    return actions.save.enabled && !busy && live !== null;
+  };
+
   const save = async () => {
-    const problem = timezoneError(timezone);
-    setTimezoneProblem(problem);
-    if (problem !== null) return;
-    const outbox = env?.outbox() ?? null;
-    if (outbox === null) {
-      setMessage(NEEDS_DATABASE);
-      return;
-    }
-    const settings = { timezone: timezone.trim(), enabled };
-    const before = sourceValue(asked.value).timezone;
-    if (
-      dialog.supersede === undefined &&
-      settings.timezone === before &&
-      settings.enabled === !asked.archived
-    ) {
-      announcer.announce(NOTHING_CHANGED);
-      onClose();
-      return;
-    }
-    const pair = saves.current.attempt(settings);
-    const request = configureSourceRequest(current, settings, pair.key);
-    setBusy(true);
-    setMessage(null);
+    // Every route that submits the form (the button, Enter in a field) arrives here: nothing is validated, closed or saved unless Save
+    // is admitted now.
+    if (!saveAdmitted() || live === null) return;
+    saving.current = true;
     try {
-      const outcome =
-        dialog.supersede === undefined
-          ? await outbox.enqueue(request)
-          : await outbox.supersede(dialog.supersede, request);
-      if (outcome.kind === "queued" || outcome.kind === "superseded") {
-        announcer.announce(SETTINGS_SAVED);
+      const problem = timezoneError(timezone);
+      setTimezoneProblem(problem);
+      if (problem !== null) return;
+      const outbox = env?.outbox() ?? null;
+      if (outbox === null) {
+        setMessage(NEEDS_DATABASE);
+        return;
+      }
+      const settings = { timezone: timezone.trim(), enabled };
+      const before = sourceValue(asked.value).timezone;
+      if (
+        dialog.supersede === undefined &&
+        settings.timezone === before &&
+        settings.enabled === !asked.archived
+      ) {
+        announcer.announce(NOTHING_CHANGED);
         onClose();
         return;
       }
-      setMessage(refusalMessage(outcome.reason));
-    } catch {
-      setMessage(NOT_SAVED);
+      const pair = saves.current.attempt(settings);
+      const request = configureSourceRequest(
+        current,
+        settings,
+        pair.key,
+        live.observation,
+      );
+      setBusy(true);
+      setMessage(null);
+      try {
+        const outcome =
+          dialog.supersede === undefined
+            ? await outbox.enqueue(request)
+            : await outbox.supersede(dialog.supersede, request);
+        if (outcome.kind === "queued" || outcome.kind === "superseded") {
+          announcer.announce(SETTINGS_SAVED);
+          // A save that finished after Manage closed closes nothing: another dialog may be open by now.
+          if (mounted.current) onClose();
+          return;
+        }
+        setMessage(refusalMessage(outcome.reason));
+      } catch {
+        setMessage(NOT_SAVED);
+      } finally {
+        setBusy(false);
+      }
     } finally {
-      setBusy(false);
+      saving.current = false;
     }
   };
 
@@ -285,26 +363,39 @@ export function ManageSourceDialog({
         <p className="text-[12.5px] text-ink-2">{CONNECTION_NOT_SHOWN}</p>
         <div className="flex flex-wrap items-start gap-2">
           <Gate enablement={actions.replace}>
-            <Button onClick={() => setPanel("replace")}>{REPLACE}</Button>
+            <Button onClick={() => openPanel("replace")}>{REPLACE}</Button>
           </Gate>
           <Gate enablement={actions.remove}>
-            <Button onClick={() => setPanel("remove")}>{REMOVE}</Button>
+            <Button onClick={() => openPanel("remove")}>{REMOVE}</Button>
           </Gate>
         </div>
         {panel !== null && api !== null ? (
           <ConnectionPanel
-            key={panel}
+            key={panel.generation}
             api={api}
-            panel={panel}
+            panel={panel.kind}
             current={current}
             online={environment.online}
-            available={panel === "replace" ? actions.replace : actions.remove}
-            onDone={(version) => {
-              onAwaiting(id, version);
-              announcer.announce(panel === "replace" ? REPLACED : REMOVED);
-              setPanel(null);
+            available={
+              panel.kind === "replace" ? actions.replace : actions.remove
+            }
+            admit={() => latestActions.current[panel.kind].enabled}
+            onSending={(delta) => {
+              sending.current += delta;
+              setConnectionBusy(sending.current > 0);
             }}
-            onClose={() => setPanel(null)}
+            onDone={(version) => {
+              // The change was made, whichever panel is open now: Save waits for the cache to pass the version it was built on.
+              awaitedHere.current = Math.max(
+                awaitedHere.current ?? -1,
+                version,
+              );
+              onAwaiting(id, version);
+              announcer.announce(panel.kind === "replace" ? REPLACED : REMOVED);
+              // Only the panel that sent it closes: a late answer never closes a panel opened since.
+              if (generation.current === panel.generation) openPanel(null);
+            }}
+            onClose={() => openPanel(null)}
           />
         ) : null}
       </section>
@@ -330,20 +421,32 @@ export function ManageSourceDialog({
   );
 }
 
+/**
+ * A control that is either the action or, when unavailable, the same control disabled with its reason. The disabled one keeps the
+ * action's `type` and `form`: a form whose submit button is disabled is not submitted by the Enter key (implicit submission), as the
+ * button says. The handler checks again in any case.
+ */
 function Gate({
   enablement,
   children,
 }: {
   enablement: Enablement;
-  children: React.ReactElement<{ children: React.ReactNode }>;
+  children: React.ReactElement<{
+    children: React.ReactNode;
+    type?: "submit" | "button";
+    form?: string;
+  }>;
 }) {
   if (enablement.enabled) return children;
+  const { type, form } = children.props;
   return (
     <Button
       variant={
         (children.props as { variant?: "primary" | "secondary" }).variant ??
         "secondary"
       }
+      {...(type === undefined ? {} : { type })}
+      {...(form === undefined ? {} : { form })}
       disabled
       reason={enablement.reason ?? ""}
     >
@@ -365,7 +468,10 @@ interface ConnectionChange {
  * Once an attempt was uncertain, "Retry" resends THAT pair, byte for byte under its key, whatever the cache has learnt since (a newer
  * version, other settings): the server finds the receipt of an attempt that landed and does not apply the change twice. Only an edit
  * of a field, or a conflict, makes the next attempt a new operation built from the row as it is then. The request is admitted only
- * while the panel is open, under the client it was opened with, and online.
+ * while the panel is open, under the client it was opened with, online, and while Manage still allows the change (`admit`).
+ *
+ * ENTRY IS ONLINE ONLY TOO (Q22, revision 2): offline, the URL and token fields are disabled with the reason, and a change that arrives
+ * anyway is put back; what was entered before stays in the open panel, for the person to send once back online.
  */
 function ConnectionPanel({
   api,
@@ -373,6 +479,8 @@ function ConnectionPanel({
   current,
   online,
   available,
+  admit,
+  onSending,
   onDone,
   onClose,
 }: {
@@ -381,6 +489,10 @@ function ConnectionPanel({
   current: CacheRow;
   online: boolean;
   available: Enablement;
+  /** Whether Manage allows this change NOW (read at each admission of the request). */
+  admit(): boolean;
+  /** A request of this panel starts (+1) or ends (-1) being sent. */
+  onSending(delta: 1 | -1): void;
   onDone(basedOn: number): void;
   onClose(): void;
 }) {
@@ -398,15 +510,27 @@ function ConnectionPanel({
   const submission = useRef(
     createSubmission<ConnectionChange>(() => crypto.randomUUID()),
   );
-  const lifetime = useLive(api, online);
+  // A synchronous latch: a second press before the screen shows the first as busy sends nothing.
+  const inFlight = useRef(false);
+  const lifetime = useLive(api, online, admit);
 
-  const edit = (name: keyof Connection, value: string) => {
+  const edit = (
+    name: keyof Connection,
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    // Offline the field is disabled; a change that arrives anyway is not taken, and the field shows what was entered before.
+    if (!lifetime.online()) {
+      event.target.value = connection[name];
+      return;
+    }
+    const value = event.target.value;
     setConnection((previous) => ({ ...previous, [name]: value }));
     submission.current.invalidate();
     setUncertain(false);
   };
 
   const submit = async () => {
+    if (inFlight.current) return;
     if (panel === "replace") {
       const next = {
         url: urlError(connection.url, "replace"),
@@ -415,50 +539,57 @@ function ConnectionPanel({
       setErrors(next);
       if (next.url !== null || next.bearer !== null) return;
     }
-    if (!available.enabled) return;
-    const afterUncertain = submission.current.uncertain;
-    const pair =
-      (afterUncertain ? submission.current.current() : null) ??
-      submission.current.attempt(
-        connectionChange(
-          panel,
-          currentSettings(current, defaultTimezone()),
-          connection,
-        ),
+    if (!available.enabled || !admit()) return;
+    inFlight.current = true;
+    onSending(1);
+    try {
+      const afterUncertain = submission.current.uncertain;
+      const pair =
+        (afterUncertain ? submission.current.current() : null) ??
+        submission.current.attempt(
+          connectionChange(
+            panel,
+            currentSettings(current, defaultTimezone()),
+            connection,
+          ),
+        );
+      setBusy(true);
+      setMessage(null);
+      const answer = await api.command(
+        pair.body.command,
+        pair.key,
+        lifetime.live,
       );
-    setBusy(true);
-    setMessage(null);
-    const answer = await api.command(
-      pair.body.command,
-      pair.key,
-      lifetime.live,
-    );
-    setBusy(false);
-    const outcome =
-      !answer.ok && answer.kind === "closed" && !lifetime.online()
-        ? ({ kind: "offline" } as const)
-        : classifySubmission(answer, afterUncertain);
-    if (outcome.kind === "succeeded") return onDone(pair.body.version);
-    if (outcome.kind === "uncertain") {
-      submission.current.markUncertain();
-      setUncertain(true);
+      setBusy(false);
+      const outcome =
+        !answer.ok && answer.kind === "closed" && !lifetime.online()
+          ? ({ kind: "offline" } as const)
+          : classifySubmission(answer, afterUncertain);
+      if (outcome.kind === "succeeded") return onDone(pair.body.version);
+      if (outcome.kind === "uncertain") {
+        submission.current.markUncertain();
+        setUncertain(true);
+      }
+      if (outcome.kind === "refused" && outcome.reason === "conflict") {
+        // The source changed elsewhere: the next attempt is built from the row as it is now, never resent blind.
+        submission.current.invalidate();
+        setUncertain(false);
+        setMessage(CONFLICT);
+        return;
+      }
+      if (outcome.kind === "refused" && outcome.reason === "access")
+        // The session re-checks a 403 by closing and reopening the display, which unmounts this panel: the words outlive it.
+        identityMemory(api.identity.account, api.identity.epoch).notices.set(
+          current.id,
+          ACCESS_LOST_NOTICE,
+        );
+      const shown = submissionMessage(outcome);
+      setMessage(shown.message);
+      if (shown.field) setErrors((e) => ({ ...e, url: shown.field?.message }));
+    } finally {
+      inFlight.current = false;
+      onSending(-1);
     }
-    if (outcome.kind === "refused" && outcome.reason === "conflict") {
-      // The source changed elsewhere: the next attempt is built from the row as it is now, never resent blind.
-      submission.current.invalidate();
-      setUncertain(false);
-      setMessage(CONFLICT);
-      return;
-    }
-    if (outcome.kind === "refused" && outcome.reason === "access")
-      // The session re-checks a 403 by closing and reopening the display, which unmounts this panel: the words outlive it.
-      identityMemory(api.identity.account, api.identity.epoch).notices.set(
-        current.id,
-        ACCESS_LOST_NOTICE,
-      );
-    const shown = submissionMessage(outcome);
-    setMessage(shown.message);
-    if (shown.field) setErrors((e) => ({ ...e, url: shown.field?.message }));
   };
 
   const submitLabel = uncertain
@@ -473,6 +604,9 @@ function ConnectionPanel({
       : panel === "replace" && connection.url.trim() === ""
         ? { enabled: false, reason: URL_REQUIRED_FOR_REPLACE }
         : { enabled: true };
+  const entry = online
+    ? {}
+    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);
   return (
     <div
       data-connection-panel={panel}
@@ -486,7 +620,8 @@ function ConnectionPanel({
             type="url"
             secret
             error={errors.url}
-            onChange={(event) => edit("url", event.target.value)}
+            {...entry}
+            onChange={(event) => edit("url", event)}
           />
           <Field
             label={BEARER_LABEL}
@@ -494,7 +629,8 @@ function ConnectionPanel({
             type="password"
             secret
             error={errors.bearer}
-            onChange={(event) => edit("bearer", event.target.value)}
+            {...entry}
+            onChange={(event) => edit("bearer", event)}
           />
           <p className="text-[12px] leading-[1.5] text-ink-2">
             {REPLACE_ROTATE_NOTE}

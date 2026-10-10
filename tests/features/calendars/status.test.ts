@@ -31,7 +31,7 @@ import {
   pendingStatus,
   sourceStatus,
 } from "../../../src/features/calendars/model/status";
-import { shownSource } from "../../../src/features/calendars/model/visibility";
+import { sourceAuthority } from "../../../src/features/calendars/model/visibility";
 
 /** The single derivation of every calendar row's status and every enablement (WEB-13a), as a table. */
 const ONLINE: Environment = {
@@ -431,7 +431,7 @@ describe("revision 1: Save restates what is waiting, so it waits until that has 
   });
 });
 
-describe("revision 1: what an open Manage may still show (R2)", () => {
+describe("revision 1: what an open Manage may still show (R2); revision 2: on what authority (R6)", () => {
   const row = (version: number, label = "Family calendar") => ({
     id: "s",
     kind: "calendar_source" as const,
@@ -443,19 +443,57 @@ describe("revision 1: what an open Manage may still show (R2)", () => {
     archived: false,
     kind_date: null,
   });
-  const ready = (base: ReturnType<typeof row> | null) => ({
+  /** The one read Manage takes of its source (`readResourceView`): its cached row (or none) and this device's create (or none). */
+  const ready = (
+    base: ReturnType<typeof row> | null,
+    create: { label: string; timezone: string } | null = null,
+  ) => ({
     status: "ready" as const,
     value: {
       base,
       merged: base,
-      effects: [],
-      creates: [],
-      createsTotal: 0,
-      createsNext: null,
+      outstanding: { total: 0, byStatus: {}, latest: null, latestOfKind: null },
+      create:
+        create === null
+          ? null
+          : {
+              local_id: "c",
+              kind: "create_source",
+              command: {
+                command: { kind: "create_source", id: "s", ...create },
+              },
+            },
+      observation: { resourceId: "s", token: "t" },
     },
   });
+  /** The row a create becomes (the production projection's shape, cut down to what the table compares). */
+  const project = (create: { command: unknown }) => {
+    const wrapped = (create.command as { command: Record<string, string> })
+      .command;
+    return {
+      ...row(1, wrapped.label),
+      value: { timezone: wrapped.timezone },
+    };
+  };
   const opened = row(3, "Opened with");
-  const cached = { row: opened, cached: true };
+  const decide = (
+    gate: string,
+    view: unknown,
+    seenCached: boolean,
+    read: boolean,
+  ) =>
+    sourceAuthority({
+      gate: gate as never,
+      view: view as never,
+      last: opened,
+      seenCached,
+      read,
+      project: project as never,
+    });
+  const strip = (decision: ReturnType<typeof decide>) =>
+    decision.kind === "cached" || decision.kind === "pending"
+      ? { kind: decision.kind, row: decision.row }
+      : decision;
 
   test.each([
     [
@@ -480,9 +518,16 @@ describe("revision 1: what an open Manage may still show (R2)", () => {
       { kind: "gone", reason: "removed" },
     ],
     [
+      "the source left the cache, although a create of it is still in the outbox (never back to pending)",
+      "open",
+      ready(null, { label: "Old", timezone: "Europe/Vienna" }),
+      true,
+      { kind: "gone", reason: "removed" },
+    ],
+    [
       "its read failed",
       "open",
-      { status: "unavailable" as const, reason: "failed" },
+      { status: "unavailable" as const, reason: "error" },
       true,
       { kind: "gone", reason: "removed" },
     ],
@@ -498,35 +543,69 @@ describe("revision 1: what an open Manage may still show (R2)", () => {
       "open",
       { status: "loading" as const },
       false,
-      { kind: "row", row: opened },
+      { kind: "resolving", row: opened },
+    ],
+    [
+      "its first read is still loading, but the gate has closed",
+      "refreshing",
+      { status: "loading" as const },
+      false,
+      { kind: "gone", reason: "refreshing" },
     ],
     [
       "it is held: the row as it is now, never the one it was opened with",
       "open",
       ready(row(4)),
       true,
-      { kind: "row", row: row(4) },
+      { kind: "cached", row: row(4) },
     ],
-  ] as const)("cached, %s", (_case, gate, resource, read, expected) => {
-    expect(
-      shownSource({
-        dialog: cached,
-        gate,
-        resource: resource as never,
-        read,
-      }),
-    ).toEqual(expected);
+  ] as const)("seen cached, %s", (_case, gate, view, read, expected) => {
+    expect(strip(decide(gate, view, true, read))).toEqual(expected);
   });
 
-  test("a pending source is not cache content: it is shown from its create whatever the gate says", () => {
-    for (const gate of ["open", "refreshing", "floor"] as const)
-      expect(
-        shownSource({
-          dialog: { row: opened, cached: false },
-          gate,
-          resource: ready(null) as never,
-          read: true,
-        }),
-      ).toEqual({ kind: "row", row: opened });
+  test.each([
+    [
+      "its create is in the outbox: shown from the create AS IT IS NOW, whatever the gate says (drafts are never behind it)",
+      ["open", "refreshing", "floor"],
+      ready(null, { label: "Edited label", timezone: "Asia/Tokyo" }),
+      {
+        kind: "pending",
+        row: { ...row(1, "Edited label"), value: { timezone: "Asia/Tokyo" } },
+      },
+    ],
+    [
+      "its create was published (R6): PROMOTED to the cached source, not the row it was opened with",
+      ["open"],
+      ready(row(4)),
+      { kind: "cached", row: row(4) },
+    ],
+    [
+      "its create was published while the cache is being brought up to date: hidden like any cached source",
+      ["refreshing", "floor"],
+      ready(row(4)),
+      { kind: "gone", reason: "refreshing" },
+    ],
+    [
+      "neither cached nor in the outbox (discarded, superseded, or receipted and never published here)",
+      ["open", "refreshing"],
+      ready(null),
+      { kind: "gone", reason: "removed" },
+    ],
+    [
+      "no read has answered yet: the last row stands in, nothing may act",
+      ["open", "refreshing"],
+      { status: "loading" as const },
+      { kind: "resolving", row: opened },
+    ],
+    [
+      "its read failed: not taken as gone (a pending create is not cache content), nothing may act",
+      ["open"],
+      { status: "unavailable" as const, reason: "error" },
+      { kind: "resolving", row: opened },
+    ],
+  ] as const)("never seen cached, %s", (_case, gates, view, expected) => {
+    for (const gate of gates)
+      for (const read of [false, true])
+        expect(strip(decide(gate, view, false, read))).toEqual(expected);
   });
 });

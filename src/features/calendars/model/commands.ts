@@ -3,6 +3,7 @@ import type {
   EnqueueRequest,
   JsonObject,
   LocalId,
+  Observation,
   ResourceId,
 } from "../../../data";
 
@@ -94,11 +95,16 @@ export function createSourceRequest(input: {
 /**
  * A queued settings change (timezone, enabled). `expected_version` is the version the OUTBOX assumes at the moment the draft is built
  * (`bases`), never the cached row's: a change saved behind another queued change of the same source is built on that change.
+ *
+ * `observed` is what the dialog read when it chose the values (revision 2): both fields are restated, so a value the person did not touch
+ * is only as current as that read. With it, the outbox writes the change only if the transaction that picks the version still reads the
+ * same source and the same drafts; otherwise nothing is stored (`refused / changed`), and the person sees the new values first.
  */
 export function configureSourceRequest(
   row: Pick<CacheRow, "id" | "value">,
   settings: { timezone: string; enabled: boolean },
   localId?: LocalId,
+  observed?: Observation,
 ): EnqueueRequest {
   const { id } = row;
   const { timezone, enabled } = settings;
@@ -133,6 +139,7 @@ export function configureSourceRequest(
       },
     }),
     ...(localId === undefined ? {} : { localId }),
+    ...(observed === undefined ? {} : { observed }),
   };
 }
 

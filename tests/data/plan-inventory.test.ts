@@ -185,6 +185,18 @@ describe("F-S7: the writer inventory", () => {
     expect([...(by("data.readOutstanding")?.scope ?? [])].sort()).toEqual(
       ["draft_commands", "drafts", "sync_state"].sort(),
     );
+    // Revision 2: Manage's one read of its source (cache, overlay, version record, drafts and the three bodies it may need).
+    expect(by("data.readResourceView")).toMatchObject({ mode: "readonly" });
+    expect([...(by("data.readResourceView")?.scope ?? [])].sort()).toEqual(
+      [
+        "cache",
+        "draft_commands",
+        "drafts",
+        "pending_effects",
+        "resource_versions",
+        "sync_state",
+      ].sort(),
+    );
   });
   test("the outbox's writers carry the guards the table gives them, and the fence guard where a draft is inserted or edited", () => {
     const by = (name: string) => plans.find((plan) => plan.name === name);

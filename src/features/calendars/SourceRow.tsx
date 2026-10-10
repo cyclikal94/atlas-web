@@ -40,6 +40,7 @@ import {
   TURN_ON,
   UPDATE_CONNECTION,
 } from "./copy";
+import { CONFIGURE_SOURCE } from "./model/commands";
 import type { RefreshView } from "./model/refresh";
 import {
   type Enablement,
@@ -214,7 +215,8 @@ export function SourceRow({
   onDialog(dialog: Dialog): void;
 }) {
   const id = row.base.id;
-  const outstanding = useOutstanding(id);
+  // With the newest settings change that applies, so a later draft of another kind (an import) does not hide the values it shows.
+  const outstanding = useOutstanding(id, CONFIGURE_SOURCE);
   const counts: OutstandingCounts | null =
     outstanding.status === "ready" ? outstanding.value : null;
   const view = controller?.view(id) ?? null;

@@ -9,6 +9,7 @@
  */
 
 export type { ReadResult } from "./engine/identity-task";
+export type { Observation } from "./model/observation";
 export type {
   Bases,
   BuildResult,
@@ -65,6 +66,7 @@ export type {
 export type {
   Outstanding,
   PendingCreatesPage,
+  ResourceView,
 } from "./plans/pending-reads";
 export {
   createDataDeletionPorts,
@@ -95,6 +97,7 @@ export {
   usePendingCreates,
   useQueueSummary,
   useResourceList,
+  useResourceView,
   useStatusInputs,
   useSyncStatusModel,
 } from "./ui/react";

@@ -34,8 +34,10 @@ import {
 import {
   type Outstanding,
   type PendingCreatesPage,
+  type ResourceView,
   readOutstanding,
   readPendingCreates,
+  readResourceView,
 } from "../plans/pending-reads";
 import type { Loadable, Watchable } from "../store/port";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
@@ -440,8 +442,14 @@ export function usePendingCreates(
   );
 }
 
-/** The unsettled drafts that target one resource: exact counts by status and the newest of them (see `readOutstanding`). */
-export function useOutstanding(id: ResourceId): Loadable<Outstanding> {
+/**
+ * The unsettled drafts that target one resource: exact counts by status and the newest of them (see `readOutstanding`); with `kind`,
+ * also the newest of that kind that is still expected to apply (`latestOfKind`).
+ */
+export function useOutstanding(
+  id: ResourceId,
+  kind?: string,
+): Loadable<Outstanding> {
   return useWatch(
     (env) => {
       const service = env.service();
@@ -449,9 +457,35 @@ export function useOutstanding(id: ResourceId): Loadable<Outstanding> {
         ? service.store.watch(readOutstanding, {
             incarnationId: service.incarnationId,
             id,
+            ...(kind === undefined ? {} : { kind }),
           })
         : null;
     },
-    [id],
+    [id, kind],
+  );
+}
+
+/**
+ * One resource as ONE read saw it (`readResourceView`): its cached and merged rows, its outstanding drafts, its newest create and the
+ * observation a save made from it states. For a dialog that edits the resource: nothing it shows or saves mixes two moments.
+ */
+export function useResourceView(
+  id: ResourceId,
+  kinds: { create?: string; settings?: string } = {},
+): Loadable<ResourceView> {
+  const { create, settings } = kinds;
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readResourceView, {
+            incarnationId: service.incarnationId,
+            id,
+            ...(create === undefined ? {} : { createKind: create }),
+            ...(settings === undefined ? {} : { settingsKind: settings }),
+          })
+        : null;
+    },
+    [id, create, settings],
   );
 }
