@@ -22,7 +22,7 @@ A browser that lacks or fails one of these shows the **compatibility screen** (`
 requirement failed and the supported browsers. It offers no way past it and shows nothing about any account. The check is presence (synchronous) and a
 functional probe with a 3 s time-out: a lock request that must be granted at once, and a throwaway IndexedDB database that must open and is deleted.
 A probe that hangs counts as a failure. The check also runs the **`atlas-auth` canary** (one small write of the durable sign-in record, the same 3 s bound): a page that cannot write it cannot
-coordinate, so it never exposes anything and shows the compatibility screen. The server's `api_version` is checked separately, after boot, by `GET /health`; a version outside `>=0.27.0 <0.28.0` (derived
+coordinate, so it never exposes anything and shows the compatibility screen. The server's `api_version` is checked separately, after boot, by `GET /health`; a version outside `>=0.28.0 <0.29.0` (derived
 from `contract-pin.json`) or a missing one replaces the sign-in entry with a compatibility screen, and never hides an account that is already settled.
 
 Older major versions are not blocked by user-agent sniffing: capability detection decides. The policy is about what is tested, not what is refused.

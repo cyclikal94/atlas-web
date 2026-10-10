@@ -1,12 +1,12 @@
 {
   "status": "released",
-  "local_asset": "vendor/atlas-api-types-0.27.0-rc.1.tgz",
-  "version": "0.27.0-rc.1",
-  "tarball_sha256": "898375708c48f7dae091916feed003a0e31e075bdd34d651c869d466b36b981a",
-  "contract_sha256": "ba586a03dd10b82590533beaaecdb387524c302c18707a5c8d83a1fd28847900",
-  "backend_commit": "7621f2fe8e033e67004a7f0767f38db26c6a46b8",
-  "backend_tag": "v0.27.0-rc.1",
-  "release_url": "https://github.com/cyclikal94/atlas/releases/download/v0.27.0-rc.1/atlas-api-types-0.27.0-rc.1.tgz",
+  "local_asset": "vendor/atlas-api-types-0.28.0-rc.1.tgz",
+  "version": "0.28.0-rc.1",
+  "tarball_sha256": "6d058983d998dcf28f3b6b116bbdca0bc41f121b0c11cd8aaf1cc32d5d00178b",
+  "contract_sha256": "087ced05e7a731d99b6374bbe0572e40746cec88dad0ce350c7bfe52fbf153fc",
+  "backend_commit": "30fec6a3f31aaeea9c69d10216c78b8c02645661",
+  "backend_tag": "v0.28.0-rc.1",
+  "release_url": "https://github.com/cyclikal94/atlas/releases/download/v0.28.0-rc.1/atlas-api-types-0.28.0-rc.1.tgz",
   "generator": "openapi-typescript@7.4.3",
   "note": "Published GitHub release asset; tag, package provenance, contract and both published checksums verified."
 }

@@ -170,7 +170,7 @@ export function leaderWorld(): LeaderWorld {
       const compat = {
         get: (): ApiCompatibility => ({
           status: "supported",
-          version: "0.27.0",
+          version: "0.28.0",
         }),
         subscribe: () => () => undefined,
       };
