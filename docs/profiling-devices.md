@@ -1,8 +1,10 @@
-# Profiling on a real device (WEB-09a, handoff items H1 to H9)
+# Profiling on a real device (evidence key `WEB-09a:sync-profiling`, handoff items H1 to H9)
 
-This is how a person with the devices runs the dense-workload measurements that the backend items BE-B1 and BE-Q23 are waiting for. It is **not** run by the
-WEB-09a delivery: that delivery measured on one macOS developer machine with Playwright engines, and says so (`.agtx/evidence/WEB-09a/profiling/handoff/report.md`).
-The measurement gate stays held until the roster below has run. Who runs it, and on which devices, is an operator decision.
+This is how a person with the devices runs the dense-workload measurements that the backend items BE-B1 and BE-Q23 are waiting for. The evidence key is unchanged;
+WEB-09c owns it since the WEB-09a closure (BC-20261009). It is **not** run by WEB-09c: that delivery measured on one macOS developer machine with Playwright engines,
+and says so in its hand-over (`docs/sync-measurements.md` names the run directory and its hashes). The operator escalated the device roster on 10 October 2026
+(OD-1, "Desktop now; escalate roster"; see "The roster" below). The measurement gate stays held until the roster below has run. Who runs it, and on which devices,
+is an operator decision.
 
 ## What the page does, and what it does not
 
@@ -12,7 +14,10 @@ build has one entry (`index.html`) and `scripts/check-no-fixture.mjs` fails any 
 Each page load is **one cold run of one workload**. The page:
 
 1. regenerates the workload in the page from `scripts/lib/profile-workloads.mjs` (deterministic: byte-identical on every machine) and checks its SHA-256 against
-   `scripts/lib/profile-workload-hashes.json`; a run whose hash does not match is marked `sha256_verified: false` and the validator refuses it;
+   `scripts/lib/profile-workload-hashes.json`; a run whose hash does not match is marked `sha256_verified: false` and the validator refuses it. **W2** is not
+   generated: it is the batch the released backend produced, captured by the desktop programme and carried in the hand-over. The page reads the capture you picked
+   (see "W2: the captured batch" below), hashes it on every run and checks it against the SHA-256 named in the URL; the validator checks it against the hand-over's
+   `W2-hashes.json`;
 2. runs the **production** processing path on it: the production sync engine, byte scanner, element validator and page commit, writing into **this device's real
    IndexedDB** (a fresh throw-away account database per run, named `atlas-fffffff0-0000-4000-8000-…`);
 3. records the outcome (`admitted`, `refused`, `error`, `timeout`), the elapsed time, the scan and commit times the engine reports, the number of requests the engine
@@ -40,7 +45,8 @@ pnpm build:fixture                                                              
 ```
 
 Serve `dist-fixture/` over **HTTPS** (Web Locks and Web Crypto need a secure context; `localhost` is one, a LAN address over plain HTTP is not). The page reports
-`secure_context` and the validator refuses a file taken in an insecure context. Any of these will do; none is installed by this repository:
+`secure_context` and the validator refuses a file taken in an insecure context. Any of these will do; none is installed by this repository, and the controller
+WEB-09c measured on has **no** `mkcert` and **no** Caddy (the operator installs one, or uses the Android `adb reverse` route, which needs neither):
 
 * `pnpm exec vite preview --mode fixture --host 0.0.0.0 --port 4173`, with a TLS-terminating reverse proxy in front (Caddy, nginx or `mkcert` with a local CA that
   the device trusts);
@@ -48,11 +54,33 @@ Serve `dist-fixture/` over **HTTPS** (Web Locks and Web Crypto need a secure con
 * for **iOS and iPadOS**: a certificate the device trusts (for example a local CA installed through Settings → General → About → Certificate Trust Settings), or a tunnel
   you choose (an external service is your decision: nothing here depends on one).
 
+## W2: the captured batch
+
+W2 is BE-B1 3(b) and BE-Q23 M3's server-reachable dense batch (one batch of 200 changes, about 1.5 MB). The hand-over carries it:
+`handoff/fixtures/W2-captured.<engine>.limit-1.json`, with their SHA-256 in `handoff/fixtures/W2-hashes.json`. Any one of the limit-1 captures will do; the
+validator accepts any hash listed in `W2-hashes.json`.
+
+1. Copy the chosen capture onto the device (AirDrop, a USB transfer or `adb push` into Downloads).
+2. Open `/profile-harness` in the tab (or installed app) that will run the protocol. Under **W2 capture**, choose the file. The page shows
+   `W2 capture kept: <name>, <bytes> bytes, SHA-256 <hex>`; check the hash against `W2-hashes.json`.
+3. Start the protocol with the hash in the URL: `/profile-harness?protocol=1&w2sha256=<hex>` (the page's own link carries it once the URL names it).
+
+The page keeps the capture in **that tab's** `sessionStorage`, which survives the protocol's reloads; a new tab does not have it, and a W2 run without it is
+recorded as an `error` run, never replaced by anything else. The page reads the capture only on a W2 run, as it holds a generated workload only on its own run.
+Nothing is fetched: the page never makes a network request of its own (lint rule R1). Without `w2sha256` the protocol has no W2, the page says so, and the results
+are **incomplete**.
+
+The desktop programme runs this exact route: its `device` stage (`node scripts/profile-sync.mjs --evidence <dir> --only device`, after the `integration` stage that
+captures W2 into the same directory) picks each engine's own capture on the page and runs the whole protocol in Chromium, Firefox and WebKit, and the hand-over
+validates each engine's results with its `W2-hashes.json`. `tests/e2e/fixture.profile-harness.spec.ts` holds the route's controls (a stand-in capture kept, read
+back, verified and run; other bytes not verified; no capture kept is an error run; no W2 without a named capture). None of this is a device run.
+
 ## Running a device
 
 1. Close other apps and other tabs of the browser. Charge the device above 50 % and keep it awake. Note the thermal state if the OS shows it.
 2. Open the `/profile-harness` path of your HTTPS host. For an **installed web app** run, install it first and open the page from the installed app; note that in the log.
-3. Tap **Start the full protocol**. The page runs every workload (five cold runs of each valid one: W1, W3, W4, W6; one run of each W5 limit and each W7 control), reloading
+3. Tap **Start the full protocol** (with W2 named, as above). The page runs every workload (five cold runs of each valid one: W1, W2, W3, W4, W6; one run of each W5
+   limit and each W7 control), reloading
    itself between runs so each is cold. Keep the page in the foreground. A run that the OS kills (the tab reloads by itself) is a **result**: the page records it as outcome `killed` when it
    next loads, and the protocol moves on to the next run instead of repeating it; note it in the log as well.
 4. While **W1** and **W3** run, record the platform's tab memory (peak and what is retained after the run) in the log: Android `adb shell dumpsys meminfo` for the browser's package, iOS
@@ -61,10 +89,11 @@ Serve `dist-fixture/` over **HTTPS** (Web Locks and Web Crypto need a secure con
 5. When the page says "Protocol complete", tap **Copy results JSON**, save it as a file, and validate it:
 
    ```
-   node scripts/validate-profile-handoff.mjs results.json
+   node scripts/validate-profile-handoff.mjs results.json --w2-hashes <handoff>/fixtures/W2-hashes.json
    ```
 
-   Exit code 0 means complete and consistent; 1 means a rule was broken (the messages say which); `--allow-partial` turns "valid but incomplete" into exit code 2.
+   Exit code 0 means complete and consistent; 1 means a rule was broken or the results are incomplete (the messages say which: a file without five W2 runs is
+   incomplete); `--allow-partial` turns "valid but incomplete" into exit code 2. A W2 run is checked against `W2-hashes.json` and cannot be validated without it.
 6. Tap **Delete profiling databases** to remove the throw-away databases from the device.
 
 ## Multi-tab runs (H5) and the contention items P-6 to P-9
@@ -72,8 +101,8 @@ Serve `dist-fixture/` over **HTTPS** (Web Locks and Web Crypto need a secure con
 The single-page protocol does not cover 2 or 3 tabs of one account, a leader syncing while others render, a backgrounded or frozen tab, or an installed app plus a tab. The **production** sync leader is WEB-09b's, so
 the production arrangement is **not run** and nobody should read its absence as a pass.
 
-The revision of WEB-09a did add a **desktop** programme for the contention items, `pnpm profile:contention` (spec `tests/e2e/fixture.profile-contention.spec.ts`, Chromium, Firefox and WebKit, one worker, written under
-`.agtx/evidence/WEB-09a/profiling/contention/`). Every result is labelled with what stood in for the real thing:
+There is a **desktop** programme for the contention items, `node scripts/profile-contention.mjs --evidence <dir>` (spec `tests/e2e/fixture.profile-contention.spec.ts`, Chromium, Firefox and WebKit, one worker,
+written under `<dir>/contention/`; `--evidence` is required and a directory that already records the stage is refused). Every result is labelled with what stood in for the real thing:
 
 | Item | What it measures | What stands in for the real thing |
 | --- | --- | --- |
@@ -81,14 +110,24 @@ The revision of WEB-09a did add a **desktop** programme for the contention items
 | P-7 | the wait for another page's activity against a back-to-back sync leader, and how often a closing write gives up against a frozen owner | a **fixture** leader (pages 5 ms apart); a **synthetic** freeze (a main-thread block, not a bfcache freeze); the production 20 s wait in one case, a **scaled** wait elsewhere |
 | P-8 | what is cancelled and retired when pages queue behind one another | the same fixture leader |
 | P-9 | the yield between pages (none, macrotask, `scheduler.yield`, idle) against other pages' waits and catch-up throughput | the same fixture leader, on a desktop |
+| P-13 | what a **healthy follower** reads because of `atlas-sync` hints (a leader's pages, drafts and receipts, stop-record hints, none), and the leader's catch-up with 0, 1 and 2 followers | the same fixture leader; the stop-record hints are **synthetic** (posted by a test-side channel, the record unchanged); counted by test-side instrumentation in the follower page |
 
 What it does **not** show, and what stays a gate: a **real** freeze or back/forward-cache restore, any **mobile** device (the roster above), a loaded or throttled CPU, and the **production leader** (WEB-09b). A device run of the contention spec
 is possible by hosting `dist-fixture/` as above and running the spec against it, but is not packaged for a person without a checkout; that is also open.
 
-## The roster (H1)
+## The roster (H1): escalated (OD-1)
 
 Fill one row per device and attach its results file. The roster that BE-B1 and BE-Q23 need is named by Kieran or product; the floor devices (the lowest-memory
-**supported** device per family) must be named by them too.
+**supported** device per family) must be named by them too. **No roster or floor device is named in any approved input**, `docs/browser-support.md` leaves its
+tested-versions table unfilled by design, and no device is attached to the controller. On 10 October 2026 Kieran chose "Desktop now; escalate roster" (OD-1): WEB-09c
+delivered the desktop programme and this package, and the following are needed before a device run:
+
+1. the named floor device for each family (model, RAM, OS);
+2. the mid-range mobile;
+3. who runs the protocol, and where;
+4. the HTTPS hosting choice (a local CA that the device trusts, or Android `adb reverse`; an external tunnel is the operator's call).
+
+Until then BE-B1 item 2 and BE-Q23 M1 are `escalated` in the hand-over, `needs_finer_pagination` is undetermined for supported devices, and BE-B1 and BE-Q23 stay blocked.
 
 | Engine and version | OS and version | Hardware | RAM | `deviceMemory` (or "absent") | `hardwareConcurrency` | Installed app or tab | Class assigned | Run by | Date | Results file |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

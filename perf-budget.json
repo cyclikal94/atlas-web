@@ -1,15 +1,23 @@
 {
-  "_": "Provisional budgets (WEB-07) and the recorded baseline. check-budgets.mjs fails above a provisional figure or more than `tolerance` above the baseline. WEB-09 profiling replaces the provisional figures with measured ones.",
-  "provisional": {
-    "initial_js_gzip": 204800,
-    "css_gzip": 30720,
-    "fonts": 256000
+  "_": "The measured budget (WEB-09c) and the recorded baselines. check-budgets.mjs fails above a `budget` figure, or more than `tolerance` above the build's own baseline; a file that still holds the retired `provisional` or `provisional_by_build` figures is refused.",
+  "budget": {
+    "initial_js_gzip": 241540,
+    "css_gzip": 7560,
+    "fonts": 92110
   },
-  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline.",
-  "provisional_by_build": {
-    "dist-fixture": {
-      "initial_js_gzip": 241544
-    }
+  "budget_basis": {
+    "rule": "one ceiling shared by both builds for each figure: round(the signed-in shell's measurement (dist-fixture) x (1 + tolerance)). No performance target is claimed: the throttled boot figures (P-1S) are reported beside the ceilings, not judged against them",
+    "authority": "OD-2, \"Signed-in size + 10% (Recommended)\", Kieran, 10 October 2026, WEB-09c Planning session 7ad2f6a0-8e07-47d7-8373-0c45e823ea68 (the agent question mechanism)",
+    "measurement": {
+      "build": "dist-fixture",
+      "initial_js_gzip": 219582,
+      "css_gzip": 6873,
+      "fonts": 83736,
+      "candidate": "the WEB-09c revision-1 candidate on 8e24e0aa478d4ab3b83b3a410456cce572a28fc1: its only src/ change is the fixture device page (a lazy chunk), which changes the chunk names the fixture entry references, so the entry measures 219,582 (the first WEB-09c candidate and WEB-09a R61 measured 219,586)",
+      "evidence": "validation run 2026-10-10T10-48-05.449Z-104ce4d2 (check-budgets-fixture.log) on this candidate; the final profiling run's bundle/bundle-profile-dist-fixture.json is the recorded measurement (its path and SHA-256 are in the hand-over's P-1)"
+    },
+    "replaces": "the WEB-07 provisional figures (204,800 / 30,720 / 256,000), the WEB-09a R61 dist-fixture-only ceiling (241,544) and the first WEB-09c candidate's ceiling (241,545 from 219,586); the CSS and font ceilings are TIGHTER than WEB-07's, which the rule selected",
+    "production": "the production build (dist) is held to the same budget and, as before, to its own baseline plus the tolerance; that baseline is unchanged and only Kieran can raise it"
   },
   "tolerance": 0.1,
   "baseline": {
@@ -19,7 +27,7 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 219586,
+      "initial_js_gzip": 219582,
       "css_gzip": 6873,
       "fonts": 83736
     }

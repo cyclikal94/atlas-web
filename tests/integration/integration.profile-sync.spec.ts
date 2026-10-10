@@ -1,15 +1,25 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
+import { oneColdRun } from "../e2e/profile-cold-run";
 import {
+  beginCollection,
+  cdpHeap,
+  descendantsRssKb,
+  endCollection,
   engineOf,
+  mib,
   PROFILE_OUT,
   record,
   recordValue,
+  sampler,
 } from "../e2e/profile-helpers";
 import {
+  API as API_URL,
+  BACKEND,
   bootHarness,
   expect,
+  ORIGIN,
   proxy,
   raw,
   rawSignIn,
@@ -19,9 +29,10 @@ import {
 } from "./helpers";
 
 /**
- * WEB-09a profiling, integration layer (plan 7.2): P-4 (the per-request write cost of a sync page and of a draft submission, end to
- * end against the released backend on loopback), P-10 (request durations, against the stamped request time-out) and the W2 feasibility
- * probe (what the real server can produce). MEASUREMENTS, not budgets; skipped unless ATLAS_PROFILE=1. The sync engine and the outbox
+ * Sync profiling, integration layer (evidence key `WEB-09a:sync-profiling`, owned by WEB-09c): P-4 (the per-request write cost of a sync
+ * page and of a draft submission, end to end against the released backend on loopback), P-10 (request durations, against the stamped
+ * request time-out), P-W2 (the server-maximal dense batch the released backend produces, captured from the real `/sync`, hashed and
+ * processed) and the W2-limits diagnostic. MEASUREMENTS, not budgets; skipped unless ATLAS_PROFILE=1. The sync engine and the outbox
  * dispatcher are started by the FIXTURE test leader, and the first snapshot is a FIXTURE seeder's; loopback removes the network.
  */
 test.skip(
@@ -29,6 +40,9 @@ test.skip(
   "not run: measurements are taken by `pnpm profile:sync`",
 );
 test.describe.configure({ mode: "serial" });
+// Each test's collection window (review finding R1): every row carries it, and the collection log records how the test ended.
+test.beforeEach(({ browserName: _browserName }, info) => beginCollection(info));
+test.afterEach(({ browserName: _browserName }, info) => endCollection(info));
 
 const API = "/api/experimental/v1";
 // ATLAS_PROFILE_SAMPLES shortens a DEBUGGING run of this spec; the recorded measurements use the defaults (20 warm-ups, 300 samples).
@@ -294,10 +308,223 @@ test("P-10: request durations under a throttled loopback (a proxy-injected 250 m
   });
 });
 
-test("W2: what the released backend can actually produce (a feasibility probe, with the largest page captured from the real /sync)", async ({
+// ---- P-W2: the server-maximal dense batch (WEB-09c plan 4.3) --------------------------------------------------------------------------
+/**
+ * WEB-03's dense checklist (100 items, 40 checked, one-character labels), with fresh ids: 7,402 bytes of value, the size of every
+ * change of the W1 fixture (scripts/lib/profile-workloads.mjs uses the same id length).
+ */
+const denseChecklist = () => {
+  const items = Array.from({ length: 100 }, () => ({
+    id: crypto.randomUUID(),
+    label: "x",
+  }));
+  return {
+    kind: "checklist",
+    items,
+    checked: items.slice(0, 40).map((item) => item.id),
+  };
+};
+
+interface Change {
+  kind: string;
+  id?: string;
+  resource?: { id: string; kind: string; value?: { kind?: string } | null };
+}
+interface SyncBody {
+  phase: string;
+  batches: Array<{ revision: number; changes: Change[] }>;
+  next_cursor: string;
+  has_more: boolean;
+}
+/** The shape of one batch: how many dense checklist field upserts, and whether `person` (their ancestor) is in it. */
+const shapeOf = (batch: { changes: Change[] }, person: string) => ({
+  changes: batch.changes.length,
+  checklist_upserts: batch.changes.filter(
+    (c) =>
+      c.kind === "upsert" &&
+      c.resource?.kind === "field" &&
+      c.resource.value?.kind === "checklist",
+  ).length,
+  person_ancestor: batch.changes.some(
+    (c) => c.kind === "upsert" && c.resource?.id === person,
+  ),
+});
+
+/** A raw writer (another account, raw HTTP through the preview origin and the proxy, as a browser's request would go). */
+async function writer() {
+  const session = await rawSignIn("dave");
+  const retried: Array<{ path: string; status: number }> = [];
+  const send = async (path: string, body: unknown) => {
+    // One idempotency key per logical write: a write the server refused for capacity (503) is asked again with the SAME key, so a
+    // retry can never create a second resource; every retry is recorded.
+    const key = crypto.randomUUID();
+    for (let attempt = 0; ; attempt += 1) {
+      const r = await raw("POST", path, {
+        cookie: session.cookie,
+        headers: { "x-csrf-token": session.csrf, "idempotency-key": key },
+        body,
+      });
+      if (r.status !== 503 || attempt >= 5) return r;
+      retried.push({ path, status: r.status });
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  };
+  return { session, send, retried };
+}
+
+/** Reads `/sync` from `cursor` at `limit` through THIS page's stamped wrapper (the cursor belongs to the page's session), as the engine does. */
+const readSync = (
+  page: Page,
+  account: string,
+  epoch: number,
+  cursor: string,
+  limit: number,
+) =>
+  page.evaluate(
+    async ({ a, e, c, l }) => {
+      const fetchPage = window.__s.api.fetchFor("ordinary", a, e);
+      const url = new URL("/api/experimental/v1/sync", location.origin);
+      url.searchParams.set("cursor", c);
+      url.searchParams.set("limit", String(l));
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        try {
+          const response = await fetchPage(new Request(url, { method: "GET" }));
+          return {
+            status: response.status,
+            text: await response.text(),
+            error: null as string | null,
+          };
+        } catch (error) {
+          if (!String(error).includes("not_sent"))
+            return { status: 0, text: "", error: String(error).slice(0, 200) };
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      return { status: 0, text: "", error: "not_sent for six seconds" };
+    },
+    { a: account, e: epoch, c: cursor, l: limit },
+  );
+
+/**
+ * The released backend's sharing rules, read from its source at the pinned commit (crates/core/src/policy.rs `put_policy`,
+ * resources/mod.rs `Grant`/`Revoke`): a field may be shared only with an account that can ALREADY see its person
+ * (`identity_grant_required`), a field is visible only while it is shared AND every ancestor is visible, and a grant or revocation of a
+ * person publishes the person and all of its children in ONE revision ("a person's visibility gates all of its independently shared
+ * fields"), refused or turned into a snapshot recovery above 200 changes for one account. The densest batch a reader can be sent is
+ * therefore reached by revoking and then granting again a person whose dense fields are shared with the reader.
+ */
+async function policyVersionOf(
+  session: Awaited<ReturnType<typeof writer>>["session"],
+  person: string,
+) {
+  const read = await raw("GET", `/people/${person}`, {
+    cookie: session.cookie,
+    headers: { "x-csrf-token": session.csrf },
+  });
+  expect(read.status, JSON.stringify(read.json)).toBe(200);
+  return (read.json as { person: { policy_version: number } }).person
+    .policy_version;
+}
+
+/** Grants (`grant`) or revokes (`revoke`) the reader's read access to `person`, with the policy version read back from the server. */
+async function access(
+  w: Awaited<ReturnType<typeof writer>>,
+  kind: "grant" | "revoke",
+  person: string,
+  account: string,
+) {
+  const policyVersion = await policyVersionOf(w.session, person);
+  const answer = await w.send("/access-commands", {
+    commands: [
+      {
+        kind,
+        id: person,
+        expected_version: policyVersion,
+        account_id: account,
+        ...(kind === "grant" ? { edit: false } : {}),
+      },
+    ],
+  });
+  return { status: answer.status, body: answer.json, policyVersion };
+}
+
+/**
+ * Seeds one person of the writer, granted to `reader`, holding `fields` dense checklist fields (put_field, one command per request), each
+ * shared with `reader` at its creation; then REVOKES the person, so the reader sees none of it. Every answer is asserted: the first
+ * put_field is the shape check, and a refusal fails the case with the server's own body, never "W2 not producible".
+ */
+async function seedDensePerson(
+  w: Awaited<ReturnType<typeof writer>>,
+  fields: number,
+  reader: string,
+) {
+  const person = crypto.randomUUID();
+  const created = await w.send("/commands", {
+    commands: [
+      {
+        kind: "create_person",
+        id: person,
+        name: "W2 person",
+        initial_policy: { grants: [], exclude_accounts: [] },
+      },
+    ],
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(200);
+  const granted = await access(w, "grant", person, reader);
+  expect(granted.status, JSON.stringify(granted.body)).toBe(200);
+  let valueBytes = 0;
+  for (let i = 0; i < fields; i += 1) {
+    const value = denseChecklist();
+    valueBytes = Buffer.byteLength(JSON.stringify(value));
+    // A creation with a non-empty explicit sharing policy is an ONLINE task command: `/task-access-commands`, not `/task-commands`
+    // (the released server refuses it there as `invalid_value`, crates/server/src/tasks.rs).
+    const put = await w.send("/task-access-commands", {
+      command: {
+        kind: "put_field",
+        id: crypto.randomUUID(),
+        parent_id: person,
+        expected_version: null,
+        label: "Checklist",
+        value,
+        initial_policy: {
+          grants: [{ kind: "account", id: reader, edit: false }],
+          exclude_accounts: [],
+        },
+      },
+    });
+    expect(
+      put.status,
+      `put_field ${i + 1} of ${fields}: ${JSON.stringify(put.json)}`,
+    ).toBe(200);
+  }
+  return { person, valueBytes };
+}
+
+/** Reads the reader's delta from `cursor` to the live edge (limit 80 pages), returning the cursor there and the shape of every batch. */
+async function drain(
+  page: Page,
+  id: { account_id: string; epoch: number },
+  cursor: string,
+  person: string,
+) {
+  let at = cursor;
+  const shapes: Array<ReturnType<typeof shapeOf>> = [];
+  for (let pages = 0; pages < 100; pages += 1) {
+    const r = await readSync(page, id.account_id, id.epoch, at, 80);
+    expect(r.status, r.error ?? r.text.slice(0, 400)).toBe(200);
+    const body = JSON.parse(r.text) as SyncBody;
+    shapes.push(...body.batches.map((b) => shapeOf(b, person)));
+    at = body.next_cursor;
+    if (!body.has_more) return { cursor: at, shapes };
+  }
+  throw new Error("the delta did not reach the live edge in 100 pages");
+}
+
+test("W2: the server-maximal dense batch from the released backend (a person holding 199 put_field checklists shared with the reader, revoked and granted again), captured from the real /sync, hashed and processed", async ({
   context,
+  browser,
 }, info) => {
-  test.setTimeout(10 * 60_000);
+  test.setTimeout(30 * 60_000);
   const engine = engineOf(info);
   const page = await bootHarness(context);
   const id = await signedIn(page);
@@ -305,68 +532,294 @@ test("W2: what the released backend can actually produce (a feasibility probe, w
     (a) => window.__atlasData?.prepareAccount(a),
     id.account_id,
   )) as { cursor: string };
+  // What the server says it is, beside what the runner fetched and verified.
+  // `GET /health` is at the origin root (decision D-08), not under the API prefix.
+  const health = await fetch(`${ORIGIN}/health`);
+  recordValue("backend", engine, {
+    health: { status: health.status, body: await health.json() },
+    revision: JSON.parse(
+      process.env.ATLAS_INTEGRATION_BACKEND_REVISION ?? "null",
+    ),
+  });
+
+  // 1-3. Seeding through the real write path: a person of another account, granted to the reader, holding 199 dense checklist fields
+  // shared with the reader, then revoked (one batch of removals). The reader reads to the live edge, and the person is granted again:
+  // that revision is the server-maximal dense batch (the person and its 199 fields).
+  const w = await writer();
+  const seededAt = Date.now();
+  const { person, valueBytes } = await seedDensePerson(w, 199, id.account_id);
+  const revoked = await access(w, "revoke", person, id.account_id);
+  expect(revoked.status, JSON.stringify(revoked.body)).toBe(200);
+  const before = await drain(page, id, seeded.cursor, person);
+  const granted = await access(w, "grant", person, id.account_id);
+  expect(granted.status, JSON.stringify(granted.body)).toBe(200);
+  const seedingMs = Date.now() - seededAt;
+
+  // 4. Capture: the reader's delta from the live edge before the grant, at limit 1 and at limit 80.
+  const captures: Record<string, unknown> = {};
+  let w2Body = "";
+  let afterW2 = "";
+  mkdirSync(`${PROFILE_OUT}/w2`, { recursive: true });
+  for (const limit of [1, 80]) {
+    const captured = await readSync(
+      page,
+      id.account_id,
+      id.epoch,
+      before.cursor,
+      limit,
+    );
+    expect(captured.status, captured.error ?? captured.text.slice(0, 400)).toBe(
+      200,
+    );
+    const body = JSON.parse(captured.text) as SyncBody;
+    const shapes = body.batches.map((b) => shapeOf(b, person));
+    // The measurement happened only if the batch is really there: at least 199 dense checklist upserts with their person, in ONE batch.
+    expect(
+      shapes.some((b) => b.checklist_upserts >= 199 && b.person_ancestor),
+      `limit ${limit}: ${JSON.stringify({ shapes, has_more: body.has_more, phase: body.phase })}`,
+    ).toBe(true);
+    const bytes = Buffer.byteLength(captured.text);
+    writeFileSync(
+      `${PROFILE_OUT}/w2/W2-captured.${engine}.limit-${limit}.json`,
+      captured.text,
+    );
+    captures[`limit_${limit}`] = {
+      phase: body.phase,
+      bytes,
+      mib: +(bytes / 1_048_576).toFixed(3),
+      batches: body.batches.length,
+      batch_shapes: shapes,
+      changes: body.batches.reduce((n, b) => n + b.changes.length, 0),
+      has_more: body.has_more,
+      sha256: createHash("sha256").update(captured.text).digest("hex"),
+      file: `w2/W2-captured.${engine}.limit-${limit}.json`,
+    };
+    if (limit === 1) w2Body = captured.text;
+    if (limit === 80) afterW2 = body.next_cursor;
+  }
+
+  // 5. Process, live: the page's FIXTURE leader syncs from the seeded cursor against the real server (every batch of the seeding, then
+  // the dense one) and commits through the production engine path; heap (Chromium) and the engine process tree's RSS are sampled while
+  // it does. It is done when a commit at least as large as the captured limit-1 page is traced and the engine is no longer running.
+  const heap = await cdpHeap(page, engine);
+  await heap.gc();
+  const heapBaseline = await heap.used();
+  const rssBaseline = descendantsRssKb();
+  const heapSampler = sampler(() => heap.used(), 25);
+  const rssSampler = sampler(() => descendantsRssKb(), 100);
+  await page.evaluate(() => performance.clearResourceTimings());
+  const liveStarted = Date.now();
+  // Only the engine: `leader` would run `prepareAccount` again, which seeds a NEW snapshot (holding the dense fields as snapshot rows)
+  // and moves the cursor past the very delta this step measures.
+  await page.evaluate(async (a) => {
+    const data = window.__atlasData;
+    if (!data) throw new Error("no data harness");
+    await data.startSync(a);
+  }, id.account_id);
+  let liveOutcome = "admitted";
+  try {
+    await page.waitForFunction(
+      (least) => {
+        const trace = window.__atlasData?.engineTrace ?? [];
+        const state = window.__atlasData?.engineState();
+        const dense = trace.some((l) => {
+          if (!l.includes("data.sync_commit")) return false;
+          const at = l.indexOf("{");
+          try {
+            return (
+              at >= 0 && (JSON.parse(l.slice(at)).bytes ?? 0) >= least * 0.9
+            );
+          } catch {
+            return false;
+          }
+        });
+        // Admitted: the dense page committed and the engine is idle. Refused: the engine stopped. Anything else is waited out (a
+        // back-off is transient) until the time-out, which is recorded as such.
+        return (dense && state?.kind === "idle") || state?.kind === "stopped";
+      },
+      Buffer.byteLength(w2Body),
+      { timeout: 240_000, polling: 25 },
+    );
+    const state = await page.evaluate(() => window.__atlasData?.engineState());
+    liveOutcome = state?.kind === "idle" ? "admitted" : "refused";
+  } catch {
+    liveOutcome = "timeout";
+  }
+  const liveElapsed = Date.now() - liveStarted;
+  const heapSamples = await heapSampler.stop();
+  const rssSamples = await rssSampler.stop();
+  const trace = await page.evaluate(
+    () => window.__atlasData?.engineTrace ?? [],
+  );
+  // The engine's own trace of the live run is kept whatever its outcome: a refusal or a time-out is read from it, never guessed at.
+  writeFileSync(
+    `${PROFILE_OUT}/w2/P-W2.${engine}.live-engine-trace.txt`,
+    trace.join("\n"),
+  );
+  const commits = trace
+    .filter((l) => l.includes("data.sync_commit"))
+    .map((l) => {
+      const at = l.indexOf("{");
+      try {
+        return at < 0 ? {} : JSON.parse(l.slice(at));
+      } catch {
+        return {};
+      }
+    });
+  const limitsAsked = await page.evaluate(() =>
+    performance
+      .getEntriesByType("resource")
+      .filter((e) => e.name.includes("/sync"))
+      .map((e) => new URL(e.name).searchParams.get("limit")),
+  );
+  const live = {
+    outcome: liveOutcome,
+    elapsed_ms: liveElapsed,
+    commits,
+    limits_the_engine_asked_for: limitsAsked,
+    heap_baseline_bytes: heapBaseline,
+    heap_peak_bytes: heapSamples.length ? Math.max(...heapSamples) : null,
+    rss_baseline_kib: rssBaseline,
+    rss_peak_kib: rssSamples.length ? Math.max(...rssSamples) : null,
+    label:
+      "the released backend's /sync read by the production engine (FIXTURE leader), on a desktop engine; RSS is the engine process tree's (browser-process RSS: not device memory, not server RSS)",
+  };
+
+  // 5 (continued). Five cold applications of the captured limit-1 bytes through the production path, the network a stub serving them.
+  const coldRuns = [];
+  for (let run = 1; run <= 5; run += 1)
+    coldRuns.push(
+      await oneColdRun(browser, info.project.use.baseURL, engine, w2Body),
+    );
+  const bytes = Buffer.byteLength(w2Body);
+  writeFileSync(
+    `${PROFILE_OUT}/w2/P-W2.${engine}.json`,
+    `${JSON.stringify(
+      {
+        engine,
+        path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the CAPTURED bytes of the released backend's /sync (limit 1), served by a Playwright route stub in a new context per run",
+        cold: "a new browser context for every run",
+        rss: "resident set of the browser process tree started by the test worker (browser-process RSS: not device memory, not server RSS)",
+        live,
+        rows: [
+          {
+            workload: "W2",
+            bytes,
+            mib: mib(bytes),
+            expected: "admitted",
+            runs: coldRuns,
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  record(
+    "P-W2 elapsed_ms",
+    engine,
+    coldRuns.map((r) => r.elapsed_ms),
+    { bytes, expected: "admitted" },
+  );
+  const rss = coldRuns
+    .map((r) => r.rss_peak_kib)
+    .filter((v): v is number => v !== null);
+  if (rss.length)
+    record("P-W2 rss_peak_kib", engine, rss, {
+      bytes,
+      caveat: "whole process tree of the engine",
+    });
+  const heapPeaks = coldRuns
+    .map((r) => r.heap_peak_bytes)
+    .filter((v): v is number => v !== null);
+  if (heapPeaks.length)
+    record("P-W2 heap_peak_bytes", engine, heapPeaks, { bytes });
+  recordValue("P-W2 capture", engine, {
+    status: "measured",
+    server:
+      "the released backend on SQLite behind the delaying proxy, loopback",
+    seeding: {
+      writer: "dave (raw HTTP)",
+      reader: "carol (this page)",
+      dense_fields: 199,
+      value_bytes: valueBytes,
+      seeding_ms: seedingMs,
+      grant_policy_version: granted.policyVersion,
+      revoke_status: revoked.status,
+      batches_before_the_grant: before.shapes,
+      capacity_retries: w.retried,
+    },
+    captures,
+    live,
+    cold_outcomes: coldRuns.map((r) => r.outcome),
+  });
+  // 6. The observed bound (recorded, not a client requirement), LAST because it may move the reader's access epoch: one more person
+  // with 200 dense fields granted at once, which would be a batch of 201 changes. What the released server answered and what it then
+  // delivered is recorded; the publisher bound is BE-B1's.
+  const bound = await seedDensePerson(w, 200, id.account_id);
+  const boundRevoke = await access(w, "revoke", bound.person, id.account_id);
+  let boundRead: Record<string, unknown> = { status: "not_read" };
+  if (boundRevoke.status === 200) {
+    const r = await readSync(page, id.account_id, id.epoch, afterW2, 80);
+    boundRead =
+      r.status === 200
+        ? {
+            status: 200,
+            batch_shapes: (JSON.parse(r.text) as SyncBody).batches.map((b) =>
+              shapeOf(b, bound.person),
+            ),
+            has_more: (JSON.parse(r.text) as SyncBody).has_more,
+            bytes: Buffer.byteLength(r.text),
+          }
+        : { status: r.status, error: r.error, body: r.text.slice(0, 400) };
+  }
+  recordValue("P-W2 observed bound", engine, {
+    write:
+      "one revocation of a person holding 200 dense checklist fields shared with the reader (201 changes for the reader in one revision)",
+    revoke: { status: boundRevoke.status, body: boundRevoke.body },
+    delivered: boundRead,
+    reading:
+      "what the released v0.27.0-rc.1 did; the publisher's bound (B-7) belongs to BE-B1 and is not a client requirement",
+  });
+});
+
+// ---- W2-limits: the old probes, and the proxy's 502 diagnosed (each oversized body is also sent directly to the backend) ----------------
+test("W2-limits: the largest text value and command count the released backend accepts, and what answers an oversized body (through the proxy and directly)", async ({
+  context,
+}, info) => {
+  test.setTimeout(10 * 60_000);
+  const engine = engineOf(info);
+  await bootHarness(context);
   const session = await rawSignIn("carol");
-  // A request the server refuses by closing the connection (a body above its limit) is an ANSWER of this probe, not a failure of it.
-  const post = async (commands: unknown[]) => {
+  const post = async (commands: unknown[], direct = false) => {
+    const headers = {
+      origin: ORIGIN,
+      "content-type": "application/json",
+      cookie: session.cookie,
+      "x-csrf-token": session.csrf,
+      "idempotency-key": crypto.randomUUID(),
+    };
     try {
-      return await raw("POST", "/commands", {
-        cookie: session.cookie,
-        headers: {
-          "x-csrf-token": session.csrf,
-          "idempotency-key": crypto.randomUUID(),
+      const response = await fetch(
+        `${direct ? `${BACKEND}/api/experimental/v1` : API_URL}/commands`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ commands }),
+          redirect: "manual",
         },
-        body: { commands },
-      });
+      );
+      const text = await response.text();
+      return { status: response.status, body: text.slice(0, 300) };
     } catch (error) {
-      return {
-        status: 0,
-        json: { transport_error: String(error).slice(0, 160) } as unknown,
-      };
+      return { status: 0, body: `transport: ${String(error).slice(0, 200)}` };
     }
   };
   const person = crypto.randomUUID();
-  const created = await post([
-    { kind: "create_person", id: person, name: "W2 person" },
-  ]);
-  expect(created.status).toBe(200);
-  const probe: Record<string, unknown> = {};
-  // 1. does the released backend accept a checklist-shaped value on a field at all?
-  const checklistTry = await post([
-    {
-      kind: "create_field",
-      id: crypto.randomUUID(),
-      person_id: person,
-      label: "Checklist",
-      value: {
-        kind: "checklist",
-        items: [{ id: crypto.randomUUID(), label: "x" }],
-        checked: [],
-      },
-    },
-  ]);
-  probe.checklist_value = {
-    status: checklistTry.status,
-    body: checklistTry.json,
-  };
-  // 2. the largest text value a field accepts
-  let valueLength = 0;
-  for (const length of [4096, 2000, 1000, 500, 100]) {
-    const r = await post([
-      {
-        kind: "create_field",
-        id: crypto.randomUUID(),
-        person_id: person,
-        label: "Text",
-        value: "w".repeat(length),
-      },
-    ]);
-    if (r.status === 200) {
-      valueLength = length;
-      break;
-    }
-  }
-  probe.largest_text_value_accepted_of_tried = valueLength;
-  // 3. the most commands one request accepts: with the largest value, and with a one-character value (to tell a count limit from a body limit)
+  expect(
+    (await post([{ kind: "create_person", id: person, name: "W2 limits" }]))
+      .status,
+  ).toBe(200);
   const bulk = (n: number, length: number) =>
     Array.from({ length: n }, () => ({
       kind: "create_field",
@@ -375,103 +828,45 @@ test("W2: what the released backend can actually produce (a feasibility probe, w
       label: "Bulk",
       value: "w".repeat(length),
     }));
-  let perRequest = 0;
-  for (const n of [800, 400, 200, 100, 50, 40, 30, 25, 20, 15, 10, 5, 1]) {
-    const r = await post(bulk(n, valueLength > 0 ? valueLength : 1));
-    probe[`request_with_${n}_commands_of_${valueLength}_chars`] = {
-      status: r.status,
-    };
-    if (r.status === 200) {
-      perRequest = n;
-      break;
-    }
-  }
-  probe.most_commands_in_one_request_of_tried = perRequest;
-  for (const n of [800, 200, 100, 50, 40, 30, 25, 20, 10]) {
-    const r = await post(bulk(n, 1));
-    probe[`request_with_${n}_commands_of_1_char`] = { status: r.status };
-    if (r.status === 200) {
-      probe.most_commands_in_one_request_with_1_char_values = n;
-      break;
-    }
-  }
-  // 3b. the biggest page the server can then be asked for: eighty requests (the largest `limit`) of the largest accepted size
-  for (let i = 0; i < 79 && perRequest > 0; i += 1)
-    expect((await post(bulk(perRequest, valueLength))).status).toBe(200);
-  // 4. read the page the real server produces for all of that, from the seeded cursor, at the largest `limit`
-  // The cursor belongs to THIS page's session, so the page reads it (through the stamped wrapper, as the engine does). An engine whose
-  // fetch fails on a body this large (WebKit did, once) is a finding to record, not a reason to lose the other engines' capture.
-  const read = () =>
-    page.evaluate(
-      async ({ a, e, cursor }) => {
-        const fetchPage = window.__s.api.fetchFor("ordinary", a, e);
-        const url = new URL("/api/experimental/v1/sync", location.origin);
-        url.searchParams.set("cursor", cursor);
-        url.searchParams.set("limit", "80");
-        for (let attempt = 0; attempt < 60; attempt += 1) {
-          try {
-            const response = await fetchPage(
-              new Request(url, { method: "GET" }),
-            );
-            return {
-              status: response.status,
-              text: await response.text(),
-              error: null as string | null,
-            };
-          } catch (error) {
-            if (!String(error).includes("not_sent"))
-              return {
-                status: 0,
-                text: "",
-                error: String(error).slice(0, 200),
-              };
-            await new Promise((resolve) => setTimeout(resolve, 100));
-          }
-        }
-        return { status: 0, text: "", error: "not_sent for six seconds" };
-      },
-      { a: id.account_id, e: id.epoch, cursor: seeded.cursor },
-    );
-  let captured = await read();
-  for (let again = 0; again < 2 && captured.status === 0; again += 1)
-    captured = await read();
-  if (captured.status === 0) {
-    recordValue("W2 feasibility", engine, {
-      status: "capture_failed_in_this_engine",
-      error: captured.error,
-      probe,
-      reading:
-        "the probe's limits above stand; the page could not be read back through this engine's fetch (three attempts)",
-    });
-    return;
-  }
-  expect(captured.status).toBe(200);
-  const body = JSON.parse(captured.text) as {
-    batches: Array<{ changes: unknown[] }>;
-    has_more: boolean;
-    phase: string;
-  };
-  const bytes = Buffer.byteLength(captured.text);
-  const sha = createHash("sha256").update(captured.text).digest("hex");
-  mkdirSync(`${PROFILE_OUT}/handoff/fixtures`, { recursive: true });
-  writeFileSync(
-    `${PROFILE_OUT}/handoff/fixtures/W2-captured.${engine}.json`,
-    captured.text,
-  );
-  recordValue("W2 feasibility", engine, {
-    status: "measured",
-    server: "the released v0.27.0-rc.1 on SQLite behind the delaying proxy",
-    probe,
-    captured: {
-      phase: body.phase,
-      bytes,
-      mib: +(bytes / 1_048_576).toFixed(3),
-      batches: body.batches.length,
-      changes: body.batches.reduce((n, b) => n + b.changes.length, 0),
-      has_more: body.has_more,
-      sha256: sha,
+  const probe: Record<string, unknown> = {};
+  // The legacy create_field cannot carry a checklist (the old probe's 400): recorded again, so the reason W2 needs put_field is on file.
+  probe.legacy_create_field_checklist = await post([
+    {
+      kind: "create_field",
+      id: crypto.randomUUID(),
+      person_id: person,
+      label: "Checklist",
+      value: denseChecklist(),
     },
+  ]);
+  let valueLength = 0;
+  for (const length of [4096, 2000, 1000, 500, 100])
+    if ((await post(bulk(1, length))).status === 200) {
+      valueLength = length;
+      break;
+    }
+  probe.largest_text_value_accepted_of_tried = valueLength;
+  // Command counts: through the proxy, and the SAME size directly to the backend, so a proxy 502 is told apart from the server's answer.
+  const rows: Array<Record<string, unknown>> = [];
+  for (const n of [800, 400, 200, 100, 40, 21, 20]) {
+    const body = bulk(n, Math.max(valueLength, 1));
+    const bodyBytes = Buffer.byteLength(JSON.stringify({ commands: body }));
+    const proxied = await post(body);
+    const direct =
+      proxied.status === 200
+        ? null
+        : await post(
+            body.map((c) => ({ ...c, id: crypto.randomUUID() })),
+            true,
+          );
+    rows.push({ commands: n, body_bytes: bodyBytes, proxied, direct });
+    if (proxied.status === 200) break;
+  }
+  probe.command_count_rows = rows;
+  recordValue("W2-limits", engine, {
+    status: "measured",
+    probe,
     reading:
-      "this is the largest page the released backend produced from what the probe could create; a checklist value (the W1 shape) is reported separately above; the dense W1 batch is a CONTRACT-valid shape that this server release may not be able to produce",
+      "the contract allows 20 content commands per request and a 4,096-character text value. `direct` is the backend's own answer; where `proxied` is 502 and `direct` is not, the backend refused the body before reading it whole and the delaying proxy (Node's http client loses an answer sent before the upload ended) reported its own 502: a harness limitation, not the server's answer",
   });
 });

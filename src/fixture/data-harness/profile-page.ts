@@ -11,6 +11,15 @@ import {
   decodeChange,
 } from "../../data/scan/validate";
 import type { DataHarness } from "./main";
+import {
+  type CaptureSource,
+  captureFrom,
+  captureQuery,
+  loadCapture,
+  protocolPlan,
+  storeCapture,
+  W2,
+} from "./profile-capture";
 
 /**
  * FIXTURE ONLY (never packaged; `check-no-fixture`). The device profiling page, `/profile-harness` (plan 7.5). One COLD run of one
@@ -21,6 +30,9 @@ import type { DataHarness } from "./main";
  *   /profile-harness                       a menu and the collected results
  *   /profile-harness?w=W1&run=1            one cold run (W1, W3, W4, W6, W5-limit-N, W7-<name>)
  *   /profile-harness?protocol=1            every workload, five cold runs each, one page load per run
+ *   ...&w2sha256=<hex>                     W2 as well: the released backend's captured batch, picked once with the page's file
+ *                                          input, read back and verified on each run (profile-capture.ts; without it the protocol
+ *                                          has no W2 and its results are incomplete)
  *
  * What this page is NOT: the transport is an in-page function that hands the body to the engine, so the real stamped wrapper's extra
  * buffer copy is NOT present (the desktop runs with the real wrapper quantify it); the engine writes to this device's real
@@ -43,6 +55,8 @@ export interface ProfileRun {
   detail: string;
   sha256: string;
   sha256_verified: boolean;
+  /** W2 only: the name of the capture file the bytes were read from. */
+  source?: string;
   bytes: number;
   elapsed_ms: number;
   scan_ms: number | null;
@@ -322,11 +336,63 @@ function runProcessing(bytes: Uint8Array, base: RunBase): ProfileRun {
   };
 }
 
+/** W2: the kept capture, read afresh and hashed; a capture that cannot be read is an `error` run, and nothing else stands in. */
+async function runCapture(
+  data: DataHarness,
+  run: number,
+  capture: CaptureSource | null,
+): Promise<ProfileRun> {
+  const loaded = capture
+    ? await loadCapture(capture)
+    : {
+        ok: false,
+        bytes: new Uint8Array(),
+        sha256: "",
+        verified: false,
+        name: "",
+        detail: "no capture named (w2sha256)",
+      };
+  const base = {
+    workload: W2,
+    run,
+    cold: true as const,
+    sha256: loaded.sha256,
+    sha256_verified: loaded.verified,
+    source: loaded.name,
+    bytes: loaded.bytes.length,
+    heap_baseline_bytes: heap(),
+    user_agent: navigator.userAgent,
+    at: new Date().toISOString(),
+  };
+  if (!loaded.ok)
+    return {
+      ...base,
+      expected: "admitted",
+      outcome: "error",
+      detail: loaded.detail,
+      elapsed_ms: 0,
+      scan_ms: null,
+      commit_ms: null,
+      request_count: 0,
+      limit: null,
+      changes_written: null,
+      cursor_after: null,
+      heap_peak_bytes: null,
+      heap_after_bytes: null,
+    };
+  return runEngine(data, loaded.bytes, "admitted", {
+    ...base,
+    expected: "admitted",
+  });
+}
+
 async function runOne(
   data: DataHarness,
   name: string,
   run: number,
+  capture: CaptureSource | null,
 ): Promise<ProfileRun> {
+  if (name === W2) return runCapture(data, run, capture);
   const workload = allWorkloads().find((w) => w.name === name);
   if (!workload) throw new Error(`unknown workload ${name}`);
   const sha256 = await sha256Hex(workload.body);
@@ -401,14 +467,16 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
 
   const protocol = params.get("protocol") === "1";
   const wanted = params.get("w");
+  const capture = captureFrom(params);
   if (protocol && !localStorage.getItem(PROTOCOL_KEY))
     localStorage.setItem(PROTOCOL_KEY, "0");
   const step = Number(localStorage.getItem(PROTOCOL_KEY) ?? "-1");
   let target: { name: string; run: number } | null = null;
-  const plan: Array<{ name: string; run: number }> = [];
-  for (const name of NAMES)
-    for (let r = 1; r <= (VALID_ENGINE_RUNS.includes(name) ? RUNS : 1); r += 1)
-      plan.push({ name, run: r });
+  const plan = protocolPlan(
+    NAMES,
+    (name) => (name === W2 || VALID_ENGINE_RUNS.includes(name) ? RUNS : 1),
+    capture !== null,
+  );
   if (wanted) target = { name: wanted, run: Number(params.get("run") ?? "1") };
   else if (step >= 0 && step < plan.length) target = plan[step] ?? null;
 
@@ -458,7 +526,7 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
       RUNNING_KEY,
       JSON.stringify({ name: target.name, run: target.run }),
     );
-    const record = await runOne(data, target.name, target.run);
+    const record = await runOne(data, target.name, target.run, capture);
     localStorage.removeItem(RUNNING_KEY);
     const collected = load();
     collected.runs.push(record);
@@ -477,7 +545,7 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
   }
 
   const menu = el("ul", {});
-  for (const name of NAMES)
+  for (const name of capture ? [...NAMES, W2] : NAMES)
     menu.append(
       el(
         "li",
@@ -485,7 +553,7 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
         el(
           "a",
           {
-            href: `?w=${encodeURIComponent(name)}&run=${load().runs.filter((r) => r.workload === name).length + 1}`,
+            href: `?w=${encodeURIComponent(name)}&run=${load().runs.filter((r) => r.workload === name).length + 1}${captureQuery(capture)}`,
           },
           name,
         ),
@@ -495,9 +563,32 @@ export async function mountProfilePage(data: DataHarness): Promise<void> {
     el("h2", {}, "Run"),
     el(
       "a",
-      { href: "?protocol=1" },
-      "Start the full protocol (every workload, five cold runs of each valid one)",
+      { href: `?protocol=1${captureQuery(capture)}` },
+      capture
+        ? "Start the full protocol (every workload, W2 included, five cold runs of each valid one)"
+        : "Start the full protocol (every workload, five cold runs of each valid one; NO W2: choose the capture and name its w2sha256, see docs/profiling-devices.md)",
     ),
+    el("h2", {}, "W2 capture"),
+    el(
+      "label",
+      { htmlFor: "w2-capture" },
+      "The hand-over's W2 capture (fixtures/W2-captured.<engine>.limit-1.json); it is kept on this origin for every W2 run",
+    ),
+    el("input", {
+      type: "file",
+      id: "w2-capture",
+      accept: "application/json,.json",
+      onchange: async (event: Event) => {
+        const file = (event.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        try {
+          const kept = await storeCapture(file, file.name);
+          status.textContent = `W2 capture kept: ${kept.name}, ${kept.bytes} bytes, SHA-256 ${kept.sha256}`;
+        } catch (error) {
+          status.textContent = `The W2 capture could not be kept: ${String(error).slice(0, 160)}`;
+        }
+      },
+    }),
     menu,
     el("h2", {}, "Results"),
     el(

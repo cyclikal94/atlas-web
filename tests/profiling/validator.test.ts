@@ -9,8 +9,17 @@ import hashes from "../../scripts/lib/profile-workload-hashes.json";
 const dir = mkdtempSync(join(tmpdir(), "atlas-validate-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
+// W2 is the released backend's captured batch: its hash comes from the hand-over's W2-hashes.json, given with --w2-hashes (review R3).
+const W2_SHA = "a".repeat(64);
+const w2Hashes = join(dir, "W2-hashes.json");
+writeFileSync(
+  w2Hashes,
+  JSON.stringify({ "W2-captured.chromium.limit-1.json": W2_SHA }),
+);
 const hash = (name: string) =>
-  hashes.workloads.find((w) => w.name === name)?.sha256 as string;
+  name === "W2"
+    ? W2_SHA
+    : (hashes.workloads.find((w) => w.name === name)?.sha256 as string);
 const run = (
   workload: string,
   n: number,
@@ -39,28 +48,51 @@ const complete = () => ({
     platform: "test",
     secure_context: true,
   },
-  runs: hashes.workloads.flatMap((w) =>
-    ["W1", "W3", "W4", "W6"].includes(w.name)
+  runs: [...hashes.workloads, { name: "W2" }].flatMap((w) =>
+    ["W1", "W2", "W3", "W4", "W6"].includes(w.name)
       ? [1, 2, 3, 4, 5].map((n) => run(w.name, n))
       : [run(w.name, 1)],
   ),
 });
 
-function validate(data: unknown, flags: string[] = []) {
+function validate(
+  data: unknown,
+  flags: string[] = [],
+  hashesFlag = ["--w2-hashes", w2Hashes],
+) {
   const file = join(dir, `${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(file, JSON.stringify(data));
   const out = spawnSync(
     process.execPath,
-    ["scripts/validate-profile-handoff.mjs", file, ...flags],
+    ["scripts/validate-profile-handoff.mjs", file, ...hashesFlag, ...flags],
     { encoding: "utf8" },
   );
   return { status: out.status, text: `${out.stdout}${out.stderr}` };
 }
 
 describe("validate-profile-handoff", () => {
-  it("accepts a complete, consistent file", () => {
+  it("accepts a complete, consistent file (W2 included, verified against the hand-over's W2 hashes)", () => {
     const out = validate(complete());
     expect(out.status, out.text).toBe(0);
+  });
+  it("refuses a W2 run that is not one of the hand-over's captures, and one that cannot be checked without --w2-hashes", () => {
+    const data = complete();
+    const w2 = data.runs.find((r) => r.workload === "W2");
+    (w2 as { sha256: string }).sha256 = "b".repeat(64);
+    const unknown = validate(data);
+    expect(unknown.status).toBe(1);
+    expect(unknown.text).toContain("is not a captured W2 of the hand-over");
+    const unchecked = validate(complete(), [], []);
+    expect(unchecked.status).toBe(1);
+    expect(unchecked.text).toContain("cannot be verified without --w2-hashes");
+  });
+  it("refuses results without W2 as incomplete, and reports 2 when partial results are allowed", () => {
+    const data = complete();
+    data.runs = data.runs.filter((r) => r.workload !== "W2");
+    const refused = validate(data);
+    expect(refused.status).toBe(1);
+    expect(refused.text).toContain("W2: no run recorded");
+    expect(validate(data, ["--allow-partial"]).status).toBe(2);
   });
   it("refuses a hash that is not the recorded one", () => {
     const data = complete();

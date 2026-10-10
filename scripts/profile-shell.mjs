@@ -5,14 +5,21 @@
 // The figures set the baseline WEB-09 profiling starts from. Run it against the throttling-free real server configuration
 // (a container serving dist-fixture through deploy/nginx/web.conf), so compression and caching are the real ones:
 //
-//   node scripts/profile-shell.mjs --url http://127.0.0.1:PORT/today
+//   node scripts/profile-shell.mjs --url http://127.0.0.1:PORT/today [--out <file>]
+//
+// `--out` names the results file (the sync-profiling programme's P-1S writes into its own evidence directory); without it the file is
+// WEB-07's `.agtx/evidence/WEB-07/A2/shell-profile.json`, as before.
 import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { chromium } from "@playwright/test";
 
 const args = process.argv.slice(2);
 const url = args.includes("--url")
   ? args[args.indexOf("--url") + 1]
   : "http://127.0.0.1:4174/today?pending=2";
+const outFile = args.includes("--out")
+  ? args[args.indexOf("--out") + 1]
+  : ".agtx/evidence/WEB-07/A2/shell-profile.json";
 const RUNS = 3;
 // Chrome DevTools / Lighthouse network presets.
 const PROFILES = {
@@ -42,6 +49,13 @@ for (const [viewportName, viewport] of Object.entries(VIEWPORTS)) {
     for (let run = 0; run < RUNS; run += 1) {
       const context = await browser.newContext({ viewport });
       const page = await context.newPage();
+      // What the server sent the scripts with: whether the transfer figures below are compressed ones.
+      const scriptEncodings = {};
+      page.on("response", (response) => {
+        if (response.request().resourceType() !== "script") return;
+        const encoding = response.headers()["content-encoding"] ?? "identity";
+        scriptEncodings[encoding] = (scriptEncodings[encoding] ?? 0) + 1;
+      });
       const cdp = await context.newCDPSession(page);
       await cdp.send("Network.enable");
       await cdp.send("Network.emulateNetworkConditions", {
@@ -91,6 +105,7 @@ for (const [viewportName, viewport] of Object.entries(VIEWPORTS)) {
       runs.push({
         ...metrics,
         fout: Math.max(0, metrics.fontsDone - metrics.fcp),
+        script_encodings: scriptEncodings,
       });
       await context.close();
     }
@@ -114,9 +129,10 @@ for (const [viewportName, viewport] of Object.entries(VIEWPORTS)) {
     );
   }
 }
+const browserVersion = browser.version();
 await browser.close();
-mkdirSync(".agtx/evidence/WEB-07/A2", { recursive: true });
+mkdirSync(dirname(outFile), { recursive: true });
 writeFileSync(
-  ".agtx/evidence/WEB-07/A2/shell-profile.json",
-  `${JSON.stringify({ url, note: "measurements only; cold cache; median of 3; Chromium", results }, null, 2)}\n`,
+  outFile,
+  `${JSON.stringify({ url, note: "measurements only; cold cache; median of 3; Chromium; CDP network and CPU throttling (EMULATED, not a device)", browser: browserVersion, results }, null, 2)}\n`,
 );

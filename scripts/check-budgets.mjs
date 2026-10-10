@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // A2. Measures the built client (initial JS and CSS gzip, font bytes, precache size) and holds each figure to the
-// provisional budget and, once recorded, to the baseline plus a tolerance. `--record` stores the current figures as the
-// baseline for that build. Usage: check-budgets.mjs [dist|dist-fixture] [--record]. The fixture build is the shell, so it
-// is the honest measure of what the signed-in client will cost; the production build is the neutral entry only.
+// measured `budget` shared by both builds and, once recorded, to that build's baseline plus a tolerance. `--record` stores
+// the current figures as the baseline for that build. Usage: check-budgets.mjs [dist|dist-fixture] [--record]. The fixture
+// build is the shell, so it is the honest measure of what the signed-in client will cost; the production build is the
+// neutral entry only. The budget is the signed-in (fixture) measurement plus the tolerance (WEB-09c, OD-2: `budget_basis` in
+// perf-budget.json); a file that still carries the provisional figures of WEB-07 is refused.
 import {
   mkdirSync,
   readdirSync,
@@ -61,13 +63,26 @@ const detail = {
 
 const budgetFile = "perf-budget.json";
 const budget = JSON.parse(readFileSync(budgetFile, "utf8"));
+// The provisional figures (WEB-07) and the per-build ceiling (WEB-09a R61) were replaced by one measured budget (WEB-09c): a file
+// that still holds either is not a budget this checker can hold a build to.
+for (const retired of ["provisional", "provisional_by_build"])
+  if (retired in budget) {
+    console.error(
+      `Budget check REFUSED: ${budgetFile} still has \`${retired}\`; the measured \`budget\` (WEB-09c) replaced it`,
+    );
+    process.exit(1);
+  }
 const failures = [];
 for (const [name, value] of Object.entries(measured)) {
-  // A build may carry its own ceiling for a figure (`provisional_by_build`, recorded with its authority in perf-budget.json).
-  const ceiling =
-    budget.provisional_by_build?.[root]?.[name] ?? budget.provisional[name];
+  const ceiling = budget.budget?.[name];
+  if (typeof ceiling !== "number") {
+    console.error(
+      `Budget check REFUSED: ${budgetFile} has no \`budget.${name}\``,
+    );
+    process.exit(1);
+  }
   if (value > ceiling)
-    failures.push(`${name} ${value} exceeds the provisional budget ${ceiling}`);
+    failures.push(`${name} ${value} exceeds the budget ${ceiling}`);
   const base = budget.baseline?.[root]?.[name];
   if (base !== undefined && value > base * (1 + budget.tolerance)) {
     failures.push(

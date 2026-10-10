@@ -387,7 +387,7 @@ results, not a heap or out-of-memory measurement and not a measurement of the co
 
 The approved dense batch (800 changes of 100-item checklists) reproduces the design's figures exactly: each value is 7,402 bytes and 547 nodes, and the page is 455,214 nodes and
 5.83 MiB (`tests/profiling/workloads.test.ts`). It is applied as **one** request at the lowest rung in all three engines (`tests/e2e/fixture.data-sync.spec.ts`, E-C3).
-Whether that suffices on a real constrained device is exactly what the measurement handoff must show (`.agtx/evidence/WEB-09a/profiling/handoff/`), and it has not been run on one.
+Whether that suffices on a real constrained device is exactly what the measurement hand-over must show (evidence key `WEB-09a:sync-profiling`, owned by WEB-09c: `docs/sync-measurements.md`), and it has not been run on one: WEB-09c measured desktop engines only, and the device roster is escalated.
 
 ### Device class, step-down and the floor
 
@@ -640,36 +640,38 @@ sign-in), and `readReadRetry` is the read-only plan that reads an entry.
 
 ## Provisional constants
 
-Every one is in `src/data/model/config.ts`, none is measured, and the right-hand column names what would settle it. The profiling programme (`pnpm profile:sync`) records them in
-`.agtx/evidence/WEB-09a/profiling/constants.md` and says the same.
+Every one is in `src/data/model/config.ts`, none is measured, and the "Settled by" column names what would settle it. The profiling programme
+(`node scripts/profile-sync.mjs --evidence <dir>`, evidence key `WEB-09a:sync-profiling`, owned by WEB-09c) records them in `<dir>/handoff/constants.md` and says
+the same. The last column points to the DESKTOP figures WEB-09c measured beside a constant (`docs/sync-measurements.md`); they inform it and settle none that names the
+device roster.
 
-| Name | Value | Source | Settled by |
-| --- | --- | --- | --- |
-| `syncLimitMax` | 80 | the design, section 4.2 (B1 unshipped: `SyncPage.batches` has `maxItems` 80) | BE-B1 |
-| `initialLimitUnconstrained`, `initialLimitOther` | 4, 1 | WEB-03 section 3.3d | the device roster |
-| `stepUpAfterSuccesses` | `null` (disabled) | not specified anywhere | the device roster |
-| `floorAfter` | 3 | the design's proposed three-failure family | the device roster |
-| `markerMinBytes` | 256 KiB | engineering default | P-2 and P-4 |
-| `syncApplyWatchdogMs` | 20,000 (was 30,000: kept 10 s inside the persistence hold's bound) | engineering default | P-2 |
-| `maxResponseBytesFor(limit)` | `limit x 800 x 9 KiB x 1.5 + 64 KiB` | contract maxima; 9 KiB from WEB-03 | the captured W2 |
-| `maxChangeBytes`, `maxValueNodes`, `maxDepth` | 64 KiB, 8,192, 24 | engineering default; WEB-03 for the depth | the largest projection per kind (W6) |
-| `syncIdleMs`, `syncReceiptMs` | 60 s, 2 s | not specified anywhere | a cadence decision |
-| `backoffInitialMs`, `backoffMaxMs`, `backoffJitter` | 2 s, 60 s, 20 % | the matrix's schedule for covers | a cadence decision |
-| `retrySustainedMs` | 180 s | the design: "a few minutes" | a cadence decision |
-| `queueWarnAt`, `queueWorkingSet` | 200, 100 | Q9, WEB-03 | P-5 on a dense queue |
-| `queueRescanMs` | 5 s, doubling to 60 s | this slice (a departure from "one extra lookup") | P-5 on a dense queue |
-| `listPage` | 100 | Q9 (100-row list pages); the overlay of a page is read in windows of `queueWorkingSet` | P-5 on a dense list |
-| `factsReadRetryMs`, `factsReadRetryMaxMs` | 250 ms, doubling to 10 s | engineering default (the paced re-read of the sync facts after a failed read, R13; also the outbox facade's paced look after a look that could not read every stop record, R55 revision 36) | a cadence decision |
-| `fenceStaleMs` | 120 s | engineering default (longer than the 20 s lock wait) | P-4 |
-| `quotaReserveBytes` | 8 MiB (user input refused below half) | engineering default | P-Q on the roster |
-| `quotaEstimateTtlMs` | 5 s (how long one reading of the free space is used, and how long the estimate is ASSUMED to take to show a write that has landed; the landed entry is kept one further lifetime for the readings that began before it ended, revision 17) | engineering default | the roster (a real estimate's lag) |
-| `quotaClockSlackMs` | 250 ms (how far the wall clock may part from the page's monotonic clock between two readings before the guard calls it a step; a smaller difference is jitter or drift, revision 17) | engineering default, above the 100 ms to which a browser may round either clock | the roster |
-| `quotaHoldLeaseMs` | 30 s (how long a hold in the origin's ledger stands when its page stops renewing it, R28; a live page renews it a third of a lease apart, and its writer may begin only until a third before it ends, revision 14; a hold with a living OWNER is not judged by the lease at all, revision 15) | engineering default, far longer than a local write | a page-lifecycle measurement on the roster |
-| `quotaHoldMaxAgeMs` | 10 min (how old a reservation whose writer has not begun may be before its permission to begin is revoked; a writer that has begun is never revoked by it, revision 16) | engineering default, far longer than any save or page commit | the roster |
-| `quotaLedgerWaitMs` | 2 s (how long a save waits for one call of the origin's ledger; a save the ledger has not answered is REFUSED as `unestablished`, R28 revision 15) | engineering default (a tiny IndexedDB record) | the roster |
-| `quotaLedgerAttempts`, `quotaLedgerRetryMs` | 4 tries, 20 ms doubling (how often one reservation asks a ledger that REJECTS the call, and the first wait between two tries; R28 revision 15) | engineering default (a transient failure of one tiny record) | the roster |
-| `stampedRequestTimeoutMs` | 30 s (WEB-08a's) | provisional | P-10: measured here, unchanged |
-| `maxInFlight` | 1 | decision D-18 | P-5 (only 1 is measurable) |
+| Name | Value | Source | Settled by | Desktop evidence (WEB-09c) |
+| --- | --- | --- | --- | --- |
+| `syncLimitMax` | 80 | the design, section 4.2 (B1 unshipped: `SyncPage.batches` has `maxItems` 80) | BE-B1 | P-2, P-11, P-W2 (H9) |
+| `initialLimitUnconstrained`, `initialLimitOther` | 4, 1 | WEB-03 section 3.3d | the device roster | P-2, P-11, P-W2 |
+| `stepUpAfterSuccesses` | `null` (disabled) | not specified anywhere | the device roster | — |
+| `floorAfter` | 3 | the design's proposed three-failure family | the device roster | — |
+| `markerMinBytes` | 256 KiB | engineering default | P-2 and P-4 | P-2, P-4 |
+| `syncApplyWatchdogMs` | 20,000 (was 30,000: kept 10 s inside the persistence hold's bound) | engineering default | P-2 | P-2, P-W2 |
+| `maxResponseBytesFor(limit)` | `limit x 800 x 9 KiB x 1.5 + 64 KiB` | contract maxima; 9 KiB from WEB-03 | the captured W2 | P-W2 |
+| `maxChangeBytes`, `maxValueNodes`, `maxDepth` | 64 KiB, 8,192, 24 | engineering default; WEB-03 for the depth | the largest projection per kind (W6) | P-11 (W6) |
+| `syncIdleMs`, `syncReceiptMs` | 60 s, 2 s | not specified anywhere | a cadence decision | — |
+| `backoffInitialMs`, `backoffMaxMs`, `backoffJitter` | 2 s, 60 s, 20 % | the matrix's schedule for covers | a cadence decision | — |
+| `retrySustainedMs` | 180 s | the design: "a few minutes" | a cadence decision | — |
+| `queueWarnAt`, `queueWorkingSet` | 200, 100 | Q9, WEB-03 | P-5 on a dense queue | P-5, P-5 (dense) |
+| `queueRescanMs` | 5 s, doubling to 60 s | this slice (a departure from "one extra lookup") | P-5 on a dense queue | P-5, P-5 (dense) |
+| `listPage` | 100 | Q9 (100-row list pages); the overlay of a page is read in windows of `queueWorkingSet` | P-5 on a dense list | P-5 |
+| `factsReadRetryMs`, `factsReadRetryMaxMs` | 250 ms, doubling to 10 s | engineering default (the paced re-read of the sync facts after a failed read, R13; also the outbox facade's paced look after a look that could not read every stop record, R55 revision 36) | a cadence decision | P-13 (reads per hint) |
+| `fenceStaleMs` | 120 s | engineering default (longer than the 20 s lock wait) | P-4 | P-4 |
+| `quotaReserveBytes` | 8 MiB (user input refused below half) | engineering default | P-Q on the roster | P-Q, P-Q2 |
+| `quotaEstimateTtlMs` | 5 s (how long one reading of the free space is used, and how long the estimate is ASSUMED to take to show a write that has landed; the landed entry is kept one further lifetime for the readings that began before it ended, revision 17) | engineering default | the roster (a real estimate's lag) | P-Q2 (estimate step) |
+| `quotaClockSlackMs` | 250 ms (how far the wall clock may part from the page's monotonic clock between two readings before the guard calls it a step; a smaller difference is jitter or drift, revision 17) | engineering default, above the 100 ms to which a browser may round either clock | the roster | — |
+| `quotaHoldLeaseMs` | 30 s (how long a hold in the origin's ledger stands when its page stops renewing it, R28; a live page renews it a third of a lease apart, and its writer may begin only until a third before it ends, revision 14; a hold with a living OWNER is not judged by the lease at all, revision 15) | engineering default, far longer than a local write | a page-lifecycle measurement on the roster | — |
+| `quotaHoldMaxAgeMs` | 10 min (how old a reservation whose writer has not begun may be before its permission to begin is revoked; a writer that has begun is never revoked by it, revision 16) | engineering default, far longer than any save or page commit | the roster | — |
+| `quotaLedgerWaitMs` | 2 s (how long a save waits for one call of the origin's ledger; a save the ledger has not answered is REFUSED as `unestablished`, R28 revision 15) | engineering default (a tiny IndexedDB record) | the roster | P-Q2 (ledger) |
+| `quotaLedgerAttempts`, `quotaLedgerRetryMs` | 4 tries, 20 ms doubling (how often one reservation asks a ledger that REJECTS the call, and the first wait between two tries; R28 revision 15) | engineering default (a transient failure of one tiny record) | the roster | — |
+| `stampedRequestTimeoutMs` | 30 s (WEB-08a's) | provisional | P-10: measured here, unchanged | P-10 |
+| `maxInFlight` | 1 | decision D-18 | P-5 (only 1 is measurable) | P-5 |
 
 The session's own two constants for the persistence hold (`SessionConfig.persistenceHoldMs`, 30 s, and `persistenceStallMs`, 10 s) are provisional and unmeasured: the hold's bound is a deadline for the whole commit (queue wait included) and is kept at least 10 s above `syncApplyWatchdogMs`; the stall bound is only when work that is still unresolved after a revocation is traced (`persistence.stalled`), and releases nothing (P-7 and a real freeze are what would tune them).
 
