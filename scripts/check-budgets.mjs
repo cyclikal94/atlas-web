@@ -12,12 +12,19 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { extname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 
+// `--out <file>` names where this run's profile is written (the sync-profiling programme gives each run its own file, so a concurrent
+// checker can never replace it between the check and its copy); without it the profile goes to WEB-07's fixed path, as before.
+const argv = process.argv.slice(2);
+const outAt = argv.indexOf("--out");
+const outFile = outAt >= 0 ? argv[outAt + 1] : null;
 const root =
-  process.argv.slice(2).find((arg) => !arg.startsWith("--")) ?? "dist";
-const record = process.argv.includes("--record");
+  argv.find(
+    (arg, i) => !arg.startsWith("--") && !(outAt >= 0 && i === outAt + 1),
+  ) ?? "dist";
+const record = argv.includes("--record");
 const html = readFileSync(join(root, "index.html"), "utf8");
 const gz = (file) =>
   gzipSync(readFileSync(join(root, file)), { level: 9 }).length;
@@ -90,10 +97,13 @@ for (const [name, value] of Object.entries(measured)) {
     );
   }
 }
-mkdirSync(".agtx/evidence/WEB-07/A2", { recursive: true });
+const profileFile =
+  outFile ?? `.agtx/evidence/WEB-07/A2/bundle-profile-${root}.json`;
+mkdirSync(dirname(profileFile), { recursive: true });
 writeFileSync(
-  `.agtx/evidence/WEB-07/A2/bundle-profile-${root}.json`,
+  profileFile,
   `${JSON.stringify({ measured, detail, budget, failures }, null, 2)}\n`,
+  outFile ? { flag: "wx" } : undefined,
 );
 if (record) {
   budget.baseline = { ...(budget.baseline ?? {}), [root]: measured };

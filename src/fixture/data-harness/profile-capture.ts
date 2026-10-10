@@ -16,8 +16,8 @@
  * so a run of any other bytes is refused.
  */
 export const W2 = "W2";
-const CAPTURE_KEY = "atlas-profile-w2";
-const NAME_KEY = "atlas-profile-w2-name";
+/** One record (name, SHA-256 and text together), written in one `setItem` (revision 2, design assessment DA-1, Q12). */
+const CAPTURE_KEY = "atlas-profile-w2-capture";
 
 /** The capture a run is to use: the SHA-256 the URL names. */
 export interface CaptureSource {
@@ -81,36 +81,45 @@ export async function sha256Bytes(bytes: Uint8Array): Promise<string> {
 
 /**
  * This tab's `sessionStorage`: one capture, replaced by each pick. The bytes are kept as their UTF-8 text (a capture that is not valid UTF-8
- * is refused when it is picked), so reading them back gives the same bytes; the run hashes what it read, so any difference would show.
+ * is refused BEFORE anything is written), together with its name, in ONE record written by one `setItem`: a write the storage refuses
+ * (quota, denied) leaves the previous capture exactly as it was, never a new name over old bytes or no capture at all. The run hashes what
+ * it read, so any difference would show.
  */
-export function sessionStore(storage: Storage = sessionStorage): CaptureStore {
+export function sessionStore(
+  storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> = sessionStorage,
+): CaptureStore {
   return {
     async put(bytes, name) {
       const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      storage.removeItem(CAPTURE_KEY);
-      storage.setItem(CAPTURE_KEY, text);
-      storage.setItem(NAME_KEY, name);
+      storage.setItem(CAPTURE_KEY, JSON.stringify({ name, text }));
     },
     async get() {
-      const text = storage.getItem(CAPTURE_KEY);
-      if (text === null) return null;
-      return {
-        bytes: new TextEncoder().encode(text),
-        name: storage.getItem(NAME_KEY) ?? "",
-      };
+      const raw = storage.getItem(CAPTURE_KEY);
+      if (raw === null) return null;
+      const kept = JSON.parse(raw) as { name?: unknown; text?: unknown };
+      if (typeof kept?.text !== "string" || typeof kept.name !== "string")
+        throw new Error("the kept capture record is malformed");
+      return { bytes: new TextEncoder().encode(kept.text), name: kept.name };
     },
   };
 }
 
-/** Keeps the picked file and returns what was kept: its name, size and SHA-256. */
+/**
+ * Keeps the picked file and returns what was kept: its name, size and SHA-256. The answer is given only after the kept record has been
+ * read back and hashes to the picked bytes; any failure throws, and the page then says the capture was NOT kept.
+ */
 export async function storeCapture(
   file: Blob,
   name: string,
   store: CaptureStore = sessionStore(),
 ): Promise<{ name: string; bytes: number; sha256: string }> {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  const sha256 = await sha256Bytes(bytes);
   await store.put(bytes, name);
-  return { name, bytes: bytes.length, sha256: await sha256Bytes(bytes) };
+  const back = await store.get();
+  if (!back || back.name !== name || (await sha256Bytes(back.bytes)) !== sha256)
+    throw new Error("the capture read back is not the one picked");
+  return { name, bytes: bytes.length, sha256 };
 }
 
 /** Reads the kept capture afresh and hashes what was read. No capture kept is an unsuccessful load with its reason, never a substitute. */

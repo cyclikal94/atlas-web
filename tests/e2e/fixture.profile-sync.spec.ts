@@ -24,15 +24,15 @@ import { expect, test } from "./helpers";
 import { commitsOf, oneColdRun } from "./profile-cold-run";
 import {
   beginCollection,
-  descendantsRssKb,
+  browserMemory,
   endCollection,
   engineOf,
   mib,
   PROFILE_OUT,
   record,
   recordValue,
-  sampler,
   sleep,
+  writeEvidence,
 } from "./profile-helpers";
 
 /**
@@ -191,9 +191,11 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
     record(`P-2 ${shape.name} commit_ms`, engine, commit, extra);
     if (supportsLong)
       record(`P-2 ${shape.name} long_task_ms_per_page`, engine, long, extra);
+    // A typed capability record: the engine has no long-task observer (the evidence contract accepts this, and only this, in place
+    // of the series; an omitted series is missing).
     else
       recordValue(`P-2 ${shape.name} long_task_ms_per_page`, engine, {
-        status: "not_run",
+        capability: "unavailable",
         reason: "this engine has no longtask observer",
       });
   }
@@ -349,53 +351,55 @@ test("P-11: W1, W3, W4, W6 (five cold runs each) and the W7 negative controls th
     });
     // A negative control that is ADMITTED, or a valid workload that is not, is a finding, not a pass mark (it is reported, never decided here).
   }
-  mkdirSync(`${PROFILE_OUT}/memory`, { recursive: true });
-  writeFileSync(
-    `${PROFILE_OUT}/memory/P-11.${engine}.json`,
-    `${JSON.stringify(
-      {
-        engine,
-        path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the network is a Playwright route stub",
-        cold: "a new browser context for every run",
-        heap:
-          engine === "chromium"
-            ? "CDP Performance.getMetrics JSHeapUsedSize sampled every 25 ms; baseline and 'after' follow HeapProfiler.collectGarbage"
-            : "not available in this engine (null)",
-        rss: "resident set of the browser process tree started by the test worker, sampled every 100 ms with ps; includes every renderer and helper of the engine, so it is an upper bound for the tab and is not comparable between engines",
-        durability_note: "ephemeral Playwright profile",
-        rows,
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  writeEvidence(`memory/P-11.${engine}.json`, {
+    engine,
+    path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the network is a Playwright route stub",
+    cold: "a new browser context for every run",
+    heap:
+      engine === "chromium"
+        ? "CDP Performance.getMetrics JSHeapUsedSize sampled every 25 ms; baseline and 'after' follow HeapProfiler.collectGarbage"
+        : "not available in this engine (null)",
+    rss: "resident set of the BROWSER's own processes, sampled about every 100 ms with ps (not blocking the worker): the test worker's descendants and, for WebKit on macOS, every service of its host's launchd PID domain (WebContent, Networking, GPU), each checked against pid reuse; every run records its process set, sample count, failed samples and whether attribution was complete. It covers every renderer and helper of the engine, so it is an upper bound for the tab and is not comparable between engines",
+    durability_note: "ephemeral Playwright profile",
+    rows,
+  });
   // One summary line per workload for the measurement table.
   for (const row of rows) {
     const runs = row.runs as Array<{
-      elapsed_ms: number;
+      elapsed_ms: number | null;
       rss_peak_kib: number | null;
       heap_peak_bytes: number | null;
     }>;
+    // Every run's figure, as it is: an attempt without one (an error run) leaves a non-number in the series, which the evidence
+    // contract refuses rather than accepting a shorter distribution.
     record(
       `P-11 ${row.workload} elapsed_ms`,
       engine,
-      runs.map((r) => r.elapsed_ms),
+      runs.map((r) => r.elapsed_ms as number),
       { bytes: row.bytes, expected: row.expected },
     );
-    const rss = runs
-      .map((r) => r.rss_peak_kib)
-      .filter((v): v is number => v !== null);
-    if (rss.length)
-      record(`P-11 ${row.workload} rss_peak_kib`, engine, rss, {
+    record(
+      `P-11 ${row.workload} rss_peak_kib`,
+      engine,
+      runs.map((r) => r.rss_peak_kib as number),
+      {
         bytes: row.bytes,
-        caveat: "whole process tree of the engine",
-      });
-    const heap = runs
-      .map((r) => r.heap_peak_bytes)
-      .filter((v): v is number => v !== null);
-    if (heap.length)
-      record(`P-11 ${row.workload} heap_peak_bytes`, engine, heap, {
-        bytes: row.bytes,
+        caveat:
+          "the browser's own processes (on macOS WebKit with its launchd services); per-run attribution in memory/",
+      },
+    );
+    if (engine === "chromium")
+      record(
+        `P-11 ${row.workload} heap_peak_bytes`,
+        engine,
+        runs.map((r) => r.heap_peak_bytes as number),
+        { bytes: row.bytes },
+      );
+    else
+      recordValue(`P-11 ${row.workload} heap_peak_bytes`, engine, {
+        capability: "unavailable",
+        reason:
+          "this engine exposes no JS heap signal to the test (CDP's Performance domain is Chromium's)",
       });
   }
   // W5 is the processing path only: it runs in the device page (`/profile-harness`), covered by the protocol test below.
@@ -432,8 +436,11 @@ test("P-11 (device page): the full /profile-harness protocol on this desktop eng
   await expect(page.locator("#profile-status")).toContainText(
     `SHA-256 ${w2sha256}`,
   );
+  // The browser's memory over the WHOLE protocol (an aggregate across 39 page loads, not a per-workload peak; attributed as P-11's is).
+  const memory = browserMemory();
+  await memory.baseline();
+  memory.start(200);
   await page.goto(`/profile-harness?protocol=1&w2sha256=${w2sha256}`);
-  const rssSampler = sampler(() => descendantsRssKb(), 200);
   await page.waitForFunction(
     () =>
       document
@@ -442,28 +449,43 @@ test("P-11 (device page): the full /profile-harness protocol on this desktop eng
     undefined,
     { timeout: 35 * 60_000, polling: 500 },
   );
-  const rss = await rssSampler.stop();
+  await memory.stop();
   const collected = await page.evaluate(() =>
-    JSON.parse(localStorage.getItem("atlas-profile-results") ?? "null"),
+    (
+      window as unknown as { __profile: { results: () => unknown } }
+    ).__profile.results(),
   );
-  expect(collected?.runs?.length).toBeGreaterThan(0);
-  // The capture route was taken: five cold W2 runs of exactly these bytes.
-  const w2Runs = (
-    collected.runs as Array<{ workload: string; sha256: string }>
-  ).filter((r) => r.workload === "W2");
+  const results = collected as {
+    protocol_id: string;
+    runs: Array<{ workload: string; sha256: string; protocol_id: string }>;
+  };
+  expect(results?.runs?.length).toBeGreaterThan(0);
+  // The capture route was taken: five cold W2 runs of exactly these bytes, all of one protocol.
+  const w2Runs = results.runs.filter((r) => r.workload === "W2");
   expect(w2Runs.map((r) => r.sha256)).toEqual(Array(5).fill(w2sha256));
-  mkdirSync(`${PROFILE_OUT}/device-page`, { recursive: true });
-  writeFileSync(
-    `${PROFILE_OUT}/device-page/results.${engine}.json`,
-    `${JSON.stringify(collected, null, 2)}\n`,
+  expect(new Set(results.runs.map((r) => r.protocol_id))).toEqual(
+    new Set([results.protocol_id]),
   );
+  const text = `${JSON.stringify(collected, null, 2)}\n`;
+  mkdirSync(`${PROFILE_OUT}/device-page`, { recursive: true });
+  writeFileSync(`${PROFILE_OUT}/device-page/results.${engine}.json`, text, {
+    flag: "wx",
+  });
+  // The row that binds the results file to this run (its SHA-256), with the protocol's aggregate memory.
   recordValue("P-11 device page", engine, {
-    runs: collected.runs.length,
+    runs: results.runs.length,
+    protocol_id: results.protocol_id,
+    results_file: `device-page/results.${engine}.json`,
+    results_sha256: createHash("sha256").update(text).digest("hex"),
     w2_capture: {
       file: `w2/W2-captured.${engine}.limit-1.json`,
       sha256: w2sha256,
     },
-    rss_peak_kib_whole_tree: rss.length ? Math.max(...rss) : null,
+    browser_memory_whole_protocol: {
+      ...memory.record(),
+      reading:
+        "an aggregate over the whole protocol's page loads: not a per-workload peak, not device memory",
+    },
   });
 });
 

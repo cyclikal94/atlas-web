@@ -4,8 +4,8 @@ import type { Page } from "@playwright/test";
 import { oneColdRun } from "../e2e/profile-cold-run";
 import {
   beginCollection,
+  browserMemory,
   cdpHeap,
-  descendantsRssKb,
   endCollection,
   engineOf,
   mib,
@@ -13,6 +13,7 @@ import {
   record,
   recordValue,
   sampler,
+  writeEvidence,
 } from "../e2e/profile-helpers";
 import {
   API as API_URL,
@@ -604,9 +605,10 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   const heap = await cdpHeap(page, engine);
   await heap.gc();
   const heapBaseline = await heap.used();
-  const rssBaseline = descendantsRssKb();
+  const memory = browserMemory();
+  await memory.baseline();
   const heapSampler = sampler(() => heap.used(), 25);
-  const rssSampler = sampler(() => descendantsRssKb(), 100);
+  memory.start(100);
   await page.evaluate(() => performance.clearResourceTimings());
   const liveStarted = Date.now();
   // Only the engine: `leader` would run `prepareAccount` again, which seeds a NEW snapshot (holding the dense fields as snapshot rows)
@@ -647,7 +649,9 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   }
   const liveElapsed = Date.now() - liveStarted;
   const heapSamples = await heapSampler.stop();
-  const rssSamples = await rssSampler.stop();
+  await memory.stop();
+  await memory.after();
+  const liveMemory = memory.record();
   const trace = await page.evaluate(
     () => window.__atlasData?.engineTrace ?? [],
   );
@@ -679,10 +683,11 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     limits_the_engine_asked_for: limitsAsked,
     heap_baseline_bytes: heapBaseline,
     heap_peak_bytes: heapSamples.length ? Math.max(...heapSamples) : null,
-    rss_baseline_kib: rssBaseline,
-    rss_peak_kib: rssSamples.length ? Math.max(...rssSamples) : null,
+    rss_baseline_kib: liveMemory.baseline_kib,
+    rss_peak_kib: liveMemory.peak_kib,
+    rss: liveMemory,
     label:
-      "the released backend's /sync read by the production engine (FIXTURE leader), on a desktop engine; RSS is the engine process tree's (browser-process RSS: not device memory, not server RSS)",
+      "the released backend's /sync read by the production engine (FIXTURE leader), on a desktop engine; RSS is the browser's own processes, attributed (on macOS WebKit with its launchd services; browser-process RSS: not device memory, not server RSS)",
   };
 
   // 5 (continued). Five cold applications of the captured limit-1 bytes through the production path, the network a stub serving them.
@@ -692,48 +697,52 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
       await oneColdRun(browser, info.project.use.baseURL, engine, w2Body),
     );
   const bytes = Buffer.byteLength(w2Body);
-  writeFileSync(
-    `${PROFILE_OUT}/w2/P-W2.${engine}.json`,
-    `${JSON.stringify(
+  writeEvidence(`w2/P-W2.${engine}.json`, {
+    engine,
+    path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the CAPTURED bytes of the released backend's /sync (limit 1), served by a Playwright route stub in a new context per run",
+    cold: "a new browser context for every run",
+    rss: "the browser's own processes, attributed per run (the test worker's descendants and, for WebKit on macOS, its host's launchd services; browser-process RSS: not device memory, not server RSS)",
+    live,
+    rows: [
       {
-        engine,
-        path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the CAPTURED bytes of the released backend's /sync (limit 1), served by a Playwright route stub in a new context per run",
-        cold: "a new browser context for every run",
-        rss: "resident set of the browser process tree started by the test worker (browser-process RSS: not device memory, not server RSS)",
-        live,
-        rows: [
-          {
-            workload: "W2",
-            bytes,
-            mib: mib(bytes),
-            expected: "admitted",
-            runs: coldRuns,
-          },
-        ],
+        workload: "W2",
+        bytes,
+        mib: mib(bytes),
+        expected: "admitted",
+        runs: coldRuns,
       },
-      null,
-      2,
-    )}\n`,
-  );
+    ],
+  });
+  // Every run's figure as it is: an error run leaves a non-number, which the evidence contract refuses (never a shorter series).
   record(
     "P-W2 elapsed_ms",
     engine,
-    coldRuns.map((r) => r.elapsed_ms),
+    coldRuns.map((r) => r.elapsed_ms as number),
     { bytes, expected: "admitted" },
   );
-  const rss = coldRuns
-    .map((r) => r.rss_peak_kib)
-    .filter((v): v is number => v !== null);
-  if (rss.length)
-    record("P-W2 rss_peak_kib", engine, rss, {
+  record(
+    "P-W2 rss_peak_kib",
+    engine,
+    coldRuns.map((r) => r.rss_peak_kib as number),
+    {
       bytes,
-      caveat: "whole process tree of the engine",
+      caveat:
+        "the browser's own processes (on macOS WebKit with its launchd services); per-run attribution in w2/",
+    },
+  );
+  if (engine === "chromium")
+    record(
+      "P-W2 heap_peak_bytes",
+      engine,
+      coldRuns.map((r) => r.heap_peak_bytes as number),
+      { bytes },
+    );
+  else
+    recordValue("P-W2 heap_peak_bytes", engine, {
+      capability: "unavailable",
+      reason:
+        "this engine exposes no JS heap signal to the test (CDP's Performance domain is Chromium's)",
     });
-  const heapPeaks = coldRuns
-    .map((r) => r.heap_peak_bytes)
-    .filter((v): v is number => v !== null);
-  if (heapPeaks.length)
-    record("P-W2 heap_peak_bytes", engine, heapPeaks, { bytes });
   recordValue("P-W2 capture", engine, {
     status: "measured",
     server:

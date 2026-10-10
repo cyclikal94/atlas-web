@@ -2,22 +2,30 @@
 // Checks a profiling results file (plan 7.3 and 7.5): the one the device page (`/profile-harness`) copies. It is also what a person with a
 // device runs before sending their results back. With `--handoff <dir>` it checks the hand-over directory instead (WEB-09c plan 4.2): every
 // consumer-map key of BE-B1 and BE-Q23 is answered with a status, evidence and an owner; no desktop row claims a device class and no device
-// row is `measured` from a desktop engine; the fixtures match the recorded hashes; SHA256SUMS covers and verifies every file; the
-// completeness inventory and the isolation of every series are present and consistent, and no desktop conclusion is drawn from an
-// incomplete programme (review R1, R2).
+// row is `measured` from a desktop engine; the fixtures match the recorded hashes; SHA256SUMS covers and verifies every file; and the
+// evidence the hand-over CARRIES (`evidence/`) is resolved again against the evidence contract (scripts/lib/profile-contract.mjs), so its
+// completeness, isolation, item statuses and desktop conclusions are recomputed here and compared with what the hand-over says (review R1,
+// R2; design assessment D). A hand-over is never trusted for its own booleans.
 //
 //   node scripts/validate-profile-handoff.mjs <results.json> --w2-hashes <handoff>/fixtures/W2-hashes.json [--allow-partial]
 //   node scripts/validate-profile-handoff.mjs --handoff <dir> [--allow-partial]
 //
-// It verifies (1) the schema, (2) every run's SHA-256 against the recorded hashes (scripts/lib/profile-workload-hashes.json; for W2, the
-// captured bytes, against the hand-over's W2-hashes.json given with --w2-hashes) and that the page itself verified the fixture, (3) the
-// "at least five cold runs" rule for the workloads that decide memory (W1, W2, W3, W4, W6), (4) that every run states its expectation and
-// its outcome, and (5) that a negative control (W7) was REFUSED and a valid workload was not silently dropped. Exit code 0: complete and
-// consistent; 1: a violation, or incomplete; 2 with `--allow-partial`: valid but incomplete. A results file without W2 is incomplete.
+// A results file (schema 2, scripts/lib/profile-device-results.mjs): one protocol identity, every (workload, run) once, every run's SHA-256
+// against the recorded hashes (W2: the hand-over's captures given with --w2-hashes), the page's own verification, at least five DISTINCT
+// cold runs of W1, W2, W3, W4 and W6, expectations from the workload contract, and every W7 negative control REFUSED (an admitted, timed-out,
+// failed or killed control is kept in the file and fails the control). Exit 0: complete and consistent; 1: a violation, a control that was
+// not fulfilled, or incomplete; 2 with `--allow-partial`: valid but incomplete. Invalid evidence or a failed control exits 1 even with
+// `--allow-partial`.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  CONTRACT_VERSION,
+  RECORDED,
+  resolveEvidence,
+} from "./lib/profile-contract.mjs";
+import { checkDeviceResults } from "./lib/profile-device-results.mjs";
 import {
   CONSUMER_KEYS,
   CONSUMER_STATUSES,
@@ -25,7 +33,6 @@ import {
   EVIDENCE_KEY,
   EVIDENCE_OWNER,
 } from "./lib/profile-evidence.mjs";
-import { VERDICTS as ISOLATION_VERDICTS } from "./lib/profile-isolation.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -44,11 +51,6 @@ if (!file) {
   );
   process.exit(1);
 }
-
-const recorded = JSON.parse(
-  readFileSync(join(root, "scripts/lib/profile-workload-hashes.json"), "utf8"),
-);
-const hashOf = new Map(recorded.workloads.map((w) => [w.name, w.sha256]));
 // W2 is not generated: its runs are of the bytes the released backend produced, which the hand-over carries with their hashes.
 let w2Hashes = null;
 if (w2HashesFile)
@@ -60,12 +62,6 @@ if (w2HashesFile)
     console.error(`cannot read ${w2HashesFile}: ${error.message}`);
     process.exit(1);
   }
-const MUST_HAVE_RUNS = ["W1", "W2", "W3", "W4", "W6"];
-const REQUIRED_COLD_RUNS = 5;
-const OUTCOMES = new Set(["admitted", "refused", "error", "timeout", "killed"]);
-
-const errors = [];
-const warnings = [];
 let data;
 try {
   data = JSON.parse(readFileSync(resolve(file), "utf8"));
@@ -73,104 +69,22 @@ try {
   console.error(`cannot read ${file}: ${error.message}`);
   process.exit(1);
 }
-
-if (data.schema !== 1) errors.push("schema must be 1");
-if (data.workload_version !== recorded.version)
-  errors.push(
-    `workload_version ${data.workload_version} is not the recorded ${recorded.version} (regenerate or re-record the fixtures)`,
-  );
-if (typeof data.machine !== "object" || data.machine === null)
-  errors.push("machine is missing");
-else {
-  for (const key of [
-    "user_agent",
-    "device_memory_gib",
-    "hardware_concurrency",
-    "platform",
-    "secure_context",
-  ])
-    if (!(key in data.machine)) errors.push(`machine.${key} is missing`);
-  if (data.machine.secure_context === false)
-    errors.push(
-      "machine.secure_context is false: Web Locks and Web Crypto need HTTPS or localhost",
-    );
-}
-if (!Array.isArray(data.runs) || data.runs.length === 0)
-  errors.push("runs is empty");
-
-const counts = new Map();
-for (const [i, run] of (Array.isArray(data.runs) ? data.runs : []).entries()) {
-  const where = `runs[${i}] (${run.workload} run ${run.run})`;
-  const isW2 = run.workload === "W2";
-  if (!isW2 && !hashOf.has(run.workload)) {
-    errors.push(`${where}: unknown workload`);
-    continue;
-  }
-  // A KILLED run never got as far as verifying anything: it counts as a cold run with its outcome, and is not held to the hash rule.
-  if (isW2 && run.outcome !== "killed") {
-    if (!w2Hashes)
-      errors.push(
-        `${where}: a W2 run cannot be verified without --w2-hashes (the hand-over's fixtures/W2-hashes.json)`,
-      );
-    else if (!w2Hashes.has(run.sha256))
-      errors.push(
-        `${where}: sha256 ${String(run.sha256).slice(0, 12)} is not a captured W2 of the hand-over`,
-      );
-  } else if (
-    !isW2 &&
-    run.outcome !== "killed" &&
-    run.sha256 !== hashOf.get(run.workload)
-  )
-    errors.push(
-      `${where}: sha256 ${String(run.sha256).slice(0, 12)} is not the recorded ${hashOf.get(run.workload).slice(0, 12)}`,
-    );
-  if (run.outcome !== "killed" && run.sha256_verified !== true)
-    errors.push(`${where}: the page did not verify the fixture's hash`);
-  if (run.cold !== true) errors.push(`${where}: not a cold run`);
-  if (!OUTCOMES.has(run.outcome))
-    errors.push(
-      `${where}: outcome ${run.outcome} is not one of ${[...OUTCOMES]}`,
-    );
-  if (run.expected !== "admitted" && run.expected !== "refused")
-    errors.push(`${where}: expected is missing`);
-  if (run.workload.startsWith("W7-") && run.outcome === "admitted")
-    errors.push(`${where}: a NEGATIVE control was admitted`);
-  if (!run.workload.startsWith("W7-") && run.outcome === "error")
-    warnings.push(`${where}: outcome error (${run.detail})`);
-  if (typeof run.elapsed_ms !== "number")
-    errors.push(`${where}: elapsed_ms is missing`);
-  if (typeof run.user_agent !== "string")
-    errors.push(`${where}: user_agent is missing`);
-  counts.set(run.workload, (counts.get(run.workload) ?? 0) + 1);
-}
-
-let incomplete = false;
-for (const name of MUST_HAVE_RUNS) {
-  const n = counts.get(name) ?? 0;
-  if (n < REQUIRED_COLD_RUNS) {
-    incomplete = true;
-    warnings.push(
-      `${name}: ${n} cold run(s); at least ${REQUIRED_COLD_RUNS} are required`,
-    );
-  }
-}
-for (const w of [...recorded.workloads, { name: "W2" }])
-  if (!counts.has(w.name)) {
-    incomplete = true;
-    warnings.push(`${w.name}: no run recorded`);
-  }
-
-for (const message of errors) console.error(`ERROR   ${message}`);
-for (const message of warnings) console.error(`WARNING ${message}`);
+const checked = checkDeviceResults(data, { recorded: RECORDED, w2Hashes });
+for (const message of checked.errors) console.error(`ERROR   ${message}`);
+for (const message of checked.failed_controls)
+  console.error(`FAILED CONTROL ${message}`);
+for (const message of checked.warnings) console.error(`WARNING ${message}`);
+const counted = Object.values(checked.runs).reduce((n, r) => n + r.length, 0);
 console.log(
-  `${data.runs?.length ?? 0} run(s) over ${counts.size} workload(s); ${errors.length} error(s), ${warnings.length} warning(s)`,
+  `${data.runs?.length ?? 0} run(s), ${counted} distinct, over ${Object.keys(checked.runs).length} workload(s); ${checked.errors.length} error(s), ${checked.failed_controls.length} failed control(s), ${checked.warnings.length} warning(s)`,
 );
-if (errors.length > 0) process.exit(1);
-if (incomplete) {
+if (checked.errors.length > 0 || checked.failed_controls.length > 0)
+  process.exit(1);
+if (checked.incomplete) {
   console.log(
     allowPartial
       ? "valid but INCOMPLETE (allowed)"
-      : "INCOMPLETE: not every workload has its runs",
+      : "INCOMPLETE: not every workload has its distinct runs",
   );
   process.exit(allowPartial ? 2 : 1);
 }
@@ -198,8 +112,9 @@ function validateHandoff(dir, allowPartialHandoff) {
   } catch (error) {
     problems.push(`results.json cannot be read: ${error.message}`);
   }
+  let recomputed = null;
   if (results) {
-    if (results.schema !== 2) problems.push("results.json: schema must be 2");
+    if (results.schema !== 3) problems.push("results.json: schema must be 3");
     if (results.evidence_key !== EVIDENCE_KEY)
       problems.push(`results.json: evidence_key must be ${EVIDENCE_KEY}`);
     if (results.owner !== EVIDENCE_OWNER)
@@ -235,7 +150,14 @@ function validateHandoff(dir, allowPartialHandoff) {
     for (const key of Object.keys(map))
       if (!CONSUMER_KEYS.includes(key))
         problems.push(`consumer_map: ${key} is not a BE-B1/BE-Q23 item`);
-    problems.push(...programmeProblems(results));
+    if (!existsSync(join(at, "evidence")))
+      problems.push(
+        "evidence/ is missing: the hand-over carries no evidence its statements can be checked against",
+      );
+    else {
+      recomputed = resolveEvidence(join(at, "evidence"));
+      problems.push(...programmeProblems(results, recomputed, at));
+    }
   }
   // The fixtures: the generator's recorded hashes, and every captured W2 file against its own hash.
   const fixtures = join(at, "fixtures");
@@ -262,6 +184,11 @@ function validateHandoff(dir, allowPartialHandoff) {
         problems.push(`fixtures/${name} is missing`);
       else if (sha(join(fixtures, name)) !== hash)
         problems.push(`fixtures/${name} does not match W2-hashes.json`);
+      else if (
+        !existsSync(join(at, "evidence", "w2", name)) ||
+        sha(join(at, "evidence", "w2", name)) !== hash
+      )
+        problems.push(`fixtures/${name} is not the capture the evidence holds`);
   }
   // SHA256SUMS covers every file and every line verifies.
   const files = [];
@@ -300,10 +227,10 @@ function validateHandoff(dir, allowPartialHandoff) {
     `${files.length} file(s), ${Object.keys(results?.consumer_map ?? {}).length} consumer-map row(s); ${problems.length} error(s)`,
   );
   if (problems.length > 0) return 1;
-  const programme = results.desktop_programme;
-  if (!programme.complete) {
+  if (!recomputed.complete) {
+    const c = recomputed.counts;
     console.log(
-      `PARTIAL hand-over: the desktop programme is ${programme.outcomes_complete ? "not isolated" : "incomplete"} (${programme.missing.length} missing, ${programme.failed.length} failed, ${programme.isolation.not_isolated_series} series not isolated)${allowPartialHandoff ? " (allowed)" : ""}`,
+      `PARTIAL hand-over: the desktop programme is ${recomputed.outcomes_complete ? "not isolated" : "incomplete"} (of ${recomputed.cells.length} required cells: ${c.missing} missing, ${c.invalid} invalid, ${c.failed} failed, ${c.failed_control} failed control(s), ${c.not_isolated} not isolated)${allowPartialHandoff ? " (allowed)" : ""}`,
     );
     return allowPartialHandoff ? 2 : 1;
   }
@@ -311,77 +238,119 @@ function validateHandoff(dir, allowPartialHandoff) {
   return 0;
 }
 
+// A function declaration: the hand-over mode runs while this module is still being evaluated.
+function idsOf(list) {
+  return JSON.stringify(
+    (Array.isArray(list) ? list : []).map((c) => c?.id ?? c).sort(),
+  );
+}
+
 /**
- * The completeness inventory, the isolation of every series and the conclusions drawn from them must agree (review R1, R2): a hand-over
- * may be partial, but it may not say it is complete when its own lists say otherwise, nor draw a desktop conclusion from an incomplete
- * programme.
+ * What the hand-over says against what its own evidence resolves to (review R1, R2): the contract, every cell's status, the lists, the
+ * item statuses and the desktop conclusions. A forged summary, a dropped raw file or a "complete" programme holding a not-run item is
+ * refused here, whatever SHA256SUMS says.
  */
-function programmeProblems(results) {
+function programmeProblems(results, recomputed, at) {
   const problems = [];
   const p = results.desktop_programme;
   if (!p || typeof p !== "object")
     return ["desktop_programme: the completeness inventory is missing"];
-  if (
-    typeof p.complete !== "boolean" ||
-    typeof p.outcomes_complete !== "boolean"
-  )
+  if (p.contract_version !== CONTRACT_VERSION)
     problems.push(
-      "desktop_programme: complete and outcomes_complete must be booleans",
+      `desktop_programme: contract ${p.contract_version}, not ${CONTRACT_VERSION}`,
     );
-  if (!Array.isArray(p.missing) || !Array.isArray(p.failed))
-    return [...problems, "desktop_programme: missing and failed must be lists"];
-  const isolation = results.isolation;
-  if (!isolation || !Array.isArray(isolation.series) || !isolation.summary)
-    return [...problems, "isolation: the per-series verdicts are missing"];
-  for (const [i, row] of isolation.series.entries())
-    if (!ISOLATION_VERDICTS.includes(row.verdict))
+  if (p.complete !== recomputed.complete)
+    problems.push(
+      `desktop_programme: complete is ${p.complete}, but the evidence resolves to ${recomputed.complete}`,
+    );
+  if (p.outcomes_complete !== recomputed.outcomes_complete)
+    problems.push(
+      `desktop_programme: outcomes_complete is ${p.outcomes_complete}, but the evidence resolves to ${recomputed.outcomes_complete}`,
+    );
+  for (const [key, status] of [
+    ["missing", "missing"],
+    ["invalid", "invalid"],
+    ["failed", "failed"],
+    ["failed_controls", "failed_control"],
+    ["not_isolated", "not_isolated"],
+    ["unavailable", "unavailable"],
+  ])
+    if (
+      idsOf(p[key]) !==
+      idsOf(recomputed.cells.filter((c) => c.status === status))
+    )
       problems.push(
-        `isolation.series[${i}] (${row.name}): verdict ${row.verdict}`,
+        `desktop_programme: its ${key} list is not what the evidence resolves to`,
       );
-  const clean = isolation.series.filter((r) => r.verdict === "clean").length;
-  const allClean =
-    isolation.series.length > 0 &&
-    clean === isolation.series.length &&
-    (isolation.tests ?? []).every((t) => t.verdict === "clean");
+  let stated = null;
+  try {
+    stated = JSON.parse(readFileSync(join(at, "resolution.json"), "utf8"));
+  } catch (error) {
+    problems.push(`resolution.json cannot be read: ${error.message}`);
+  }
+  if (stated) {
+    const statusOf = new Map((stated.cells ?? []).map((c) => [c.id, c.status]));
+    const differing = recomputed.cells.filter(
+      (c) => statusOf.get(c.id) !== c.status,
+    );
+    if (differing.length || statusOf.size !== recomputed.cells.length)
+      problems.push(
+        `resolution.json: ${differing.length} cell(s) differ from the evidence (first: ${differing[0]?.id ?? "a cell outside the contract"})`,
+      );
+  }
+  const d = recomputed.derived;
   if (
-    isolation.summary.series !== isolation.series.length ||
-    isolation.summary.clean !== clean
+    results.H8?.desktop_valid_workload_failure !==
+    d.desktop_valid_workload_failure
   )
-    problems.push("isolation.summary does not count its own series");
+    problems.push(
+      `H8: desktop_valid_workload_failure is ${results.H8?.desktop_valid_workload_failure}; the evidence gives ${d.desktop_valid_workload_failure}`,
+    );
   if (
-    isolation.summary.all_clean !== allClean ||
-    p.isolation?.all_clean !== allClean
+    results.H9?.desktop_needs_finer_pagination !==
+    d.desktop_needs_finer_pagination
   )
-    problems.push("isolation: all_clean does not match the verdicts");
-  if (p.outcomes_complete !== (p.missing.length === 0 && p.failed.length === 0))
     problems.push(
-      "desktop_programme: outcomes_complete contradicts its missing and failed lists",
+      `H9: desktop_needs_finer_pagination is ${results.H9?.desktop_needs_finer_pagination}; the evidence gives ${d.desktop_needs_finer_pagination}`,
     );
-  if (p.complete !== (p.outcomes_complete && allClean))
+  if (
+    JSON.stringify(results.H9?.desktop_D_largest_dense_changes_committed) !==
+    JSON.stringify(d.desktop_D_largest_dense_changes_committed)
+  )
     problems.push(
-      "desktop_programme: complete contradicts its outcomes and its isolation",
+      "H9: the desktop dense bound D is not what the evidence gives",
     );
-  const failure = results.H8?.desktop_valid_workload_failure;
-  if (failure === false && !p.outcomes_complete)
-    problems.push(
-      "H8: no desktop failure is concluded from an INCOMPLETE programme",
-    );
-  if (failure !== false && failure !== true && failure !== null)
-    problems.push(
-      "H8: desktop_valid_workload_failure must be true, false or null",
-    );
-  const finer = results.H9?.desktop_needs_finer_pagination;
-  if (finer === false && (failure !== false || !p.outcomes_complete))
-    problems.push(
-      "H9: 'the desktop engines do not need finer pagination' needs a complete programme with no failure",
-    );
-  if (p.outcomes_complete)
-    for (const [file, v] of Object.entries(
-      results.device_page_validation ?? {},
-    ))
-      if (v.exit !== 0)
+  for (const [item, resolved] of Object.entries(recomputed.items)) {
+    if (item === "stages" || item === "cases") continue;
+    const stated = results.programme?.[item]?.status;
+    if (stated !== resolved.status)
+      problems.push(
+        `programme: ${item} is ${stated}, but its evidence resolves to ${resolved.status}`,
+      );
+  }
+  if (recomputed.complete)
+    for (const [item, entry] of Object.entries(results.programme ?? {}))
+      if (entry?.status === "not_run" || entry?.status === "partial")
         problems.push(
-          `device_page_validation: ${file} exited ${v.exit} in a programme called complete`,
+          `programme: ${item} is ${entry.status} in a programme called complete`,
         );
+  const verdicts = recomputed.cells.filter((c) => c.isolation);
+  const clean = verdicts.filter((c) => c.isolation.verdict === "clean").length;
+  if (
+    results.isolation?.summary?.judged_cells !== verdicts.length ||
+    results.isolation?.summary?.clean !== clean ||
+    results.isolation?.summary?.all_clean !==
+      (verdicts.length > 0 && clean === verdicts.length)
+  )
+    problems.push(
+      "isolation: the summary does not count the resolved verdicts",
+    );
+  for (const c of recomputed.cells.filter((x) => x.kind === "device-file")) {
+    const stated = results.device_page_validation?.[`results.${c.engine}.json`];
+    if (stated?.status !== c.status)
+      problems.push(
+        `device_page_validation: results.${c.engine}.json is ${stated?.status}; the evidence resolves to ${c.status}`,
+      );
+  }
   return problems;
 }

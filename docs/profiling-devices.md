@@ -22,7 +22,17 @@ Each page load is **one cold run of one workload**. The page:
    IndexedDB** (a fresh throw-away account database per run, named `atlas-fffffff0-0000-4000-8000-…`);
 3. records the outcome (`admitted`, `refused`, `error`, `timeout`), the elapsed time, the scan and commit times the engine reports, the number of requests the engine
    made, the page's own JS heap where the engine exposes it (`performance.memory`: **Chromium only**), and the machine's own description;
-4. appends the record to this origin's `localStorage`, so runs collected over many page loads end up in one results file that the page can copy.
+4. stores the record in the protocol's state in this origin's `localStorage`, so runs collected over many page loads end up in one results file that the page can
+   copy (schema 2: every run carries the protocol's `protocol_id`).
+
+**One tab owns a protocol** (WEB-09c revision 2). The tab that starts it owns it: its token is in that tab's `sessionStorage`, which survives the protocol's
+reloads. Every attempt is **reserved** in one write before it runs and its result is stored, with the end of the reservation, in one more write, so a reload or a
+killed tab never skips an attempt or records one twice. Any other tab, including a plain `/profile-harness` page, only reads: it does not run, recover, clear or
+delete anything, and says which tab owns the protocol. A duplicate of the owning tab (browsers copy `sessionStorage` when a tab is duplicated) does not act while
+the owning page is alive (it holds a Web Lock). If the owning tab is lost for good, **Take over the active collection** moves ownership to the current tab, and the
+take-over is recorded in the results. A storage error or an unreadable state stops the protocol with its message; nothing is reset or started over silently. A
+completed protocol is never overwritten: copy its results, then **Clear results** before starting another. The W2 capture and the plan never change after a
+protocol starts.
 
 What it does **not** do, and the figures must not be read as if it did:
 
@@ -92,8 +102,12 @@ back, verified and run; other bytes not verified; no capture kept is an error ru
    node scripts/validate-profile-handoff.mjs results.json --w2-hashes <handoff>/fixtures/W2-hashes.json
    ```
 
-   Exit code 0 means complete and consistent; 1 means a rule was broken or the results are incomplete (the messages say which: a file without five W2 runs is
-   incomplete); `--allow-partial` turns "valid but incomplete" into exit code 2. A W2 run is checked against `W2-hashes.json` and cannot be validated without it.
+   Exit code 0 means complete and consistent; 1 means a rule was broken, a negative control was not fulfilled, or the results are incomplete (the messages say
+   which: a file without five distinct W2 runs is incomplete); `--allow-partial` turns "valid but incomplete" into exit code 2, never a broken rule or a failed
+   control. Runs are counted as distinct run numbers of ONE protocol (a duplicated run, a run of another protocol or a schema-1 file is refused). A W7 control
+   fulfils its control only when it was **refused**: an admitted, timed-out, failed or killed control stays in the file and is reported as `FAILED CONTROL`.
+   What a run is expected to do comes from the workload, never from the file. A W2 run is checked against `W2-hashes.json` and cannot be validated without it;
+   a W2 capture whose bytes are not the ones the protocol names is an `error` run and is not processed.
 6. Tap **Delete profiling databases** to remove the throw-away databases from the device.
 
 ## Multi-tab runs (H5) and the contention items P-6 to P-9

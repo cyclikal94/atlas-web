@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import hashes from "../../scripts/lib/profile-workload-hashes.json";
 
-/** scripts/validate-profile-handoff.mjs: what it accepts and what it refuses (each rule fails on its own). */
+/**
+ * scripts/validate-profile-handoff.mjs: what it accepts and what it refuses (each rule fails on its own). Schema 2 (WEB-09c revision 2,
+ * design assessment DA-1): one protocol identity, every (workload, run) once, distinct runs counted, expectations from the workload
+ * contract, and a W7 control fulfilled only when refused.
+ */
 const dir = mkdtempSync(join(tmpdir(), "atlas-validate-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -25,6 +29,7 @@ const run = (
   n: number,
   extra: Record<string, unknown> = {},
 ) => ({
+  protocol_id: "protocol-1",
   workload,
   run: n,
   cold: true,
@@ -39,7 +44,9 @@ const run = (
   ...extra,
 });
 const complete = () => ({
-  schema: 1,
+  schema: 2,
+  protocol_id: "protocol-1",
+  w2sha256: W2_SHA,
   workload_version: hashes.version,
   machine: {
     user_agent: "test",
@@ -109,13 +116,73 @@ describe("validate-profile-handoff", () => {
     expect(out.status).toBe(1);
     expect(out.text).toContain("NEGATIVE control was admitted");
   });
+  it("a W7 control that timed out, failed or was killed is kept but does not fulfil its control, even with --allow-partial", () => {
+    for (const outcome of ["timeout", "error", "killed"]) {
+      const data = complete();
+      const control = data.runs.find((r) => r.workload === "W7-truncated");
+      (control as { outcome: string }).outcome = outcome;
+      const out = validate(data, ["--allow-partial"]);
+      expect(out.status, outcome).toBe(1);
+      expect(out.text).toContain(`FAILED CONTROL runs[`);
+      expect(out.text).toContain(`was not refused (outcome ${outcome})`);
+    }
+  });
+  it("an expectation is the workload contract's: a W7 run declared 'admitted' is refused", () => {
+    const data = complete();
+    const control = data.runs.find((r) => r.workload.startsWith("W7-"));
+    Object.assign(control as object, {
+      expected: "admitted",
+      outcome: "admitted",
+    });
+    const out = validate(data);
+    expect(out.status).toBe(1);
+    expect(out.text).toContain("the workload contract expects refused");
+  });
+  it("five copies of one run are one run: duplicates are refused and distinct runs are counted", () => {
+    const data = complete();
+    data.runs = data.runs.map((r) =>
+      r.workload === "W3" ? { ...r, run: 1 } : r,
+    );
+    const out = validate(data, ["--allow-partial"]);
+    expect(out.status).toBe(1);
+    expect(out.text).toContain("a duplicate of runs[");
+  });
+  it("runs of another protocol, a missing protocol identity and a historical schema-1 file are refused", () => {
+    const mixed = complete();
+    (mixed.runs[3] as { protocol_id: string }).protocol_id = "protocol-2";
+    expect(validate(mixed).text).toContain(
+      "runs of different protocols cannot be counted together",
+    );
+    const anonymous = complete() as Record<string, unknown>;
+    delete anonymous.protocol_id;
+    expect(validate(anonymous).text).toContain("protocol_id is missing");
+    const historical = { ...complete(), schema: 1 };
+    const out = validate(historical);
+    expect(out.status).toBe(1);
+    expect(out.text).toContain("schema must be 2");
+  });
+  it("a W2 run, killed ones included, is of the protocol's capture", () => {
+    const data = complete();
+    const w2 = data.runs.find((r) => r.workload === "W2") as Record<
+      string,
+      unknown
+    >;
+    Object.assign(w2, {
+      outcome: "killed",
+      sha256: "",
+      sha256_verified: false,
+    });
+    const out = validate(data);
+    expect(out.status).toBe(1);
+    expect(out.text).toContain("is not the protocol's capture");
+  });
   it("refuses fewer than five cold runs of W1, and reports 2 when partial results are allowed", () => {
     const data = complete();
     data.runs = data.runs.filter((r) => !(r.workload === "W1" && r.run > 2));
     expect(validate(data).status).toBe(1);
     const allowed = validate(data, ["--allow-partial"]);
     expect(allowed.status).toBe(2);
-    expect(allowed.text).toContain("W1: 2 cold run(s)");
+    expect(allowed.text).toContain("W1: 2 distinct cold run(s)");
   });
   it("refuses a run the page did not verify, a non-secure context and a stale workload version", () => {
     const unverified = complete();

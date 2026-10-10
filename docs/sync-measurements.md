@@ -11,6 +11,14 @@ is a pass mark, none stands for a device class, and BE-B1 and BE-Q23 remain bloc
 > (R2) and the device page's W2 route (R3), so the corrected validator refuses it. The record of reference for BE-B1 and BE-Q23 will be the hand-over of the isolated
 > final run (`handoff/report.md` and `results.json` there state the completeness and isolation of every figure). Until then, use the figures below as indicative
 > desktop observations only. The admission outcomes, shapes, bytes and hashes do not depend on isolation and stand.
+>
+> **Status after review 2 (revision 2, 10 October 2026).** Review 2 and the independent design assessment found that the shell boot escaped the isolation check
+> (R1), that case completion still stood in for measurement completeness and a timed-out W7 control counted as a refusal (R2), and that the browser RSS left out
+> macOS WebKit's renderer (R4). Revision 2 replaces the completeness predicate with a finite **evidence contract** (`scripts/lib/profile-contract.mjs`: 796
+> required cells, each resolved against the evidence itself), binds every load-dependent cell to its own stage's load samples (the shell's 24 runs included),
+> carries the evidence inside the hand-over so the validator resolves it again, and attributes WebKit's WebContent, Networking and GPU processes through its host's
+> launchd PID domain. **Every RSS figure of attempt 4 below is descendant-only**: for WebKit it omits the renderer and is withdrawn as browser memory; for
+> Chromium and Firefox it is indicative only. No figure below is current-tree evidence; the final run's hand-over is.
 
 ## Read this first
 
@@ -19,8 +27,10 @@ is a pass mark, none stands for a device class, and BE-B1 and BE-Q23 remain bloc
 * **Fixture and real backend are kept apart.** P-2, P-3, P-5, P-11, P-13, P-Q and P-Q2 use a stub network (the real stamped wrapper and the production engine). P-4,
   P-10 and P-W2 use the released backend (v0.27.0-rc.1, disposable SQLite, loopback, behind the delaying proxy). The sync leader in every case is the FIXTURE test
   leader: production leadership is WEB-09b's.
-* **Memory labels.** "JS heap" is Chromium's own heap (CDP). "RSS" is the engine's whole browser process tree from `ps`. It is **not device memory** and **not
-  server RSS**, and it is not comparable between engines.
+* **Memory labels.** "JS heap" is Chromium's own heap (CDP). "RSS" is the browser's own processes from `ps`. From revision 2 that is the test worker's descendants
+  plus, for WebKit on macOS, every service in its host's launchd PID domain (`scripts/lib/browser-processes.mjs`); each run records its process set, sample count,
+  failed samples and whether its attribution was complete, and a run without complete attribution is not memory evidence. Attempt 4's RSS (below) was
+  descendant-only: WebKit's figures omit its renderer. It is **not device memory** and **not server RSS**, and it is not comparable between engines.
 * **Isolation.** The controller is shared with other cards. No timing, rate, memory or footprint figure below is an isolated measurement (see the status note above
   and "Attempts and isolation"). The `(m)` and `(X)` marks in the tables are the withdrawn labels, kept only so that rows can be compared with the original
   annotation; an unmarked figure is **not** clean either. Their **outcomes** stand.
@@ -42,6 +52,12 @@ The latest complete data are the fourth run of the programme (attempt 4; every p
 `node scripts/validate-profile-handoff.mjs --handoff <dir>` refuses it (exit 1: no completeness inventory). A hand-over of the current programme states, in
 `results.json` (`desktop_programme`, `isolation`) and at the top of `report.md`, whether it is complete and isolated; a partial one is refused unless
 `--allow-partial` is given (exit 2). The evidence is ignored (`.agtx/`), so it is kept on the controller and in the reviewed record, not in the repository.
+
+From revision 2 the hand-over is self-contained: `handoff/evidence/` is a copy of the whole evidence directory (raw samples, per-run memory, the device page's
+results, the contention files, the shell runs, the stage records and the load samples), `handoff/resolution.json` is every required cell with its status and
+reasons, and `results.json` (`schema: 3`) takes every completeness, isolation, item status and desktop conclusion from that resolution. The validator resolves
+`evidence/` again and refuses a hand-over whose statements differ from it, whatever `SHA256SUMS` says. One invocation at a time holds an evidence directory
+(`writer.lock`, created exclusively; released into `writers/`); an interrupted invocation leaves it held, and a fresh directory is then the only route.
 
 ## The decisions, and what the desktop evidence can and cannot settle
 
@@ -118,7 +134,9 @@ Wall ms (nudge to idle, including the stub's own transfer), p50 / p95 / max:
 | W6 (0.05 MiB) | webkit | 5 x admitted | 48 / 60 (m) | 309312 / 312048 (m) | not available |
 | W7 negative controls (6) | webkit | truncated: refused, deep_value: refused, unknown_field: refused, bad_kind: refused, raw_control_char: refused, oversize_change: refused | | | |
 
-RSS is the engine's whole process tree, sampled with `ps` (browser-process RSS: not device memory, not server RSS, not comparable between engines).
+RSS here is attempt 4's descendant-only figure, sampled with `ps` (browser-process RSS: not device memory, not server RSS, not comparable between engines).
+**WebKit's RSS column omits its WebContent, Networking and GPU processes** (launchd children; review R4) and is withdrawn as browser memory; revision 2's collector
+counts them, and the final run recollects every memory figure.
 
 ### The server-maximal dense batch from the released backend (P-W2)
 
@@ -242,6 +260,16 @@ From revision 1, every row carries its collection window (the test that collecte
 process tree and its own WebKit services excluded, and the hand-over carries a verdict for every series (`clean`, `idle_foreign`, `contaminated` or `unknown`; only
 `clean` is isolated) and states whether the whole programme is isolated.
 
+From revision 2 (review 2, design assessment), the unit of evidence is a **cell** of the evidence contract (`scripts/lib/profile-contract.mjs`), not a row:
+
+* every load-dependent cell (every distribution, the shell's 24 cold runs, the footprints and quota inputs, the P-6 counts, the production lock wait and the device
+  protocol) is judged over its own window by the samples of **its own stage only**; another stage's samples never fill a gap;
+* a stage's action runs between its sampler's barriers: the sampler must have written a valid first sample before it (otherwise the stage fails before its action),
+  and writes a final one after it; the stage record is sealed whatever happens, with the action's interval, the sampler's state and any failure;
+* a stage whose sampler was not ready, wrote no final sample, wrote a malformed sample, whose clock went backwards or that left a gap of more than two intervals
+  judges its cells `unknown`; only `clean` is isolated, and there is still no CPU tolerance;
+* a 5 s poll cannot prove that no short foreign job ran between two samples: final timings need a protected controller.
+
 ## What the released backend does (read from its source at the pinned commit, then measured)
 
 * **Sharing gates fields by their person.** A field is visible only while it is shared **and** every ancestor is visible. A field may be shared only with an account that can
@@ -302,3 +330,8 @@ recorded in the execution report.
 Review 1 found that the per-series labels did not describe the collection intervals (R1), that the hand-over could state a desktop conclusion without complete
 evidence (R2), and that the device package could not run W2 (R3). Revision 1 corrected all three in the tooling; under the corrected method attempt 4 has no
 isolated series. An isolated run of the whole programme is part of the final validation; it is listed in the execution report and is not passed until it has run.
+
+Review 2 found that the shell boot was outside the isolation check (R1), that the completeness check accepted a programme without its measurements and a timed-out
+negative control (R2), and that WebKit's RSS omitted its renderer (R4); the design assessment added the device page's persistence and ownership (DA-1) and concurrent
+writers of one evidence directory (DA-2). Revision 2 corrected all five (`.agtx/execute.md`). Attempt 4 remains history: its rows carry no stage, invocation or raw
+linkage, so the evidence contract resolves none of its cells, and its memory is descendant-only.

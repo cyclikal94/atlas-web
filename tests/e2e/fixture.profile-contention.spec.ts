@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import type { BrowserContext, Page, Route } from "@playwright/test";
 import {
   ACCOUNT,
@@ -15,6 +15,7 @@ import {
   record,
   recordValue,
   sleep,
+  writeEvidence,
 } from "./profile-helpers";
 
 /**
@@ -42,10 +43,10 @@ test.afterEach(({ browserName: _browserName }, info) => endCollection(info));
 const QUICK = Number(process.env.ATLAS_PROFILE_SAMPLES ?? 0);
 const N = (full: number): number => (QUICK > 0 ? Math.min(full, QUICK) : full);
 const OUT = `${PROFILE_OUT}/contention`;
-const write = (name: string, data: unknown): void => {
-  mkdirSync(OUT, { recursive: true });
-  writeFileSync(`${OUT}/${name}`, `${JSON.stringify(data, null, 2)}\n`);
-};
+// A file of the programme item, written once and stamped with its stage, invocation and collection window (the evidence contract judges
+// it over its enclosing test's window and refuses a second write).
+const write = (name: string, data: Record<string, unknown>): void =>
+  writeEvidence(`contention/${name}`, data);
 const append = (name: string, row: unknown): void => {
   mkdirSync(OUT, { recursive: true });
   appendFileSync(`${OUT}/${name}`, `${JSON.stringify(row)}\n`);

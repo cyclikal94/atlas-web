@@ -100,8 +100,58 @@ describe("profile capture (W2 on the device page)", () => {
     await expect(
       storeCapture(new Blob([new Uint8Array([0xff, 0xfe])]), "bad.json", store),
     ).rejects.toThrow();
+    // Refused BEFORE anything is written: the capture kept earlier is still the one kept.
+    const still = await store.get();
+    expect(still?.name).toBe("W2.json");
+    expect([...(still?.bytes ?? [])]).toEqual([...text]);
     sessionStorage.clear();
     expect(await sessionStore().get()).toBeNull();
+  });
+
+  it("case: a write the storage refuses leaves the previous capture exactly as it was (one record: name, bytes and hash together)", async () => {
+    sessionStorage.clear();
+    const kept = new TextEncoder().encode('{"kept":true}');
+    await storeCapture(new Blob([kept]), "kept.json", sessionStore());
+    let refuse = false;
+    const quota: Pick<Storage, "getItem" | "setItem" | "removeItem"> = {
+      getItem: (k) => sessionStorage.getItem(k),
+      removeItem: (k) => sessionStorage.removeItem(k),
+      setItem: (k, v) => {
+        if (refuse) throw new DOMException("quota", "QuotaExceededError");
+        sessionStorage.setItem(k, v);
+      },
+    };
+    refuse = true;
+    await expect(
+      storeCapture(
+        new Blob([new TextEncoder().encode('{"new":true}')]),
+        "new.json",
+        sessionStore(quota),
+      ),
+    ).rejects.toThrow(/quota/);
+    const back = await sessionStore().get();
+    expect(back?.name).toBe("kept.json");
+    expect([...(back?.bytes ?? [])]).toEqual([...kept]);
+    sessionStorage.clear();
+  });
+
+  it("case: nothing is acknowledged before the kept record reads back as the picked bytes", async () => {
+    const lying: CaptureStore = {
+      put: async () => undefined,
+      get: async () => ({ bytes: new Uint8Array([1, 2, 3]), name: "x.json" }),
+    };
+    await expect(
+      storeCapture(new Blob([BYTES]), "x.json", lying),
+    ).rejects.toThrow(/not the one picked/);
+  });
+
+  it("case: a malformed kept record is an unsuccessful load, never a capture", async () => {
+    sessionStorage.clear();
+    sessionStorage.setItem("atlas-profile-w2-capture", '{"name":1}');
+    const loaded = await loadCapture({ sha256: "0".repeat(64) });
+    expect(loaded).toMatchObject({ ok: false, verified: false });
+    expect(loaded.detail).toContain("malformed");
+    sessionStorage.clear();
   });
 
   it("the protocol runs W2 five times after W1 only when a capture is named", () => {

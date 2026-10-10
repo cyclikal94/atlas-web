@@ -144,13 +144,18 @@ export function sampleLoad(rootPid, intervalMs = SAMPLE_INTERVAL_MS) {
 
 /**
  * Starts the sampler for one stage as a child process (the stage's own work blocks this process's event loop). It takes a sample at once,
- * every `intervalMs` after, and one more when stopped; it ends by itself when the root process has gone. `stop()` resolves after that
- * last sample is written.
+ * every `intervalMs` after, and a FINAL one when stopped; it ends by itself when the root process has gone. The returned sampler is
+ * `ready` only once a valid first sample (parsed, not a failed `ps`) is on disk: a stage whose sampler never becomes ready throws here,
+ * before its action, and so fails closed. `stop()` resolves after the final sample, with whether it was written after the stop began.
  */
 export async function startLoadSampler(
   dir,
   stage,
-  { intervalMs = SAMPLE_INTERVAL_MS, rootPid = process.pid } = {},
+  {
+    intervalMs = SAMPLE_INTERVAL_MS,
+    rootPid = process.pid,
+    readyWithinMs = 15_000,
+  } = {},
 ) {
   const { spawn } = await import("node:child_process");
   const file = join(dir, "isolation", `${stage}.jsonl`);
@@ -169,17 +174,57 @@ export async function startLoadSampler(
     ],
     { stdio: "ignore" },
   );
-  // The first sample is on disk before the stage begins.
-  for (let i = 0; i < 100 && !existsSync(file); i += 1)
+  const exited = new Promise((resolve) =>
+    child.once("exit", (code) => resolve(code)),
+  );
+  const firstValid = () => {
+    try {
+      const [first] = readSamples(file);
+      return first && !first.error && Number.isFinite(Date.parse(first.at))
+        ? first
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  let first = null;
+  for (
+    let waited = 0;
+    waited < readyWithinMs && !first && child.exitCode === null;
+    waited += 50
+  ) {
     await new Promise((r) => setTimeout(r, 50));
+    first = firstValid();
+  }
+  if (!first) {
+    child.kill("SIGTERM");
+    await exited;
+    throw new Error(
+      `the load sampler of stage ${stage} wrote no valid first sample within ${readyWithinMs} ms: the stage cannot be judged and does not run`,
+    );
+  }
   return {
     file,
-    stop: () =>
-      new Promise((resolve) => {
-        if (child.exitCode !== null) return resolve(child.exitCode);
-        child.once("exit", (code) => resolve(code));
-        child.kill("SIGTERM");
-      }),
+    ready: true,
+    ready_at: first.at,
+    stop: async () => {
+      const stopping = Date.now();
+      if (child.exitCode === null) child.kill("SIGTERM");
+      const code = child.exitCode ?? (await exited);
+      let samples = [];
+      try {
+        samples = readSamples(file);
+      } catch {
+        samples = [];
+      }
+      const last = samples.at(-1);
+      return {
+        exit_code: code,
+        samples: samples.length,
+        final_sample:
+          code === 0 && last?.final === true && Date.parse(last.at) >= stopping,
+      };
+    },
   };
 }
 
@@ -362,8 +407,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const rootPid = Number(value("--root-pid", String(process.ppid)));
   const intervalMs = Number(value("--interval-ms", String(SAMPLE_INTERVAL_MS)));
   mkdirSync(dirname(out), { recursive: true });
-  const write = () =>
-    appendFileSync(out, `${JSON.stringify(sampleLoad(rootPid, intervalMs))}\n`);
+  const write = (final = false) =>
+    appendFileSync(
+      out,
+      `${JSON.stringify({ ...sampleLoad(rootPid, intervalMs), ...(final ? { final: true } : {}) })}\n`,
+    );
   const alive = () => {
     try {
       process.kill(rootPid, 0);
@@ -375,7 +423,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   let stopping = false;
   process.on("SIGTERM", () => {
     stopping = true;
-    write();
+    write(true);
     process.exit(0);
   });
   write();

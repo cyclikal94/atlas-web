@@ -4,14 +4,40 @@
 // A programme is several invocations into ONE directory (`--only bundle,fixture`, then `contention`, then `integration`, then `handoff`),
 // so the refusal is per stage: a stage that has already been recorded in the directory (its stage record, or its own output) is refused,
 // and the caller must use a fresh directory. The measurement files `measurements.jsonl` and `values.jsonl` are shared and only appended to.
+//
+// One writer at a time (revision 2, design assessment DA-2): an invocation first CLAIMS the directory by creating `writer.lock`
+// exclusively (the file system refuses a second creation, so two invocations can never both pass), and only then checks which stages are
+// recorded. The nested contention driver runs under its parent's claim (`ATLAS_PROFILE_CLAIM`). A finished invocation releases its claim
+// into `writers/`; an interrupted one leaves it, so the directory is refused from then on and its evidence stays as it was for diagnosis.
+// Each stage record is SEALED when its action ends: its action interval (inside the load sampler's first and last samples), the sampler's
+// state, and the line ranges of the shared files its rows occupy.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { loadavg } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fingerprint } from "../validation/runtime.mjs";
 
 export const EVIDENCE_KEY = "WEB-09a:sync-profiling";
 export const EVIDENCE_OWNER = "WEB-09c";
+/** The version of the evidence contract (scripts/lib/profile-contract.mjs) a stage was recorded under. */
+export const CONTRACT_VERSION = 1;
+export const CLAIM_FILE = "writer.lock";
+/** The files every stage appends rows to; a sealed stage records which lines are its own. */
+export const SHARED_ROWS = [
+  "measurements.jsonl",
+  "values.jsonl",
+  "collection.jsonl",
+];
 
 /** Every BE-B1 item (1 to 7) and BE-Q23 row (M0 to M9) the hand-over's consumer map must answer, with a status, evidence and owner. */
 export const CONSUMER_KEYS = [
@@ -150,6 +176,90 @@ export function refuseRecorded(dir, stages, log = console.error) {
   process.exit(2);
 }
 
+/** Who holds the directory now, or null. */
+export function claimHolder(dir) {
+  const file = join(dir, CLAIM_FILE);
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return { unreadable: true };
+  }
+}
+
+/**
+ * Claims `dir` for this invocation, or runs under the claim `delegated` names (a nested driver). The claim is created with O_EXCL: of two
+ * invocations that reach this point together, exactly one succeeds; the other is refused (exit 2) without touching anything. Returns the
+ * invocation id and `release(status)`, which moves the claim to `writers/<invocation>.json` with its end.
+ */
+export function claimDirectory(
+  dir,
+  { stages, delegated = process.env.ATLAS_PROFILE_CLAIM, log = console.error },
+) {
+  if (delegated) {
+    const holder = claimHolder(dir);
+    if (holder?.invocation !== delegated) {
+      log(
+        `refused: ${dir} is not held by the delegating invocation ${delegated} (holder: ${JSON.stringify(holder)}); nothing was changed`,
+      );
+      process.exit(2);
+    }
+    return { invocation: delegated, delegated: true, release: () => undefined };
+  }
+  mkdirSync(dir, { recursive: true });
+  const invocation = randomUUID();
+  const file = join(dir, CLAIM_FILE);
+  let fd;
+  try {
+    fd = openSync(file, "wx");
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    log(
+      `refused: ${dir} is held by another invocation (${JSON.stringify(claimHolder(dir))}), or by one that was interrupted; use a fresh evidence directory. Nothing was changed or deleted.`,
+    );
+    process.exit(2);
+  }
+  const record = {
+    invocation,
+    pid: process.pid,
+    started_at: new Date().toISOString(),
+    stages,
+    argv: process.argv.slice(1),
+  };
+  writeSync(fd, `${JSON.stringify(record, null, 2)}\n`);
+  closeSync(fd);
+  return {
+    invocation,
+    delegated: false,
+    /** Withdraws a claim under which nothing was written (a refusal after the claim): the directory is left as it was found. */
+    withdraw() {
+      unlinkSync(file);
+    },
+    release(status) {
+      mkdirSync(join(dir, "writers"), { recursive: true });
+      writeFileSync(
+        join(dir, "writers", `${invocation}.json`),
+        `${JSON.stringify({ ...record, finished_at: new Date().toISOString(), exit_status: status }, null, 2)}\n`,
+      );
+      unlinkSync(file);
+    },
+  };
+}
+
+/** How many lines each shared row file holds now (a stage's rows are the lines added between its start and its seal). */
+export function sharedRowCounts(dir) {
+  return Object.fromEntries(
+    SHARED_ROWS.map((name) => [
+      name,
+      existsSync(join(dir, name))
+        ? readFileSync(join(dir, name), "utf8")
+            .split("\n")
+            .filter((l) => l.trim()).length
+        : 0,
+    ]),
+  );
+}
+
 /** Load and competing work on this machine: a measurement taken beside another heavy run is contaminated, and says so. */
 export function loadSnapshot() {
   let competing = [];
@@ -193,14 +303,17 @@ export function candidate(root) {
   };
 }
 
-/** Writes `stages/<stage>.json` (the stage began here, on this candidate, under this load). */
+/** Writes `stages/<stage>.json` (the stage began here, on this candidate, under this load, by this invocation). */
 export function recordStage(dir, stage, extra = {}) {
   mkdirSync(join(dir, "stages"), { recursive: true });
   const record = {
     evidence_key: EVIDENCE_KEY,
     owner: EVIDENCE_OWNER,
     stage,
+    contract_version: CONTRACT_VERSION,
+    invocation: extra.invocation ?? null,
     started_at: new Date().toISOString(),
+    rows_at_start: sharedRowCounts(dir),
     candidate: candidate(extra.root ?? process.cwd()),
     load_at_start: loadSnapshot(),
     // A shortened DEBUGGING run (ATLAS_PROFILE_SAMPLES) is never evidence: the handoff refuses a directory that holds one.
@@ -215,13 +328,72 @@ export function recordStage(dir, stage, extra = {}) {
   return record;
 }
 
-/** Adds the end of a stage to its record: its exit status and the load when it ended. */
-export function finishStage(dir, stage, status) {
+/**
+ * Seals a stage: its exit status, its action interval (`action_started_at`/`action_finished_at`, taken inside the sampler's barriers),
+ * the sampler's state, a failure if the action threw, the shared rows it added, and the load when it ended.
+ */
+export function finishStage(dir, stage, status, seal = {}) {
   const file = join(dir, "stages", `${stage}.json`);
   const record = JSON.parse(readFileSync(file, "utf8"));
   record.finished_at = new Date().toISOString();
   record.exit_status = status;
+  record.action_started_at = seal.action_started_at ?? null;
+  record.action_finished_at = seal.action_finished_at ?? null;
+  record.sampler = seal.sampler ?? null;
+  record.failure = seal.failure ?? null;
+  record.rows_at_end = sharedRowCounts(dir);
   record.load_at_end = loadSnapshot();
+  record.sealed = true;
   writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
   return record;
+}
+
+/**
+ * Runs one stage's `action` between the sampler's barriers and seals it whatever happens: the sampler must have written a valid first
+ * sample before the action starts (otherwise the stage fails closed), the action's interval is recorded inside it, a throw is recorded as
+ * a failure, and the sampler's final sample is written after the action. Returns the exit status.
+ */
+export async function runStage(
+  dir,
+  stage,
+  action,
+  { sample, invocation, extra = {} },
+) {
+  recordStage(dir, stage, { ...extra, invocation });
+  let sampler = null;
+  let status = 1;
+  let failure = null;
+  let started = null;
+  let finished = null;
+  let stopped = null;
+  try {
+    sampler = sample ? await sample(dir, stage) : null;
+    started = new Date().toISOString();
+    status = (await action()) ?? 1;
+  } catch (error) {
+    failure = String(error?.stack ?? error).slice(0, 2000);
+    status = 1;
+  } finally {
+    finished = new Date().toISOString();
+    if (sampler)
+      stopped = await sampler.stop().catch((error) => ({
+        error: String(error).slice(0, 200),
+      }));
+  }
+  finishStage(dir, stage, status, {
+    action_started_at: started,
+    action_finished_at: finished,
+    sampler: sampler
+      ? {
+          ready: sampler.ready === true,
+          ready_at: sampler.ready_at ?? null,
+          final_sample: stopped?.final_sample === true,
+          exit_code: stopped?.exit_code ?? null,
+          samples: stopped?.samples ?? null,
+          error: stopped?.error ?? null,
+        }
+      : null,
+    failure,
+  });
+  return status;
 }

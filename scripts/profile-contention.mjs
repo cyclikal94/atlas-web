@@ -10,17 +10,20 @@
 //
 // `--evidence` is required and nothing is deleted: a directory whose contention stage is already recorded is refused (exit 2).
 // `--samples N` is a DEBUGGING run with at most N per cell; it is never recorded as evidence (its stage record says so).
-// The controller's load is sampled throughout (`<dir>/isolation/contention.jsonl`, scripts/lib/profile-isolation.mjs).
+// The controller's load is sampled throughout (`<dir>/isolation/contention.jsonl`, scripts/lib/profile-isolation.mjs), and the stage is
+// sealed with its action interval inside the sampler's first and last samples, whatever happens to the action.
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFixtureServer } from "./lib/fixture-server.mjs";
 import {
+  CLAIM_FILE,
+  claimDirectory,
+  claimHolder,
   evidenceArg,
-  finishStage,
-  recordStage,
+  recordedStages,
   refuseRecorded,
+  runStage,
 } from "./lib/profile-evidence.mjs";
 import { startLoadSampler } from "./lib/profile-isolation.mjs";
 
@@ -36,67 +39,87 @@ const value = (name, fallback) => {
 const out = evidenceArg(args, root, USAGE);
 const log = (message) => console.log(`[profile:contention] ${message}`);
 refuseRecorded(out, ["contention"]);
+// Run directly, this driver claims the directory itself; run by `profile-sync.mjs`, it runs under that invocation's claim
+// (ATLAS_PROFILE_CLAIM), which must be the one holding the directory.
+const delegated = process.env.ATLAS_PROFILE_CLAIM;
+if (!delegated && claimHolder(out)) {
+  console.error(
+    `refused: ${out} is held by another invocation, or by one that was interrupted (${CLAIM_FILE}: ${JSON.stringify(claimHolder(out))}); use a fresh evidence directory. Nothing was changed or deleted.`,
+  );
+  process.exit(2);
+}
 if (flag("--preflight")) {
   log(
     `preflight: would run the contention stage into ${out}; nothing was written`,
   );
   process.exit(0);
 }
-mkdirSync(out, { recursive: true });
-const samples = value("--samples", "");
-recordStage(out, "contention", {
-  root,
-  debugging_samples: samples || null,
-  note: samples
-    ? "a DEBUGGING run (--samples): never evidence"
-    : "the recorded counts",
-});
-
-const loadSampler = await startLoadSampler(out, "contention");
-let status = 0;
-if (!flag("--skip-build")) {
-  log("pnpm build:fixture");
-  const built = spawnSync("pnpm", ["build:fixture"], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  if (built.status !== 0) {
-    console.error(built.stdout, built.stderr);
-    status = 1;
-  }
+const claim = claimDirectory(out, { stages: ["contention"], delegated });
+if (recordedStages(out, ["contention"]).length > 0) {
+  if (!claim.delegated) claim.withdraw();
+  refuseRecorded(out, ["contention"]);
 }
+const samples = value("--samples", "");
 
-if (status === 0)
-  status = await withFixtureServer(root, async (url) => {
-    log(`contention profiling against ${url} (one worker, three engines)`);
-    const ran = spawnSync(
-      process.execPath,
-      [
-        join(root, "node_modules/@playwright/test/cli.js"),
-        "test",
-        "--project=fixture-chromium",
-        "--project=fixture-firefox",
-        "--project=fixture-webkit",
-        "--workers=1",
-        "--retries=0",
-        "tests/e2e/fixture.profile-contention.spec.ts",
-      ],
-      {
+const status = await runStage(
+  out,
+  "contention",
+  async () => {
+    if (!flag("--skip-build")) {
+      log("pnpm build:fixture");
+      const built = spawnSync("pnpm", ["build:fixture"], {
         cwd: root,
-        stdio: "inherit",
-        env: {
-          ...process.env,
-          ATLAS_PROFILE: "1",
-          ATLAS_PROFILE_OUT: out,
-          ATLAS_E2E_BROWSERS: "all",
-          ATLAS_FIXTURE_URL: url,
-          ...(samples ? { ATLAS_PROFILE_SAMPLES: samples } : {}),
+        encoding: "utf8",
+      });
+      if (built.status !== 0) {
+        console.error(built.stdout, built.stderr);
+        return 1;
+      }
+    }
+    return withFixtureServer(root, async (url) => {
+      log(`contention profiling against ${url} (one worker, three engines)`);
+      const ran = spawnSync(
+        process.execPath,
+        [
+          join(root, "node_modules/@playwright/test/cli.js"),
+          "test",
+          "--project=fixture-chromium",
+          "--project=fixture-firefox",
+          "--project=fixture-webkit",
+          "--workers=1",
+          "--retries=0",
+          "tests/e2e/fixture.profile-contention.spec.ts",
+        ],
+        {
+          cwd: root,
+          stdio: "inherit",
+          env: {
+            ...process.env,
+            ATLAS_PROFILE: "1",
+            ATLAS_PROFILE_OUT: out,
+            ATLAS_PROFILE_STAGE: "contention",
+            ATLAS_PROFILE_INVOCATION: claim.invocation,
+            ATLAS_E2E_BROWSERS: "all",
+            ATLAS_FIXTURE_URL: url,
+            ...(samples ? { ATLAS_PROFILE_SAMPLES: samples } : {}),
+          },
         },
-      },
-    );
-    return ran.status ?? 1;
-  });
-await loadSampler.stop();
-finishStage(out, "contention", status);
+      );
+      return ran.status ?? 1;
+    });
+  },
+  {
+    sample: (dir, stage) => startLoadSampler(dir, stage),
+    invocation: claim.invocation,
+    extra: {
+      root,
+      debugging_samples: samples || null,
+      note: samples
+        ? "a DEBUGGING run (--samples): never evidence"
+        : "the recorded counts",
+    },
+  },
+);
+claim.release(status);
 log(`written to ${out}/contention (exit ${status})`);
 process.exit(status);

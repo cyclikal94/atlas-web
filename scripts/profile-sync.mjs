@@ -28,6 +28,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -43,27 +44,32 @@ import { freePort } from "./integration/free-port.mjs";
 import { withFixtureServer as serveFixture } from "./lib/fixture-server.mjs";
 import { initialScripts } from "./lib/initial-chunk.mjs";
 import {
-  COLD_RUN_WORKLOADS,
+  CELL_STATUSES as CELL_STATUSES_FOR_REPORT,
+  CONTRACT_VERSION,
+  resolveEvidence,
+} from "./lib/profile-contract.mjs";
+import {
+  CLAIM_FILE,
   COLLECTION_LOG,
   candidate,
+  claimDirectory,
+  claimHolder,
   ENGINES,
   EVIDENCE_KEY,
   EVIDENCE_OWNER,
   evidenceArg,
-  finishStage,
-  PROGRAMME_STAGES,
-  REQUIRED_CASES,
-  REQUIRED_COLD_RUNS,
-  recordStage,
+  recordedStages,
   refuseRecorded,
+  runStage,
   STAGES,
 } from "./lib/profile-evidence.mjs";
 import {
   annotate,
+  METHOD as ISOLATION_METHOD,
   readSamples,
+  SAMPLE_INTERVAL_MS,
   startLoadSampler,
 } from "./lib/profile-isolation.mjs";
-import { allWorkloads } from "./lib/profile-workloads.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const USAGE =
@@ -84,16 +90,27 @@ for (const stage of only)
     console.error(`unknown stage ${stage}\n${USAGE}`);
     process.exit(2);
   }
-// The contention stage is recorded (and refused) by its own driver.
+// The contention stage is recorded (and refused) by its own driver. A recorded stage is refused before anything is written, and again
+// once this invocation holds the directory (two invocations that both passed the first check cannot both pass the second).
 refuseRecorded(out, only);
 const log = (message) => console.log(`[profile:sync] ${message}`);
+if (claimHolder(out)) {
+  console.error(
+    `refused: ${out} is held by another invocation, or by one that was interrupted (${CLAIM_FILE}: ${JSON.stringify(claimHolder(out))}); use a fresh evidence directory. Nothing was changed or deleted.`,
+  );
+  process.exit(2);
+}
 if (flag("--preflight")) {
   log(
     `preflight: would run ${only.join(", ")} into ${out}; nothing was written`,
   );
   process.exit(0);
 }
-mkdirSync(out, { recursive: true });
+const claim = claimDirectory(out, { stages: only });
+if (recordedStages(out, only).length > 0) {
+  claim.withdraw();
+  refuseRecorded(out, only);
+}
 
 const sh = (command, commandArgs, env = {}) =>
   spawnSync(command, commandArgs, {
@@ -103,7 +120,13 @@ const sh = (command, commandArgs, env = {}) =>
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 64 * 1024 * 1024,
   });
-const childEnv = { ATLAS_PROFILE: "1", ATLAS_PROFILE_OUT: out };
+const childEnv = {
+  ATLAS_PROFILE: "1",
+  ATLAS_PROFILE_OUT: out,
+  ATLAS_PROFILE_INVOCATION: claim.invocation,
+};
+/** The environment of a stage's child: its rows carry the stage and this invocation. */
+const stageEnv = (stage) => ({ ...childEnv, ATLAS_PROFILE_STAGE: stage });
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const readJson = (file) =>
   existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
@@ -199,24 +222,27 @@ function bundle() {
   const budgets = {};
   let status = 0;
   for (const build of ["dist", "dist-fixture"]) {
-    // check-budgets.mjs always writes its profile to the fixed WEB-07 path; the copy here, with its hash, is this run's record of it.
+    // check-budgets.mjs writes this run's profile straight into the evidence directory (`--out`, created exclusively): no shared
+    // fixed path, so nothing can replace it between the check and the record (design assessment DA-2).
+    const target = join(out, "bundle", `bundle-profile-${build}.json`);
     const checked = sh(process.execPath, [
       join(root, "scripts/check-budgets.mjs"),
       build,
+      "--out",
+      target,
     ]);
     writeFileSync(
       join(out, "bundle", `check-budgets-${build}.log`),
       `${checked.stdout}${checked.stderr}`,
     );
-    const source = join(
-      root,
-      ".agtx/evidence/WEB-07/A2",
-      `bundle-profile-${build}.json`,
-    );
-    const target = join(out, "bundle", `bundle-profile-${build}.json`);
-    copyFileSync(source, target);
+    if (!existsSync(target)) {
+      console.error(`check-budgets wrote no profile for ${build}`);
+      status = 1;
+      continue;
+    }
     budgets[build] = {
       exit: checked.status,
+      build,
       file: `bundle/bundle-profile-${build}.json`,
       sha256: sha256(readFileSync(target)),
       measured: readJson(target)?.measured ?? null,
@@ -294,7 +320,7 @@ async function fixture() {
         stdio: "inherit",
         env: {
           ...process.env,
-          ...childEnv,
+          ...stageEnv("fixture"),
           ATLAS_E2E_BROWSERS: "all",
           ATLAS_FIXTURE_URL: url,
         },
@@ -338,7 +364,7 @@ async function device() {
         stdio: "inherit",
         env: {
           ...process.env,
-          ...childEnv,
+          ...stageEnv("device"),
           ATLAS_E2E_BROWSERS: "all",
           ATLAS_FIXTURE_URL: url,
         },
@@ -352,21 +378,29 @@ async function device() {
 async function shellStage() {
   const dir = join(out, "shell");
   mkdirSync(dir, { recursive: true });
-  const shell = (url, file) =>
+  // Every cold run records its own window (from before its context opens to after its figures are read), inside this stage's sampler,
+  // and the file carries the stage and this invocation: the shell is judged for isolation like every other figure (review R1).
+  const shell = (url, build) =>
     spawnSync(
       process.execPath,
       [
         join(root, "scripts/profile-shell.mjs"),
         "--url",
         url,
+        "--build",
+        build,
         "--out",
-        join(dir, file),
+        join(dir, `${build}.json`),
       ],
-      { cwd: root, stdio: "inherit" },
+      {
+        cwd: root,
+        stdio: "inherit",
+        env: { ...process.env, ...stageEnv("shell") },
+      },
     ).status ?? 1;
   let status = await withFixtureServer(async (url) => {
     log(`P-1S dist-fixture (the signed-in shell) at ${url}`);
-    return shell(`${url}/today?pending=2`, "dist-fixture.json");
+    return shell(`${url}/today?pending=2`, "dist-fixture");
   });
   if (status !== 0) return status;
   // The production build boots against a stub that answers /health and /ready only (it asks for the API version at boot).
@@ -391,7 +425,7 @@ async function shellStage() {
       await new Promise((r) => setTimeout(r, 200));
     }
     log(`P-1S dist (the neutral production entry) at ${url}`);
-    status = shell(`${url}/`, "dist.json");
+    status = shell(`${url}/`, "dist");
   } finally {
     try {
       process.kill(-server.pid, "SIGTERM");
@@ -433,7 +467,7 @@ function integration() {
     {
       cwd: root,
       stdio: "inherit",
-      env: { ...process.env, ...childEnv },
+      env: { ...process.env, ...stageEnv("integration") },
     },
   );
   return ran.status ?? 1;
@@ -449,7 +483,12 @@ function contention() {
       "--evidence",
       out,
     ],
-    { cwd: root, stdio: "inherit", env: process.env },
+    // The nested driver runs under this invocation's claim; it records and seals its own stage.
+    {
+      cwd: root,
+      stdio: "inherit",
+      env: { ...process.env, ATLAS_PROFILE_CLAIM: claim.invocation },
+    },
   );
   return ran.status ?? 1;
 }
@@ -464,11 +503,18 @@ function readJsonl(file) {
         .map((l) => JSON.parse(l))
     : [];
 }
+// A malformed file is skipped here (the report's lists); the evidence resolution names it as invalid.
 const readDir = (dir, prefix) =>
   existsSync(dir)
     ? readdirSync(dir)
         .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
-        .map((f) => JSON.parse(readFileSync(join(dir, f), "utf8")))
+        .flatMap((f) => {
+          try {
+            return [JSON.parse(readFileSync(join(dir, f), "utf8"))];
+          } catch {
+            return [];
+          }
+        })
     : [];
 const enginesOf = (rows) => [...new Set(rows.map((r) => r.engine))].sort();
 const allEngines = (rows) =>
@@ -633,136 +679,23 @@ const W_IN_BE = {
   W7: "BE-Q23 M3 W7: malformed and oversize negative controls",
 };
 
-/**
- * The finite inventory of a complete desktop programme (review R2), from what the directory holds: every programme stage recorded,
- * finished and exit 0; every required case collected exactly once in every engine and passed; per engine, five cold runs of W1, W3, W4
- * and W6, one run of every W7 control (each refused), W2's live outcome and five cold runs, the device page's results validated (W2
- * included); the throttled boot of both builds; both budget checks. `outcomes_complete` holds when nothing is missing or failed;
- * `complete` also needs every series isolated. Missing and failed items are listed, never inferred away.
- */
-function completeness({
-  stages,
-  collectionLog,
-  memory,
-  w2Memory,
-  validated,
-  shellPresent,
-  bundleRecord,
-  negativeAdmitted,
-  isolation,
-}) {
-  const missing = [];
-  const failed = [];
-  for (const stage of PROGRAMME_STAGES) {
-    const r = stages[stage];
-    if (!r) missing.push(`stage ${stage}: not recorded`);
-    else if (!r.finished_at) failed.push(`stage ${stage}: never finished`);
-    else if (r.exit_status !== 0)
-      failed.push(`stage ${stage}: exit status ${r.exit_status}`);
-  }
-  for (const [stage, prefixes] of Object.entries(REQUIRED_CASES))
-    for (const engine of ENGINES)
-      for (const prefix of prefixes) {
-        const found = collectionLog.filter(
-          (t) => t.engine === engine && String(t.test).startsWith(prefix),
-        );
-        if (found.length === 0)
-          missing.push(
-            `case "${prefix}" [${engine}] (${stage}): not collected`,
-          );
-        else if (found.length > 1)
-          failed.push(
-            `case "${prefix}" [${engine}] (${stage}): collected ${found.length} times`,
-          );
-        else if (found[0].status !== "passed")
-          failed.push(
-            `case "${prefix}" [${engine}] (${stage}): ${found[0].status}`,
-          );
-      }
-  const controls = allWorkloads()
-    .map((w) => w.name)
-    .filter((name) => name.startsWith("W7-"));
-  const runsOf = (file, workload) =>
-    (file?.rows ?? [])
-      .filter((row) => row.workload === workload)
-      .flatMap((row) => row.runs ?? []);
-  for (const engine of ENGINES) {
-    const p11 = memory.find((m) => m.engine === engine);
-    if (!p11) missing.push(`P-11 cold runs [${engine}]: no memory file`);
-    else {
-      for (const workload of COLD_RUN_WORKLOADS) {
-        const n = runsOf(p11, workload).filter((r) => r.outcome).length;
-        if (n < REQUIRED_COLD_RUNS)
-          missing.push(
-            `${workload} [${engine}]: ${n} of ${REQUIRED_COLD_RUNS} cold runs with an outcome`,
-          );
-      }
-      for (const control of controls)
-        if (runsOf(p11, control).filter((r) => r.outcome).length === 0)
-          missing.push(`${control} [${engine}]: no run`);
-    }
-    const w2 = w2Memory.find((m) => m.engine === engine);
-    if (!w2) missing.push(`P-W2 [${engine}]: no file`);
-    else {
-      if (!w2.live?.outcome)
-        missing.push(`P-W2 live application [${engine}]: no outcome`);
-      const n = runsOf(w2, "W2").filter((r) => r.outcome).length;
-      if (n < REQUIRED_COLD_RUNS)
-        missing.push(
-          `W2 [${engine}]: ${n} of ${REQUIRED_COLD_RUNS} cold runs with an outcome`,
-        );
-    }
-    const device = validated[`results.${engine}.json`];
-    if (!device) missing.push(`device page [${engine}]: no results`);
-    else if (device.exit !== 0)
-      failed.push(
-        `device page [${engine}]: the validator exited ${device.exit} (${device.output.join(" / ")})`,
-      );
-  }
-  for (const [build, present] of Object.entries(shellPresent))
-    if (!present) missing.push(`P-1S ${build}: no result`);
-  if (!bundleRecord) missing.push("P-1: no bundle record");
-  else
-    for (const [build, b] of Object.entries(bundleRecord.budgets ?? {}))
-      if (b.exit !== 0)
-        failed.push(`P-1 budget check ${build}: exit status ${b.exit}`);
-  for (const n of negativeAdmitted)
-    failed.push(`${n.workload} [${n.engine}]: a negative control was ADMITTED`);
-  const notIsolated = isolation.series.filter((r) => r.verdict !== "clean");
-  const outcomesComplete = missing.length === 0 && failed.length === 0;
-  return {
-    complete: outcomesComplete && isolation.summary.all_clean,
-    outcomes_complete: outcomesComplete,
-    missing,
-    failed,
-    isolation: {
-      all_clean: isolation.summary.all_clean,
-      not_isolated_series: notIsolated.length,
-      not_isolated_tests: isolation.tests.filter((t) => t.verdict !== "clean")
-        .length,
-    },
-    inventory: {
-      stages: PROGRAMME_STAGES,
-      engines: ENGINES,
-      cases: REQUIRED_CASES,
-      cold_runs: {
-        workloads: [...COLD_RUN_WORKLOADS, "W2"],
-        each: REQUIRED_COLD_RUNS,
-      },
-      negative_controls: controls,
-      also: [
-        "W2's live application in every engine",
-        "the device page's results in every engine, validated with the W2 hashes",
-        "P-1S for dist and dist-fixture",
-        "both budget checks",
-        "every measurement series and collected test isolated (clean)",
-      ],
-    },
-    note: "a partial hand-over is valid only as a partial one: its validator exits 1 (2 with --allow-partial) and no desktop conclusion is drawn from anything missing",
-  };
+/** The evidence the hand-over carries (`handoff/evidence/`): every file of the directory but the hand-over itself and the live claim. */
+function copyEvidence(handoff) {
+  const target = join(handoff, "evidence");
+  mkdirSync(target, { recursive: true });
+  for (const name of readdirSync(out))
+    if (name !== "handoff" && name !== CLAIM_FILE)
+      cpSync(join(out, name), join(target, name), { recursive: true });
+  return target;
 }
 
-function assembleHandoff(bundleRecord) {
+/** One line per status of a resolution: what a reader must see before any figure. */
+const listOf = (resolution, status) =>
+  resolution.cells
+    .filter((c) => c.status === status)
+    .map((c) => ({ id: c.id, reasons: c.reasons }));
+
+function assembleHandoff() {
   const stages = stageRecords();
   const now = candidate(root);
   const mismatched = Object.entries(stages)
@@ -822,125 +755,62 @@ function assembleHandoff(bundleRecord) {
     `${JSON.stringify(w2Hashes, null, 2)}\n`,
   );
 
-  // Desktop results of the device page, validated by the same tool (and the same W2 hashes) a device operator uses.
-  const validated = {};
-  const devicePageDir = join(out, "device-page");
-  if (existsSync(devicePageDir))
-    for (const file of readdirSync(devicePageDir)) {
-      const v = sh(process.execPath, [
-        join(root, "scripts/validate-profile-handoff.mjs"),
-        join(devicePageDir, file),
-        "--w2-hashes",
-        join(fixtures, "W2-hashes.json"),
-      ]);
-      validated[file] = {
-        exit: v.status,
-        output: `${v.stdout}${v.stderr}`.trim().split("\n").slice(-6),
-      };
-    }
-
+  // The evidence, carried and resolved (review R2; design assessment C/D): every status and conclusion below comes from the contract's
+  // resolution of the copy the hand-over carries, which the validator resolves again. Nothing is taken from a stage's exit or a test title.
+  const evidenceDir = copyEvidence(handoff);
+  const resolution = resolveEvidence(evidenceDir);
+  writeFileSync(
+    join(handoff, "resolution.json"),
+    `${JSON.stringify(resolution, null, 2)}\n`,
+  );
+  const { derived } = resolution;
+  const item = (name) =>
+    resolution.items[name] ?? { status: "not_run", cells: 0, satisfied: 0 };
+  const statusOf = (name) => item(name).status;
+  const failure = derived.desktop_valid_workload_failure;
+  const bundleRecord = readJson(join(out, "bundle-delta.json"));
   const memoryDir = join(out, "memory");
   const memory = existsSync(memoryDir)
-    ? readdirSync(memoryDir).map((f) =>
-        JSON.parse(readFileSync(join(memoryDir, f), "utf8")),
-      )
+    ? readdirSync(memoryDir).flatMap((f) => {
+        try {
+          return [JSON.parse(readFileSync(join(memoryDir, f), "utf8"))];
+        } catch {
+          return [];
+        }
+      })
     : [];
   const w2Memory = readDir(w2Dir, "P-W2.");
 
-  // H8: the smallest valid response the client could not process on any desktop engine of this run: every cold run (P-11, P-W2), W2's
-  // LIVE application by the production engine, and the device page's own runs.
-  const failures = [];
-  const negativeAdmitted = [];
-  for (const m of [...memory, ...w2Memory])
-    for (const row of m.rows ?? [])
-      for (const run of row.runs ?? []) {
-        if (row.expected === "admitted" && run.outcome !== "admitted")
-          failures.push({
-            engine: m.engine,
-            workload: row.workload,
-            path: "cold run",
-            outcome: run.outcome,
-          });
-        if (row.expected === "refused" && run.outcome === "admitted")
-          negativeAdmitted.push({ engine: m.engine, workload: row.workload });
-      }
-  for (const m of w2Memory)
-    if (m.live && m.live.outcome !== "admitted")
-      failures.push({
-        engine: m.engine,
-        workload: "W2",
-        path: "live application by the production engine",
-        outcome: m.live.outcome ?? "not recorded",
-      });
-  const devicePage = Object.fromEntries(
-    ENGINES.map((engine) => [
-      engine,
-      readJson(join(devicePageDir, `results.${engine}.json`)),
+  // Isolation, per cell (review R1): every timing, rate, memory and footprint cell judged over its own window by its own stage's samples.
+  const judgedCells = resolution.cells.filter((c) => c.isolation);
+  const verdicts = Object.fromEntries(
+    ["clean", "idle_foreign", "contaminated", "unknown"].map((v) => [
+      v,
+      judgedCells.filter((c) => c.isolation.verdict === v).length,
     ]),
   );
-  for (const [engine, results] of Object.entries(devicePage))
-    for (const run of results?.runs ?? []) {
-      if (run.expected === "admitted" && run.outcome !== "admitted")
-        failures.push({
-          engine,
-          workload: run.workload,
-          path: "device page (in-page transport)",
-          outcome: run.outcome,
-        });
-      if (run.expected === "refused" && run.outcome === "admitted")
-        negativeAdmitted.push({ engine, workload: run.workload });
-    }
-
-  // Isolation (review R1): every series judged over its collection window by the load samples of its stage.
-  const collectionLog = readJsonl(join(out, COLLECTION_LOG));
-  const isolationDir = join(out, "isolation");
-  const samples = existsSync(isolationDir)
-    ? readdirSync(isolationDir)
-        .filter((f) => f.endsWith(".jsonl"))
-        .flatMap((f) => readSamples(join(isolationDir, f)))
-    : [];
-  const isolation = annotate({
-    rows: [
-      ...measurements.map((r) => ({ ...r, file: "measurements.jsonl" })),
-      ...values.map((r) => ({ ...r, file: "values.jsonl" })),
-    ],
-    tests: collectionLog,
-    samples,
-  });
-  const isolationOf = (prefix) => {
-    const series = isolation.series.filter((r) => r.name.startsWith(prefix));
-    const counts = Object.fromEntries(
-      ["clean", "idle_foreign", "contaminated", "unknown"].map((v) => [
-        v,
-        series.filter((r) => r.verdict === v).length,
-      ]),
-    );
-    return {
-      series: series.length,
-      ...counts,
-      isolated: series.length > 0 && counts.clean === series.length,
-    };
+  const isolationSummary = {
+    judged_cells: judgedCells.length,
+    ...verdicts,
+    all_clean: judgedCells.length > 0 && verdicts.clean === judgedCells.length,
   };
-
-  // Completeness (review R2): the finite inventory a desktop conclusion needs, from what this directory actually holds.
-  const desktopProgramme = completeness({
-    stages,
-    collectionLog,
-    memory,
-    w2Memory,
-    validated,
-    shellPresent: {
-      dist: existsSync(join(out, "shell", "dist.json")),
-      "dist-fixture": existsSync(join(out, "shell", "dist-fixture.json")),
-    },
-    bundleRecord,
-    negativeAdmitted,
-    isolation,
+  // The tests themselves, for the reader (informational: completeness is judged per cell above).
+  const collectionLog = readJsonl(join(out, COLLECTION_LOG));
+  const testsByStage = {};
+  for (const t of collectionLog) {
+    const stage = t.stage ?? "unknown";
+    testsByStage[stage] = [...(testsByStage[stage] ?? []), t];
+  }
+  const tests = Object.entries(testsByStage).flatMap(([stage, list]) => {
+    const file = join(out, "isolation", `${stage}.jsonl`);
+    let samples = [];
+    try {
+      samples = existsSync(file) ? readSamples(file) : [];
+    } catch {
+      samples = [];
+    }
+    return annotate({ rows: [], tests: list, samples }).tests;
   });
-  const outcomesComplete = desktopProgramme.outcomes_complete;
-  // true: a valid workload failed; false: none failed in a COMPLETE programme; null: undetermined (the evidence is incomplete).
-  const desktopFailure =
-    failures.length > 0 ? true : outcomesComplete ? false : null;
 
   const w2 = values.filter((v) => v.name === "P-W2 capture");
   const w2Bound = values.filter((v) => v.name === "P-W2 observed bound");
@@ -949,7 +819,6 @@ function assembleHandoff(bundleRecord) {
   const integrationSummary = readJson(
     join(out, "integration-run", "summary.json"),
   );
-  const pq = values.filter((v) => v.name === "P-Q footprints");
   const pq2 = values.filter((v) => v.name === "P-Q2 quota reserve inputs");
   const shellDir = join(out, "shell");
   const shell = {
@@ -957,6 +826,8 @@ function assembleHandoff(bundleRecord) {
     "dist-fixture": readJson(join(shellDir, "dist-fixture.json")),
   };
   const programme = contentionProgramme();
+  for (const id of ["P-6", "P-7", "P-8", "P-9", "P-13"])
+    programme[id] = { ...programme[id], status: statusOf(id) };
   const configValues = constants();
   const pinned = JSON.parse(
     readFileSync(join(root, "contract-pin.json"), "utf8"),
@@ -966,51 +837,45 @@ function assembleHandoff(bundleRecord) {
       .filter((m) => m.name.startsWith(prefix))
       .map((m) => m.name)
       .filter((n, i, a) => a.indexOf(n) === i);
-  const measuredIn = (prefix) => {
-    const rows = measurements.filter((m) => m.name.startsWith(prefix));
-    return rows.length === 0
-      ? "not_run"
-      : allEngines(rows)
-        ? "measured"
-        : "partial";
-  };
-  const w2Status =
-    w2.length === 0
-      ? "not_run"
-      : w2.every((v) => v.status === "measured") && allEngines(w2)
-        ? "measured"
-        : "partial";
-  const desktopD = {};
-  for (const engine of ENGINES) {
-    const ok = measurements
-      .filter(
-        (m) =>
-          m.engine === engine &&
-          /^P-2 dense-(\d+)/.test(m.name) &&
-          m.name.endsWith("commit_ms"),
-      )
-      .map((m) => Number(/^P-2 dense-(\d+)/.exec(m.name)[1]));
-    desktopD[engine] = ok.length ? Math.max(...ok) : null;
-  }
-  const w1Admitted = Object.fromEntries(
+  const capturesResolved = resolution.cells
+    .filter((c) => c.kind === "w2-capture")
+    .every((c) => c.status === "ok");
+  const w1Outcomes = Object.fromEntries(
     memory.map((m) => [
       m.engine,
       (m.rows ?? [])
         .filter((r) => r.workload === "W1")
-        .flatMap((r) => r.runs.map((run) => run.outcome)),
+        .flatMap((r) => (r.runs ?? []).map((run) => run.outcome)),
     ]),
   );
-  const w2Admitted = Object.fromEntries(
+  const w2Outcomes = Object.fromEntries(
     w2Memory.map((m) => [
       m.engine,
-      (m.rows ?? []).flatMap((r) => r.runs.map((run) => run.outcome)),
+      (m.rows ?? []).flatMap((r) => (r.runs ?? []).map((run) => run.outcome)),
     ]),
+  );
+  const devicePage = Object.fromEntries(
+    ENGINES.map((engine) => [
+      engine,
+      readJson(join(out, "device-page", `results.${engine}.json`)),
+    ]),
+  );
+  const deviceValidation = Object.fromEntries(
+    resolution.cells
+      .filter((c) => c.kind === "device-file")
+      .map((c) => [
+        `results.${c.engine}.json`,
+        { status: c.status, reasons: c.reasons },
+      ]),
   );
 
   // ---- the consumer map: every BE-B1 item (1 to 7) and BE-Q23 row (M0 to M9), with what this record answers ------------------------------
-  // Provenance is complete only when every stage recorded its candidate and the backend the integration stage ran was recorded.
+  // Provenance is complete only when every stage recorded its candidate, the backend the integration stage ran was recorded, and the
+  // resolved outcomes are complete.
   const provenanceStatus =
-    integrationSummary?.backend && backendSeen.length > 0 && outcomesComplete
+    integrationSummary?.backend &&
+    backendSeen.length > 0 &&
+    resolution.outcomes_complete
       ? "measured"
       : "partial";
   const desktop = "desktop-playwright";
@@ -1041,10 +906,10 @@ function assembleHandoff(bundleRecord) {
       { claims_device_class: false },
     ),
     "BE-B1:3 workloads with bytes, nodes and changes": entry(
-      w2Status === "measured" ? "partial" : "partial",
+      "partial",
       ["H3", "P-2", "P-11", "P-W2"],
       "W1, W3 to W7 generated and hashed; W2 captured from the real /sync" +
-        (w2Status === "measured" ? "" : " (NOT complete: see P-W2)") +
+        (capturesResolved ? "" : " (NOT complete: see P-W2)") +
         "; delta pages at limit 50 and mixed ordinary/dense delta pages (3(d)) are not generated; the Q9 co-resident shapes (3(g)) only as P-5 and P-Q",
       "WEB-09c (desktop); the roster for device rows",
     ),
@@ -1057,7 +922,7 @@ function assembleHandoff(bundleRecord) {
     "BE-B1:5 metrics per run": entry(
       "partial",
       ["H2", "P-11", "P-W2", "P-Q"],
-      "desktop: Chromium heap (CDP), the engine process tree's RSS (all three engines; BROWSER-PROCESS RSS, not device memory and not server RSS), scan and commit times, outcomes, at least five cold runs; IndexedDB bytes only as Chromium's exact figure and the obfuscated estimate elsewhere; the device tools (dumpsys, Instruments, about:memory) need the roster",
+      "desktop: Chromium heap (CDP), the browser's RSS attributed per run (its own processes; on macOS WebKit with its WebContent, Networking and GPU services from the host's launchd domain; BROWSER-PROCESS RSS, not device memory and not server RSS), scan and commit times, outcomes, five cold runs; IndexedDB bytes only as Chromium's exact figure and the obfuscated estimate elsewhere; the device tools (dumpsys, Instruments, about:memory) need the roster",
       devicesOwner,
     ),
     "BE-B1:6 derived values": entry(
@@ -1068,8 +933,14 @@ function assembleHandoff(bundleRecord) {
     ),
     "BE-B1:7 format": entry(
       "partial",
-      ["results.json", "report.md", "SHA256SUMS"],
-      "machine-readable results, a short report and checksums exist; the statement that every figure is measured on real hardware CANNOT be made (desktop only)",
+      [
+        "results.json",
+        "resolution.json",
+        "report.md",
+        "evidence/",
+        "SHA256SUMS",
+      ],
+      "machine-readable results, the resolved evidence contract, the evidence itself, a short report and checksums exist; the statement that every figure is measured on real hardware CANNOT be made (desktop only)",
       "WEB-09c",
       { environment: "source" },
     ),
@@ -1089,15 +960,15 @@ function assembleHandoff(bundleRecord) {
     "BE-Q23:M2 method": entry(
       "partial",
       ["H2"],
-      "the desktop method is stated (heap in Chromium only, process-tree RSS, GC before baseline and after, five cold runs, outcome per run); the per-platform device tools are part of the device package, not run",
+      "the desktop method is stated (heap in Chromium only, the browser's attributed RSS, GC before baseline and after, five cold runs, outcome per run); the per-platform device tools are part of the device package, not run",
       devicesOwner,
     ),
     "BE-Q23:M3 fixtures": entry(
-      w2Status === "measured" ? "measured" : "partial",
+      capturesResolved ? "measured" : "partial",
       ["H3", "fixtures/hashes.json", "fixtures/W2-hashes.json"],
-      w2Status === "measured"
-        ? "generator source and SHA-256 of W1, W3 to W7; the W2 bytes captured from the real /sync in every engine, hashed"
-        : "generator source and SHA-256 of W1, W3 to W7; W2 not captured in every engine (see P-W2)",
+      capturesResolved
+        ? "generator source and SHA-256 of W1, W3 to W7; the W2 bytes captured from the real /sync in every engine (limits 1 and 80), hashed and resolved against their records"
+        : "generator source and SHA-256 of W1, W3 to W7; W2 not captured and resolved in every engine (see P-W2)",
       "WEB-09c",
       { environment: "source" },
     ),
@@ -1121,7 +992,7 @@ function assembleHandoff(bundleRecord) {
       { environment: "source" },
     ),
     "BE-Q23:M7 cost of finer requests": entry(
-      measuredIn("P-4") === "measured" ? "partial" : "not_run",
+      statusOf("P-4") === "measured" ? "partial" : "not_run",
       ["P-4", "P-10", "P-3", "P-9"],
       "desktop per-request overhead (pre-issue, lease and lock, request, record) on loopback and behind a 250 ms proxy delay; a 10,000-resource snapshot is WEB-09b's and was not run",
       "WEB-09b (snapshot), the roster (device CPU)",
@@ -1129,11 +1000,11 @@ function assembleHandoff(bundleRecord) {
     "BE-Q23:M8 smallest unprocessable response": entry(
       "partial",
       ["H8"],
-      desktopFailure === null
-        ? "desktop: UNDETERMINED, the desktop programme is incomplete (see desktop_programme); the answer for supported devices needs the roster"
-        : desktopFailure
+      failure === null
+        ? "desktop: UNDETERMINED, the desktop programme's outcomes are incomplete (see desktop_programme); the answer for supported devices needs the roster"
+        : failure
           ? "desktop: valid workloads failed (see H8.desktop_answer); the answer for supported devices needs the roster"
-          : "desktop: no valid workload failed on any desktop engine of this complete programme; the answer for supported devices needs the roster",
+          : "desktop: no valid workload failed on any desktop engine of this programme, whose outcomes are complete; the answer for supported devices needs the roster",
       devicesOwner,
     ),
     "BE-Q23:M9 derived values": entry(
@@ -1144,8 +1015,23 @@ function assembleHandoff(bundleRecord) {
     ),
   };
 
+  const desktopProgramme = {
+    contract_version: CONTRACT_VERSION,
+    complete: resolution.complete,
+    outcomes_complete: resolution.outcomes_complete,
+    counts: resolution.counts,
+    cells: resolution.cells.length,
+    missing: listOf(resolution, "missing"),
+    invalid: listOf(resolution, "invalid"),
+    failed: listOf(resolution, "failed"),
+    failed_controls: listOf(resolution, "failed_control"),
+    not_isolated: listOf(resolution, "not_isolated"),
+    unavailable: listOf(resolution, "unavailable"),
+    note: "every required observation of the evidence contract (scripts/lib/profile-contract.mjs, resolution.json) resolved against the evidence this hand-over carries (evidence/); a partial hand-over is valid only as a partial one: its validator exits 1 (2 with --allow-partial), and nothing is concluded from what is absent",
+  };
+
   const results = {
-    schema: 2,
+    schema: 3,
     title: `${EVIDENCE_KEY} — WEB-09c measurement hand-over`,
     evidence_key: EVIDENCE_KEY,
     owner: EVIDENCE_OWNER,
@@ -1160,9 +1046,14 @@ function assembleHandoff(bundleRecord) {
             source_fingerprint: r.candidate?.source_fingerprint,
             commit: r.candidate?.commit,
             status_porcelain: r.candidate?.status_porcelain,
+            invocation: r.invocation ?? null,
             started_at: r.started_at,
+            action_started_at: r.action_started_at ?? null,
+            action_finished_at: r.action_finished_at ?? null,
             finished_at: r.finished_at ?? null,
             exit_status: r.exit_status ?? null,
+            sealed: r.sealed === true,
+            sampler: r.sampler ?? null,
             load_at_start: r.load_at_start,
             load_at_end: r.load_at_end ?? null,
           },
@@ -1217,7 +1108,7 @@ function assembleHandoff(bundleRecord) {
     H2: {
       status: "partial",
       method:
-        "peak and retained JS heap (Chromium only, CDP) and the engine process tree's RSS (ps, all three engines; BROWSER-PROCESS RSS: not device memory, not server RSS) across receive, scan, validate, stage and commit; five cold runs (a new browser context each); idle baseline recorded before the run; outcome per run; the modelled figure is WEB-03's (A:3483-3497) beside each measured one, labelled modelled",
+        "peak and retained JS heap (Chromium only, CDP) and the browser's resident set (ps) across receive, scan, validate, stage and commit; the processes counted are the browser's own: the test worker's descendants and, for WebKit on macOS, every service in each WebKit host's launchd PID domain (WebContent, Networking, GPU), each checked against pid reuse (scripts/lib/browser-processes.mjs); every run records its process set, sample count, failed samples and whether its attribution was complete, and a run without complete attribution is not memory evidence. BROWSER-PROCESS RSS: not device memory, not server RSS. Five cold runs (a new browser context each); idle baseline recorded before the run; outcome per run; the modelled figure is WEB-03's (A:3483-3497) beside each measured one, labelled modelled",
       modelled: {
         "W1 at limit 1":
           "150.75 MiB (WEB-03's combined check, 120.6 % of its R, rejected by that model; this client does not apply that check, it bounds processing instead)",
@@ -1226,9 +1117,16 @@ function assembleHandoff(bundleRecord) {
         ...memory.map((m) => `memory/P-11.${m.engine}.json`),
         ...w2Memory.map((m) => `w2/P-W2.${m.engine}.json`),
       ],
+      memory_cells: Object.fromEntries(
+        CELL_STATUSES_FOR_REPORT.map((s) => [
+          s,
+          resolution.cells.filter((c) => c.kind === "memory" && c.status === s)
+            .length,
+        ]),
+      ),
     },
     H3: {
-      status: w2Status === "measured" ? "measured" : "partial",
+      status: capturesResolved ? "measured" : "partial",
       fixtures: hashes.workloads,
       w2_captured: w2,
       w2_capture_hashes: w2Hashes,
@@ -1264,17 +1162,17 @@ function assembleHandoff(bundleRecord) {
     },
     H8: {
       status: "partial",
-      desktop_valid_workload_failure: desktopFailure,
-      derived_from: outcomesComplete
-        ? "a complete desktop programme (desktop_programme.outcomes_complete)"
+      desktop_valid_workload_failure: failure,
+      derived_from: resolution.outcomes_complete
+        ? "a desktop programme whose outcomes are complete (desktop_programme.outcomes_complete)"
         : "an INCOMPLETE desktop programme: only failures it holds are facts; their absence is not",
       desktop_answer:
-        desktopFailure === null
-          ? "UNDETERMINED: the desktop programme is incomplete (see desktop_programme.missing and desktop_programme.failed), so the absence of a failure in it is not evidence that none would occur"
-          : desktopFailure
-            ? { failures }
-            : "no valid workload (W1, W3, W4, W6 in five cold runs; W2 live and in five cold runs; the device page's runs) was refused or failed on any desktop engine of this complete programme",
-      negative_controls_admitted: negativeAdmitted,
+        failure === null
+          ? "UNDETERMINED: the desktop programme's outcomes are incomplete (see desktop_programme), so the absence of a failure in it is not evidence that none would occur"
+          : failure
+            ? { failures: resolution.failures }
+            : "no valid workload (W1, W3, W4, W6 in five cold runs; W2 live and in five cold runs; the device page's runs) was refused or failed on any desktop engine of this programme",
+      negative_controls_not_fulfilled: desktopProgramme.failed_controls,
       reason: "the roster's answer is needed for any supported mobile device",
     },
     H9: {
@@ -1288,88 +1186,84 @@ function assembleHandoff(bundleRecord) {
       client_validator_consumes_SyncPage_batches_maxItems: false,
       reason_validator:
         "decision D-10: the scanner enforces its own bounds (80 batches, 800 changes per batch) and does not rely on the contract's batches.maxItems; no file under src/ reads `maxItems` (only the comment of syncLimitMax names it)",
-      desktop_D_largest_dense_changes_committed: desktopD,
-      desktop_D_basis: outcomesComplete
-        ? "the largest dense P-2 page committed in each engine of a complete programme"
-        : "the largest dense P-2 page in the rows present; the programme is INCOMPLETE, so a larger page may simply not have run",
-      w1_outcomes_at_limit_1: w1Admitted,
-      w2_outcomes_at_limit_1: w2Admitted,
+      desktop_D_largest_dense_changes_committed:
+        derived.desktop_D_largest_dense_changes_committed,
+      desktop_D_basis:
+        "the largest dense P-2 page whose commit series, and the series of every smaller dense page, RESOLVED in that engine (exact sample count, raw support, window, isolation); null when the smallest did not",
+      w1_outcomes_at_limit_1: w1Outcomes,
+      w2_outcomes_at_limit_1: w2Outcomes,
       w2_live_outcome: Object.fromEntries(
         w2Memory.map((m) => [m.engine, m.live?.outcome ?? null]),
       ),
-      // false only from a complete programme with no failure; true when a valid workload failed; null when undetermined.
-      desktop_needs_finer_pagination:
-        desktopFailure === null ? null : desktopFailure,
+      // false only from a COMPLETE programme with no failure; otherwise null (a failure is a fact in H8, not by itself a diagnosis).
+      desktop_needs_finer_pagination: derived.desktop_needs_finer_pagination,
       needs_finer_pagination: `undetermined for supported devices; desktop: ${
-        desktopFailure === null
-          ? "UNDETERMINED, the desktop programme is incomplete (see desktop_programme)"
-          : desktopFailure
-            ? "a valid workload failed on a desktop engine (see H8)"
-            : "no valid workload failed on a desktop engine of this complete programme, so the desktop engines do not need it"
+        derived.desktop_needs_finer_pagination === false
+          ? "no valid workload failed on a desktop engine of this complete, isolated programme, so the desktop engines do not need it"
+          : failure
+            ? "UNDETERMINED: a valid workload failed on a desktop engine (H8); that failure is a fact, but it does not by itself establish finer pagination as the remedy"
+            : "UNDETERMINED, the desktop programme is not complete (see desktop_programme)"
       }`,
     },
     programme: {
-      "P-1": bundleRecord ?? {
-        status: "not_run",
-        reason: "the bundle stage did not run in this record",
+      "P-1": {
+        ...(bundleRecord ?? {
+          reason: "the bundle stage did not run in this record",
+        }),
+        status: statusOf("P-1"),
       },
       "P-1S": {
-        status:
-          shell.dist && shell["dist-fixture"]
-            ? "measured"
-            : shell.dist || shell["dist-fixture"]
-              ? "partial"
-              : "not_run",
+        status: statusOf("P-1S"),
         label:
-          "Chromium only, CDP network and CPU throttling: EMULATED throttling, not a device; reported, not judged",
+          "Chromium only, CDP network and CPU throttling: EMULATED throttling, not a device; reported, not judged; every cold run judged for isolation over its own window",
         results: shell,
       },
-      "P-2": { status: measuredIn("P-2"), names: named("P-2") },
+      "P-2": { status: statusOf("P-2"), names: named("P-2") },
       "P-3": {
-        status: measuredIn("P-3"),
+        status: statusOf("P-3"),
         caveat:
           "ephemeral Playwright profile; the hint is passed through Dexie's `chromeTransactionDurability` option; whether Firefox and WebKit act on it was not determined",
       },
       "P-4": {
-        status: measuredIn("P-4"),
+        status: statusOf("P-4"),
         layer: "integration, released backend on loopback",
       },
       "P-5": {
-        status: measuredIn("P-5") === "measured" ? "partial" : "not_run",
-        measured: "maxInFlight 1, 200 drafts, 20 runs",
-        not_run:
-          "maxInFlight 2 and 3 (D-18 fixes 1), and the outbox drain's own effect on a second page's waits (the sync leader's effect is P-7 and P-9)",
+        status: statusOf("P-5"),
+        measured:
+          "maxInFlight 1, 200 drafts and 201 dense drafts, 20 runs each",
+        omitted:
+          "maxInFlight 2 and 3 (D-18 fixes 1: a declared omission, not a measurement), and the outbox drain's own effect on a second page's waits (the sync leader's effect is P-7 and P-9)",
       },
       ...programme,
       "P-10": {
-        status: measuredIn("P-10"),
+        status: statusOf("P-10"),
         conclusion:
           "the stamped request time-out (30 s) against the measured durations; see the rows named P-10",
       },
       "P-11": {
-        status: memory.length === 0 ? "not_run" : "partial",
-        note: "desktop engines through the real wrapper and through the device page; real devices not run",
+        status: statusOf("P-11"),
+        note: "desktop engines through the real wrapper; real devices not run (H1)",
       },
       "P-W2": {
-        status: w2Status,
+        status: statusOf("P-W2"),
         layer:
           "the released backend (put_field with checklist values and a grant, then the real /sync) on a desktop engine; the captured bytes then processed through the production path in five cold runs per engine",
         captures: w2,
         processing_files: w2Memory.map((m) => `w2/P-W2.${m.engine}.json`),
       },
+      "W2-limits": { status: statusOf("W2-limits") },
+      device: {
+        status: statusOf("device"),
+        note: "the device page's whole protocol on each desktop engine (39 distinct runs over 19 workloads, W2 from that engine's capture): the route a device operator follows, not a device run",
+      },
       "P-12": { status: "provisional", file: "handoff/constants.md" },
       "P-Q": {
-        status:
-          pq.length === 0 ? "not_run" : allEngines(pq) ? "measured" : "partial",
+        status: statusOf("P-Q"),
         note: "footprints measured; Firefox and Safari report an obfuscated estimate",
       },
       "P-Q2": {
-        status:
-          pq2.length === 0
-            ? "not_run"
-            : allEngines(pq2)
-              ? "measured"
-              : "partial",
+        status: statusOf("P-Q2"),
         note: "the atlas-auth burst, each engine's estimate step and the ledger overhead; the reserve itself (8 MiB) is NOT changed: a desktop figure cannot set a device constant",
         by_engine: Object.fromEntries(pq2.map((v) => [v.engine, v])),
       },
@@ -1377,27 +1271,12 @@ function assembleHandoff(bundleRecord) {
     consumer_map: consumerMap,
     desktop_programme: desktopProgramme,
     isolation: {
-      ...isolation,
-      by_item: Object.fromEntries(
-        [
-          "P-2",
-          "P-3",
-          "P-4",
-          "P-5",
-          "P-6",
-          "P-7",
-          "P-8",
-          "P-9",
-          "P-10",
-          "P-11",
-          "P-13",
-          "P-Q",
-          "P-W2",
-          "W2-limits",
-        ].map((p) => [p, isolationOf(p)]),
-      ),
+      method: `${ISOLATION_METHOD} Each cell is judged over its own window by the load samples of its OWN stage only; a stage whose sampler was not ready before its action, did not write its final sample after it, wrote malformed samples or whose clock went backwards judges all its cells unknown.`,
+      sampling_interval_ms: SAMPLE_INTERVAL_MS,
+      summary: isolationSummary,
+      tests,
       applicability:
-        "a timing, rate, memory or footprint figure is applicable as an isolated desktop measurement only when its series is `clean`; any other verdict qualifies it (it was, or may have been, taken beside other heavy work). Shapes, byte counts, hashes and admission outcomes do not depend on isolation",
+        "a timing, rate, memory or footprint figure is applicable as an isolated desktop measurement only when its cell is `ok` (its window `clean`); any other verdict qualifies it (it was, or may have been, taken beside other heavy work, or its coverage is unknown). Shapes, byte counts, hashes and admission outcomes do not depend on isolation. A 5 s poll cannot prove that no short foreign job ran between two samples: final timings need a protected controller",
     },
     escalations: [
       {
@@ -1418,7 +1297,7 @@ function assembleHandoff(bundleRecord) {
       "P-4 (per-request lease cost with production leadership)",
       "multi-tab H5 (takeover mid-snapshot; installed app plus a tab)",
     ],
-    device_page_validation: validated,
+    device_page_validation: deviceValidation,
     measurement_rows: measurements.length,
   };
   writeFileSync(
@@ -1426,26 +1305,39 @@ function assembleHandoff(bundleRecord) {
     `${JSON.stringify(results, null, 2)}\n`,
   );
 
-  const verdictOf = new Map(
-    isolation.series
-      .filter((r) => r.file === "measurements.jsonl")
-      .map((r, i) => [i, r.verdict]),
-  );
+  const cellOf = new Map(resolution.cells.map((c) => [c.id, c]));
   const table = measurements
-    .map(
-      (m, i) =>
-        `| ${m.name} | ${m.engine} | ${m.n} | ${m.p50} | ${m.p95} | ${m.max} | ${verdictOf.get(i)} |`,
-    )
+    .map((m) => {
+      const cell = cellOf.get(`${m.name}[${m.engine}]`);
+      return `| ${m.name} | ${m.engine} | ${m.n} | ${m.p50} | ${m.p95} | ${m.max} | ${cell ? `${cell.status}${cell.isolation ? ` (${cell.isolation.verdict})` : ""}` : "not a required cell"} |`;
+    })
     .join("\n");
-  const statusLine = desktopProgramme.complete
-    ? "**Desktop programme: COMPLETE and ISOLATED.** Every required stage, case, engine, workload and outcome is present and every series was taken with no other heavy work on the controller. Device evidence is still escalated (H1)."
-    : `**Desktop programme: ${desktopProgramme.outcomes_complete ? "outcomes complete, NOT ISOLATED" : "INCOMPLETE"}.** This is a partial hand-over: ${desktopProgramme.missing.length} item(s) missing, ${desktopProgramme.failed.length} failed, ${isolation.summary.series - isolation.summary.clean} of ${isolation.summary.series} series not isolated. No desktop conclusion is drawn from what is absent.`;
+  const statusLine = resolution.complete
+    ? "**Desktop programme: COMPLETE and ISOLATED.** Every required cell of the evidence contract resolved, and every load-dependent cell was taken with no other heavy work on the controller. Device evidence is still escalated (H1)."
+    : `**Desktop programme: ${resolution.outcomes_complete ? "outcomes complete, NOT ISOLATED" : "INCOMPLETE"}.** This is a partial hand-over: of ${resolution.cells.length} required cells, ${resolution.counts.missing} missing, ${resolution.counts.invalid} invalid, ${resolution.counts.failed} failed, ${resolution.counts.failed_control} failed control(s), ${resolution.counts.not_isolated} not isolated. No desktop conclusion is drawn from what is absent.`;
+  const head = (list) =>
+    list.length
+      ? `${list
+          .slice(0, 40)
+          .map((c) => `${c.id} (${c.reasons.join("; ")})`)
+          .join(
+            "; ",
+          )}${list.length > 40 ? `; and ${list.length - 40} more (resolution.json)` : ""}`
+      : "none";
   const completenessSection = [
-    `* Desktop programme complete: **${desktopProgramme.complete}** (outcomes complete: ${desktopProgramme.outcomes_complete}; every series isolated: ${isolation.summary.all_clean}).`,
-    `* Missing: ${desktopProgramme.missing.length ? desktopProgramme.missing.join("; ") : "none"}.`,
-    `* Failed: ${desktopProgramme.failed.length ? desktopProgramme.failed.join("; ") : "none"}.`,
-    `* Isolation of ${isolation.summary.series} series: ${isolation.summary.clean} clean, ${isolation.summary.idle_foreign} idle_foreign, ${isolation.summary.contaminated} contaminated, ${isolation.summary.unknown} unknown (${isolation.load_samples} load samples every ${isolation.sampling_interval_ms / 1000} s). Method: ${isolation.method}.`,
-    `* H8 (a valid workload failed on a desktop engine): ${desktopFailure === null ? "undetermined" : desktopFailure}. H9 desktop needs finer pagination: ${desktopFailure === null ? "undetermined" : desktopFailure}.`,
+    `* Desktop programme complete: **${resolution.complete}** (outcomes complete: ${resolution.outcomes_complete}). Contract version ${CONTRACT_VERSION}; ${resolution.cells.length} required cells: ${Object.entries(
+      resolution.counts,
+    )
+      .map(([k, n]) => `${n} ${k}`)
+      .join(", ")}.`,
+    `* Missing: ${head(desktopProgramme.missing)}.`,
+    `* Invalid: ${head(desktopProgramme.invalid)}.`,
+    `* Failed: ${head(desktopProgramme.failed)}.`,
+    `* Negative controls not fulfilled: ${head(desktopProgramme.failed_controls)}.`,
+    `* Not isolated: ${head(desktopProgramme.not_isolated)}.`,
+    `* Unavailable by declared capability: ${head(desktopProgramme.unavailable)}.`,
+    `* Isolation of ${isolationSummary.judged_cells} judged cells: ${verdicts.clean} clean, ${verdicts.idle_foreign} idle_foreign, ${verdicts.contaminated} contaminated, ${verdicts.unknown} unknown (load samples every ${SAMPLE_INTERVAL_MS / 1000} s).`,
+    `* H8 (a valid workload failed on a desktop engine): ${failure === null ? "undetermined" : failure}. H9 desktop needs finer pagination: ${derived.desktop_needs_finer_pagination === null ? "undetermined" : derived.desktop_needs_finer_pagination}. D(engine): ${JSON.stringify(derived.desktop_D_largest_dense_changes_committed)}.`,
   ].join("\n");
   writeFileSync(
     join(handoff, "report.md"),
@@ -1491,19 +1383,19 @@ ${Object.entries(results)
 ${Object.entries(results.programme)
   .map(
     ([k, v]) =>
-      `* **${k}**: ${v.status}${v.reason ? `. ${v.reason}` : ""}${v.note ? `. ${v.note}` : ""}${v.caveat ? `. ${v.caveat}` : ""}${v.label ? `. ${v.label}` : ""}`,
+      `* **${k}**: ${v.status}${v.reason ? `. ${v.reason}` : ""}${v.note ? `. ${v.note}` : ""}${v.caveat ? `. ${v.caveat}` : ""}${v.label ? `. ${v.label}` : ""}${v.omitted ? `. Not measured: ${v.omitted}` : ""}`,
   )
   .join("\n")}
 
 ## Measurements (milliseconds unless the name says otherwise; p50, p95 and max)
 
-Isolation is each series' verdict over its collection window (see above): only \`clean\` figures are isolated desktop measurements.
+The last column is the row's cell in the evidence contract: \`ok\` (resolved and isolated) or why not, with its isolation verdict. Only \`ok\` figures are isolated desktop measurements.
 
-| Measurement | Engine | n | p50 | p95 | max | Isolation |
+| Measurement | Engine | n | p50 | p95 | max | Cell |
 | --- | --- | --- | --- | --- | --- | --- |
 ${table}
 
-Raw samples are in \`../raw/\`, per-run memory in \`../memory/\` and \`../w2/\`, the device page's own results in \`../device-page/\`, the contention files in \`../contention/\`, the throttled shell boot in \`../shell/\`, the stage records in \`../stages/\`, and the recorded fixture hashes in \`fixtures/hashes.json\` and \`fixtures/W2-hashes.json\`.
+The evidence itself is in \`evidence/\` (raw samples \`evidence/raw/\`, per-run memory \`evidence/memory/\` and \`evidence/w2/\`, the device page's own results \`evidence/device-page/\`, the contention files \`evidence/contention/\`, the throttled shell boot \`evidence/shell/\`, the stage records \`evidence/stages/\`, the load samples \`evidence/isolation/\`), every cell's resolution in \`resolution.json\`, and the recorded fixture hashes in \`fixtures/hashes.json\` and \`fixtures/W2-hashes.json\`. \`node scripts/validate-profile-handoff.mjs --handoff <this directory>\` resolves the evidence again.
 `,
   );
 
@@ -1526,16 +1418,14 @@ Raw samples are in \`../raw/\`, per-run memory in \`../memory/\` and \`../w2/\`,
 let status = 0;
 const run = async (stage, action) => {
   if (!only.includes(stage) || status !== 0) return;
-  recordStage(out, stage, { root, machine: machineRecord });
-  // The load beside every measuring stage, sampled from before its first test to after its last (the handoff measures nothing).
-  const sampler =
-    stage === "handoff" ? null : await startLoadSampler(out, stage);
-  try {
-    status = (await action()) ?? 1;
-  } finally {
-    await sampler?.stop();
-  }
-  finishStage(out, stage, status);
+  // The load beside every measuring stage, sampled from before its action to after it (the handoff measures nothing). The stage is
+  // sealed whatever happens; a sampler that never becomes ready fails the stage before its action.
+  status = await runStage(out, stage, action, {
+    sample:
+      stage === "handoff" ? null : (dir, name) => startLoadSampler(dir, name),
+    invocation: claim.invocation,
+    extra: { root, machine: machineRecord },
+  });
 };
 await run("bundle", bundle);
 await run("fixture", fixture);
@@ -1544,8 +1434,7 @@ await run("shell", shellStage);
 if (only.includes("contention") && status === 0) status = contention();
 await run("integration", integration);
 await run("device", device);
-await run("handoff", () =>
-  assembleHandoff(readJson(join(out, "bundle-delta.json"))),
-);
+await run("handoff", () => assembleHandoff());
+claim.release(status);
 log(`written to ${out} (exit ${status})`);
 process.exit(status);
