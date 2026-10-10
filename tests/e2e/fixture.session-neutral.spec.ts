@@ -70,12 +70,6 @@ const SURFACES: Surface[] = [
     region: "main",
     focusHeading: true,
   })),
-  {
-    name: "neutral-sign-in-unavailable",
-    path: "/__neutral?state=1b&unavailable=1",
-    region: "main",
-    focusHeading: true,
-  },
   { name: "gate", path: "/__neutral?state=gate", region: "#resume-gate" },
   {
     name: "settings-home",

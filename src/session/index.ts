@@ -20,6 +20,7 @@ export {
 } from "./adapters/protected-surface";
 export { createWebLocksPort } from "./adapters/web-locks";
 export type {
+  AccountSummary,
   ApiCompatibility,
   AttemptHandle,
   AttemptOutcome,
@@ -31,14 +32,17 @@ export type {
   DevicesRead,
   ExchangeResult,
   Identity,
+  InvitationPreview,
   LocalWorkSummary,
   NeutralActions,
   NeutralStateId,
+  OidcStartOutcome,
   OperationStart,
   Operations,
   Recovery,
   RecoveryBegin,
   RecoveryHandle,
+  RegistrationInput,
   RequestClass,
   Result,
   Session,

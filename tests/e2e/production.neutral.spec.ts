@@ -6,22 +6,24 @@ import { DARK, expect, LIGHT, runAxe, test } from "./helpers";
  */
 
 test.describe("neutral shell", () => {
-  test("shows only the neutral entry, and the protected root stays inert, hidden and empty (B6)", async ({
+  test("shows the sign-in surface and nothing about any account, and the protected root stays inert, hidden and empty (B6)", async ({
     page,
   }) => {
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { level: 1, name: "Atlas" }),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
+    await expect(page.getByLabel("Username")).toBeVisible();
+    await expect(page.getByLabel("Password")).toBeVisible();
     await expect(
-      page.getByText("Sign-in isn't available in this build yet."),
+      page.getByRole("button", { name: "Use single sign-on instead" }),
     ).toBeVisible();
     const root = page.locator("#protected-root");
     await expect(root).toHaveAttribute("inert", "");
     await expect(root).toHaveAttribute("aria-hidden", "true");
     expect(await root.evaluate((element) => element.childElementCount)).toBe(0);
     expect(await page.locator("[data-portal-root]").count()).toBe(0);
-    await expect(page).toHaveTitle("Atlas");
+    await expect(page).toHaveTitle("Sign in · Atlas");
   });
 
   test("the production build carries no fixture entry or marker", async ({
@@ -40,18 +42,32 @@ test.describe("neutral shell", () => {
     expect(html).not.toContain("/src/fixture/");
   });
 
-  test("preserves the URL fragment through boot (B11)", async ({ page }) => {
-    await page.goto("/#atlas_grant=abc123");
+  test("a fragment this client does not recognise is left alone through boot (B11)", async ({
+    page,
+  }) => {
+    await page.goto("/#section-2");
     await expect(
-      page.getByRole("heading", { level: 1, name: "Atlas" }),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
-    expect(await page.evaluate(() => location.hash)).toBe(
-      "#atlas_grant=abc123",
-    );
+    expect(await page.evaluate(() => location.hash)).toBe("#section-2");
     await page.waitForTimeout(300);
     expect(
-      await page.evaluate(() => location.href.endsWith("/#atlas_grant=abc123")),
+      await page.evaluate(() => location.href.endsWith("/#section-2")),
     ).toBe(true);
+  });
+
+  test("a recognised fragment (the OIDC grant) is stripped at boot, valid or not, and the page says it wasn't valid", async ({
+    page,
+  }) => {
+    await page.goto("/#atlas_grant=abc123");
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => location.hash)).toBe("");
+    expect(await page.evaluate(() => location.href)).not.toContain("abc123");
+    await expect(
+      page.getByText("That sign-in link wasn't valid. Start again."),
+    ).toBeVisible();
   });
 
   test("does not rewrite history on load", async ({ page }) => {
@@ -70,7 +86,7 @@ test.describe("neutral shell", () => {
     });
     await page.goto("/deep/link?x=1#frag");
     await expect(
-      page.getByRole("heading", { level: 1, name: "Atlas" }),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
     expect(
       await page.evaluate(
@@ -79,12 +95,12 @@ test.describe("neutral shell", () => {
     ).toEqual({ replace: 0, push: 0 });
   });
 
-  test("a deep link is served the shell, then the neutral entry, without touching the path", async ({
+  test("a deep link is served the shell, then the sign-in surface, without touching the path", async ({
     page,
   }) => {
     await page.goto("/tasks/example");
     await expect(
-      page.getByRole("heading", { level: 1, name: "Atlas" }),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
     expect(new URL(page.url()).pathname).toBe("/tasks/example");
   });
@@ -100,7 +116,7 @@ test.describe("neutral shell", () => {
       const page = await context.newPage();
       await page.goto("/");
       await expect(
-        page.getByRole("heading", { level: 1, name: "Atlas" }),
+        page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
       ).toBeVisible();
       expect(
         await page.evaluate(
@@ -116,12 +132,12 @@ test.describe("neutral shell", () => {
 test.describe("capability check (B7)", () => {
   const compatible = "Atlas can't open in this browser";
 
-  test("a fully capable browser shows the neutral entry, not the compatibility screen", async ({
+  test("a fully capable browser shows the sign-in surface, not the compatibility screen", async ({
     page,
   }) => {
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { level: 1, name: "Atlas" }),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
     await expect(page.getByRole("heading", { name: compatible })).toHaveCount(
       0,
@@ -181,9 +197,7 @@ test.describe("capability check (B7)", () => {
         ),
       ).toBeVisible();
       await expect(page.getByRole("navigation")).toHaveCount(0);
-      await expect(
-        page.getByText("Sign-in isn't available in this build yet."),
-      ).toHaveCount(0);
+      await expect(page.getByLabel("Username")).toHaveCount(0);
       expect(
         await page
           .locator("#protected-root")
@@ -354,7 +368,7 @@ test.describe("offline fonts (B9)", () => {
       });
       await page.goto("/");
       await expect(
-        page.getByRole("heading", { level: 1, name: "Atlas" }),
+        page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
       ).toBeVisible();
       const loaded = await page.evaluate(async () => {
         await document.fonts.ready;
@@ -388,7 +402,7 @@ test.describe("offline fonts (B9)", () => {
     });
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { level: 1, name: "Atlas" }),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
     expect(offOrigin).toEqual([]);
   });

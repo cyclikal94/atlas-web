@@ -102,7 +102,12 @@ function FixtureApp() {
 if (location.pathname === "/__neutral") {
   // One neutral state or the resume gate, for rendered checks (src/fixture/neutral-page.tsx).
   mountNeutralPage(params);
-} else if (location.pathname === "/__session") {
+} else if (
+  location.pathname === "/__session" ||
+  // The backend's OIDC callback redirects to the origin root with the grant in the fragment (BE-Q19). In an integration run
+  // that root must run the PRODUCTION composition to land it, so the harness takes it (fixture only: production serves the real app).
+  (location.pathname === "/" && location.hash.includes("atlas_grant="))
+) {
   // The session harness (real adapters, real engine, no backend): see src/fixture/session-harness.
   void import("./session-harness/main");
 } else {

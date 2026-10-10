@@ -2,7 +2,6 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
 import { CompatibilityScreen } from "../../src/app/CompatibilityScreen";
-import { NeutralEntry } from "../../src/app/NeutralEntry";
 
 afterEach(cleanup);
 
@@ -46,18 +45,5 @@ describe("CompatibilityScreen", () => {
     );
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.queryByRole("link")).toBeNull();
-  });
-});
-
-describe("NeutralEntry", () => {
-  test("shows only the neutral heading and the provisional line, with no account data", async () => {
-    const { container } = render(<NeutralEntry />);
-    expect(
-      screen.getByRole("heading", { level: 1, name: "Atlas" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("Sign-in isn't available in this build yet."),
-    ).toBeInTheDocument();
-    expect((await axe(container)).violations).toEqual([]);
   });
 });

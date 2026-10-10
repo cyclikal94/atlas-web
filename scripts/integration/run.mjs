@@ -2,11 +2,13 @@
 // Part C (plan 14): run the integration specs against the RELEASED backend, on a disposable SQLite database, behind the delaying
 // proxy, with the fixture-only session harness page served by `vite preview --mode fixture`.
 //
-//   node scripts/integration/run.mjs [--serve] [--postgres] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [-- <playwright args>]
+//   node scripts/integration/run.mjs [--serve] [--postgres] [--oidc on|off] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [-- <playwright args>]
 //
 //   default   for each browser: start a FRESH stack, run Playwright's `integration-<browser>` project, stop everything; exit non-zero if any failed.
 //             With no --grep the project runs in two stacks per browser (see STACKS): the suite exceeds what one stack's backend allows.
 //   --serve   start everything and print the URLs; run until interrupted (for exploring; nothing is run)
+//   --oidc    for a NARROWED run only (--grep or Playwright arguments): whether the stack configures the stub OpenID Connect provider
+//             (default on). The default suite decides per stack (WEB-08b: STACKS below).
 //
 // Loopback listeners on OS-chosen free ports only. Disposable state under a fresh directory in $TMPDIR. Every process this script
 // starts is stopped on exit and the ports are checked to be free again. It touches no existing service and no real user data.
@@ -25,6 +27,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createProxy } from "./delaying-proxy.mjs";
 import { freePort } from "./free-port.mjs";
+import { createOidcProvider } from "./oidc-provider.mjs";
 import { startPostgresBackend } from "./postgres-backend.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -55,13 +58,40 @@ const passthrough = args.includes("--")
 // window and the last specs are refused with 429 (this happened when I-14e was added, before it had its own stack). The suite is
 // split over fresh stacks: everything but I-14e, then I-14e. A run the caller has narrowed (`--grep`, or Playwright arguments
 // after `--` such as a spec file or a config) is one stack, as before: the caller chose what runs.
-const STACKS =
-  grep || passthrough.length > 0
-    ? [{ suffix: "", args: grep ? ["--grep", grep] : [] }]
-    : [
-        { suffix: "", args: ["--grep-invert", "I-14e"] },
-        { suffix: "-i14e", args: ["--grep", "I-14e"] },
-      ];
+// WEB-08b adds stacks that each run a group of specs: the ordering traces, registration and the browser OIDC round trip consume
+// sign-ins, invitations and provider flows, and some need a stack WITHOUT single sign-on configured (I-28b). `oidc` says whether the
+// stack starts the stub provider and configures the backend with it.
+const oidcFlag = value("--oidc", "on") !== "off";
+const NARROWED = grep || passthrough.length > 0;
+const STACKS = NARROWED
+  ? [
+      {
+        suffix: "",
+        args: grep ? ["--grep", grep] : [],
+        oidc: oidcFlag && !postgres,
+      },
+    ]
+  : [
+      {
+        suffix: "",
+        args: ["--grep-invert", "I-14e|I-2[0-9]|I-30"],
+        oidc: false,
+      },
+      { suffix: "-i14e", args: ["--grep", "I-14e"], oidc: false },
+      { suffix: "-traces", args: ["--grep", "I-20|I-22|I-23"], oidc: false },
+      {
+        suffix: "-registration",
+        args: ["--grep", "I-24|I-25|I-26"],
+        oidc: false,
+      },
+      {
+        suffix: "-oidc",
+        args: ["--grep", "I-21|I-27|I-28a"],
+        oidc: true,
+      },
+      { suffix: "-oidc-off", args: ["--grep", "I-28b"], oidc: false },
+      { suffix: "-settings", args: ["--grep", "I-29|I-30"], oidc: false },
+    ];
 
 const children = [];
 let tmp = "";
@@ -69,6 +99,7 @@ const ports = [];
 let proxy = null;
 let lastBackend = null;
 let extraCleanup = null;
+let provider = null;
 
 const listening = (port) =>
   new Promise((resolveCheck) => {
@@ -87,6 +118,7 @@ async function cleanup() {
   for (const child of children)
     if (child.exitCode === null) child.kill("SIGKILL");
   if (proxy) await proxy.stop().catch(() => undefined);
+  if (provider) await provider.stop().catch(() => undefined);
   if (extraCleanup) {
     const left = extraCleanup();
     console.error(
@@ -107,6 +139,7 @@ async function cleanup() {
   children.length = 0;
   ports.length = 0;
   proxy = null;
+  provider = null;
   tmp = "";
 }
 process.on("SIGINT", () => cleanup().finally(() => process.exit(130)));
@@ -126,7 +159,28 @@ async function waitFor(url, label, tries = 80) {
 }
 
 async function main(browser, stack) {
-  const names = ["alice", "bob", "carol", "dave", "erin"];
+  // alice to erin: the earlier specs. frank to quinn: WEB-08b (ordering traces, sign-in surface, Settings, single sign-on), each
+  // spec using its own account so no spec depends on another's side effects or on a sign-in throttle another has used up.
+  const names = [
+    "alice",
+    "bob",
+    "carol",
+    "dave",
+    "erin",
+    "frank",
+    "grace",
+    "heidi",
+    "ivan",
+    "judy",
+    "kate",
+    "liam",
+    "mia",
+    "nora",
+    "olga",
+    "pete",
+    "quinn",
+  ];
+  const invitations = [];
   tmp = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "atlas-integration-"));
   const [backendPort, previewPort, proxyPort, controlPort] = [
     await freePort(),
@@ -141,6 +195,16 @@ async function main(browser, stack) {
   // and the environment only.
   const accounts = {};
   let revision;
+  let oidc = null;
+  if (stack.oidc && !postgres) {
+    // The stub provider, on loopback, before the backend: the backend discovers it at the first single-sign-on request.
+    provider = createOidcProvider({
+      clientId: "atlas-web-integration",
+      callbackUrl: `${origin}/api/experimental/v1/oidc/callback`,
+    });
+    oidc = await provider.start();
+    ports.push(oidc.issuerPort, oidc.controlPort);
+  }
 
   if (postgres) {
     // OPTIONAL repeat: the released backend CONTAINER image against a disposable PostgreSQL (docs/session.md, "Integration").
@@ -190,6 +254,19 @@ async function main(browser, stack) {
       accounts[name] = { username: name, password };
     }
 
+    // 2b. Standalone signup invitations, made with the backend's own command (the token is printed once).
+    for (let i = 0; i < 19; i += 1) {
+      const made = spawnSync(backend.binary, ["invite"], {
+        env: { ...process.env, ATLAS_DATABASE_URL: database },
+        encoding: "utf8",
+      });
+      if (made.status !== 0)
+        throw new Error(
+          `could not create an invitation:\n${made.stdout}${made.stderr}`,
+        );
+      invitations.push(JSON.parse(made.stdout.trim().split("\n").at(-1)));
+    }
+
     // 3. The backend.
     const server = spawn(backend.binary, [], {
       env: {
@@ -197,6 +274,12 @@ async function main(browser, stack) {
         ATLAS_DATABASE_URL: database,
         ATLAS_BIND: `127.0.0.1:${backendPort}`,
         ATLAS_PUBLIC_ORIGIN: origin,
+        ...(oidc
+          ? {
+              ATLAS_OIDC_ISSUER: oidc.issuer,
+              ATLAS_OIDC_CLIENT_ID: oidc.clientId,
+            }
+          : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -252,6 +335,16 @@ async function main(browser, stack) {
     ATLAS_INTEGRATION_CONTROL: urls.controlUrl,
     ATLAS_INTEGRATION_BACKEND: `http://127.0.0.1:${backendPort}`,
     ATLAS_INTEGRATION_ACCOUNTS: JSON.stringify(accounts),
+    ATLAS_INTEGRATION_INVITATIONS: JSON.stringify(invitations),
+    ATLAS_INTEGRATION_OIDC: oidc
+      ? JSON.stringify({
+          issuer: oidc.issuer,
+          control: oidc.controlUrl,
+          client_id: oidc.clientId,
+        })
+      : "",
+    // WEB-08b measurements and evidence stay apart from every earlier task's (the earlier default is WEB-08a-named).
+    ATLAS_MEASUREMENTS_DIR: join(dirname(evidence), "profiling"),
     ATLAS_INTEGRATION_BACKEND_REVISION: JSON.stringify(revision),
     ATLAS_E2E_BROWSERS: browser === "chromium" ? "" : "all",
   };

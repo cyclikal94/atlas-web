@@ -6,6 +6,13 @@ import { liveRegions } from "../components/ui/announcer";
 import { createGateDialog } from "../components/ui/gate-dialog";
 import { NeutralGate } from "../components/ui/neutral-gate";
 import { ThemeProvider } from "../design/ThemeProvider";
+import { completeLanding } from "../features/authentication/controller";
+import {
+  browserHandoffEnv,
+  captureHandoff,
+  rememberInvitation,
+} from "../features/authentication/handoff";
+import { signInRequest } from "../features/authentication/sign-in-request";
 import {
   AuthStoreOpenError,
   browserPorts,
@@ -27,7 +34,6 @@ import {
   probeCapabilities,
 } from "./capabilities";
 import { SessionRoot } from "./SessionRoot";
-import { signInStub } from "./sign-in-stub";
 
 /**
  * The boot sequence (plan 5.4), shared by the production entry (`main.tsx`) and the fixture-only session harness
@@ -36,8 +42,8 @@ import { signInStub } from "./sign-in-stub";
  * `start()` is not called); then the protected tree is loaded (D-10); `createSession` and `start()` run OUTSIDE any component
  * effect (React StrictMode double-invokes effects); one neutral React root renders `session.view`.
  *
- * Nothing here lifts the gate: only the session's `act` does, through the protected-surface adapter. This module does not touch
- * `location.hash`, because WEB-08b reads the OIDC grant from the URL fragment (`beforeStart` is where that capture goes).
+ * Nothing here lifts the gate: only the session's `act` does, through the protected-surface adapter. The URL fragment (the OIDC
+ * grant, an invitation token) is captured and stripped by the FIRST statement of `boot`, before any `await` (WEB-08b).
  */
 export interface Booted {
   session: Session;
@@ -45,7 +51,7 @@ export interface Booted {
 }
 export interface BootOptions {
   neutralRoot: HTMLElement;
-  /** Called synchronously before the session starts; WEB-08b's fragment capture goes here. */
+  /** Called synchronously before the session starts. The fragment capture is not here: it is the first statement of `boot`. */
   beforeStart?: () => void;
   onReload?: () => void;
   /** Test instrumentation only (the fixture-only harness). */
@@ -53,6 +59,18 @@ export interface BootOptions {
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
+  // THE FIRST STATEMENT, before any `await`: copy what the fragment carries (an OIDC grant, an invitation token) and strip it
+  // from the address bar and the history entry (matrix 3.4 step 2). Nothing below may run before this.
+  const handoff = captureHandoff(browserHandoffEnv());
+  rememberInvitation(handoff.invitation);
+  // A fragment-only navigation (pasting another link into the address bar of this open page) does not reload it: it is captured
+  // and stripped the same way, so a grant or a token never stays in the address bar or the history.
+  let live: Session | null = null;
+  window.addEventListener("hashchange", () => {
+    const next = captureHandoff(browserHandoffEnv());
+    rememberInvitation(next.invitation);
+    if (next.oidc && live) void completeLanding(live, next.oidc);
+  });
   const reactRoot = createRoot(options.neutralRoot);
   const render = (node: ReactNode) =>
     reactRoot.render(
@@ -110,10 +128,11 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     browserPorts({ store: opened, surface, trace: options.trace }),
     {
       supportedRange: rangeFromPin(contractVersion),
-      onSignIn: () => signInStub.request(),
+      onSignIn: () => signInRequest.request(),
       onReload: options.onReload ?? (() => location.reload()),
     },
   );
+  live = session;
   renderTree = createProtectedTree(session);
   render(
     <SessionProvider session={session}>
@@ -121,5 +140,7 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     </SessionProvider>,
   );
   await session.start({ beforeStart: options.beforeStart });
+  // The OIDC landing continues only now: the durable record decides (epoch and phase), never the order things happened in.
+  if (handoff.oidc) void completeLanding(session, handoff.oidc);
   return { session, store: opened };
 }

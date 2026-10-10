@@ -104,6 +104,14 @@ const operations: Call[] = [
     start: (page) => outcomeOfResult(page.session.operations.listSessions()),
   },
   {
+    // WEB-08b: `GET /me` shares the decode path of the other reads (`ordinaryCall`, `jsonResult`, `sealResult`), and is held to the
+    // same schedules and to property V7 here.
+    name: "operations.readAccount",
+    refusal: "closed",
+    match: hasField("username"),
+    start: (page) => outcomeOfResult(page.session.operations.readAccount()),
+  },
+  {
     name: "operations.readDevices",
     refusal: "closed",
     match: hasKey("devices"),

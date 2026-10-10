@@ -29,8 +29,9 @@ test.describe("I-11: api_version", () => {
       .poll(() => compat(page))
       .toMatchObject({ status: "supported", version: "0.27.0" });
     await expect(
-      page.getByText("Sign-in isn't available in this build yet."),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
+    await expect(page.getByLabel("Username")).toBeVisible();
   });
 
   for (const [version, status] of [
@@ -54,9 +55,7 @@ test.describe("I-11: api_version", () => {
           name: "Atlas can't work with this server yet",
         }),
       ).toBeVisible();
-      await expect(
-        page.getByText("Sign-in isn't available in this build yet."),
-      ).toHaveCount(0);
+      await expect(page.getByLabel("Username")).toHaveCount(0);
     });
   }
 
@@ -91,8 +90,9 @@ test.describe("I-11: api_version", () => {
     const page = await bootHarness(context);
     await expect.poll(() => compat(page)).toEqual({ status: "unreachable" });
     await expect(
-      page.getByText("Sign-in isn't available in this build yet."),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
+    await expect(page.getByLabel("Username")).toBeVisible();
   });
 
   test("an unsupported server never hides an account that is already settled (only sign-in is gated)", async ({

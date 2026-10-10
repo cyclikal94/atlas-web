@@ -1,5 +1,11 @@
 import { vi } from "vitest";
-import type { Operations, Session, Store } from "../../src/session";
+import type {
+  AttemptHandle,
+  Attempts,
+  Operations,
+  Session,
+  Store,
+} from "../../src/session";
 
 /**
  * A `Session` for component tests: every operation is a spy with a harmless default, and any of them can be replaced. It
@@ -10,6 +16,50 @@ export const store = <T>(value: T): Store<T> => ({
   get: () => value,
   subscribe: () => () => undefined,
 });
+
+/**
+ * `Attempts` as spies. By default `begin` starts an attempt of the requested method and every exchange settles; a test
+ * replaces the one it is about. A double of the PUBLIC interface only: it proves what a screen does with each answer.
+ */
+export function attemptsDouble(over: Partial<Attempts> = {}): Attempts {
+  return {
+    begin: vi.fn(async (method) => ({
+      kind: "started" as const,
+      handle: { epoch: 1, method, challenge: "c".repeat(43) } as AttemptHandle,
+    })),
+    signInWithPassword: vi.fn(async () => ({
+      kind: "settled" as const,
+      account_id: "acct",
+      epoch: 1,
+      method: "password" as const,
+    })),
+    registerWithInvitation: vi.fn(async () => ({
+      kind: "settled" as const,
+      account_id: "acct",
+      epoch: 1,
+      method: "registration" as const,
+    })),
+    previewInvitation: vi.fn(async () => ({
+      kind: "ok" as const,
+      household: null,
+      expires_at: "2026-10-08T18:00:00.000Z",
+    })),
+    startOidc: vi.fn(async () => ({
+      kind: "redirect" as const,
+      authorization_url: "https://idp.example.test/authorize",
+    })),
+    completeExchange: vi.fn(),
+    markRedirected: vi.fn(),
+    landing: vi.fn(async () => ({
+      kind: "settled" as const,
+      account_id: "acct",
+      epoch: 1,
+      method: "oidc" as const,
+    })),
+    cancel: vi.fn(),
+    ...over,
+  };
+}
 
 export function sessionDouble(
   operations: Partial<Operations> = {},
@@ -48,6 +98,15 @@ export function sessionDouble(
     changePassword: vi.fn(async () => ({
       ok: true as const,
       value: "changed" as const,
+    })),
+    readAccount: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        id: "acct",
+        username: "kieran",
+        has_password: true,
+        oidc_issuers: [] as string[],
+      },
     })),
     unlinkOidc: vi.fn(async () => ({
       ok: true as const,
