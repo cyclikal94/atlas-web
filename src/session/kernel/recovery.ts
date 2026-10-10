@@ -13,7 +13,26 @@ import type { Kernel } from "./state";
  * snapshot paths, retry budgets) and calls `begin` and `finish`. It never edits `auth_state` itself.
  */
 export class RecoveryService implements Recovery {
+  private readonly retries = new Set<() => void>();
   constructor(private readonly k: Kernel) {}
+
+  onRetry(listener: () => void): () => void {
+    this.retries.add(listener);
+    return () => {
+      this.retries.delete(listener);
+    };
+  }
+
+  /** The person's neutral "Try again" (session `actions.retry`): every listener (the page's sync leader) is told. */
+  retried(): void {
+    for (const listener of [...this.retries]) {
+      try {
+        listener();
+      } catch {
+        // A listener's failure is its own; the session's retry goes on.
+      }
+    }
+  }
 
   async begin(account: AccountId): Promise<RecoveryBegin> {
     const { k } = this;

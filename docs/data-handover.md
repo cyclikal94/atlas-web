@@ -37,13 +37,24 @@ Every outcome type is a closed union. A refusal is a value, never an exception, 
   job in that page only; other pages follow (their request is queued) and send nothing. Do not start another engine or dispatcher in a production page.
 * **Register once, into the page host.** Feature slices register command kinds and conflict handlers into `getPageDataHost().commands` / `.conflicts` (the leader's
   dispatcher and every screen read the same registries), not into a registry of their own. `CommandSpec.rebuild(draft, current)` offers "Resend as a new operation" /
-  "Review, then save as new" in WF-QUEUE-02 (nothing is offered without it); `CommandSpec.onlineOnly` selects the dialog's online-only variant.
+  "Review and save as a new attempt" in WF-QUEUE-02 (nothing is offered without it); `CommandSpec.onlineOnly` selects the dialog's online-only variant.
+  `CommandSpec.readCurrent(draft, io)` (review cycle 1, R7) is the kind's AUTHORISED current-state read for the dialog's "Currently saved": the slice knows its resource's
+  endpoint (`io.get("/tasks/<id>")`, an ordinary stamped `GET` of the displayed account and epoch) and answers `loaded` (a `CacheRow`), `indeterminate` or `failed`. A kind
+  without it has no authorised read: the dialog says so and asks before a new attempt. `rebuild` receives the value that read returned (or `null` when the person continued
+  without it), never the cache. The data layer seals the read's WHOLE result (review cycle 2, R7): a command may decode and
+  interpret as it likes, and need not check the account itself; it must make its requests through `io.get` and honour `io.signal` where it can (a command that ignores it is
+  still refused at release).
 * **One runtime and one markers object per page.** With a leader on the page the provider uses the page's runtime (never disposed while the page lives) and the page's markers
   (`getPageDataHost().markers`, its directory slot leased); anything that needs a writer on that page uses them too.
 * **Recovery is automatic and runs while fenced.** After a re-authentication the job asks `session.recovery.begin`, reads with the recovery class only, makes the data commit,
-  then `finish`; WEB-08c's exposure decides display afterwards. Unsent drafts, their bodies and effects are byte-identical through a recovery; nothing is replayed or deleted.
-* **Status.** `StatusInputs.recovery` may carry the job's `state` and Q24 `notice`; `follower` and `recoveryBlocked` are optional. `DataActions` gained `acknowledgeResync`
-  and `saveAsNew`; `retryUpdates` reaches the job while it holds a stop, pause or the blocking budget.
+  then `finish` with the handle that commit was made under (a newer handle makes its own catch-up first); WEB-08c's exposure decides display afterwards. The recovery writes
+  NOTHING of the draft queue (unsent or acknowledged), replays nothing and deletes nothing; the acknowledged receipts' bookkeeping it owes is done by W26 as an ordinary write
+  once the account is displayed (`sync_state.recovery_reconcile_pending`).
+* **Status.** `StatusInputs.recovery` may carry the job's `state` and Q24 `notice`; `follower`, `followerStops` (the leader's durable pause, page stops and floor, read by a
+  follower) and `recoveryBlocked` are optional. `DataActions` gained `acknowledgeResync`, `readCurrent` and `saveAsNew(localId, current)`; `retryUpdates` reaches the job while
+  it holds a stop, pause or the blocking budget, and on a follower page it asks the leading page (`retry_requested` on `atlas-sync`, with the account and epoch shown).
+* **The neutral "Try again" is the recovery owner's act too.** `session.recovery.onRetry(listener)` is told when the person presses the neutral state's "Try again"; the
+  browser composition routes it to the leading page's job. A session consumer need do nothing else.
 
 ## What each following card owns
 

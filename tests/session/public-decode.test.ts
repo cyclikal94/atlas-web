@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, test } from "vitest";
+import { apiUrl } from "../../src/lib/api-client/wire";
 import type { FakePage } from "../support/session/harness";
 import { checkProperties } from "../support/session/properties";
 import {
@@ -155,6 +156,37 @@ const typed: Call[] = (["ordinary"] as const).flatMap((klass) => [
   },
 ]);
 
+/**
+ * WEB-09b (R7 of the review of 10 October 2026, second cycle): `session.api.seal` around a caller's OWN interpretation of `fetchFor`
+ * responses, as the data layer's authorised current read makes it (`DataActions.readCurrent`: the command's decode and any later work,
+ * then the seal). The caller's decode is the held one; the seal must read the record after it.
+ */
+const sealed: Call[] = [
+  {
+    name: "session.api.seal around a caller's own decode of fetchFor, GET /sessions",
+    refusal: "stale",
+    match: hasKey("sessions"),
+    start: (page, stamp) =>
+      outcomeOfTyped(
+        page.session.api.seal(
+          stamp.account,
+          stamp.epoch,
+          (async () => {
+            const response = await page.session.api.fetchFor(
+              "ordinary",
+              stamp.account,
+              stamp.epoch,
+            )(new Request(apiUrl("/sessions"), { method: "GET" }));
+            const body = (await response.json()) as { sessions: unknown[] };
+            // Further interpretation after the decode, as a command may do: still before the seal.
+            await Promise.resolve();
+            return body.sessions.length;
+          })(),
+        ),
+      ),
+  },
+];
+
 /** What a call has produced so far, without waiting for it. */
 const watch = (call: Promise<Outcome>) => {
   const seen: { done: boolean; value?: Outcome } = { done: false };
@@ -197,7 +229,7 @@ async function decodeHeld(call: Call) {
   return { f, l, other, seen, finish };
 }
 
-describe.each([...operations, ...typed])("$name", (call) => {
+describe.each([...operations, ...typed, ...sealed])("$name", (call) => {
   test("no transition: the held decode ends and the result is returned whole (the control)", async () => {
     const { f, seen, finish } = await decodeHeld(call);
     await finish();

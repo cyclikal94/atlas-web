@@ -66,6 +66,36 @@ export interface StampedApi {
    * checks the stamp again inside its own atomic commit (docs/session.md, obligation 4).
    */
   fetchFor(klass: RequestClass, account: AccountId, epoch: Epoch): StampedFetch;
+  /**
+   * WEB-09b: the FINAL validation of a caller's own interpretation of `fetchFor` responses (its decode, parse and any further
+   * asynchronous work), the same check the typed client applies after its decode. `pending` is the caller's whole result; the record is
+   * read only after it has settled, in the step that decides, and the result is handed back with nothing asynchronous in between. It
+   * rejects with `StampedRequestError("stale")` when the durable record no longer names `account` and `epoch`, cannot be read in time,
+   * or the session was disposed meanwhile; a rejected `pending` is passed on untouched.
+   */
+  seal<T>(
+    account: AccountId,
+    epoch: Epoch,
+    pending: Promise<T> | T,
+  ): Promise<T>;
+  /**
+   * WEB-09b: a READ of what decides whether a request of `klass` for (account, epoch) would be admitted now, for a caller whose request
+   * was refused before it was sent and that waits for that to change. `revision` is opaque (a digest of the settled stamp, a gating
+   * attempt, the account's fences, the other pages' request leases, and this page's hold, closing write and CSRF token); `blocked` says
+   * whether one of them refuses the request now. A hint, never a permission: the cover still decides. Null when the record cannot be
+   * read in time. It writes nothing, takes no lease and waits for no lock.
+   */
+  admission(
+    klass: RequestClass,
+    account: AccountId,
+    epoch: Epoch,
+  ): Promise<RequestAdmission | null>;
+}
+
+/** The answer of `StampedApi.admission`. */
+export interface RequestAdmission {
+  readonly revision: string;
+  readonly blocked: boolean;
 }
 
 // ---- attempts (WEB-08b builds registration and OIDC on this; the password method is delivered here) -----------------
@@ -248,6 +278,12 @@ export interface Recovery {
   >;
   /** WEB-09b reports the job's phase so the neutral states 2 and 3 can show; it changes no protection. */
   report(phase: "catching_up" | "failed" | null): void;
+  /**
+   * WEB-09b: the person pressed the neutral state's "Try again" (`actions.retry`). The sync leader of the page listens, so that state 3
+   * ("Couldn't finish catching up") reaches the recovery job that owns the attempt (on this page, or the leading page through
+   * `atlas-sync`). It is a request, never a permission: it changes no protection, and the job's own checks decide what it resets.
+   */
+  onRetry(listener: () => void): () => void;
 }
 
 // ---- the canonical deletion procedure (WEB-04 7.8) -----------------------------------------------------------------

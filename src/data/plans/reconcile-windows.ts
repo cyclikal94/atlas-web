@@ -45,8 +45,10 @@ export interface WindowedReconcile {
   /** Rows in hand at once. */
   window: number;
   /**
-   * WEB-09b's recovery mode (matrix 3.7.3, P-7): only the effects of ACKNOWLEDGED drafts are reconciled (their receipt bookkeeping), the
-   * rows of unsent work are never written, and nothing is deleted. Absent: the ordinary page, exactly as before.
+   * WEB-09b's recovery mode (matrix 3.7.3: the recovery touches NO draft, `pending_effects` or outbox entry; R8 of the review of 10
+   * October 2026): no effect row and no draft is read for writing or written at all, and no tracked version is deleted. The page's
+   * delivered versions are still recorded (cache-side bookkeeping). The receipt bookkeeping it skips is done after the recovery, as an
+   * ordinary write once the account is displayed (W26). Absent: the ordinary page, exactly as before.
    */
   recovery?: boolean;
 }
@@ -272,12 +274,11 @@ export async function reconcileInWindows(
       facts,
       window,
       stats,
-      ...(input.recovery === true
-        ? { select: acknowledgedOnly, deletes: false }
-        : {}),
     });
 
-  if (input.walkAllEffects) {
+  if (input.recovery === true) {
+    // Nothing of the queue (R8): the effects and their drafts are left exactly as they are.
+  } else if (input.walkAllEffects) {
     let after: Key | null = null;
     for (;;) {
       const rows: PendingEffectRow[] = await reader.byIndex(

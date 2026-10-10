@@ -205,6 +205,8 @@ export type RecoveryCapture =
       operations?: readonly string[];
       /** `blocked`: the version of the whole-attempt failure a "Try again" ends. */
       budgetVersion?: number;
+      /** `not_needed`: a recovery-mode data commit left the queue's receipt bookkeeping owed (W26 does it once displayed, R8). */
+      reconcilePending?: true;
     };
 
 /**
@@ -243,7 +245,15 @@ export const captureRecoveryRequest = singletonPlan<
       return { result: { kind: "gated", reason: "owner" } };
     const snapshot = input.path === "snapshot";
     if (snapshot ? !needsSnapshot(sync) : needsSnapshot(sync))
-      return { result: { kind: "gated", reason: "not_needed" } };
+      return {
+        result: {
+          kind: "gated",
+          reason: "not_needed",
+          ...(sync.recovery_reconcile_pending === true
+            ? { reconcilePending: true as const }
+            : {}),
+        },
+      };
     const fields = recoveryFields(sync);
     const blocked = blockedBy(sync);
     if (blocked !== null && input.allowBlocked !== true)
@@ -610,6 +620,9 @@ export const activateSnapshot = guardedPlan<
         sync_error_streak: 0,
         delta_error_streak: 0,
         recovery_attempt_streak: 0,
+        // R8: in recovery mode the receipt bookkeeping is owed to the ordinary write after the recovery (W26); an ordinary activation
+        // does it here, in this transaction, against the new cache, and so settles anything a recovery left owed.
+        recovery_reconcile_pending: input.mode === "recovery",
       },
       result: {
         kind: "activated",
@@ -659,18 +672,27 @@ export const activateSnapshot = guardedPlan<
       if (late()) throw new PlanRejected("apply", "watchdog");
       if (staged.length < size) break;
     }
-    // 3. The receipt bookkeeping of acknowledged drafts the snapshot covers (P-7), then the tracked versions, against the new cache.
+    // 3. In ORDINARY mode, the receipt bookkeeping of acknowledged drafts the snapshot covers (P-7); in recovery mode none (R8: the
+    // recovery touches no draft, `pending_effects` or outbox entry; W26 does it once the account is displayed). Then the tracked
+    // versions, against the new cache (nothing deleted in recovery mode).
     const window = Math.max(
       1,
       input.reconcileWindow ?? DATA_CONFIG.queueWorkingSet,
     );
-    const stats = await reconcileReceipts(reader, sink, {
-      boundary: result.revision,
-      pageSeq: result.pageSeq,
-      window,
-      deletes: input.mode !== "recovery",
-      late,
-    });
+    const stats =
+      input.mode === "recovery"
+        ? {
+            mentioned: 0,
+            resolvedNoPublication: 0,
+            heldReleased: 0,
+            unavailable: 0,
+          }
+        : await reconcileReceipts(reader, sink, {
+            boundary: result.revision,
+            pageSeq: result.pageSeq,
+            window,
+            late,
+          });
     await reconcileTrackedVersions(reader, sink, {
       window,
       deletes: input.mode !== "recovery",
@@ -698,7 +720,6 @@ async function reconcileReceipts(
     boundary: number | null;
     pageSeq: number;
     window: number;
-    deletes: boolean;
     late(): boolean;
   },
 ): Promise<Reconciled["stats"]> {
@@ -750,7 +771,6 @@ async function reconcileReceipts(
         window: options.window,
         stats,
         select: acknowledgedOnly,
-        deletes: options.deletes,
       });
     }
     if (options.late()) throw new PlanRejected("apply", "watchdog");
@@ -813,51 +833,47 @@ async function reconcileTrackedVersions(
 }
 
 // ---- W24 ------------------------------------------------------------------------------------------------------------------------
-export type RecoveryOutcomeResult =
-  | { kind: "dropped"; reason: "absent" | "closing" | "owner" | "generation" }
-  | {
-      kind: "recorded";
-      syncErrorStreak: number;
-      deltaErrorStreak: number;
-      recoveryAttemptStreak: number;
-      blocked: BlockedBy;
-      abandoned: boolean;
-      recoveryGeneration: number;
-      budgetVersion: number;
-    };
+export interface RecoveryOutcome {
+  syncErrorStreak: number;
+  deltaErrorStreak: number;
+  recoveryAttemptStreak: number;
+  blocked: BlockedBy;
+  abandoned: boolean;
+  recoveryGeneration: number;
+  budgetVersion: number;
+}
 
 /**
  * W24: what one answer does to the recovery-scoped counters (`budgetStep`) and, when the attempt is ABANDONED (a cursor defect, a tripped
  * per-cursor bound, `410`, `409 access_changed`), the abandonment in the same transaction: staging cleared, a new generation, a cursor-less
  * restart, and a cache that was still `valid` (a catch-up cursor abandoned) made `invalid`. It writes NOTHING of the draft queue and drops no
- * overlay (P-7; the cache gate hides the cache while it is invalid). Only the binding that owns the attempt (OWN, GEN) may record it: the
- * answer of a superseded binding counts nothing.
+ * overlay (P-7; the cache gate hides the cache while it is invalid).
+ *
+ * It is RESPONSE-DERIVED, so it is admitted exactly as a page is (R5 of the review of 10 October 2026): through `AccountService.commit`
+ * with the request's `Captured` stamp (G1, G2, the persistence hold G5 and the in-transaction G2b/G5b), and the guards of the data
+ * transaction: the incarnation, a closing fence, the generation and the ownership the request was captured under (OWN, GEN: the answer of
+ * a superseded binding counts nothing) and the epoch mirror (EPO: an answer of an earlier epoch, decoded after a re-authentication, clears
+ * no staging, invalidates no newer cache and consumes no budget).
  */
-export const recordRecoveryOutcome = singletonPlan<
+export const recordRecoveryOutcome = guardedPlan<
   {
-    incarnationId: string;
-    token: string;
-    recoveryGeneration: number;
+    captured: Captured;
     event: BudgetEvent;
     config?: Partial<RecoveryConfig>;
   },
   null,
-  RecoveryOutcomeResult
+  RecoveryOutcome
 >({
   name: "data.recordRecoveryOutcome",
-  meta: { writer: "W24", guards: ["INC", "CLS", "OWN", "GEN"], quota: null },
+  meta: {
+    writer: "W24",
+    guards: ["INC", "CLS", "GEN", "OWN", "EPO"],
+    quota: null,
+  },
   scope: ["cache_staging"],
   durability: "strict",
   read: async () => null,
   decide: ({ sync, input }) => {
-    if (sync === undefined)
-      return { result: { kind: "dropped", reason: "absent" } };
-    if (sync.draft_fence?.closing === true)
-      return { result: { kind: "dropped", reason: "closing" } };
-    if (!owns(sync, input.token))
-      return { result: { kind: "dropped", reason: "owner" } };
-    if (sync.recovery_generation !== input.recoveryGeneration)
-      return { result: { kind: "dropped", reason: "generation" } };
     const config = recoveryConfig(input.config);
     const fields = recoveryFields(sync);
     const step = budgetStep(fields, input.event, config);
@@ -891,7 +907,6 @@ export const recordRecoveryOutcome = singletonPlan<
       writes: step.abandon ? [w.clear("cache_staging")] : [],
       sync: next,
       result: {
-        kind: "recorded",
         syncErrorStreak: step.sync_error_streak,
         deltaErrorStreak: step.delta_error_streak,
         recoveryAttemptStreak: step.recovery_attempt_streak,
@@ -942,5 +957,81 @@ export const resetRecoveryBudget = singletonPlan<
       sync: { ...sync, recovery_attempt_streak: 0 },
       result: { cleared: true, budgetVersion: fields.recovery_budget_version },
     };
+  },
+});
+
+// ---- W26 ------------------------------------------------------------------------------------------------------------------------
+export type OwedReconcileResult =
+  | { kind: "none" }
+  | { kind: "reconciled"; stats: Reconciled["stats"] };
+
+/**
+ * W26 (R8 of the review of 10 October 2026): the receipt bookkeeping a RECOVERY-mode data commit owed (`recovery_reconcile_pending`),
+ * done as an ORDINARY write once the account is displayed, so that the recovery itself touches no draft, `pending_effects` or outbox entry
+ * (matrix 3.7.3, the approved brief). It is what an ordinary activation does in its own transaction (P-7), against the cache as it is
+ * NOW: the cache is valid at `applied_revision`, so an acknowledged draft's effect whose receipt is at or below it is decided by the cache
+ * (held there: a mention; not held: not published to this account), and every tracked version is reconciled with deletion allowed. Only
+ * ACKNOWLEDGED drafts take part: unsent work is never written. Admitted with the displayed epoch's stamp for the binding that owns the
+ * database (OWN), never while a wipe is closing; a cache that is not valid owes nothing yet (the next activation settles it).
+ */
+export const reconcileOwedReceipts = guardedPlan<
+  {
+    captured: Captured;
+    elapsed?: () => number;
+    watchdogMs?: number;
+    window?: number;
+  },
+  null,
+  OwedReconcileResult
+>({
+  name: "data.reconcileOwedReceipts",
+  meta: { writer: "W26", guards: ["INC", "CLS", "OWN", "EPO"], quota: null },
+  scope: [
+    "cache",
+    "pending_effects",
+    "drafts",
+    "draft_commands",
+    "resource_versions",
+  ],
+  durability: "default",
+  read: async () => null,
+  decide: ({ sync }) => {
+    if (
+      sync.recovery_reconcile_pending !== true ||
+      sync.cache_status !== "valid"
+    )
+      return { result: { kind: "none" } };
+    return {
+      sync: { ...sync, recovery_reconcile_pending: false },
+      result: {
+        kind: "reconciled",
+        stats: {
+          mentioned: 0,
+          resolvedNoPublication: 0,
+          heldReleased: 0,
+          unavailable: 0,
+        },
+      },
+    };
+  },
+  async apply(sink, { sync, reader, input, result }) {
+    if (result.kind !== "reconciled") return result;
+    const elapsed = input.elapsed ?? (() => performance.now());
+    const watchdogMs = input.watchdogMs ?? DATA_CONFIG.syncApplyWatchdogMs;
+    const startedAt = elapsed();
+    const late = (): boolean => elapsed() - startedAt > watchdogMs;
+    const window = Math.max(1, input.window ?? DATA_CONFIG.queueWorkingSet);
+    const stats = await reconcileReceipts(reader, sink, {
+      boundary: sync.applied_revision,
+      pageSeq: sync.page_seq,
+      window,
+      late,
+    });
+    await reconcileTrackedVersions(reader, sink, {
+      window,
+      deletes: true,
+      late,
+    });
+    return { kind: "reconciled", stats };
   },
 });

@@ -91,6 +91,20 @@ export function adoptDecision(
  * catch-up path uses WEB-09a's own delta-page identity, `page:<cursor>`.
  */
 export const SNAPSHOT_PAGE_PREFIX = "snapshot-page:";
+
+/**
+ * The fixed identities of the sync writers' own bookkeeping writes in `local_write_streaks` (the engine's capture, read-retry and sizing
+ * writes, the recovery job's capture and budget writes), named here as values so that the follower's facts (`plans/facts.ts`) can tell a
+ * sync writer's stop from the outbox's without importing the writers. `tests/data/follower-status.test.tsx` holds them equal to the
+ * writers' own constants.
+ */
+export const SYNC_WRITER_OPERATIONS: readonly string[] = [
+  "capture",
+  "retry-state",
+  "sizing",
+  "recovery-capture",
+  "recovery-budget",
+];
 export const snapshotPageOperation = (position: string | null): string =>
   position === null
     ? `${SNAPSHOT_PAGE_PREFIX}start`

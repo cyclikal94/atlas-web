@@ -169,26 +169,32 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
       target_resource_ids: ["r1"],
       created_at: "2026-10-01T08:04:00",
     });
-  /** A stub controller whose cache holds `base` for every id (the merged read of one resource). */
-  const withCache = (
+  /**
+   * A stub controller whose CACHE holds `cached` for every id, and whose authorised current-state read answers `read`. ADAPTED (R7 of
+   * the review of 10 October 2026): these cases originally gave the dialog only a cache (`useCachedResource`) and asserted it as
+   * "Currently saved"; the approved amendment requires an authorised CURRENT-STATE read. The cache is still planted (with a different,
+   * stale value) so that each case also shows the cache is never what the dialog presents or rebuilds on.
+   */
+  const withRead = (
     env: StubEnv,
-    base: ReturnType<typeof cacheRow> | null | "failed",
+    read: StubEnv["currentRead"],
+    cached: ReturnType<typeof cacheRow> | null = cacheRow({
+      id: "r1",
+      label: "STALE cached value",
+      version: 1,
+    }),
   ) => {
-    // One stable snapshot, as a live query holds one between changes.
-    const snapshot =
-      base === "failed"
-        ? { status: "unavailable", reason: "error" }
-        : {
-            status: "ready",
-            value: {
-              base,
-              effects: [],
-              creates: [],
-              createsTotal: 0,
-              createsNext: null,
-              merged: base,
-            },
-          };
+    const snapshot = {
+      status: "ready",
+      value: {
+        base: cached,
+        effects: [],
+        creates: [],
+        createsTotal: 0,
+        createsNext: null,
+        merged: cached,
+      },
+    };
     const watchable = { get: () => snapshot, subscribe: () => () => undefined };
     const service = {
       account: "a",
@@ -199,17 +205,20 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
     Object.assign(env, {
       service: () => service,
       serviceStore: { get: () => service, subscribe: () => () => undefined },
+      currentRead: read,
     });
     return env;
   };
+  const loaded = (row: ReturnType<typeof cacheRow>) =>
+    ({ kind: "loaded", value: row }) as const;
 
-  test("U-5 a version conflict: the saved state beside the retained change; Discard mine asks first; no resend without a registered rebuild", async () => {
-    const env = withCache(
+  test("U-5 a version conflict: the CURRENT saved state (the authorised read, not the cache) beside the retained change; Discard mine asks first; no resend without a registered rebuild", async () => {
+    const env = withRead(
       stubEnv(),
-      cacheRow({ id: "r1", label: "Fed at 08:02", version: 4 }),
+      loaded(cacheRow({ id: "r1", label: "Fed at 08:02", version: 4 })),
     );
     const onClose = vi.fn();
-    const { container } = mount(
+    mount(
       env,
       <ItemDetailDialog
         draft={conflict("version_conflict")}
@@ -228,8 +237,10 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
     const current = dialog.querySelector(
       '[data-compare="current"]',
     ) as HTMLElement;
-    expect(current).toHaveTextContent("Fed at 08:02");
+    await waitFor(() => expect(current).toHaveTextContent("Fed at 08:02"));
     expect(current).toHaveTextContent(copy.DETAIL_VERSION(4));
+    expect(current).not.toHaveTextContent("STALE cached value");
+    expect(env.reads).toEqual([conflict("version_conflict").local_id]);
     expect(dialog.querySelector('[data-compare="retained"]')).toHaveTextContent(
       "Feed cat",
     );
@@ -249,11 +260,11 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
       ]),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    void container;
   });
 
-  test("U-6 a registered rebuild offers 'Resend as a new operation', which asks the data layer to save it as new", async () => {
-    const env = withCache(stubEnv(), cacheRow({ id: "r1", version: 4 }));
+  test("U-6 a registered rebuild offers 'Resend as a new operation', which asks the data layer to save it as new ON THE VALUE THE READ RETURNED", async () => {
+    const server = cacheRow({ id: "r1", label: "Fed at 08:02", version: 4 });
+    const env = withRead(stubEnv(), loaded(server));
     env.commands.register("edit", {
       describe: () => "Feed cat",
       rebuild: () => null,
@@ -269,9 +280,20 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
         onRemoved={() => {}}
       />,
     );
+    // The action is disabled while the read loads; it is enabled (a new element) once the read has loaded.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: copy.DETAIL_RESEND }),
+      ).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: copy.DETAIL_RESEND }));
     await waitFor(() =>
-      expect(env.calls.map((c) => c.action)).toEqual(["saveAsNew"]),
+      expect(env.calls).toEqual([
+        {
+          action: "saveAsNew",
+          args: [conflict("version_conflict").local_id, server],
+        },
+      ]),
     );
     // The stub declined: the change is kept and the dialog says so.
     expect(
@@ -280,16 +302,16 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
   });
 
   test("U-7 an operation conflict: the corrected copy and the honest limit; the new attempt waits for the read, or an explicit choice when it fails", async () => {
-    const loaded = withCache(
+    const env = withRead(
       stubEnv(),
-      cacheRow({ id: "r1", label: "Fed at 08:02" }),
+      loaded(cacheRow({ id: "r1", label: "Fed at 08:02" })),
     );
-    loaded.commands.register("edit", {
+    env.commands.register("edit", {
       describe: () => "Feed cat",
       rebuild: () => null,
     });
     const { container } = mount(
-      loaded,
+      env,
       <ItemDetailDialog
         draft={conflict("operation_conflict")}
         title="Feed cat"
@@ -304,14 +326,19 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
       within(dialog).getByText(copy.DETAIL_OPERATION_TITLE),
     ).toBeInTheDocument();
     expect(dialog).toHaveTextContent(copy.DETAIL_OPERATION_BODY);
-    expect(dialog).toHaveTextContent(copy.DETAIL_OPERATION_LIMIT);
+    await waitFor(() =>
+      expect(dialog).toHaveTextContent(copy.DETAIL_OPERATION_LIMIT),
+    );
     expect(dialog.textContent).not.toMatch(/already recorded.*sent twice/i);
     expect(
       within(dialog).getByRole("button", { name: copy.DETAIL_SAVE_NEW }),
     ).toBeEnabled();
     expect((await axe(container)).violations).toEqual([]);
     cleanup();
-    const failing = withCache(stubEnv(), "failed");
+    const failing = withRead(stubEnv(), {
+      kind: "failed",
+      reason: "inaccessible",
+    });
     failing.commands.register("edit", {
       describe: () => "Feed cat",
       rebuild: () => null,
@@ -327,9 +354,14 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
         onRemoved={() => {}}
       />,
     );
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-compare="current"]'),
+      ).toHaveTextContent(copy.DETAIL_READ_FAILED),
+    );
     expect(
       document.querySelector('[data-compare="current"]'),
-    ).toHaveTextContent(copy.DETAIL_READ_FAILED);
+    ).not.toHaveTextContent("STALE cached value");
     expect(
       screen.getByRole("button", { name: copy.DETAIL_SAVE_NEW }),
     ).toBeDisabled();
@@ -342,10 +374,86 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
     expect(
       screen.getByRole("button", { name: copy.DETAIL_SAVE_NEW }),
     ).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: copy.DETAIL_SAVE_NEW }));
+    // Continued explicitly without the read: rebuilt on nothing, never on the stale cache.
+    await waitFor(() =>
+      expect(failing.calls).toEqual([
+        {
+          action: "saveAsNew",
+          args: [conflict("operation_conflict").local_id, null],
+        },
+      ]),
+    );
   });
 
-  test("U-8 the online-only variant: nothing to compare or resend; and a failed row of the queue opens the dialog from 'Details'", async () => {
-    const env = withCache(stubEnv(), null);
+  test("U-7b R7: while the read loads the new attempt is disabled (both variants); a stale cache never stands in for it", async () => {
+    for (const variant of ["operation_conflict", "version_conflict"] as const) {
+      const env = withRead(
+        stubEnv(),
+        () => new Promise<never>(() => undefined),
+      );
+      env.commands.register("edit", {
+        describe: () => "Feed cat",
+        rebuild: () => null,
+      });
+      mount(
+        env,
+        <ItemDetailDialog
+          draft={conflict(variant)}
+          title="Feed cat"
+          variant={variant}
+          open
+          onClose={() => {}}
+          onRemoved={() => {}}
+        />,
+      );
+      const current = document.querySelector(
+        '[data-compare="current"]',
+      ) as HTMLElement;
+      expect(current.querySelector('[aria-busy="true"]')).not.toBeNull();
+      expect(current).not.toHaveTextContent("STALE cached value");
+      expect(
+        screen.getByRole("button", {
+          name:
+            variant === "operation_conflict"
+              ? copy.DETAIL_SAVE_NEW
+              : copy.DETAIL_RESEND,
+        }),
+      ).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: copy.DETAIL_PROCEED_WITHOUT }),
+      ).toBeNull();
+      cleanup();
+    }
+  });
+
+  test("U-7c R7: an indeterminate read is shown plainly; the queued attempt is kept, never auto-discarded or resubmitted", async () => {
+    const env = withRead(stubEnv(), { kind: "indeterminate" });
+    env.commands.register("edit", {
+      describe: () => "Feed cat",
+      rebuild: () => null,
+    });
+    mount(
+      env,
+      <ItemDetailDialog
+        draft={conflict("operation_conflict")}
+        title="Feed cat"
+        variant="operation_conflict"
+        open
+        onClose={() => {}}
+        onRemoved={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-compare="current"]'),
+      ).toHaveTextContent(copy.DETAIL_INDETERMINATE),
+    );
+    expect(env.calls).toEqual([]);
+  });
+
+  test("U-8 the online-only variant: nothing to compare or resend (and no read is made); and a failed row of the queue opens the dialog from 'Details'", async () => {
+    const env = withRead(stubEnv(), { kind: "failed", reason: "unavailable" });
     const { container } = mount(
       env,
       <ItemDetailDialog
@@ -360,10 +468,12 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveTextContent(copy.DETAIL_ONLINE_ONLY);
     expect(dialog.querySelector("[data-compare]")).toBeNull();
+    expect(env.reads).toEqual([]);
     expect((await axe(container)).violations).toEqual([]);
     cleanup();
-    const panelEnv = withCache(
+    const panelEnv = withRead(
       stubEnv({ drafts: [conflict("version_conflict")] }),
+      { kind: "indeterminate" },
       null,
     );
     mount(panelEnv, <QueuePanel tab="decision" onTabChange={() => {}} />);
@@ -372,8 +482,10 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
         name: new RegExp(`^${copy.DETAIL_ACTION}`),
       }),
     );
-    expect(screen.getByRole("dialog")).toHaveTextContent(
-      copy.DETAIL_INDETERMINATE,
+    await waitFor(() =>
+      expect(screen.getByRole("dialog")).toHaveTextContent(
+        copy.DETAIL_INDETERMINATE,
+      ),
     );
   });
 });

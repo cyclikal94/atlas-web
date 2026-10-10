@@ -470,3 +470,40 @@ describe("F: reconciliation row 6 case (f), two pages, the leader lock held thro
     expect(w.requests.filter((r) => r.page === "B")).toEqual([]);
   });
 });
+
+describe("L-13: an account switch while the old account's request is in flight (R4 of the review of 10 October 2026)", () => {
+  test("the new account's binding starts its own snapshot as soon as the old step ends, with no further notification; the old answer applies nothing", async () => {
+    const w = leaderWorld();
+    let release: (r: Response) => void = () => undefined;
+    w.server = (request) => {
+      if (request.path !== "/sync") return w.status(404);
+      if (request.account === A && request.cursor === null)
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      if (request.cursor === null) return w.json(snapshot());
+      return w.json({
+        phase: "delta",
+        hasMore: false,
+        nextCursor: request.cursor,
+        batches: [],
+      });
+    };
+    const one = w.page("A");
+    await w.settle();
+    expect(syncs(w).map((r) => r.account)).toEqual([A]);
+    // The person switches to B: the leader rebinds (A's ownership aborted, B opened and owned) while A's request is still held, so the
+    // job's step for A is still busy when it is bound to B.
+    one.identity.move(B);
+    await w.settle();
+    expect(one.leader.binding.get()?.account).toBe(B);
+    release(w.json(snapshot()));
+    await w.settle();
+    await w.advance(1_000);
+    const forB = syncs(w).filter((r) => r.account === B);
+    expect(forB.length).toBeGreaterThan(0);
+    expect(w.sync(B)?.cache_status).toBe("valid");
+    // A's late answer wrote nothing to A's database (its binding was aborted; A's attempt is still the one it captured).
+    expect(w.sync(A)?.cache_status).not.toBe("valid");
+  });
+});

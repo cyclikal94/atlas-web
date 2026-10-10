@@ -1,19 +1,27 @@
-import type { BrowserContext, Page } from "@playwright/test";
 import {
   ACCOUNT,
+  arrange,
+  BLOCKED,
   deltaPage,
+  displayed,
+  draft,
   failStagingWrites,
   failStoreWrites,
   fencedAfterReauth,
+  fencedWithCursor,
+  fencesOf,
+  fresh,
   held,
   holdActivation,
   holdFinishAfterCommit,
-  type LeaderNet,
   leaderNetwork,
   leaderOf,
   leaderPage,
   leaderPageAfter,
+  ownerTab,
+  QUEUED,
   rowsOf,
+  SNAP,
   seedAuth,
   snapshotPage,
   stagingFaultHits,
@@ -40,38 +48,6 @@ import { expect, test } from "./helpers";
  *   E-R1  matrix 3.7.3: a fenced account (settled at epoch 2 over an epoch-1 `invalid_session` entry) is caught up from its saved cursor
  *         while hidden, then `finish` clears the fence and the account is displayed; unsent drafts are byte-identical.
  */
-const SNAP = (n: number[]) => n.map((i) => upsert(i, { n: i }));
-
-async function fresh(context: BrowserContext): Promise<LeaderNet> {
-  const net = await leaderNetwork(context);
-  await seedAuth(context);
-  return net;
-}
-
-/** A database for ACCOUNT, created and arranged in a page that runs no session (`?boot=off`), before any leader page boots. */
-async function arrange(
-  context: BrowserContext,
-  steps: (page: Page) => Promise<void>,
-): Promise<void> {
-  const page = await context.newPage();
-  await page.goto("/__session?boot=off");
-  await page.waitForFunction(() => window.__atlasData !== undefined);
-  await page.evaluate(async (account) => {
-    const data = window.__atlasData;
-    if (!data) throw new Error("no harness");
-    data.setIdentity(account);
-    const opened = await data.open(account, { create: true });
-    if (opened !== "created" && opened !== "opened")
-      throw new Error(`arrange: ${opened}`);
-  }, ACCOUNT);
-  await steps(page);
-  await page.evaluate((account) => window.__atlasData?.close(account), ACCOUNT);
-  await page.close();
-}
-
-const ownerTab = async (page: Page): Promise<string | null> =>
-  ((await syncStateOf(page))?.owner as { tab_id?: string } | null)?.tab_id ??
-  null;
 
 test.describe("E-B: production leadership and the first snapshot", () => {
   test("E-B1 one leader among three pages; the followers send nothing and report a follower's status", async ({
@@ -315,102 +291,6 @@ test.describe("E-B13: the recovery-scoped budget in a real engine (trace 6)", ()
   });
 });
 
-/** A draft row and its body, as the enqueue plan writes them (a FIXTURE arrangement, written by the harness). */
-const draft = (localId: string, status: string, seq: number) => ({
-  header: {
-    local_id: localId,
-    account_id: ACCOUNT,
-    endpoint: "/commands",
-    target_id: null,
-    kind: "note",
-    command_digest: "d".repeat(64),
-    defaults_revision: null,
-    target_resource_ids: [],
-    side_effect_bases: {},
-    index_targets: [],
-    bases: {},
-    bumped: [],
-    defaults_context: null,
-    review_block: null,
-    depends_on: [],
-    status,
-    ...(status === "blocked" ? { blocked_reason: "slice_capacity" } : {}),
-    held_pending_cache: false,
-    unavailable_outcome: false,
-    retry_state: null,
-    attempts: 0,
-    last_attempt_at: null,
-    last_error: null,
-    display_patch: null,
-    receipt_revision: null,
-    created_seq: seq,
-    created_at: new Date().toISOString(),
-  },
-  body: {
-    local_id: localId,
-    command: { kind: "note", text: `${localId} body` },
-  },
-});
-const QUEUED = "11111111-0000-4000-8000-000000000001";
-const BLOCKED = "11111111-0000-4000-8000-000000000002";
-
-async function fencedWithCursor(context: BrowserContext): Promise<LeaderNet> {
-  const net = await leaderNetwork(context);
-  await seedAuth(context, fencedAfterReauth());
-  await arrange(context, async (page) => {
-    await page.evaluate(
-      async ([account, rows]) => {
-        const data = window.__atlasData;
-        await data?.seedDelta(account, "delta-0");
-        await data?.put(account, "cache", [
-          {
-            id: "00000000-0000-4000-8000-000000000040",
-            kind: "task",
-            parent_id: null,
-            label: "kept",
-            value: null,
-            version: 1,
-            can_edit: true,
-            archived: false,
-            kind_date: null,
-          },
-        ]);
-        await data?.put(
-          account,
-          "drafts",
-          rows.map((r) => r.header),
-        );
-        await data?.put(
-          account,
-          "draft_commands",
-          rows.map((r) => r.body),
-        );
-      },
-      [
-        ACCOUNT,
-        [draft(QUEUED, "queued", 1), draft(BLOCKED, "blocked", 2)],
-      ] as const,
-    );
-  });
-  return net;
-}
-
-const displayed = (page: Page) =>
-  page.waitForFunction(
-    () =>
-      document.getElementById("protected-root")?.getAttribute("inert") === null,
-    undefined,
-    { timeout: 15_000 },
-  );
-const fencesOf = async (page: Page): Promise<unknown[]> =>
-  (
-    (await page.evaluate(() =>
-      window.__atlasFixture?.session?.readRecords(),
-    )) as {
-      auth_state: { fences: Record<string, unknown[]> };
-    }
-  ).auth_state.fences[ACCOUNT] ?? [];
-
 test.describe("E-R: matrix 3.7.3 recovery while fenced", () => {
   test("E-R1 T24 A and E: a valid saved cursor is caught up while hidden, `finish` clears the fence, the account is displayed; the unsent work is byte-identical and the queued draft is sent once, after, with its own key", async ({
     context,
@@ -530,9 +410,10 @@ test.describe("E-B14 and E-B11: local writes of the snapshot in a real engine", 
     });
     expect(await stagingFaultHits(page)).toBe(3);
     expect(net.calls.map((c) => c.cursor)).toEqual([null, null, null]);
-    // The stop is durable: the reloaded page sends nothing.
+    // The stop is durable: the reloaded page sends nothing. It is reloaded on the queue screen (`/sync`), whose notices are the
+    // person's.
     net.label(page, "reloaded");
-    page = await leaderPage(context, net, "reloaded", page);
+    page = await leaderPage(context, net, "reloaded", page, { route: "/sync" });
     const still = await untilLeader(page, (v) =>
       JSON.stringify(v.job).includes("local_storage"),
     );
@@ -542,8 +423,12 @@ test.describe("E-B14 and E-B11: local writes of the snapshot in a real engine", 
     });
     await page.waitForTimeout(1_000);
     expect(net.calls.filter((c) => c.page === "reloaded")).toEqual([]);
-    // "Retry applying changes": the whole page is asked for again and activates.
-    await page.evaluate(() => window.__atlasFixture?.session?.leaderRetry());
+    // "Retry applying changes": the whole page is asked for again and activates. ADAPTED (R2 of the review of 10 October 2026): the
+    // person's VISIBLE action on the notice, not the fixture-only `leaderRetry()` this case first called (a fixture method is not
+    // evidence for the action).
+    await page
+      .getByRole("button", { name: "Retry applying changes", exact: true })
+      .click();
     const done = await untilSync(page, (s) => s?.cache_status === "valid");
     expect(done?.cursor).toBe("delta-1");
   });
@@ -618,8 +503,14 @@ test.describe("E-R: matrix 3.7.3 recovery while fenced (the failures)", () => {
       ),
     ).toBe(true);
     expect((await syncStateOf(page))?.cursor).toBe("delta-0");
-    // "Retry applying changes": the whole page again, from the same position; then the data commit and `finish`.
-    await page.evaluate(() => window.__atlasFixture?.session?.leaderRetry());
+    // State 3's "Try again": the whole page again, from the same position; then the data commit and `finish`. ADAPTED (R2 of the review
+    // of 10 October 2026): the person's VISIBLE action on the neutral state ("Couldn't finish catching up"), not the fixture-only
+    // `leaderRetry()` this case first called. The reviewer's comparison (`.agtx/evidence/review-1/native-retry-2*`) found this click did
+    // nothing before the fix.
+    await expect(
+      page.getByRole("heading", { name: "Couldn't finish catching up" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
     await displayed(page);
     expect((await syncStateOf(page))?.cursor).toBe("delta-1");
     expect(await fencesOf(page)).toEqual([]);

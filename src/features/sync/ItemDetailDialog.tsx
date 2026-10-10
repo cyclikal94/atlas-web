@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
 import {
+  type CacheRow,
+  type CurrentRead,
   type DraftRow,
-  useCachedResource,
   useDataActions,
   useDataEnv,
 } from "../../data";
@@ -23,6 +24,7 @@ import {
   DETAIL_PROCEED_WITHOUT,
   DETAIL_QUEUED_SINCE,
   DETAIL_READ_FAILED,
+  DETAIL_READ_LOADING,
   DETAIL_REF,
   DETAIL_RESEND,
   DETAIL_RETAINED,
@@ -44,12 +46,18 @@ import { formatSavedAt } from "./rows";
  * WF-QUEUE-02, the GENERIC item-detail dialog (`gaps/queue-02-desktop.html`; owner WEB-09b in `design-gallery.md`). Opened only from
  * a failed row of WF-QUEUE-01 (its one drawn state is the error detail). It reuses the dialog shell and states what the store holds:
  *
- *  - a VERSION CONFLICT: the resource as it is saved now (an ordinary authorised read of the cache, never the overlay) beside the
- *    retained, unsent change, with "Discard mine" and, ONLY when the command's slice registered `rebuild`, "Resend as a new operation";
+ *  - a VERSION CONFLICT: the resource as the SERVER holds it now beside the retained, unsent change, with "Discard mine" and, ONLY when
+ *    the command's slice registered `rebuild`, "Resend as a new operation";
  *  - an OPERATION CONFLICT (the corrected copy of `design-coverage.md` row 5): the target's current state with the honest limit of what
- *    it proves, "Discard queued attempt" and, only with `rebuild`, "Review and save as a new attempt", disabled until the read has
- *    loaded, or until the person explicitly continues without it when the read fails;
+ *    it proves (never attributed to the collided operation), "Discard queued attempt" and, only with `rebuild`, "Review and save as a
+ *    new attempt";
  *  - the ONLINE-ONLY variant: nothing to compare or resend.
+ *
+ * "Currently saved" is the result of the kind's AUTHORISED CURRENT-STATE read (`actions.readCurrent`, an ordinary stamped request; R7 of
+ * the review of 10 October 2026), never the cache, which may predate the conflict, be paused or offline, or still hold a resource whose
+ * access has changed. Its four states are kept apart: loading (the new attempt is disabled), loaded (compared, and the value the new
+ * attempt is rebuilt on), indeterminate (shown plainly, nothing forced), and failed ("Couldn't load the current state of this item to
+ * compare.", the new attempt disabled until the person explicitly continues without it). Discarding needs no read.
  *
  * No command-specific comparison is invented (no command kind exists yet): a feature slice's registered description is the title. All
  * copy not quoted from the wireframe is PROPOSED, pending Kieran's visual and copy sign-off. Closing the dialog keeps the change.
@@ -97,7 +105,10 @@ export function ItemDetailDialog({
   const actions = useDataActions();
   const announcer = useAnnouncer();
   const target = draft.target_resource_ids[0];
-  const current = useCachedResource(target ?? "");
+  const current = useCurrentRead(
+    draft.local_id,
+    open && variant !== "online_only" && target !== undefined,
+  );
   const rebuildable = env.commands.canRebuild(draft);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -107,14 +118,15 @@ export function ItemDetailDialog({
   const read =
     target === undefined
       ? ("indeterminate" as const)
-      : current.status === "ready"
-        ? current.value.base === null
-          ? ("indeterminate" as const)
-          : ("loaded" as const)
-        : current.status === "loading"
-          ? ("loading" as const)
-          : ("failed" as const);
-  const base = current.status === "ready" ? current.value.base : null;
+      : current === null
+        ? ("loading" as const)
+        : current.kind === "loaded"
+          ? ("loaded" as const)
+          : current.kind === "indeterminate"
+            ? ("indeterminate" as const)
+            : ("failed" as const);
+  const base: CacheRow | null =
+    current !== null && current.kind === "loaded" ? current.value : null;
 
   const discard = async (): Promise<void> => {
     setBusy(true);
@@ -134,7 +146,8 @@ export function ItemDetailDialog({
   const saveAsNew = async (): Promise<void> => {
     setBusy(true);
     setFailed(null);
-    const out = await actions.saveAsNew(draft.local_id).catch(() => null);
+    // Rebuilt on the value the person reviewed (null when they explicitly continued without it), never on the cache.
+    const out = await actions.saveAsNew(draft.local_id, base).catch(() => null);
     setBusy(false);
     if (out !== null && out.kind === "superseded") {
       onClose();
@@ -156,8 +169,12 @@ export function ItemDetailDialog({
         ? DETAIL_VERSION_KIND
         : null;
   const ref = refOf(draft.local_id);
+  // The new attempt waits for the read: allowed once it has loaded or is shown as indeterminate, or after the person explicitly continues
+  // without it when it failed. Never while it is loading.
   const newAllowed =
-    variant === "operation_conflict" ? read === "loaded" || proceed : true;
+    read === "loaded" ||
+    read === "indeterminate" ||
+    (read === "failed" && proceed);
 
   const footer =
     variant === "online_only" ? null : confirming ? (
@@ -203,7 +220,16 @@ export function ItemDetailDialog({
                 : DETAIL_RESEND}
             </Button>
           ) : (
-            <Button disabled reason={busy ? "Working…" : DETAIL_READ_FAILED}>
+            <Button
+              disabled
+              reason={
+                busy
+                  ? "Working…"
+                  : read === "loading"
+                    ? DETAIL_READ_LOADING
+                    : DETAIL_READ_FAILED
+              }
+            >
               {variant === "operation_conflict"
                 ? DETAIL_SAVE_NEW
                 : DETAIL_RESEND}
@@ -264,9 +290,7 @@ export function ItemDetailDialog({
                 ) : read === "failed" ? (
                   <>
                     <p>{DETAIL_READ_FAILED}</p>
-                    {variant === "operation_conflict" &&
-                    rebuildable &&
-                    !proceed ? (
+                    {rebuildable && !proceed ? (
                       <Button onClick={() => setProceed(true)}>
                         {DETAIL_PROCEED_WITHOUT}
                       </Button>
@@ -300,4 +324,30 @@ export function ItemDetailDialog({
       </div>
     </Dialog>
   );
+}
+
+/**
+ * The authorised current-state read of the dialog's target (R7): asked once each time the dialog opens, cancelled when it closes. `null`
+ * while it loads. A failure of the call itself is a failed read, never "loaded".
+ */
+function useCurrentRead(localId: string, enabled: boolean): CurrentRead | null {
+  const actions = useDataActions();
+  const [result, setResult] = useState<CurrentRead | null>(null);
+  useEffect(() => {
+    setResult(null);
+    if (!enabled) return;
+    const controller = new AbortController();
+    let live = true;
+    actions
+      .readCurrent(localId, controller.signal)
+      .catch((): CurrentRead => ({ kind: "failed", reason: "error" }))
+      .then((answer) => {
+        if (live) setResult(answer);
+      });
+    return () => {
+      live = false;
+      controller.abort();
+    };
+  }, [actions, localId, enabled]);
+  return result;
 }

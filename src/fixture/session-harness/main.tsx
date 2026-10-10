@@ -63,6 +63,15 @@ export interface SessionHarness {
   leaderRetry(): void;
   /** FIXTURE ONLY: the production engine looks now (its own `nudge`), so a test need not wait for the live-edge poll. */
   leaderNudge(): void;
+  /**
+   * FIXTURE ONLY (WEB-09b, R7 of the review of 10 October 2026, second cycle): WF-QUEUE-02's authorised current read of a draft, made by
+   * the PRODUCTION controller (`createDataEnv`) over this page's booted session (its real ordinary `fetchFor` and `seal`) and the page
+   * runtime the production leader composed. No production command kind registers a read yet, so the read is a TEST-ONLY kind (`note`,
+   * the native drafts' kind) in a private registry: `GET /tasks/<local id>`, its body decoded, then, while `window.__currentReadHold` is
+   * true, its LATER interpretation held until the test sets it false (`window.__currentReadHeld` says it is held). The result is the
+   * controller's, unchanged.
+   */
+  currentRead(localId: string): Promise<unknown>;
 }
 
 const params = new URLSearchParams(location.search);
@@ -144,7 +153,91 @@ const harness: SessionHarness = {
     const attachment = getPageDataHost().leader.get();
     if (attachment.role === "leader") attachment.engine.nudge("now");
   },
+  async currentRead(localId) {
+    currentReadEnv ??= createCurrentReadEnv();
+    const env = await currentReadEnv;
+    for (let i = 0; i < 200 && env.service() === null; i += 1)
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    return env.actions.readCurrent(localId as never);
+  },
 };
+
+let currentReadEnv: Promise<import("../../data/ui/env").DataEnv> | null = null;
+/** The production controller of `currentRead` (built once, on first use; never part of the harness's first chunk). */
+async function createCurrentReadEnv() {
+  const session = harness.booted?.session;
+  if (!session) throw new Error("fixture: the session has not booted");
+  const [{ createDataEnv }, { createCommandRegistry }, { apiUrl }] =
+    await Promise.all([
+      import("../../data/ui/env"),
+      import("../../data/outbox/registries"),
+      import("../../lib/api-client/wire"),
+    ]);
+  const host = getPageDataHost();
+  const commands = createCommandRegistry();
+  const flags = window as unknown as {
+    __currentReadHold?: boolean;
+    __currentReadHeld?: boolean;
+  };
+  commands.register("note", {
+    describe: () => "A note (test-only kind)",
+    readCurrent: async (draft, io) => {
+      const response = await io.get(`/tasks/${draft.local_id}`);
+      if (response.status === 404)
+        return { kind: "failed", reason: "inaccessible" };
+      const body = (await response.json()) as {
+        label: string;
+        version: number;
+      };
+      flags.__currentReadHeld = flags.__currentReadHold === true;
+      while (flags.__currentReadHold === true)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      flags.__currentReadHeld = false;
+      return {
+        kind: "loaded",
+        value: {
+          id: draft.local_id,
+          kind: "task",
+          parent_id: null,
+          label: body.label,
+          value: null,
+          version: body.version,
+          can_edit: true,
+          archived: false,
+          kind_date: null,
+        } as never,
+      };
+    },
+  });
+  return createDataEnv({
+    identity: session.identity,
+    loadRuntime: () =>
+      new Promise((resolve) => {
+        const now = host.runtime.get();
+        if (now !== null) return resolve(now.runtime);
+        const off = host.runtime.subscribe(() => {
+          const next = host.runtime.get();
+          if (next === null) return;
+          off();
+          resolve(next.runtime);
+        });
+      }),
+    online: { get: () => navigator.onLine, subscribe: () => () => undefined },
+    quota: { check: async () => "admit" } as never,
+    ids: { uuid: () => crypto.randomUUID() },
+    clock: { now: () => Date.now(), iso: () => new Date().toISOString() },
+    fence: () => ({ hasPendingOperation: false, sessionStarted: true }),
+    readMe: async () => ({ kind: "closed" }),
+    currentDeviceId: async () => ({ kind: "closed" }),
+    onOnline: () => () => undefined,
+    commands,
+    fetchOrdinary: (account, epoch) =>
+      session.api.fetchFor("ordinary", account, epoch),
+    apiUrl: (path) => apiUrl(path),
+    seal: (account, epoch, pending) =>
+      session.api.seal(account, epoch, pending),
+  });
+}
 // The data harness is attached too, so one page can run the production session AND arrange or inspect real rows in the
 // account databases (it shares the page registry the production deletion ports use).
 void import("../data-harness/main");

@@ -41,6 +41,7 @@ export type {
   Recovery,
   RecoveryBegin,
   RecoveryHandle,
+  RequestAdmission,
   RequestClass,
   Result,
   Session,

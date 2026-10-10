@@ -13,6 +13,7 @@ import {
   records,
   signIn as signInUnpaced,
   test,
+  untilHeld,
   untilRecord,
   untilView,
   type Who,
@@ -27,8 +28,12 @@ import {
  *   I-N1  a fresh account's first sync: the leader creates the database, stages and activates the snapshot, and a real change then
  *         arrives as an ordinary delta page on top;
  *   I-N2  a PROXY-INJECTED 410 on a delta page: the cache is hidden and a replacement snapshot is activated with the backend's own cursors;
+ *   I-N3  an interrupted snapshot (review cycle 1, R9): the proxy HOLDS page 2; the page reloads; the reloaded leader ADOPTS the staged
+ *         attempt and its first request carries the staged real cursor; the activation completes;
  *   I-N4  T24 A against the backend: a real revocation elsewhere, a real 401 fence, a password sign-in again, then a recovery-class
  *         catch-up while hidden, `finish`, and the account displayed again;
+ *   I-N5  T24 B (review cycle 1, R9): the same, with a PROXY-INJECTED 410 on the first recovery page: a replacement snapshot is built
+ *         and activated while the account stays hidden, and only then does `finish` clear the fence;
  *   I-N6  two pages: only the leader's page reads `/sync`; when it closes the other page leads and the next real change arrives there.
  */
 const API = "/api/experimental/v1";
@@ -292,6 +297,58 @@ test.describe("I-N: the production leader against the released backend", () => {
     await proxy.removeRule(rule.id);
   });
 
+  test("I-N3 an interrupted snapshot: the proxy HOLDS page 2; the page reloads; the reloaded leader adopts the staged attempt, its first request carries the staged real cursor, and the activation completes", async ({
+    context,
+  }) => {
+    // Enough content for several snapshot pages at the initial page limit.
+    const people = await createPeople(main, 10, "I-N3 Person");
+    const rule = await proxy.addRule({
+      method: "GET",
+      path: `${API}/sync`,
+      ordinal: 2,
+      action: "hold",
+    });
+    const page = await leaderPage(context);
+    const asked: Array<string | null> = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (request.method() === "GET" && url.pathname.endsWith("/sync"))
+        asked.push(url.searchParams.get("cursor"));
+    });
+    const id = await signedIn(page, main);
+    await untilHeld(rule.id ?? "", 1);
+    const staged = await syncOf(page, id.account_id);
+    expect(staged?.cache_status).not.toBe("valid");
+    expect(typeof staged?.staging_position).toBe("string");
+    // The held request is page 2, made at the staged position (the backend's own cursor of page 1).
+    expect(asked[0]).toBeNull();
+    expect(asked[1]).toBe(staged?.staging_position);
+    const heldCursor = asked[1];
+    const generation = staged?.recovery_generation;
+    // The page reloads while page 2 is held: the reloaded leader adopts (within the one-hour lifetime) and asks for that position.
+    const marker = asked.length;
+    await page.goto("/__session?route=%2Ftoday&leader=production");
+    await exposeSession(page);
+    await page.waitForFunction(() => window.__atlasData !== undefined);
+    await untilView(page, "displaying", undefined, 60_000);
+    await holds(
+      page,
+      id.account_id,
+      people.map((p) => p.id),
+    );
+    expect(asked[marker]).toBe(heldCursor);
+    const done = await syncOf(page, id.account_id);
+    expect(done).toMatchObject({
+      cache_status: "valid",
+      phase: "delta",
+      staging_position: null,
+      recovery_generation: generation,
+    });
+    expect(await rowsOf(page, id.account_id, "cache_staging")).toEqual([]);
+    await proxy.release(rule.id ?? "");
+    await proxy.removeRule(rule.id ?? "");
+  });
+
   test("I-N4 T24 A: a real revocation fences the account; after the password sign-in again a recovery-class catch-up runs while hidden, `finish` clears the fence and the account is displayed", async ({
     context,
     provokes,
@@ -382,6 +439,117 @@ test.describe("I-N: the production leader against the released backend", () => {
     expect(recovery[0]?.cursor).toBe(cursor);
     expect(recovery.some((e) => e.phase === "snapshot")).toBe(false);
     expect((await syncOf(page, id.account_id))?.cache_status).toBe("valid");
+  });
+
+  test("I-N5 T24 B: after the re-authentication a PROXY-INJECTED 410 on the first recovery page makes a replacement snapshot that is built and activated while the account stays hidden; only then does `finish` clear the fence", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(401, 410);
+    const page = await leaderPage(context);
+    const exchanges = recordSync(page);
+    const id = await signedIn(page, main);
+    await expect
+      .poll(async () => (await syncOf(page, id.account_id))?.cache_status, {
+        timeout: 60_000,
+      })
+      .toBe("valid");
+    const cursor = (await syncOf(page, id.account_id))?.cursor;
+    const generation = (await syncOf(page, id.account_id))
+      ?.recovery_generation as number;
+    const settled = (await records(page)).auth_state.settled;
+    const revoker = await rawSignIn(main);
+    const revoked = await raw("DELETE", `/sessions/${settled?.session_id}`, {
+      cookie: revoker.cookie,
+      headers: { "x-csrf-token": revoker.csrf },
+    });
+    expect([200, 204]).toContain(revoked.status);
+    await page.evaluate(() => window.__atlasFixture?.session?.leaderNudge());
+    await untilRecord(
+      page,
+      (s) =>
+        Object.values(s.fences)
+          .flat()
+          .some((f) => f.kind === "invalid_session"),
+      "the real 401 is recorded as an invalid_session fence",
+    );
+    // The first `/sync` after the re-authentication (the recovery's catch-up from the saved cursor) is answered 410 by the proxy.
+    const rule = await proxy.addRule({
+      method: "GET",
+      path: `${API}/sync`,
+      ordinal: 1,
+      action: "rewrite_status",
+      status: 410,
+    });
+    const fencedAt = exchanges.length;
+    expect((await signIn(page, main)).kind).toBe("settled");
+    await untilView(page, "displaying", undefined, 60_000);
+    expect(
+      Object.values((await records(page)).auth_state.fences).flat(),
+    ).toEqual([]);
+    const recovery = exchanges.slice(fencedAt);
+    expect(recovery[0]).toMatchObject({ cursor, status: 410 });
+    expect(recovery[1]?.cursor).toBeNull();
+    expect(recovery.slice(1).some((e) => e.phase === "snapshot")).toBe(true);
+    const done = await syncOf(page, id.account_id);
+    expect(done?.cache_status).toBe("valid");
+    expect(done?.recovery_generation as number).toBeGreaterThan(generation);
+    // Every read while fenced was of the RECOVERY class; the replacement was ACTIVATED before `finish` cleared, and the display
+    // followed the release.
+    const trace = (await page.evaluate(
+      () => window.__atlasFixture?.session?.trace ?? [],
+    )) as Array<{
+      event: string;
+      data?: {
+        reason?: string;
+        kind?: string;
+        klass?: string;
+        result?: string;
+        value?: string;
+        final?: boolean;
+        epoch?: number;
+      };
+    }>;
+    const at = (predicate: (e: (typeof trace)[number]) => boolean) =>
+      trace.findIndex(predicate);
+    const eligible = at(
+      (e) => e.event === "data.recovery_begin" && e.data?.kind === "eligible",
+    );
+    // Each looked for AFTER the eligible `begin` (the account's own first activation, before the fence, precedes it).
+    const following = (
+      from: number,
+      predicate: (e: (typeof trace)[number]) => boolean,
+    ) => {
+      const found = trace.slice(from + 1).findIndex(predicate);
+      return found < 0 ? -1 : from + 1 + found;
+    };
+    const activated = following(
+      eligible,
+      (e) =>
+        e.event === "data.recovery_commit" && e.data?.value === "activated",
+    );
+    const cleared = following(
+      eligible,
+      (e) => e.event === "data.recovery_finish" && e.data?.result === "cleared",
+    );
+    const finished = following(
+      eligible,
+      (e) => e.event === "evaluate" && e.data?.reason === "recovery_finished",
+    );
+    expect(eligible, "begin said eligible").toBeGreaterThan(-1);
+    expect(activated, "the replacement was activated").toBeGreaterThan(
+      eligible,
+    );
+    expect(cleared, "finish cleared after the activation").toBeGreaterThan(
+      activated,
+    );
+    expect(finished).toBeGreaterThan(cleared);
+    const reads = trace
+      .slice(eligible, cleared)
+      .filter((e) => e.event === "request.issued");
+    expect(reads.length).toBeGreaterThanOrEqual(2);
+    expect(reads.every((e) => e.data?.klass === "recovery")).toBe(true);
+    await proxy.removeRule(rule.id ?? "");
   });
 
   test("I-N6 two pages: only the leader's page reads `/sync`; when it closes the other page leads and the next real change arrives there", async ({

@@ -57,6 +57,8 @@ export {
   type ConflictContext,
   type ConflictDecision,
   type ConflictHandlerRegistry,
+  type CurrentRead,
+  type CurrentReadIo,
   commandKind,
   createCommandRegistry,
   createConflictHandlerRegistry,

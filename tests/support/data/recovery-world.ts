@@ -13,10 +13,10 @@ import {
   createKeyDerivers,
   createValueValidators,
 } from "../../../src/data/scan/validate";
-import type {
-  RecoveryBegin,
-  RecoveryHandle,
-  SessionView,
+import {
+  type RecoveryBegin,
+  type RecoveryHandle,
+  type SessionView,
   StampedRequestError,
 } from "../../../src/session";
 import { EPOCH_BASE } from "../session/env";
@@ -38,12 +38,43 @@ export type Scripted =
 export interface RecoveryWorld extends PageWorld {
   job: RecoveryJob;
   requests: Array<{ klass: "ordinary" | "recovery"; url: URL; epoch: number }>;
+  /** The `Request` objects themselves (their signals), in the order they were sent. */
+  sent: Request[];
+  /**
+   * Whether a request's own signal ends it at once (default true, as the stamped wrapper's caller signal does). False models a wrapper
+   * that settles an aborted call only LATER (it has its own lease to clean up first), so the step that made it is still busy when the
+   * job is bound again (R4 of the review of 10 October 2026).
+   */
+  honourAbort: boolean;
   script: Scripted[];
   posted: SyncMessage[];
   online: boolean;
   view: { get(): SessionView; set(next: SessionView): void };
-  /** What `begin` answers next (default: eligible with a handle of the current epoch and `s = sequence`). */
+  /**
+   * What `begin` answers next. Default: the record's gate (below) if one stands, else eligible with a handle of the current epoch and
+   * `s = sequence`.
+   */
   begins: Array<RecoveryBegin | Error>;
+  /**
+   * The session's record and page memory as far as admission goes (R3, second cycle): a durable gate and a page-local hold. A scripted
+   * `begin` refusal on the record sets the gate (the record says so), an eligible answer clears it, and a scripted `auth_state` answer
+   * records a current-epoch entry, as the session does. `session.api.admission` reads them: its revision is a digest of the gate, the
+   * hold and `salt` (a test moves `salt` for a change that admits nothing new), and it is blocked while either stands.
+   */
+  recordGate: { reason: GateReason; epoch: number } | null;
+  setGate(reason: GateReason | null): void;
+  hold: boolean;
+  salt: number;
+  /** The admission probe cannot read the record (it answers null). */
+  admissionUnreadable: boolean;
+  probes: Array<{ klass: "ordinary" | "recovery"; epoch: number }>;
+  /**
+   * Whether `report` notifies the job's subscription, as production's does (the session evaluates on a report and publishes a new
+   * identity object): the loop-safety cases set it.
+   */
+  reportNotifies: boolean;
+  /** The job's trace events (a fixed vocabulary), in order. */
+  traced: Array<{ event: string; data?: unknown }>;
   finishes: Array<Awaited<ReturnType<RecoveryJobDeps["recovery"]["finish"]>>>;
   calls: Array<
     | { call: "begin"; account: string }
@@ -74,6 +105,18 @@ export interface RecoveryWorld extends PageWorld {
   ): Response;
 }
 
+export type GateReason =
+  | "attempt_gating"
+  | "operation_pending"
+  | "credential_unverified"
+  | "current_epoch_entry";
+const GATES: readonly string[] = [
+  "attempt_gating",
+  "operation_pending",
+  "credential_unverified",
+  "current_epoch_entry",
+];
+
 export async function recoveryWorld(
   options: {
     cursor?: string | null;
@@ -103,6 +146,8 @@ export async function recoveryWorld(
   const out = {
     ...base,
     requests: [],
+    sent: [],
+    honourAbort: true,
     script: [],
     posted: [],
     online: true,
@@ -113,7 +158,31 @@ export async function recoveryWorld(
     markers: pageMarkers(markerStorage),
     freeBytes: 500 * 1024 * 1024,
     token: "",
+    recordGate: null,
+    hold: false,
+    salt: 0,
+    admissionUnreadable: false,
+    probes: [],
+    reportNotifies: false,
+    traced: [],
   } as unknown as RecoveryWorld;
+  out.setGate = (reason) => {
+    out.recordGate =
+      reason === null
+        ? null
+        : { reason, epoch: base.identity.get()?.epoch ?? 1 };
+  };
+  /** A current-epoch entry stands only in its own epoch; the other gates stand until removed. */
+  const gateNow = (): GateReason | null => {
+    const gate = out.recordGate;
+    if (gate === null) return null;
+    if (
+      gate.reason === "current_epoch_entry" &&
+      gate.epoch !== (base.identity.get()?.epoch ?? 1)
+    )
+      return null;
+    return gate.reason;
+  };
   out.view = {
     get: () => view,
     set(next) {
@@ -141,18 +210,44 @@ export async function recoveryWorld(
     } as RecoveryJobDeps["view"],
     fetchFor: (klass, _account, epoch) => async (request) => {
       out.requests.push({ klass, url: new URL(request.url), epoch });
+      out.sent.push(request);
       const next = out.script.shift();
-      const resolved = typeof next === "function" ? await next() : next;
-      if (resolved instanceof Error) throw resolved;
-      if (resolved) return resolved;
-      // Nothing scripted: the request stays in flight (a test counts it; nothing is answered that it did not ask for).
-      return new Promise<Response>(() => undefined);
+      // The request's own signal ends it, as the stamped wrapper's caller signal does (a clean `AbortError`).
+      const aborted = new Promise<never>((_, reject) => {
+        const fail = () =>
+          reject(new DOMException("The request was aborted", "AbortError"));
+        if (!out.honourAbort) return;
+        if (request.signal.aborted) fail();
+        else request.signal.addEventListener("abort", fail, { once: true });
+      });
+      const answered = (async () => {
+        const resolved = typeof next === "function" ? await next() : next;
+        if (
+          resolved instanceof StampedRequestError &&
+          resolved.kind === "auth_state"
+        )
+          out.setGate("current_epoch_entry");
+        if (resolved instanceof Error) throw resolved;
+        if (resolved) return resolved;
+        // Nothing scripted: the request stays in flight (a test counts it; nothing is answered that it did not ask for).
+        return new Promise<Response>(() => undefined);
+      })();
+      return Promise.race([answered, aborted]);
     },
     recovery: {
       begin: async (account) => {
         out.calls.push({ call: "begin", account });
         const next = out.begins.shift();
         if (next instanceof Error) throw next;
+        if (next === undefined) {
+          const gate = gateNow();
+          if (gate !== null) return { kind: "ineligible", reason: gate };
+        } else if (next.kind === "ineligible") {
+          if (GATES.includes(next.reason))
+            out.setGate(next.reason as GateReason);
+          return next;
+        }
+        out.recordGate = null;
         sequence += 1;
         return (
           next ?? {
@@ -171,7 +266,18 @@ export async function recoveryWorld(
       },
       report: (phase) => {
         out.calls.push({ call: "report", phase });
+        if (out.reportNotifies)
+          world.schedule("misc", "A", { what: "evaluate" }, () => out.fire());
       },
+    },
+    admission: async (klass, _account, epoch) => {
+      out.probes.push({ klass, epoch });
+      if (out.admissionUnreadable) return null;
+      const gate = gateNow();
+      return {
+        revision: JSON.stringify([gate, out.hold, out.salt]),
+        blocked: gate !== null || out.hold,
+      };
     },
     apiUrl: (path) => new URL(`http://localhost/api/experimental/v1${path}`),
     online: () => out.online,
@@ -232,6 +338,11 @@ export async function recoveryWorld(
       return out.markers;
     },
     ids: { uuid: () => crypto.randomUUID() },
+    trace: {
+      emit: (event: string, data?: unknown) => {
+        out.traced.push({ event, data });
+      },
+    } as RecoveryJobDeps["trace"],
     elapsed: () => world.time,
     ...(options.config ? { config: options.config } : {}),
   };

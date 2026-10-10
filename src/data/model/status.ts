@@ -26,6 +26,16 @@ export type CacheState =
    */
   | "unverified";
 
+/**
+ * The durable stops of the sync writers, as a follower page reads them (P-11, R6 of the review of 10 October 2026): the `sync` read caller
+ * paused, a sync-side local write stopped at its bound, the Q23 floor. Read from `sync_state` by `plans/facts.ts`.
+ */
+export interface SyncStops {
+  paused: boolean;
+  pageStopped: boolean;
+  floor: boolean;
+}
+
 export interface StatusInputs {
   /** The page's own knowledge of connectivity (`navigator.onLine` and the `online`/`offline` events). */
   online: boolean;
@@ -45,6 +55,11 @@ export interface StatusInputs {
   follower?: boolean;
   /** The durable recovery budget is at its bound (whichever page recorded it): sync can't proceed until a reload or "Try again". */
   recoveryBlocked?: boolean;
+  /**
+   * A FOLLOWER's reading of the leader's durable stops (absent on a leader page and on a page with no production leader, whose own
+   * engine and job are what speak). A follower says "Updates stopped" and shows the stop's notice while one stands.
+   */
+  followerStops?: SyncStops;
   /** `unknown`: no account database is open here (nothing is cached or readable, nothing is gated). */
   cache: CacheState;
   lastSyncedAt: string | null;
@@ -71,6 +86,12 @@ export function derivePhase(inputs: StatusInputs, now: number): SyncPhase {
     // A follower page: another page leads, and this page knows only what the durable facts say (P-11). A valid cache that has
     // completed a sync is up to date as far as it can tell; a cache that is not valid is being brought back by the leader.
     if (inputs.follower === true) {
+      const stops = inputs.followerStops;
+      if (
+        stops !== undefined &&
+        (stops.paused || stops.pageStopped || stops.floor)
+      )
+        return "interrupted";
       if (inputs.cache === "valid")
         return inputs.lastSyncedAt === null ? "interrupted" : "synced";
       if (inputs.cache === "unknown") return "interrupted";
@@ -186,8 +207,11 @@ export function deriveNotices(inputs: StatusInputs): Notice[] {
     (engine?.kind === "stopped" && engine.memoryOnly === true) ||
     (job?.kind === "stopped" && job.memoryOnly === true);
   const cache: "valid" | "invalid" = cacheHidden(inputs) ? "invalid" : "valid";
+  // A follower has no engine or job of its own: the leader's durable stops speak for them (their actions reach the leader, P-11).
+  const follows = engine === null && inputs.follower === true;
+  const stops = follows ? inputs.followerStops : undefined;
 
-  if (stopped === "floor")
+  if (stopped === "floor" || stops?.floor === true)
     out.push({
       kind: "floor",
       variant: cacheHidden(inputs) ? "b" : "a",
@@ -197,7 +221,7 @@ export function deriveNotices(inputs: StatusInputs): Notice[] {
     (outbox?.kind === "stopped" && outbox.cause === "storage_full")
   )
     out.push({ kind: "storage_full", cache });
-  if (stopped === "local_storage")
+  if (stopped === "local_storage" || stops?.pageStopped === true)
     out.push({ kind: "page_not_saved", memoryOnly });
   if (
     inputs.storageNotResponding ||
@@ -214,7 +238,7 @@ export function deriveNotices(inputs: StatusInputs): Notice[] {
       kind: "compat_paused",
       reason: outbox.reason === "compat_missing" ? "missing" : "unsupported",
     });
-  if (engine?.kind === "paused" || job?.kind === "paused")
+  if (engine?.kind === "paused" || job?.kind === "paused" || stops?.paused)
     out.push({ kind: "still_trying", scope: "updates", count: 1 });
   if (outbox?.kind === "needs_retry")
     out.push({ kind: "still_trying", scope: "changes", count: outbox.count });
@@ -248,7 +272,10 @@ export function deriveGate(inputs: StatusInputs): GateState {
   const job = inputs.recovery.state ?? null;
   return (inputs.engine?.kind === "stopped" &&
     inputs.engine.cause === "floor") ||
-    (job?.kind === "stopped" && job.cause === "floor")
+    (job?.kind === "stopped" && job.cause === "floor") ||
+    (inputs.engine === null &&
+      inputs.follower === true &&
+      inputs.followerStops?.floor === true)
     ? "floor"
     : "refreshing";
 }

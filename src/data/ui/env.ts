@@ -1,4 +1,4 @@
-import type { Identity, Store } from "../../session";
+import type { Identity, StampedFetch, Store } from "../../session";
 import type { AccountService, DataRuntime } from "../engine/account-service";
 import { startDeviceMirror } from "../engine/device-mirror";
 import type { ReadResult } from "../engine/identity-task";
@@ -20,7 +20,7 @@ import type {
 import { DATA_CONFIG } from "../model/config";
 import type { QueueSummary } from "../model/queue-summary";
 import type { CacheState, StatusInputs } from "../model/status";
-import type { AccountId, LocalId } from "../model/types";
+import type { AccountId, CacheRow, LocalId } from "../model/types";
 import {
   createOutbox,
   type DiscardOutcome,
@@ -29,12 +29,12 @@ import {
 } from "../outbox/outbox";
 import {
   type CommandRegistry,
+  type CurrentRead,
   createCommandRegistry,
 } from "../outbox/registries";
 import { readDraftWithCommand } from "../plans/draft-detail";
 import { readSyncFacts, type SyncFacts } from "../plans/facts";
 import type { ConflictPage, QueuePage } from "../plans/outbox";
-import { readMerged } from "../plans/outbox";
 import type { Loadable, Watchable } from "../store/port";
 
 /**
@@ -60,11 +60,24 @@ export interface DataActions {
   /** WEB-09b (Q24): dismisses the "Resyncing" notice; it changes nothing else. */
   acknowledgeResync(id: string): void;
   /**
-   * WEB-09b (WF-QUEUE-02): "Resend as a new operation" / "Review, then save as new". Only for a draft whose kind registered `rebuild`:
-   * the new command is built from the draft and the resource as the cache holds it now, and SUPERSEDES the draft (a new operation id).
+   * WEB-09b (WF-QUEUE-02, R7 of the review of 10 October 2026): the draft's target as the SERVER holds it now, through the kind's
+   * registered authorised read (`CommandSpec.readCurrent`) and an ordinary stamped request of the displayed account and epoch. Never the
+   * cache. `failed`/`unavailable` when there is no open account, no draft, or no read registered for its kind. The WHOLE result (the
+   * command's decode and any later work) is released only if the durable record still names the account and epoch it was made for
+   * (`session.api.seal`) and the call's scope stands (this controller's lifetime, its binding and service, `signal`); otherwise it is
+   * `failed`/`unavailable` (review cycle 2, R7).
+   */
+  readCurrent(localId: LocalId, signal?: AbortSignal): Promise<CurrentRead>;
+  /**
+   * WEB-09b (WF-QUEUE-02): "Resend as a new operation" / "Review and save as a new attempt". Only for a draft whose kind registered
+   * `rebuild`: the new command is built from the draft and `current`, the value the authorised read returned and the dialog showed (`null`
+   * when the person explicitly continued without it), and SUPERSEDES the draft (a new operation id). Never rebuilt on the cache.
    * `not_rebuildable`: nothing is registered, or the rebuild declined; nothing was changed.
    */
-  saveAsNew(localId: LocalId): Promise<SaveAsNewOutcome>;
+  saveAsNew(
+    localId: LocalId,
+    current: CacheRow | null,
+  ): Promise<SaveAsNewOutcome>;
   /** The next window of the queue replaces the one shown. */
   showNextQueue(): void;
   /** The previous window of the queue replaces the one shown. */
@@ -165,6 +178,17 @@ export interface DataEnvDeps {
   /** The account's write-failure markers (`localStorage`): the facade restores a stop recorded before a reload. */
   markers?: WriteFailureMarkers;
   commands?: CommandRegistry;
+  /**
+   * WEB-09b (R7): the session's ORDINARY stamped fetch for the account and epoch (`session.api.fetchFor("ordinary", …)`) and the API
+   * base, for the authorised current-state read of WF-QUEUE-02. Absent: no such read can be made here (`failed`/`unavailable`).
+   */
+  fetchOrdinary?(account: AccountId, epoch: number): StampedFetch;
+  apiUrl?(path: string): URL;
+  /**
+   * WEB-09b (R7, second cycle): `session.api.seal`, the final validation of the read's WHOLE interpreted result against the durable
+   * record (the command's decode and any later work included). Absent, like `fetchOrdinary`: no current read is made here.
+   */
+  seal?<T>(account: AccountId, epoch: number, pending: Promise<T>): Promise<T>;
 }
 
 class MutableStore<T> implements Store<T> {
@@ -319,6 +343,23 @@ export function createDataEnv(
   let disposed = false;
   let generation = 0;
   let current: { account: AccountId; service: AccountService } | null = null;
+  /**
+   * The controller's lifetimes (R7, second cycle): `stop` begins a new one. A current read belongs to the lifetime and the binding it
+   * began in, and each in-flight read's scope is aborted when either ends, so a read that outlives them answers nothing (even when its
+   * command ignores the signal, and even when a later `start` or binding names the same account again).
+   */
+  let lifetime = 0;
+  const currentReads = new Set<{
+    bound: { account: AccountId; service: AccountService };
+    scope: AbortController;
+  }>();
+  const endCurrentReads = (bound?: object): void => {
+    for (const read of [...currentReads])
+      if (bound === undefined || read.bound === bound) {
+        currentReads.delete(read);
+        read.scope.abort();
+      }
+  };
   let outbox: Outbox | null = null;
   let facts: Watchable<SyncFacts | null> | null = null;
   /**
@@ -523,6 +564,11 @@ export function createDataEnv(
       follower:
         follower !== null && leader.engine === undefined ? true : undefined,
       recoveryBlocked: established?.recoveryBlocked === true ? true : undefined,
+      ...(follower !== null &&
+      leader.engine === undefined &&
+      established?.syncStops !== undefined
+        ? { followerStops: established.syncStops }
+        : {}),
       cache: cacheOf(),
       lastSyncedAt: established?.lastSyncedAt ?? null,
       summary: readSummary.status === "ready" ? readSummary.value : null,
@@ -542,6 +588,7 @@ export function createDataEnv(
   const unbind = (): void => {
     for (const off of detach) off();
     detach = [];
+    if (current !== null) endCurrentReads(current);
     cancelReread();
     stopFacts = null;
     established = null;
@@ -899,6 +946,8 @@ export function createDataEnv(
     active = false;
     disposed = true;
     generation += 1;
+    lifetime += 1;
+    endCurrentReads();
     // The runtime a stopped controller loaded belongs to its owner's disposal; a restart loads its own.
     runtime = null;
     // A look that was under way belongs to the lifetime that began it: left standing, it would make the restart's `follow` believe the
@@ -918,6 +967,18 @@ export function createDataEnv(
     // The job holds the cache while it stands in a state of its own (a stop, a pause, the blocking budget): its retry is the act; else
     // the engine's.
     retryUpdates: () => {
+      // A FOLLOWER has neither the engine nor the job (R2 of the review of 10 October 2026): the act is the leading page's, asked on
+      // `atlas-sync` for the account and the epoch this page shows; the leader applies it only if it is bound to exactly those.
+      if (follower !== null && leader.engine === undefined) {
+        const identity = deps.identity.get();
+        if (identity !== null)
+          deps.channel?.post({
+            type: "retry_requested",
+            account: identity.account_id,
+            epoch: identity.epoch,
+          });
+        return;
+      }
       const job = leader.recovery;
       const state = job?.state?.get();
       if (
@@ -925,6 +986,7 @@ export function createDataEnv(
         (state?.kind === "stopped" ||
           state?.kind === "paused" ||
           state?.kind === "backing_off" ||
+          state?.kind === "admission_wait" ||
           established?.recoveryBlocked === true)
       )
         job.retryNow();
@@ -944,7 +1006,85 @@ export function createDataEnv(
         return { kind: "refused", reason: "closed" } as DiscardOutcome;
       return facade.discard(localId);
     },
-    saveAsNew: async (localId) => {
+    readCurrent: async (localId, signal) => {
+      const bound = current;
+      const identity = deps.identity.get();
+      const fetchOrdinary = deps.fetchOrdinary;
+      const apiUrl = deps.apiUrl;
+      const seal = deps.seal;
+      const unavailable: CurrentRead = {
+        kind: "failed",
+        reason: "unavailable",
+      };
+      if (
+        !active ||
+        bound === null ||
+        !bound.service.live ||
+        identity === null ||
+        identity.account_id !== bound.service.account ||
+        fetchOrdinary === undefined ||
+        apiUrl === undefined ||
+        seal === undefined ||
+        signal?.aborted === true
+      )
+        return unavailable;
+      // The call's scope (R7, second cycle): the lifetime and the binding it began in, the caller's signal, and an abort of its own
+      // that `stop` and `unbind` send. Checked before each step that could send and, synchronously, at release.
+      const account = identity.account_id;
+      const epoch = identity.epoch;
+      const born = lifetime;
+      const scope = new AbortController();
+      const onCaller = () => scope.abort();
+      signal?.addEventListener("abort", onCaller, { once: true });
+      const read = { bound, scope };
+      currentReads.add(read);
+      const live = (): boolean =>
+        !scope.signal.aborted &&
+        active &&
+        lifetime === born &&
+        current === bound &&
+        bound.service.live;
+      try {
+        const service = bound.service;
+        const draft = await service.store
+          .run(readDraftWithCommand, {
+            incarnationId: service.incarnationId,
+            localId,
+          })
+          .catch(() => null);
+        if (draft === null || !live()) return unavailable;
+        const stamped = fetchOrdinary(account, epoch);
+        const interpreted = commands.readCurrent(draft, {
+          get: (path) =>
+            live()
+              ? stamped(
+                  new Request(apiUrl(path), {
+                    method: "GET",
+                    signal: scope.signal,
+                  }),
+                )
+              : Promise.reject(
+                  new DOMException("the read's scope has ended", "AbortError"),
+                ),
+          signal: scope.signal,
+        });
+        // The WHOLE interpretation (the command's decode and whatever it does after it) is sealed against the durable record of the
+        // account and epoch the read was made for: a result is released only if that record still names them AFTER the last
+        // asynchronous step. Every outcome is sealed, a failure too: an `inaccessible` of an account no longer shown is no answer.
+        let result: CurrentRead;
+        try {
+          result = await seal(account, epoch, interpreted);
+        } catch {
+          return unavailable;
+        }
+        // Nothing asynchronous after the record's verdict: the call's own scope is checked synchronously, and the result handed back.
+        return live() ? result : unavailable;
+      } finally {
+        signal?.removeEventListener("abort", onCaller);
+        currentReads.delete(read);
+      }
+    },
+    saveAsNew: async (localId, base) => {
       const bound = current;
       const facade = leader.outbox ?? outbox;
       if (bound === null || facade === null || !bound.service.live)
@@ -956,15 +1096,8 @@ export function createDataEnv(
       });
       if (draft === null || !commands.canRebuild(draft))
         return { kind: "refused", reason: "not_rebuildable" };
-      const target = draft.target_resource_ids[0];
-      const merged =
-        target === undefined
-          ? null
-          : await service.store.run(readMerged, {
-              incarnationId: service.incarnationId,
-              id: target,
-            });
-      const next = commands.rebuild(draft, merged?.base ?? null);
+      // R7: rebuilt on the value of the authorised current read the person reviewed, never on the cache.
+      const next = commands.rebuild(draft, base);
       if (next === null) return { kind: "refused", reason: "not_rebuildable" };
       return facade.supersede(localId, next);
     },

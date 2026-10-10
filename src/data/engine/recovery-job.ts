@@ -3,6 +3,7 @@ import {
   type Recovery,
   type RecoveryBegin,
   type RecoveryHandle,
+  type RequestAdmission,
   type SessionView,
   type StampedFetch,
   StampedRequestError,
@@ -27,6 +28,7 @@ import {
   RECOVERY_CAPTURE_OPERATION,
   type RecoveryCapture,
   type RecoveryPath,
+  reconcileOwedReceipts,
   recordRecoveryOutcome,
   resetRecoveryBudget,
 } from "../plans/recovery-writers";
@@ -89,6 +91,11 @@ export type RecoveryJobState =
       kind: "eligible_wait";
       reason: Exclude<RecoveryBegin, { kind: "eligible" }>["reason"];
     }
+  /**
+   * A request was refused by the session before it was sent (the cover closed, or the page's hold or closing write outlasted the
+   * immediate retries): the job waits for what admits it to change (R3 of the review of 10 October 2026, second cycle).
+   */
+  | { kind: "admission_wait"; mode: RecoveryMode }
   | { kind: "running"; mode: RecoveryMode; path: RecoveryPath }
   | { kind: "backing_off"; mode: RecoveryMode; since: number }
   /** The `sync` read caller is paused after a sustained failure (state 3 in recovery mode). */
@@ -136,6 +143,15 @@ export interface RecoveryJobDeps {
     epoch: number,
   ): StampedFetch;
   recovery: Pick<Recovery, "begin" | "finish" | "report">;
+  /**
+   * `session.api.admission(klass, account, epoch)`: a READ of what admits a request (an opaque revision, and whether a blocker stands
+   * now). The job's admission waits compare it; it is never a permission.
+   */
+  admission(
+    klass: "ordinary" | "recovery",
+    account: AccountId,
+    epoch: number,
+  ): Promise<RequestAdmission | null>;
   apiUrl(path: string): URL;
   online(): boolean;
   /** Fires when eligibility may have changed (the session view, the identity, visibility). */
@@ -199,10 +215,34 @@ interface Issued {
   readonly capture: Extract<RecoveryCapture, { kind: "captured" }>;
   readonly captured: Captured;
   readonly epoch: number;
+  /** Recovery mode: the handle of the fenced run this request was issued under (rule 9's `s`); its data commit is what `finish` releases. */
+  readonly handle: RecoveryHandle | null;
   /** The markers the gate saw of the page's operations (R51). */
   readonly saw: ReadonlyMap<string, MarkerSeen>;
   /** This request holds the one attempt a page load (or "Try again") permits while blocked, returned if nothing is sent. */
   permit: boolean;
+}
+
+/**
+ * One episode of refusals before a request was sent (R3 of the review of 10 October 2026, second cycle), for one binding, mode and
+ * epoch. `revision` is the session's admission revision last seen; `consumed` says that the one attempt an unblocked, unchanged revision
+ * permits has been made, so a refusal that the revision does not show cannot make the job ask again and again.
+ */
+interface AdmissionEpisode {
+  readonly binding: number;
+  readonly mode: RecoveryMode;
+  readonly epoch: number;
+  cause: "begin" | "closed" | "not_sent";
+  revision: string | null;
+  consumed: boolean;
+  /** Read-only probes made since the revision last changed: they pace the reconciliation for a notification that never came. */
+  probes: number;
+  /**
+   * An OPEN, unchanged revision whose attempt was refused anyway (a refusal the probe cannot show: a token that only a new verification
+   * can fetch, a hold that came and went) is tried again on a paced, TIME-based back-off (`retryAt`; notifications cannot hasten it).
+   */
+  retries: number;
+  retryAt: number | null;
 }
 
 const sameJson = <T>(a: T, b: T): boolean =>
@@ -254,10 +294,29 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     JSON.stringify([service.account, service.incarnationId, operation]);
   /** The attempt whose crash-loop marker this page saw end and could not retire (R42). */
   const endedAttempts = new Map<AccountId, string>();
-  /** The data commit is done and `finish` must be asked (again): the next step asks it, and nothing else. */
-  let finishPending = false;
+  /**
+   * The data commit is done and `finish` must be asked (again): the next step asks it, and nothing else. It is the PROOF of one data
+   * commit, bound to the binding and the exact handle whose request made it (R1 of the review of 10 October 2026): a `finish` that could
+   * not take the lock is asked again with that handle alone, and a new handle (a second re-authentication, a `stale` or `rerun` answer)
+   * is never finished on an earlier handle's commit. It must make its own catch-up first: the fence entries it covers may need access
+   * removals that the earlier catch-up never fetched.
+   */
+  let commitProof: {
+    readonly binding: number;
+    readonly handle: RecoveryHandle;
+  } | null = null;
   /** The trigger of the current snapshot (for the trace and the Q24 notice). */
   let trigger: RecoveryTrigger | null = null;
+  /**
+   * The episode of refusals before a request was sent, and whether the job stands in its wait now (a step then only probes the session's
+   * admission revision). The episode outlives the attempt a wait lets through, so a repeated refusal finds what was already tried.
+   */
+  let admission: AdmissionEpisode | null = null;
+  let waiting = false;
+  const endEpisode = (): void => {
+    admission = null;
+    waiting = false;
+  };
 
   const alive = (b: Binding): boolean =>
     binding !== null && binding.id === b.id && !b.ownership.signal.aborted;
@@ -337,16 +396,32 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       busy = false;
     }
     if (!alive(b)) {
-      resolveWaiters();
+      // The step belonged to a binding that has been replaced meanwhile (R4 of the review of 10 October 2026): the replacement's own
+      // start (`bind` ran while this step was busy) was absorbed by `busy`, so it is scheduled now. Nothing of the old step's outcome is
+      // carried over: the new binding begins from the durable record.
+      woken = false;
+      const current = binding;
+      if (current !== null && alive(current))
+        schedule(current, { when: "now" });
+      else resolveWaiters();
       return;
     }
-    // A wake that arrived during the step is honoured once when nothing else is scheduled; a stop is left only by an explicit act.
-    if (woken && next.when === "event" && state.get().kind !== "stopped")
+    // A wake that arrived during the step is honoured once when nothing else is scheduled, or when the job stands in an admission wait
+    // (whose next step only probes): a change that came while the refusal was being handled is not lost. A stop is left only by an
+    // explicit act.
+    if (
+      woken &&
+      (next.when === "event" || waiting) &&
+      state.get().kind !== "stopped"
+    )
       next = { when: "now" };
     woken = false;
     if (next.when === "now") await deps.yield();
     if (!alive(b)) {
-      resolveWaiters();
+      const current = binding;
+      if (current !== null && alive(current))
+        schedule(current, { when: "now" });
+      else resolveWaiters();
       return;
     }
     schedule(b, next);
@@ -359,8 +434,10 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       woken = true;
       return;
     }
-    // A notification that changes nothing this job reads is not news (the session publishes a new identity object at every evaluation).
-    if (eligibility() === lastEligibility) return;
+    // A notification that changes nothing this job reads is not news (the session publishes a new identity object at every evaluation),
+    // unless the job stands in an admission wait: what ends one (a gate resolved in the same epoch, a hold released) need change nothing
+    // the fingerprint reads, so the next step PROBES the session's admission revision, a read that sends and writes nothing (R3).
+    if (eligibility() === lastEligibility && !waiting) return;
     if (timer !== null && state.get().kind === "backing_off") return;
     void tick();
   };
@@ -375,10 +452,19 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     const view = deps.view.get();
     const displayed =
       view.kind === "displaying" && view.account_id === service.account;
+    if (waiting) {
+      const stands = await admitted(
+        b,
+        displayed ? "ordinary" : "recovery",
+        identity.epoch,
+      );
+      if (stands !== null) return stands;
+    }
     let mode: RecoveryMode;
     if (displayed) {
       // The account is displayed: any recovery handle of a fenced run is over (the session cleared the fence).
-      if (handle !== null) handle = null;
+      handle = null;
+      commitProof = null;
       if (reported !== null) report(null);
       mode = "ordinary";
     } else {
@@ -388,20 +474,29 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       }
       if (handle === null || handle.epoch !== identity.epoch) {
         handle = null;
+        commitProof = null;
         const begun = await deps.recovery.begin(service.account);
         deps.trace?.emit("data.recovery_begin", {
           kind: begun.kind,
           ...(begun.kind === "ineligible" ? { reason: begun.reason } : {}),
         });
         if (!alive(b)) return { when: "event" };
-        if (begun.kind === "ineligible") return ineligible(begun.reason);
+        if (begun.kind === "ineligible")
+          return ineligible(b, identity.epoch, begun.reason);
         beginWaits = 0;
         handle = begun.handle;
         trigger ??= "reauthenticated";
       }
       mode = "recovery";
-      // The data commit has been made: step 2 is all that is left (a `finish` that could not take the lock is asked again, alone).
-      if (finishPending) return finish(b);
+      // The data commit has been made UNDER THIS HANDLE: step 2 is all that is left (a `finish` that could not take the lock is asked
+      // again, alone). A commit made under another handle proves nothing for this one.
+      if (
+        commitProof !== null &&
+        commitProof.binding === b.id &&
+        commitProof.handle === handle
+      )
+        return finish(b, handle as RecoveryHandle);
+      commitProof = null;
       report("catching_up");
     }
     if (!deps.online()) return waitOffline();
@@ -411,7 +506,12 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     let capture = await runCapture(b, "snapshot");
     if (!alive(b)) return { when: "event" };
     if (capture.kind === "gated" && capture.reason === "not_needed") {
-      if (mode === "ordinary") return idle();
+      if (mode === "ordinary") {
+        // R8: the receipt bookkeeping a recovery-mode commit owed is done now, as an ordinary write of the displayed account.
+        if (capture.reconcilePending === true)
+          return reconcileOwed(b, identity.epoch);
+        return idle();
+      }
       path = "catch_up";
       capture = await runCapture(b, "catch_up");
       if (!alive(b)) return { when: "event" };
@@ -443,6 +543,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       capture,
       captured,
       epoch,
+      handle: mode === "recovery" ? handle : null,
       saw,
       permit: false,
     };
@@ -480,13 +581,14 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         mode === "recovery" ? "recovery" : "ordinary",
         service.account,
         epoch,
-      )(new Request(url, { method: "GET" }));
+      )(new Request(url, { method: "GET", signal: b.ownership.signal }));
     } catch (error) {
       if (!alive(b)) return { when: "event" };
       return requestError(issued, error);
     }
     if (!alive(b)) return { when: "event" };
     notSent = 0;
+    endEpisode();
     return answer(issued, response);
   }
 
@@ -506,7 +608,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       const view = deps.view.get();
       return view.kind === "displaying" && view.account_id === service.account;
     }
-    return handle !== null && handle.epoch === issued.epoch;
+    return handle !== null && handle === issued.handle;
   }
 
   type CaptureOutcome = RecoveryCapture | { kind: "failed"; error: unknown };
@@ -542,13 +644,202 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     }
   }
 
+  /** W26 (R8): the owed receipt bookkeeping, admitted with the displayed epoch's stamp; paced when it cannot be had now. */
+  async function reconcileOwed(b: Binding, epoch: number): Promise<Next> {
+    const service = b.service;
+    const captured = service.capture(epoch, {
+      requestSeq: null,
+      ownershipToken: b.ownership.token,
+      recoveryGeneration: 0,
+      expectedPosition: null,
+    });
+    const out = await service.commit(reconcileOwedReceipts, {
+      captured,
+      ...(deps.elapsed ? { elapsed: deps.elapsed } : {}),
+    });
+    if (!alive(b)) return { when: "event" };
+    deps.trace?.emit("data.recovery_owed_reconcile", {
+      outcome: out.kind,
+      ...(out.kind === "applied" ? { value: out.value.kind } : {}),
+    });
+    if (out.kind === "applied") {
+      deps.channel?.post({
+        type: "data_changed",
+        account: service.account,
+        stores: ["drafts", "sync_state"],
+      });
+      return idle();
+    }
+    if (out.kind === "dropped") {
+      if (out.reason === "unverified") return paced();
+      return idle();
+    }
+    // A failed write leaves it owed: asked again, paced (it is bookkeeping, never a reason to stop sync).
+    return paced();
+  }
+
+  // ---- admission waits (R3 of the review of 10 October 2026, second cycle) -----------------------------------------------------------
+  /**
+   * The session refused before anything was sent, for a reason that only a change of its admission inputs ends: `begin` refused on the
+   * durable record (a gating attempt, an operation, an unverified credential, a current-epoch entry), the cover closed after `begin` had
+   * said eligible (`closed`, `closed_unresolved`: another page added a gate, or a request lease of another page is unresolved), or the
+   * page's hold, closing write or token outlasted the immediate retries (`not_sent`). The account, its epoch and a neutral view can stay
+   * exactly as they were when any of these ends, so the job does not wait for the fingerprint: it stands in an explicit wait whose steps
+   * PROBE the session's admission revision (a read: no capture, no request, no write) on every notification and, paced, without one (a
+   * hint can be lost). The wait is installed BEFORE the first probe, so a change that came first is seen by it.
+   */
+  function awaitAdmission(
+    b: Binding,
+    mode: RecoveryMode,
+    epoch: number,
+    cause: AdmissionEpisode["cause"],
+  ): Next {
+    const episode = admission;
+    if (
+      episode === null ||
+      episode.binding !== b.id ||
+      episode.mode !== mode ||
+      episode.epoch !== epoch
+    )
+      admission = {
+        binding: b.id,
+        mode,
+        epoch,
+        cause,
+        revision: null,
+        consumed: false,
+        probes: 0,
+        retries: 0,
+        retryAt: null,
+      };
+    else episode.cause = cause;
+    waiting = true;
+    return { when: "now" };
+  }
+
+  /**
+   * One step of an admission wait: null when the step may go on (the wait is over, or it belongs to a binding, mode or epoch that is no
+   * longer the current one: the step then decides afresh), else what the wait schedules next.
+   *
+   * The step goes on when the probe finds nothing that refuses the request AND either its revision changed (something that admits it
+   * moved: a fresh run of immediate retries is permitted) or the episode has not used its one attempt yet (a change that came before the
+   * wait was installed, or a refusal the revision does not show, is tried at once), or the paced attempt of an open, unchanged revision
+   * has fallen due (a refusal the probe cannot show, such as a CSRF token that only a new verification can fetch, is tried again at
+   * 1 s doubling to 60 s: bounded, and no notification hastens it). In recovery mode a changed revision also re-asks `begin`
+   * while blocked: `begin` reads the record and returns before any lease work while a gate stands, and its answer keeps the published
+   * reason true. An unchanged revision asks nothing, so the job's own reports, its own leases and new identity objects cannot make it
+   * ask again (no loop). A record that cannot be read is unknown: nothing is asked, and the next probe is paced.
+   */
+  async function admitted(
+    b: Binding,
+    mode: RecoveryMode,
+    epoch: number,
+  ): Promise<Next | null> {
+    const episode = admission;
+    if (
+      episode === null ||
+      episode.binding !== b.id ||
+      episode.mode !== mode ||
+      episode.epoch !== epoch ||
+      !deps.online()
+    ) {
+      // The situation moved (displayed or fenced now, another epoch, offline): the wait is over; the step decides from what is true now.
+      endEpisode();
+      return null;
+    }
+    let probe: RequestAdmission | null;
+    try {
+      probe = await deps.admission(mode, b.service.account, epoch);
+    } catch {
+      probe = null;
+    }
+    if (!alive(b)) return { when: "event" };
+    // An explicit act (retry, online) ended the episode while the probe was read: the step goes on.
+    if (admission !== episode || !waiting) return null;
+    const changed = probe !== null && probe.revision !== episode.revision;
+    const seen = episode.revision !== null;
+    const now = deps.clock.now();
+    const due =
+      probe !== null &&
+      !probe.blocked &&
+      !changed &&
+      episode.consumed &&
+      episode.retryAt !== null &&
+      now >= episode.retryAt;
+    if (
+      probe !== null &&
+      ((!probe.blocked && (changed || !episode.consumed || due)) ||
+        (mode === "recovery" && changed && seen))
+    ) {
+      if (changed && seen) {
+        notSent = 0;
+        episode.retries = 0;
+      }
+      if (due) episode.retries += 1;
+      episode.retryAt =
+        now +
+        Math.min(
+          config.recoveryBeginRetryMaxMs,
+          config.recoveryBeginRetryMs * 2 ** Math.min(episode.retries, 8),
+        );
+      deps.trace?.emit("data.recovery_admission", {
+        phase: "resume",
+        cause: episode.cause,
+        mode,
+        changed: changed && seen,
+        paced: due,
+        blocked: probe.blocked,
+      });
+      episode.revision = probe.revision;
+      episode.consumed = true;
+      episode.probes = 0;
+      waiting = false;
+      return null;
+    }
+    if (probe !== null) {
+      if (changed) {
+        episode.revision = probe.revision;
+        episode.probes = 0;
+      }
+      // A blocker stands: when it goes, the revision changes and the episode may try again.
+      if (probe.blocked) episode.consumed = false;
+    }
+    if (changed || episode.probes === 0)
+      deps.trace?.emit("data.recovery_admission", {
+        phase: "wait",
+        cause: episode.cause,
+        mode,
+        probe: probe === null ? "unknown" : probe.blocked ? "blocked" : "open",
+      });
+    episode.probes += 1;
+    exclusive.set(true);
+    if (state.get().kind !== "eligible_wait")
+      setState({ kind: "admission_wait", mode });
+    if (mode === "recovery") report("failed");
+    let ms = Math.min(
+      config.recoveryBeginRetryMaxMs,
+      config.recoveryBeginRetryMs * 2 ** Math.min(episode.probes - 1, 8),
+    );
+    // An open revision whose attempt was refused is looked at again when its paced attempt falls due.
+    if (
+      probe !== null &&
+      !probe.blocked &&
+      episode.consumed &&
+      episode.retryAt !== null
+    )
+      ms = Math.max(1, Math.min(ms, episode.retryAt - now));
+    return { when: "after", ms };
+  }
+
   // ---- states without a request -----------------------------------------------------------------------------------------------------
   function quiet(): Next {
+    endEpisode();
     exclusive.set(false);
     setState({ kind: "idle" });
     return { when: "event" };
   }
   function idle(): Next {
+    endEpisode();
     trigger = null;
     failures = 0;
     exclusive.set(false);
@@ -560,13 +851,16 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     return { when: "event" };
   }
   function ineligible(
+    b: Binding,
+    epoch: number,
     reason: Exclude<RecoveryBegin, { kind: "eligible" }>["reason"],
   ): Next {
     if (reason === "no_fence") return quiet();
     exclusive.set(true);
     setState({ kind: "eligible_wait", reason });
-    // A current-epoch entry (a recovery-time `401` or `credential_mismatch`) stops the run for the session; the re-authentication's
-    // notification restarts it. A lease or a record that is not settled yet is asked again, paced; offline waits for `online`.
+    // A lease or a record that is not settled yet is asked again, paced; offline waits for `online`. A gate of the durable record (a
+    // gating attempt, an operation, an unverified credential, a current-epoch entry) is an admission wait: whatever ends it, in this
+    // epoch (O11, an attempt resolved, the operation's outcome) or by a re-authentication, the job notices (R3).
     if (reason === "unresolved_lease" || reason === "stale") {
       beginWaits += 1;
       return {
@@ -577,8 +871,9 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         ),
       };
     }
-    if (reason !== "offline") report("failed");
-    return { when: "event" };
+    if (reason === "offline") return { when: "event" };
+    report("failed");
+    return awaitAdmission(b, "recovery", epoch, "begin");
   }
   function stop(
     next: Extract<RecoveryJobState, { kind: "stopped" }>,
@@ -661,14 +956,21 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         permitBlocked = true;
       switch (error.kind) {
         case "not_sent": {
+          // A short local refusal (the post-display verification's detection hold, a token being fetched) is retried at once, a few
+          // times. One that outlasts them is an admission wait (R3): the counter is NOT reset here, so the one attempt the wait then
+          // permits on an unchanged revision is the last; a changed revision permits a fresh run.
           const pace = config.notSentBackoffMs;
           if (notSent < pace.length) {
             const ms = pace[notSent] as number;
             notSent += 1;
             return { when: "after", ms };
           }
-          notSent = 0;
-          return { when: "event" };
+          return awaitAdmission(
+            issued.binding,
+            issued.mode,
+            issued.epoch,
+            "not_sent",
+          );
         }
         case "not_covered":
           failures += 1;
@@ -678,20 +980,44 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
           };
         case "closed":
         case "closed_unresolved":
-          return { when: "event" };
+          // The cover closed after `begin` said eligible (R3, second cycle): another page added a gate, or another page's request lease
+          // is unresolved (the session verifies it). `begin`'s answer is no continuing permission, so the handle and any commit proof
+          // made under it end (a new `begin` captures a fresh `s` and resolves the leases); the job waits for the admission inputs.
+          if (issued.mode === "recovery") {
+            handle = null;
+            commitProof = null;
+          }
+          return awaitAdmission(
+            issued.binding,
+            issued.mode,
+            issued.epoch,
+            "closed",
+          );
         case "auth_state":
           // A recovery-time `401` or `credential_mismatch` recorded a current-epoch entry: nothing is counted, and the run stops for the
-          // session; a re-authentication (a new epoch, `begin` eligible again) restarts it (T24 C).
+          // session; a re-authentication (a new epoch, `begin` eligible again) restarts it (T24 C). The request was answered, so this is
+          // a new episode; whatever clears the entry ends its wait (R3).
           handle = null;
+          commitProof = null;
+          endEpisode();
           if (issued.mode === "recovery") report("failed");
           setState({ kind: "eligible_wait", reason: "current_epoch_entry" });
-          return { when: "event" };
+          return awaitAdmission(
+            issued.binding,
+            issued.mode,
+            issued.epoch,
+            "begin",
+          );
         case "stale":
-          // A newer settlement: the run starts again from `begin`, with a new `s` (T24 G).
+          // A newer settlement: the run starts again from `begin`, with a new `s` (T24 G), and its own catch-up.
           handle = null;
+          commitProof = null;
+          endEpisode();
           return { when: "now" };
       }
     }
+    // Sent and failed (a network error, a time-out): the episode of refusals before sending is over.
+    endEpisode();
     return failRead(issued, null);
   }
 
@@ -732,44 +1058,51 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     );
   }
 
-  async function serverRestart(
+  function serverRestart(
     issued: Issued,
     reason: "resync_required" | "access_changed",
   ): Promise<Next> {
-    // Q24: the restart is automatic and the person is told once, per generation.
-    notice.set({
-      reason,
-      id: `${issued.capture.recoveryGeneration}:${reason}`,
-    });
-    trigger = reason;
-    return budget(issued, "server_restart");
+    return budget(issued, "server_restart", reason);
   }
 
-  /** Records what the answer does to the recovery-scoped counters (W24) and follows it. */
-  async function budget(issued: Issued, event: BudgetEvent): Promise<Next> {
+  /**
+   * Records what the answer does to the recovery-scoped counters (W24) and follows it. W24 is admitted with the request's own stamp (R5):
+   * an answer whose epoch, ownership or generation is no longer current writes nothing, and none of its visible effects (the Q24 notice,
+   * the trigger) happen either. They follow the recorded write, never the response alone.
+   */
+  async function budget(
+    issued: Issued,
+    event: BudgetEvent,
+    restart?: "resync_required" | "access_changed",
+  ): Promise<Next> {
     const service = issued.binding.service;
-    let out: Awaited<ReturnType<typeof recordBudget>>;
-    try {
-      out = await recordBudget(issued, event);
-    } catch (error) {
-      if (!alive(issued.binding)) return { when: "event" };
-      return bookkeepingStop(issued, RECOVERY_BUDGET_OPERATION, error);
-    }
+    const out = await service.commit(recordRecoveryOutcome, {
+      captured: issued.captured,
+      event,
+    });
     if (!alive(issued.binding)) return { when: "event" };
-    if (out.kind === "dropped")
-      return out.reason === "owner" || out.reason === "closing"
-        ? quiet()
-        : { when: "now" };
+    if (out.kind === "failed")
+      return bookkeepingStop(issued, RECOVERY_BUDGET_OPERATION, out.failure);
+    if (out.kind === "dropped") return dropped(issued, out.reason);
+    const recorded = out.value;
+    if (restart !== undefined) {
+      // Q24: the restart is automatic and the person is told once, per generation.
+      notice.set({
+        reason: restart,
+        id: `${issued.capture.recoveryGeneration}:${restart}`,
+      });
+      trigger = restart;
+    }
     deps.channel?.post({
       type: "data_changed",
       account: service.account,
       stores: ["sync_state"],
     });
-    if (out.blocked !== null) {
-      blockedSeen = out.blocked;
-      blockedVersion = out.budgetVersion;
+    if (recorded.blocked !== null) {
+      blockedSeen = recorded.blocked;
+      blockedVersion = recorded.budgetVersion;
       return stop(
-        { kind: "stopped", cause: "sync_blocked", blocked: out.blocked },
+        { kind: "stopped", cause: "sync_blocked", blocked: recorded.blocked },
         issued.mode,
       );
     }
@@ -785,13 +1118,6 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       ms: nextDelay(failures, deps.clock.random(), config),
     };
   }
-  const recordBudget = (issued: Issued, event: BudgetEvent) =>
-    issued.binding.service.store.run(recordRecoveryOutcome, {
-      incarnationId: issued.binding.service.incarnationId,
-      token: issued.binding.ownership.token ?? "",
-      recoveryGeneration: issued.capture.recoveryGeneration,
-      event,
-    });
 
   /** A counted failure of the read (network, `5xx`, `429`): the `sync` caller's durable back-off, then its pause (consumed, P-10). */
   async function failRead(
@@ -993,17 +1319,18 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     // The data commit is complete. In ordinary mode the cache is valid now and the engine takes over; in recovery mode `finish` follows.
     trigger = null;
     if (issued.mode === "ordinary") return idle();
-    return finish(b);
+    return finish(b, issued.handle);
   }
 
   /** Step 2 of ending a recovery (matrix 3.7.3): `finish_recovery`'s release transaction, after the data commit. */
-  async function finish(b: Binding): Promise<Next> {
+  async function finish(b: Binding, of: RecoveryHandle | null): Promise<Next> {
     const current = handle;
-    if (current === null) {
-      finishPending = false;
+    if (current === null || of === null || current !== of) {
+      // The run this commit was made for is over (a new handle begins with its own catch-up).
+      commitProof = null;
       return { when: "now" };
     }
-    finishPending = true;
+    commitProof = { binding: b.id, handle: current };
     setState({ kind: "finishing" });
     const result = await deps.recovery.finish(current);
     deps.trace?.emit("data.recovery_finish", { result });
@@ -1011,7 +1338,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     switch (result) {
       case "cleared":
         handle = null;
-        finishPending = false;
+        commitProof = null;
         finishWaits = 0;
         report(null);
         return idle();
@@ -1019,14 +1346,16 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       case "superseded":
         // A newer fence entry (rerun) or a newer epoch: `begin` again, with a new `s`; a catch-up with nothing to apply finishes at once.
         handle = null;
-        finishPending = false;
+        commitProof = null;
         return { when: "now" };
-      case "not_eligible":
+      case "not_eligible": {
+        // The record is no longer eligible at `finish` (a gate another page added): `begin` again once it changes (R3).
         handle = null;
-        finishPending = false;
+        commitProof = null;
         report("failed");
         setState({ kind: "eligible_wait", reason: "current_epoch_entry" });
-        return { when: "event" };
+        return awaitAdmission(b, "recovery", current.epoch, "begin");
+      }
       case "lock_timeout":
       case "failed":
         finishWaits += 1;
@@ -1271,6 +1600,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     request(reason) {
       // The engine invalidated the cache (W18) and asks for recovery: the snapshot begins at the next step.
       trigger = reason;
+      endEpisode();
       if (reason === "resync_required" || reason === "access_changed")
         notice.set({ reason, id: `${deps.clock.now()}:${reason}` });
       if (binding !== null) {
@@ -1290,7 +1620,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       unbind();
       bindings += 1;
       handle = null;
-      finishPending = false;
+      commitProof = null;
+      endEpisode();
       failures = 0;
       notSent = 0;
       beginWaits = 0;
@@ -1324,7 +1655,10 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
             .catch(() => undefined)
             .then(() => {
               if (alive(b)) {
+                // Connectivity returned: a new opportunity, with its immediate retries (an admission episode ends with it).
                 failures = 0;
+                notSent = 0;
+                endEpisode();
                 void tick();
               }
             });
@@ -1396,6 +1730,9 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         }
         failures = 0;
         if (alive(b)) {
+          // The person's act ends an admission episode too: one fresh attempt, with its immediate retries.
+          notSent = 0;
+          endEpisode();
           setState({ kind: "idle" });
           void tick();
         }

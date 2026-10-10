@@ -13,7 +13,11 @@ import {
   type OutboxDispatcher,
 } from "../engine/outbox-dispatcher";
 import type { QuotaGuard } from "../engine/quota-guard";
-import { createRecoveryJob, type RecoveryJob } from "../engine/recovery-job";
+import {
+  createRecoveryJob,
+  type RecoveryJob,
+  type RecoveryJobDeps,
+} from "../engine/recovery-job";
 import type { SyncChannel } from "../engine/sync-channel";
 import {
   createSyncEngine,
@@ -62,6 +66,8 @@ export interface SyncLeaderDeps {
     epoch: number,
   ): StampedFetch;
   recovery: Pick<Recovery, "begin" | "finish" | "report">;
+  /** `session.api.admission`: the recovery job's admission waits probe it (R3). */
+  admission: RecoveryJobDeps["admission"];
   /** `session.operations.pending` names the account (the outbox's stale-fence reconciliation). */
   operationPending(account: AccountId): boolean;
   apiUrl(path: string): URL;
@@ -104,6 +110,13 @@ export interface SyncLeader {
   readonly job: RecoveryJob;
   /** The bound account's facade, for the leader page's own screens; null while unbound. */
   outbox(): Outbox | null;
+  /**
+   * The person's retry of UPDATES (R2 of the review of 10 October 2026), wherever it was pressed: the recovery job's own retry while it
+   * stands in a state of its own (a stop, a pause, a back-off, a refusal of `begin`), else the engine's. Applied only while this page leads
+   * and is bound to `account` at `epoch` (the act was made against that account's view); otherwise, from a page that does not lead, it is
+   * asked of the leading page on `atlas-sync`. Never a permission: each retry is versioned on the failure that stands.
+   */
+  retryUpdates(target: { account: AccountId; epoch: number }): void;
   readonly binding: Store<LeaderBinding | null>;
   /** Starts the election (idempotent). */
   start(): void;
@@ -158,6 +171,7 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
     view: deps.view,
     fetchFor: deps.fetchFor,
     recovery: deps.recovery,
+    admission: deps.admission,
     apiUrl: deps.apiUrl,
     online: deps.online,
     subscribe: deps.subscribe,
@@ -215,6 +229,36 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
   });
 
   const leading = (): boolean => deps.election.role.get().kind === "leader";
+
+  const retryHere = (target: {
+    account: AccountId;
+    epoch: number;
+  }): boolean => {
+    const b = bound;
+    const identity = deps.identity.get();
+    if (
+      !leading() ||
+      b === null ||
+      !b.service.live ||
+      b.account !== target.account ||
+      identity === null ||
+      identity.account_id !== target.account ||
+      identity.epoch !== target.epoch
+    )
+      return false;
+    const state = job.state.get();
+    if (
+      state.kind === "stopped" ||
+      state.kind === "paused" ||
+      state.kind === "backing_off" ||
+      state.kind === "eligible_wait" ||
+      state.kind === "admission_wait" ||
+      job.exclusive.get()
+    )
+      job.retryNow();
+    else engine.retryNow();
+    return true;
+  };
 
   const publish = (): void => {
     if (!leading()) {
@@ -433,6 +477,15 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
     dispatcher,
     job,
     outbox: () => bound?.outbox ?? null,
+    retryUpdates(target) {
+      if (disposed) return;
+      if (retryHere(target)) return;
+      deps.channel.post({
+        type: "retry_requested",
+        account: target.account,
+        epoch: target.epoch,
+      });
+    },
     binding,
     start() {
       if (offs.length > 0 || disposed) return;
@@ -450,6 +503,11 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
         // A draft saved through ANOTHER facade (this page's screens, or a follower page) is announced on `atlas-sync`; the dispatcher
         // is woken by its own facade only, so the hint is what makes it look now rather than at some unrelated wake.
         deps.channel.subscribe((message) => {
+          // Another page's person asked for a retry of updates: this page applies it only if it leads that account at that epoch.
+          if (message.type === "retry_requested") {
+            retryHere({ account: message.account, epoch: message.epoch });
+            return;
+          }
           if (
             message.type === "data_changed" &&
             bound !== null &&

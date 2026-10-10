@@ -220,6 +220,9 @@ export function leaderWorld(): LeaderWorld {
           finish: async () => "cleared",
           report: () => undefined,
         },
+        // Nothing in this world refuses a request before it is sent: the admission probe always finds it open (R3's waits are the
+        // recovery world's and the native cases').
+        admission: async () => ({ revision: "open", blocked: false }),
         operationPending: (a) => pageEnv.pending.has(a),
         apiUrl: (path) =>
           new URL(`http://localhost/api/experimental/v1${path}`),

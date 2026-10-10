@@ -284,6 +284,13 @@ export interface SyncStateRow {
   delta_error_streak?: number;
   recovery_attempt_streak?: number;
   recovery_budget_version?: number;
+  /**
+   * WEB-09b (R8 of the review of 10 October 2026): a RECOVERY-mode data commit (a catch-up page, or the activation of a replacement
+   * snapshot while the account was fenced) skipped the receipt bookkeeping of acknowledged drafts, because the recovery touches no draft,
+   * `pending_effects` or outbox entry (matrix 3.7.3). It is owed: W26 does it as an ordinary write once the account is displayed, against
+   * the cache as it is then, and clears this. Absent: nothing is owed.
+   */
+  recovery_reconcile_pending?: boolean;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

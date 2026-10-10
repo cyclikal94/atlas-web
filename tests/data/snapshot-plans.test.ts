@@ -13,6 +13,7 @@ import {
   activateSnapshot,
   captureRecoveryRequest,
   commitStagingPage,
+  reconcileOwedReceipts,
   recordRecoveryOutcome,
   resetRecoveryBudget,
 } from "../../src/data/plans/recovery-writers";
@@ -21,7 +22,7 @@ import {
   createKeyDerivers,
   createValueValidators,
 } from "../../src/data/scan/validate";
-import { type PageWorld, pageWorld } from "../support/data/page-world";
+import { ACCOUNT, type PageWorld, pageWorld } from "../support/data/page-world";
 import {
   cacheRow,
   draftRow,
@@ -743,11 +744,39 @@ describe("S: the activation (W23) is one transaction (reconciliation row 3)", ()
         )
         .map((row) => JSON.stringify(row));
       const body = w.commandOf("unsent");
+      const queueBefore = JSON.stringify([
+        w.rows("drafts"),
+        w.rows("draft_commands"),
+        w.rows("pending_effects"),
+      ]);
       const out = await w.service.commit(
         activateSnapshot,
         activationInput(w, final, { mode }),
       );
       expect(out.kind, mode).toBe("applied");
+      if (mode === "recovery") {
+        // ADAPTED (R8 of the review of 10 October 2026): the recovery-mode activation writes NOTHING of the queue (the approved brief:
+        // the recovery touches no draft, `pending_effects` or outbox entry); the receipt bookkeeping is owed and done by W26 once the
+        // account is displayed. The original assertions below (covered released, gone unavailable, newer and unsent work untouched)
+        // now hold after W26, an ordinary write, which also deletes the finished receipt as the ordinary activation does.
+        expect(
+          JSON.stringify([
+            w.rows("drafts"),
+            w.rows("draft_commands"),
+            w.rows("pending_effects"),
+          ]),
+          mode,
+        ).toBe(queueBefore);
+        expect(w.sync().recovery_reconcile_pending, mode).toBe(true);
+        const owed = await w.service.commit(reconcileOwedReceipts, {
+          captured: w.capture(),
+        });
+        expect(owed, mode).toMatchObject({
+          kind: "applied",
+          value: { kind: "reconciled" },
+        });
+        expect(w.sync().recovery_reconcile_pending, mode).toBe(false);
+      } else expect(w.sync().recovery_reconcile_pending, mode).toBe(false);
       expect(
         (w.rows("drafts") as Array<{ local_id: string }>)
           .filter(
@@ -779,16 +808,8 @@ describe("S: the activation (W23) is one transaction (reconciliation row 3)", ()
         held_pending_cache: false,
         unavailable_outcome: true,
       });
-      if (mode === "recovery") {
-        // Nothing is deleted in recovery mode: the released draft stays, flags clear.
-        expect(drafts.get("covered"), mode).toMatchObject({
-          held_pending_cache: false,
-        });
-        expect(w.rows("pending_effects"), mode).toHaveLength(5);
-      } else {
-        // The released, finished draft leaves with its effect.
-        expect(drafts.has("covered"), mode).toBe(false);
-      }
+      // The released, finished draft leaves with its effect (in recovery mode, at W26 after the account is displayed).
+      expect(drafts.has("covered"), mode).toBe(false);
       w.assertNoOrphanBodies();
     }
   });
@@ -871,17 +892,19 @@ describe("R: the recovery-scoped retry classes (W24, W25)", () => {
     ]);
     const effects = JSON.stringify(w.rows("pending_effects"));
     const gen = w.sync().recovery_generation;
-    const out = await w.service.store.run(recordRecoveryOutcome, {
-      incarnationId: w.service.incarnationId,
-      token: TOKEN,
-      recoveryGeneration: gen,
+    // ADAPTED (R5 of the review of 10 October 2026): W24 is admitted with the request's stamp through `AccountService.commit`, so its
+    // answer is the commit's `applied` envelope; the recorded values asserted are the original ones.
+    const out = await w.service.commit(recordRecoveryOutcome, {
+      captured: captureFor(w),
       event: "cursor_defect",
     });
     expect(out).toMatchObject({
-      kind: "recorded",
-      abandoned: true,
-      recoveryAttemptStreak: 1,
-      recoveryGeneration: gen + 1,
+      kind: "applied",
+      value: {
+        abandoned: true,
+        recoveryAttemptStreak: 1,
+        recoveryGeneration: gen + 1,
+      },
     });
     expect(w.sync()).toMatchObject({
       cache_status: "invalid",
@@ -902,14 +925,42 @@ describe("R: the recovery-scoped retry classes (W24, W25)", () => {
       [TOKEN, 99, "generation"],
     ] as const)
       expect(
-        await w.service.store.run(recordRecoveryOutcome, {
-          incarnationId: w.service.incarnationId,
-          token,
-          recoveryGeneration: generation,
+        await w.service.commit(recordRecoveryOutcome, {
+          captured: captureFor(w, {
+            ownershipToken: token,
+            recoveryGeneration: generation,
+          }),
           event: "cursorless_error",
         }),
       ).toEqual({ kind: "dropped", reason });
     expect(w.snapshot()).toEqual(before);
+  });
+
+  test("R-3b an answer of an EARLIER epoch counts nothing and abandons nothing (R5: W24 is admitted with the request's stamp)", async () => {
+    const w = await pageWorld({ cursor: "c" });
+    await own(w);
+    const before = w.snapshot();
+    // The answer's request was captured at epoch 1; a same-account re-authentication then made epoch 2 current. The binding (token,
+    // generation) is unchanged, which is exactly what OWN and GEN cannot tell apart.
+    const stale = captureFor(w);
+    w.identity.move({ account: ACCOUNT, epoch: 2 });
+    expect(
+      await w.service.commit(recordRecoveryOutcome, {
+        captured: stale,
+        event: "cursor_defect",
+      }),
+    ).toEqual({ kind: "dropped", reason: "identity_changed" });
+    expect(w.snapshot()).toEqual(before);
+    // And inside the data transaction: a later epoch already published to this database (another page's commit) drops it too.
+    w.setSync({ stamp: { epoch: 3 } });
+    const published = w.snapshot();
+    expect(
+      await w.service.store.run(recordRecoveryOutcome, {
+        captured: captureFor(w),
+        event: "cursor_defect",
+      }),
+    ).toEqual({ kind: "dropped", reason: "epoch_superseded" });
+    expect(w.snapshot()).toEqual(published);
   });
 
   test("R-4 Try again resets the whole-attempt counter only for the failure it saw", async () => {

@@ -193,3 +193,121 @@ describe("the provider on a page with a production leader", () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * R6 of the review of 10 October 2026 (finding family follower-durable-sync-status): a follower reads the leader's DURABLE stops from
+ * `sync_state` (the production facts plan over the IndexedDB double) and says so, rather than "Up to date". The reviewer's probe
+ * (`.agtx/evidence/review-1/probes/follower-status-review.test.ts`) is the origin of the first case; the healthy control is kept beside it.
+ */
+describe("R6: a follower's status follows the durable sync stops", () => {
+  async function followerPhase(
+    patch: Partial<import("../../src/data/model/types").SyncStateRow>,
+  ) {
+    const { pageWorld } = await import("../support/data/page-world");
+    const { readSyncFacts } = await import("../../src/data/plans/facts");
+    const w = await pageWorld({
+      cursor: "d1",
+      phase: "delta",
+      cacheStatus: "valid",
+    });
+    w.setSync({ last_synced_at: "2026-10-10T00:00:00Z", ...patch });
+    const facts = await w.service.store.run(readSyncFacts, {
+      incarnationId: w.service.incarnationId,
+    });
+    if (facts === null) throw new Error("no facts");
+    const inputs = at({
+      follower: true,
+      cache: facts.cacheStatus,
+      lastSyncedAt: facts.lastSyncedAt,
+      recoveryBlocked: facts.recoveryBlocked,
+      followerStops: facts.syncStops,
+      recovery: { registered: true, active: false },
+    });
+    return {
+      phase: derivePhase(inputs, 3_600_000),
+      notices: deriveNotices(inputs),
+      gate: deriveGate(inputs),
+    };
+  }
+
+  test("control: a healthy follower whose cache has synced is up to date, with no notice", async () => {
+    const out = await followerPhase({});
+    expect(out.phase).toBe("synced");
+    expect(out.notices).toEqual([]);
+  });
+
+  test("R6: a durably PAUSED `sync` read caller is not 'Up to date': it is interrupted, with 'Retry now'", async () => {
+    const { initialReadRetry } = await import("../../src/data/model/retry");
+    const out = await followerPhase({
+      read_retry_states: {
+        sync: { ...initialReadRetry(), paused: true, backing_off_since: 0 },
+      },
+    });
+    expect(out.phase).toBe("interrupted");
+    expect(out.notices).toContainEqual({
+      kind: "still_trying",
+      scope: "updates",
+      count: 1,
+    });
+  });
+
+  for (const operation of [
+    "page:d1",
+    "snapshot-page:start",
+    "snapshot-page:at:s-2",
+    "invalidate:d1",
+    "capture",
+    "recovery-capture",
+    "recovery-budget",
+  ])
+    test(`R6: a sync writer's local write stopped at its bound (${operation}) is shown with 'Retry applying changes'`, async () => {
+      const out = await followerPhase({
+        local_write_streaks: { [operation]: 3 },
+      });
+      expect(out.phase).toBe("interrupted");
+      expect(out.notices).toContainEqual({
+        kind: "page_not_saved",
+        memoryOnly: false,
+      });
+    });
+
+  test("control: the outbox's own stops (a draft, the queue) and a streak below the bound are not the sync writers' stops", async () => {
+    const out = await followerPhase({
+      local_write_streaks: {
+        "00000000-0000-4000-8000-000000000001": 3,
+        queue: 3,
+        "page:d1": 2,
+      },
+    });
+    expect(out.phase).toBe("synced");
+    expect(out.notices).not.toContainEqual(
+      expect.objectContaining({ kind: "page_not_saved" }),
+    );
+  });
+
+  test("R6: the Q23 floor is shown on a follower (state (a) with the cache still shown)", async () => {
+    const out = await followerPhase({
+      sizing: { limit: 1, class: "constrained", floor_hits: 3, attempt: null },
+    });
+    expect(out.phase).toBe("interrupted");
+    expect(out.notices).toContainEqual({ kind: "floor", variant: "a" });
+    expect(out.gate).toBe("open");
+  });
+
+  test("the follower's list of sync-writer operations is the writers' own constants", async () => {
+    const { SYNC_WRITER_OPERATIONS } = await import(
+      "../../src/data/model/recovery"
+    );
+    const writers = await import("../../src/data/plans/sync-writers");
+    const recovery = await import("../../src/data/plans/recovery-writers");
+    expect([...SYNC_WRITER_OPERATIONS].sort()).toEqual(
+      [
+        writers.CAPTURE_OPERATION,
+        writers.READ_RETRY_OPERATION,
+        writers.SIZING_OPERATION,
+        recovery.RECOVERY_CAPTURE_OPERATION,
+        recovery.RECOVERY_BUDGET_OPERATION,
+      ].sort(),
+    );
+  });
+});

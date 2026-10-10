@@ -75,6 +75,8 @@ export function sessionDouble(
     api: {
       client: fail("api.client"),
       fetchFor: fail("api.fetchFor"),
+      seal: fail("api.seal"),
+      admission: fail("api.admission"),
     } as never,
     attempts: {} as never,
     operations: { ...base, ...operations },

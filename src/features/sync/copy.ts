@@ -78,6 +78,8 @@ export const DETAIL_DISCARD_ATTEMPT = "Discard queued attempt";
 export const DETAIL_SAVE_NEW = "Review and save as a new attempt";
 export const DETAIL_READ_FAILED =
   "Couldn't load the current state of this item to compare.";
+/** PROPOSED: the disabled action's reason while the authorised current-state read is loading (the wireframe: disabled until it has loaded). */
+export const DETAIL_READ_LOADING = "Loading the current state…";
 /** PROPOSED: the explicit confirmation the wireframe requires before a new attempt is made without the read. */
 export const DETAIL_PROCEED_WITHOUT = "Continue without comparing";
 export const DETAIL_INDETERMINATE =

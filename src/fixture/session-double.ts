@@ -202,6 +202,8 @@ export function fixtureSession(params: URLSearchParams): Session {
     api: {
       client: refusing("api.client"),
       fetchFor: refusing("api.fetchFor"),
+      seal: refusing("api.seal"),
+      admission: refusing("api.admission"),
     } as never,
     attempts: {} as never,
     operations,

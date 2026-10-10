@@ -48,6 +48,8 @@ export function startBrowserLeader(
     fetchFor: (klass, account, epoch) =>
       session.api.fetchFor(klass, account, epoch),
     recovery: session.recovery,
+    admission: (klass, account, epoch) =>
+      session.api.admission(klass, account, epoch),
     operationPending: (account) =>
       session.operations.pending.get().some((op) => op.account_id === account),
     apiUrl: (path) => apiUrl(path),
@@ -95,9 +97,20 @@ export function startBrowserLeader(
     ...(options.trace ? { trace: options.trace } : {}),
   });
   leader.start();
+  // The neutral state 3's "Try again" (the session's `actions.retry`) is the recovery job's act too (R2 of the review of 10 October
+  // 2026): this page's job when it leads the displayed identity's account, else the leading page's, asked on `atlas-sync`.
+  const offRetry = session.recovery.onRetry(() => {
+    const identity = session.identity.get();
+    if (identity !== null)
+      leader.retryUpdates({
+        account: identity.account_id,
+        epoch: identity.epoch,
+      });
+  });
   return {
     leader,
     dispose() {
+      offRetry();
       leader.dispose();
       host.setRuntime(null);
       markers.release();

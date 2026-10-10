@@ -20,8 +20,9 @@ export interface CommandSpec {
    */
   projectCreate?(draft: DraftWithCommand): CacheRow | null;
   /**
-   * WEB-09b's seam for the generic item-detail dialog (WF-QUEUE-02): a NEW command built from a failed or conflicting draft and the
-   * resource as the cache holds it now, for "Resend as a new operation" / "Review, then save as new". `null`: nothing can be rebuilt.
+   * WEB-09b's seam for the generic item-detail dialog (WF-QUEUE-02): a NEW command built from a failed or conflicting draft and `current`,
+   * the value of the authorised current read (`readCurrent`) the person reviewed, or `null` when they continued without it (never the
+   * cache), for "Resend as a new operation" / "Review, then save as new". `null`: nothing can be rebuilt.
    * A kind that registers none is never offered them: the dialog offers only what the store can do (discard).
    */
   rebuild?(
@@ -33,7 +34,41 @@ export interface CommandSpec {
    * online-only variant, with nothing to compare or resend.
    */
   onlineOnly?: boolean;
+  /**
+   * WEB-09b's seam for WF-QUEUE-02's "Currently saved" (R7 of the review of 10 October 2026; the approved amendment
+   * `gaps/queue-02-desktop.html` and follow-up decision 4): the target's CURRENT state from an ordinary AUTHORISED read of the server,
+   * authorised the same way any ordinary view of it would be. Never the cache: the cache may predate the conflict, be paused or offline,
+   * or still hold a resource whose access has changed. The slice knows its resource's endpoint and shape; the data layer supplies the
+   * stamped request (`io.get`). `indeterminate`: the read succeeded but cannot be compared (the field or the shape changed). A kind that
+   * registers none has no authorised read: the dialog says it could not load the current state and asks before continuing. The data
+   * layer seals the WHOLE result this returns against the durable record and the call's scope (R7, second cycle): the slice need not.
+   */
+  readCurrent?(
+    draft: DraftWithCommand,
+    io: CurrentReadIo,
+  ): Promise<CurrentRead>;
 }
+
+/** What the data layer gives a slice's `readCurrent`: one ordinary, stamped, authorised `GET` for the displayed account and epoch. */
+export interface CurrentReadIo {
+  /** `path` is under the API base (`/tasks/<id>`). A refusal of the session (`StampedRequestError`) or a network failure rejects. */
+  get(path: string): Promise<Response>;
+  readonly signal: AbortSignal;
+}
+
+/** The authorised current-state read of WF-QUEUE-02, as the dialog distinguishes it. */
+export type CurrentRead =
+  | { kind: "loaded"; value: CacheRow }
+  /** The read succeeded but the current state cannot be compared to the queued attempt. */
+  | { kind: "indeterminate" }
+  | {
+      kind: "failed";
+      /**
+       * `inaccessible`: access was revoked or the target was deleted (`403`/`404`/`410`); `unavailable`: no authorised read exists for
+       * this kind, or none could be made (no open account, offline, the session refused it); `error`: anything else.
+       */
+      reason: "inaccessible" | "unavailable" | "error";
+    };
 
 /**
  * The kind of a draft: `command.kind`, else the first member of a command group, else the endpoint, derived once at enqueue into
@@ -54,6 +89,8 @@ export interface CommandRegistry {
     current: CacheRow | null,
   ): EnqueueRequest | null;
   onlineOnly(draft: Pick<DraftRow, "kind">): boolean;
+  /** The kind's authorised current-state read (R7); `failed`/`unavailable` when it registered none, `failed`/`error` if it threw. */
+  readCurrent(draft: DraftWithCommand, io: CurrentReadIo): Promise<CurrentRead>;
 }
 
 export function createCommandRegistry(): CommandRegistry {
@@ -72,6 +109,15 @@ export function createCommandRegistry(): CommandRegistry {
     rebuild: (draft, current) =>
       specs.get(commandKind(draft))?.rebuild?.(draft, current) ?? null,
     onlineOnly: (draft) => specs.get(commandKind(draft))?.onlineOnly === true,
+    async readCurrent(draft, io) {
+      const read = specs.get(commandKind(draft))?.readCurrent;
+      if (read === undefined) return { kind: "failed", reason: "unavailable" };
+      try {
+        return await read(draft, io);
+      } catch {
+        return { kind: "failed", reason: "error" };
+      }
+    },
   };
 }
 

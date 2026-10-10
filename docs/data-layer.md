@@ -104,8 +104,9 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W21 | `captureRecoveryRequest` (WEB-09b: the recovery job's gate and capture; a cursor-less capture begins the attempt) | INC, CLS, OWN |
 | W22 | `commitStagingPage` (WEB-09b: one snapshot page into `cache_staging`) | INC, CLS, STG, GEN, OWN, EPO |
 | W23 | `activateSnapshot` (WEB-09b: the final page and the swap, one transaction) | INC, CLS, STG, GEN, OWN, EPO |
-| W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment) | INC, CLS, OWN, GEN |
+| W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
+| W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -668,9 +669,27 @@ the first integration run of the production leader showed; `tests/data/leader.te
   with ordinary requests while the cache stays hidden through `cache_status`.
 * RECOVERY (matrix 3.7.3, the account fenced): only after `session.recovery.begin` says `eligible` (each `ineligible` reason sends nothing; `unresolved_lease` and `stale`
   are asked again, paced). Recovery-class requests only: a catch-up from a valid saved cursor through W1 in recovery mode, else a replacement snapshot; the DATA COMMIT, then
-  `finish`. `cleared` returns the engine; `rerun`/`superseded` begin again with a new `s`; `not_eligible` waits; `lock_timeout`/`failed` ask `finish` again, alone. A
-  recovery-time `auth_state` (`401`, `credential_mismatch`) stops the run with nothing counted; the re-authentication's new epoch begins again. `report` drives neutral states 2
-  and 3. The job never mounts or permits anything: display is decided afterwards by the session's ordinary exposure.
+  `finish`. `cleared` returns the engine; `rerun`/`superseded` begin again with a new `s`; `not_eligible` waits; `lock_timeout`/`failed` ask `finish` again, alone, with
+  the SAME handle. The proof that a data commit was made is bound to the binding and the exact handle whose request made it (review cycle 1, R1): a new handle (a second
+  re-authentication, `stale`, `rerun`) makes its own catch-up before it finishes, because the fence entries it covers may need access removals the earlier catch-up never
+  fetched. A recovery-time `auth_state` (`401`, `credential_mismatch`) stops the run with nothing counted; the re-authentication's new epoch begins again. A request refused BEFORE it was sent (review
+  cycle 2, R3) is an explicit ADMISSION WAIT (`admission_wait`, or `eligible_wait` with `begin`'s reason): `begin` refused on the durable record (a gating attempt, O11's
+  `operation_pending`, an unverified credential, a current-epoch entry); the cover closed after `begin` had said eligible (`closed`, `closed_unresolved`: `begin`'s answer is
+  no continuing permission, so the handle and its commit proof end and the next attempt begins again, resolving leases and capturing a fresh `s`); `finish` answered
+  `not_eligible`; or the page's hold, closing write or token outlasted the immediate `not_sent` retries (in either mode). Resolving any of these can leave the account, its
+  epoch and a neutral view exactly as they were, so the wait does not depend on them: every notification, and a paced timer while none comes (a hint can be lost; 1 s
+  doubling to 60 s), PROBES `session.api.admission` (a read of the record and page memory: no capture, no request, no write, no lock) and compares its opaque revision with the
+  one the episode last saw. The job goes on when nothing refuses the request and either the revision changed (a fresh run of immediate retries) or the episode has not yet
+  used its one attempt (a change before the wait was installed, or a refusal the probe cannot see, is tried once); in recovery mode a changed revision also re-asks `begin`
+  while blocked (a read while a gate stands), so the published reason stays true. An unchanged revision asks nothing on a notification, so the job's own reports, its own
+  leases and new identity objects cannot make a loop; an OPEN unchanged revision whose attempt was refused anyway (a refusal the probe cannot show, such as a CSRF token that
+  only a new verification can fetch after `/browser-sessions/current` failed) is tried again on a paced, time-based back-off (1 s doubling to 60 s) that no notification
+  hastens; a blocked or unreadable one asks nothing. Unsent calls count nothing; `online`, the person's retry and a new binding end an
+  episode; stops, pauses, back-offs and budgets are untouched by a probe. `report` drives neutral states 2 and 3. The job never mounts or permits anything: display is decided afterwards by the session's ordinary exposure.
+* A step of a binding that has been replaced meanwhile (an account switch, a rebinding of the same account) ends without effect, and the replacement's own start, absorbed while
+  it was busy, is scheduled at once; each request carries its binding's ownership signal, so an obsolete call is aborted (R4). The budget and abandonment write W24 is
+  response-derived and is admitted exactly as a page is, through `AccountService.commit` with the request's `Captured` stamp and the epoch mirror (R5): an answer decoded or
+  committed after a re-authentication clears no staging, invalidates no newer cache, consumes no budget and raises no notice.
 
 **The staged snapshot** (D 4.1, reconciliation row 3): each page is one transaction (W22) into `cache_staging`, tagged with the generation, admitted by the staging
 compare-and-set (STG: `staging_position` must equal the captured position), GEN, OWN, INC, CLS and EPO; every page must carry the snapshot's one boundary revision. The final
@@ -679,10 +698,15 @@ bounded by the window, the transaction stays one) and removed from staging, and 
 `applied_revision` (the boundary) are committed with it. The staged rows are admitted by generation alone, so rows an earlier owner staged and this one adopted are eligible.
 A failure anywhere rolls the whole activation back.
 
-**Local work is preserved (P-7).** No WEB-09b plan writes the header, the body or an effect row of an unsent draft, and `draft_commands` is outside every WEB-09b scope in
-recovery mode. The activation does the receipt bookkeeping of ACKNOWLEDGED drafts that the snapshot covers (receipt revision at or below the boundary: present means released,
-absent means `no_publication` and `unavailable_outcome`), because skipping it would turn an applied, acknowledged change into "not showing" at the first live-edge page; a
-newer receipt is left to the first delta page. In recovery mode nothing at all is deleted, and an abandonment goes through W24 (no overlay writes) instead of W18.
+**Local work is preserved (P-7), and the recovery touches no draft, `pending_effects` or outbox entry (matrix 3.7.3; review cycle 1, R8).** No WEB-09b plan writes the
+header, the body or an effect row of an unsent draft. An ORDINARY activation does the receipt bookkeeping of ACKNOWLEDGED drafts that the snapshot covers (receipt revision at
+or below the boundary: present means released, absent means `no_publication` and `unavailable_outcome`), because skipping it would turn an applied, acknowledged change into
+"not showing" at the first live-edge page; a newer receipt is left to the first delta page. A RECOVERY-mode data commit (a catch-up page, or the activation of a replacement
+snapshot while the account is fenced) writes NOTHING of the queue, acknowledged work included, and deletes no tracked version: it records that the bookkeeping is owed
+(`recovery_reconcile_pending`), and W26 does it as an ordinary write of the displayed account at the job's first ordinary step after the display, against the cache as it is
+then (valid at `applied_revision`), acknowledged drafts only. Between the display and W26 an acknowledged change may still show its overlay for a moment. An abandonment goes
+through W24 (no overlay writes) instead of W18. (The first candidate did the acknowledged bookkeeping inside the recovery itself, an interpretation of the brief the review
+rejected; it is withdrawn, not relabelled.)
 
 **Q24.** A `410 resync_required` or a snapshot-phase `409 access_changed` restarts automatically, uncounted; the chip reads "Catching up" from the instant the answer arrives
 (`active`), and a dismissible notice per generation carries the wireframe's copy with a single **Acknowledge** that only dismisses. A failed local commit is retried as the
@@ -690,7 +714,26 @@ whole page from the same position (`snapshot-page:<generation>:<position>` and `
 three failures stop it ("Retry applying changes").
 
 **Followers (P-11).** A page that does not lead derives its status from the durable facts it already re-reads (a valid cache that has synced is "Up to date"; a cache that is
-not valid is "Catching up"), never "Updates stopped" merely because another page leads. A follower cannot see a frozen leader: the stated limit of P-2.
+not valid is "Catching up"), never "Updates stopped" merely because another page leads. It also reads the leader's DURABLE stops (review cycle 1, R6): the `sync` read caller
+paused (`read_retry_states.sync.paused`), a sync writer's local write stopped at its bound (`page:`, `invalidate:`, `snapshot-page:`, the capture, read-retry, sizing and the
+job's own capture and budget writes; never the outbox's), and the Q23 floor. Each makes the follower say "Updates stopped" with its notice. A follower cannot see a frozen
+leader: the stated limit of P-2.
+
+**Retries reach the recovery owner (R2).** The person's retry of updates is the leading page's act wherever it is pressed: on the leading page the job's retry (while it stands
+in a state of its own) or the engine's; from a follower's notice, a `retry_requested` message on `atlas-sync` carrying the account and epoch the follower shows, which the
+leading page applies only if it is bound to exactly those. The neutral state 3's "Try again" (`session.actions.retry`) also tells `session.recovery.onRetry`, which the browser
+composition routes the same way. Each retry is versioned on the failure that stands, as the leading page's own is (at a stop nothing automatic runs, so the failure that
+stands is the one every page shows).
+
+**The conflict comparison is an authorised CURRENT read (R7).** WF-QUEUE-02's "Currently saved" is the result of the command kind's registered `CommandSpec.readCurrent`, an
+ordinary stamped `GET` of the displayed account and epoch (`DataActions.readCurrent`), never the cache, which may predate the conflict, be paused or offline, or still hold a
+resource whose access has changed. Its loading, loaded, indeterminate and failed states are kept apart; the new attempt is disabled while it loads and, when it fails, until the
+person explicitly continues without it; "save as new" is rebuilt on the value the read returned (or on nothing), never on the cache. A kind that registers no read has none: the
+dialog says it could not load the current state. Per-operation attribution remains deferred (follow-up decision 4). **The returned value is released only at the end
+(review cycle 2, R7):** the command's whole interpretation (its decode and any later asynchronous work) is sealed with `session.api.seal` against the durable record of the
+account and epoch the read was made for, and the call's own scope (the controller lifetime, the exact binding and its service, the caller's signal, aborted by `stop` and
+`unbind` even when the command ignores it) is checked synchronously before the value is handed back; a moved record, an unreadable one, a stopped controller (also one
+started again for the same account), an ended binding or a cancelled call answer `failed`/`unavailable`, never the old value or an old account's `inaccessible`.
 
 ## Retry budgets this slice owns
 
@@ -758,8 +801,9 @@ The session's own two constants for the persistence hold (`SessionConfig.persist
   the receipt is at or below the boundary, so a newer one is left to the first delta page rather than released against content that predates it;
   (4) **the leader never reopens by itself** and opens nothing while a logout or retirement is pending (not in the plan): `openAccountData` opens an existing database without the
   may-create predicate and would lift a wipe's latch;
-  (5) **P-7 is an interpretation**: "touch no draft, `pending_effects` or outbox entry" is read as "no unsent work", and the receipt bookkeeping of acknowledged drafts is done
-  (switchable); the alternative's consequence is a false "not showing here yet" after every recovery;
+  (5) **WITHDRAWN in review cycle 1 (R8)**: the first candidate read "touch no draft, `pending_effects` or outbox entry" as "no unsent work" and did the receipt bookkeeping of
+  acknowledged drafts inside the recovery. The review held that this is not a scope amendment. The recovery now writes nothing of the queue, and the bookkeeping is owed to W26,
+  an ordinary write after the display (a new writer, not a departure from the brief);
   (6) the blocked state's "Try again" also permits one attempt when the cursor-less counter is the one at its bound (it resets nothing then), as a reload does;
   (7) WF-QUEUE-02 gained `CommandSpec.onlineOnly` besides the planned `rebuild`, to choose the online-only variant without inventing an error code;
   (8) **the engine and the dispatcher run only while the bound account is displayed** (the plan said the dispatcher keeps running under a fence): a refused request
@@ -770,7 +814,14 @@ The session's own two constants for the persistence hold (`SessionConfig.persist
   (10) **the permitted attempt is returned when nothing was sent** (the plan said only "a page load permits one attempt"): the job spent it as it called the session, and
   a call the session refused before sending it (the post-display verification's detection hold, `not_sent`) left a reloaded page blocked having sent nothing (found by
   E-B13 in WebKit, twice; the attached kernel trace shows `data.recovery_request` followed by `activity.cancel` with reason `hold`). Regression tests in
-  `tests/data/recovery-job.test.ts`, mutants MU-1233 and MU-1234.
+  `tests/data/recovery-job.test.ts`, mutants MU-1233 and MU-1234;
+  (11) **review cycle 1 additions to public interfaces** (not in the plan): `Recovery.onRetry` on the session (R2; the session's own retry otherwise had no route to the job),
+  the `retry_requested` message of `atlas-sync` (R2), `StatusInputs.followerStops` (R6), `CommandSpec.readCurrent`, `DataActions.readCurrent` and the `current` argument of
+  `DataActions.saveAsNew` (R7), the writer W26 and `sync_state.recovery_reconcile_pending` (R8), and W24's admission through `AccountService.commit` with EPO (R5);
+  (12) **review cycle 2 additions** (not in the plan): on the session, `StampedApi.admission(klass, account, epoch)` (a read of what admits a request: an opaque digest and
+  `blocked`, R3) and `StampedApi.seal(account, epoch, pending)` (the public form of `sealResult`, refusing too once the session is disposed, R7); in the data layer, the
+  `admission_wait` job state, `RecoveryJobDeps.admission` / `SyncLeaderDeps.admission`, and `DataEnvDeps.seal` (with neither `fetchOrdinary` nor `seal`, no current read is
+  made).
 
 * The raw-IndexedDB host is `store/idb-host.ts` (the plan said `account-database.ts` for the exists/incarnation/delete functions, which now sit in `ports/account-database.ts`
   over that host).
@@ -849,21 +900,26 @@ The session's own two constants for the persistence hold (`SessionConfig.persist
 
 In the WEB-09a specs the sync engine and the dispatcher are started by a **fixture** test leader, and the first snapshot is a **fixture** seeder's. Since WEB-09b the
 PRODUCTION leader has its own layers, opt-in on the fixture harness (`?leader=production`) so the earlier specs keep their meaning: L1a/L1b `tests/data/snapshot-plans`,
-`recovery-job`, `leader` (two to three pages on the fake Web Locks), `commit-page-recovery`, `follower-status`, `tests/features/sync/recovery-screens`; L1c
-`tests/e2e/fixture.data-leader.spec.ts` (E-B1 to E-B4, E-B10, E-B11 with a named delay injection, E-B12 and E-B13 (traces 5 and 6 across reloads), E-B14 with a named
-IndexedDB fault, and T24 A to F and H on a seeded recovery-eligible record: E-R1, E-R2, E-R3, E-R4 with a named fault, E-R6 with a named hold of `finish`, E-R8; T24 G is
-unit-level only) and the gated design measurement `fixture.design-snapshot.spec.ts`; L2 `tests/integration/integration.snapshot.spec.ts` (I-N1, I-N2
-proxy-injected, I-N4 a real revocation and a real re-sign-in, I-N6). None of it is WEB-08c's composed lifecycle acceptance or BE-Q19's. Anything the
+`recovery-job`, `leader` (two to three pages on the fake Web Locks), `commit-page-recovery`, `follower-status`, `retry-routing`, `current-read`,
+`tests/features/sync/recovery-screens`; L1c `tests/e2e/fixture.data-leader.spec.ts` (E-B1 to E-B4, E-B10, E-B11 with a named delay injection, E-B12 and E-B13 (traces 5
+and 6 across reloads), E-B14 with a named IndexedDB fault, and T24 A to F and H on a seeded recovery-eligible record: E-R1, E-R2, E-R3, E-R4 with a named fault and the
+visible "Try again", E-R6 with a named hold of `finish`, E-R8) and `tests/e2e/fixture.data-recovery.spec.ts` (review cycle 1: E-R7 T24 G with a `finish` held past its lock
+wait and a second re-authentication from another tab, E-R10/E-R12/E-R13 the other refusals of `begin` and their resolution in the same epoch, E-R11 the queue untouched while
+fenced and W26 after the display, E-R3b the aborted-recording variant with an offline reload (offline at the app's boundary), E-B5 case (d) with the newer owner SEEDED, E-B6
+and E-B7 case (f)'s two variants across real account switches, E-B8 the lock's scope probed with `ifAvailable`, E-B9 case (e), E-B13u trace 6's unrecognised variant, E-B15
+and E-B16 a follower's visible retries and durable stops), and the gated design measurement `fixture.design-snapshot.spec.ts`; L2
+`tests/integration/integration.snapshot.spec.ts` (I-N1, I-N2 proxy-injected, I-N3 a proxy-held page and a reload, I-N4 a real revocation and a real re-sign-in, I-N5 the same
+with a proxy-injected `410`, I-N6). None of it is WEB-08c's composed lifecycle acceptance or BE-Q19's. Anything the
 proxy injects (`rewrite_status` for a bare status, `replace_response` for an Atlas-formatted error body with its `code`) is labelled **proxy-injected** in the test name. Nothing here is release evidence and `integration_passed` stays false.
 
-The guards are shown to fail on their removal by a mutation catalogue run on **copies** of the source (`pnpm test:data-mutants`: 932 unit mutants (at revision 38; 914 at revision 37, 903 at revision 36, 888 at revision 35, 884 at revision 34, 875 at revision 33, 857 at revision 32), each with an unmutated control,
-the count asserted; `pnpm test:engine-mutants`: 141 mutants through a real engine (140 at revision 37, 137 at revision 36, 136 at revision 35, 134 at revision 34, 132 at revision 33, 123 at revision 32)). A mutant is **caught** only by an `AssertionError` (a crash, a timeout or a suite that does not load is classified and is not evidence), and every mutant added since revision 12 carries an `expect` pattern: the test written for the defect must be among the failures (in every engine, for a real-engine mutant). An earlier mutant caught by crashes alone is reported in the results (`crash_only_legacy`), never counted as an assertion catch. It never uses `tests/.mutants`, which regenerates from the current source.
+The guards are shown to fail on their removal by a mutation catalogue run on **copies** of the source (`pnpm test:data-mutants`: 982 unit mutants (WEB-09b review cycle 1; 966 at WEB-09b's first candidate; 932 at revision 38; 914 at revision 37, 903 at revision 36, 888 at revision 35, 884 at revision 34, 875 at revision 33, 857 at revision 32), each with an unmutated control,
+the count asserted; `pnpm test:engine-mutants`: 151 mutants through a real engine (WEB-09b review cycle 1; 141 at revision 38; 140 at revision 37, 137 at revision 36, 136 at revision 35, 134 at revision 34, 132 at revision 33, 123 at revision 32)). A mutant is **caught** only by an `AssertionError` (a crash, a timeout or a suite that does not load is classified and is not evidence), and every mutant added since revision 12 carries an `expect` pattern: the test written for the defect must be among the failures (in every engine, for a real-engine mutant). An earlier mutant caught by crashes alone is reported in the results (`crash_only_legacy`), never counted as an assertion catch. It never uses `tests/.mutants`, which regenerates from the current source.
 
 ## Seams
 
 * **WEB-09b** supplies (since 10 October 2026) `start(ownership)` for the engine and the dispatcher through the production leader, the first snapshot, the recovery job behind
   `RecoverySeam` (the default seam, which says no recovery is registered, remains for a page with no leader), the fields of `sync_state` that are its own, and the generic
-  WF-QUEUE-02 dialog with its `CommandSpec.rebuild` and `onlineOnly` seams.
+  WF-QUEUE-02 dialog with its `CommandSpec.rebuild`, `onlineOnly` and `readCurrent` seams (the authorised current-state read a feature slice supplies for its kind).
 * **WEB-08c** owns the production decisions on the waits against a back-to-back leader and a frozen owner. P-6 to P-9 **are now measured on a desktop** (`pnpm profile:contention`, the spec `fixture.profile-contention.spec.ts`), with **a fixture leader** (not the production leader of
   WEB-09b), **synthetic** delays and a **synthetic** freeze (a main-thread block, not a real bfcache or freeze), a **scaled** lock wait where a production-length wait would not fit, and one real Chromium renderer crash; each result carries its label and
   `docs/profiling-devices.md` says what each does not show. A **real freeze, a mobile device and the production leader** remain gates.

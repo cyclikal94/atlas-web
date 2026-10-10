@@ -114,10 +114,16 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
   },
   W24: {
     name: "recordRecoveryOutcome",
-    guards: ["INC", "CLS", "OWN", "GEN"],
+    // R5 of the review of 10 October 2026: response-derived, so the epoch mirror too (and the stamp's G1/G2/G5 through `commit`).
+    guards: ["INC", "CLS", "OWN", "GEN", "EPO"],
     durability: "strict",
   },
   W25: { name: "resetRecoveryBudget", guards: ["INC"], durability: "strict" },
+  W26: {
+    name: "reconcileOwedReceipts",
+    guards: ["INC", "CLS", "OWN", "EPO"],
+    durability: "default",
+  },
 };
 
 /**
@@ -148,6 +154,7 @@ const PRESENT_WRITERS: readonly string[] = [
   "W23",
   "W24",
   "W25",
+  "W26",
 ];
 
 describe("F-S7: the writer inventory", () => {
@@ -266,9 +273,9 @@ describe("F-S7: the writer inventory", () => {
         .sort(),
     ).toEqual([...ADMITTED, ...FIXED_SIZE].sort());
   });
-  test("the table is exactly W1 to W25 (W20 to W25 are WEB-09b's)", () => {
+  test("the table is exactly W1 to W26 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026)", () => {
     expect(Object.keys(WRITER_TABLE)).toEqual(
-      Array.from({ length: 25 }, (_, i) => `W${i + 1}`),
+      Array.from({ length: 26 }, (_, i) => `W${i + 1}`),
     );
   });
 });

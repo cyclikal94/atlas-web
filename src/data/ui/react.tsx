@@ -9,6 +9,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { apiUrl } from "../../lib/api-client/wire";
 import type { SyncStatusModel } from "../../lib/sync-chip";
 import type { Session } from "../../session";
 import type { DataRuntime } from "../engine/account-service";
@@ -154,6 +155,13 @@ function createProductionEnv(
       }),
       readMe: readMeThrough(session),
       currentDeviceId: currentDeviceThrough(session),
+      // R7: WF-QUEUE-02's authorised current-state read is an ORDINARY stamped request of the displayed account and epoch.
+      fetchOrdinary: (account, epoch) =>
+        session.api.fetchFor("ordinary", account, epoch),
+      apiUrl: (path) => apiUrl(path),
+      // R7 (second cycle): the read's whole interpreted result is validated against the durable record before it is handed back.
+      seal: (account, epoch, pending) =>
+        session.api.seal(account, epoch, pending),
       onOnline: (listener) => {
         window.addEventListener("online", listener);
         return () => window.removeEventListener("online", listener);

@@ -568,6 +568,740 @@ describe("superseded bindings", () => {
     const before = w.snapshot();
     release(w.page_(snap([1])));
     await w.settle();
-    expect(w.snapshot()).toEqual(before);
+    // ADAPTED (R4 of the review of 10 October 2026): the replacement's own first step now runs as soon as the old one has ended (before,
+    // it was absorbed by the old step and never ran, which this test did not notice). Its capture (W21) legitimately moves the request
+    // fields of `sync_state`; everything else, and every row the old answer would have staged or counted, is exactly as it was.
+    expect(w.requests).toHaveLength(2);
+    const strip = (snapshot: Record<string, object[]> | null) => ({
+      ...snapshot,
+      sync_state: (snapshot?.sync_state ?? []).map((row) => ({
+        ...row,
+        request_seq: 0,
+        staging_request_seq: null,
+        staging_started_at: null,
+      })),
+    });
+    expect(strip(w.snapshot())).toEqual(strip(before));
+    expect(w.rows("cache")).toEqual([]);
+  });
+});
+
+/**
+ * Review cycle 1 of 10 October 2026, R1 and R3 to R5 (finding families recovery-finish-epoch-binding, recovery-eligibility-wake,
+ * recovery-rebind-scheduling and recovery-outcome-stamp-admission), each beside the control that shows what the job legitimately does.
+ * The reviewer's own probes (`.agtx/evidence/review-1/probes/recovery-review.test.ts`, `recovery-boundaries.test.ts`) are the origin of
+ * the first case of each family; they are kept there unchanged.
+ */
+describe("review cycle 1: a finish is the finish of its own data commit (R1)", () => {
+  async function fenced() {
+    return recoveryWorld({
+      cursor: "delta-0",
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+  }
+  const finishes = (w: RecoveryWorld) =>
+    (
+      w.calls.filter((c) => c.call === "finish") as Array<{
+        handle: { epoch: number; s: number };
+      }>
+    ).map((c) => c.handle.epoch);
+
+  for (const failure of ["lock_timeout", "failed"] as const) {
+    test(`control: a \`finish\` that answers ${failure} is asked again with the SAME handle and no further request`, async () => {
+      const w = await fenced();
+      w.finishes.push(failure, "cleared");
+      w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+      await w.bindJob();
+      await w.advance(60_000);
+      expect(w.requests.map((r) => r.epoch)).toEqual([1]);
+      expect(finishes(w)).toEqual([1, 1]);
+      expect(w.sync().cursor).toBe("d2");
+      expect(w.state()).toEqual({ kind: "idle" });
+    });
+
+    test(`R1 (${failure}): a second re-authentication catches up under its own handle before it finishes; the earlier commit proves nothing for it`, async () => {
+      const w = await fenced();
+      w.finishes.push(failure, "cleared");
+      w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+      await w.bindJob();
+      await w.settle();
+      expect(w.state().kind).toBe("finishing");
+      expect(w.requests.map((r) => r.epoch)).toEqual([1]);
+      // A same-account re-authentication: epoch 2, the same binding (the leader does not rebind for it).
+      w.script.push(w.page_(delta([], { nextCursor: "d3" })));
+      w.identity.move({ account: ACCOUNT, epoch: 2 });
+      await w.advance(60_000);
+      expect(w.requests.map((r) => [r.klass, r.epoch])).toEqual([
+        ["recovery", 1],
+        ["recovery", 2],
+      ]);
+      expect(w.sync().cursor).toBe("d3");
+      // The epoch-2 handle is finished only after the epoch-2 data commit.
+      expect(finishes(w)).toEqual([1, 2]);
+      const order = w.calls
+        .filter((c) => c.call === "finish" || c.call === "begin")
+        .map((c) => c.call);
+      expect(order).toEqual(["begin", "finish", "begin", "finish"]);
+    });
+  }
+
+  test("R1: a `stale` request answer after a data commit is not finished on the old commit either", async () => {
+    const w = await fenced();
+    w.finishes.push("lock_timeout", "cleared");
+    w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+    await w.bindJob();
+    await w.settle();
+    // The retried `finish` finds a newer settlement: `superseded`; the new run catches up first.
+    w.finishes.unshift("superseded");
+    w.script.push(w.page_(delta([], { nextCursor: "d3" })));
+    await w.advance(60_000);
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cursor).toBe("d3");
+    const calls = w.calls
+      .filter((c) => c.call === "finish" || c.call === "begin")
+      .map((c) => c.call);
+    expect(calls).toEqual(["begin", "finish", "finish", "begin", "finish"]);
+  });
+});
+
+describe("review cycle 1: a refusal that only the durable record ends is asked again on the record's notification (R3)", () => {
+  for (const reason of [
+    "attempt_gating",
+    "operation_pending",
+    "credential_unverified",
+    "current_epoch_entry",
+  ] as const) {
+    test(`R3 (${reason}): resolved in the SAME epoch with the view still neutral, the next notification begins the recovery`, async () => {
+      const w = await recoveryWorld({
+        cursor: "d1",
+        phase: "delta",
+        cacheStatus: "valid",
+        displayed: false,
+      });
+      w.begins.push({ kind: "ineligible", reason });
+      await w.bindJob();
+      await w.settle();
+      expect(w.requests).toHaveLength(0);
+      expect(w.state()).toEqual({ kind: "eligible_wait", reason });
+      // The gate is removed (an attempt resolved, O11 resolved): the session evaluates and notifies; the identity and the view are the
+      // same as before (same account, same epoch, still neutral).
+      // ADAPTED (R3 of the review of 10 October 2026, second cycle): the gate's removal is now made in the world's record (`setGate`),
+      // which `begin` and the admission probe both read. Before, the world's `begin` forgot its scripted refusal after answering it, so a
+      // bare notification stood for the removal; the assertions below are unchanged.
+      w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+      w.setGate(null);
+      w.fire();
+      await w.settle();
+      await w.advance(60_000);
+      expect(w.requests.map((r) => r.klass)).toEqual(["recovery"]);
+      expect(w.sync().cursor).toBe("d2");
+      expect(w.calls.filter((c) => c.call === "finish")).toHaveLength(1);
+    });
+  }
+
+  test("control: a refusal that stands is asked about once per notification, never in a loop of its own", async () => {
+    const w = await recoveryWorld({
+      cursor: "d1",
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+    w.begins.push(
+      { kind: "ineligible", reason: "attempt_gating" },
+      { kind: "ineligible", reason: "attempt_gating" },
+      { kind: "ineligible", reason: "attempt_gating" },
+    );
+    await w.bindJob();
+    await w.settle();
+    w.fire();
+    await w.settle();
+    await w.advance(120_000);
+    const begins = w.calls.filter((c) => c.call === "begin").length;
+    // ADAPTED (R3, second cycle): was `toBe(2)` (one `begin` per notification). A standing refusal is now re-checked by the admission
+    // probe, a read of the record, so an unchanged gate asks `begin` nothing more at all: the notification and two minutes of paced
+    // reconciliation probed the record and asked nothing.
+    expect(begins).toBe(1);
+    expect(w.probes.length).toBeGreaterThan(1);
+    // The refusal is reported once: an unchanged answer causes no further evaluation.
+    expect(
+      w.calls.filter(
+        (c) =>
+          c.call === "report" &&
+          (c as { phase: string | null }).phase === "failed",
+      ),
+    ).toHaveLength(1);
+    expect(w.requests).toHaveLength(0);
+  });
+
+  test("control: an offline wait is still left only by `online`, and a back-off is not cut short by a notification", async () => {
+    const w = await recoveryWorld({
+      cursor: "d1",
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+    w.online = false;
+    await w.bindJob();
+    await w.settle();
+    expect(w.state()).toEqual({ kind: "eligible_wait", reason: "offline" });
+    w.fire();
+    await w.settle();
+    expect(w.calls.filter((c) => c.call === "begin")).toHaveLength(0);
+  });
+});
+
+describe("review cycle 1: a replacement binding is scheduled by its own binding (R4)", () => {
+  test("control: an ordinary notification after the old answer also lets the replacement proceed", async () => {
+    const w = await recoveryWorld();
+    w.honourAbort = false;
+    let release: (r: Response) => void = () => undefined;
+    w.script.push(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await w.bindJob("old");
+    await w.settle();
+    w.script.push(w.page_(finalSnap([2])));
+    await w.bindJob("new");
+    await w.settle();
+    release(w.page_(finalSnap([1])));
+    await w.settle();
+    w.fire();
+    await w.settle();
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cache_status).toBe("valid");
+  });
+
+  test("R4: with NO further notification, the replacement starts as soon as the obsolete step has ended, and the old answer applies nothing", async () => {
+    const w = await recoveryWorld();
+    // The old call is settled only later than the rebinding (its wrapper's own clean-up), so the old step is still busy when the job is
+    // bound again: the replacement's start is absorbed by `busy` and must be scheduled when the old step ends.
+    w.honourAbort = false;
+    let release: (r: Response) => void = () => undefined;
+    w.script.push(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await w.bindJob("old");
+    await w.settle();
+    expect(w.requests).toHaveLength(1);
+    w.script.push(w.page_(finalSnap([2])));
+    await w.bindJob("new");
+    await w.settle();
+    release(w.page_(finalSnap([1])));
+    await w.settle();
+    await w.advance(60_000);
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cache_status).toBe("valid");
+    // Only the replacement's snapshot is in the cache.
+    expect(ids(w)).toEqual([uuid(2)]);
+  });
+
+  test("R4: the obsolete request is aborted with its binding's ownership signal", async () => {
+    const w = await recoveryWorld();
+    const signals: AbortSignal[] = [];
+    w.script.push(
+      () =>
+        new Promise<Response>(() => {
+          // Never answered: the request's own signal is what ends it.
+        }),
+    );
+    await w.bindJob("old");
+    await w.settle();
+    signals.push(w.ownership.signal);
+    w.script.push(w.page_(finalSnap([2])));
+    await w.bindJob("new");
+    await w.settle();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(w.sent.map((request) => request.signal.aborted)).toEqual([
+      true,
+      false,
+    ]);
+  });
+});
+
+describe("review cycle 1: a response-derived budget write is admitted with its request's stamp (R5)", () => {
+  test("control: a current-epoch `409 access_changed` abandons the snapshot and restarts it (with the Q24 notice)", async () => {
+    const w = await recoveryWorld();
+    w.script.push(w.status(409, { code: "access_changed" }));
+    await w.bindJob();
+    await w.settle();
+    expect(w.sync().recovery_generation).toBe(2);
+    expect(w.requests).toHaveLength(2);
+    expect(w.job.notice.get()?.reason).toBe("access_changed");
+  });
+
+  test("R5: an error body decoded after a re-authentication changes nothing of the newer epoch: no abandonment, no budget, no notice", async () => {
+    const w = await recoveryWorld();
+    let release: (v: ArrayBuffer) => void = () => undefined;
+    let decoding = false;
+    const response = w.status(409, { code: "access_changed" });
+    response.arrayBuffer = () => {
+      decoding = true;
+      return new Promise<ArrayBuffer>((resolve) => {
+        release = resolve;
+      });
+    };
+    w.script.push(response);
+    await w.bindJob();
+    await w.settle();
+    expect(decoding).toBe(true);
+    const before = w.sync();
+    w.script.push(() => new Promise<Response>(() => undefined));
+    w.identity.move({ account: ACCOUNT, epoch: 2 });
+    await w.settle();
+    release(
+      new TextEncoder().encode(JSON.stringify({ code: "access_changed" }))
+        .buffer as ArrayBuffer,
+    );
+    await w.settle();
+    expect(w.sync().recovery_generation).toBe(before.recovery_generation);
+    expect(w.sync().recovery_budget_version ?? 0).toBe(
+      before.recovery_budget_version ?? 0,
+    );
+    expect(w.job.notice.get()).toBeNull();
+  });
+
+  for (const [what, answer] of [
+    ["410", () => ({ code: 410, body: { code: "resync_required" } })],
+    ["400 (cursor-less)", () => ({ code: 400, body: {} })],
+    ["422 (cursor-less)", () => ({ code: 422, body: {} })],
+    ["an unrecognised status", () => ({ code: 418, body: {} })],
+  ] as const)
+    test(`R5 (${what}): W24 waits for the persistence hold, the epoch moves meanwhile, and the transaction admits nothing`, async () => {
+      const w = await recoveryWorld();
+      const { code, body } = answer();
+      w.script.push(w.status(code, body));
+      w.gate.queue = true;
+      await w.bindJob();
+      await w.settle();
+      const waiting = w.gate.waiting.splice(0);
+      expect(waiting).toHaveLength(1);
+      const before = JSON.stringify(w.sync());
+      // A same-account re-authentication becomes current while W24 waits for its hold; the hold is then granted (a stale grant).
+      w.gate.queue = false;
+      w.script.push(() => new Promise<Response>(() => undefined));
+      w.identity.move({ account: ACCOUNT, epoch: 2 });
+      waiting[0]?.answer("held");
+      await w.settle();
+      const after = w.sync();
+      const parsed = JSON.parse(before);
+      expect(after.recovery_generation).toBe(parsed.recovery_generation);
+      expect(after.sync_error_streak ?? 0).toBe(parsed.sync_error_streak ?? 0);
+      expect(after.recovery_attempt_streak ?? 0).toBe(
+        parsed.recovery_attempt_streak ?? 0,
+      );
+      expect(w.job.notice.get()).toBeNull();
+    });
+});
+
+describe("review cycle 1: the recovery touches no draft, `pending_effects` or outbox entry; the owed bookkeeping follows the display (R8)", () => {
+  for (const path of ["catch_up", "snapshot"] as const)
+    test(`${path}: while fenced the whole queue is byte-identical (acknowledged work too); once displayed, W26 releases the acknowledged receipt and leaves unsent work alone`, async () => {
+      const w = await recoveryWorld({
+        cursor: "delta-0",
+        phase: "delta",
+        cacheStatus: "valid",
+        displayed: false,
+      });
+      w.put("drafts", [
+        draftRow({ local_id: "unsent", status: "queued" }),
+        draftRow({
+          local_id: "acked",
+          status: "acknowledged",
+          held_pending_cache: true,
+          receipt_revision: 45,
+        }),
+      ]);
+      w.put("pending_effects", [
+        effectRow({
+          resource_id: uuid(41),
+          local_id: "unsent",
+          display: { label: "mine" },
+        }),
+        effectRow({
+          resource_id: uuid(41),
+          local_id: "acked",
+          receipt_revision: 45,
+          no_publication_floor: 0,
+          display: { label: "sent" },
+        }),
+      ]);
+      const queue = () =>
+        JSON.stringify([
+          w.rows("drafts"),
+          w.rows("draft_commands"),
+          w.rows("pending_effects"),
+        ]);
+      const unsent = () =>
+        JSON.stringify([
+          (w.rows("drafts") as Array<{ local_id: string }>).filter(
+            (d) => d.local_id === "unsent",
+          ),
+          (w.rows("pending_effects") as Array<{ local_id: string }>).filter(
+            (e) => e.local_id === "unsent",
+          ),
+        ]);
+      const before = queue();
+      const unsentBefore = unsent();
+      if (path === "catch_up") w.script.push(w.page_(delta([41])));
+      else
+        w.script.push(
+          w.status(410, { code: "resync_required" }),
+          w.page_(finalSnap([41])),
+        );
+      await w.bindJob();
+      await w.settle();
+      expect(w.calls.some((c) => c.call === "finish")).toBe(true);
+      expect(queue()).toBe(before);
+      expect(w.sync().recovery_reconcile_pending).toBe(true);
+      // The session displays the account (an ordinary exposure); the job's next step is ordinary and does what was owed.
+      w.view.set({ kind: "displaying", account_id: ACCOUNT, epoch: 1 });
+      await w.settle();
+      expect(w.sync().recovery_reconcile_pending).toBe(false);
+      expect(unsent()).toBe(unsentBefore);
+      expect(
+        (w.rows("drafts") as Array<{ local_id: string }>).map(
+          (d) => d.local_id,
+        ),
+      ).toEqual(["unsent"]);
+    });
+});
+
+describe("review cycle 2: a request refused before it was sent is an explicit admission wait (R3)", () => {
+  const PACE = DATA_CONFIG.notSentBackoffMs.length;
+  async function fencedWithCursor() {
+    return recoveryWorld({
+      cursor: "d1",
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+  }
+  const begins = (w: RecoveryWorld) =>
+    w.calls.filter((c) => c.call === "begin").length;
+  const finishes = (w: RecoveryWorld) =>
+    w.calls.filter((c) => c.call === "finish") as Array<{
+      handle: { s: number; epoch: number };
+    }>;
+  /** A refusal of the wrapper AFTER `begin` said eligible: another page adds a gate meanwhile, and the cover closes. */
+  const closedBy =
+    (w: RecoveryWorld, kind: "closed" | "closed_unresolved") => () => {
+      w.setGate("credential_unverified");
+      return new StampedRequestError(kind);
+    };
+
+  for (const kind of ["closed", "closed_unresolved"] as const) {
+    test(`R3 (${kind} after \`begin\`): the job waits, sends nothing while the gate stands, and resumes in the SAME epoch when it is resolved, under a fresh handle`, async () => {
+      const w = await fencedWithCursor();
+      w.script.push(closedBy(w, kind));
+      await w.bindJob();
+      await w.settle();
+      expect(w.requests).toHaveLength(1);
+      expect(w.state()).toEqual({ kind: "admission_wait", mode: "recovery" });
+      // Notifications and time change nothing while the gate stands: no `begin`, no request.
+      for (let i = 0; i < 5; i += 1) w.fire();
+      await w.advance(120_000);
+      expect(w.requests).toHaveLength(1);
+      expect(begins(w)).toBe(1);
+      // O11 resolves the credential in the same epoch; the view stays neutral. Resolved only after the wait was installed and the
+      // job is idle, so no pending wake can stand in for the fix.
+      w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+      w.setGate(null);
+      w.fire();
+      await w.settle();
+      expect(w.requests.map((r) => [r.klass, r.epoch])).toEqual([
+        ["recovery", 1],
+        ["recovery", 1],
+      ]);
+      expect(w.sync().cursor).toBe("d2");
+      expect(begins(w)).toBe(2);
+      // The refused request's handle (s = 1) proves nothing: `finish` is asked with the new one.
+      expect(finishes(w).map((c) => c.handle.s)).toEqual([2]);
+      expect(w.state()).toEqual({ kind: "idle" });
+    });
+  }
+
+  test("R3 (closed_unresolved, lease only): with no gate, the job re-enters `begin` at once (which resolves the leases) and proceeds", async () => {
+    const w = await fencedWithCursor();
+    w.script.push(
+      new StampedRequestError("closed_unresolved"),
+      w.page_(delta([], { nextCursor: "d2" })),
+    );
+    w.begins.push(
+      {
+        kind: "eligible",
+        handle: { account: ACCOUNT, epoch: 1, s: 1 },
+      },
+      { kind: "ineligible", reason: "unresolved_lease" },
+    );
+    await w.bindJob();
+    await w.settle();
+    expect(w.state()).toEqual({
+      kind: "eligible_wait",
+      reason: "unresolved_lease",
+    });
+    await w.advance(DATA_CONFIG.recoveryBeginRetryMs * 2);
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cursor).toBe("d2");
+    expect(begins(w)).toBe(3);
+  });
+
+  test("R3: a gate that came and went while the refusal was handled (never seen, no notification) is tried once at once", async () => {
+    const w = await fencedWithCursor();
+    w.script.push(
+      new StampedRequestError("closed"),
+      w.page_(delta([], { nextCursor: "d2" })),
+    );
+    await w.bindJob();
+    await w.settle();
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cursor).toBe("d2");
+  });
+
+  test("R3: a notification during the refusal step is honoured: the resolution before the wait is installed is not lost", async () => {
+    const w = await fencedWithCursor();
+    w.script.push(
+      () => {
+        w.setGate("attempt_gating");
+        // Resolved, and notified, while the job is still busy with the refusal.
+        w.setGate(null);
+        w.fire();
+        return new StampedRequestError("closed");
+      },
+      w.page_(delta([], { nextCursor: "d2" })),
+    );
+    await w.bindJob();
+    await w.settle();
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cursor).toBe("d2");
+  });
+
+  test("R3 (ordinary snapshot): a cover closed by another tab's gating attempt waits while the view stays displayed, and resumes when it resolves", async () => {
+    const w = await recoveryWorld();
+    w.script.push(() => {
+      w.setGate("attempt_gating");
+      return new StampedRequestError("closed");
+    });
+    await w.bindJob();
+    await w.settle();
+    expect(w.state()).toEqual({ kind: "admission_wait", mode: "ordinary" });
+    w.fire();
+    await w.advance(120_000);
+    expect(w.requests).toHaveLength(1);
+    expect(w.sync().cache_status).not.toBe("valid");
+    w.script.push(w.page_(finalSnap([1])));
+    w.setGate(null);
+    w.fire();
+    await w.settle();
+    expect(w.requests.map((r) => r.klass)).toEqual(["ordinary", "ordinary"]);
+    expect(w.sync().cache_status).toBe("valid");
+    expect(w.state()).toEqual({ kind: "idle" });
+  });
+
+  for (const fenced of [false, true])
+    test(`R3 (not_sent outlasting the immediate retries, ${fenced ? "recovery catch-up" : "ordinary snapshot"}): waits on the page's hold, counts nothing, and a released hold resumes it`, async () => {
+      const w = fenced ? await fencedWithCursor() : await recoveryWorld();
+      w.hold = true;
+      for (let i = 0; i <= PACE; i += 1)
+        w.script.push(new StampedRequestError("not_sent"));
+      await w.bindJob();
+      for (let i = 0; i < 12; i += 1) await w.advance(1_000);
+      expect(w.requests).toHaveLength(PACE + 1);
+      expect(w.state()).toEqual({
+        kind: "admission_wait",
+        mode: fenced ? "recovery" : "ordinary",
+      });
+      for (let i = 0; i < 5; i += 1) w.fire();
+      await w.advance(600_000);
+      expect(w.requests).toHaveLength(PACE + 1);
+      // Nothing was counted: unsent requests consume no read or recovery budget.
+      expect(w.sync().read_retry_states.sync).toBeUndefined();
+      w.script.push(
+        fenced
+          ? w.page_(delta([], { nextCursor: "d2" }))
+          : w.page_(finalSnap([1])),
+      );
+      w.hold = false;
+      w.fire();
+      await w.settle();
+      expect(w.requests).toHaveLength(PACE + 2);
+      if (fenced) expect(w.sync().cursor).toBe("d2");
+      else expect(w.sync().cache_status).toBe("valid");
+    });
+
+  test("R3 (lost hint): a hold released with NO notification is found by the paced read-only reconciliation", async () => {
+    const w = await recoveryWorld();
+    w.hold = true;
+    for (let i = 0; i <= PACE; i += 1)
+      w.script.push(new StampedRequestError("not_sent"));
+    await w.bindJob();
+    await w.advance(600_000);
+    expect(w.requests).toHaveLength(PACE + 1);
+    const probed = w.probes.length;
+    w.script.push(w.page_(finalSnap([1])));
+    w.hold = false;
+    await w.advance(DATA_CONFIG.recoveryBeginRetryMaxMs);
+    expect(w.probes.length).toBeGreaterThan(probed);
+    expect(w.requests).toHaveLength(PACE + 2);
+    expect(w.sync().cache_status).toBe("valid");
+  });
+
+  test("control: one transient not_sent still recovers at once", async () => {
+    const w = await recoveryWorld();
+    w.script.push(new StampedRequestError("not_sent"), w.page_(finalSnap([1])));
+    await w.bindJob();
+    await w.advance(1_000);
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cache_status).toBe("valid");
+  });
+
+  test("control: a refusal the probe cannot see is tried ONCE more at once, then only on a paced back-off: notifications, the job's own reports and time make no request loop", async () => {
+    const w = await fencedWithCursor();
+    w.reportNotifies = true;
+    for (let i = 0; i < 200; i += 1)
+      w.script.push(new StampedRequestError("not_sent"));
+    await w.bindJob();
+    for (let i = 0; i < 6; i += 1) await w.advance(1_000);
+    // The immediate retries, then the one attempt an open, unchanged revision permits at once.
+    expect(w.requests).toHaveLength(PACE + 2);
+    const before = w.requests.length;
+    // Twenty notifications at once: probes, never a request.
+    for (let i = 0; i < 20; i += 1) w.fire();
+    await w.settle();
+    expect(w.requests).toHaveLength(before);
+    // Ten minutes: paced attempts only (1 s doubling to 60 s), so a bounded handful, never a burst.
+    await w.advance(600_000);
+    const paced = w.requests.length - before;
+    expect(paced).toBeGreaterThanOrEqual(5);
+    expect(paced).toBeLessThanOrEqual(16);
+    // At the bound the attempts are a minute apart.
+    const at = w.requests.length;
+    await w.advance(59_000);
+    expect(w.requests.length - at).toBeLessThanOrEqual(1);
+    // Nothing was counted.
+    expect(w.sync().read_retry_states.sync).toBeUndefined();
+  });
+
+  test("R3 (open but refused, e.g. a token only a new verification can fetch): the paced attempt recovers once the cause is gone, with no notification", async () => {
+    const w = await recoveryWorld();
+    for (let i = 0; i < PACE + 4; i += 1)
+      w.script.push(new StampedRequestError("not_sent"));
+    w.script.push(w.page_(finalSnap([1])));
+    await w.bindJob();
+    await w.advance(120_000);
+    expect(w.requests).toHaveLength(PACE + 5);
+    expect(w.sync().cache_status).toBe("valid");
+  });
+
+  test("control: a changed revision is a fresh opportunity, with a fresh run of immediate retries", async () => {
+    const w = await fencedWithCursor();
+    for (let i = 0; i < PACE + 2; i += 1)
+      w.script.push(new StampedRequestError("not_sent"));
+    await w.bindJob();
+    for (let i = 0; i < 6; i += 1) await w.advance(1_000);
+    expect(w.requests).toHaveLength(PACE + 2);
+    w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+    w.salt += 1;
+    w.fire();
+    await w.settle();
+    expect(w.requests).toHaveLength(PACE + 3);
+    expect(w.sync().cursor).toBe("d2");
+  });
+
+  test("control: an unreadable admission record is unknown: nothing is asked until it can be read and is open", async () => {
+    const w = await fencedWithCursor();
+    w.script.push(closedBy(w, "closed"));
+    await w.bindJob();
+    await w.settle();
+    w.admissionUnreadable = true;
+    w.setGate(null);
+    w.fire();
+    await w.advance(5_000);
+    expect(begins(w)).toBe(1);
+    expect(w.requests).toHaveLength(1);
+    w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+    w.admissionUnreadable = false;
+    w.fire();
+    await w.settle();
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cursor).toBe("d2");
+  });
+
+  test("control: a current-epoch entry (a recovery-time 401) is not lifted by notifications in its epoch; the re-authentication's epoch resumes", async () => {
+    const w = await fencedWithCursor();
+    w.script.push(new StampedRequestError("auth_state"));
+    await w.bindJob();
+    await w.settle();
+    for (let i = 0; i < 5; i += 1) w.fire();
+    await w.advance(120_000);
+    expect(begins(w)).toBe(1);
+    expect(w.state()).toEqual({
+      kind: "eligible_wait",
+      reason: "current_epoch_entry",
+    });
+    w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+    w.identity.move({ account: ACCOUNT, epoch: 2 });
+    await w.settle();
+    expect(w.requests.map((r) => r.epoch)).toEqual([1, 2]);
+  });
+
+  test("R3 (`finish` not_eligible): a gate added before `finish` is waited on, and its resolution begins again under a new handle", async () => {
+    const w = await fencedWithCursor();
+    w.finishes.push("not_eligible", "cleared");
+    // Another page adds the gate after the answer and before `finish`.
+    w.script.push(() => {
+      w.setGate("credential_unverified");
+      return w.page_(delta([], { nextCursor: "d2" }));
+    });
+    await w.bindJob();
+    await w.settle();
+    expect(w.state().kind).toBe("eligible_wait");
+    w.fire();
+    await w.advance(60_000);
+    expect(begins(w)).toBe(1);
+    expect(w.requests).toHaveLength(1);
+    w.script.push(w.page_(delta([], { nextCursor: "d3" })));
+    w.setGate(null);
+    w.fire();
+    await w.settle();
+    expect(begins(w)).toBe(2);
+    expect(finishes(w).map((c) => c.handle.s)).toEqual([1, 2]);
+    expect(w.sync().cursor).toBe("d3");
+    expect(w.state()).toEqual({ kind: "idle" });
+  });
+
+  test("control: a stop is not lifted by admission changes (a paused read caller stays paused)", async () => {
+    const w = await recoveryWorld({ config: { pauseAfterMs: 1 } as never });
+    w.script.push(w.status(503), w.status(503), w.status(503));
+    await w.bindJob();
+    await w.advance(600_000);
+    const state = w.state().kind;
+    const sent = w.requests.length;
+    w.salt += 1;
+    w.fire();
+    await w.advance(600_000);
+    expect(w.state().kind).toBe(state);
+    if (state === "paused") expect(w.requests).toHaveLength(sent);
+  });
+
+  test("R3 with R4: a replacement binding during a standing wait starts on its own, from `begin`", async () => {
+    const w = await fencedWithCursor();
+    w.script.push(closedBy(w, "closed"));
+    await w.bindJob();
+    await w.settle();
+    expect(w.state()).toEqual({ kind: "admission_wait", mode: "recovery" });
+    w.setGate(null);
+    w.script.push(w.page_(delta([], { nextCursor: "d2" })));
+    await w.bindJob();
+    await w.settle();
+    expect(w.requests).toHaveLength(2);
+    expect(w.sync().cursor).toBe("d2");
   });
 });

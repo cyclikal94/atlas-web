@@ -54,9 +54,10 @@ export interface CommitPageInput {
    */
   leaseLive?: () => boolean;
   /**
-   * WEB-09b: `recovery` is a catch-up page applied by the recovery job while the account is fenced (matrix 3.7.3, P-7). The page and its
-   * position are applied exactly as an ordinary page's, but its reconciliation writes only the receipt bookkeeping of ACKNOWLEDGED drafts
-   * and deletes nothing: no unsent draft, its body or its effects is touched. Absent (`ordinary`): the WEB-09a behaviour, unchanged.
+   * WEB-09b: `recovery` is a catch-up page applied by the recovery job while the account is fenced (matrix 3.7.3). The page and its
+   * position are applied exactly as an ordinary page's, but NOTHING of the queue is written (no draft, body or effect row, R8 of the review
+   * of 10 October 2026), and no tracked version is deleted; the receipt bookkeeping it skips is owed (`recovery_reconcile_pending`) and
+   * done by W26 once the account is displayed. Absent (`ordinary`): the WEB-09a behaviour, unchanged.
    */
   mode?: "ordinary" | "recovery";
 }
@@ -134,6 +135,10 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
           invalidateOperation(input.captured.expectedPosition),
         ),
         sizing: { ...sync.sizing, attempt: null, floor_hits: 0 },
+        // R8: a recovery-mode page skips the queue's bookkeeping; it is owed to the ordinary write after the recovery (W26).
+        ...(input.mode === "recovery"
+          ? { recovery_reconcile_pending: true }
+          : {}),
       },
       result: {
         kind: "committed",
