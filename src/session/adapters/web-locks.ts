@@ -10,7 +10,9 @@ const isAbort = (error: unknown): boolean =>
 
 /**
  * The production `LockPort` over Web Locks. There is no fallback: the capability check has already refused a browser
- * without them (answer Q12). A lock is requested `exclusive`, is never stolen, and is never read with `query()`.
+ * without them (answer Q12). A lock is requested `exclusive` (the protocol's own locks) or, for `acquireShared`, `shared` (the
+ * persistence hold, which must coexist with other holds and conflict with every settlement); it is never stolen, and never read
+ * with `query()`.
  */
 export function createWebLocksPort(locks: LockManagerLike): LockPort {
   return {
@@ -26,6 +28,31 @@ export function createWebLocksPort(locks: LockManagerLike): LockPort {
               return undefined;
             }
             if (abandonIf?.()) {
+              resolve(null);
+              return undefined;
+            }
+            return new Promise<void>((done) => {
+              let released = false;
+              resolve({
+                release() {
+                  if (released) return;
+                  released = true;
+                  done();
+                },
+              });
+            });
+          },
+        );
+        request.catch(() => resolve(null));
+      });
+    },
+    acquireShared(name, options) {
+      return new Promise<LockHandle | null>((resolve) => {
+        const request = locks.request(
+          name,
+          { mode: "shared", signal: options?.signal },
+          (lock) => {
+            if (!lock) {
               resolve(null);
               return undefined;
             }

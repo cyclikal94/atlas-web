@@ -20,6 +20,7 @@ import {
   RESTORED_TEXT,
   RecoveryBanner,
   SAVE_FAILED_TEXT,
+  SAVE_REFUSED_TEXT,
 } from "../../src/lib/form-recovery/RecoveryBanner";
 import {
   UPDATE_TEXT,
@@ -160,6 +161,13 @@ describe("MemoryRecoveryAdapter (a fixture, not the real store)", () => {
     );
   });
 
+  test("a save refused while the account is signing out reports refused and writes nothing (D-16)", async () => {
+    const adapter = new MemoryRecoveryAdapter();
+    adapter.refuseSaves = true;
+    expect(await adapter.save(snapshot("tab-a", "x"))).toBe("refused");
+    expect(await adapter.load("task-edit:42", "tab-a")).toBeNull();
+  });
+
   test("a save that fails reports failed, then succeeds on retry", async () => {
     const adapter = new MemoryRecoveryAdapter();
     adapter.failSaves = true;
@@ -234,6 +242,24 @@ describe("RecoveryBanner", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(onDiscardAndReload).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Discard and reload anyway" }),
+    );
+    expect(onDiscardAndReload).toHaveBeenCalledTimes(1);
+    expect((await axe(container)).violations).toEqual([]);
+  });
+
+  test("state 2b, save refused while signing out (D-16): keeps the form open, announces assertively, and offers only Discard and reload anyway (there is nothing to retry)", async () => {
+    const onDiscardAndReload = vi.fn();
+    const { container } = render(
+      withAnnouncer(
+        <RecoveryBanner state={{ kind: "save-refused", onDiscardAndReload }} />,
+      ),
+    );
+    expect(screen.getAllByText(SAVE_REFUSED_TEXT)).toHaveLength(1);
+    await act(frame);
+    expect(screen.getByRole("alert")).toHaveTextContent(SAVE_REFUSED_TEXT);
+    expect(screen.queryByRole("button", { name: "Retry save" })).toBeNull();
     fireEvent.click(
       screen.getByRole("button", { name: "Discard and reload anyway" }),
     );

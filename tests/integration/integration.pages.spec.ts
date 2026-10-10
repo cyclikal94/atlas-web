@@ -365,13 +365,15 @@ test.describe("I-14b: an answer that arrives after the switch (G4, matrix 3.7.2)
     const held = await proxy.addRule(sessionsRule("hold"));
     await page.evaluate(
       (arg) => {
-        window.__t.late = window.__s.api
-          .client("ordinary", arg.account, arg.epoch)
-          .GET("/sessions")
-          .then(
-            () => "returned",
-            (error: unknown) => (error as { kind?: string }).kind ?? "threw",
-          );
+        window.__t.late = window.__retryTyped(() =>
+          window.__s.api
+            .client("ordinary", arg.account, arg.epoch)
+            .GET("/sessions")
+            .then(
+              () => "returned",
+              (error: unknown) => (error as { kind?: string }).kind ?? "threw",
+            ),
+        );
       },
       { account: a?.account_id ?? "", epoch: a?.epoch ?? 0 },
     );
@@ -419,13 +421,15 @@ test.describe("I-14c: a transition completed by ANOTHER page whose notice never 
     const held = await proxy.addRule(sessionsRule("hold"));
     await first.evaluate(
       (arg) => {
-        window.__t.late = window.__s.api
-          .client("ordinary", arg.account, arg.epoch)
-          .GET("/sessions")
-          .then(
-            () => "returned",
-            (error: unknown) => (error as { kind?: string }).kind ?? "threw",
-          );
+        window.__t.late = window.__retryTyped(() =>
+          window.__s.api
+            .client("ordinary", arg.account, arg.epoch)
+            .GET("/sessions")
+            .then(
+              () => "returned",
+              (error: unknown) => (error as { kind?: string }).kind ?? "threw",
+            ),
+        );
       },
       { account: a?.account_id ?? "", epoch: a?.epoch ?? 0 },
     );
@@ -528,19 +532,23 @@ async function startHeldCheckCall(
         };
       };
       window.__t.checkHeld = false;
-      window.__t.late = window.__s.api
-        .client("ordinary", arg.account, arg.epoch)
-        .GET("/sessions")
-        .then(
-          () => {
-            window.__t.returnedAt = Date.now();
-            return "returned";
-          },
-          (error: unknown) => {
-            window.__t.returnedAt = Date.now();
-            return (error as { kind?: string }).kind ?? "threw";
-          },
-        );
+      // A call refused as `not_sent` (a hold was in force for a moment: the page's own post-display verification is answered about
+      // now, and its read of `/me` runs beside it) counted as no attempt and sent nothing: it is made again, as a queue would, exactly
+      // as I-09 and I-14e do. Revision 10's WebKit failure of this case was that refusal (kernel trace, `activity.cancel` reason `hold`).
+      window.__t.late = window
+        .__retryTyped(() =>
+          window.__s.api
+            .client("ordinary", arg.account, arg.epoch)
+            .GET("/sessions")
+            .then(
+              () => "returned",
+              (error: unknown) => (error as { kind?: string }).kind ?? "threw",
+            ),
+        )
+        .then((kind) => {
+          window.__t.returnedAt = Date.now();
+          return kind;
+        });
     },
     { account: a?.account_id ?? "", epoch: a?.epoch ?? 0 },
   );
@@ -605,6 +613,106 @@ test.describe("I-14d: the release does not wait for the completion of the check 
     await expect
       .poll(() => first.evaluate(() => window.__s.identity.get()?.account_id))
       .toBe(settled?.account_id);
+  });
+});
+
+/**
+ * I-14d, revision 11: the cause of revision 10's single WebKit failure of the case above (`the proxy holds 1 response(s)`, zero after
+ * 15 s). The kernel trace attached to that failure shows the test's typed call (activity 4) created in the very millisecond in which
+ * the page's own post-display VERIFICATION (activity 2: `GET /browser-sessions/current`, asked for by the session as soon as an account
+ * is displayed) was answered; the answer's detection step set a hold (`hold.set`, cause `detection`, released a millisecond later), and
+ * the call was cancelled with reason `hold` (`activity.cancel`): `not_sent`, which counts as no attempt and sends nothing, so the
+ * proxy never saw it. That refusal is the documented queue contract ("a hold, or a closing write, was in force for a moment"), and
+ * every other case that calls a stamped endpoint at once after sign-in retries it (`__retry`, `__retryTyped`); I-14b, I-14c and I-14d
+ * did not. The page's read of `/me` (the data layer's, WEB-09a) runs beside the verification at the same moment and widens the window a
+ * little; it does not create it (the verification, the hold and the refusal are the session module's, WEB-08a).
+ *
+ * These two cases put the call exactly there ON PURPOSE (test instrumentation: `fetch` is wrapped so that the typed call is made in the
+ * task in which the verification's answer is delivered, before the kernel has seen it; the proxy holds the answer so that the
+ * placement is deterministic, not a measured delay): the call is refused `not_sent` and nothing reaches the proxy (the failure's
+ * signature, reproduced), and, retried as the other cases do, it is sent once and held once.
+ */
+async function callAtVerificationAnswer(
+  context: import("@playwright/test").BrowserContext,
+  retry: boolean,
+) {
+  await context.addInitScript(() => {
+    const original = window.fetch.bind(window);
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const response = await original(...args);
+      const url = args[0] instanceof Request ? args[0].url : String(args[0]);
+      const w = window as unknown as { __onCurrent?: () => void };
+      if (url.includes("/browser-sessions/current") && w.__onCurrent) {
+        const hook = w.__onCurrent;
+        w.__onCurrent = undefined;
+        hook();
+      }
+      return response;
+    };
+  });
+  const page = await bootHarness(context);
+  const verification = await proxy.addRule({
+    method: "GET",
+    path: "/^\\/api\\/experimental\\/v1\\/browser-sessions\\/current$/",
+    action: "hold",
+    ordinal: 1,
+  });
+  expect((await signIn(page, "alice")).kind).toBe("settled");
+  await untilView(page, "displaying");
+  // The page's own verification of the displayed account is outstanding at the proxy.
+  await untilHeld(verification.id);
+  const a = (await records(page)).auth_state.settled;
+  const sessions = await proxy.addRule(sessionsRule("hold"));
+  await page.evaluate(
+    (arg) => {
+      const once = () =>
+        window.__s.api
+          .client("ordinary", arg.account, arg.epoch)
+          .GET("/sessions")
+          .then(
+            () => "returned",
+            (error: unknown) => (error as { kind?: string }).kind ?? "threw",
+          );
+      window.__t.late = new Promise<string>((resolve) => {
+        (window as unknown as { __onCurrent?: () => void }).__onCurrent =
+          () => {
+            void (arg.retry ? window.__retryTyped(once) : once()).then(resolve);
+          };
+      });
+    },
+    { account: a?.account_id ?? "", epoch: a?.epoch ?? 0, retry },
+  );
+  // The answer is delivered now: the call is made in the same task.
+  await proxy.release(verification.id);
+  return { page, sessions };
+}
+
+test.describe("I-14d (revision 11): a typed call made as the page's own verification is answered", () => {
+  test("it is refused `not_sent` (no attempt, nothing sent), which is what revision 10's WebKit failure was", async ({
+    context,
+  }) => {
+    const { page, sessions } = await callAtVerificationAnswer(context, false);
+    expect(await page.evaluate(() => window.__t.late)).toBe("not_sent");
+    // Nothing reached the proxy, however long it is waited for: zero held, and no `GET /sessions` in its log.
+    await page.waitForTimeout(1_500);
+    expect((await proxy.held())[sessions.id] ?? 0).toBe(0);
+    const requests = (await proxy.log()).filter(
+      (entry) => entry.method === "GET" && /\/sessions$/.test(entry.path),
+    );
+    expect(requests).toEqual([]);
+    // The page itself is healthy: its identity is displayed and a call made now is sent.
+    expect((await view(page)).kind).toBe("displaying");
+  });
+
+  test("retried as every other case does, it is sent once, held once, and returned when released", async ({
+    context,
+  }) => {
+    const { page, sessions } = await callAtVerificationAnswer(context, true);
+    await untilHeld(sessions.id);
+    await page.waitForTimeout(500);
+    expect((await proxy.held())[sessions.id]).toBe(1);
+    await proxy.release(sessions.id);
+    expect(await page.evaluate(() => window.__t.late)).toBe("returned");
   });
 });
 

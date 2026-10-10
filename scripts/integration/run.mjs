@@ -5,7 +5,7 @@
 //   node scripts/integration/run.mjs [--serve] [--postgres] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [-- <playwright args>]
 //
 //   default   for each browser: start a FRESH stack, run Playwright's `integration-<browser>` project, stop everything; exit non-zero if any failed.
-//             With no --grep the project runs in two stacks per browser (see STACKS): the suite exceeds what one stack's backend allows.
+//             With no --grep the project runs in three stacks per browser (see STACKS): the suite exceeds what one stack's backend allows.
 //   --serve   start everything and print the URLs; run until interrupted (for exploring; nothing is run)
 //
 // Loopback listeners on OS-chosen free ports only. Disposable state under a fresh directory in $TMPDIR. Every process this script
@@ -53,14 +53,28 @@ const passthrough = args.includes("--")
 // The backend throttles password sign-ins per source (a fixed window of 60 s: at most 120 requests, and 10 attempts per account),
 // and every spec of a stack signs in from the same loopback address. One stack that runs the whole suite therefore exhausts the
 // window and the last specs are refused with 429 (this happened when I-14e was added, before it had its own stack). The suite is
-// split over fresh stacks: everything but I-14e, then I-14e. A run the caller has narrowed (`--grep`, or Playwright arguments
+// split over fresh stacks: everything but I-14e and the I-14d cases of revision 11, then I-14e, then those. A run the caller has narrowed (`--grep`, or Playwright arguments
 // after `--` such as a spec file or a config) is one stack, as before: the caller chose what runs.
 const STACKS =
   grep || passthrough.length > 0
     ? [{ suffix: "", args: grep ? ["--grep", grep] : [] }]
     : [
-        { suffix: "", args: ["--grep-invert", "I-14e"] },
+        // WEB-09a's data specs (I-P1, I-O*, I-C*, I-S1, I-W1) sign in often: they have a stack of their own, and pace themselves.
+        // So do the two deterministic I-14d cases of revision 11 ("I-14d (revision 11)": one sign-in each): the main stack runs close to
+        // the throttle's window, and two more sign-ins made the last three I-03 cases of every engine answer `rate_limited`.
+        {
+          suffix: "",
+          args: [
+            "--grep-invert",
+            "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W)[0-9]",
+          ],
+        },
         { suffix: "-i14e", args: ["--grep", "I-14e"] },
+        { suffix: "-i14d", args: ["--grep", "I-14d \\(revision 11\\)"] },
+        {
+          suffix: "-data",
+          args: ["tests/integration/integration.data.spec.ts"],
+        },
       ];
 
 const children = [];

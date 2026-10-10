@@ -337,7 +337,11 @@ export async function handleOrdinaryAnswer(
  * queued behind a read or never delivered. It is used only for the cheap early exit that saves decoding a body nobody will
  * receive; the authority is `checkAtTheRecord`.
  */
-function stampIsStale(k: Kernel, account: AccountId, epoch: Epoch): boolean {
+export function stampIsStale(
+  k: Kernel,
+  account: AccountId,
+  epoch: Epoch,
+): boolean {
   const settled = k.memory.settled;
   return (
     settled === null || settled.account !== account || settled.epoch !== epoch
@@ -345,7 +349,7 @@ function stampIsStale(k: Kernel, account: AccountId, epoch: Epoch): boolean {
 }
 
 /** What the release check found in the transaction that read the record (`checkAtTheRecord`). */
-type ReleaseVerdict =
+export type ReleaseVerdict =
   | { kind: "current"; n: number }
   | { kind: "moved"; durable: { account: AccountId; epoch: Epoch } | null }
   | { kind: "unreadable" };
@@ -376,11 +380,13 @@ export type ReleaseTarget = "caller" | "library" | "result";
  * A record that cannot be read in time is not evidence. `open` is cleared when the page gives up, so a body that runs after
  * that releases nothing. `decoded` is the number of the decode a final check follows (`sealResult`), or null.
  */
-async function checkAtTheRecord(
+export async function checkAtTheRecord(
   k: Kernel,
   account: AccountId,
   epoch: Epoch,
   decoded: number | null,
+  /** The trace event of the check: a release is `response.check`; a persistence hold's is its own, so the two never pair up. */
+  event: "response.check" | "persistence.check" = "response.check",
 ): Promise<ReleaseVerdict> {
   const n = ++k.memory.responseChecks;
   let open = true;
@@ -402,7 +408,7 @@ async function checkAtTheRecord(
             durable.account === account &&
             durable.epoch === epoch;
           decide(current ? { kind: "current", n } : { kind: "moved", durable });
-          k.emit("response.check", {
+          k.emit(event, {
             n,
             account,
             epoch,

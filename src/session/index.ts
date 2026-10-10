@@ -36,6 +36,8 @@ export type {
   NeutralStateId,
   OperationStart,
   Operations,
+  Persistence,
+  PersistenceHold,
   Recovery,
   RecoveryBegin,
   RecoveryHandle,
@@ -53,6 +55,12 @@ export type {
   WipeOutcome,
 } from "./api";
 export { StampedRequestError } from "./api";
+/**
+ * `openHold` is the lifecycle of a granted persistence hold (revocation at the bound, the work registered with it, the stall report), and
+ * `unrevokedHold` a hold that is never revoked: both are for composing DOUBLES and the fixture's real-lock scenarios, never for the
+ * session's own consumers, which ask `session.persistence.hold`.
+ */
+export { openHold, unrevokedHold } from "./kernel/persistence";
 export {
   formatRange,
   rangeFromPin,

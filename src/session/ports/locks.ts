@@ -28,6 +28,16 @@ export interface LockPort {
   /** probe(id): `ifAvailable`. `true` proves the lock was released; `false` proves NOTHING. */
   probe(name: string): Promise<boolean>;
   /**
+   * SHARED request, held until released: granted together with other shared holders, never alongside an exclusive one, and in
+   * queue order (a shared request queued behind a waiting exclusive one waits for it). It is how a persistence commit is ordered
+   * against every settlement of the session record without serialising commits with one another (`persistence.hold`). Null if
+   * `signal` aborts first; a handle granted after `signal` aborted is released before this resolves.
+   */
+  acquireShared(
+    name: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<LockHandle | null>;
+  /**
    * `ifAvailable`, and HOLD it on a grant. Null when it was not available. Used only for liveness and
    * de-duplication locks whose correctness never depends on them (`atlas-op-<id>`, decision D-17).
    */

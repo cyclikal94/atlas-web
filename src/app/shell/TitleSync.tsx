@@ -9,7 +9,12 @@ export function TitleSync() {
     select: (state) => state.location.pathname,
   });
   useEffect(() => {
-    setProtectedTitle([destinationFor(pathname)?.label ?? "Not found"]);
+    // `/sync` is a screen, not a navigation destination: it has a generic name of its own (never account data).
+    setProtectedTitle([
+      pathname === "/sync"
+        ? "Sync"
+        : (destinationFor(pathname)?.label ?? "Not found"),
+    ]);
   }, [pathname]);
   return null;
 }

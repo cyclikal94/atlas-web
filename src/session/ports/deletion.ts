@@ -51,6 +51,14 @@ export interface LocalWorkPort {
   summarise(account: AccountId): Promise<LocalWorkSummary>;
 }
 
+/**
+ * What `setClosing` knows. `closing`: the account database's `draft_fence.closing` is DURABLY set (the transaction completed), or
+ * there is no database to close; from then on every recovery write is refused by the store itself. `unconfirmed`: it is not known to
+ * be set (the transaction failed, aborted or hit the quota, the singleton is missing, the data layer could not be loaded). Nothing
+ * else counts: the kernel treats any answer other than exactly `closing` as `unconfirmed`.
+ */
+export type ClosingOutcome = "closing" | "unconfirmed";
+
 /** Step 3a of the canonical procedure; WEB-09a implements it over draft_fence and form_recovery. */
 export interface WipeCoordinationPort {
   /** BEFORE the fence/envelope and the network call (D-18). */
@@ -60,8 +68,13 @@ export interface WipeCoordinationPort {
   ): Promise<{ consentDigest: string }>;
   broadcastImminent(account: AccountId, operationId: OperationId): void;
   waitForClosure(account: AccountId, boundedMs: number): Promise<void>;
-  /** draft_fence.closing = true, in the same transaction as the broadcast. */
-  setClosing(account: AccountId): Promise<void>;
+  /**
+   * `draft_fence.closing = true`, durably, and only then the `wipe_imminent` broadcast. TOTAL (it never rejects) and HONEST: a failure
+   * is answered `unconfirmed`, never swallowed, because a deletion may not go on without the durable flag. The flag, not the
+   * broadcast, is what excludes a recovery writer that has not heard (a delayed or absent hint); the digest read that follows can be
+   * overtaken by such a writer, so the answer `closing` is a precondition of reading it.
+   */
+  setClosing(account: AccountId): Promise<ClosingOutcome>;
   liveDigest(account: AccountId): Promise<string>;
   /** How many unsent changes and recovery copies exist now (a count for the consent prompt). */
   liveCount(account: AccountId): Promise<number>;

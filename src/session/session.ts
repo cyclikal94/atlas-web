@@ -26,6 +26,7 @@ import {
 } from "./kernel/identity";
 import { recordAndHold } from "./kernel/observation";
 import { OperationService } from "./kernel/operations";
+import { holdForPersistence } from "./kernel/persistence";
 import { RecoveryService } from "./kernel/recovery";
 import { createStampedFetch } from "./kernel/send";
 import { Kernel, MutableStore, type SessionPorts } from "./kernel/state";
@@ -309,6 +310,9 @@ export function createSessionWithKernel(
     wipe: wipe as Wipe,
     compat,
     actions,
+    persistence: {
+      hold: (account, epoch) => holdForPersistence(k, account, epoch),
+    },
   };
   void formatRange;
   return { session, kernel: k };

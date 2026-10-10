@@ -1,0 +1,401 @@
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import type { SyncStatusModel } from "../../lib/sync-chip";
+import type { Session } from "../../session";
+import { createBroadcastSyncChannel } from "../engine/sync-channel";
+import { createWriteFailureMarkers } from "../engine/write-failure-marker";
+import type { MergedResource } from "../model/overlay";
+import type { QueueSummary } from "../model/queue-summary";
+import {
+  deriveGate,
+  deriveNotices,
+  deriveSyncStatus,
+  type GateState,
+  type Notice,
+  type StatusInputs,
+} from "../model/status";
+import type { DraftRow, ResourceKind } from "../model/types";
+import {
+  type QueuePage,
+  type ResourcePage,
+  readMerged,
+  readResourceList,
+} from "../plans/outbox";
+import type { Loadable, Watchable } from "../store/port";
+import { createDataEnv, type DataActions, type DataEnv } from "./env";
+import { currentDeviceThrough, readMeThrough } from "./identity-reads";
+import { createProductionQuota } from "./production-quota";
+
+/**
+ * The React face of the data layer (plan 5.7): a provider that owns ONE controller for the protected tree, and the hooks the
+ * screens and the shell read. Every hook that reads the database returns `{ status: "unavailable" }` when there is none (a page
+ * that never saved or synced anything) or it is latched, and NONE of them creates it.
+ *
+ * `DataEnvProvider` takes a ready controller (tests and the fixture); `DataProvider` builds the production one over the session,
+ * loading the browser composition (Dexie) lazily so it stays out of the initial bundle.
+ */
+const DataEnvContext = createContext<DataEnv | null>(null);
+
+export function DataEnvProvider({
+  env,
+  children,
+}: {
+  env: DataEnv;
+  children: ReactNode;
+}) {
+  return (
+    <DataEnvContext.Provider value={env}>{children}</DataEnvContext.Provider>
+  );
+}
+
+/** The browser composition (Dexie, the host, the open predicate): loaded lazily, so it stays out of the initial bundle. */
+export type BrowserComposition = Pick<
+  typeof import("./browser-env"),
+  "createBrowserRuntime"
+>;
+
+export function DataProvider({
+  session,
+  children,
+  loadBrowser = () => import("./browser-env"),
+}: {
+  session: Session;
+  children: ReactNode;
+  /** The lazy load of the browser composition. Only a test names its own, to decide WHEN the import arrives; production leaves the default. */
+  loadBrowser?: () => Promise<BrowserComposition>;
+}) {
+  // CONSTRUCTION IS INERT (R29): a state initialiser runs in render, and development Strict Mode runs it twice and keeps one, so
+  // whatever it builds must hold nothing (no subscription, no timer, no channel) and may be dropped without a cleanup. The controller
+  // starts in the effect and stops in its cleanup, which is the PAIR React replays (mount, cleanup, mount) and runs at unmount, so a
+  // replay leaves the same live controller, never a disposed one, and nothing outlives the tree.
+  const [env] = useState<DataEnv>(() =>
+    createProductionEnv(session, loadBrowser),
+  );
+  useEffect(() => {
+    env.start();
+    return () => env.dispose();
+  }, [env]);
+  return <DataEnvProvider env={env}>{children}</DataEnvProvider>;
+}
+
+/**
+ * The production controller over the session. Everything here is light (no Dexie): connectivity, the quota estimate, the stamped
+ * `GET /me`, the sessions list, `atlas-sync`. The ONE heavy part, the runtime and its Dexie adapter, is a dynamic import made the
+ * first time an identity is displayed, so it is a separate chunk and never part of the initial bundle.
+ */
+function createProductionEnv(
+  session: Session,
+  loadBrowser: () => Promise<BrowserComposition>,
+): DataEnv {
+  let browser: { dispose(): void } | null = null;
+  /**
+   * Counts every start and every stop. A runtime is built after an asynchronous import, so it belongs to the lifetime that asked for it:
+   * one that arrives after a stop (an unmount, or the cleanup of a replayed effect) is disposed at once and never kept.
+   */
+  let lifetime = 0;
+  let running = false;
+  const online = onlineStore();
+  const channel = createBroadcastSyncChannel();
+  // What is promised and what has just landed is the ORIGIN's (R28): every page of the origin judges against one ledger. It is opened on
+  // first use, so building this holds nothing.
+  const quota = createProductionQuota();
+  const env = createDataEnv(
+    {
+      identity: session.identity,
+      loadRuntime: async () => {
+        const asked = lifetime;
+        const module = await loadBrowser();
+        const built = module.createBrowserRuntime(session);
+        if (asked !== lifetime) {
+          built.dispose();
+          throw new Error("the data layer was disposed");
+        }
+        browser?.dispose();
+        browser = built;
+        return built.runtime;
+      },
+      online,
+      quota,
+      ids: { uuid: () => crypto.randomUUID() },
+      clock: {
+        iso: () => new Date().toISOString(),
+        now: () => Date.now(),
+        random: () => Math.random(),
+      },
+      fence: (account) => ({
+        hasPendingOperation: session.operations.pending
+          .get()
+          .some((op) => op.account_id === account),
+        sessionStarted: true,
+      }),
+      readMe: readMeThrough(session),
+      currentDeviceId: currentDeviceThrough(session),
+      onOnline: (listener) => {
+        window.addEventListener("online", listener);
+        return () => window.removeEventListener("online", listener);
+      },
+      channel,
+      markers: createWriteFailureMarkers(),
+    },
+    { start: false },
+  );
+  const start = env.start.bind(env);
+  const dispose = env.dispose.bind(env);
+  return {
+    ...env,
+    start() {
+      // A start that is already running is not a new lifetime: it must not make a runtime that is still loading obsolete.
+      if (running) return;
+      running = true;
+      lifetime += 1;
+      start();
+    },
+    dispose() {
+      if (!running) return;
+      running = false;
+      lifetime += 1;
+      dispose();
+      browser?.dispose();
+      browser = null;
+      // What this controller opened is closed with it; the next start opens what it needs again (all of it opens on first use).
+      channel.close();
+      quota.close?.();
+    },
+  };
+}
+
+/** Connectivity as the page knows it. */
+function onlineStore() {
+  const listeners = new Set<() => void>();
+  const notify = (): void => {
+    for (const listener of [...listeners]) listener();
+  };
+  return {
+    get: () => (typeof navigator === "undefined" ? true : navigator.onLine),
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      if (listeners.size === 1) {
+        window.addEventListener("online", notify);
+        window.addEventListener("offline", notify);
+      }
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          window.removeEventListener("online", notify);
+          window.removeEventListener("offline", notify);
+        }
+      };
+    },
+  };
+}
+
+/** The controller, or null when no provider is mounted (the shell and its tests render without one and then show nothing of it). */
+export function useOptionalDataEnv(): DataEnv | null {
+  return useContext(DataEnvContext);
+}
+
+export function useDataEnv(): DataEnv {
+  const env = useContext(DataEnvContext);
+  if (!env) throw new Error("useDataEnv must be used inside a DataProvider");
+  return env;
+}
+
+/** A store is read through closures over the store itself: the stores are class instances, and a detached method loses `this`. */
+function useStore<T>(store: {
+  get(): T;
+  subscribe(listener: () => void): () => void;
+}): T {
+  const subscribe = useCallback(
+    (listener: () => void) => store.subscribe(listener),
+    [store],
+  );
+  const get = useCallback(() => store.get(), [store]);
+  return useSyncExternalStore(subscribe, get, get);
+}
+
+// ---- the status model ----------------------------------------------------------------------------------------------------------
+export function useStatusInputs(): StatusInputs {
+  return useStore(useDataEnv().inputs);
+}
+
+/**
+ * The model the chip reads. A transient back-off keeps the phase shown last, so it is remembered across renders; the object is
+ * stable while its fields are unchanged, so a consumer that memoises on it does not re-render for nothing.
+ */
+export function useSyncStatusModel(): SyncStatusModel {
+  const inputs = useStatusInputs();
+  const previous = useRef<SyncStatusModel | null>(null);
+  const next = deriveSyncStatus(
+    { ...inputs, previous: previous.current?.phase },
+    Date.now(),
+  );
+  const last = previous.current;
+  if (
+    last !== null &&
+    last.phase === next.phase &&
+    last.pendingCount === next.pendingCount &&
+    last.conflictCount === next.conflictCount &&
+    last.lastSyncedAt === next.lastSyncedAt
+  )
+    return last;
+  previous.current = next;
+  return next;
+}
+
+export function useNotices(): Notice[] {
+  const inputs = useStatusInputs();
+  return useMemo(() => deriveNotices(inputs), [inputs]);
+}
+
+export function useCacheGate(): GateState {
+  const inputs = useStatusInputs();
+  return useMemo(() => deriveGate(inputs), [inputs]);
+}
+
+// ---- the queue --------------------------------------------------------------------------------------------------------------------
+export function useQueueSummary(): Loadable<QueueSummary> {
+  return useStore(useDataEnv().summary);
+}
+
+/**
+ * The visible queue, a page at a time: the rows, whether more follow, and the number of drafts that depend on each. Subscribing to
+ * it is what loads the rows; the counts a screen needs for a heading come from `useQueueSummary`, never from the rows.
+ */
+export function useDraftQueue(): Loadable<QueuePage> {
+  return useStore(useDataEnv().queue);
+}
+
+/** One entry of the conflict inbox: a draft that needs a decision, with the kind of decision (read-only: no screen resolves it here). */
+export interface ConflictRow {
+  draft: DraftRow;
+  kind: "version_conflict" | "operation_conflict" | "defaults_review";
+}
+
+/**
+ * The conflict inbox (plan 3.3, D-17): the drafts that wait for a decision the person has not made, in queue order, each with its
+ * kind, a bounded page read by index (the conflicts and the reviewing drafts, never the whole queue). The screens that resolve them
+ * (WF-CONFLICT-01/02) are unowned and not built in this slice, so this carries no action; a rejected or capacity-blocked draft is not
+ * a conflict (it has its own review, with Discard and Retry).
+ */
+export function useConflictInbox(): Loadable<ConflictRow[]> {
+  const page = useStore(useDataEnv().conflicts);
+  return useMemo(
+    () =>
+      page.status === "ready"
+        ? ({ status: "ready", value: page.value.rows } as Loadable<
+            ConflictRow[]
+          >)
+        : (page as Loadable<ConflictRow[]>),
+    [page],
+  );
+}
+
+export function useDataActions(): DataActions {
+  return useDataEnv().actions;
+}
+
+/** A generic, content-free description of a draft from the registered kind, or null when none is registered. */
+export function useCommandDescription(): (draft: DraftRow) => string | null {
+  const { commands } = useDataEnv();
+  return (draft) => commands.describe(draft);
+}
+
+// ---- the account label (HO-9) ----------------------------------------------------------------------------------------------------
+/** The verified username, only while it is verified for the CURRENT epoch; otherwise null. Never derived from the account id. */
+export function useAccountLabel(): string | null {
+  const env = useDataEnv();
+  useStore(env.profile.profile);
+  const identity = useStore(env.identity);
+  return env.profile.labelFor(identity);
+}
+
+// ---- cache reads (never create a database) ------------------------------------------------------------------------------------
+const ABSENT: Loadable<never> = { status: "unavailable", reason: "absent" };
+
+function useWatch<T>(
+  make: (env: DataEnv) => Watchable<T> | null,
+  deps: readonly unknown[],
+): Loadable<T> {
+  const env = useDataEnv();
+  const service = useStore(env.serviceStore);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the watch is rebuilt when the service or the caller's inputs change
+  const watchable = useMemo(
+    () => (service ? make(env) : null),
+    [service, env, ...deps],
+  );
+  // Stable functions per watchable: a new `subscribe` every render would resubscribe, which re-evaluates the live query, which renders.
+  const subscribe = useCallback(
+    (listener: () => void) =>
+      watchable?.subscribe(listener) ?? (() => undefined),
+    [watchable],
+  );
+  const read = useCallback(
+    () => (watchable ? watchable.get() : (ABSENT as Loadable<T>)),
+    [watchable],
+  );
+  return useSyncExternalStore(subscribe, read, () => ABSENT as Loadable<T>);
+}
+
+/**
+ * One resource with the overlay of its admitted changes (plan 5.5.6). For a resource the cache does not hold yet, `creates` is the
+ * OLDEST window (100) of the changes saved against it and `createsNext` says where the next window begins: pass it back as `after`
+ * to read on (R21, revision 10). A screen that shows only the resource passes nothing and gets the first window, which holds the
+ * create that introduces it.
+ */
+export function useCachedResource(
+  id: string,
+  after?: number | null,
+): Loadable<MergedResource> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readMerged, {
+            incarnationId: service.incarnationId,
+            id,
+            ...(after === undefined || after === null ? {} : { after }),
+          })
+        : null;
+    },
+    [id, after],
+  );
+}
+
+/**
+ * A PAGE of the cached resources of one kind (optionally under one parent), each with its overlay applied (R14): at most `limit` rows
+ * (default and largest 100, Q9) after the cursor `after`. The page says where the next one begins (`next`, null on the last); a screen
+ * keeps the cursors it has visited and passes one back to move, so what it holds is one page whichever it shows.
+ */
+export function useResourceList(options: {
+  kind: ResourceKind;
+  parentId?: string;
+  after?: string | null;
+  limit?: number;
+}): Loadable<ResourcePage> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readResourceList, {
+            incarnationId: service.incarnationId,
+            kind: options.kind,
+            ...(options.parentId === undefined
+              ? {}
+              : { parentId: options.parentId }),
+            ...(options.after === undefined ? {} : { after: options.after }),
+            ...(options.limit === undefined ? {} : { limit: options.limit }),
+          })
+        : null;
+    },
+    [options.kind, options.parentId, options.after, options.limit],
+  );
+}

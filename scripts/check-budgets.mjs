@@ -63,10 +63,11 @@ const budgetFile = "perf-budget.json";
 const budget = JSON.parse(readFileSync(budgetFile, "utf8"));
 const failures = [];
 for (const [name, value] of Object.entries(measured)) {
-  if (value > budget.provisional[name])
-    failures.push(
-      `${name} ${value} exceeds the provisional budget ${budget.provisional[name]}`,
-    );
+  // A build may carry its own ceiling for a figure (`provisional_by_build`, recorded with its authority in perf-budget.json).
+  const ceiling =
+    budget.provisional_by_build?.[root]?.[name] ?? budget.provisional[name];
+  if (value > ceiling)
+    failures.push(`${name} ${value} exceeds the provisional budget ${ceiling}`);
   const base = budget.baseline?.[root]?.[name];
   if (base !== undefined && value > base * (1 + budget.tolerance)) {
     failures.push(

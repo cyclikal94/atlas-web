@@ -71,9 +71,11 @@ describe("F-BND-2: Web Locks are used only as the protocol allows", () => {
 describe("F-BND-3: deletion lives in the wipe procedure and its ports", () => {
   test("deleteDatabase is not used by the session at all (the account database is the port's, WEB-09a's)", () => {
     expect(filesMatching("src/session", /deleteDatabase/)).toEqual([]);
-    // The only other use in src is the capability probe's own throwaway database.
+    // The only other uses in src are the capability probe's own throwaway database and the data layer's one raw-IndexedDB
+    // host (WEB-09a, plan 9.3: the account database is deleted there and nowhere else; lint rule R16 keeps the list closed).
     expect(filesMatching("src", /deleteDatabase/)).toEqual([
       "src/app/capabilities.ts",
+      "src/data/store/idb-host.ts",
     ]);
   });
 

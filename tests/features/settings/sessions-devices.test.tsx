@@ -34,6 +34,10 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 beforeEach(() => {
+  // The rows' fixed timestamps are read against "now"; pin only the date so
+  // "Signed in 3 days ago" does not drift with the calendar. Timers stay real.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-30T12:00:00.000Z"));
   localStorage.clear();
   document.head.innerHTML = '<meta name="theme-color" content="#08090A">';
 });

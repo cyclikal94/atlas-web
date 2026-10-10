@@ -9,6 +9,11 @@ import { Button } from "../../components/ui/button";
  */
 export type RecoveryBannerState =
   | { kind: "save-failed"; onRetry(): void; onDiscardAndReload(): void }
+  /**
+   * The account is being signed out, so the unfinished form cannot be saved (`FormRecoveryPort.save` returned `refused`).
+   * There is nothing to retry: the form stays open and the reload is the person's choice. PROPOSED copy, not accepted.
+   */
+  | { kind: "save-refused"; onDiscardAndReload(): void }
   | { kind: "restored"; onDiscard(): void };
 
 export interface RecoveryBannerProps {
@@ -19,6 +24,8 @@ export interface RecoveryBannerProps {
 
 export const SAVE_FAILED_TEXT =
   "Couldn't save your unfinished form before reloading. Nothing was lost — your form is still here.";
+export const SAVE_REFUSED_TEXT =
+  "Can't save your unfinished form while you're signing out. Nothing was lost — your form is still here.";
 export const RESTORED_TEXT =
   "Restored your unfinished form from before the update. Nothing was submitted automatically — review and submit when ready.";
 
@@ -29,8 +36,12 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
 
   useEffect(() => {
     announce(
-      kind === "save-failed" ? SAVE_FAILED_TEXT : RESTORED_TEXT,
-      kind === "save-failed" ? "assertive" : "polite",
+      kind === "save-failed"
+        ? SAVE_FAILED_TEXT
+        : kind === "save-refused"
+          ? SAVE_REFUSED_TEXT
+          : RESTORED_TEXT,
+      kind === "restored" ? "polite" : "assertive",
     );
   }, [kind, announce]);
 
@@ -53,6 +64,23 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
           <Button variant="secondary" onClick={state.onRetry}>
             Retry save
           </Button>
+          <Button variant="quiet" onClick={state.onDiscardAndReload}>
+            Discard and reload anyway
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (state.kind === "save-refused") {
+    return (
+      <div
+        data-recovery-state="save-refused"
+        className="flex flex-col gap-3 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+      >
+        <p className="text-[13.5px] leading-[1.6] text-conflict-text">
+          {SAVE_REFUSED_TEXT}
+        </p>
+        <div className="flex flex-wrap gap-2">
           <Button variant="quiet" onClick={state.onDiscardAndReload}>
             Discard and reload anyway
           </Button>

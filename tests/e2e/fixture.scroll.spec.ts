@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { EVIDENCE, expect, pressTab, test } from "./helpers";
+import { evidencePath, expect, pressTab, test } from "./helpers";
 
 /**
  * R5 (revision review): the navigation and the sync status stay inside the viewport while long content scrolls, at all three
@@ -206,7 +206,7 @@ for (const layout of layouts) {
           before + 1,
         );
         await page.screenshot({
-          path: `${EVIDENCE}/R5/${mode}-${width}x${height}-${position}.png`,
+          path: evidencePath(`R5/${mode}-${width}x${height}-${position}.png`),
         });
       }
       // Navigation works from the bottom of the page, and the chrome is still in view on the page it reaches.

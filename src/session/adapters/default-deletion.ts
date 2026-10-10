@@ -65,7 +65,10 @@ export const defaultCoordinationPort: WipeCoordinationPort = {
   },
   broadcastImminent() {},
   async waitForClosure() {},
-  async setClosing() {},
+  // The default has no local stores (its `exists` refuses while a database exists), so there is no fence to close.
+  async setClosing() {
+    return "closing" as const;
+  },
   async liveDigest() {
     return "0";
   },

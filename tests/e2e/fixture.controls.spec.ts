@@ -1,6 +1,6 @@
 import { contrastRatio } from "../../src/design/contrast";
 import { tokens } from "../../src/design/tokens";
-import { EVIDENCE, expect, runAxe, test } from "./helpers";
+import { evidencePath, expect, runAxe, test } from "./helpers";
 
 /**
  * Q17 (input-border sweep), in a real browser: the shared controls are measured with the colours actually painted,
@@ -114,7 +114,7 @@ for (const scheme of ["dark", "light"] as const) {
       await page.goto("/__controls");
       expect(await runAxe(page)).toEqual([]);
       await page.screenshot({
-        path: `${EVIDENCE}/A4/controls-${scheme}.png`,
+        path: evidencePath(`A4/controls-${scheme}.png`),
         fullPage: true,
       });
     });

@@ -33,11 +33,14 @@ export interface ProxyRule {
     | "drop_after_forward"
     | "rewrite_status"
     | "rewrite_json"
+    | "replace_response"
     | "swap";
   ms?: number;
   status?: number;
   set?: Record<string, unknown>;
   delete?: string[];
+  /** `replace_response`: the JSON body to answer with. */
+  json?: unknown;
 }
 export interface ProxyLogEntry {
   id: number;
@@ -155,6 +158,12 @@ declare global {
     __retry: <T extends { ok: boolean; error?: string }>(
       call: () => Promise<T>,
     ) => Promise<T>;
+    /**
+     * The same for a call made through the typed client (`session.api.client(...).GET(...)`), which reports its outcome as a string
+     * (`returned`, or the rejection's `kind`): a `not_sent` is made again, as a queue would (WEB-09a, revision 11: the page's own
+     * post-display verification and its read of `/me` can hold the account for a millisecond, and a call made then is refused).
+     */
+    __retryTyped: (once: () => Promise<string>) => Promise<string>;
   }
 }
 
@@ -187,6 +196,14 @@ export async function exposeSession(page: Page): Promise<void> {
       for (let i = 1; i < 60 && !last.ok && last.error === "not_sent"; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 100));
         last = await call();
+      }
+      return last;
+    };
+    window.__retryTyped = async (once) => {
+      let last = await once();
+      for (let i = 1; i < 60 && last === "not_sent"; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        last = await once();
       }
       return last;
     };

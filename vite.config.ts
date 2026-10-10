@@ -111,7 +111,15 @@ export default defineConfig(({ mode }) => {
     build: {
       target: "es2022",
       outDir: fixture ? "dist-fixture" : "dist",
-      ...(fixture ? { rollupOptions: { input: "fixture.html" } } : {}),
+      rollupOptions: {
+        ...(fixture ? { input: "fixture.html" } : {}),
+        // `src/data` modules have no import-time effect the application depends on (the plan registry is filled by the plans that
+        // are USED, and is read only by tests). Saying so lets the bundler drop whatever the boot path does not use from the data
+        // layer's single public index, so the initial chunk carries only the deletion-port shims (plan 5.3.1, 6.1).
+        treeshake: {
+          moduleSideEffects: (id: string) => !/[\\/]src[\\/]data[\\/]/.test(id),
+        },
+      },
     },
   };
 });

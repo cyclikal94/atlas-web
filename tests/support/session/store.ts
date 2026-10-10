@@ -63,6 +63,12 @@ export class SharedStore {
   private injections: Injection[] = [];
   /** Invariant violations found at any commit (property P-F). */
   readonly violations: string[] = [];
+  /**
+   * The premise of the persistence hold (docs/session.md, revision 5): every change of `auth_state.settled` is made by a page that
+   * holds `atlas-auth` EXCLUSIVELY. A harness that has a lock manager sets this; a commit that changes `settled` without it is a
+   * violation, so every scenario of every matrix is also a check that no settlement can slip past a shared hold.
+   */
+  holdsSettlementLock: ((page: string) => boolean) | null = null;
 
   constructor(private readonly world: World) {}
 
@@ -210,6 +216,16 @@ export class SharedStore {
       this.records = { ...this.records, ...write };
       wrote = true;
     }
+    if (
+      wrote &&
+      this.holdsSettlementLock !== null &&
+      JSON.stringify(before.settled) !==
+        JSON.stringify(this.records.auth_state.settled) &&
+      !this.holdsSettlementLock(tx.page)
+    )
+      this.violations.push(
+        `${tx.label}#${tx.order}: settled changed while page ${tx.page} did not hold atlas-auth exclusively`,
+      );
     if (wrote) {
       for (const violation of checkInvariants(this.records.auth_state))
         this.violations.push(`${tx.label}#${tx.order}: ${violation}`);

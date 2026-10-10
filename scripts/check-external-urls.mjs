@@ -35,6 +35,16 @@ const INERT = [
     reason:
       "documentation link inside a Workbox warning message, never fetched",
   },
+  {
+    pattern: /^http:\/\/bit\.ly\/2kdckMn$/,
+    reason:
+      "documentation link inside Dexie's PrematureCommit error message (WEB-09a), never fetched",
+  },
+  {
+    pattern: /^https:\/\/tinyurl\.com\/y2uuvskb$/,
+    reason:
+      "documentation link inside Dexie's MissingAPI error message (WEB-09a), never fetched",
+  },
 ];
 // Text files (.txt) are not scanned: the third-party notices are licence prose full of project URLs and are never loaded by the client.
 const TEXT = new Set([

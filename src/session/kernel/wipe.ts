@@ -146,7 +146,13 @@ export class WipeService implements Wipe {
     // Step 3a: coordinated closure and the consent digest.
     k.emit("wipe.step", { step: "3a", account });
     coordination.broadcastImminent(account, operationId);
-    await coordination.setClosing(account);
+    // The durable closing flag is what excludes a recovery writer that has not heard the broadcast (a delayed or absent hint), and
+    // the digest read below can be overtaken by exactly such a writer. Without the flag nothing is read and nothing is deleted:
+    // the entry, the fence and the work stay, and the next entry repeats this step and recomputes the consent population.
+    if (!(await this.confirmClosing(account))) {
+      k.emit("wipe.closing_unconfirmed", { account });
+      return { kind: "retry_later", reason: "closing_unconfirmed" };
+    }
     await coordination.waitForClosure(account, k.config.wipeClosureWaitMs);
     const live = await coordination.liveDigest(account);
     if (baseline !== null && live !== baseline) {
@@ -179,6 +185,33 @@ export class WipeService implements Wipe {
     k.emit("wipe.step", { step: 5, account });
     await this.finishEntry(account, operationId, callLease);
     return { kind: "deleted" };
+  }
+
+  /**
+   * Whether the durable closing flag is KNOWN to be set. Up to `closingWriteAttempts` asks: the first re-ask is at once (a single
+   * transaction that aborted is the common case, and each ask is itself a full transaction), and any further ones follow the usual
+   * back-off, so the page does not wait for its next boot for a transient fault. Only the exact answer `closing` counts: a rejection,
+   * an `unconfirmed` and anything else are all "not known", so a port that swallows its failure cannot authorise a deletion. The
+   * caller HOLDS `atlas-delete:<account>`.
+   */
+  private async confirmClosing(account: AccountId): Promise<boolean> {
+    const { k } = this;
+    const attempts = Math.max(1, k.config.closingWriteAttempts);
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (attempt >= 2) {
+        await k.sleep(k.backoff(attempt - 2));
+        if (k.disposed) return false;
+      }
+      let answer: unknown;
+      try {
+        answer = await this.ports.coordination.setClosing(account);
+      } catch {
+        answer = "unconfirmed";
+      }
+      if (answer === "closing") return true;
+      k.emit("wipe.closing_write_failed", { account, attempt });
+    }
+    return false;
   }
 
   /** Step 5: `ledger.clear` (ownership-checked), then the `atlas-auth` completion (3.5.4), then broadcast. */

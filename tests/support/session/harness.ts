@@ -38,6 +38,8 @@ function spyLockPort(world: World, page: string, inner: LockPort): LockPort {
   };
   return {
     acquire: (name, options) => wrap(name, inner.acquire(name, options)),
+    acquireShared: (name, options) =>
+      wrap(name, inner.acquireShared(name, options)),
     tryAcquire: (name) => wrap(name, inner.tryAcquire(name)),
     wait: (name, signal) => inner.wait(name, signal),
     probe: (name) => inner.probe(name),
@@ -57,6 +59,14 @@ export class FakeLocalData {
   baselineDigests = new Map<string, string | null>();
   onSetDraftFence: (() => void) | null = null;
   liveDigests = new Map<string, string>();
+  /** How many of the next `setClosing` calls answer `unconfirmed` (the durable flag could not be written). */
+  closingFailures = 0;
+  /** How many of the next `setClosing` calls REJECT (a port that breaks its totality; the kernel must still not delete). */
+  closingRejections = 0;
+  /** A late writer that gets in after a `setClosing` call: runs once, after the call at which it is armed returns. */
+  afterSetClosing: (() => void) | null = null;
+  /** Whether `closing` is durably set, per account (what a recovery writer would find). */
+  closing = new Set<string>();
 }
 
 export function fakeDeletionPorts(
@@ -107,6 +117,21 @@ export function fakeDeletionPorts(
       },
       async setClosing(account) {
         data.calls.push(`setClosing:${account}`);
+        const hook = data.afterSetClosing;
+        data.afterSetClosing = null;
+        if (data.closingRejections > 0) {
+          data.closingRejections -= 1;
+          hook?.();
+          throw new Error("setClosing rejected");
+        }
+        if (data.closingFailures > 0) {
+          data.closingFailures -= 1;
+          hook?.();
+          return "unconfirmed";
+        }
+        data.closing.add(account);
+        hook?.();
+        return "closing";
       },
       async liveDigest(account) {
         data.calls.push(`liveDigest:${account}`);
@@ -136,6 +161,16 @@ export interface FixtureOptions {
   config?: Partial<SessionConfig>;
   /** The production modules to run; `src/` by default, a patched copy for the mutation tests. */
   modules?: Modules;
+  /**
+   * WEB-09a: the data ports (database, local work, coordination) of each page, in place of the in-memory fakes of
+   * `fakeDeletionPorts`. The deletion LEDGER stays the session's own (over this fixture's `atlas-auth` double). Absent: the
+   * 08a behaviour, unchanged. This is how the consent schedules run against the REAL adapters over the data layer's double.
+   */
+  dataPorts?: (page: {
+    id: string;
+    world: World;
+    fixture: Fixture;
+  }) => Omit<DeletionPorts, "ledger">;
 }
 
 export class FakePage {
@@ -197,6 +232,8 @@ export class Fixture {
     this.server = new StubServer(this.world);
     this.store = new SharedStore(this.world);
     this.locks = new FakeLockManager(this.world);
+    this.store.holdsSettlementLock = (page) =>
+      this.locks.holdsExclusive(page, "atlas-auth");
     this.bus = new FakeHintBus(this.world);
   }
 
@@ -235,7 +272,12 @@ export class Fixture {
         surface,
         transport: modules.boundary.createIssueTransport(fetch),
         unstamped: modules.unstamped.createUnstampedApi(fetch),
-        deletion: fakeDeletionPorts(store, this.data, modules),
+        deletion: this.options.dataPorts
+          ? {
+              ledger: modules.ledger.createStoreLedger(store),
+              ...this.options.dataPorts({ id, world, fixture: this }),
+            }
+          : fakeDeletionPorts(store, this.data, modules),
         trace: new FakeTrace(world, id, surface),
       },
       {

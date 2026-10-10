@@ -1,7 +1,7 @@
 // Part C (plan 14.2): a loopback HTTP proxy between the preview server and the backend, with a loopback CONTROL endpoint, that can
 // hold, delay, drop after forwarding, rewrite to a status after forwarding, and swap responses. It logs every request and response
 // with timing. It never modifies a request body and never strips or adds Set-Cookie, Origin or X-CSRF-Token: the only response
-// it ever changes is one a rule asks it to (rewrite_status, rewrite_json).
+// it ever changes is one a rule asks it to (rewrite_status, rewrite_json, replace_response).
 //
 // Rules are matched by method, path (exact string or /regex/) and ORDINAL (the nth matching request since the rule was added,
 // 1-based; absent = every match). Actions:
@@ -10,6 +10,7 @@
 //   delay                deliver the response after `ms`
 //   drop_after_forward   forward, let the backend commit, then destroy the connection (the browser sees it close)
 //   rewrite_status       forward, then answer with `status` and an empty JSON body and NONE of the backend's headers (a gateway's error carries no Set-Cookie)
+//   replace_response     forward, then answer with `status` and the JSON body `json` (for example an Atlas-formatted error with its `code`) and none of the backend's headers
 //   rewrite_json         forward, then set/delete fields of the JSON body: { set: {...}, delete: [...] }
 //   swap                 with `with: <other rule id>`: hold both, then deliver each to the OTHER's client on release
 import { createServer, request as httpRequest } from "node:http";
@@ -126,6 +127,12 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
                   body: Buffer.from("{}"),
                   contentType: "application/json",
                 });
+              case "replace_response":
+                return deliver({
+                  status: rule.status ?? 502,
+                  body: Buffer.from(JSON.stringify(rule.json ?? {})),
+                  contentType: "application/json",
+                });
               case "rewrite_json": {
                 let json;
                 try {
@@ -152,6 +159,12 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
           t: Date.now() - entry.at,
           event: "upstream_error",
         });
+        // An upstream error AFTER the answer began (a reset of a large response, a client that went away) must not throw: the
+        // connection is simply ended. Before the answer began, it is a 502.
+        if (res.headersSent || res.writableEnded) {
+          res.destroy();
+          return;
+        }
         res.writeHead(502, { "content-type": "application/json" });
         res.end("{}");
       });

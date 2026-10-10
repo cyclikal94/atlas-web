@@ -1,4 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureEvidenceRun } from "./tests/e2e/evidence-run";
+import { PARALLEL_UI } from "./tests/e2e/scheduling";
 import { neededTargets } from "./tests/e2e/targets";
 
 /**
@@ -30,21 +32,29 @@ const browsers = [
 // behind the delaying proxy. Without it they skip themselves and are reported as not run, so `pnpm test:e2e` is unaffected.
 const INTEGRATION = process.env.ATLAS_INTEGRATION_URL ?? "http://127.0.0.1:9";
 
+const lane = process.env.ATLAS_E2E_LANE;
+if (lane && !["parallel-ui", "serial"].includes(lane))
+  throw new Error("Unknown ATLAS_E2E_LANE");
+const requestedWorkers = Number(process.env.ATLAS_E2E_WORKERS ?? "1");
+if (![1, 2, 3, 4].includes(requestedWorkers))
+  throw new Error("ATLAS_E2E_WORKERS must be 1..4");
+
 const projects = browsers.flatMap(({ name, device }) => [
   {
     name: `production-${name}`,
-    testMatch: /production\..*\.spec\.ts/,
+    testMatch: lane === "parallel-ui" ? /$a/ : /production\..*\.spec\.ts/,
     use: { ...device, baseURL: PRODUCTION },
   },
   {
     name: `fixture-${name}`,
-    testMatch: /fixture\..*\.spec\.ts/,
+    testMatch: lane === "parallel-ui" ? PARALLEL_UI : /fixture\..*\.spec\.ts/,
+    ...(lane === "serial" ? { testIgnore: PARALLEL_UI } : {}),
     use: { ...device, baseURL: FIXTURE },
   },
   {
     name: `integration-${name}`,
     testDir: "./tests/integration",
-    testMatch: /integration\..*\.spec\.ts/,
+    testMatch: lane === "parallel-ui" ? /$a/ : /integration\..*\.spec\.ts/,
     use: { ...device, baseURL: INTEGRATION },
   },
 ]);
@@ -53,12 +63,16 @@ const needed = neededTargets(
   projects.map((project) => project.name),
 );
 
+const browserEvidenceRun = configureEvidenceRun();
+
 export default defineConfig({
   testDir: "./tests/e2e",
-  outputDir: "test-results",
+  outputDir: `${browserEvidenceRun}/test-results`,
+  metadata: { atlasEvidenceRun: browserEvidenceRun },
+  globalSetup: "./tests/e2e/evidence-run.ts",
   reporter: "list",
   fullyParallel: false,
-  workers: 1,
+  workers: lane === "parallel-ui" ? requestedWorkers : 1,
   use: { trace: "retain-on-failure" },
   projects,
   webServer: [

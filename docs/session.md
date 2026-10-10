@@ -17,6 +17,7 @@ Where this document says "the matrix" it means that file; its wording is not res
 `src/session/index.ts` is the **only** import path other slices may use (`tests/session/boundary.test.ts` fails the build on a deep import). It exports:
 
 - `createSession(ports, options)` and the React bindings (`SessionProvider`, `useSession`, `useSessionView`, `useIdentity`, `useApiCompatibility`, `useSessionNotices`);
+- `session.persistence.hold(account, epoch)` (revisions 5 and 6, obligation 4 below), the types `Persistence` and `PersistenceHold`, and `unrevokedHold` (a hold that is never revoked, for a double of the session); `LockPort` gained `acquireShared`;
 - the production assembly: `openAuthStore`, `runAuthCanary`, `browserPorts`, `createProtectedSurface`;
 - the types of the public surface: `Session`, `SessionView`, `NeutralStateId`, `Attempts`, `Operations`, `Recovery`, `Wipe`, `StampedApi`, `StampedRequestError`, `ApiCompatibility`.
 
@@ -35,9 +36,12 @@ permission**: do not decide to send, render or write on it (matrix G3).
 
 ### Obligations this slice creates for WEB-09a
 
+WEB-09a has met these four obligations; `docs/data-layer.md` says how (the registered ports, the layered commit guard **and the persistence hold of revision 5 below, which orders every persistence commit against every settlement**, the outbox's handling of `StampedRequestError` and `compat`). An earlier statement that all four were met while a residual window remained was wrong for obligation 4: the window was characterised, not closed. Revision 5 closes it.
+
 1. Register an `AccountDatabasePort`, a `LocalWorkPort` and a `WipeCoordinationPort` (including `setDraftFence`) through `browserPorts({ deletion })`. The defaults
    (`adapters/default-deletion.ts`, decision D-14) say "no local stores yet": `exists` **refuses** (`adapter_missing`) when an `atlas-<account>` database exists, so the wipe
-   can never conclude "nothing to delete, nothing unsynced" about data it cannot see.
+   can never conclude "nothing to delete, nothing unsynced" about data it cannot see. **Revision 8:** `WipeCoordinationPort.setClosing` returns a `ClosingOutcome` (`closing` or `unconfirmed`) instead of nothing, and the wipe does not go on without exactly `closing`: it asks up to `SessionConfig.closingWriteAttempts` (3) times, and then reads no digest, closes no connection, deletes nothing and
+   reports `retry_later` with the new reason `closing_unconfirmed`, leaving the ledger entry, the draft fence and the work where they are, so the next entry repeats step 3a and recomputes the consent population. A port that swallows its failure and resolves with nothing cannot authorise a deletion (the third revision review's R12).
 2. Pass the count of unsynced changes through `LocalWorkPort.summarise`; the logout and retirement dialogs recheck it at confirmation and show "Actually N changes - still log out?"
    when it moved.
 3. Honour `StampedRequestError` kinds and `compat` (pause submissions when the status is `unsupported` or `missing`).
@@ -50,6 +54,40 @@ permission**: do not decide to send, render or write on it (matrix G3).
    (Revision 3 stated that the typed client's decode was caller work after the release; that was wrong for the typed client and the operations, and is corrected by revision 4 below.)
    An invalidating answer (`401`, `credential_mismatch`) hands back nothing, so it is classified by the page's own copy of the settled identity and its recording is stamp-checked where it commits: it is never applied to the new account, but
    with a delayed notice it can be reported as `auth_state` rather than `stale`.
+
+   **Revision 5: how the persistence commit is ordered against a transition (`session.persistence.hold`).** A commit in `atlas-<account>` cannot be atomic with a read of `atlas-auth` (IndexedDB transactions never span two databases), and a read
+   followed by a commit leaves a gap in which another page can settle a transition this page has not been told of; a notice, a hint or a broadcast cannot close it. What can be ordered across databases is a Web Lock, and **every write that
+   changes `auth_state.settled` is made while the writing page holds `atlas-auth` exclusively** (`settleAttempt`, which is given the held handle, and the completion of a wipe, `WipeService.complete`). So a persistence consumer asks
+   `session.persistence.hold(account, epoch)` (a `PersistenceHold`) before it creates its data transaction:
+
+   - the hold is a **shared** request for `atlas-auth` (granted together with other holds, never alongside a settlement, in queue order) followed, inside it, by the **verdict at the durable record** (`checkAtTheRecord`, the same authority the stamped
+     wrapper's release uses: the body of the store transaction that reads `settled`, whatever this page has been told);
+   - `held` means the record says `(account, epoch)` is settled **and no settlement can begin until `release()`**: the consumer creates its transaction, waits for its completion (or failure) and releases. A transition committed before the verdict is seen
+     by it, and one that has not yet begun is ordered after the persistence, which finishes inside the hold;
+   - `stale` means the record names another identity or none: persist nothing. `unavailable` means the lock could not be had within `persistenceWaitMs` (20 s) or the record could not be read: persist nothing, count nothing, ask again. It is
+     not an answer about identity;
+   - **Revision 6: the end of a hold is a REVOCATION, not a release. Revision 7: and the lock is never given up while registered work is unresolved.** A hold that outlives `persistenceHoldMs` (30 s: a transaction queued behind a long one, a stalled apply) must never leave a
+     commit able to persist on a verdict nobody is vouching for any longer. The first version simply gave the lock up at the bound, so a transaction that was still queued in the engine could run after another page's settlement and be applied (the
+     second revision review's R2: queue a commit behind a blocking transaction, withhold the other page's notices, wait 31 s, settle another account on that page, release the transaction: `applied`). At the bound, in this order, the hold is
+     **revoked**: `valid()` is false and `revoked` (an `AbortSignal`) fires, synchronously, so the data layer aborts a transaction that has not started, is reading or is applying (nothing of it is durable) and starts none; the lock is **kept until
+     every promise registered with `track` has settled**, so a transaction that is already committing (it cannot be aborted) completes while the lock is still held and is ordered before any settlement, exactly as an unexpired commit is; and only then is
+     the lock released (traced `persistence.timed_out`, then `persistence.released`). A consumer calls `valid()`, starts its transaction with `revoked` and `track`s it in the **same synchronous step**. A holder that registered no work is released at
+     once, and `release()` itself waits for registered work, so a consumer cannot give the lock up under a transaction it has not seen end.
+     **The wait has no deadline (revision 7).** The second revision gave the lock up `persistenceDrainMs` (10 s) after the revocation even when work was still unresolved, which the third revision review's R2 showed waives the invariant for exactly the transaction it exists
+     for: a commit that is already **committing** (its data is not durable yet and will be) cannot be aborted, and from this page cannot be told from one that is durable whose completion has not been delivered; once the lock was gone another page could settle a switch, a
+     re-authentication or a sign-out and the old commit could still land after it, with no later ordering fence, and a successful store result was still returned `applied`. Nothing on this page can force a committing transaction to end, so the only safe rule is to wait for it.
+     `persistenceStallMs` (10 s, replacing `persistenceDrainMs`) after the revocation, if work is still unresolved, the stall is **traced** once (`persistence.stalled`, replacing `persistence.abandoned`); it releases nothing. **The cost is availability, not privacy**: a settlement
+     requested on another page waits for the lock, gives up after `lockWaitMs` (20 s) and retries as every `atlas-auth` request does (a sign-out is refused as `closing_write_gave_up`, a sign-in or switch reports `lock_timeout`), so while an old commit is outstanding the browser shows the
+     paused state and the settlement is not made; it is made as soon as the commit ends (whatever its outcome: completed, failed, or the store refusing it) or the page that holds it is closed or reloaded (a Web Lock does not outlive its page). A commit is `applied` only if its
+     transaction completed while the lock was still held, so no settlement can be ordered ahead of it. What is NOT shown: a real native IndexedDB commit that stalls for longer than the bound in a real engine (the double's `stall_commit` models it; no real engine was made to), so the real-world duration of such a stall, and
+     whether it can occur on a supported device, are unmeasured. The bound (30 s) is kept above the data layer's own apply watchdog (`syncApplyWatchdogMs`, 20 s, which measures the apply alone) with room for the verdict read and the queue, so a slow apply meets the watchdog's step-down and never an endless
+     retry (`tests/data/commit-guard-expiry.test.ts` holds the margin at 10 s or more).
+
+   **The premise is tested, not assumed**: the store double of the fake platform records every commit that changes `settled` and the lock manager records who held what, so every scenario of every fake-world suite and of the full matrices is also a check that
+   no settlement is made without the exclusive lock (`tests/support/session/store.ts`, property P-F). `tests/session/persistence.test.ts` drives the real kernel; `tests/data/commit-guard-expiry.test.ts` drives the real kernel and the real `DataRuntime` over the store double through every position of a commit at the moment its hold runs out
+   (queued, applying, committing and **unfinished** (the engine is still committing, the data is not durable yet), committing with the data durable and only the completion **delayed**, each for far longer than the bound and the stall report) against every kind of transition, with the other page's notices withheld or delivered; `tests/e2e/fixture.data-sync.spec.ts` (E-P1) drives real Web Locks and the real
+   `atlas-auth` store, and `tests/e2e/fixture.data-store.spec.ts` (E-P2) the revoked hold over real Web Locks, a real timer and a real Dexie transaction queued behind a real one, all in three engines. What the hold does **not** do: it does not put the data transaction inside the record's transaction (nothing can), it does not cover an invalidation (`401`, `credential_mismatch`) that adds a fence without
+   changing `settled`, and a consumer that does not call it has no ordering at all (the data layer's runtime requires it, and a static test keeps the production composition passing `session.persistence`).
 
 ## Module map
 

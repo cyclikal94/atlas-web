@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import {
   DARK,
-  EVIDENCE,
+  evidencePath,
   expect,
   expectFocusLoop,
   LIGHT,
@@ -108,7 +108,7 @@ test.describe("layout modes at every breakpoint edge (A3)", () => {
           ),
         ).toBe(scheme === "dark" ? DARK.canvas : LIGHT.canvas);
         await page.screenshot({
-          path: `${EVIDENCE}/A3/shell-${scheme}-${width}x${height}.png`,
+          path: evidencePath(`A3/shell-${scheme}-${width}x${height}.png`),
         });
         expect(problems).toEqual([]);
         await context.close();
@@ -417,7 +417,7 @@ test.describe("collapsed rail labels (A5)", () => {
       await page.getByRole("tooltip", { name: "Tasks" }).hover();
       await expect(page.getByRole("tooltip", { name: "Tasks" })).toBeVisible();
       await page.screenshot({
-        path: `${EVIDENCE}/A5/collapsed-rail-${width}x${height}.png`,
+        path: evidencePath(`A5/collapsed-rail-${width}x${height}.png`),
       });
     });
   }
@@ -492,14 +492,14 @@ test.describe("accessibility with real layout (A4)", () => {
       await primaryNav(page).getByRole("button", { name: "More" }).click();
       await expect(page.getByRole("dialog", { name: "More" })).toBeVisible();
       expect(await runAxe(page), `More, ${scheme}`).toEqual([]);
-      await page.screenshot({ path: `${EVIDENCE}/A4/more-${scheme}.png` });
+      await page.screenshot({ path: evidencePath(`A4/more-${scheme}.png`) });
       await page.goto("/settings/appearance?phase=synced&conflicts=1");
       await expect(
         page.getByRole("dialog", { name: "Appearance" }),
       ).toBeVisible();
       expect(await runAxe(page), `Appearance, ${scheme}`).toEqual([]);
       await page.screenshot({
-        path: `${EVIDENCE}/A4/appearance-${scheme}.png`,
+        path: evidencePath(`A4/appearance-${scheme}.png`),
       });
       await context.close();
     }

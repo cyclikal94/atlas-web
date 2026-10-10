@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "workloads": [
+    {
+      "name": "W1",
+      "bytes": 6108899,
+      "nodes": 455214,
+      "sha256": "dfb06a8f51e2831b40db02000a7835dc2f20ecdac16e8bd83ab5a18c35df56e6"
+    },
+    {
+      "name": "W3",
+      "bytes": 3547334,
+      "nodes": 21614,
+      "sha256": "e00833dea2e16c2ff912cdb02649f7b83a80698b7797ae67f77c93d085b6c929"
+    },
+    {
+      "name": "W4",
+      "bytes": 1434241,
+      "nodes": 21659,
+      "sha256": "76e48a7b8afc20ec8a6c5ce774432e741d4e7934235f8d67fc34c3562f43c0a7"
+    },
+    {
+      "name": "W5-limit-1",
+      "bytes": 27257,
+      "nodes": 2714,
+      "sha256": "98786fe98604118c6d0f5ae509ee75ce8e38c0d644c9a89f79339f1e34846513"
+    },
+    {
+      "name": "W5-limit-2",
+      "bytes": 54477,
+      "nodes": 5419,
+      "sha256": "175191921d44b96656b7a558dde5d692178eb11e43438ee5af0a493070cd2477"
+    },
+    {
+      "name": "W5-limit-4",
+      "bytes": 108955,
+      "nodes": 10829,
+      "sha256": "1f0d8ad1b8db7340f00c70df50ef52c4c890998330d0e2c8b15f0855ae6d0f80"
+    },
+    {
+      "name": "W5-limit-8",
+      "bytes": 217850,
+      "nodes": 21649,
+      "sha256": "7ece9da6916ff3a7442cf6a890591b01898ee3fc297aa3224be578acdbe931a2"
+    },
+    {
+      "name": "W5-limit-16",
+      "bytes": 436238,
+      "nodes": 43289,
+      "sha256": "8eb6838b22b9c3e1ca22f7c277a2bdd4b3711ef68dc3fb23e72f00676ea9b3b3"
+    },
+    {
+      "name": "W5-limit-32",
+      "bytes": 873412,
+      "nodes": 86569,
+      "sha256": "66e03862f5b4f402ad6645c3b89b4b30634e61401cfc4896277f10f241ffc8c6"
+    },
+    {
+      "name": "W5-limit-64",
+      "bytes": 1747790,
+      "nodes": 173129,
+      "sha256": "52bd2d13ba0dd4225cd03cc7d58d11b93fc1ce73420b260ba02f1c54ad229852"
+    },
+    {
+      "name": "W5-limit-80",
+      "bytes": 2184981,
+      "nodes": 216409,
+      "sha256": "c777d52d04d831f6d6bdcbc29793968d850fb3b43835ddb0c65ac9cd7df0db2d"
+    },
+    {
+      "name": "W6",
+      "bytes": 51834,
+      "nodes": 311,
+      "sha256": "beacf9aab2cc8504c2bcbcdc0b8bb74a9efa0120e37e537951601009ed6fe70d"
+    },
+    {
+      "name": "W7-truncated",
+      "bytes": 90,
+      "nodes": null,
+      "sha256": "cd734e82409427d33c7ccad0707f2e699add595130d3050c91b33cfceb76a42f"
+    },
+    {
+      "name": "W7-deep_value",
+      "bytes": 573,
+      "nodes": 119,
+      "sha256": "5294b4e2e0cc5b97aeb6b24df52c1f7965419140bdc5c72c95669de91f28a2a4"
+    },
+    {
+      "name": "W7-unknown_field",
+      "bytes": 331,
+      "nodes": 39,
+      "sha256": "37eef29055ad22953595ab551b2f3f9d2679a692befe0739e2fd6cfc729d90a1"
+    },
+    {
+      "name": "W7-bad_kind",
+      "bytes": 324,
+      "nodes": 37,
+      "sha256": "092dadf9716de221d8ca8ccc8dd6ca8fc7a7edcf12248ee844c6c938a4dc7e08"
+    },
+    {
+      "name": "W7-raw_control_char",
+      "bytes": 330,
+      "nodes": null,
+      "sha256": "411cadd531b55f5d87129a5bc3c14954b194b6547e2748dad21fa707d1649882"
+    },
+    {
+      "name": "W7-oversize_change",
+      "bytes": 70344,
+      "nodes": 41,
+      "sha256": "4c11db9a66014146cb2b5f15f9192fdebe8323d44355a5e59ce7014ad0a190ad"
+    }
+  ]
+}

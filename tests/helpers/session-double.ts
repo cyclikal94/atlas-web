@@ -1,5 +1,10 @@
 import { vi } from "vitest";
-import type { Operations, Session, Store } from "../../src/session";
+import {
+  type Operations,
+  type Session,
+  type Store,
+  unrevokedHold,
+} from "../../src/session";
 
 /**
  * A `Session` for component tests: every operation is a spy with a harmless default, and any of them can be replaced. It
@@ -82,6 +87,9 @@ export function sessionDouble(
       reload: vi.fn(),
       reviewDevice: vi.fn(),
       consent: vi.fn(),
+    },
+    persistence: {
+      hold: vi.fn(async () => unrevokedHold()),
     },
     ...overrides,
   };

@@ -1,9 +1,10 @@
 import { RouterProvider } from "@tanstack/react-router";
-import { useSyncExternalStore } from "react";
+import { type ReactNode, useSyncExternalStore } from "react";
 import { ProtectedProviders } from "../app/providers";
 import { createAppRouter } from "../app/router";
 import { SessionNotices } from "../app/SessionNotices";
 import { ShellEnvProvider } from "../app/shell/env";
+import { DataEnvProvider, useSyncStatusModel } from "../data";
 import type { ChipDestination, SyncStatusModel } from "../lib/sync-chip";
 import {
   getProtectedRoot,
@@ -12,6 +13,8 @@ import {
 } from "../protected-surface/gate";
 import { SessionProvider } from "../session";
 import { ControlsGallery } from "./ControlsGallery";
+import { type FixtureData, fixtureData } from "./data-env";
+import { GateGallery } from "./GateGallery";
 import { mountNeutralPage } from "./neutral-page";
 import { fixtureSession } from "./session-double";
 import type { SessionHarness } from "./session-harness/main";
@@ -53,48 +56,86 @@ declare global {
     __atlasFixture?: {
       setSync(next: SyncStatusModel): void;
       opened: ChipDestination[];
+      /** The sync screens' data double (query-driven): `?state=`, `?drafts=N`, ... See `data-env.ts`. */
+      data?: FixtureData;
       /** Present only on the `/__session` harness page (src/fixture/session-harness). */
       session?: SessionHarness;
     };
   }
 }
 const opened: ChipDestination[] = [];
-window.__atlasFixture = { setSync: store.set, opened };
+// The sync screens (`/sync`, the banners, the cache gate) read a data env; the fixture's is a double driven by the query string.
+const data = fixtureData(params);
+window.__atlasFixture = { setSync: store.set, opened, data };
 document.documentElement.dataset.atlasFixture = ATLAS_FIXTURE_ONLY;
 
 const router = createAppRouter();
 const session = fixtureSession(params);
+/** The sync screens' data double drives the chip when the page asks for one of its states. */
+const usesData =
+  [
+    "state",
+    "drafts",
+    "paused",
+    "decisions",
+    "rejected",
+    "confirming",
+    "queue",
+    "label",
+    "netoffline",
+  ].some((key) => params.has(key)) || location.pathname === "/sync";
+
+function FixtureShell({ children }: { children: ReactNode }) {
+  // Sync screens driven by `?state=` take the chip from the same data double, so the chip and the panel can never disagree;
+  // every other fixture page keeps the chip's own query-driven model (`?phase=`, `?pending=`).
+  const fromData = useSyncStatusModel();
+  const fixtureModel = useSyncExternalStore(store.subscribe, store.get);
+  const syncModel = usesData ? fromData : fixtureModel;
+  return (
+    <ShellEnvProvider
+      value={{
+        syncModel,
+        onOpenSync: (destination) => {
+          opened.push(destination);
+          if (usesData)
+            void router.navigate({
+              to: "/sync",
+              search: {
+                tab: destination === "conflicts" ? "conflicts" : "queue",
+              },
+            });
+        },
+        // On the icon rail there is room for one 44px control: a compact form with its own accessible name.
+        accountSlot: ({ collapsed }) =>
+          collapsed ? (
+            <div
+              role="img"
+              aria-label="Fixture account"
+              className="flex size-11 items-center justify-center rounded-nav text-[13px] font-semibold text-ink-2"
+            >
+              F
+            </div>
+          ) : (
+            <div className="px-2.5 py-2 text-[13px] text-ink-2">
+              Fixture account
+            </div>
+          ),
+      }}
+    >
+      {children}
+    </ShellEnvProvider>
+  );
+}
 
 function FixtureApp() {
-  const syncModel = useSyncExternalStore(store.subscribe, store.get);
   return (
     <SessionProvider session={session}>
-      <ShellEnvProvider
-        value={{
-          syncModel,
-          onOpenSync: (destination) => {
-            opened.push(destination);
-          },
-          // On the icon rail there is room for one 44px control: a compact form with its own accessible name.
-          accountSlot: ({ collapsed }) =>
-            collapsed ? (
-              <div
-                role="img"
-                aria-label="Fixture account"
-                className="flex size-11 items-center justify-center rounded-nav text-[13px] font-semibold text-ink-2"
-              >
-                F
-              </div>
-            ) : (
-              <div className="px-2.5 py-2 text-[13px] text-ink-2">
-                Fixture account
-              </div>
-            ),
-        }}
-      >
-        <RouterProvider router={router} />
-        <SessionNotices />
-      </ShellEnvProvider>
+      <DataEnvProvider env={data.env}>
+        <FixtureShell>
+          <RouterProvider router={router} />
+          <SessionNotices />
+        </FixtureShell>
+      </DataEnvProvider>
     </SessionProvider>
   );
 }
@@ -102,6 +143,19 @@ function FixtureApp() {
 if (location.pathname === "/__neutral") {
   // One neutral state or the resume gate, for rendered checks (src/fixture/neutral-page.tsx).
   mountNeutralPage(params);
+} else if (location.pathname === "/__data") {
+  // The data harness (the production Dexie adapter, host and open predicate in a real engine): src/fixture/data-harness.
+  document.getElementById("neutral-root")?.replaceChildren();
+  void import("./data-harness/main");
+} else if (location.pathname === "/profile-harness") {
+  // The device profiling page (plan 7.5): one cold run of one workload per load; see src/fixture/data-harness/profile-page.ts.
+  document.getElementById("neutral-root")?.replaceChildren();
+  void import("./data-harness/main").then(async () => {
+    const data = window.__atlasData;
+    if (!data) throw new Error("the data harness did not start");
+    const { mountProfilePage } = await import("./data-harness/profile-page");
+    await mountProfilePage(data);
+  });
 } else if (location.pathname === "/__session") {
   // The session harness (real adapters, real engine, no backend): see src/fixture/session-harness.
   void import("./session-harness/main");
@@ -115,6 +169,10 @@ if (location.pathname === "/__neutral") {
     <ProtectedProviders>
       {location.pathname === "/__controls" ? (
         <ControlsGallery />
+      ) : location.pathname === "/__gate" ? (
+        <DataEnvProvider env={data.env}>
+          <GateGallery />
+        </DataEnvProvider>
       ) : (
         <FixtureApp />
       )}

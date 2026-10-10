@@ -260,7 +260,15 @@ export type WipeOutcome =
   | { kind: "prompt_superseded" }
   | {
       kind: "retry_later";
-      reason: "delete_error" | "blocked" | "adapter_missing";
+      /**
+       * `closing_unconfirmed`: the durable closing flag could not be set (after the bounded attempts), so nothing was deleted and
+       * no digest was read. The entry, the fence and the work stay; the next entry repeats step 3a and recomputes the population.
+       */
+      reason:
+        | "delete_error"
+        | "blocked"
+        | "adapter_missing"
+        | "closing_unconfirmed";
     };
 export interface Wipe {
   /** Runs the canonical procedure inside atlas-delete:<account>. Re-enterable at step 0; idempotent. */
@@ -285,6 +293,19 @@ export type SessionNotice = {
   kind: "remained_signed_in";
 };
 
+/**
+ * Ordering of a persistence commit against the session's own settlements (revision 5 of docs/session.md, obligation 4). The
+ * consumer that persists a response, a receipt or a page asks `hold(account, epoch)`, persists ONLY on `held`, and releases when its
+ * transaction has completed. See `kernel/persistence.ts` for the protocol and its limits.
+ */
+export interface Persistence {
+  hold(account: AccountId, epoch: Epoch): Promise<PersistenceHold>;
+}
+
+import type { PersistenceHold } from "./kernel/persistence";
+
+export type { PersistenceHold };
+
 export interface Session {
   readonly bootId: string;
   readonly notices: Store<readonly SessionNotice[]>;
@@ -302,6 +323,8 @@ export interface Session {
   readonly compat: Store<ApiCompatibility>;
   /** Actions the neutral states offer. */
   readonly actions: NeutralActions;
+  /** The persistence hold: orders a commit in an account's own database against every settlement of the session record. */
+  readonly persistence: Persistence;
 }
 
 export interface NeutralActions {

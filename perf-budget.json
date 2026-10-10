@@ -5,6 +5,12 @@
     "css_gzip": 30720,
     "fonts": 256000
   },
+  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline.",
+  "provisional_by_build": {
+    "dist-fixture": {
+      "initial_js_gzip": 241544
+    }
+  },
   "tolerance": 0.1,
   "baseline": {
     "dist": {
@@ -13,8 +19,8 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 170002,
-      "css_gzip": 6708,
+      "initial_js_gzip": 219586,
+      "css_gzip": 6873,
       "fonts": 83736
     }
   }

@@ -7,6 +7,8 @@ import {
   type Page,
 } from "@playwright/test";
 
+import { claimEvidencePath } from "./evidence-run";
+
 const require = createRequire(import.meta.url);
 const axeSource = readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
 
@@ -14,7 +16,46 @@ const axeSource = readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
  * Every browser test fails on any console error or warning, page error or failed same-origin request: the shell must
  * be quiet. There is no opt-out: a test that provokes a message on purpose must catch it in the page instead.
  */
-export const test = base.extend<{ consoleGuard: undefined }>({
+export const test = base.extend<{
+  consoleGuard: undefined;
+  harnessDiagnostics: undefined;
+}>({
+  /**
+   * R57 (revision 34): a spec that FAILS has the state of every data-harness page of its context attached to its report: the clock, the
+   * identity, what the harness outbox is bound to (the captured service's lifetime and incarnation, the registry's open count and latch),
+   * the registry's last closes and latches, the services' ends, the outbox's refusals with the binding at each, the dispatcher's state and
+   * the fallback markers' raw keys. It is collected after the test body, reads and changes nothing, and is skipped for a page that is
+   * gone; a failure that is not about a harness page has nothing to attach.
+   */
+  harnessDiagnostics: [
+    async ({ context }, use, testInfo) => {
+      await use(undefined);
+      if (testInfo.status === testInfo.expectedStatus) return;
+      let index = 0;
+      for (const page of context.pages()) {
+        index += 1;
+        try {
+          if (page.isClosed()) continue;
+          const found = await page.evaluate(
+            () =>
+              (
+                window as unknown as {
+                  __atlasData?: { diagnostics?: () => unknown };
+                }
+              ).__atlasData?.diagnostics?.() ?? null,
+          );
+          if (found !== null)
+            await testInfo.attach(`harness-diagnostics-page-${index}`, {
+              body: JSON.stringify(found, null, 2),
+              contentType: "application/json",
+            });
+        } catch {
+          // A page that cannot be asked has nothing to say.
+        }
+      }
+    },
+    { auto: true },
+  ],
   consoleGuard: [
     async ({ page }, use) => {
       const problems: string[] = [];
@@ -77,7 +118,10 @@ export async function runAxe(
 export const DARK = { canvas: "rgb(8, 9, 10)" };
 export const LIGHT = { canvas: "rgb(247, 248, 249)" };
 
-export const EVIDENCE = ".agtx/evidence/WEB-07";
+/** Screenshots share the invocation's isolated evidence tree and refuse duplicates. */
+export function evidencePath(name: string): string {
+  return claimEvidencePath(base.info(), name);
+}
 
 /**
  * Presses Tab (or Shift+Tab). Safari on macOS does not Tab to links or buttons unless Option is held ("Press Tab to highlight each

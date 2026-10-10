@@ -28,8 +28,37 @@ export interface SessionConfig {
   waitingCardDelayMs: number;
   /** The bounded wait for coordinated closure in step 3a of the canonical wipe (WEB-04 7.8). */
   wipeClosureWaitMs: number;
+  /**
+   * How many times step 3a asks for the durable closing flag before it gives up and reports `retry_later/closing_unconfirmed` (the
+   * first re-ask is at once, later ones follow the usual back-off; the deletion never goes on without the flag). At least 1.
+   */
+  closingWriteAttempts: number;
   /** `GET /health` bound. */
   healthTimeoutMs: number;
+  /**
+   * The wait for the shared `atlas-auth` lock of a persistence hold. A settlement or closing write holds it exclusively for the
+   * length of its own transaction (and a closing write for up to `lockWaitMs`); a persistence hold that cannot be had in time is
+   * `unavailable`, which the caller treats like a request that was never sent: nothing is applied, nothing is counted, and it asks again.
+   */
+  persistenceWaitMs: number;
+  /**
+   * The longest a persistence hold vouches for its verdict. At this bound the hold is REVOKED (not simply released): the data
+   * transaction it protects is aborted if it can still be, the lock is kept until that transaction has settled, and only then is
+   * a settlement let in (`kernel/persistence.ts`). It is a deadline for the whole commit, from the verdict to the transaction's
+   * completion, queue wait included, so it must sit above the data layer's own apply watchdog (`syncApplyWatchdogMs`, 20 s, which
+   * measures the apply alone) with room for the verdict read, the engine's queue and the reads before the apply: a revocation that
+   * came first would turn every slow apply into an endless retry instead of the watchdog's step-down. `tests/data/commit-guard-expiry`
+   * keeps the margin (at least 10 s). A settlement that waits for a hold gives up after `lockWaitMs` and retries (the session's
+   * rule for every `atlas-auth` request), so a long hold is a delay, not a block. A hold ended this way is traced.
+   */
+  persistenceHoldMs: number;
+  /**
+   * After a revocation, how long registered work may stay unresolved before the stall is TRACED (`persistence.stalled`, once). It is
+   * a report and nothing else: the lock is never given up while registered work is unresolved, because a commit that is already
+   * committing cannot be aborted and, from this page, cannot be told from a durable write whose completion has not arrived; giving
+   * the lock up would let another page settle a transition ahead of a commit that then lands. Provisional and unmeasured.
+   */
+  persistenceStallMs: number;
 }
 
 export const DEFAULT_CONFIG: SessionConfig = Object.freeze({
@@ -47,7 +76,11 @@ export const DEFAULT_CONFIG: SessionConfig = Object.freeze({
   scanIntervalMs: 30_000,
   waitingCardDelayMs: 2_000,
   wipeClosureWaitMs: 5_000,
+  closingWriteAttempts: 3,
   healthTimeoutMs: 3_000,
+  persistenceWaitMs: 20_000,
+  persistenceHoldMs: 30_000,
+  persistenceStallMs: 10_000,
 });
 
 /** Lock names (matrix 3.3). Only ever requested, waited for or probed; never queried, never stolen. */

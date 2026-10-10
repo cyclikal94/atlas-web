@@ -1,12 +1,18 @@
-import { mkdirSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, expectFocusLoop, pressTab, runAxe, test } from "./helpers";
+import {
+  evidencePath,
+  expect,
+  expectFocusLoop,
+  pressTab,
+  runAxe,
+  test,
+} from "./helpers";
 
 /**
  * S-NEUTRAL / A2 (plan 12.1, 13.5): the rendered checks of every neutral state, the level-0 gate, the Settings screens and the
  * three confirmation dialogs, at 320, 390, 768 and 1280 px, in dark and light, in each engine: no horizontal scroll, axe clean
  * INCLUDING colour contrast in real layout, 44 px targets in the content, a visible focus ring, the right focus target.
- * Screenshots (Chromium) go to .agtx/evidence/WEB-08a/design/. FIXTURE evidence: it says the screens render as designed. It is
+ * Screenshots (Chromium) go to this invocation's evidence directory. FIXTURE evidence: it says the screens render as designed. It is
  * not Kieran's visual sign-off and not assistive-technology evidence (T22, WEB-08c). The light theme of the gap frames was
  * unverified in the design files (G-11); this is where it is measured.
  */
@@ -16,7 +22,6 @@ const WIDTHS: Array<[number, number]> = [
   [768, 1024],
   [1280, 800],
 ];
-const EVIDENCE = ".agtx/evidence/WEB-08a/design";
 
 const NEUTRAL_STATES = [
   "1a.confirming",
@@ -275,9 +280,10 @@ for (const scheme of ["dark", "light"] as const) {
           }
 
           if (engine === "chromium") {
-            mkdirSync(`${EVIDENCE}/chromium`, { recursive: true });
             await page.screenshot({
-              path: `${EVIDENCE}/chromium/${surface.name}-${width}-${scheme}.png`,
+              path: evidencePath(
+                `session-neutral/${surface.name}-${width}-${scheme}.png`,
+              ),
               fullPage: true,
             });
           }

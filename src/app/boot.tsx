@@ -5,10 +5,12 @@ import { version as contractVersion } from "../../contract-pin.json";
 import { liveRegions } from "../components/ui/announcer";
 import { createGateDialog } from "../components/ui/gate-dialog";
 import { NeutralGate } from "../components/ui/neutral-gate";
+import { createDataDeletionPorts } from "../data";
 import { ThemeProvider } from "../design/ThemeProvider";
 import {
   AuthStoreOpenError,
   browserPorts,
+  type CreateSessionOptions,
   createProtectedSurface,
   createSession,
   type OpenedAuthStore,
@@ -50,6 +52,11 @@ export interface BootOptions {
   onReload?: () => void;
   /** Test instrumentation only (the fixture-only harness). */
   trace?: Trace;
+  /**
+   * Session constants to override, for the FIXTURE harness only (the contention measurements scale `lockWaitMs`, and say so).
+   * Production passes none: `main.tsx` never sets it.
+   */
+  config?: NonNullable<CreateSessionOptions["config"]>;
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
@@ -107,11 +114,20 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     liveRegions,
   });
   const session = createSession(
-    browserPorts({ store: opened, surface, trace: options.trace }),
+    browserPorts({
+      store: opened,
+      surface,
+      trace: options.trace,
+      // WEB-09a: the real database, local-work and wipe-coordination ports. Without this the session's defaults refuse
+      // (`adapter_missing`) whenever an account database exists, so a wipe can never conclude "nothing to delete" about data
+      // it cannot see.
+      deletion: createDataDeletionPorts(),
+    }),
     {
       supportedRange: rangeFromPin(contractVersion),
       onSignIn: () => signInStub.request(),
       onReload: options.onReload ?? (() => location.reload()),
+      ...(options.config === undefined ? {} : { config: options.config }),
     },
   );
   renderTree = createProtectedTree(session);

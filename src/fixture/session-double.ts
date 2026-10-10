@@ -1,10 +1,11 @@
-import type {
-  DeviceRow,
-  Operations,
-  Result,
-  Session,
-  SessionSummary,
-  Store,
+import {
+  type DeviceRow,
+  type Operations,
+  type Result,
+  type Session,
+  type SessionSummary,
+  type Store,
+  unrevokedHold,
 } from "../session";
 
 /**
@@ -213,6 +214,10 @@ export function fixtureSession(params: URLSearchParams): Session {
       reload: () => undefined,
       reviewDevice: () => undefined,
       consent: () => undefined,
+    },
+    // A fixture page has no `atlas-auth` record to order against: the hold is granted at once, and says nothing about identity.
+    persistence: {
+      hold: async () => unrevokedHold(),
     },
   };
 }

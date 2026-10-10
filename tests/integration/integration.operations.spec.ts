@@ -16,7 +16,8 @@ import {
  * I-06 and I-07 (plan 14.3): explicit logout and self-retirement against the RELEASED backend. The wipe runs with the default
  * "no local stores yet" data adapters (decision D-14): what it does to a real cache needs WEB-09a's adapter, and is not claimed.
  */
-const ZERO = { count: 0, items: [] as string[], digest: "0" };
+// WEB-09a registered the real local-work port: a confirmation carries what the page itself reports (the summary the person was
+// shown), not a fixed "nothing" value; the callbacks below ask for it in the page, as the confirmation dialog does.
 
 interface Seen {
   method: string;
@@ -64,10 +65,11 @@ test.describe("I-06: the logout ledger", () => {
     await untilView(page, "displaying");
     const before = (await records(page)).auth_state.settled;
     const second = await rawSignIn("dave");
-    const started = await page.evaluate(
-      async (zero) => window.__s.operations.logout({ unsynced: zero }),
-      ZERO,
-    );
+    const started = await page.evaluate(async () => {
+      const unsynced = await window.__s.operations.summariseLocalWork();
+      if (!unsynced) throw new Error("nobody is settled");
+      return window.__s.operations.logout({ unsynced });
+    });
     expect(started.kind).toBe("started");
     await untilRecord(
       page,
@@ -114,10 +116,11 @@ test.describe("I-06: the logout ledger", () => {
       action: "hold_request",
       ordinal: 1,
     });
-    const started = await page.evaluate(
-      async (zero) => window.__s.operations.logout({ unsynced: zero }),
-      ZERO,
-    );
+    const started = await page.evaluate(async () => {
+      const unsynced = await window.__s.operations.summariseLocalWork();
+      if (!unsynced) throw new Error("nobody is settled");
+      return window.__s.operations.logout({ unsynced });
+    });
     expect(started.kind).toBe("started");
     await expect.poll(async () => (await proxy.held())[hold.id] ?? 0).toBe(1);
     const removed = await raw("DELETE", `/sessions/${initial?.session_id}`, {
@@ -182,14 +185,11 @@ test.describe("I-07: self-retirement of the current device", () => {
     await untilView(page, "displaying");
     const row = await readCurrent(page);
     expect(row.state_token).toMatch(/^v1\./);
-    const started = await page.evaluate(
-      (r) =>
-        window.__s.operations.retireThisDevice({
-          read: r,
-          unsynced: { count: 0, items: [], digest: "0" },
-        }),
-      row,
-    );
+    const started = await page.evaluate(async (r) => {
+      const unsynced = await window.__s.operations.summariseLocalWork();
+      if (!unsynced) throw new Error("nobody is settled");
+      return window.__s.operations.retireThisDevice({ read: r, unsynced });
+    }, row);
     expect(started.kind).toBe("started");
     await untilRecord(
       page,
@@ -215,14 +215,11 @@ test.describe("I-07: self-retirement of the current device", () => {
     const deviceId = (await records(page)).device?.device_id ?? "";
     // The state the token approved changes: a further session under the SAME device id.
     await rawSignIn("bob", deviceId);
-    const started = await page.evaluate(
-      (r) =>
-        window.__s.operations.retireThisDevice({
-          read: r,
-          unsynced: { count: 0, items: [], digest: "0" },
-        }),
-      row,
-    );
+    const started = await page.evaluate(async (r) => {
+      const unsynced = await window.__s.operations.summariseLocalWork();
+      if (!unsynced) throw new Error("nobody is settled");
+      return window.__s.operations.retireThisDevice({ read: r, unsynced });
+    }, row);
     expect(started.kind).toBe("started");
     await untilRecord(
       page,
@@ -265,14 +262,11 @@ test.describe("I-07: self-retirement of the current device", () => {
       ordinal: 1,
     });
     expect(rule.id).toBeTruthy();
-    const started = await page.evaluate(
-      (r) =>
-        window.__s.operations.retireThisDevice({
-          read: r,
-          unsynced: { count: 0, items: [], digest: "0" },
-        }),
-      row,
-    );
+    const started = await page.evaluate(async (r) => {
+      const unsynced = await window.__s.operations.summariseLocalWork();
+      if (!unsynced) throw new Error("nobody is settled");
+      return window.__s.operations.retireThisDevice({ read: r, unsynced });
+    }, row);
     expect(started.kind).toBe("started");
     // The connection dropped: the person cannot know. The fence and the envelope stay; the card is the honest one.
     await untilView(page, "neutral", "1a.confirming");

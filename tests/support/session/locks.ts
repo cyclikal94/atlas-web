@@ -2,18 +2,21 @@ import type { LockManagerLike } from "../../../src/session/adapters/web-locks";
 import type { World } from "./world";
 
 /**
- * A faithful stand-in for the origin's Web Locks manager (plan 13.1): exclusive locks only; first-in-first-out per
- * name; a lock is granted only after its holder's release has been PUBLISHED (delay knob D1); `ifAvailable` calls
- * back with null while the lock is held or its release is unpublished; a `signal` rejects a not-yet-granted request
- * with AbortError and is ignored once granted; `query()` and `steal` throw so any use fails the test. A destroyed
- * page's locks are released by the platform (also through D1).
+ * A faithful stand-in for the origin's Web Locks manager (plan 13.1): first-in-first-out per name; `exclusive` and `shared`
+ * requests (a shared request is granted together with other shared holders and never alongside an exclusive one, and a shared
+ * request queued behind a waiting exclusive one waits for it, as the specification's queue does); a lock is granted only after
+ * its holder's release has been PUBLISHED (delay knob D1); `ifAvailable` calls back with null while the lock is held or its
+ * release is unpublished; a `signal` rejects a not-yet-granted request with AbortError and is ignored once granted;
+ * `query()` and `steal` throw so any use fails the test. A destroyed page's locks are released by the platform (also through D1).
  */
 interface Holder {
   page: string;
   token: number;
+  mode: "exclusive" | "shared";
 }
 interface Pending {
   page: string;
+  mode: "exclusive" | "shared";
   callback: (lock: object | null) => unknown;
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
@@ -21,9 +24,12 @@ interface Pending {
   onAbort?: () => void;
 }
 interface LockState {
-  holder: Holder | null;
-  /** The holder released; the release is not yet published. */
-  releasing: boolean;
+  /** Every current holder: one exclusive, or any number of shared. */
+  holders: Holder[];
+  /** Releases not yet published (a grant waits for them, as it waited for the single holder's). */
+  releasing: number;
+  /** An exclusive release is among the unpublished ones: nothing at all is granted until it is published. */
+  exclusiveReleasing: number;
   queue: Pending[];
 }
 
@@ -38,7 +44,7 @@ export class FakeLockManager {
   private state(name: string): LockState {
     let state = this.states.get(name);
     if (!state) {
-      state = { holder: null, releasing: false, queue: [] };
+      state = { holders: [], releasing: 0, exclusiveReleasing: 0, queue: [] };
       this.states.set(name, state);
     }
     return state;
@@ -94,8 +100,8 @@ export class FakeLockManager {
           { name, ifAvailable: true },
           () => {
             const free =
-              state.holder === null &&
-              !state.releasing &&
+              state.holders.length === 0 &&
+              state.releasing === 0 &&
               state.queue.length === 0;
             if (!free) {
               log("lock.unavailable");
@@ -108,6 +114,7 @@ export class FakeLockManager {
             }
             this.grantTo(state, name, {
               page,
+              mode: "exclusive",
               callback,
               resolve,
               reject,
@@ -116,7 +123,13 @@ export class FakeLockManager {
         );
         return;
       }
-      const pending: Pending = { page, callback, resolve, reject };
+      const pending: Pending = {
+        page,
+        mode: options.mode === "shared" ? "shared" : "exclusive",
+        callback,
+        resolve,
+        reject,
+      };
       if (options.signal) {
         pending.signal = options.signal;
         pending.onAbort = () => {
@@ -137,35 +150,61 @@ export class FakeLockManager {
     });
   }
 
+  /** Whether the head of the queue may be granted now: in queue order, and never past a request that has to wait. */
+  private grantable(state: LockState, head: Pending): boolean {
+    if (head.mode === "exclusive")
+      return state.holders.length === 0 && state.releasing === 0;
+    return (
+      state.exclusiveReleasing === 0 &&
+      state.holders.every((holder) => holder.mode === "shared")
+    );
+  }
+
   private tryGrant(name: string): void {
     const state = this.state(name);
-    if (state.holder !== null || state.releasing) return;
     while (state.queue.length > 0) {
-      const next = state.queue.shift() as Pending;
-      if (next.onAbort) next.signal?.removeEventListener("abort", next.onAbort);
-      if (this.world.isDestroyed(next.page)) continue;
-      this.grantTo(state, name, next);
-      return;
+      const head = state.queue[0] as Pending;
+      if (this.world.isDestroyed(head.page)) {
+        state.queue.shift();
+        if (head.onAbort)
+          head.signal?.removeEventListener("abort", head.onAbort);
+        continue;
+      }
+      if (!this.grantable(state, head)) return;
+      state.queue.shift();
+      if (head.onAbort) head.signal?.removeEventListener("abort", head.onAbort);
+      this.grantTo(state, name, head);
+      // A shared grant may be followed by more shared requests that were queued behind it; an exclusive one ends the round.
+      if (head.mode === "exclusive") return;
     }
   }
 
   private grantTo(
     state: LockState,
     name: string,
-    request: Pick<Pending, "page" | "callback" | "resolve" | "reject">,
+    request: Pick<Pending, "page" | "mode" | "callback" | "resolve" | "reject">,
   ): void {
-    const holder: Holder = { page: request.page, token: ++this.tokens };
-    state.holder = holder;
+    const holder: Holder = {
+      page: request.page,
+      token: ++this.tokens,
+      mode: request.mode,
+    };
+    state.holders.push(holder);
     let held = this.heldBy.get(request.page);
     if (!held) {
       held = new Set();
       this.heldBy.set(request.page, held);
     }
     held.add(name);
-    this.world.log({ type: "lock.grant", page: request.page, name });
+    this.world.log({
+      type: "lock.grant",
+      page: request.page,
+      name,
+      mode: request.mode,
+    });
     let outcome: unknown;
     try {
-      outcome = request.callback({ name, mode: "exclusive" });
+      outcome = request.callback({ name, mode: request.mode });
     } catch (error) {
       this.release(name, holder, "callback_threw");
       request.reject(error);
@@ -187,14 +226,24 @@ export class FakeLockManager {
 
   private release(name: string, holder: Holder, reason: string): void {
     const state = this.state(name);
-    if (state.holder?.token !== holder.token) return;
-    state.holder = null;
-    state.releasing = true;
-    this.heldBy.get(holder.page)?.delete(name);
-    this.world.log({ type: "lock.release", page: holder.page, name, reason });
+    const index = state.holders.findIndex((h) => h.token === holder.token);
+    if (index === -1) return;
+    state.holders.splice(index, 1);
+    state.releasing += 1;
+    if (holder.mode === "exclusive") state.exclusiveReleasing += 1;
+    if (!state.holders.some((h) => h.page === holder.page))
+      this.heldBy.get(holder.page)?.delete(name);
+    this.world.log({
+      type: "lock.release",
+      page: holder.page,
+      name,
+      reason,
+      mode: holder.mode,
+    });
     // The release is PUBLISHED later; nothing is granted, and `ifAvailable` still sees the lock held, until then.
     this.world.schedule("D1", null, { name, releasedBy: holder.page }, () => {
-      state.releasing = false;
+      state.releasing -= 1;
+      if (holder.mode === "exclusive") state.exclusiveReleasing -= 1;
       this.world.log({ type: "lock.published", name });
       this.tryGrant(name);
     });
@@ -209,8 +258,8 @@ export class FakeLockManager {
           pending.signal?.removeEventListener("abort", pending.onAbort);
         return false;
       });
-      if (state.holder?.page === page)
-        this.release(name, state.holder, "destroyed");
+      for (const holder of state.holders.filter((h) => h.page === page))
+        this.release(name, holder, "destroyed");
     }
   }
 
@@ -227,6 +276,15 @@ export class FakeLockManager {
   }
   isFree(name: string): boolean {
     const state = this.states.get(name);
-    return !state || (state.holder === null && !state.releasing);
+    return !state || (state.holders.length === 0 && state.releasing === 0);
+  }
+  /** Whether a page holds the lock EXCLUSIVELY right now (the protocol's premise about every settlement, checked by the store). */
+  holdsExclusive(page: string, name: string): boolean {
+    return (
+      this.states
+        .get(name)
+        ?.holders.some((h) => h.page === page && h.mode === "exclusive") ??
+      false
+    );
   }
 }
