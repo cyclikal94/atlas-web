@@ -77,8 +77,13 @@ export interface SessionHarness {
 const params = new URLSearchParams(location.search);
 const off = params.get("boot") === "off";
 const manual = params.get("boot") === "manual";
-// The protected tree routes on the browser location; start it on the route the test asks for (default: Today).
-history.replaceState(null, "", params.get("route") ?? "/today");
+// The protected tree routes on the browser location; start it on the route the test asks for (default: Today). The URL fragment
+// is KEPT: boot's first statement reads and strips it (an OIDC grant, an invitation token), exactly as in production.
+history.replaceState(
+  null,
+  "",
+  (params.get("route") ?? "/today") + location.hash,
+);
 const neutralRoot = document.getElementById("neutral-root");
 if (!neutralRoot) throw new Error("Missing neutral root");
 

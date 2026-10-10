@@ -13,6 +13,26 @@ interface Account {
   id: string;
   username: string;
   password: string;
+  hasPassword: boolean;
+  oidcIssuers: string[];
+}
+export interface Invitation {
+  token: string;
+  /** Null for a standalone invitation (the preview then carries `household: null`). */
+  household: { id: string; name: string } | null;
+  /** Server time (world ms) at which it stops working. */
+  expires: number;
+  state: "open" | "redeemed" | "revoked";
+}
+/** A browser OIDC flow the stub provider is holding between `/oidc/start` and its callback. */
+export interface OidcFlow {
+  id: string;
+  attemptId: string;
+  challenge: string;
+  device: string;
+  link: boolean;
+  /** The account a link flow belongs to (the session that started it). */
+  linkAccount: string | null;
 }
 interface ServerSession {
   id: string;
@@ -95,6 +115,12 @@ export class StubServer {
   readonly grants = new Map<string, Grant>();
   readonly devices = new Map<string, DeviceData>();
   readonly ledger = new Map<string, { outcome: string; kind: string }>();
+  readonly invitations = new Map<string, Invitation>();
+  readonly oidcFlows = new Map<string, OidcFlow>();
+  /** False answers `404 not_found` to `/oidc/start`, as an unconfigured server does. */
+  oidcConfigured = true;
+  /** The issuer a completed link flow attaches to the account. */
+  oidcIssuer = "https://idp.example.test";
   /** The browser's cookie jar for the origin: shared by every page. */
   cookie: string | null = null;
   apiVersion: string | undefined = "0.27.0";
@@ -109,9 +135,67 @@ export class StubServer {
 
   // ---- fixtures ----
   addAccount(username: string, password: string): Account {
-    const account = { id: `acct-${++this.counter}`, username, password };
+    const account: Account = {
+      id: `acct-${++this.counter}`,
+      username,
+      password,
+      hasPassword: true,
+      oidcIssuers: [],
+    };
     this.accounts.set(account.id, account);
     return account;
+  }
+  /** An invitation token is 64 lower-case hexadecimal characters, as the real ones are. */
+  addInvitation(
+    options: {
+      household?: { id: string; name: string } | null;
+      ttlMs?: number;
+    } = {},
+  ): Invitation {
+    const token = (++this.counter).toString(16).padStart(64, "a");
+    const invitation: Invitation = {
+      token,
+      household: options.household ?? null,
+      expires: this.world.time + (options.ttlMs ?? 7 * 86_400_000),
+      state: "open",
+    };
+    this.invitations.set(token, invitation);
+    return invitation;
+  }
+  /**
+   * What the stub provider's callback does once the person has approved at the provider: it issues an activation grant
+   * for `subject` (a sign-in) or links the issuer to the flow's account (a link) and returns the fragment fields the
+   * backend would put in the redirect to the origin. It answers no browser request, so it sets no cookie.
+   */
+  completeOidc(
+    flow: OidcFlow,
+    subject: string,
+  ): { grant: string; attempt: string; account: string } {
+    const account = flow.link ? (flow.linkAccount ?? subject) : subject;
+    if (flow.link) {
+      const owner = this.accounts.get(account);
+      if (owner && !owner.oidcIssuers.includes(this.oidcIssuer))
+        owner.oidcIssuers.push(this.oidcIssuer);
+    }
+    const grant: Grant = {
+      grant: `grant-${++this.counter}`,
+      account,
+      device: flow.device,
+      challenge: flow.challenge,
+      state: "issued",
+      wrongVerifiers: 0,
+      session: null,
+    };
+    this.grants.set(grant.grant, grant);
+    this.oidcFlows.delete(flow.id);
+    return { grant: grant.grant, attempt: flow.attemptId, account };
+  }
+  /** The flow most recently started (a test that started one knows there is exactly one). */
+  latestOidcFlow(): OidcFlow {
+    const flows = [...this.oidcFlows.values()];
+    const last = flows[flows.length - 1];
+    if (!last) throw new Error("no OIDC flow is waiting at the provider");
+    return last;
   }
   /** Create a session directly (a sign-in that the client did not perform, for example on another device). */
   createSession(
@@ -252,7 +336,7 @@ export class StubServer {
       if (!account) return error(401, "unauthenticated");
       const challenge = String(b.attempt_challenge ?? "");
       if (!/^[A-Za-z0-9_-]{43}$/.test(challenge))
-        return error(422, "validation_failed");
+        return error(422, "invalid_value");
       const grant: Grant = {
         grant: `grant-${++this.counter}`,
         account: account.id,
@@ -269,6 +353,99 @@ export class StubServer {
           EPOCH_BASE + this.world.time + 60_000,
         ).toISOString(),
         account_id: account.id,
+      });
+    }
+    if (route === "/registration/preview" && method === "POST") {
+      const token = String(b.token ?? "");
+      if (!/^[0-9a-f]{64}$/.test(token)) return error(422, "invalid_value");
+      const invitation = this.invitations.get(token);
+      // Unknown, expired, already redeemed and revoked are one answer: the server does not say which.
+      if (!invitation || !this.invitationOpen(invitation))
+        return error(401, "unauthenticated");
+      return json(200, {
+        household: invitation.household,
+        expires_at: new Date(EPOCH_BASE + invitation.expires).toISOString(),
+      });
+    }
+    if (route === "/browser-registration" && method === "POST") {
+      const token = String(b.token ?? "");
+      const username = String(b.username ?? "");
+      const password = typeof b.password === "string" ? b.password : "";
+      const challenge = String(b.attempt_challenge ?? "");
+      const bytes = new TextEncoder().encode(password).length;
+      if (
+        !/^[0-9a-f]{64}$/.test(token) ||
+        !/^[a-z0-9_.-]{1,100}$/.test(username) ||
+        bytes < 12 ||
+        bytes > 1024 ||
+        !/^[A-Za-z0-9_-]{43}$/.test(challenge) ||
+        typeof b.device_id !== "string" ||
+        b.device_id.length === 0
+      )
+        return error(422, "invalid_value");
+      const invitation = this.invitations.get(token);
+      if (!invitation || !this.invitationOpen(invitation))
+        return error(401, "unauthenticated");
+      // A taken username is a conflict and the invitation is preserved.
+      if ([...this.accounts.values()].some((a) => a.username === username))
+        return error(409, "conflict");
+      const account = this.addAccount(username, password);
+      invitation.state = "redeemed";
+      const grant: Grant = {
+        grant: `grant-${++this.counter}`,
+        account: account.id,
+        device: b.device_id,
+        challenge,
+        state: "issued",
+        wrongVerifiers: 0,
+        session: null,
+      };
+      this.grants.set(grant.grant, grant);
+      // The registration response sets no cookie: only `activate` does (G1).
+      return json(200, {
+        grant: grant.grant,
+        grant_expires_at: new Date(
+          EPOCH_BASE + this.world.time + 60_000,
+        ).toISOString(),
+        account_id: account.id,
+      });
+    }
+    if (route === "/oidc/start" && method === "POST") {
+      if (!this.oidcConfigured) return error(404, "not_found");
+      const challenge = String(b.attempt_challenge ?? "");
+      if (
+        !/^[A-Za-z0-9_-]{43}$/.test(challenge) ||
+        typeof b.device_id !== "string" ||
+        typeof b.attempt_id !== "string" ||
+        b.attempt_id.length === 0 ||
+        typeof b.link !== "boolean"
+      )
+        return error(422, "invalid_value");
+      let linkAccount: string | null = null;
+      if (b.link) {
+        // A link is authenticated by the session cookie, as any cookie-session request is, so it needs that session's CSRF token
+        // (the released backend answers `403` without it: found by the Layer C integration run, not by the earlier fakes), and the
+        // session must have been created within the last five minutes.
+        if (!session) return error(401, "unauthenticated");
+        const csrf = headers.get("X-CSRF-Token");
+        if (!csrf) return error(403, "forbidden");
+        if (csrf !== this.csrfFor(session))
+          return error(403, "credential_mismatch");
+        if (this.world.time - session.created > 300_000)
+          return error(401, "unauthenticated");
+        linkAccount = session.account;
+      }
+      const flow: OidcFlow = {
+        id: `flow-${++this.counter}`,
+        attemptId: b.attempt_id,
+        challenge,
+        device: b.device_id,
+        link: b.link,
+        linkAccount,
+      };
+      this.oidcFlows.set(flow.id, flow);
+      return json(200, {
+        authorization_url: `${this.oidcIssuer}/authorize?state=${flow.id}`,
       });
     }
     if (route === "/browser-sessions/activate" && method === "POST") {
@@ -451,7 +628,26 @@ export class StubServer {
         if (s.account === session.account) this.sessions.delete(s.id);
       return { status: 204 };
     }
+    if (route === "/me" && method === "GET") {
+      const account = this.accounts.get(session.account);
+      if (!account) return error(401, "unauthenticated");
+      return json(200, {
+        id: account.id,
+        username: account.username,
+        has_password: account.hasPassword,
+        oidc_issuers: [...account.oidcIssuers],
+      });
+    }
     if (route === "/oidc/identities" && method === "DELETE") {
+      // As the backend answers: the body shape, then recency, then a local password, then the identity itself.
+      if (typeof b.issuer !== "string") return error(400, "malformed_request");
+      if (this.world.time - session.created > 300_000)
+        return error(401, "unauthenticated");
+      const account = this.accounts.get(session.account);
+      if (!account?.hasPassword) return error(409, "conflict");
+      if (!account.oidcIssuers.includes(b.issuer))
+        return error(404, "not_found");
+      account.oidcIssuers = account.oidcIssuers.filter((i) => i !== b.issuer);
       for (const s of [...this.sessions.values()])
         if (s.account === session.account) this.sessions.delete(s.id);
       return { status: 204 };
@@ -464,6 +660,10 @@ export class StubServer {
       return json(200, { ok: true, path: route });
     }
     return error(404, "not_found");
+  }
+
+  private invitationOpen(invitation: Invitation): boolean {
+    return invitation.state === "open" && invitation.expires > this.world.time;
   }
 
   private deviceState(
@@ -568,7 +768,7 @@ export function createFakeFetch(
         { once: true },
       );
       const bodyPromise =
-        method === "GET" || method === "DELETE" || method === "HEAD"
+        method === "GET" || method === "HEAD"
           ? Promise.resolve("")
           : request.text();
       bodyPromise.then((text) => {

@@ -110,7 +110,9 @@ describe("the screen and the sign-in gate (F-API)", () => {
       API_HEADING,
     );
     expect(screen.getByText(API_EXPLANATION.unsupported)).toBeInTheDocument();
-    expect(screen.queryByText(/Sign-in isn't available/)).toBeNull();
+    // The sign-in form is not offered: nothing here could sign anyone in against this server.
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
     expect((await axe(container)).violations).toEqual([]);
   });
 
@@ -126,8 +128,9 @@ describe("the screen and the sign-in gate (F-API)", () => {
   ] as const)("signed out and %j: the entry is offered as usual", (compat) => {
     mount({ kind: "signed_out", state: null }, compat);
     expect(
-      screen.getByText("Sign-in isn't available in this build yet."),
+      screen.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("Username")).toBeInTheDocument();
     expect(screen.queryByText(API_HEADING)).toBeNull();
   });
 

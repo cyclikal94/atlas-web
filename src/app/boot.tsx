@@ -7,6 +7,13 @@ import { createGateDialog } from "../components/ui/gate-dialog";
 import { NeutralGate } from "../components/ui/neutral-gate";
 import { createDataDeletionPorts } from "../data";
 import { ThemeProvider } from "../design/ThemeProvider";
+import type { completeLanding } from "../features/authentication/controller";
+import {
+  browserHandoffEnv,
+  captureHandoff,
+  rememberInvitation,
+} from "../features/authentication/handoff";
+import { signInRequest } from "../features/authentication/sign-in-request";
 import {
   AuthStoreOpenError,
   browserPorts,
@@ -29,8 +36,6 @@ import {
   probeCapabilities,
 } from "./capabilities";
 import { type DataLeaderHandle, dataLeader } from "./data-leader";
-import { SessionRoot } from "./SessionRoot";
-import { signInStub } from "./sign-in-stub";
 
 /**
  * The boot sequence (plan 5.4), shared by the production entry (`main.tsx`) and the fixture-only session harness
@@ -39,8 +44,8 @@ import { signInStub } from "./sign-in-stub";
  * `start()` is not called); then the protected tree is loaded (D-10); `createSession` and `start()` run OUTSIDE any component
  * effect (React StrictMode double-invokes effects); one neutral React root renders `session.view`.
  *
- * Nothing here lifts the gate: only the session's `act` does, through the protected-surface adapter. This module does not touch
- * `location.hash`, because WEB-08b reads the OIDC grant from the URL fragment (`beforeStart` is where that capture goes).
+ * Nothing here lifts the gate: only the session's `act` does, through the protected-surface adapter. The URL fragment (the OIDC
+ * grant, an invitation token) is captured and stripped by the FIRST statement of `boot`, before any `await` (WEB-08b).
  */
 export interface Booted {
   session: Session;
@@ -50,7 +55,7 @@ export interface Booted {
 }
 export interface BootOptions {
   neutralRoot: HTMLElement;
-  /** Called synchronously before the session starts; WEB-08b's fragment capture goes here. */
+  /** Called synchronously before the session starts. The fragment capture is not here: it is the first statement of `boot`. */
   beforeStart?: () => void;
   onReload?: () => void;
   /** Test instrumentation only (the fixture-only harness). */
@@ -69,6 +74,19 @@ export interface BootOptions {
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
+  // THE FIRST STATEMENT, before any `await`: copy what the fragment carries (an OIDC grant, an invitation token) and strip it
+  // from the address bar and the history entry (matrix 3.4 step 2). Nothing below may run before this.
+  const handoff = captureHandoff(browserHandoffEnv());
+  rememberInvitation(handoff.invitation);
+  // A fragment-only navigation (pasting another link into the address bar of this open page) does not reload it: it is captured
+  // and stripped the same way, so a grant or a token never stays in the address bar or the history.
+  let live: Session | null = null;
+  let finishLanding: typeof completeLanding | null = null;
+  window.addEventListener("hashchange", () => {
+    const next = captureHandoff(browserHandoffEnv());
+    rememberInvitation(next.invitation);
+    if (next.oidc && live && finishLanding) void finishLanding(live, next.oidc);
+  });
   const reactRoot = createRoot(options.neutralRoot);
   const render = (node: ReactNode) =>
     reactRoot.render(
@@ -106,8 +124,16 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     return null;
   }
 
-  // D-10: the protected tree is loaded before `expose` starts, so `act` mounts it in one synchronous step.
-  const { createProtectedTree } = await import("./protected-tree");
+  // D-10: load the protected tree, neutral forms and landing controller after the capability checks, but before any session
+  // starts or `expose` runs. Fragment capture remains synchronous above; `act` never waits for a component import.
+  // Keeping the forms/controller off the initial boot path preserves the startup budget when authentication and sync are composed.
+  const [{ createProtectedTree }, { SessionRoot }, { completeLanding }] =
+    await Promise.all([
+      import("./protected-tree"),
+      import("./SessionRoot"),
+      import("../features/authentication/controller"),
+    ]);
+  finishLanding = completeLanding;
   // The session and the surface refer to each other only through this closure: the surface asks for the tree, and the
   // tree needs the session for its screens.
   let renderTree: (() => ReactNode) | null = null;
@@ -134,11 +160,12 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     }),
     {
       supportedRange: rangeFromPin(contractVersion),
-      onSignIn: () => signInStub.request(),
+      onSignIn: () => signInRequest.request(),
       onReload: options.onReload ?? (() => location.reload()),
       ...(options.config === undefined ? {} : { config: options.config }),
     },
   );
+  live = session;
   renderTree = createProtectedTree(session);
   const leads = options.dataLeader !== false;
   // Before the session starts: the protected tree may be mounted during `start`, and its provider must then wait for the PAGE's runtime
@@ -151,5 +178,7 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
   );
   await session.start({ beforeStart: options.beforeStart });
   const leader = leads ? dataLeader.start(session, options.trace) : null;
+  // The OIDC landing continues only now: the durable record decides (epoch and phase), never the order things happened in.
+  if (handoff.oidc) void completeLanding(session, handoff.oidc);
   return { session, store: opened, leader };
 }

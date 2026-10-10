@@ -14,7 +14,9 @@ import { ProtectedProviders } from "../../src/app/providers";
 import { createAppRouter } from "../../src/app/router";
 import { ShellEnvProvider } from "../../src/app/shell/env";
 import type { SyncStatusModel } from "../../src/lib/sync-chip";
+import { SessionProvider } from "../../src/session";
 import { installMatchMedia } from "../helpers/match-media";
+import { sessionDouble } from "../helpers/session-double";
 
 afterEach(cleanup);
 
@@ -32,17 +34,19 @@ async function mount(
 ) {
   const router = createAppRouter({ initialPath: path });
   const view = render(
-    <ProtectedProviders>
-      <ShellEnvProvider
-        value={{
-          syncModel: sync,
-          onOpenSync,
-          accountSlot: <span>Fixture account</span>,
-        }}
-      >
-        <RouterProvider router={router} />
-      </ShellEnvProvider>
-    </ProtectedProviders>,
+    <SessionProvider session={sessionDouble()}>
+      <ProtectedProviders>
+        <ShellEnvProvider
+          value={{
+            syncModel: sync,
+            onOpenSync,
+            accountSlot: <span>Fixture account</span>,
+          }}
+        >
+          <RouterProvider router={router} />
+        </ShellEnvProvider>
+      </ProtectedProviders>
+    </SessionProvider>,
   );
   await screen.findByRole("main", { hidden: true });
   return { router, onOpenSync, ...view };

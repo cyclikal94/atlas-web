@@ -122,9 +122,24 @@ export type ExchangeResult =
   | { kind: "error"; error: AtlasError | null; status: number }
   | { kind: "network_failure" };
 export type AttemptOutcome =
-  | { kind: "settled"; account_id: AccountId; epoch: Epoch }
-  /** An Atlas 4xx or 503 device_capacity: definitive. */
-  | { kind: "refused"; error: AtlasError; definitive: true }
+  /** `method` is the attempt's own (K-2): a page that completes an `oidc_link` landing can tell the person that linking worked. */
+  | {
+      kind: "settled";
+      account_id: AccountId;
+      epoch: Epoch;
+      method: AttemptMethod;
+    }
+  /**
+   * An Atlas 4xx or 503 device_capacity: definitive. `stage` says which request was refused (K-3): `exchange` (login,
+   * registration; nothing was activated) or `activation` (the grant was good and the account exists, but `activate` was
+   * refused: for a registration the invitation is spent and the person signs in with the credentials they chose).
+   */
+  | {
+      kind: "refused";
+      error: AtlasError;
+      definitive: true;
+      stage: "exchange" | "activation";
+    }
   /** The exchange (login, registration) failed before any activation: nothing was sent that could set a cookie. */
   | { kind: "exchange_failed"; status: number | null }
   /** Discarded silently: the epoch is no longer the latest. */
@@ -140,6 +155,46 @@ export type AttemptOutcome =
         | "attempt_gone"
         | "wipe_pending";
     };
+/** What the person typed on the join form. Never logged, never stored; the token comes from the join link's fragment. */
+export interface RegistrationInput {
+  /** 64 lower-case hexadecimal characters. */
+  readonly token: string;
+  /** 1 to 100 characters of `[a-z0-9_.-]`. */
+  readonly username: string;
+  /** 12 to 1,024 BYTES. */
+  readonly password: string;
+}
+
+export type InvitationPreview =
+  | {
+      kind: "ok";
+      /** Null for a standalone invitation. The preview names no inviter and no member count. */
+      household: { id: string; name: string } | null;
+      expires_at: IsoInstant;
+    }
+  /** `401 unauthenticated`: unknown, expired, already used or revoked. The server does not say which. */
+  | { kind: "unavailable" }
+  /** Any other Atlas error: 403, 404 (browser sessions not configured), 422, 429, 5xx with an Atlas body. */
+  | { kind: "refused"; error: AtlasError; status: number }
+  /** No answer, a time-out, or an answer that is not an Atlas body. */
+  | { kind: "network_failure" };
+
+export type OidcStartOutcome =
+  /** The attempt is durably `redirected` (verifier stored, owner lock released). The caller navigates at once. */
+  | { kind: "redirect"; authorization_url: string }
+  /** A definitive Atlas error: 401, 403, 404 (not configured), 422, 429, 502 `oidc_unavailable`. */
+  | { kind: "refused"; error: AtlasError; status: number }
+  /** A network failure, a non-Atlas body, or a malformed or unsafe 200. */
+  | { kind: "exchange_failed"; status: number | null }
+  /** A newer attempt exists: do not navigate. */
+  | { kind: "superseded" }
+  /**
+   * Only for `oidc_link`, which is an ordinary stamped request: the session it needs has ended (a `401` is an OBSERVATION, never
+   * a refusal of the link) or moved on. The neutral state takes over; there is nothing for the form to say.
+   */
+  | { kind: "session_ended" }
+  | { kind: "not_started"; reason: "attempt_gone" | "not_settled" };
+
 export interface Attempts {
   begin(method: AttemptMethod): Promise<BeginResult>;
   /** Password path: runs step 2 (exchange) then continues to steps 3 to 5. Never returns the password or verifier. */
@@ -147,7 +202,33 @@ export interface Attempts {
     handle: AttemptHandle,
     credentials: { username: string; password: string },
   ): Promise<AttemptOutcome>;
-  /** For WEB-08b: feed a result the caller obtained itself (registration; OIDC start). */
+  /**
+   * `POST /registration/preview`. Not an attempt: no epoch, no lock, no record, and safe while anyone is signed in. The token
+   * goes in the request BODY and nowhere in a URL.
+   */
+  previewInvitation(
+    token: string,
+    signal?: AbortSignal,
+  ): Promise<InvitationPreview>;
+  /**
+   * Step 2 for method "registration": the exchange, then steps 3 to 5 as for a password grant. The browser's `device_id`
+   * never leaves the kernel. Throws a TypeError when `handle.method` is not "registration".
+   */
+  registerWithInvitation(
+    handle: AttemptHandle,
+    input: RegistrationInput,
+  ): Promise<AttemptOutcome>;
+  /**
+   * Step 2 for "oidc" and "oidc_link": `POST /oidc/start`, then the attempt is durably `redirected` and its owner lock
+   * released BEFORE this returns `redirect`; the caller then navigates at once. Throws a TypeError for any other method.
+   *
+   * `oidc` is a login-family exchange (no session, no stamp). `oidc_link` is authenticated by the settled session's cookie and so
+   * carries its CSRF token: it is sent as an ORDINARY stamped request, with the cover, the lease and the identity checks of any
+   * other, and a `401` is an observation that fails closed like a password change's (the released backend answers it when the
+   * session is older than five minutes).
+   */
+  startOidc(handle: AttemptHandle): Promise<OidcStartOutcome>;
+  /** Feed a result the caller obtained itself. Registration and OIDC start have their own methods above. */
   completeExchange(
     handle: AttemptHandle,
     result: ExchangeResult,
@@ -208,6 +289,13 @@ export type Result<T> =
       status?: number;
       atlasError?: AtlasError;
     };
+/** `GET /me`: the contract's own fields and nothing else (no display name, no link date). */
+export interface AccountSummary {
+  readonly id: AccountId;
+  readonly username: string;
+  readonly has_password: boolean;
+  readonly oidc_issuers: readonly string[];
+}
 export interface Operations {
   /**
    * How many unsynced changes and recovery copies this browser holds for the settled account, as the confirmation dialog
@@ -232,7 +320,13 @@ export interface Operations {
     current: string;
     next: string;
   }): Promise<Result<"changed">>;
-  unlinkOidc(): Promise<Result<"unlinked">>;
+  /**
+   * An ordinary GET `/me`, sealed like `listSessions`: nothing is returned for an identity that is no longer settled.
+   * Never cached by this module.
+   */
+  readAccount(): Promise<Result<AccountSummary>>;
+  /** `DELETE /oidc/identities` with the body `{ issuer }` the contract requires; the issuer is taken verbatim from `readAccount`. */
+  unlinkOidc(issuer: string): Promise<Result<"unlinked">>;
   /** Re-drives every operation fence: at boot, on online, on becoming visible, after a settlement. */
   resume(options?: { force?: boolean }): void;
   readonly pending: Store<
