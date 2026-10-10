@@ -28,7 +28,7 @@ import {
  */
 test.use({ firstGeneration: "production-a" });
 
-const ENTRY = "Sign-in isn't available in this build yet.";
+const ENTRY = "Sign in to Atlas";
 
 /** Records every content security policy violation the page reports, from its first script on. */
 async function openNeutral(page: Page, world: Generations): Promise<void> {

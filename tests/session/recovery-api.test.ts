@@ -351,3 +351,24 @@ describe("recovery states are presentational", () => {
     });
   });
 });
+
+describe("WEB-09b R2: the neutral state's Try again is the recovery owner's act too", () => {
+  test("`actions.retry` tells every `recovery.onRetry` listener once per press; a listener that unsubscribed or threw does not stop the rest", async () => {
+    const { f, l } = await reauthenticated();
+    const heard: string[] = [];
+    const off = l.page.session.recovery.onRetry(() => heard.push("first"));
+    l.page.session.recovery.onRetry(() => {
+      throw new Error("a listener's own failure");
+    });
+    l.page.session.recovery.onRetry(() => heard.push("third"));
+    l.page.session.actions.retry();
+    await f.settle();
+    expect(heard).toEqual(["first", "third"]);
+    off();
+    l.page.session.actions.retry();
+    await f.settle();
+    expect(heard).toEqual(["first", "third", "third"]);
+    // It is a request, never a permission: the fence still stands and nothing was released by it.
+    expect(fencesOf(f, l.account).length).toBeGreaterThan(0);
+  });
+});

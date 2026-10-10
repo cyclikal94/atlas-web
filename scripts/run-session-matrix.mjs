@@ -20,7 +20,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const evidence = join(root, ".agtx/evidence/WEB-08a/fixture");
+// `ATLAS_MATRIX_EVIDENCE` keeps a later task's run from overwriting an earlier task's evidence (the default is WEB-08a's folder).
+const evidence = process.env.ATLAS_MATRIX_EVIDENCE
+  ? resolve(root, process.env.ATLAS_MATRIX_EVIDENCE)
+  : join(root, ".agtx/evidence/WEB-08a/fixture");
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const value = (name, fallback) => {

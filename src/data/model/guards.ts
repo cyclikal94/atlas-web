@@ -21,6 +21,12 @@ export type GuardName =
   | "GEN"
   | "OWN"
   | "EPO"
+  /**
+   * WEB-09b: the STAGING compare-and-set. A snapshot page (and the activation that follows the final one) applies only at the staged
+   * position its request was captured at (`sync.staging_position === captured.expectedPosition`): a duplicate, a delayed answer of an
+   * older owner or an answer for an abandoned attempt finds another position and writes nothing. Its drop reason is `position`.
+   */
+  | "STG"
   /** The draft fence refuses a new draft or an in-place edit of a queued command (enforced by the enqueue and edit plans). */
   | "FEN";
 
@@ -73,6 +79,10 @@ export function checkGuards(
   }
   if (guards.includes("CAS")) {
     if (sync.cursor !== (captured.expectedPosition ?? null)) return "position";
+  }
+  if (guards.includes("STG")) {
+    if (sync.staging_position !== (captured.expectedPosition ?? null))
+      return "position";
   }
   if (guards.includes("GEN")) {
     if (sync.recovery_generation !== (captured.recoveryGeneration ?? 0))

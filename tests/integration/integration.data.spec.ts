@@ -128,10 +128,7 @@ const identity = (page: Page) =>
       window.__s.identity.get() as { account_id: string; epoch: number } | null,
   );
 
-async function signedIn(
-  page: Page,
-  who: "alice" | "bob" | "carol" | "dave" | "erin",
-) {
+async function signedIn(page: Page, who: Who) {
   expect((await signIn(page, who)).kind).toBe("settled");
   await untilView(page, "displaying");
   const id = await identity(page);

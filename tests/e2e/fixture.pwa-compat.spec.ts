@@ -29,7 +29,7 @@ const MISSING =
   "This server didn't say which version it is, so Atlas can't be sure it is safe to use. Ask whoever runs Atlas for you to check it.";
 const UNSUPPORTED =
   "This copy of Atlas doesn't work with the version of the server it is talking to. Ask whoever runs Atlas for you to update one of them.";
-const ENTRY = "Sign-in isn't available in this build yet.";
+const ENTRY = "Sign in to Atlas";
 
 async function openSignedOut(
   context: BrowserContext,

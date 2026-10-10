@@ -130,6 +130,28 @@ export const DATA_CONFIG = Object.freeze({
    * tab is protected by `closing` and the digest recheck, and the delete completes the moment it wakes and closes).
    */
   presenceGraceMs: 150,
+  /**
+   * WEB-09b. The ONE origin-wide leader lock (D 6.1, reconciliation row 6 case 5): fixed, never scoped by account or generation, and
+   * never released across a logout, a retirement, an account switch or a re-authentication; the holder re-points itself internally.
+   */
+  syncLeaderLock: "atlas-sync-leader",
+  /** The backend's snapshot sessions last one hour (D 4.1 item 3): an attempt older than this cannot be resumed. */
+  snapshotCursorLifetimeMs: 3_600_000,
+  /**
+   * An attempt is adopted only while it is at least this far inside the lifetime (Q7). The client's clock of the cursor-less capture
+   * is EARLIER than the server's start of the session, so its estimate of the age is conservative; the margin covers the request and
+   * a modest clock step. Provisional, unmeasured.
+   */
+  snapshotAdoptMarginMs: 60_000,
+  /** The three recovery-scoped retry classes (reconciliation, retry-budget rows 4 to 6). Provisional, "same order of magnitude". */
+  syncErrorStopAfter: 3,
+  deltaErrorAbandonAfter: 3,
+  recoveryAttemptStopAfter: 3,
+  /** Staged rows copied per keyset window inside the activation transaction (memory is bounded by the window, not the snapshot). */
+  activationWindow: 500,
+  /** The pace of the recovery job's look at a session that is not yet eligible (`unresolved_lease`, `stale`), doubling to the cap. */
+  recoveryBeginRetryMs: 1_000,
+  recoveryBeginRetryMaxMs: 60_000,
 });
 
 /** The shape of the constants with plain `number`s, so a test or a caller can supply other values than the provisional ones. */

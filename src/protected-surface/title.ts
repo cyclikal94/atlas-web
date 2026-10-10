@@ -16,8 +16,25 @@ function protectedSurfaceIsGated(doc: Document): boolean {
   }
 }
 
-export function setNeutralTitle(doc: Document = document): void {
-  doc.title = NEUTRAL_TITLE;
+/** The public surfaces' own generic titles: a closed set, nothing about any account. */
+export type NeutralTitlePart = "Sign in" | "Join";
+
+export function setNeutralTitle(
+  doc: Document = document,
+  part?: NeutralTitlePart,
+): void {
+  doc.title = part ? `${part} · ${NEUTRAL_TITLE}` : NEUTRAL_TITLE;
+}
+
+/**
+ * A public surface leaving: put the plain neutral title back, but only if the title is still the one that surface set. The protected
+ * tree may already have set its own (the surface unmounts as the tree mounts), and that must not be overwritten.
+ */
+export function clearNeutralTitle(
+  part: NeutralTitlePart,
+  doc: Document = document,
+): void {
+  if (doc.title === `${part} · ${NEUTRAL_TITLE}`) setNeutralTitle(doc);
 }
 
 const titleOf = (parts: readonly string[]): string =>

@@ -237,7 +237,13 @@ const fixtures: Fixture[] = [
     ),
     expected: [1, 2, 3, 4, 5].map((line) => ["R6", line] as [string, number]),
   },
-  ...["announcer", "sync-status", "neutral-gate", "neutral-state"].map(
+  ...[
+    "announcer",
+    "sync-status",
+    "neutral-gate",
+    "neutral-state",
+    "neutral-status",
+  ].map(
     (name): Fixture => ({
       name: `R6: ${name} may hold live regions`,
       path: `src/components/ui/${name}.tsx`,

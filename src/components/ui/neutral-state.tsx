@@ -191,19 +191,9 @@ export interface NeutralStateProps {
   actions: NeutralActions;
   /** The `wipe.consent` state carries a count only, and the opaque ticket that names this prompt for the choice. */
   consent?: { count: number; ticket: ConsentTicket };
-  /**
-   * PROVISIONAL (WEB-08b supplies the sign-in surface): a line shown after a button that leads to sign-in was pressed
-   * while none exists, so the button is not silent.
-   */
-  unavailable?: string | null;
 }
 
-export function NeutralState({
-  state,
-  actions,
-  consent,
-  unavailable,
-}: NeutralStateProps) {
+export function NeutralState({ state, actions, consent }: NeutralStateProps) {
   const heading = useRef<HTMLHeadingElement>(null);
   // The heading is the programmatic focus target, focused when the state renders (and again when the state changes), unless the
   // resume gate is open: a hidden page's provisional state renders beneath the modal gate, which owns focus until it lifts
@@ -265,11 +255,6 @@ export function NeutralState({
         </div>
       ) : null}
       {card.note ? <p className={muted}>{card.note}</p> : null}
-      {unavailable ? (
-        <p role="status" className={muted}>
-          {unavailable}
-        </p>
-      ) : null}
     </main>
   );
 }

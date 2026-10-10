@@ -1,0 +1,109 @@
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { createProtectedTree } from "../../src/app/protected-tree";
+import { NEUTRAL_COPY } from "../../src/components/ui/neutral-state";
+import { authFeedback } from "../../src/features/authentication/feedback";
+import { invitationMemory } from "../../src/features/authentication/handoff";
+import { MESSAGE_TEXT } from "../../src/features/authentication/outcome-copy";
+import {
+  JOIN_WHILE_SIGNED_IN_BODY,
+  JOIN_WHILE_SIGNED_IN_HEADING,
+} from "../../src/features/authentication/route";
+import { installMatchMedia } from "../helpers/match-media";
+import { sessionDouble } from "../helpers/session-double";
+
+installMatchMedia({ width: 1440 });
+
+beforeEach(() => {
+  invitationMemory.clear();
+  authFeedback.clearOnBegin();
+});
+afterEach(() => {
+  cleanup();
+  history.replaceState(null, "", "/");
+  invitationMemory.clear();
+  authFeedback.clearOnBegin();
+});
+
+const mount = () => render(createProtectedTree(sessionDouble())());
+
+describe("the protected tree and /join", () => {
+  test("a person who has just registered never lands on /join: it becomes / (query kept) synchronously, before the router exists", async () => {
+    history.replaceState(null, "", "/join?x=1");
+    // Building the tree is the factory's synchronous step: the path is already `/` when it returns.
+    const tree = createProtectedTree(sessionDouble())();
+    expect(location.pathname).toBe("/");
+    expect(location.search).toBe("?x=1");
+    render(tree);
+    await waitFor(() => expect(location.pathname).toBe("/today"));
+    expect(screen.queryByText(JOIN_WHILE_SIGNED_IN_HEADING)).toBeNull();
+  });
+
+  test("E-15: a person who is signed in and holds an unused invitation is told why the link registers nobody", async () => {
+    invitationMemory.set("c".repeat(64));
+    history.replaceState(null, "", "/join");
+    mount();
+    expect(
+      await screen.findByRole("heading", {
+        level: 1,
+        name: JOIN_WHILE_SIGNED_IN_HEADING,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(JOIN_WHILE_SIGNED_IN_BODY)).toBeInTheDocument();
+    expect(location.pathname).toBe("/join");
+    // The invitation stays in page memory for after the sign-out; nothing about it is drawn.
+    expect(invitationMemory.peek()).toBe("c".repeat(64));
+    expect(document.body.innerHTML).not.toContain("c".repeat(64));
+  });
+
+  test("any other path is left exactly as it is", async () => {
+    history.replaceState(null, "", "/settings");
+    mount();
+    await screen.findByRole("heading", { level: 1, name: "Settings" });
+    expect(location.pathname).toBe("/settings");
+  });
+});
+
+describe("notices about a sign-in that finished while an account displays", () => {
+  test("T1/T2: the superseded notice, with the accepted wording, dismissible", async () => {
+    history.replaceState(null, "", "/today");
+    mount();
+    await screen.findByRole("main", { hidden: true });
+    act(() => authFeedback.add({ kind: "superseded" }));
+    const notice = await screen.findByText(
+      NEUTRAL_COPY["1c.superseded"].message,
+    );
+    expect(notice.closest("[data-notice]")).toHaveAttribute(
+      "data-notice",
+      "feedback-superseded",
+    );
+    const notices = screen.getByRole("region", { name: "Notices" });
+    fireEvent.click(notices.querySelector("button") as HTMLElement);
+    expect(
+      screen.queryByText(NEUTRAL_COPY["1c.superseded"].message),
+    ).toBeNull();
+  });
+
+  test("linking single sign-on says so", async () => {
+    history.replaceState(null, "", "/today");
+    mount();
+    await screen.findByRole("main", { hidden: true });
+    act(() =>
+      authFeedback.add({
+        kind: "message",
+        tone: "info",
+        message: { id: "sso_linked" },
+      }),
+    );
+    expect(
+      await screen.findByText(MESSAGE_TEXT.sso_linked),
+    ).toBeInTheDocument();
+  });
+});

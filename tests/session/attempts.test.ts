@@ -115,14 +115,15 @@ describe("two fake tabs allocate epochs concurrently (AC-05)", () => {
       target_account_id: null,
       verifier,
     });
-    // The older attempt's exchange fails: its error is stale and clears nothing.
+    // The older attempt's exchange fails: its error is stale, clears nothing and is discarded like a stale grant (K-1: the
+    // caller is told `superseded`, not "wrong password"; WEB-08a returned `refused` here).
     const staleError = await f.runWith(
       olderPage.session.attempts.signInWithPassword(older.handle, {
         username: "kieran",
         password: "WRONG",
       }),
     );
-    expect(staleError.kind).toBe("refused");
+    expect(staleError).toEqual({ kind: "superseded" });
     expect(attemptOf(f)).toMatchObject({ epoch: newest, verifier });
     expect(f.store.violations).toEqual([]);
   });
