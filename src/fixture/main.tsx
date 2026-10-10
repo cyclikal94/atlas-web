@@ -156,7 +156,13 @@ if (location.pathname === "/__neutral") {
     const { mountProfilePage } = await import("./data-harness/profile-page");
     await mountProfilePage(data);
   });
-} else if (location.pathname === "/__session") {
+} else if (
+  location.pathname === "/__session" ||
+  // WEB-14a: a harness tab opened with `?sticky=1` stays the harness when it is reloaded (the app's own update reload included), though
+  // its address is then the route it shows. Only an opted-in tab, and never a `/__` page.
+  (!location.pathname.startsWith("/__") &&
+    sessionStorage.getItem("atlas-fixture-session") !== null)
+) {
   // The session harness (real adapters, real engine, no backend): see src/fixture/session-harness.
   void import("./session-harness/main");
 } else {

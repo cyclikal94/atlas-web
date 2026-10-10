@@ -1,4 +1,9 @@
-import type { FormRecoveryPort, RecoverySnapshot, SaveResult } from "./port";
+import type {
+  DiscardResult,
+  FormRecoveryPort,
+  RecoverySnapshot,
+  SaveResult,
+} from "./port";
 
 /**
  * Fixture adapter for tests and fixture mode. It is NOT the real store: WEB-09a implements FormRecoveryPort over
@@ -33,7 +38,25 @@ export class MemoryRecoveryAdapter implements FormRecoveryPort {
     return found ? structuredClone(found) : null;
   }
 
-  async discard(formContext: string, tabInstanceId: string): Promise<void> {
+  /** Set to make the next discards fail (the copy stays), to exercise the honest failure of a discard. */
+  failDiscards = false;
+
+  async discard(
+    formContext: string,
+    tabInstanceId: string,
+  ): Promise<DiscardResult> {
+    if (this.refuseSaves) return "refused";
+    if (this.failDiscards) return "failed";
     this.store.delete(this.key(formContext, tabInstanceId));
+    return "discarded";
+  }
+
+  async list(formContext: string): Promise<readonly RecoverySnapshot[]> {
+    return [...this.store.values()]
+      .filter((snapshot) => snapshot.formContext === formContext)
+      .sort((a, b) =>
+        a.savedAt === b.savedAt ? 0 : a.savedAt < b.savedAt ? 1 : -1,
+      )
+      .map((snapshot) => structuredClone(snapshot));
   }
 }

@@ -1,5 +1,5 @@
 import type { FormRecoveryRow, IsoInstant } from "../model/types";
-import { w } from "../store/port";
+import { range, w } from "../store/port";
 import { singletonPlan } from "./builders";
 
 /**
@@ -257,5 +257,50 @@ export const loadFormRecovery = singletonPlan<
     reader.get("form_recovery", [input.formContext, input.tabInstanceId]),
   decide: ({ reads: stored }) => ({
     result: stored && !stored.terminal ? stored : null,
+  }),
+});
+
+/** How many rows of one form `listFormRecovery` reads in one step of its walk (terminal rows included). */
+export const LIST_PAGE_ROWS = 50;
+
+/**
+ * Every copy of one form that can still be restored (WEB-14a, D-P6): the non-terminal rows of `form_context`, newest first by `saved_at`.
+ *
+ * COMPLETE (WEB-14a revision 1, R5). The rows of a form are walked in pages of `LIST_PAGE_ROWS` entries of the `form_context` index, inside
+ * ONE readonly transaction (so no page shifts under the next), until a page comes back short, and the discarded and submitted rows are
+ * dropped as they are met. Only the restorable copies are kept, so what is held grows with the copies that can be restored, never with the
+ * terminal rows (which are kept on purpose: they order a late capture, and are never deleted). Revision 0 read only the FIRST 50 entries
+ * of the index (in primary-key order, not by `saved_at`) and answered at most ten copies: 50 terminal rows of other tabs whose ids sort
+ * first hid a durable copy for good, and ten open tabs' copies hid a closed tab's. Every copy is answered; which of them may be restored
+ * (only those whose owner has gone) is the caller's decision. READONLY, not refused by `closing` (like `loadFormRecovery`).
+ */
+export const listFormRecovery = singletonPlan<
+  { incarnationId: string; formContext: string },
+  FormRecoveryRow[],
+  FormRecoveryRow[]
+>({
+  name: "data.listFormRecovery",
+  meta: { writer: "W9", guards: ["INC"], quota: null },
+  scope: ["form_recovery"],
+  mode: "readonly",
+  durability: "default",
+  read: async (reader, input) => {
+    const restorable: FormRecoveryRow[] = [];
+    for (let offset = 0; ; offset += LIST_PAGE_ROWS) {
+      const page = await reader.byIndex(
+        "form_recovery",
+        "form_context",
+        range.only(input.formContext),
+        LIST_PAGE_ROWS,
+        offset,
+      );
+      for (const row of page) if (!row.terminal) restorable.push(row);
+      if (page.length < LIST_PAGE_ROWS) return restorable;
+    }
+  },
+  decide: ({ reads: rows }) => ({
+    result: [...rows].sort((a, b) =>
+      a.saved_at === b.saved_at ? 0 : a.saved_at < b.saved_at ? 1 : -1,
+    ),
   }),
 });

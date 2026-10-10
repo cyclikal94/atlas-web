@@ -1,3 +1,4 @@
+import { raiseDataSuperseded } from "../../lib/pwa/signals";
 import { createWebLocksPort, type Session } from "../../session";
 import { DataRuntime } from "../engine/account-service";
 import {
@@ -5,9 +6,12 @@ import {
   type SyncChannel,
 } from "../engine/sync-channel";
 import { attachWipeResponder } from "../engine/wipe-responder";
+import type { AccountId } from "../model/types";
 import { createDexieOpener } from "../store/dexie-adapter";
 import { createIdbHost } from "../store/idb-host";
 import { type OpenDeps, openAccountData } from "../store/open";
+import type { AccountStore } from "../store/port";
+import { createRecoveryStore } from "../store/recovery-store";
 import { getPageRegistry } from "../store/registry";
 
 /**
@@ -21,6 +25,12 @@ import { getPageRegistry } from "../store/registry";
 export interface BrowserRuntime {
   runtime: DataRuntime;
   channel: SyncChannel;
+  /**
+   * The recovery connection of an account whose database another tab's newer build upgraded (WEB-14a revision 1, R7), for the incarnation
+   * this page last had open; null unless the account is latched `upgrade_pending` (a deletion's or an identity change's closure is never
+   * stood in for). One store per account and incarnation, so the port's order of captures continues across calls.
+   */
+  recoveryStore(account: AccountId, incarnationId: string): AccountStore | null;
   dispose(): void;
 }
 
@@ -29,7 +39,11 @@ export function createBrowserRuntime(session: Session): BrowserRuntime {
   const host = createIdbHost();
   const opener = createDexieOpener({
     registry,
-    onVersionChange: () => undefined,
+    // Another tab's newer build upgraded an account database (WEB-14a D-P8): this page asks to be reloaded. A deletion is the wipe's,
+    // which reports itself.
+    onVersionChange: (_account, kind) => {
+      if (kind === "upgraded") raiseDataSuperseded();
+    },
   });
   const locks = createWebLocksPort(navigator.locks);
   const identity = session.identity;
@@ -54,9 +68,27 @@ export function createBrowserRuntime(session: Session): BrowserRuntime {
   });
   const channel = createBroadcastSyncChannel();
   const stopResponder = attachWipeResponder({ channel, registry });
+  const recoveryStores = new Map<string, AccountStore>();
+  const superseded = (account: AccountId): boolean =>
+    registry.latch(account) === "upgrade_pending";
   return {
     runtime,
     channel,
+    recoveryStore(account, incarnationId) {
+      if (!superseded(account)) return null;
+      const key = JSON.stringify([account, incarnationId]);
+      let store = recoveryStores.get(key);
+      if (!store) {
+        store = createRecoveryStore({
+          account,
+          incarnationId,
+          admitted: () =>
+            superseded(account) && identity.get()?.account_id === account,
+        });
+        recoveryStores.set(key, store);
+      }
+      return store;
+    },
     dispose() {
       stopResponder();
       runtime.dispose();

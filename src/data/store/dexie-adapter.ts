@@ -2,6 +2,7 @@ import Dexie, { liveQuery, type Table, type Transaction } from "dexie";
 import { commandKindOf } from "../model/outbox";
 import {
   accountDatabaseName,
+  DECLARED_IDB_VERSION,
   DEXIE_SCHEMA,
   DEXIE_SCHEMA_V1,
   KEY_PATHS,
@@ -396,9 +397,32 @@ async function moveDraftCommands(tx: Transaction): Promise<void> {
   }
 }
 
+/**
+ * DECLARED-THEN-PROBE (WEB-03 5, WEB-14a D-P8). Dexie 4 opens a database whose installed version is NEWER than the one declared here
+ * without complaint, so a page whose build is older than another tab's would go on running its code over a schema it does not know. The
+ * accounts this page found superseded (an installed version above `DECLARED_IDB_VERSION` when it opened, or an upgrading `versionchange`
+ * while it held the database) are kept per page registry, for the page's life: every later open of them on this page fails with
+ * `StoreFailure("closed")` before it touches any data, and only a reload (a newer build) can use them again.
+ */
+const supersededByRegistry = new WeakMap<ConnectionRegistry, Set<AccountId>>();
+const supersededOf = (registry: ConnectionRegistry): Set<AccountId> => {
+  let set = supersededByRegistry.get(registry);
+  if (!set) {
+    set = new Set();
+    supersededByRegistry.set(registry, set);
+  }
+  return set;
+};
+
+/** The version of the database a Dexie connection holds open, as the engine reports it (`IDBDatabase.version`). */
+const installedVersion = (db: Dexie): number => db.backendDB().version;
+
 export interface DexieOpenerDeps {
   registry: ConnectionRegistry;
-  /** A connection closed because of another tab's `versionchange` (a deletion or an upgrade): the data runtime reports it. */
+  /**
+   * A connection closed because of another tab's `versionchange` (a deletion or an upgrade), or an open found the database already upgraded
+   * past this build's schema (`upgraded`, reported once per account and page registry): the data runtime reports it.
+   */
   onVersionChange?(account: AccountId, kind: "deleted" | "upgraded"): void;
 }
 
@@ -406,6 +430,13 @@ export function createDexieOpener(deps: DexieOpenerDeps): EngineOpener {
   return {
     async open(account, options): Promise<OpenResult> {
       const name = accountDatabaseName(account);
+      const superseded = supersededOf(deps.registry);
+      // A database a newer build has upgraded is never opened again by this page's code (D-P8): nothing is read or written. The refusal is
+      // the same closure as the first one (the latch is set again), so every caller is answered `closed` alike.
+      if (superseded.has(account)) {
+        deps.registry.closeAll(account, { latch: "upgrade_pending" });
+        throw new StoreFailure("closed");
+      }
       let created = false;
       // Whether THIS open's own `populate` hook refused to create the database (R12, revision 11). Dexie runs that hook only inside
       // the upgrade that creates the database (old version 0), so the flag is the one proof that the database did not exist: an open
@@ -464,7 +495,12 @@ export function createDexieOpener(deps: DexieOpenerDeps): EngineOpener {
           const latch = deleted ? "closed_for_deletion" : "upgrade_pending";
           // An engine may deliver the event to BOTH of this page's connections (WebKit does; Chromium and Firefox close the
           // second before its event): report the closure once.
-          const first = deps.registry.latch(account) !== latch;
+          let first = deps.registry.latch(account) !== latch;
+          // An upgrade by another page is a newer build's (D-P8): this page never opens the database again.
+          if (!deleted) {
+            first = !superseded.has(account);
+            superseded.add(account);
+          }
           // Every connection this open has acquired is in the registry (see `adopt`), so this closes all of them, the one that received
           // the event included.
           deps.registry.closeAll(account, { latch });
@@ -499,18 +535,35 @@ export function createDexieOpener(deps: DexieOpenerDeps): EngineOpener {
       const refused = (error: unknown): boolean =>
         refusedCreation || NAMES(error).includes("CreateRefused");
 
+      /**
+       * The database is newer than this build (D-P8): the account is latched `upgrade_pending` and every connection of it on this page is
+       * closed (a closure, so the open's caller answers `closed`), the runtime is told once, and this open fails before reading anything.
+       */
+      const supersede = (): StoreFailure => {
+        const first = !superseded.has(account);
+        superseded.add(account);
+        deps.registry.closeAll(account, { latch: "upgrade_pending" });
+        release();
+        if (first) deps.onVersionChange?.(account, "upgraded");
+        return new StoreFailure("closed");
+      };
+
       const strict = make("strict", options.create);
       try {
         await strict.open();
       } catch (error) {
         // A closure outranks whatever the engine says about the request it interrupted.
         if (lifetimeEnded()) throw endedByClosure();
+        // An engine (or a Dexie) that refuses to open a newer version at an older one says so with `VersionError`: the same supersession.
+        if (NAMES(error).includes("VersionError")) throw supersede();
         release();
         if (refused(error)) return { kind: "absent" };
         throw toStoreFailure(error);
       }
       adopt(strict);
       if (lifetimeEnded()) throw endedByClosure();
+      // The probe: the version the engine actually opened. Above this build's declared version, another tab's newer build upgraded it.
+      if (installedVersion(strict) > DECLARED_IDB_VERSION) throw supersede();
       const fast = options.single ? strict : make("default", false);
       try {
         if (!options.single) await fast.open();

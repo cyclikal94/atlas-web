@@ -8,6 +8,7 @@ import {
   useNotices,
   useOptionalDataEnv,
 } from "../../data";
+import { UpdateReady } from "../../lib/pwa/UpdateReady";
 import {
   COMPAT_MISSING_BODY,
   COMPAT_TITLE,
@@ -216,6 +217,7 @@ function NoticeView({
               ? COMPAT_MISSING_BODY
               : COMPAT_UNSUPPORTED_BODY}
           </p>
+          {notice.reason === "unsupported" ? <UpdateReady /> : null}
         </Banner>
       );
     case "still_trying":

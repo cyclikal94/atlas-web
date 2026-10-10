@@ -1,6 +1,8 @@
-import { useSyncExternalStore } from "react";
+import { lazy, Suspense, useSyncExternalStore } from "react";
+import { NeutralLiveRegion } from "../components/ui/announcer";
 import { NeutralGate } from "../components/ui/neutral-gate";
 import { NeutralState } from "../components/ui/neutral-state";
+import { useAppUpdate } from "../lib/pwa/store";
 import { useApiCompatibility, useSession, useSessionView } from "../session";
 import { CompatibilityScreen, isApiRefusal } from "./CompatibilityScreen";
 import { NeutralEntry } from "./NeutralEntry";
@@ -16,7 +18,31 @@ import { SIGN_IN_UNAVAILABLE, signInStub } from "./sign-in-stub";
  *  - `displaying`: nothing. The gate is lifted over the protected tree by `act`, and only by `act`.
  * It renders nothing about any account.
  */
+// The neutral update banner (WEB-14a) is loaded only when there is something to say: the initial chunk carries the import, not the banner.
+const NeutralUpdateBanner = lazy(() => import("../lib/pwa/UpdateBanner"));
+
 export function SessionRoot() {
+  const update = useAppUpdate();
+  const view = useSessionView();
+  const screen = <NeutralScreen />;
+  // While the account is displayed the shell shows the banner itself (`AppUpdateBanner`), and announces it through the protected tree.
+  if (view.kind === "displaying") return screen;
+  // The neutral live region is mounted (empty) whenever no account is displayed, BEFORE an update can be offered: a region inserted with
+  // its message is not reliably announced (revision 1, R8).
+  return (
+    <>
+      {screen}
+      <NeutralLiveRegion />
+      {update.kind === "none" ? null : (
+        <Suspense fallback={null}>
+          <NeutralUpdateBanner />
+        </Suspense>
+      )}
+    </>
+  );
+}
+
+function NeutralScreen() {
   const view = useSessionView();
   const api = useApiCompatibility();
   const session = useSession();

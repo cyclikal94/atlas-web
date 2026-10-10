@@ -1,5 +1,6 @@
 import {
   accountDatabaseName,
+  DECLARED_IDB_VERSION,
   KEY_PATHS,
   type RowOf,
   STORE_NAMES,
@@ -150,6 +151,8 @@ class FakeDatabase {
   stalled: StalledCommit | null = null;
   /** Deletes waiting for every connection to close. */
   waitingDeletes: Array<() => void> = [];
+  /** The installed IndexedDB version (WEB-14a D-P8): this build's declared version unless a newer build upgraded it (`upgradeTo`). */
+  version = DECLARED_IDB_VERSION;
   constructor(
     readonly name: string,
     readonly world: World,
@@ -169,6 +172,10 @@ class FakeDatabase {
 
 export class FakeIdb {
   readonly databases = new Map<string, FakeDatabase>();
+  private readonly superseded = new WeakMap<
+    ConnectionRegistry,
+    Set<AccountId>
+  >();
   private counter = 0;
   private injections: Injection[] = [];
   private listeners = new Set<
@@ -314,6 +321,26 @@ export class FakeIdb {
       accountDatabaseName(account),
       new FakeDatabase(accountDatabaseName(account), this.world, this),
     );
+  }
+  /**
+   * A NEWER BUILD upgrades the database (WEB-14a D-P8), as another tab's open at a higher version does: every open connection is sent an
+   * upgrading `versionchange` first (each page's handler closes its own), then the version is raised. The data stays as it was.
+   */
+  upgradeTo(name: string, version: number, page = "newer-build"): void {
+    const db = this.databases.get(name);
+    if (!db) throw new Error(`no database ${name}`);
+    for (const connection of [...db.connections]) {
+      if (connection.closing) continue;
+      this.world.schedule(
+        "misc",
+        connection.page,
+        { what: "idb.versionchange", name },
+        () => connection.onVersionChange(version),
+      );
+    }
+    this.world.schedule("misc", page, { what: "idb.upgraded", name }, () => {
+      db.version = version;
+    });
   }
   /** Removes a database as if another browser profile action did it, with no versionchange. */
   vanish(name: string): void {
@@ -510,9 +537,20 @@ export class FakeIdb {
       ) => void;
     } = {},
   ): EngineOpener {
+    // The adapter's page-sticky supersession (D-P8), per page registry.
+    let superseded = this.superseded.get(registry);
+    if (!superseded) {
+      superseded = new Set();
+      this.superseded.set(registry, superseded);
+    }
+    const supersededHere = superseded;
     return {
       open: async (account, openOptions): Promise<OpenResult> => {
         const name = accountDatabaseName(account);
+        if (supersededHere.has(account)) {
+          registry.closeAll(account, { latch: "upgrade_pending" });
+          throw new StoreFailure("closed");
+        }
         this.beforeOpen?.(name);
         let db = this.databases.get(name);
         let created = false;
@@ -531,6 +569,14 @@ export class FakeIdb {
           created = true;
         }
         const target = db;
+        // The probe: a database a newer build upgraded is not used by this build's code; the page latches it and is told once.
+        if (target.version > DECLARED_IDB_VERSION) {
+          const first = !supersededHere.has(account);
+          supersededHere.add(account);
+          registry.closeAll(account, { latch: "upgrade_pending" });
+          if (first) options.onVersionChange?.(account, "upgraded");
+          throw new StoreFailure("closed");
+        }
         const makeConnection = (
           durability: "strict" | "default",
         ): FakeConnection => {
@@ -542,7 +588,11 @@ export class FakeIdb {
               const deleted = newVersion === null;
               const latch = deleted ? "closed_for_deletion" : "upgrade_pending";
               // The real adapter reports a closure once per page, whatever the engine delivers.
-              const first = registry.latch(account) !== latch;
+              let first = registry.latch(account) !== latch;
+              if (!deleted) {
+                first = !supersededHere.has(account);
+                supersededHere.add(account);
+              }
               registry.closeAll(account, { latch });
               if (first)
                 options.onVersionChange?.(

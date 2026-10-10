@@ -100,9 +100,14 @@ for platform in $PLATFORMS; do
   expect_contains "$arch: referrer policy" "$headers" "Referrer-Policy: no-referrer"
   expect_contains "$arch: opener policy" "$headers" "Cross-Origin-Opener-Policy: same-origin"
   expect_contains "$arch: index.html revalidates" "$headers" "Cache-Control: no-cache"
-  for path in /sw.js /theme-init.js /_web/provenance.json /settings; do
+  for path in /sw.js /theme-init.js /manifest.webmanifest /icons/icon-192.png /_web/provenance.json /settings; do
     expect_contains "$arch: $path revalidates" "$(curl -sI "$base$path")" "Cache-Control: no-cache"
   done
+  # WEB-14a: the installable app's manifest and icons are served with their media types.
+  expect_contains "$arch: the web app manifest has its MIME type" "$(curl -sI "$base/manifest.webmanifest")" "application/manifest+json"
+  expect_eq "$arch: the web app manifest equals dist's" "$(body "$base/manifest.webmanifest")" "$(cat dist/manifest.webmanifest)"
+  expect_contains "$arch: the icons are PNG" "$(curl -sI "$base/icons/icon-512.png")" "image/png"
+  expect_contains "$arch: the worker is JavaScript" "$(curl -sI "$base/sw.js")" "javascript"
   asset="$(printf '%s' "$index" | sed -n 's/.*src="\(\/assets\/index-[^"]*\.js\)".*/\1/p' | head -1)"
   font="$(cd dist && ls assets/*.woff2 | head -1)"
   ah="$(curl -sI "$base$asset")"

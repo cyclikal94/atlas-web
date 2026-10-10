@@ -14113,6 +14113,952 @@ export const UNIT = [
         "w.outcomes === outcomes;",
       ),
   },
+  {
+    id: "MU-1118",
+    title:
+      "WEB-14a: the coordinator reloads on its own when a newer version is installed",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /through every event without an action/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (worker.state === "installed") {\n',
+        '      if (worker.state === "installed") {\n        reload();\n',
+      ),
+  },
+  {
+    id: "MU-1119",
+    title:
+      "WEB-14a: skip-waiting is posted to the ACTIVE worker instead of the waiting one",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the waiting worker \(and only it\) is told to skip waiting/,
+    patch: (t) =>
+      sub(
+        t,
+        '      waiting.postMessage({ type: "atlas:skip-waiting" });\n',
+        '      (registration?.active ?? waiting).postMessage({ type: "atlas:skip-waiting" });\n',
+      ),
+  },
+  {
+    id: "MU-1120",
+    title:
+      "WEB-14a: the acting tab does not wait for the other tabs' saves (bound 0)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another tab's dirty form is saved before the update is applied/,
+    patch: (t) =>
+      sub(
+        t,
+        "const bound = after(FLUSH_MAX_MS, finish);",
+        "const bound = after(0, finish);",
+      ),
+  },
+  {
+    id: "MU-1121",
+    title:
+      "WEB-14a: the start grace never ends: the acting tab always waits the whole bound",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /no other tab answers: the acting tab waits only FLUSH_START_GRACE_MS/,
+    patch: (t) => sub(t, "        graceOver = true;\n", ""),
+  },
+  {
+    id: "MU-1122",
+    title:
+      "WEB-14a: the acting tab stops waiting for a tab that said it is saving",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another tab's dirty form is saved before the update is applied/,
+    patch: (t) =>
+      sub(t, "            if (!wait.done.has(started)) return;\n", ""),
+  },
+  {
+    id: "MU-1123",
+    title: "WEB-14a: a dismissed banner never reappears",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /dismissed until the next return to the page/,
+    patch: (t) => sub(t, "    if (dismissed) {\n", "    if (false) {\n"),
+  },
+  {
+    id: "MU-1124",
+    title: "WEB-14a: 'Not now' does not dismiss",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /dismissed until the next return to the page/,
+    patch: (t) => sub(t, "      dismissed = true;\n", ""),
+  },
+  {
+    id: "MU-1125",
+    title:
+      "WEB-14a: the first install's controllerchange is taken for 'updated elsewhere'",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the first controllerchange from no controller is not 'updated elsewhere'/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (previous !== null) noteElsewhere();\n",
+        "    noteElsewhere();\n",
+      ),
+  },
+  {
+    id: "MU-1126",
+    title:
+      "WEB-14a: the accepting tab does not reload when its controller changes",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /reloads on the controller change even when the worker's statechange never reaches it/,
+    patch: (t) => sub(t, "    if (accepting) {\n", "    if (false) {\n"),
+  },
+  {
+    id: "MU-1127",
+    title:
+      "WEB-14a: a report answered with a newer active generation is ignored (a frozen tab never learns)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a frozen tab that missed the change finds out by reporting/,
+    patch: (t) => sub(t, "      if (ack.newer) noteElsewhere();\n", ""),
+  },
+  {
+    id: "MU-1128",
+    title: "WEB-14a: an unacknowledged report is not sent again",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an unacknowledged report is sent again with back-off/,
+    patch: (t) => sub(t, "    } else scheduleReport();\n", "    }\n"),
+  },
+  {
+    id: "MU-1129",
+    title:
+      "WEB-14a: a return to the page checks for an update every time (no 15-minute pace)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /on online; on a return to the page at most every 15 min/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!force && clock.now() - lastCheck < UPDATE_CHECK_VISIBLE_MIN_MS) return;\n",
+        "    if (false) return;\n",
+      ),
+  },
+  {
+    id: "MU-1130",
+    title: "WEB-14a: the hourly check also runs while the page is hidden",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /hourly while visible/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (deps.page.isVisible()) void checkForUpdate(true);\n",
+        "      void checkForUpdate(true);\n",
+      ),
+  },
+  {
+    id: "MU-1131",
+    title:
+      "WEB-14a: an unsupported server asks for a newer client on every answer (no 60-second pace)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /an unsupported server asks for a newer client at once, at most every 60 s/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (clock.now() - lastUnsupportedCheck < UPDATE_CHECK_UNSUPPORTED_MIN_MS)\n      return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1132",
+    title:
+      "WEB-14a: a failed save does not stop the update (the form's input is lost to the reload)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a failed save keeps the form, shows retry or discard/,
+    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '      if (mode === "save" && !(await saveOwn())) return;\n',
+        '      if (mode === "save") await saveOwn();\n',
+      ),
+  },
+  {
+    id: "MU-1133",
+    title:
+      "WEB-14a: a refused save (signing out) is shown as an ordinary failure with 'Retry save'",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /signing out \(refused\)/,
+    patch: (t) =>
+      sub(t, 'results.includes("refused")', 'results.includes("never")'),
+  },
+  {
+    id: "MU-1134",
+    title:
+      "WEB-14a: no fallback: an activation that never happens leaves the tab waiting for ever",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /activation that never happens: the tab reloads after ACTIVATION_FALLBACK_MS/,
+    patch: (t) => sub(t, "    after(ACTIVATION_FALLBACK_MS, reload);\n", ""),
+  },
+  {
+    id: "MU-1135",
+    title:
+      "WEB-14a: a tab that learns it was updated elsewhere does not save its input",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saves its dirty forms as a precaution/,
+    patch: (t) =>
+      sub(
+        t,
+        "    publish();\n    void flushDirty(deps.forms);\n  };\n",
+        "    publish();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1136",
+    title:
+      "WEB-14a: an unsupported answer that came before the registration is never followed by an update check",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /asks for a newer client once registered/,
+    patch: (t) =>
+      sub(
+        t,
+        "      // An answer that came before the registration could not ask for a newer client: it asks now.\n      checkIfUnsupported();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1137",
+    title:
+      "WEB-14a: one unacknowledged client no longer keeps every generation",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /one unacknowledged client keeps every generation/,
+    patch: (t) => sub(t, "      unknown ||\n", ""),
+  },
+  {
+    id: "MU-1138",
+    title: "WEB-14a: the active generation is not kept for being active",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the active generation is kept even if marked retired/,
+    patch: (t) => sub(t, "      generation === input.active ||\n", ""),
+  },
+  {
+    id: "MU-1139",
+    title:
+      "WEB-14a: a generation never retired (the waiting one) may be purged",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a generation retired within the grace is kept; one never retired/,
+    patch: (t) => sub(t, "      retiredAt === null ||\n", ""),
+  },
+  {
+    id: "MU-1140",
+    title: "WEB-14a: no grace: a generation is purged the moment it is retired",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a generation retired within the grace is kept/,
+    patch: (t) =>
+      sub(t, "      input.now - retiredAt < grace;", "      false;"),
+  },
+  {
+    id: "MU-1141",
+    title: "WEB-14a: a non-GET request is answered by the worker",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /non-GET is never answered/,
+    patch: (t) =>
+      sub(t, '  if (input.method !== "GET") return { kind: "pass" };\n', ""),
+  },
+  {
+    id: "MU-1142",
+    title: "WEB-14a: a cross-origin request is answered by the worker",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cross-origin is never answered/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (url.origin !== input.origin) return { kind: "pass" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1143",
+    title: "WEB-14a: backend paths are answered (the shell for a navigation)",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /backend path .* is passed/,
+    patch: (t) =>
+      sub(t, '  if (isBackendPath(url)) return { kind: "pass" };\n', ""),
+  },
+  {
+    id: "MU-1144",
+    title:
+      "WEB-14a: a navigation is not answered with the shell (offline navigation fails)",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is the shell/,
+    patch: (t) =>
+      sub(t, '      : { kind: "shell" };', '      : { kind: "pass" };'),
+  },
+  {
+    id: "MU-1145",
+    title:
+      "WEB-14a: an older page's hashed file is not answered from the retained precache",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /any hashed asset are answered from the precache/,
+    patch: (t) => sub(t, ' || path.startsWith("/assets/")', ""),
+  },
+  {
+    id: "MU-1146",
+    title: "WEB-14a: a report is answered before its record has landed",
+    file: "src/sw/lifecycle.ts",
+    tests: ["tests/pwa/sw-lifecycle.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no answer before the record has landed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    await deps.state.recordReport(clientId, {",
+        "    void deps.state.recordReport(clientId, {",
+      ),
+  },
+  {
+    id: "MU-1147",
+    title: "WEB-14a: the reports of closed clients are never forgotten",
+    file: "src/sw/lifecycle.ts",
+    tests: ["tests/pwa/sw-lifecycle.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an open page on A keeps A through B and C/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!open.has(clientId)) await deps.state.deleteClient(clientId);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1148",
+    title:
+      "WEB-14a: activation does not retire the other generations (nothing is ever purged)",
+    file: "src/sw/lifecycle.ts",
+    tests: ["tests/pwa/sw-lifecycle.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a generation retired within the grace is not purged/,
+    patch: (t) =>
+      sub(
+        t,
+        "  await deps.state.retireAllBut(deps.own.generation, deps.now());\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1149",
+    title:
+      "WEB-14a: a trigger during a check is dropped (no check after a reconnect that came during one)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a reconnect during a check asks exactly once more after it/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (checking) {\n      again = true;\n      return;\n    }\n",
+        "    if (checking) return;\n",
+      ),
+  },
+  {
+    id: "MU-1150",
+    title:
+      "WEB-14a: a reconnect asks again only after an unreachable answer (the base behaviour)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a server upgraded under an open tab is noticed at the next reconnect/,
+    patch: (t) =>
+      sub(
+        t,
+        "          // while this page could not reach it. FIRST, before anything below can wake a sender.\n          revalidate();\n",
+        '          // while this page could not reach it.\n          if (compat.get().status === "unreachable") revalidate();\n',
+      ),
+  },
+  {
+    id: "MU-1151",
+    title: "WEB-14a: the pace does not start again when the answer changes",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the pace starts again when the answer changes/,
+    patch: (t) =>
+      sub(t, "    if (result.status !== before) retryStep = 0;\n", ""),
+  },
+  {
+    id: "MU-1152",
+    title:
+      "WEB-14a: the paced re-check keeps running once the server is supported",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /lifted once the server reports a supported version/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (k.disposed || result.status === "supported") return;\n',
+        "    if (k.disposed) return;\n",
+      ),
+  },
+  {
+    id: "MU-1153",
+    title:
+      "WEB-14a: a return to the page asks again whatever the last answer's age",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /asks again only after the minimum interval/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (ports.clock.now() - lastAnswerAt >= config.compatRecheckMinIntervalMs)\n",
+        "    if (true)\n",
+      ),
+  },
+  {
+    id: "MU-1154",
+    title: "WEB-14a: a return to the page during a check queues another one",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a return to the page while a check is in flight asks nothing more/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (checking) return;\n    if (ports.clock",
+        "    if (ports.clock",
+      ),
+  },
+  {
+    id: "MU-1155",
+    title:
+      "WEB-14a: the recovery identifier is minted at load, not at the first save",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the identifier is minted at the first save, not at load/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const fields = latest.current.allow;\n",
+        "    const fields = latest.current.allow;\n    void tab.id();\n",
+      ),
+  },
+  {
+    id: "MU-1156",
+    title:
+      "WEB-14a: a remounted form does not restore this page's own copy first",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restores this page's own copy first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const own = tab.current();\n      const gone",
+        "      const own = null;\n      const gone",
+      ),
+  },
+  {
+    id: "MU-1157",
+    title:
+      "WEB-14a: a copy is restored over input typed before the look finished",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /never restored over input typed before the look finished/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (newest && current && !typed) {",
+        "      if (newest && current) {",
+      ),
+  },
+  {
+    id: "MU-1158",
+    title: "WEB-14a: the look is made again whenever the port changes",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the look is made once per mount/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!finished) looked.current = false;",
+        "      looked.current = false;",
+      ),
+  },
+  {
+    id: "MU-1159",
+    title:
+      "WEB-14a: the copy restored from is discarded even when this page's own save failed",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a failed own save does not discard the restored-from copy/,
+    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '    if (result !== "saved") return result;\n',
+        '    if (result !== "saved") {\n      const lost = persisted.current.source;\n      if (lost !== null) await current.discard(context, lost.id);\n      return result;\n    }\n',
+      ),
+  },
+  {
+    id: "MU-1160",
+    title: "WEB-14a: a submission leaves this page's own copy behind",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /submission discards both copies/,
+    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (own !== null && (state.ownAsked || state.own !== null)) ids.add(own);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1161",
+    title:
+      "WEB-14a: the recovery identifier is kept in sessionStorage (an opener-copied tab shares it)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the identifier is minted at the first save, not at load/,
+    patch: (t) =>
+      sub(
+        t,
+        "      minted = id;\n",
+        '      minted = id;\n      sessionStorage.setItem("atlas-recovery-tab", id);\n',
+      ),
+  },
+  {
+    id: "MU-1162",
+    title:
+      "WEB-14a: an open owner's lock is read as gone (another open tab's copy is taken over)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an open owner's lock is held, a gone owner's is free/,
+    patch: (t) =>
+      sub(
+        t,
+        "          (lock) => lock === null,",
+        "          (lock) => lock !== null,",
+      ),
+  },
+  {
+    id: "MU-1163",
+    title: "WEB-14a: a discarded (terminal) copy is listed",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a discarded copy is not listed/,
+    // Re-anchored in revision 1 (R5: the walk keeps the restorable rows as it meets them); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "if (!row.terminal) restorable.push(row);",
+        "restorable.push(row);",
+      ),
+  },
+  {
+    id: "MU-1164",
+    title: "WEB-14a: the list is oldest first",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /newest first, one per tab/,
+    patch: (t) =>
+      sub(
+        t,
+        "a.saved_at < b.saved_at ? 1 : -1",
+        "a.saved_at < b.saved_at ? -1 : 1",
+      ),
+  },
+  {
+    id: "MU-1168",
+    title:
+      "WEB-14a revision 1, R1: a reconnect does not withdraw `supported`: queued writes are admitted before the fresh answer",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /withdrawn at the online event/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (compat.get().status === "supported") compat.set({ status: "unknown" });\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1169",
+    title:
+      "WEB-14a revision 1, R1: an answer asked before the latest reconnect is applied (a stale `supported` reopens admission)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /asked BEFORE the reconnect is dropped|drops that check's answer too/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (!k.disposed && asked === reconnects) answered(result);",
+        "if (!k.disposed) answered(result);",
+      ),
+  },
+  {
+    id: "MU-1170",
+    title:
+      "WEB-14a revision 1, R2: dirty is judged against the mount values only (a form back at them after a save looks clean)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saved, then cleared back to the mount value|back to X: dirty/,
+    patch: (t) =>
+      sub(t, "    if (own) return !sameValues(now, own.values);\n", ""),
+  },
+  {
+    id: "MU-1171",
+    title:
+      "WEB-14a revision 1, R2: a form back at its clean values saves a copy instead of discarding its copies",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /saved, then cleared back to the mount value|cleared back to the mount value: dirty, and the next page shows it empty/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameValues(now, clean.current ?? {})) {",
+        "    if (false) {",
+      ),
+  },
+  {
+    id: "MU-1172",
+    title:
+      "WEB-14a revision 1, R4: a flush overtaken by a submission or discard while it waits for its identifier is still written",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /first identifier still being granted|still overtakes it/,
+    patch: (t) =>
+      sub(t, '    if (order.current.lastTerminal > op) return "failed";\n', ""),
+  },
+  {
+    id: "MU-1173",
+    title:
+      "WEB-14a revision 1, R6: a discard that did not land is reported as discarded (nothing is owed)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /whose discard fails/,
+    patch: (t) =>
+      sub(
+        t,
+        '        } else outcome = outcome === "refused" ? outcome : result;',
+        "        }",
+      ),
+  },
+  {
+    id: "MU-1174",
+    title:
+      "WEB-14a revision 1, R6: 'Discard and reload anyway' reloads although the discard failed",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a discard that fails: discard_failed/,
+    patch: (t) =>
+      sub(t, '    if (results.includes("failed")) {', "    if (false) {"),
+  },
+  {
+    id: "MU-1175",
+    title:
+      "WEB-14a revision 1, R6: 'Discard and reload anyway' skips the discard (revision 0)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /copies are discarded before the reload|a discard that fails: discard_failed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    discardAndReload: () => void act("discard"),',
+        '    discardAndReload: () => void act("anyway"),',
+      ),
+  },
+  {
+    id: "MU-1176",
+    title:
+      "WEB-14a revision 1, R3: nothing is frozen while the tab saves and waits for the reload",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /frozen from accept|a failed save releases the forms/,
+    patch: (t) => sub(t, "    frozen ??= deps.forms.freeze();\n", ""),
+  },
+  {
+    id: "MU-1177",
+    title:
+      "WEB-14a revision 1, R3: the freeze ends before the activation the tab waits for",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /frozen from accept/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!reloaded && !accepting) unfreeze();",
+        "      if (!reloaded) unfreeze();",
+      ),
+  },
+  {
+    id: "MU-1178",
+    title:
+      "WEB-14a revision 1, R3: a form that mounts during a freeze is not frozen",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: [
+      "tests/lib/use-recoverable-form.test.tsx",
+      "tests/pwa/coordinator.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /registers during a freeze is frozen too|frozen from accept/,
+    patch: (t) =>
+      sub(t, "      for (const held of freezes) hold(held, handle);\n", ""),
+  },
+  {
+    id: "MU-1179",
+    title:
+      "WEB-14a revision 1, R5: the listing reads only its first page (revision 0's window): terminal rows hide a durable copy",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /terminal rows whose ids sort first|ends exactly on a page boundary/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (page.length < LIST_PAGE_ROWS) return restorable;",
+        "      return restorable;",
+      ),
+  },
+  {
+    id: "MU-1180",
+    title:
+      "WEB-14a revision 1, R5: the answer is cut to ten copies before it is ordered (revision 0's bound)",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /every copy is answered, newest first/,
+    patch: (t) =>
+      sub(
+        t,
+        "    result: [...rows].sort((a, b) =>",
+        "    result: [...rows].slice(0, 10).sort((a, b) =>",
+      ),
+  },
+  {
+    id: "MU-1181",
+    title:
+      "WEB-14a revision 1, R6: a discard whose terminal write failed over an existing copy answers `discarded`",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a write that fails: failed, and the copy is still there/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return created ? "discarded" : "failed";',
+        '          return "discarded";',
+      ),
+  },
+  {
+    id: "MU-1182",
+    title:
+      "WEB-14a revision 1, R8: the neutral banner announces through the protected tree's bridge (silent while signed out)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-banner.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /announced once through the neutral live region/,
+    patch: (t) =>
+      sub(
+        t,
+        "  useAnnounceOnce(text, (message) => neutralLiveRegion.announce(message));",
+        "  useAnnounceOnce(text, () => undefined);",
+      ),
+  },
+  {
+    id: "MU-1183",
+    title:
+      "WEB-14a revision 1, R7: the form's port is withdrawn when the database is superseded (revision 0: no recovery connection)",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/form-recovery-superseded.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /superseded: it reaches the recovery connection/,
+    patch: (t) =>
+      sub(
+        t,
+        "    current?.service.live ? current.service : recoveryTarget();",
+        "    current?.service.live ? current.service : null;",
+      ),
+  },
+  {
+    id: "MU-1184",
+    title:
+      "WEB-14a revision 1, R7: the recovery connection stands in for a page that left the account",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/form-recovery-superseded.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the identity leaves the account/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (deps.identity.get()?.account_id !== last.account) return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1188",
+    title:
+      "WEB-14a revision 1: a flush is not pinned when it is asked for (a write that waits lands in whichever account is displayed then)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the copy lands in the form's account only|changed under the form/,
+    patch: (t) =>
+      sub(
+        t,
+        '      const current = unpinned ? targetOf(unpinned) : null;\n      if (!form || !current) return "failed";',
+        '      const current = unpinned;\n      if (!form || !current) return "failed";',
+      ),
+  },
+  {
+    id: "MU-1189",
+    title:
+      "WEB-14a revision 1: a write is made for another account than the one the form was mounted for",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /changed under the form|unmounts after the account changed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        pinned.account !== mountedAccount.current\n",
+        "        false\n",
+      ),
+  },
+  {
+    id: "MU-1190",
+    title:
+      "WEB-14a revision 1 (F-1): a form that unmounts dirty leaves nothing for its remount (the input is lost)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /leaves its input \(memory only\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (element && scope !== null && dirtyOf(element)) {",
+        "      if (false) {",
+      ),
+  },
+  {
+    id: "MU-1191",
+    title:
+      "WEB-14a revision 1 (F-1): the form mounted again does not take back what its previous mount left",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /leaves its input \(memory only\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (carried && sameValues(read(form, fields), initial.current ?? {})) {",
+        "    if (false) {",
+      ),
+  },
+  {
+    id: "MU-1192",
+    title:
+      "WEB-14a revision 1: `pin` answers a port that follows the displayed account (not pinned)",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a pinned port keeps writing there/,
+    patch: (t) =>
+      sub(
+        t,
+        "        port = createFormRecoveryPort({ ...deps, service: () => target });",
+        "        port = createFormRecoveryPort(deps);",
+      ),
+  },
+  {
+    id: "MU-1193",
+    title:
+      "WEB-14a revision 1 (F-1): what a form left at a remount is handed to another account or a re-created database",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /never to another account, nor/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return form.scope === scope ? form : null;",
+        "      return form;",
+      ),
+  },
 ];
 
 /**
@@ -14123,6 +15069,18 @@ export const UNIT = [
  * of a fallback that no longer exists has nothing to patch; what each of them stood for is covered by the mutant named beside it.
  */
 export const RETIRED = [
+  {
+    id: "MU-1187",
+    why: "WEB-14a revision 1: EQUIVALENT. It removed only the check made before the recovery connection is opened; the check made after the open and before the transaction refuses exactly the same calls, so no outcome changes (it opens one connection, closed at once). It SURVIVED in all three engines in pool request-824743e1a5ee45cdada6 (2026-10-10, control passed), recorded in .agtx/execute.md",
+    replacedBy:
+      "MU-1194 (every admission check of the recovery connection removed)",
+  },
+  {
+    id: "MU-1165",
+    why: "WEB-14a revision 1 (R5): the ten-copy bound of the answer was REMOVED on purpose (it hid an eligible copy and omitted alternatives), so the mutant that lifted it has nothing to patch",
+    replacedBy:
+      "MU-1180 (the bound put back) and MU-1179 (the read window put back)",
+  },
   {
     id: "MU-444",
     why: "(REAL ENGINE) a hold in the origin's ledger lapses at once, so a page that dies mid-save frees its bytes immediately: with the ownership of revision 15 a hold of a page that has gone is reclaimed AT ONCE on proof whatever its lease, and a hold of a page that lives is never judged by its lease, so the lease no longer decides the outcome of that spec: the mutant is equivalent there",
@@ -15129,8 +16087,9 @@ export const ENGINE = [
         sub(
           sub(
             t,
-            "      adopt(strict);\n      if (lifetimeEnded()) throw endedByClosure();\n      const fast",
-            "      if (lifetimeEnded()) throw endedByClosure();\n      const fast",
+            // WEB-14a: re-anchored past the declared-then-probe line that now follows the first connection's adoption (the defect is unchanged).
+            "      adopt(strict);\n      if (lifetimeEnded()) throw endedByClosure();\n      // The probe:",
+            "      if (lifetimeEnded()) throw endedByClosure();\n      // The probe:",
           ),
           "      if (fast !== strict) adopt(fast);\n      if (lifetimeEnded()) throw endedByClosure();\n",
           "      if (lifetimeEnded()) throw endedByClosure();\n",
@@ -16406,6 +17365,85 @@ export const ENGINE = [
       sub(
         t,
         "        if (endedStreak >= config.localWritePauseAfter) stopsChanged();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1166",
+    title:
+      "WEB-14a D-P8: (REAL ENGINE) the probe is skipped: a database a newer build upgraded is opened and used by this build's code",
+    file: "src/data/store/dexie-adapter.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "a\\ database\\ already\\ NEWER\\ than\\ this\\ build",
+    expect: /a database already NEWER than this build/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (installedVersion(strict) > DECLARED_IDB_VERSION) throw supersede();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1167",
+    title:
+      "WEB-14a D-P8: (REAL ENGINE) the probe compares with >=: this build's own version is taken for a newer one (nothing opens)",
+    file: "src/data/store/dexie-adapter.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "Q\\-P1\\ and\\ the\\ positive\\ control",
+    expect: /Q-P1 and the positive control/,
+    patch: (t) =>
+      sub(
+        t,
+        "installedVersion(strict) > DECLARED_IDB_VERSION",
+        "installedVersion(strict) >= DECLARED_IDB_VERSION",
+      ),
+  },
+  {
+    id: "MU-1185",
+    title:
+      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection runs any plan (not only the recovery plans): a way back into the account's data",
+    file: "src/data/store/recovery-store.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "E\\-R7\\ \\(revision\\ 1\\)",
+    expect: /E-R7 \(revision 1\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !ALLOWED.has(plan.name) ||\n        plan.apply !== undefined ||\n        plan.scope.some((store) => !SCOPE.has(store))\n",
+        "        false\n",
+      ),
+  },
+  {
+    id: "MU-1186",
+    title:
+      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection's open creates a database that is not there",
+    file: "src/data/store/recovery-store.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "E\\-R7\\ \\(revision\\ 1\\)",
+    expect: /E-R7 \(revision 1\)/,
+    patch: (t) => sub(t, "        request.transaction?.abort();\n", ""),
+  },
+  {
+    id: "MU-1194",
+    title:
+      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection never asks whether it is admitted (a closed or left account is written and read)",
+    file: "src/data/store/recovery-store.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "E\\-R7\\ \\(revision\\ 1\\)",
+    expect: /E-R7 \(revision 1\)/,
+    // Every admission check at once: each alone is covered by the next (see MU-1187 in RETIRED).
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "      if (closed || !factory || !deps.admitted())",
+            "      if (closed || !factory)",
+          ),
+          '            if (!deps.admitted()) throw new StoreFailure("closed");\n',
+          "",
+        ),
+        '        if (!deps.admitted()) throw new StoreFailure("closed");\n',
         "",
       ),
   },

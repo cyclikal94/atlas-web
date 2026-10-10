@@ -5,7 +5,9 @@
 //
 // Rules are matched by method, path (exact string or /regex/) and ORDINAL (the nth matching request since the rule was added,
 // 1-based; absent = every match). Actions:
-//   hold                 forward now, deliver the response only after POST /release/<id> (the backend has already committed)
+//   hold                 forward now, deliver the response only after POST /release/<id> (the backend has already committed); with
+//                        `set`/`delete` (as rewrite_json) the held JSON body is rewritten when it is delivered (a delayed answer of
+//                        another version, WEB-14a revision 1)
 //   hold_request         do NOT forward until POST /release/<id>
 //   delay                deliver the response after `ms`
 //   drop_after_forward   forward, let the backend commit, then destroy the connection (the browser sees it close)
@@ -14,6 +16,22 @@
 //   rewrite_json         forward, then set/delete fields of the JSON body: { set: {...}, delete: [...] }
 //   swap                 with `with: <other rule id>`: hold both, then deliver each to the OTHER's client on release
 import { createServer, request as httpRequest } from "node:http";
+
+/** The `set`/`delete` rewrite of a JSON body (undefined, so the original is delivered, when the body is not JSON). */
+function rewritten(rule, body) {
+  let json;
+  try {
+    json = JSON.parse(body.toString("utf8"));
+  } catch {
+    return undefined;
+  }
+  for (const [k, v] of Object.entries(rule.set ?? {})) json[k] = v;
+  for (const k of rule.delete ?? []) delete json[k];
+  return {
+    body: Buffer.from(JSON.stringify(json)),
+    contentType: "application/json",
+  };
+}
 
 export function createProxy({ upstream, port = 0, controlPort = 0 }) {
   const target = new URL(upstream);
@@ -94,7 +112,13 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
                 return void setTimeout(() => deliver(), rule.ms ?? 1000);
               case "hold": {
                 const list = held.get(rule.id) ?? [];
-                list.push({ deliver: () => deliver(), entry });
+                const rewrite =
+                  rule.set !== undefined || rule.delete !== undefined;
+                list.push({
+                  deliver: () =>
+                    deliver(rewrite ? rewritten(rule, body) : undefined),
+                  entry,
+                });
                 held.set(rule.id, list);
                 entry.events.push({ t: Date.now() - entry.at, event: "held" });
                 return;
@@ -133,21 +157,8 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
                   body: Buffer.from(JSON.stringify(rule.json ?? {})),
                   contentType: "application/json",
                 });
-              case "rewrite_json": {
-                let json;
-                try {
-                  json = JSON.parse(body.toString("utf8"));
-                } catch {
-                  return deliver();
-                }
-                for (const [k, v] of Object.entries(rule.set ?? {}))
-                  json[k] = v;
-                for (const k of rule.delete ?? []) delete json[k];
-                return deliver({
-                  body: Buffer.from(JSON.stringify(json)),
-                  contentType: "application/json",
-                });
-              }
+              case "rewrite_json":
+                return deliver(rewritten(rule, body));
               default:
                 return deliver();
             }

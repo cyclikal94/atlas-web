@@ -60,7 +60,7 @@ contains**, from two sources: the packages the build itself recorded as bundled 
 
 - **The record of bundled packages** is `dist/_web/bundled-packages-app.json` and `dist/_web/bundled-packages-service-worker.json` (names and versions only), written from the
   bundler's own module graph (`build/bundled-packages.ts`) for the application and, separately, for `sw.js`, which vite-plugin-pwa builds on its own. Vite compiles every package the
-  code imports into the output whatever `package.json` calls it: the Workbox packages (`workbox-core`, `-precaching`, `-routing` and their dependency `-strategies`) are
+  code imports into the output whatever `package.json` calls it: the Workbox packages (`workbox-core` and `-routing` since WEB-14a, which removed `-precaching` and with it `-strategies`) are
   development dependencies and are inside `sw.js`, so a listing of production dependencies alone omitted them. The records travel in `dist/`, the archive and the image beside the
   files they describe, so they cannot be stale.
 - It reads each package's licence text from the installed package. **It fails on any licence not on the reviewed list**: MIT, ISC, Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD,

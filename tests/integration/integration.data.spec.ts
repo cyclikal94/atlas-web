@@ -874,6 +874,198 @@ test.describe("I-O3: queued writes wait for a supported server", () => {
   });
 });
 
+// ---- I-U1 (WEB-14a, D-P9): the server's API version changes UNDER an open, signed-in page ----------------------------------------------
+// The real backend answers `/health` with `api_version` 0.27.0; the proxy rewrites the field (mismatched) or deletes it (missing) while the
+// page is open and its dispatcher runs. The pause legs' version field is therefore PROXY-SUPPLIED (labelled); the rest of the stack is real.
+test.describe("I-U1: a server version that changes under an open page pauses and resumes sending without a reload", () => {
+  test("mismatched (proxy-rewritten 0.28.0): a reconnect re-checks, the draft is kept and NOT sent; the server back in range and another reconnect send it exactly once", async ({
+    context,
+  }) => {
+    const page = await bootHarness(context);
+    const id = await signedIn(page, me());
+    await leader(page, id.account_id);
+    await expect
+      .poll(() => page.evaluate(() => window.__s.compat.get()))
+      .toMatchObject({ status: "supported" });
+    const rule = await proxy.addRule({
+      method: "GET",
+      path: "/health",
+      action: "rewrite_json",
+      set: { api_version: "0.28.0" },
+    });
+    // A reconnect: the session asks `/health` again (before WEB-14a it asked only after an `unreachable` answer).
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect
+      .poll(() => page.evaluate(() => window.__s.compat.get()))
+      .toMatchObject({ status: "unsupported", version: "0.28.0" });
+    await expect
+      .poll(() => dispatcherState(page))
+      .toMatchObject({ kind: "paused", reason: "compat_unsupported" });
+    const before = (await proxy.log()).length;
+    const queued = await page.evaluate(
+      (spec) => window.__atlasData?.enqueue(spec),
+      create(uuid(), "I-U1 mismatched") as never,
+    );
+    expect(queued?.kind).toBe("queued");
+    await page.waitForTimeout(3_000);
+    expect(await commandsLog(before)).toEqual([]);
+    await proxy.removeRule(rule.id);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect
+      .poll(() => page.evaluate(() => window.__s.compat.get()))
+      .toMatchObject({ status: "supported" });
+    await acknowledged(page, id.account_id, queued?.localId as string);
+    expect(await commandsLog(before)).toHaveLength(1);
+  });
+
+  test("missing (proxy-deleted field): the draft is kept and NOT sent; with no event at all, the paced re-check lifts the pause once the real field is back, and the draft is sent exactly once", async ({
+    context,
+  }) => {
+    const page = await bootHarness(context);
+    const id = await signedIn(page, me());
+    await leader(page, id.account_id);
+    const rule = await proxy.addRule({
+      method: "GET",
+      path: "/health",
+      action: "rewrite_json",
+      delete: ["api_version"],
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect
+      .poll(() => page.evaluate(() => window.__s.compat.get()))
+      .toEqual({ status: "missing" });
+    await expect
+      .poll(() => dispatcherState(page))
+      .toMatchObject({ kind: "paused", reason: "compat_missing" });
+    const before = (await proxy.log()).length;
+    const queued = await page.evaluate(
+      (spec) => window.__atlasData?.enqueue(spec),
+      create(uuid(), "I-U1 missing") as never,
+    );
+    await page.waitForTimeout(3_000);
+    expect(await commandsLog(before)).toEqual([]);
+    await proxy.removeRule(rule.id);
+    // The production pace: first re-check 30 s after the answer.
+    await expect
+      .poll(() => page.evaluate(() => window.__s.compat.get()), {
+        timeout: 45_000,
+      })
+      .toMatchObject({ status: "supported" });
+    await acknowledged(page, id.account_id, queued?.localId as string);
+    expect(await commandsLog(before)).toHaveLength(1);
+  });
+});
+
+// ---- I-U1 (revision 1, R1): a reconnect admits no queued write before ITS OWN compatibility answer ------------------------------
+// A draft queued while the page is offline must not be sent at the reconnect until the `/health` asked AFTER the reconnect has answered.
+// The proxy HOLDS that answer (with a rewritten field for the mismatched and missing legs: PROXY-SUPPLIED, labelled); everything else is the
+// released backend, the real session and the real dispatcher. The answer is released inside the production health timeout (3 s), so the
+// check is the production one; nothing is shortened.
+const goOfflinePage = (page: Page) =>
+  page.evaluate(() => {
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      get: () => false,
+    });
+    window.dispatchEvent(new Event("offline"));
+  });
+const goOnlinePage = (page: Page) =>
+  page.evaluate(() => {
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      get: () => true,
+    });
+    window.dispatchEvent(new Event("online"));
+  });
+
+test.describe("I-U1 (revision 1, R1): a draft queued offline waits for the reconnect's own answer", () => {
+  const legs: Array<
+    [
+      string,
+      Pick<ProxyRule, "set" | "delete">,
+      "supported" | "unsupported" | "missing",
+    ]
+  > = [
+    ["matching (the real 0.27.0)", {}, "supported"],
+    [
+      "mismatched (proxy-supplied 0.28.0)",
+      { set: { api_version: "0.28.0" } },
+      "unsupported",
+    ],
+    ["missing (proxy-deleted field)", { delete: ["api_version"] }, "missing"],
+  ];
+  for (const [name, rewrite, answer] of legs)
+    test(`${name}: nothing is sent while the answer is held; then ${answer === "supported" ? "sent exactly once" : "kept, and sent exactly once only after a later supported answer"}`, async ({
+      context,
+    }) => {
+      const page = await bootHarness(context);
+      const id = await signedIn(page, me());
+      await leader(page, id.account_id);
+      await expect
+        .poll(() => page.evaluate(() => window.__s.compat.get()))
+        .toMatchObject({ status: "supported" });
+      // The healthy control: a draft queued while online is sent.
+      const control = await page.evaluate(
+        (spec) => window.__atlasData?.enqueue(spec),
+        create(uuid(), "I-U1 R1 control") as never,
+      );
+      await acknowledged(page, id.account_id, control?.localId as string);
+      await goOfflinePage(page);
+      const before = (await proxy.log()).length;
+      const queued = await page.evaluate(
+        (spec) => window.__atlasData?.enqueue(spec),
+        create(uuid(), `I-U1 R1 ${answer}`) as never,
+      );
+      expect(queued?.kind).toBe("queued");
+      const rule = await proxy.addRule({
+        method: "GET",
+        path: "/health",
+        action: "hold",
+        ...rewrite,
+      });
+      await goOnlinePage(page);
+      await expect
+        .poll(async () => (await proxy.held())[rule.id] ?? 0, {
+          intervals: [20],
+        })
+        .toBe(1);
+      // The reconnect withdrew `supported` at once: the dispatcher holds the draft quietly.
+      expect(await page.evaluate(() => window.__s.compat.get())).toEqual({
+        status: "unknown",
+      });
+      await expect
+        .poll(() => dispatcherState(page))
+        .toMatchObject({ kind: "held", reason: "compat_unconfirmed" });
+      // Most of the production health timeout passes with the answer held: nothing is sent.
+      await page.waitForTimeout(1_500);
+      expect(await commandsLog(before)).toEqual([]);
+      expect((await proxy.held())[rule.id]).toBe(1);
+      await proxy.release(rule.id);
+      await proxy.removeRule(rule.id);
+      if (answer === "supported") {
+        await expect
+          .poll(() => page.evaluate(() => window.__s.compat.get()))
+          .toMatchObject({ status: "supported" });
+        await acknowledged(page, id.account_id, queued?.localId as string);
+        expect(await commandsLog(before)).toHaveLength(1);
+        return;
+      }
+      await expect
+        .poll(() => page.evaluate(() => window.__s.compat.get().status))
+        .toBe(answer);
+      await page.waitForTimeout(3_000);
+      expect(await commandsLog(before)).toEqual([]);
+      // The real answer again at the next reconnect: sent exactly once.
+      await goOfflinePage(page);
+      await goOnlinePage(page);
+      await expect
+        .poll(() => page.evaluate(() => window.__s.compat.get()))
+        .toMatchObject({ status: "supported" });
+      await acknowledged(page, id.account_id, queued?.localId as string);
+      expect(await commandsLog(before)).toHaveLength(1);
+    });
+});
+
 // ---- I-O4: injected gateway failures: back-off, then the sustained pause, resumed only by `online` or "Retry now" --------------
 // The production clocks are used (2 s doubling to 60 s; paused after 180 s of continuous failure), so the paused case takes minutes.
 test.describe("I-O4: a failing /commands (a proxy-injected 503) is retried with back-off, then paused", () => {

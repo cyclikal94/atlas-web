@@ -57,9 +57,15 @@ export interface BootOptions {
    * Production passes none: `main.tsx` never sets it.
    */
   config?: NonNullable<CreateSessionOptions["config"]>;
+  /** FIXTURE harness only: more of the protected tree (a test form). Production passes none. */
+  protectedExtra?: () => ReactNode;
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
+  // TEST BUILDS ONLY (WEB-14a): scripts/build-pwa-generations.mjs builds generations that differ by this label, so each has its own hashed
+  // files. The production build has none, and this is then removed by the bundler.
+  const label = import.meta.env.VITE_ATLAS_BUILD_LABEL;
+  if (label) document.documentElement.dataset.atlasBuild = label;
   const reactRoot = createRoot(options.neutralRoot);
   const render = (node: ReactNode) =>
     reactRoot.render(
@@ -130,12 +136,22 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
       ...(options.config === undefined ? {} : { config: options.config }),
     },
   );
-  renderTree = createProtectedTree(session);
+  renderTree = createProtectedTree(session, options.protectedExtra);
   render(
     <SessionProvider session={session}>
       <SessionRoot />
     </SessionProvider>,
   );
-  await session.start({ beforeStart: options.beforeStart });
+  const started = session.start({ beforeStart: options.beforeStart });
+  // WEB-14a: the service worker and the update coordinator, in the builds that ship a worker (production and the PWA test build), loaded
+  // lazily once the session has started so the initial chunk carries only this import. Never in development, Vitest or the fixture build.
+  if (
+    import.meta.env.MODE === "production" ||
+    import.meta.env.MODE === "pwa-fixture"
+  )
+    void import("../lib/pwa/start")
+      .then(({ startBrowserAppUpdates }) => startBrowserAppUpdates(session))
+      .catch(() => undefined);
+  await started;
   return { session, store: opened };
 }

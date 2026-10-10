@@ -50,7 +50,11 @@ function ShellFromData({
   return <ShellEnvProvider value={env}>{children}</ShellEnvProvider>;
 }
 
-export function createProtectedTree(session: Session) {
+/**
+ * `extra`: FIXTURE harness only (the `/__session` page's recoverable test form, WEB-14a). Rendered inside the data provider, after the
+ * routed shell. Production passes nothing.
+ */
+export function createProtectedTree(session: Session, extra?: () => ReactNode) {
   return (): ReactNode => {
     // A new router per mount: an account change must not inherit the previous account's location or loaders.
     const router = createAppRouter();
@@ -61,6 +65,7 @@ export function createProtectedTree(session: Session) {
             <ShellFromData router={router}>
               <RouterProvider router={router} />
               <SessionNotices />
+              {extra?.()}
             </ShellFromData>
           </DataProvider>
         </ProtectedProviders>

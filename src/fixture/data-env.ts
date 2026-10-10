@@ -8,6 +8,7 @@ import type {
 } from "../data";
 import { createCommandRegistry } from "../data";
 import { summariseQueue } from "../data/model/queue-summary";
+import { MemoryRecoveryAdapter } from "../lib/form-recovery/memory-adapter";
 import type { Identity, Store } from "../session";
 
 /**
@@ -267,6 +268,9 @@ export function fixtureData(params: URLSearchParams): FixtureData {
     outbox: () => null,
     service: () => null,
     serviceStore: new Cell(null),
+    formRecovery: new MemoryRecoveryAdapter(),
+    // No database: a form is handed no port (as `serviceStore` says).
+    formRecoveryOpen: new Cell(false),
     attachLeader: () => () => undefined,
     start: () => undefined,
     dispose: () => undefined,

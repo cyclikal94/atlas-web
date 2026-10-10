@@ -1,3 +1,4 @@
+import type { FormRecoveryPort } from "../../lib/form-recovery/port";
 import type { Identity, Store } from "../../session";
 import type { AccountService, DataRuntime } from "../engine/account-service";
 import { startDeviceMirror } from "../engine/device-mirror";
@@ -32,7 +33,11 @@ import {
 } from "../outbox/registries";
 import { readSyncFacts, type SyncFacts } from "../plans/facts";
 import type { ConflictPage, QueuePage } from "../plans/outbox";
-import type { Loadable, Watchable } from "../store/port";
+import {
+  createFormRecoveryPort,
+  type FormRecoveryTarget,
+} from "../ports/form-recovery";
+import type { AccountStore, Loadable, Watchable } from "../store/port";
 
 /**
  * The data layer as the UI sees it (plan 5.7, 6.1): ONE React-free controller per mounted protected tree. It follows the displayed
@@ -82,6 +87,19 @@ export interface DataEnv {
   service(): AccountService | null;
   /** The same, observable: a database that another tab creates later appears here without a reload. */
   readonly serviceStore: Store<AccountService | null>;
+  /**
+   * Form recovery around an app-update reload (Q4, WEB-14a) over the DISPLAYED account's `form_recovery` store: every call reaches the
+   * service bound when it is called (one database per account, so a copy can never land in another account's). With no open database
+   * (nothing was ever saved here, or it was closed) `save` answers `failed` and `list` an empty list: the form stays open and the person
+   * chooses to retry or discard. The copy is admitted by the same quota guard as a draft.
+   */
+  readonly formRecovery: FormRecoveryPort;
+  /**
+   * Whether `formRecovery` can reach the displayed account's copies now: its database is open, or (revision 1, R7) another tab's newer build
+   * has upgraded it and the recovery connection stands in for the person's form (save, restore, discard only). A form is handed the port
+   * while this is true.
+   */
+  readonly formRecoveryOpen: Store<boolean>;
   /**
    * A sync leader (and a dispatcher) takes part: the status follows them. Returns a function that detaches THIS attachment (R30): it
    * acts only while this attachment is the leader that stands, and only once. Run late or again, after another leader replaced this one,
@@ -145,6 +163,17 @@ export interface DataEnvDeps {
   /** The account's write-failure markers (`localStorage`): the facade restores a stop recorded before a reload. */
   markers?: WriteFailureMarkers;
   commands?: CommandRegistry;
+  /**
+   * The recovery connection (WEB-14a revision 1, R7; WEB-04 8): after another tab's newer build has upgraded an account's database, this
+   * page's code never uses it again, except to save, restore and discard the person's form copies through a fresh connection that keeps the
+   * `form_recovery` contract (`store/recovery-store.ts`). `storeFor` answers that store for the account and the incarnation this controller
+   * last had open, or null when the account is not superseded (a deletion, an identity change, or an open database: none applies);
+   * `subscribe` is told when that may have changed (a latch).
+   */
+  recovery?: {
+    storeFor(account: AccountId, incarnationId: string): AccountStore | null;
+    subscribe(listener: () => void): () => void;
+  };
 }
 
 class MutableStore<T> implements Store<T> {
@@ -510,6 +539,24 @@ export function createDataEnv(
     rereadTimer = null;
   };
 
+  /**
+   * The binding the recovery connection may stand in for (R7): the account and incarnation this controller last had open. Only ever used
+   * while that account is still the displayed one and its database is superseded (`deps.recovery.storeFor`); never for another account.
+   */
+  let lastBound: { account: AccountId; incarnationId: string } | null = null;
+  const formRecoveryOpen = new MutableStore<boolean>(false);
+  const recoveryTarget = (): FormRecoveryTarget | null => {
+    const last = lastBound;
+    if (last === null || deps.recovery === undefined) return null;
+    if (deps.identity.get()?.account_id !== last.account) return null;
+    const store = deps.recovery.storeFor(last.account, last.incarnationId);
+    return store === null ? null : { store, incarnationId: last.incarnationId };
+  };
+  const formRecoveryTarget = (): FormRecoveryTarget | null =>
+    current?.service.live ? current.service : recoveryTarget();
+  const refreshRecovery = (): void =>
+    formRecoveryOpen.set(formRecoveryTarget() !== null);
+
   const unbind = (): void => {
     for (const off of detach) off();
     detach = [];
@@ -527,13 +574,16 @@ export function createDataEnv(
     queue.use(null, ABSENT);
     conflicts.use(null, ABSENT);
     summary.set(ABSENT);
+    refreshRecovery();
     recompute();
   };
 
   const bind = (account: AccountId, service: AccountService): void => {
     unbind();
     current = { account, service };
+    lastBound = { account, incarnationId: service.incarnationId };
     serviceStore.set(service);
+    refreshRecovery();
     const facade = createOutbox({
       service,
       quota: deps.quota,
@@ -727,6 +777,7 @@ export function createDataEnv(
   };
 
   const follow = (): void => {
+    refreshRecovery();
     const identity = deps.identity.get();
     if (identity === null) {
       generation += 1;
@@ -855,6 +906,7 @@ export function createDataEnv(
         if (message.type === "data_changed") reprobe();
       }) ?? (() => undefined),
       deps.markers?.subscribe(onMarkerChange) ?? (() => undefined),
+      deps.recovery?.subscribe(refreshRecovery) ?? (() => undefined),
       stopProfile,
       stopMirror,
     ];
@@ -902,6 +954,12 @@ export function createDataEnv(
 
   if (options.start !== false) start();
 
+  const formRecovery = createFormRecoveryPort({
+    service: formRecoveryTarget,
+    quota: deps.quota,
+    now: () => deps.clock.iso(),
+  });
+
   return {
     inputs,
     identity: deps.identity,
@@ -914,6 +972,8 @@ export function createDataEnv(
     outbox: () => outbox,
     service: () => (current?.service.live ? current.service : null),
     serviceStore,
+    formRecovery,
+    formRecoveryOpen,
     attachLeader(next) {
       // A leader that is replaced keeps what it knew of the cache it could not write an invalidation for.
       if (leader.engine !== next.engine) carry(leader.engine);

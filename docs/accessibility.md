@@ -32,6 +32,13 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Focus ring:** one style everywhere, 2px `action-ink`, 2px offset, and system colours in forced-colours mode.
 - **Forms:** every `Input` requires a label association. A disabled control states its reason beside it.
 
+- **The update banner (WEB-14a)** is a labelled region ("Update") at the top of the shell (and, signed out, of the neutral screen). It never takes focus; its
+  message is announced once through the announcer; in the neutral root, which has no protected tree, through the neutral root's own polite status region
+  (`NeutralLiveRegion` in `announcer.tsx`, kept mounted and empty while no account is displayed, so it exists before a message is written into it; neutral text
+  only, cleared by the level-0 gate; WEB-14a revision 1, R8, `production.pwa.spec.ts` P-P2 checks exactly one announcement and unmoved focus in three engines).
+  With a recoverable form open it is WEB-07's Q4 prompt, and a failed save is WEB-07's recovery banner, which announce themselves. "Not now" is a labelled icon button. axe passes in both themes
+  (`tests/pwa/update-banner.test.tsx`); a screen-reader pass of the update journey belongs to the Layer 2 checklist (WEB-08c, WEB-15).
+
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
 For each core journey (open the app, move between destinations, open Appearance and change it, open the More sheet, read the sync status, reach a compatibility screen):

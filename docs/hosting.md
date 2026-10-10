@@ -53,7 +53,7 @@ the image runs unprivileged, as UID 101, on port 8080, with a **read-only root f
 - Backend paths return an explicit **404** with a plain-text explanation, so a mis-routed API call fails visibly instead of receiving HTML.
 - Paths beneath `/assets/` and any path with a file extension return **404 when absent** (never the shell).
 - Every other path falls back to `index.html`, so deep links and reloads work.
-- `index.html`, `sw.js`, `theme-init.js`, `noscript.css`, `favicon.svg` and `/_web/*` are `Cache-Control: no-cache`; hashed `/assets/*` are
+- `index.html`, `sw.js`, `manifest.webmanifest` (as `application/manifest+json`), `theme-init.js`, `noscript.css`, `favicon.svg`, the icons and `/_web/*` are `Cache-Control: no-cache`; hashed `/assets/*` are
   `public, max-age=31536000, immutable`; dotfiles are denied; only `GET` and `HEAD` are allowed.
 - `GET /_web/health` returns `200 ok`; `GET /_web/provenance.json` returns the release provenance.
 - Every response carries the security headers below.

@@ -121,6 +121,15 @@ Dependency direction: `model` imports no I/O (its only repository imports are tw
 5. `start()` registers the page listeners once, reads `auth_state`, resolves any attempt, re-drives operation fences, recovers pending deletions, starts the API-version check
    in the background, then derives the view: settled and nothing closing it → `expose`; otherwise the neutral state the record names; nothing settled → signed out.
 
+6. WEB-14a: in the builds that ship the service worker (production and the `pwa-fixture` test build), once `start()` has been called, the app-update
+   coordinator is imported lazily and registers `/sw.js` (`docs/pwa.md`). Nothing else changes in the order above.
+
+The API-version check (D-08) is asked again after boot (WEB-14a, D-P9): at every `online`, on a return to the page once `compatRecheckMinIntervalMs` has passed,
+on a paced timer (`compatRetryInitialMs` doubling to `compatRetryMaxMs`) while the answer is `missing`, `unsupported` or `unreachable`, and when
+`session.recheckCompatibility()` is called; one check in flight, and a trigger during it asks exactly once more after it (`docs/pwa.md`). A
+reconnect withdraws a `supported` answer at once (`unknown` until the check asked after it answers; an answer to a check asked before it is
+dropped), so no queued write is admitted before the fresh answer (WEB-14a revision 1, R1).
+
 A valid cookie with nothing settled never signs anyone in (matrix 3.4, "Never inferred").
 
 ## State inventory and copy map (A1)

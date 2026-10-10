@@ -8,6 +8,7 @@ import {
   openAuthStore,
   runAuthCanary,
 } from "../../session";
+import { FixtureRecoveryForm } from "../recovery-form";
 
 /**
  * FIXTURE ONLY. The session harness: it runs the PRODUCTION composition (`src/app/boot.tsx`, the real IndexedDB store, Web Locks,
@@ -45,13 +46,23 @@ export interface SessionHarness {
   /** Write any of the `atlas-auth` records directly (for example a `pending_deletions` entry another visit left behind). */
   seedRecords(records: Record<string, unknown>): Promise<void>;
   readRecords(): Promise<unknown>;
+  /** WEB-14a: imports a lazy chunk nothing else loads, and answers its build label (src/fixture/pwa-probe-chunk.ts). */
+  lazyBuildLabel(): Promise<string>;
 }
 
-const params = new URLSearchParams(location.search);
+// WEB-14a: `?sticky=1` keeps this tab the harness across reloads (src/fixture/main.tsx), with the parameters it was opened with; a reload
+// shows the route the page is on.
+const entered = location.pathname === "/__session";
+const stored = sessionStorage.getItem("atlas-fixture-session");
+const params = new URLSearchParams(
+  entered ? location.search : (stored ?? location.search),
+);
+if (entered && params.get("sticky") === "1")
+  sessionStorage.setItem("atlas-fixture-session", params.toString());
 const off = params.get("boot") === "off";
 const manual = params.get("boot") === "manual";
 // The protected tree routes on the browser location; start it on the route the test asks for (default: Today).
-history.replaceState(null, "", params.get("route") ?? "/today");
+if (entered) history.replaceState(null, "", params.get("route") ?? "/today");
 const neutralRoot = document.getElementById("neutral-root");
 if (!neutralRoot) throw new Error("Missing neutral root");
 
@@ -89,6 +100,8 @@ const harness: SessionHarness = {
       { durability: "strict", label: "seed" },
     ).complete;
   },
+  lazyBuildLabel: () =>
+    import("../pwa-probe-chunk").then((chunk) => chunk.label),
   async readRecords() {
     const store: OpenedAuthStore =
       harness.booted?.store ?? (await openAuthStore());
@@ -113,6 +126,10 @@ const scaledLockWait = Number(params.get("lockWaitMs"));
 let startedByTest: Promise<Booted | null> | null = null;
 const startBoot = (): Promise<Booted | null> => {
   harness.ready = boot({
+    // WEB-14a: `?form=1` adds the recoverable test form to the protected tree.
+    ...(params.get("form") === "1"
+      ? { protectedExtra: () => <FixtureRecoveryForm /> }
+      : {}),
     ...(Number.isFinite(scaledLockWait) && scaledLockWait > 0
       ? { config: { lockWaitMs: scaledLockWait } }
       : {}),

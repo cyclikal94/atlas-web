@@ -29,8 +29,61 @@ const AnnouncerContext = createContext<Announcer | null>(null);
 let active: Announcer | null = null;
 export const liveRegions: Announcer = {
   announce: (message, politeness) => active?.announce(message, politeness),
-  clearAll: () => active?.clearAll(),
+  clearAll: () => {
+    active?.clearAll();
+    neutralLiveRegion.clear();
+  },
 };
+
+/**
+ * THE NEUTRAL ROOT'S LIVE REGION (WEB-14a revision 1, R8). The neutral root (signed out, a neutral state) has no protected tree and so no
+ * announcer, and the bridge above is silent there: an update offered while signed out was shown but never announced. `NeutralLiveRegion`
+ * is one polite status region the neutral root keeps mounted (empty) while no account is displayed, so it exists before any message is
+ * written into it; `neutralLiveRegion.announce` writes a message once (cleared first, set on the next frame, like the announcer). It is for
+ * NEUTRAL text only (it carries nothing about any account), it never moves focus, and the level-0 gate clears it with the others.
+ */
+let neutralRegion: HTMLElement | null = null;
+let neutralFrame: number | null = null;
+export const neutralLiveRegion = {
+  announce(message: string): void {
+    const region = neutralRegion;
+    if (!region) return;
+    if (neutralFrame !== null) window.cancelAnimationFrame(neutralFrame);
+    region.textContent = "";
+    neutralFrame = window.requestAnimationFrame(() => {
+      neutralFrame = null;
+      region.textContent = message;
+    });
+  },
+  clear(): void {
+    if (neutralFrame !== null) window.cancelAnimationFrame(neutralFrame);
+    neutralFrame = null;
+    if (neutralRegion) neutralRegion.textContent = "";
+  },
+};
+
+export function NeutralLiveRegion() {
+  const region = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = region.current;
+    neutralRegion = element;
+    return () => {
+      if (neutralRegion !== element) return;
+      neutralLiveRegion.clear();
+      neutralRegion = null;
+    };
+  }, []);
+  return (
+    <div
+      ref={region}
+      data-neutral-live-region=""
+      className="sr-only"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    />
+  );
+}
 
 export function AnnouncerProvider({ children }: { children: ReactNode }) {
   const polite = useRef<HTMLDivElement>(null);

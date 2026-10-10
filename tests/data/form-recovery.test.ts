@@ -219,9 +219,9 @@ describe("FormRecoveryPort over the form_recovery store", () => {
     drop();
     expect(await port.save(snap({ title: "y" }))).toBe("failed");
     expect(await port.load("task-edit:42", "tab-a")).toBeNull();
-    await expect(
-      port.discard("task-edit:42", "tab-a"),
-    ).resolves.toBeUndefined();
+    // ADAPTED (WEB-14a revision 1, R6): a discard with no open store resolved `undefined`; it now says it did nothing (`failed`), so no
+    // caller can claim the copy is gone. The intent kept: it never throws.
+    await expect(port.discard("task-edit:42", "tab-a")).resolves.toBe("failed");
   });
 
   test("the quota reserve refuses user input only below half the reserve", async () => {

@@ -9,5 +9,10 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/sw.ts", "src/lib/backend-routes.ts"]
+  "include": [
+    "src/sw.ts",
+    "src/sw/**/*.ts",
+    "src/lib/backend-routes.ts",
+    "src/lib/pwa/protocol.ts"
+  ]
 }

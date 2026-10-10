@@ -24,11 +24,34 @@ export interface RecoverySnapshot {
  */
 export type SaveResult = "saved" | "failed" | "refused";
 
+/**
+ * What a discard (a submission's, or "Discard instead") did to a copy (WEB-14a revision 1, R6). `discarded`: no copy of that form and tab
+ * can be restored any more (the terminal row is durable, or there was no copy). `failed`: the copy may still be there and come back after a
+ * reload; the caller must not say it was discarded. `refused`: the account is being signed out; nothing was written (the database is about
+ * to be deleted with every copy in it).
+ */
+export type DiscardResult = "discarded" | "failed" | "refused";
+
 export interface FormRecoveryPort {
   save(snapshot: RecoverySnapshot): Promise<SaveResult>;
   load(
     formContext: string,
     tabInstanceId: string,
   ): Promise<RecoverySnapshot | null>;
-  discard(formContext: string, tabInstanceId: string): Promise<void>;
+  discard(formContext: string, tabInstanceId: string): Promise<DiscardResult>;
+  /**
+   * EVERY copy of the form that can still be restored, newest first (WEB-14a; revision 1, R5: complete, however many discarded or submitted
+   * rows the form has, so a bound on one read never hides a copy): one per tab that saved one, so a page that returns after an update can
+   * restore the newest and name the others. A copy that was discarded or submitted is not listed. A read that fails answers an empty list
+   * (nothing is restored; nothing is lost either).
+   */
+  list(formContext: string): Promise<readonly RecoverySnapshot[]>;
+  /**
+   * The port fixed to the account (and database handle) this one reaches NOW, with that account, or null when it reaches none (WEB-14a
+   * revision 1). A capture pins the port when it is ASKED FOR, so a write that waits (for the page's recovery identifier, the quota reserve)
+   * can never land in another account's store; one whose handle has closed meanwhile fails. `scope` names the account's database as it is
+   * now (its incarnation): a database deleted and created again since is another scope. Optional: a port over a single store has nothing to
+   * pin.
+   */
+  pin?(): { account: string; scope: string; port: FormRecoveryPort } | null;
 }

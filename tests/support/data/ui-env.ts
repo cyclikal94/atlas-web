@@ -10,6 +10,7 @@ import type {
 } from "../../../src/data";
 import { summariseQueue } from "../../../src/data/model/queue-summary";
 import { createCommandRegistry } from "../../../src/data/outbox/registries";
+import { MemoryRecoveryAdapter } from "../../../src/lib/form-recovery/memory-adapter";
 import type { Identity, Store } from "../../../src/session";
 
 /**
@@ -147,6 +148,9 @@ export function stubEnv(
     outbox: () => null,
     service: () => null,
     serviceStore: new Cell(null),
+    formRecovery: new MemoryRecoveryAdapter(),
+    // No database: a form is handed no port (as `serviceStore` says).
+    formRecoveryOpen: new Cell(false),
     attachLeader: () => () => undefined,
     start: () => undefined,
     dispose: () => undefined,

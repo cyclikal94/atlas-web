@@ -36,6 +36,19 @@ export interface SessionConfig {
   /** `GET /health` bound. */
   healthTimeoutMs: number;
   /**
+   * The API-version re-check (WEB-14a, D-P9; WEB-03 3.9a "every bootstrap and reconnect"). Every `online` asks again; a return to the
+   * page (`visible`, `focus`, `pageshow`, `resume`) asks again only when this long has passed since the last answer, so a server
+   * upgraded under an open tab is noticed without a request on every focus.
+   */
+  compatRecheckMinIntervalMs: number;
+  /**
+   * While the answer is `missing`, `unsupported` or `unreachable`, the check is asked again on its own, first after `compatRetryInitialMs`,
+   * then at a doubling pace up to `compatRetryMaxMs`; the pace starts again when the answer changes. A `missing` pause therefore lifts
+   * by itself once the server starts reporting a supported version ("Atlas will keep checking").
+   */
+  compatRetryInitialMs: number;
+  compatRetryMaxMs: number;
+  /**
    * The wait for the shared `atlas-auth` lock of a persistence hold. A settlement or closing write holds it exclusively for the
    * length of its own transaction (and a closing write for up to `lockWaitMs`); a persistence hold that cannot be had in time is
    * `unavailable`, which the caller treats like a request that was never sent: nothing is applied, nothing is counted, and it asks again.
@@ -78,6 +91,9 @@ export const DEFAULT_CONFIG: SessionConfig = Object.freeze({
   wipeClosureWaitMs: 5_000,
   closingWriteAttempts: 3,
   healthTimeoutMs: 3_000,
+  compatRecheckMinIntervalMs: 300_000,
+  compatRetryInitialMs: 30_000,
+  compatRetryMaxMs: 600_000,
   persistenceWaitMs: 20_000,
   persistenceHoldMs: 30_000,
   persistenceStallMs: 10_000,

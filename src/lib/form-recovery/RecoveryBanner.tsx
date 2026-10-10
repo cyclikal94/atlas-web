@@ -14,6 +14,11 @@ export type RecoveryBannerState =
    * There is nothing to retry: the form stays open and the reload is the person's choice. PROPOSED copy, not accepted.
    */
   | { kind: "save-refused"; onDiscardAndReload(): void }
+  /**
+   * "Discard and reload anyway" could not discard the copy saved earlier (WEB-14a revision 1, R6): a reload now may restore it. Nothing
+   * reloads until the person tries again or chooses to reload anyway. PROPOSED copy, not accepted.
+   */
+  | { kind: "discard-failed"; onRetry(): void; onReloadAnyway(): void }
   | { kind: "restored"; onDiscard(): void };
 
 export interface RecoveryBannerProps {
@@ -26,6 +31,8 @@ export const SAVE_FAILED_TEXT =
   "Couldn't save your unfinished form before reloading. Nothing was lost — your form is still here.";
 export const SAVE_REFUSED_TEXT =
   "Can't save your unfinished form while you're signing out. Nothing was lost — your form is still here.";
+export const DISCARD_FAILED_TEXT =
+  "Couldn't clear the saved copy of your unfinished form. If you reload now, that copy may be restored afterwards. Your form is still here.";
 export const RESTORED_TEXT =
   "Restored your unfinished form from before the update. Nothing was submitted automatically — review and submit when ready.";
 
@@ -40,7 +47,9 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
         ? SAVE_FAILED_TEXT
         : kind === "save-refused"
           ? SAVE_REFUSED_TEXT
-          : RESTORED_TEXT,
+          : kind === "discard-failed"
+            ? DISCARD_FAILED_TEXT
+            : RESTORED_TEXT,
       kind === "restored" ? "polite" : "assertive",
     );
   }, [kind, announce]);
@@ -66,6 +75,26 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
           </Button>
           <Button variant="quiet" onClick={state.onDiscardAndReload}>
             Discard and reload anyway
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (state.kind === "discard-failed") {
+    return (
+      <div
+        data-recovery-state="discard-failed"
+        className="flex flex-col gap-3 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+      >
+        <p className="text-[13.5px] leading-[1.6] text-conflict-text">
+          {DISCARD_FAILED_TEXT}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={state.onRetry}>
+            Try again
+          </Button>
+          <Button variant="quiet" onClick={state.onReloadAnyway}>
+            Reload anyway
           </Button>
         </div>
       </div>

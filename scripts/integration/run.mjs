@@ -2,11 +2,13 @@
 // Part C (plan 14): run the integration specs against the RELEASED backend, on a disposable SQLite database, behind the delaying
 // proxy, with the fixture-only session harness page served by `vite preview --mode fixture`.
 //
-//   node scripts/integration/run.mjs [--serve] [--postgres] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [-- <playwright args>]
+//   node scripts/integration/run.mjs [--serve] [--postgres] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [--app <dir>] [-- <playwright args>]
 //
 //   default   for each browser: start a FRESH stack, run Playwright's `integration-<browser>` project, stop everything; exit non-zero if any failed.
 //             With no --grep the project runs in three stacks per browser (see STACKS): the suite exceeds what one stack's backend allows.
 //   --serve   start everything and print the URLs; run until interrupted (for exploring; nothing is run)
+//   --app     serve this built directory instead of dist-fixture (WEB-14a: `dist-pwa/fixture-a`, the fixture entry WITH the service worker,
+//             for I-U2); the specs see it as ATLAS_INTEGRATION_APP. The default is unchanged.
 //
 // Loopback listeners on OS-chosen free ports only. Disposable state under a fresh directory in $TMPDIR. Every process this script
 // starts is stopped on exit and the ports are checked to be free again. It touches no existing service and no real user data.
@@ -47,6 +49,7 @@ const serve = flag("--serve");
 const postgres = flag("--postgres");
 const browsers = value("--browsers", "chromium").split(",");
 const grep = value("--grep", "");
+const app = value("--app", "");
 const passthrough = args.includes("--")
   ? args.slice(args.indexOf("--") + 1)
   : [];
@@ -66,7 +69,7 @@ const STACKS =
           suffix: "",
           args: [
             "--grep-invert",
-            "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W)[0-9]",
+            "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|U)[0-9]",
           ],
         },
         { suffix: "-i14e", args: ["--grep", "I-14e"] },
@@ -76,6 +79,8 @@ const STACKS =
           args: ["tests/integration/integration.data.spec.ts"],
         },
       ];
+// WEB-14a: I-U1 is in the data stack's file. I-U2 needs the worker-enabled build (`--app dist-pwa/fixture-a`) and is run on its own
+// (`-- tests/integration/integration.pwa.spec.ts`); without `--app` it skips itself.
 
 const children = [];
 let tmp = "";
@@ -250,6 +255,7 @@ async function main(browser, stack) {
       "--port",
       String(previewPort),
       "--strictPort",
+      ...(app ? ["--outDir", app] : []),
     ],
     {
       cwd: root,
@@ -268,6 +274,7 @@ async function main(browser, stack) {
     ATLAS_INTEGRATION_ACCOUNTS: JSON.stringify(accounts),
     ATLAS_INTEGRATION_BACKEND_REVISION: JSON.stringify(revision),
     ATLAS_E2E_BROWSERS: browser === "chromium" ? "" : "all",
+    ATLAS_INTEGRATION_APP: app,
   };
   if (serve) {
     console.error(

@@ -23,7 +23,7 @@
     "profile:session": "node scripts/profile-session.mjs",
     "profile:sync": "node scripts/profile-sync.mjs",
     "profile:contention": "node scripts/profile-contention.mjs",
-    "test:e2e": "pnpm build && pnpm build:fixture && playwright test",
+    "test:e2e": "pnpm build && pnpm build:fixture && node scripts/build-pwa-generations.mjs && playwright test",
     "check:contract": "node scripts/check-contract.mjs",
     "build:fixture": "vite build --mode fixture",
     "preview:fixture": "vite preview --mode fixture --host 127.0.0.1",
@@ -33,7 +33,7 @@
     "check:artefacts": "node scripts/check-no-fixture.mjs dist && node scripts/check-external-urls.mjs dist && node scripts/check-budgets.mjs dist && node scripts/check-initial-chunk.mjs dist && node scripts/check-notices.mjs dist",
     "docs:tokens": "node scripts/generate-token-docs.mjs",
     "dev:fixture": "vite --mode fixture --host 127.0.0.1",
-    "test:e2e:efficient": "pnpm build && pnpm build:fixture && node scripts/run-e2e-efficient.mjs",
+    "test:e2e:efficient": "pnpm build && pnpm build:fixture && node scripts/build-pwa-generations.mjs && node scripts/run-e2e-efficient.mjs",
     "test:validation-tools": "node --test scripts/validation/*.test.mjs"
   },
   "dependencies": {
@@ -72,7 +72,6 @@
     "vite-plugin-pwa": "1.3.0",
     "vitest": "5.0.1",
     "workbox-core": "7.4.1",
-    "workbox-precaching": "7.4.1",
     "workbox-routing": "7.4.1"
   }
 }

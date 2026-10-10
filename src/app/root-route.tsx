@@ -1,5 +1,6 @@
 import { createRootRoute, Outlet } from "@tanstack/react-router";
 import { GlobalNotices } from "../features/sync/NoticeBanners";
+import { AppUpdateBanner } from "../lib/pwa/UpdateBanner";
 import { NotFound } from "./NotFound";
 import { AppShell } from "./shell/AppShell";
 import { useShellEnv } from "./shell/env";
@@ -15,6 +16,7 @@ function ShellLayout() {
   const env = useShellEnv();
   return (
     <AppShell {...env}>
+      <AppUpdateBanner />
       <GlobalNotices />
       <Outlet />
     </AppShell>
