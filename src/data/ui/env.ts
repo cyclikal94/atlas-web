@@ -25,13 +25,16 @@ import {
   createOutbox,
   type DiscardOutcome,
   type Outbox,
+  type SupersedeOutcome,
 } from "../outbox/outbox";
 import {
   type CommandRegistry,
   createCommandRegistry,
 } from "../outbox/registries";
+import { readDraftWithCommand } from "../plans/draft-detail";
 import { readSyncFacts, type SyncFacts } from "../plans/facts";
 import type { ConflictPage, QueuePage } from "../plans/outbox";
+import { readMerged } from "../plans/outbox";
 import type { Loadable, Watchable } from "../store/port";
 
 /**
@@ -54,11 +57,23 @@ export interface DataActions {
   discard(localId: LocalId): Promise<DiscardOutcome>;
   /** The queue could not be read (the data layer did not start): look again. */
   retryLoad(): void;
+  /** WEB-09b (Q24): dismisses the "Resyncing" notice; it changes nothing else. */
+  acknowledgeResync(id: string): void;
+  /**
+   * WEB-09b (WF-QUEUE-02): "Resend as a new operation" / "Review, then save as new". Only for a draft whose kind registered `rebuild`:
+   * the new command is built from the draft and the resource as the cache holds it now, and SUPERSEDES the draft (a new operation id).
+   * `not_rebuildable`: nothing is registered, or the rebuild declined; nothing was changed.
+   */
+  saveAsNew(localId: LocalId): Promise<SaveAsNewOutcome>;
   /** The next window of the queue replaces the one shown. */
   showNextQueue(): void;
   /** The previous window of the queue replaces the one shown. */
   showPreviousQueue(): void;
 }
+
+export type SaveAsNewOutcome =
+  | SupersedeOutcome
+  | { kind: "refused"; reason: "not_rebuildable" | "closed" };
 
 export interface DataEnv {
   readonly inputs: Store<StatusInputs>;
@@ -92,6 +107,11 @@ export interface DataEnv {
     outbox?: Outbox;
     recovery?: RecoverySeam;
   }): () => void;
+  /**
+   * WEB-09b (P-11): another page of this browser leads sync. The status is derived from the durable facts this controller already
+   * re-reads, never "Updates stopped" merely because this page is not the leader. Returns the detacher (once, while it stands).
+   */
+  attachFollower(): () => void;
   /**
    * Starts following the identity, connectivity, the channel and the markers (R29). Idempotent, and it may follow a `dispose()`: a
    * controller is a start and stop PAIR, so that a provider can start it in an effect and stop it in the effect's cleanup however
@@ -334,6 +354,8 @@ export function createDataEnv(
   let leaderOffs: Array<() => void> = [];
   /** The `attachLeader` call whose leader stands now (R30): a disposer acts only while the attachment that made it is this one. */
   let attachment: object | null = null;
+  /** Another page leads (P-11), as the `attachFollower` call that stands says. */
+  let follower: object | null = null;
 
   const patch = (next: Partial<StatusInputs>): void => {
     const merged = { ...inputs.get(), ...next };
@@ -491,9 +513,16 @@ export function createDataEnv(
       online: deps.online.get(),
       engine,
       recovery: {
-        registered: recovery.registered,
+        registered: recovery.registered || follower !== null,
         active: recovery.active.get(),
+        // Present only with WEB-09b's job (the default seam and a fixture's test leader have neither).
+        ...(recovery.state ? { state: recovery.state.get() } : {}),
+        ...(recovery.notice ? { notice: recovery.notice.get() } : {}),
       },
+      // Absent (undefined) unless they apply, so a page with no production leader reports exactly what it did before WEB-09b.
+      follower:
+        follower !== null && leader.engine === undefined ? true : undefined,
+      recoveryBlocked: established?.recoveryBlocked === true ? true : undefined,
       cache: cacheOf(),
       lastSyncedAt: established?.lastSyncedAt ?? null,
       summary: readSummary.status === "ready" ? readSummary.value : null,
@@ -821,6 +850,8 @@ export function createDataEnv(
       leader.outbox?.storageNotResponding.subscribe(recompute),
       leader.outbox?.storageMemoryOnly.subscribe(recompute),
       leader.recovery?.active.subscribe(recompute),
+      leader.recovery?.state?.subscribe(recompute),
+      leader.recovery?.notice?.subscribe(recompute),
     ].filter((off): off is () => void => typeof off === "function");
   };
 
@@ -884,7 +915,22 @@ export function createDataEnv(
   };
 
   const actions: DataActions = {
-    retryUpdates: () => leader.engine?.retryNow(),
+    // The job holds the cache while it stands in a state of its own (a stop, a pause, the blocking budget): its retry is the act; else
+    // the engine's.
+    retryUpdates: () => {
+      const job = leader.recovery;
+      const state = job?.state?.get();
+      if (
+        job?.retryNow !== undefined &&
+        (state?.kind === "stopped" ||
+          state?.kind === "paused" ||
+          state?.kind === "backing_off" ||
+          established?.recoveryBlocked === true)
+      )
+        job.retryNow();
+      else leader.engine?.retryNow();
+    },
+    acknowledgeResync: (id) => leader.recovery?.acknowledge?.(id),
     retryChanges: (localId) => (leader.outbox ?? outbox)?.retry(localId),
     retryLoad: () => {
       const identity = deps.identity.get();
@@ -897,6 +943,30 @@ export function createDataEnv(
       if (facade === null)
         return { kind: "refused", reason: "closed" } as DiscardOutcome;
       return facade.discard(localId);
+    },
+    saveAsNew: async (localId) => {
+      const bound = current;
+      const facade = leader.outbox ?? outbox;
+      if (bound === null || facade === null || !bound.service.live)
+        return { kind: "refused", reason: "closed" };
+      const service = bound.service;
+      const draft = await service.store.run(readDraftWithCommand, {
+        incarnationId: service.incarnationId,
+        localId,
+      });
+      if (draft === null || !commands.canRebuild(draft))
+        return { kind: "refused", reason: "not_rebuildable" };
+      const target = draft.target_resource_ids[0];
+      const merged =
+        target === undefined
+          ? null
+          : await service.store.run(readMerged, {
+              incarnationId: service.incarnationId,
+              id: target,
+            });
+      const next = commands.rebuild(draft, merged?.base ?? null);
+      if (next === null) return { kind: "refused", reason: "not_rebuildable" };
+      return facade.supersede(localId, next);
     },
   };
 
@@ -933,6 +1003,16 @@ export function createDataEnv(
         leaderOffs = [];
         carry(next.engine);
         leader = {};
+        recompute();
+      };
+    },
+    attachFollower() {
+      const mine = {};
+      follower = mine;
+      recompute();
+      return () => {
+        if (follower !== mine) return;
+        follower = null;
         recompute();
       };
     },

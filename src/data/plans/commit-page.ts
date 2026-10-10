@@ -53,6 +53,12 @@ export interface CommitPageInput {
    * while it stands, so the commit begins only while it does. Read in the step that decides what is written, before anything is.
    */
   leaseLive?: () => boolean;
+  /**
+   * WEB-09b: `recovery` is a catch-up page applied by the recovery job while the account is fenced (matrix 3.7.3, P-7). The page and its
+   * position are applied exactly as an ordinary page's, but its reconciliation writes only the receipt bookkeeping of ACKNOWLEDGED drafts
+   * and deletes nothing: no unsent draft, its body or its effects is touched. Absent (`ordinary`): the WEB-09a behaviour, unchanged.
+   */
+  mode?: "ordinary" | "recovery";
 }
 
 export type CommitPageResult =
@@ -236,6 +242,7 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
           },
           walkAllEffects: liveEdge,
           window,
+          ...(input.mode === "recovery" ? { recovery: true } : {}),
         })
       : {
           mentioned: 0,

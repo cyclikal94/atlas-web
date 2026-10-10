@@ -243,6 +243,12 @@ export function fixtureData(params: URLSearchParams): FixtureData {
       retryUpdates: () => calls.push({ action: "retryUpdates", args: [] }),
       retryChanges: (id) => calls.push({ action: "retryChanges", args: [id] }),
       retryLoad: () => calls.push({ action: "retryLoad", args: [] }),
+      acknowledgeResync: (id) =>
+        calls.push({ action: "acknowledgeResync", args: [id] }),
+      saveAsNew: async (id) => {
+        calls.push({ action: "saveAsNew", args: [id] });
+        return { kind: "refused", reason: "not_rebuildable" };
+      },
       showNextQueue: () => {
         calls.push({ action: "showNextQueue", args: [] });
         move(1);
@@ -268,6 +274,7 @@ export function fixtureData(params: URLSearchParams): FixtureData {
     service: () => null,
     serviceStore: new Cell(null),
     attachLeader: () => () => undefined,
+    attachFollower: () => () => undefined,
     start: () => undefined,
     dispose: () => undefined,
   };

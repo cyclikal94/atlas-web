@@ -1,3 +1,4 @@
+import { blockedBy } from "../model/recovery";
 import { invalidateOperation } from "../model/retry";
 import type { CacheStatus } from "../model/types";
 import { readPlan } from "./builders";
@@ -20,6 +21,8 @@ export interface SyncFacts {
   invalidating: boolean;
   /** The operation that names an admitted invalidation at the current position (`invalidate:<cursor>`): the key of its fallback marker. */
   invalidateOperation: string;
+  /** WEB-09b: the recovery-scoped budget is at its bound (durable, so every page shows the blocking state). */
+  recoveryBlocked: boolean;
 }
 
 export const readSyncFacts = readPlan<
@@ -41,5 +44,6 @@ export const readSyncFacts = readPlan<
             (sync.local_write_streaks[invalidateOperation(sync.cursor)] ?? 0) >
             0,
           invalidateOperation: invalidateOperation(sync.cursor),
+          recoveryBlocked: blockedBy(sync) !== null,
         },
 });

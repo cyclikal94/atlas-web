@@ -44,6 +44,11 @@ export interface WindowedReconcile {
   walkAllEffects: boolean;
   /** Rows in hand at once. */
   window: number;
+  /**
+   * WEB-09b's recovery mode (matrix 3.7.3, P-7): only the effects of ACKNOWLEDGED drafts are reconciled (their receipt bookkeeping), the
+   * rows of unsent work are never written, and nothing is deleted. Absent: the ordinary page, exactly as before.
+   */
+  recovery?: boolean;
 }
 
 /** The compound primary key of `pending_effects`, as an index. */
@@ -106,7 +111,7 @@ export async function interestingOf(
 }
 
 /** Whether an outstanding draft still targets `resource`: the index's headers a window at a time, until one is found. */
-async function hasOutstandingDraft(
+export async function hasOutstandingDraft(
   reader: Reader,
   resource: string,
   window: number,
@@ -149,6 +154,106 @@ async function hasOtherDisplaying(
   }
 }
 
+/**
+ * One window of effect rows and the drafts that own them, reconciled and written through the caller's sink (`reconcileEffects`, with a
+ * draft that would leave kept while another of its effects still shows an overlay). `select` (WEB-09b) narrows the rows that take part
+ * by their owner's header: a row it refuses is not handed to `reconcileEffects` at all, so it is neither written nor counted as touched,
+ * and `deletes: false` keeps every row and draft the reconciliation would have removed (P-7). Adds the window's counts to `stats`.
+ */
+export async function reconcileEffectWindow(
+  reader: Reader,
+  sink: WriteSink,
+  rows: readonly PendingEffectRow[],
+  context: {
+    mentions: ReadonlyMap<string, Mention>;
+    facts: PageFacts;
+    window: number;
+    stats: Reconciled["stats"];
+    select?: (row: PendingEffectRow, owner: DraftRow | undefined) => boolean;
+    deletes?: boolean;
+  },
+): Promise<void> {
+  const { mentions, facts, window, stats } = context;
+  const owners = [...new Set(rows.map((row) => row.local_id))];
+  const headers: DraftRow[] = [];
+  for (const header of await reader.bulkGet("drafts", owners))
+    if (header !== undefined) headers.push(header);
+  const select = context.select;
+  const byId = new Map(headers.map((header) => [header.local_id, header]));
+  const effects =
+    select === undefined
+      ? rows
+      : rows.filter((row) => select(row, byId.get(row.local_id)));
+  if (effects.length === 0) return;
+  const inWindow = new Set(effects.map(effectKeyString));
+  let result = reconcileEffects({
+    effects,
+    drafts: headers,
+    mentions,
+    facts,
+  });
+  if (result.draftDeletes.length > 0) {
+    const others = new Set<string>();
+    for (const owner of result.draftDeletes)
+      if (await hasOtherDisplaying(reader, owner, inWindow, window))
+        others.add(owner);
+    if (others.size > 0)
+      result = reconcileEffects({
+        effects,
+        drafts: headers,
+        mentions,
+        facts,
+        othersDisplaying: others,
+      });
+  }
+  stats.mentioned += result.stats.mentioned;
+  stats.resolvedNoPublication += result.stats.resolvedNoPublication;
+  stats.heldReleased += result.stats.heldReleased;
+  stats.unavailable += result.stats.unavailable;
+  const deletes = context.deletes !== false;
+  // A row the reconciliation would have removed is kept, finished as it is, when nothing may be deleted (P-7).
+  const kept = deletes
+    ? []
+    : effects.filter((row) =>
+        result.effectDeletes.some(
+          ([resource, local]) =>
+            resource === row.resource_id && local === row.local_id,
+        ),
+      );
+  const keptRows = kept.map((row) => {
+    const mention = mentions.get(row.resource_id);
+    return mention
+      ? { ...row, last_mentioned_page_seq: facts.pageSeq, display: null }
+      : { ...row, resolved: "no_publication" as const, display: null };
+  });
+  const effectPuts = [...result.effectPuts, ...keptRows];
+  if (effectPuts.length) await sink.bulkPut("pending_effects", effectPuts);
+  if (deletes && result.effectDeletes.length)
+    await sink.bulkDelete("pending_effects", result.effectDeletes);
+  // A draft the reconciliation would have removed leaves with its flags clear (`retentionMet`): kept, it is written with them clear.
+  const keptDrafts = deletes
+    ? []
+    : result.draftDeletes.flatMap((id) => {
+        const header = byId.get(id);
+        return header === undefined
+          ? []
+          : [{ ...header, held_pending_cache: false }];
+      });
+  const draftPuts = [...result.draftPuts, ...keptDrafts];
+  if (draftPuts.length) await sink.bulkPut("drafts", draftPuts);
+  if (deletes && result.draftDeletes.length) {
+    await sink.bulkDelete("drafts", result.draftDeletes);
+    // A body never outlives its draft.
+    await sink.bulkDelete("draft_commands", result.draftDeletes);
+  }
+}
+
+/** The drafts whose receipt bookkeeping a recovery may do (P-7): settled by an acknowledgement, never unsent work. */
+export const acknowledgedOnly = (
+  _row: PendingEffectRow,
+  owner: DraftRow | undefined,
+): boolean => owner?.status === "acknowledged";
+
 export async function reconcileInWindows(
   input: WindowedReconcile,
 ): Promise<Reconciled["stats"]> {
@@ -161,47 +266,16 @@ export async function reconcileInWindows(
   };
 
   // ---- effects and the drafts that own them ---------------------------------------------------------------------------------
-  const effectWindow = async (rows: PendingEffectRow[]): Promise<void> => {
-    const owners = [...new Set(rows.map((row) => row.local_id))];
-    const headers: DraftRow[] = [];
-    for (const header of await reader.bulkGet("drafts", owners))
-      if (header !== undefined) headers.push(header);
-    const inWindow = new Set(rows.map(effectKeyString));
-    let result = reconcileEffects({
-      effects: rows,
-      drafts: headers,
+  const effectWindow = (rows: PendingEffectRow[]): Promise<void> =>
+    reconcileEffectWindow(reader, sink, rows, {
       mentions,
       facts,
+      window,
+      stats,
+      ...(input.recovery === true
+        ? { select: acknowledgedOnly, deletes: false }
+        : {}),
     });
-    if (result.draftDeletes.length > 0) {
-      const others = new Set<string>();
-      for (const owner of result.draftDeletes)
-        if (await hasOtherDisplaying(reader, owner, inWindow, window))
-          others.add(owner);
-      if (others.size > 0)
-        result = reconcileEffects({
-          effects: rows,
-          drafts: headers,
-          mentions,
-          facts,
-          othersDisplaying: others,
-        });
-    }
-    stats.mentioned += result.stats.mentioned;
-    stats.resolvedNoPublication += result.stats.resolvedNoPublication;
-    stats.heldReleased += result.stats.heldReleased;
-    stats.unavailable += result.stats.unavailable;
-    if (result.effectPuts.length)
-      await sink.bulkPut("pending_effects", result.effectPuts);
-    if (result.effectDeletes.length)
-      await sink.bulkDelete("pending_effects", result.effectDeletes);
-    if (result.draftPuts.length) await sink.bulkPut("drafts", result.draftPuts);
-    if (result.draftDeletes.length) {
-      await sink.bulkDelete("drafts", result.draftDeletes);
-      // A body never outlives its draft.
-      await sink.bulkDelete("draft_commands", result.draftDeletes);
-    }
-  };
 
   if (input.walkAllEffects) {
     let after: Key | null = null;
@@ -269,7 +343,7 @@ export async function reconcileInWindows(
     const result = reconcileVersions({ versions, mentions, outstanding });
     if (result.versionPuts.length)
       await sink.bulkPut("resource_versions", result.versionPuts);
-    if (result.versionDeletes.length)
+    if (result.versionDeletes.length && input.recovery !== true)
       await sink.bulkDelete("resource_versions", result.versionDeletes);
   }
   return stats;

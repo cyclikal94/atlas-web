@@ -1,4 +1,5 @@
 import { type Booted, boot } from "../../app/boot";
+import { getPageDataHost } from "../../data";
 import {
   createBroadcastHints,
   createWebLocksPort,
@@ -45,6 +46,23 @@ export interface SessionHarness {
   /** Write any of the `atlas-auth` records directly (for example a `pending_deletions` entry another visit left behind). */
   seedRecords(records: Record<string, unknown>): Promise<void>;
   readRecords(): Promise<unknown>;
+  /**
+   * FIXTURE ONLY (WEB-09b): what the PRODUCTION leader of this page is doing (`?leader=production`), read from the page host the
+   * provider also reads: the election's role, the attachment, the engine's and the recovery job's states, the job's exclusivity and its
+   * Q24 notice. A content-free snapshot for the native specs; it changes nothing.
+   */
+  leader(): {
+    role: string;
+    attachment: string;
+    engine: unknown;
+    job: unknown;
+    exclusive: boolean | null;
+    notice: unknown;
+  };
+  /** FIXTURE ONLY: the job's own retry ("Try again" / "Retry applying changes"), as the screens call it. */
+  leaderRetry(): void;
+  /** FIXTURE ONLY: the production engine looks now (its own `nudge`), so a test need not wait for the live-edge poll. */
+  leaderNudge(): void;
 }
 
 const params = new URLSearchParams(location.search);
@@ -97,6 +115,35 @@ const harness: SessionHarness = {
       result: structuredClone(records),
     })).complete;
   },
+  leader() {
+    const attachment = getPageDataHost().leader.get();
+    const role = harness.booted?.leader?.role.get().kind ?? "none";
+    if (attachment.role !== "leader")
+      return {
+        role,
+        attachment: attachment.role,
+        engine: null,
+        job: null,
+        exclusive: null,
+        notice: null,
+      };
+    return {
+      role,
+      attachment: "leader",
+      engine: attachment.engine.state.get(),
+      job: attachment.recovery.state.get(),
+      exclusive: attachment.recovery.exclusive.get(),
+      notice: attachment.recovery.notice.get(),
+    };
+  },
+  leaderRetry() {
+    const attachment = getPageDataHost().leader.get();
+    if (attachment.role === "leader") attachment.recovery.retryNow();
+  },
+  leaderNudge() {
+    const attachment = getPageDataHost().leader.get();
+    if (attachment.role === "leader") attachment.engine.nudge("now");
+  },
 };
 // The data harness is attached too, so one page can run the production session AND arrange or inspect real rows in the
 // account databases (it shares the page registry the production deletion ports use).
@@ -110,6 +157,9 @@ window.__atlasFixture = { ...fixtureHooks, session: harness };
 // FIXTURE ONLY: the contention measurements scale the session's lock wait so a "closing write gives up" can be observed many times
 // (`?lockWaitMs=1000`); the result says it was scaled. Production never sets a session constant.
 const scaledLockWait = Number(params.get("lockWaitMs"));
+// FIXTURE ONLY (WEB-09b, P-13): the PRODUCTION sync leader runs only when the page asks (`?leader=production`), so the specs that drive
+// the data harness's own test leader keep their meaning and two engines never issue `/sync` on one page.
+const productionLeader = params.get("leader") === "production";
 let startedByTest: Promise<Booted | null> | null = null;
 const startBoot = (): Promise<Booted | null> => {
   harness.ready = boot({
@@ -117,6 +167,7 @@ const startBoot = (): Promise<Booted | null> => {
       ? { config: { lockWaitMs: scaledLockWait } }
       : {}),
     neutralRoot,
+    dataLeader: productionLeader,
     trace: {
       emit(event, data) {
         harness.trace.push({ at: Date.now(), event, data });

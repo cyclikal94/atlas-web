@@ -123,6 +123,11 @@ export function stubEnv(
     retryUpdates: record("retryUpdates"),
     retryChanges: record("retryChanges"),
     retryLoad: record("retryLoad"),
+    acknowledgeResync: record("acknowledgeResync"),
+    saveAsNew: async (localId) => {
+      calls.push({ action: "saveAsNew", args: [localId] });
+      return { kind: "refused", reason: "not_rebuildable" };
+    },
     showNextQueue: record("showNextQueue"),
     showPreviousQueue: record("showPreviousQueue"),
     discard: async (localId) => {
@@ -148,6 +153,7 @@ export function stubEnv(
     service: () => null,
     serviceStore: new Cell(null),
     attachLeader: () => () => undefined,
+    attachFollower: () => () => undefined,
     start: () => undefined,
     dispose: () => undefined,
     calls,

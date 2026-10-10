@@ -28,6 +28,7 @@ import {
   checkCapabilities,
   probeCapabilities,
 } from "./capabilities";
+import { type DataLeaderHandle, dataLeader } from "./data-leader";
 import { SessionRoot } from "./SessionRoot";
 import { signInStub } from "./sign-in-stub";
 
@@ -44,6 +45,8 @@ import { signInStub } from "./sign-in-stub";
 export interface Booted {
   session: Session;
   store: OpenedAuthStore;
+  /** The page's production sync leader (WEB-09b), or null when the composition does not start one (a fixture page that asks not to). */
+  leader: DataLeaderHandle | null;
 }
 export interface BootOptions {
   neutralRoot: HTMLElement;
@@ -57,6 +60,12 @@ export interface BootOptions {
    * Production passes none: `main.tsx` never sets it.
    */
   config?: NonNullable<CreateSessionOptions["config"]>;
+  /**
+   * WEB-09b (P-13): start the production sync leader (the election, the engine, the dispatcher and the recovery job) at session level.
+   * Defaults to TRUE and `main.tsx` never passes `false` (a static test asserts it). Only the fixture session harness turns it off, so its
+   * own test leader and the evidence recorded with it keep their meaning (two engines must never issue `/sync` on one page).
+   */
+  dataLeader?: boolean;
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
@@ -131,11 +140,16 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     },
   );
   renderTree = createProtectedTree(session);
+  const leads = options.dataLeader !== false;
+  // Before the session starts: the protected tree may be mounted during `start`, and its provider must then wait for the PAGE's runtime
+  // that the leader composes rather than build one of its own (P-3).
+  if (leads) dataLeader.announce();
   render(
     <SessionProvider session={session}>
       <SessionRoot />
     </SessionProvider>,
   );
   await session.start({ beforeStart: options.beforeStart });
-  return { session, store: opened };
+  const leader = leads ? dataLeader.start(session, options.trace) : null;
+  return { session, store: opened, leader };
 }

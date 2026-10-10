@@ -11,6 +11,7 @@ import "../../src/data/plans/outbox";
 import "../../src/data/plans/profile";
 import "../../src/data/plans/sync-writers";
 import "../../src/data/plans/retry-state";
+import "../../src/data/plans/recovery-writers";
 
 /**
  * F-S7 and lint rule R18 (plan 5.2.4): the writer inventory is the authority. Every registered plan must belong to a writer of
@@ -90,6 +91,33 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
     durability: "strict",
   },
   W19: { name: "captureRequest", guards: ["INC"], durability: "default" },
+  // WEB-09b: ownership, the staged snapshot and its activation, the recovery-scoped retry classes.
+  W20: {
+    name: "acquireOwnership",
+    guards: ["INC", "CLS"],
+    durability: "strict",
+  },
+  W21: {
+    name: "captureRecoveryRequest",
+    guards: ["INC", "CLS", "OWN"],
+    durability: "default",
+  },
+  W22: {
+    name: "commitStagingPage",
+    guards: ["INC", "CLS", "STG", "GEN", "OWN", "EPO"],
+    durability: "default",
+  },
+  W23: {
+    name: "activateSnapshot",
+    guards: ["INC", "CLS", "STG", "GEN", "OWN", "EPO"],
+    durability: "default",
+  },
+  W24: {
+    name: "recordRecoveryOutcome",
+    guards: ["INC", "CLS", "OWN", "GEN"],
+    durability: "strict",
+  },
+  W25: { name: "resetRecoveryBudget", guards: ["INC"], durability: "strict" },
 };
 
 /**
@@ -114,6 +142,12 @@ const PRESENT_WRITERS: readonly string[] = [
   "W16",
   "W18",
   "W19",
+  "W20",
+  "W21",
+  "W22",
+  "W23",
+  "W24",
+  "W25",
 ];
 
 describe("F-S7: the writer inventory", () => {
@@ -210,6 +244,9 @@ describe("F-S7: the writer inventory", () => {
     // recovery copy by its port. Each reads the reservation's `live()` where its plan decides what to write (the plan's `leaseLive`).
     const ADMITTED = [
       "data.commitPage",
+      // WEB-09b: a staged snapshot page and the activation are admitted like a delta page, by the job that commits them.
+      "data.commitStagingPage",
+      "data.activateSnapshot",
       "data.enqueueDraft",
       "data.editQueuedDraft",
       "data.supersedeDraft",
@@ -229,9 +266,9 @@ describe("F-S7: the writer inventory", () => {
         .sort(),
     ).toEqual([...ADMITTED, ...FIXED_SIZE].sort());
   });
-  test("the table is exactly W1 to W19", () => {
+  test("the table is exactly W1 to W25 (W20 to W25 are WEB-09b's)", () => {
     expect(Object.keys(WRITER_TABLE)).toEqual(
-      Array.from({ length: 19 }, (_, i) => `W${i + 1}`),
+      Array.from({ length: 25 }, (_, i) => `W${i + 1}`),
     );
   });
 });

@@ -10,6 +10,15 @@
 
 export type { ReadResult } from "./engine/identity-task";
 export type {
+  RecoveryJobState,
+  ResyncNotice,
+} from "./engine/recovery-job";
+// ---- production leadership (WEB-09b): the boot shim is static and tiny; the leader itself is a dynamic import ---------------------
+export type { LeaderRole } from "./leader/election";
+export { getPageDataHost, type PageDataHost } from "./leader/page-host";
+export { markLeaderStarted } from "./leader/presence";
+export { type DataLeaderHandle, startDataLeader } from "./leader/start";
+export type {
   Bases,
   BuildResult,
   EnqueueRequest,

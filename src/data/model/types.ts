@@ -268,6 +268,22 @@ export interface SyncStateRow {
   } | null;
   staging_position: string | null;
   expected_position: string | null;
+  /**
+   * WEB-09b (all optional and read with their defaults, so a database created before them needs no migration):
+   *  - `staging_started_at`: the client clock of the cursor-less capture that began the staged attempt, the one-hour bound of
+   *    adoption (Q7); `staging_request_seq`: that capture's `request_seq`, the boundary for receipts at activation;
+   *  - `staging_revision`: the snapshot's boundary revision (every page of one snapshot carries it); `staging_bytes`: the staged bytes;
+   *  - the three recovery-scoped retry classes (absent = 0) and `recovery_budget_version`, the version of the whole-attempt failure
+   *    that a person's "Try again" ends (R53-style: a newer trip is never cleared by an older act).
+   */
+  staging_started_at?: number | null;
+  staging_request_seq?: number | null;
+  staging_revision?: number | null;
+  staging_bytes?: number;
+  sync_error_streak?: number;
+  delta_error_streak?: number;
+  recovery_attempt_streak?: number;
+  recovery_budget_version?: number;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

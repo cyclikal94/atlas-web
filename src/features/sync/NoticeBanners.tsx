@@ -8,7 +8,10 @@ import {
   useNotices,
   useOptionalDataEnv,
 } from "../../data";
+import { useSession } from "../../session";
 import {
+  ACCESS_CHANGED_BODY,
+  ACCESS_CHANGED_TITLE,
   COMPAT_MISSING_BODY,
   COMPAT_TITLE,
   COMPAT_UNSUPPORTED_BODY,
@@ -24,6 +27,9 @@ import {
   PAGE_NOT_SAVED_TITLE,
   QUEUE_WARNING_BODY,
   QUEUE_WARNING_TITLE,
+  RESYNC_ACKNOWLEDGE,
+  RESYNC_REQUIRED_BODY,
+  RESYNC_REQUIRED_TITLE,
   STILL_TRYING_ACTION,
   STILL_TRYING_CHANGES_BODY,
   STILL_TRYING_CHANGES_TITLE,
@@ -39,6 +45,10 @@ import {
   STORAGE_NOT_RESPONDING_ACTION,
   STORAGE_NOT_RESPONDING_BODY,
   STORAGE_NOT_RESPONDING_TITLE,
+  SYNC_BLOCKED_BODY,
+  SYNC_BLOCKED_RELOAD,
+  SYNC_BLOCKED_RETRY,
+  SYNC_BLOCKED_TITLE,
   UNRECOGNISED_ACTION,
   UNRECOGNISED_BODY,
   UNRECOGNISED_TITLE,
@@ -107,7 +117,9 @@ const keyOf = (notice: Notice): string =>
         ? `still_trying-${notice.scope}`
         : notice.kind === "compat_paused"
           ? `compat-${notice.reason}`
-          : notice.kind;
+          : notice.kind === "resync_notice"
+            ? `resync-${notice.id}`
+            : notice.kind;
 
 function titleOf(notice: Notice): string {
   switch (notice.kind) {
@@ -133,6 +145,12 @@ function titleOf(notice: Notice): string {
       return UNRECOGNISED_TITLE;
     case "queue_warning":
       return QUEUE_WARNING_TITLE;
+    case "sync_blocked":
+      return SYNC_BLOCKED_TITLE;
+    case "resync_notice":
+      return notice.reason === "access_changed"
+        ? ACCESS_CHANGED_TITLE
+        : RESYNC_REQUIRED_TITLE;
   }
 }
 
@@ -269,6 +287,32 @@ function NoticeView({
           <p>{UNRECOGNISED_BODY}</p>
         </Banner>
       );
+    case "sync_blocked":
+      return <SyncBlocked onRetry={() => actions.retryUpdates()} />;
+    case "resync_notice":
+      return (
+        <Banner
+          kind={`resync_${notice.reason}`}
+          tone="info"
+          title={titleOf(notice)}
+          actions={
+            <Button
+              onClick={() => {
+                actions.acknowledgeResync(notice.id);
+                onDismiss();
+              }}
+            >
+              {RESYNC_ACKNOWLEDGE}
+            </Button>
+          }
+        >
+          <p>
+            {notice.reason === "access_changed"
+              ? ACCESS_CHANGED_BODY
+              : RESYNC_REQUIRED_BODY}
+          </p>
+        </Banner>
+      );
     case "queue_warning":
       return (
         <Banner kind="queue_warning" tone="info" title={QUEUE_WARNING_TITLE}>
@@ -280,6 +324,34 @@ function NoticeView({
         </Banner>
       );
   }
+}
+
+/**
+ * The persistent, blocking state of the recovery budgets (WEB-04 design 5.11): no automatic request is issued while it stands. Reload
+ * is the session's own (a page load permits one attempt, subject to the same counters); Try again starts a fresh budget for the whole
+ * attempt and permits one attempt.
+ */
+function SyncBlocked({ onRetry }: { onRetry(): void }) {
+  const session = useSession();
+  return (
+    <Banner
+      kind="sync_blocked"
+      tone="error"
+      title={SYNC_BLOCKED_TITLE}
+      actions={
+        <>
+          <Button onClick={() => session.actions.reload()}>
+            {SYNC_BLOCKED_RELOAD}
+          </Button>
+          <Button variant="primary" onClick={onRetry}>
+            {SYNC_BLOCKED_RETRY}
+          </Button>
+        </>
+      }
+    >
+      <p>{SYNC_BLOCKED_BODY}</p>
+    </Banner>
+  );
 }
 
 /** Announces a banner once, when it first appears; never on first render. */
@@ -347,6 +419,8 @@ const GLOBAL: ReadonlySet<Notice["kind"]> = new Set([
   "still_trying",
   "device_capacity",
   "unrecognised",
+  "sync_blocked",
+  "resync_notice",
 ]);
 
 /** The blocking notices at the top of every screen of the shell. Renders nothing with no data layer mounted, or nothing to say. */

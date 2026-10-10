@@ -100,6 +100,12 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W17 | the creation of the database: the versionchange transaction of the Dexie adapter (not a plan) | the creation lock |
 | W18 | `invalidateCache` | INC (and the response guards) |
 | W19 | `captureRequest` (the `request_seq` capture) | INC |
+| W20 | `acquireOwnership` (WEB-09b: the binding's ownership token and the adopt-or-restart decision, one transaction) | INC, CLS |
+| W21 | `captureRecoveryRequest` (WEB-09b: the recovery job's gate and capture; a cursor-less capture begins the attempt) | INC, CLS, OWN |
+| W22 | `commitStagingPage` (WEB-09b: one snapshot page into `cache_staging`) | INC, CLS, STG, GEN, OWN, EPO |
+| W23 | `activateSnapshot` (WEB-09b: the final page and the swap, one transaction) | INC, CLS, STG, GEN, OWN, EPO |
+| W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment) | INC, CLS, OWN, GEN |
+| W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -629,11 +635,73 @@ through an open service (it never opens, and so never creates, a database), and 
 the current epoch is shown with no request, one persisted for another epoch is not, and an identity that moves while the read is pending shows nothing of it. A name verified
 **before** the database was open is written to it when it opens, if it is the current epoch's and the database does not already hold it.
 
+## Snapshot, production leadership and recovery (WEB-09b)
+
+*Added by WEB-09b, 10 October 2026. Fixture evidence only where it says so; none of it is integration or release evidence.*
+
+**Leadership.** `boot.tsx` starts the production sync leader at session level (`startDataLeader`, a static shim over a dynamic import of `src/data/ui/browser-leader.ts`), so it
+keeps running while the account is fenced and the protected tree is unmounted, which is when recovery must run (matrix 3.7.1, 3.7.3). The leader requests ONE fixed,
+origin-wide exclusive Web Lock, `atlas-sync-leader` (`syncLeaderLock`): `tryAcquire`, else an ordinary request that stays queued for the page's life (a follower). The lock is
+never released across a logout, a retirement, an account switch or a re-authentication; the holder re-points itself by REBINDING (D 6.1, 7.8 step 4; reconciliation row 6
+case 5). There is no heartbeat takeover and no Web-Locks fallback (Q12): a frozen leader stalls sync in the other tabs until it resumes or is discarded (the platform then
+releases the lock). `navigator.locks.query()` is never called.
+
+**A binding** is (leader, account, incarnation): one `AbortController`, one ownership token written by W20, and the engine, the dispatcher and the recovery job started with
+`{ token, signal }`. W20 ADOPTS a staged attempt that is at least `snapshotAdoptMarginMs` inside the one-hour snapshot lifetime by the client clock of its cursor-less capture
+(same generation, resumed at `staging_position`, its staged rows kept), and otherwise RESTARTS (a new generation, every staged row cleared, cursor-less) in the same
+transaction (Q7, cases (a) to (c)); a clock that moved backwards restarts. An open that is refused, closed or abandoned is unknown, never absence: the leader looks again on
+the session's next notification, paced. The leader NEVER reopens by itself when its service ends (a wipe's latch, another tab's deletion or upgrade), and opens nothing while a
+logout or retirement is pending (row 3), because `openAccountData` opens an existing database without the may-create predicate and would lift the closure's latch.
+
+**One runtime per page.** The provider's own runtime is disposed with the tree, and `Service.dispose("closed")` latches the page's registry, which would close the leader's
+connections at every fence. So when a leader is started on a page (`markLeaderStarted`, before `session.start`, since the tree may mount during it) the provider uses the PAGE's
+runtime that the leader composed, waits for it rather than building a second one, and never disposes it. A page with no production leader (the fixture harness unless
+`?leader=production`) behaves exactly as before. The page host (`getPageDataHost`) also holds the page's ONE markers object (its directory slot leased by every controller
+that runs) and the command and conflict registries feature slices register into once.
+
+**The recovery job** (`src/data/engine/recovery-job.ts`) is the `RecoverySeam`. While it needs the cache (`exclusive`) the engine is stopped, so one `/sync` is in flight;
+it is started again with the same ownership when the job is done. The engine and the dispatcher run only while the bound account is DISPLAYED: while it is fenced or not
+yet exposed neither may send anything, and a request they tried would be refused by the session, whose re-evaluation would wake them again (a loop of refused requests that
+the first integration run of the production leader showed; `tests/data/leader.test.ts` L-10 holds it). The job is what reads while the account is fenced. It has two modes over one implementation:
+
+* ORDINARY (the account is displayed): a fresh database (`empty`), an invalidated cache (W18's `410`/`400`/`422` on a delta cursor) or an abandoned attempt is snapshotted
+  with ordinary requests while the cache stays hidden through `cache_status`.
+* RECOVERY (matrix 3.7.3, the account fenced): only after `session.recovery.begin` says `eligible` (each `ineligible` reason sends nothing; `unresolved_lease` and `stale`
+  are asked again, paced). Recovery-class requests only: a catch-up from a valid saved cursor through W1 in recovery mode, else a replacement snapshot; the DATA COMMIT, then
+  `finish`. `cleared` returns the engine; `rerun`/`superseded` begin again with a new `s`; `not_eligible` waits; `lock_timeout`/`failed` ask `finish` again, alone. A
+  recovery-time `auth_state` (`401`, `credential_mismatch`) stops the run with nothing counted; the re-authentication's new epoch begins again. `report` drives neutral states 2
+  and 3. The job never mounts or permits anything: display is decided afterwards by the session's ordinary exposure.
+
+**The staged snapshot** (D 4.1, reconciliation row 3): each page is one transaction (W22) into `cache_staging`, tagged with the generation, admitted by the staging
+compare-and-set (STG: `staging_position` must equal the captured position), GEN, OWN, INC, CLS and EPO; every page must carry the snapshot's one boundary revision. The final
+page and the swap are ONE transaction (W23): the cache is cleared, every staged row of the current generation is copied in keyset windows (`activationWindow`; memory is
+bounded by the window, the transaction stays one) and removed from staging, and the delta cursor (verbatim), `phase: "delta"`, `cache_status: "valid"` and
+`applied_revision` (the boundary) are committed with it. The staged rows are admitted by generation alone, so rows an earlier owner staged and this one adopted are eligible.
+A failure anywhere rolls the whole activation back.
+
+**Local work is preserved (P-7).** No WEB-09b plan writes the header, the body or an effect row of an unsent draft, and `draft_commands` is outside every WEB-09b scope in
+recovery mode. The activation does the receipt bookkeeping of ACKNOWLEDGED drafts that the snapshot covers (receipt revision at or below the boundary: present means released,
+absent means `no_publication` and `unavailable_outcome`), because skipping it would turn an applied, acknowledged change into "not showing" at the first live-edge page; a
+newer receipt is left to the first delta page. In recovery mode nothing at all is deleted, and an abandonment goes through W24 (no overlay writes) instead of W18.
+
+**Q24.** A `410 resync_required` or a snapshot-phase `409 access_changed` restarts automatically, uncounted; the chip reads "Catching up" from the instant the answer arrives
+(`active`), and a dismissible notice per generation carries the wireframe's copy with a single **Acknowledge** that only dismisses. A failed local commit is retried as the
+whole page from the same position (`snapshot-page:<generation>:<position>` and `snapshot-activate:<generation>` in `local_write_streaks`; `page:<cursor>` on the catch-up path),
+three failures stop it ("Retry applying changes").
+
+**Followers (P-11).** A page that does not lead derives its status from the durable facts it already re-reads (a valid cache that has synced is "Up to date"; a cache that is
+not valid is "Catching up"), never "Updates stopped" merely because another page leads. A follower cannot see a frozen leader: the stated limit of P-2.
+
 ## Retry budgets this slice owns
 
 Four of the seven classes of the reconciliation (`src/data/model/retry.ts`): network or 5xx on a draft submission, network or 5xx on a read, unrecognised responses on a read
-(three consecutive ones stop the caller, durably), and a local write failure that is not a quota (three stop **that operation**, durably, per operation: R5). The three recovery-scoped classes are WEB-09b's and nothing in
-`src/data` writes them. `not_sent`, `not_covered`, `closed`, `stale` and `auth_state` increment none of these. A back-off is duration-based and its clock is durable, so a
+(three consecutive ones stop the caller, durably), and a local write failure that is not a quota (three stop **that operation**, durably, per operation: R5). The three recovery-scoped classes are WEB-09b's (W24, W25;
+`src/data/model/recovery.ts`): `sync_error_streak` (cursor-less `400`/`422`/unrecognised; three are the blocking "Sync can't proceed" state), `delta_error_streak` (unrecognised
+answers on the current recovery-phase cursor; three abandon it), and `recovery_attempt_streak` (error-driven restarts of the whole attempt; three are the blocking state; reset
+ONLY by an activation that commits or the person's "Try again", never by a page's success). `410` and `409 access_changed` count nothing. While blocked no automatic request is
+issued; a page load permits one attempt subject to the same counters, and "Try again" resets the whole-attempt counter (for the failure it saw) and permits one. That attempt is
+used only by a request that is **sent**: a capture withheld at the issue check keeps it, and so does a request the session refuses before sending it (`not_sent`,
+`not_covered`; the post-display verification's detection hold refuses calls made in that moment). `not_sent`, `not_covered`, `closed`, `stale` and `auth_state` increment none of these. A back-off is duration-based and its clock is durable, so a
 reload does not restart it. Two ordinary callers use the read classes since revision 12: the profile read and the device mirror (the section above), each keyed by sign-in
 (`profile:<epoch>`, `device:<epoch>`) in `read_retry_states`; `recordReadOutcome` takes `known` (what the page already counted) and `supersedes` (a caller family keyed by
 sign-in), and `readReadRetry` is the read-only plan that reads an entry.
@@ -670,10 +738,39 @@ Every one is in `src/data/model/config.ts`, none is measured, and the right-hand
 | `quotaLedgerAttempts`, `quotaLedgerRetryMs` | 4 tries, 20 ms doubling (how often one reservation asks a ledger that REJECTS the call, and the first wait between two tries; R28 revision 15) | engineering default (a transient failure of one tiny record) | the roster |
 | `stampedRequestTimeoutMs` | 30 s (WEB-08a's) | provisional | P-10: measured here, unchanged |
 | `maxInFlight` | 1 | decision D-18 | P-5 (only 1 is measurable) |
+| `syncLeaderLock` | `atlas-sync-leader` | D 6.1 (a name, not a measurement) | fixed |
+| `snapshotCursorLifetimeMs` | 3,600,000 ms | the backend's one-hour snapshot session (D 4.1 item 3) | the backend contract |
+| `snapshotAdoptMarginMs` | 60,000 ms | engineering default (the client's clock of the capture is earlier than the server's start) | WEB-09c |
+| `syncErrorStopAfter`, `deltaErrorAbandonAfter`, `recoveryAttemptStopAfter` | 3, 3, 3 | the reconciliation's proposed bound ("same order of magnitude") | a cadence decision |
+| `activationWindow` | 500 staged rows per window | engineering default | WEB-09c (activation of dense content inside the 30 s hold) |
+| `recoveryBeginRetryMs`, `recoveryBeginRetryMaxMs` | 1 s, doubling to 60 s | engineering default (the job's look at a session that is not eligible yet) | a cadence decision |
 
 The session's own two constants for the persistence hold (`SessionConfig.persistenceHoldMs`, 30 s, and `persistenceStallMs`, 10 s) are provisional and unmeasured: the hold's bound is a deadline for the whole commit (queue wait included) and is kept at least 10 s above `syncApplyWatchdogMs`; the stall bound is only when work that is still unresolved after a revocation is traced (`persistence.stalled`), and releases nothing (P-7 and a real freeze are what would tune them).
 
 ## Departures from the plan, for the reviewer
+
+* **WEB-09b departures from its own plan** (`.agtx/plan.md`, 10 October 2026), each called out for the reviewer:
+  (1) **one runtime per page** when a production leader runs (the plan said the leader owns "its own `DataRuntime` on the page's shared connection registry"): the provider's
+  disposal latches the page's registry and would end the leader's service at every fence, so the provider uses the page's runtime instead and never disposes it;
+  (2) **recovery-mode abandonment through W24, not W18** (the plan reused W18): W18 drops every overlay display, which writes the effect rows of unsent drafts that matrix 3.7.3
+  says recovery must not touch;
+  (3) **the activation's receipt rule** is by receipt revision against the snapshot's boundary (the plan said only "held receipt released"): a snapshot covers a receipt only if
+  the receipt is at or below the boundary, so a newer one is left to the first delta page rather than released against content that predates it;
+  (4) **the leader never reopens by itself** and opens nothing while a logout or retirement is pending (not in the plan): `openAccountData` opens an existing database without the
+  may-create predicate and would lift a wipe's latch;
+  (5) **P-7 is an interpretation**: "touch no draft, `pending_effects` or outbox entry" is read as "no unsent work", and the receipt bookkeeping of acknowledged drafts is done
+  (switchable); the alternative's consequence is a false "not showing here yet" after every recovery;
+  (6) the blocked state's "Try again" also permits one attempt when the cursor-less counter is the one at its bound (it resets nothing then), as a reload does;
+  (7) WF-QUEUE-02 gained `CommandSpec.onlineOnly` besides the planned `rebuild`, to choose the online-only variant without inventing an error code;
+  (8) **the engine and the dispatcher run only while the bound account is displayed** (the plan said the dispatcher keeps running under a fence): a refused request
+  re-evaluates the session, which notified both again, a loop for as long as the fence stood (found by I-N4 against the released backend);
+  (9) a snapshot page's local-write identity is its POSITION alone (`snapshot-page:start`, `snapshot-page:at:<cursor>`), and the final page's activation counts under
+  it (the plan named `snapshot-page:<generation>:<position>` and `snapshot-activate:<generation>`): W20 restarts under a new generation whenever nothing is staged, so
+  an identity carrying the generation let a reload forget three failures (found by E-B14 in a real engine);
+  (10) **the permitted attempt is returned when nothing was sent** (the plan said only "a page load permits one attempt"): the job spent it as it called the session, and
+  a call the session refused before sending it (the post-display verification's detection hold, `not_sent`) left a reloaded page blocked having sent nothing (found by
+  E-B13 in WebKit, twice; the attached kernel trace shows `data.recovery_request` followed by `activity.cancel` with reason `hold`). Regression tests in
+  `tests/data/recovery-job.test.ts`, mutants MU-1233 and MU-1234.
 
 * The raw-IndexedDB host is `store/idb-host.ts` (the plan said `account-database.ts` for the exists/incarnation/delete functions, which now sit in `ports/account-database.ts`
   over that host).
@@ -750,7 +847,13 @@ The session's own two constants for the persistence hold (`SessionConfig.persist
 | L1c | `tests/e2e/fixture.data-*.spec.ts`, `fixture.sync-screens.spec.ts` in Chromium, Firefox and WebKit (among them E-A1 and E-A4, a version-1 database upgraded in place; E-O4, a long queue of large retained drafts in two tabs; E-R1 and E-R2, form recovery across a real reload and overlapping ports; E-P1, the persistence hold with real Web Locks and the real `atlas-auth` store; E-P2, a hold that runs out, over real Web Locks, a real timer and a real Dexie transaction queued behind a real one; E-C5 and E-C6, an admitted invalidation's failed write, its retry, an offline wake, a second tab and a reload, with the production controller's gate; E-C9, the profile and device reads of two real tabs (a healthy control, a 404, a 503, a connection reset, a reload that now asks nothing at all, `online`), E-C10, an offline start's persisted name, and E-C11, a database that binds late (the listing held for 1.5 s: a durable pause honoured across three remounts, the controls), malformed identity bodies, and a look that FAILS (`indexedDB.databases()` rejecting for ever or for 4 s: nothing asked, the budget read on recovery, genuine absence, an offline persisted name); E-C13, a wake that arrives while a sync step runs (the engine over real IndexedDB and real timers); E-C14, an open that FAILS is never an absence (the production ports, the page's opener on both connections and an aborted open request of an existing database, with `indexedDB.open` named-fault injections, and the identity reads over it); E-O6, a defaults context charged to the quota on enqueue, edit and supersede, and two real pages of one origin sharing the origin's quota ledger (a simultaneous race with room for one, the control with room for both, a delayed estimate with no hint, a slow ledger, a page closed with its hold outstanding; the free space a named injection); E-O5, a supersession under a key that already names a draft (a sent one, the old one) and its retry, and a base-dependent 900 KB command charged its real size on enqueue, edit and supersede, for a command only its bases can build and for one no estimate can size (the free space a named injection); E-C15, the engine's ownership seam over real timers and a real `AbortSignal` (a restart and a late abort of the replaced signal against a real `Retry-After`) and a `stop()` or a lost ownership during a held quota read; and conformance cases C-14, the abort of a queued, an applying and a completed transaction, and C-15, `anyOf` and `offset`) | the adapter, the host, the open predicate, the wipe, the upgrade, the hold, the payload split and the bounded queue reads in three real engines on this machine | real Safari, any device, assistive technology, a real freeze or back/forward cache (visibility is an override), and **quota** (injected) |
 | L2 | `tests/integration/integration.data.spec.ts` against the **released** v0.27.0-rc.1 on SQLite behind the delaying proxy | wire behaviour of the production session, engine and dispatcher on loopback | PostgreSQL, HTTPS, the unmodified Compose or Ingress arrangement, BE-B1, BE-Q23, any real device |
 
-The sync engine and the dispatcher are started by a **fixture** test leader, and the first snapshot is a **fixture** seeder's (the real first snapshot is WEB-09b's). Anything the
+In the WEB-09a specs the sync engine and the dispatcher are started by a **fixture** test leader, and the first snapshot is a **fixture** seeder's. Since WEB-09b the
+PRODUCTION leader has its own layers, opt-in on the fixture harness (`?leader=production`) so the earlier specs keep their meaning: L1a/L1b `tests/data/snapshot-plans`,
+`recovery-job`, `leader` (two to three pages on the fake Web Locks), `commit-page-recovery`, `follower-status`, `tests/features/sync/recovery-screens`; L1c
+`tests/e2e/fixture.data-leader.spec.ts` (E-B1 to E-B4, E-B10, E-B11 with a named delay injection, E-B12 and E-B13 (traces 5 and 6 across reloads), E-B14 with a named
+IndexedDB fault, and T24 A to F and H on a seeded recovery-eligible record: E-R1, E-R2, E-R3, E-R4 with a named fault, E-R6 with a named hold of `finish`, E-R8; T24 G is
+unit-level only) and the gated design measurement `fixture.design-snapshot.spec.ts`; L2 `tests/integration/integration.snapshot.spec.ts` (I-N1, I-N2
+proxy-injected, I-N4 a real revocation and a real re-sign-in, I-N6). None of it is WEB-08c's composed lifecycle acceptance or BE-Q19's. Anything the
 proxy injects (`rewrite_status` for a bare status, `replace_response` for an Atlas-formatted error body with its `code`) is labelled **proxy-injected** in the test name. Nothing here is release evidence and `integration_passed` stays false.
 
 The guards are shown to fail on their removal by a mutation catalogue run on **copies** of the source (`pnpm test:data-mutants`: 932 unit mutants (at revision 38; 914 at revision 37, 903 at revision 36, 888 at revision 35, 884 at revision 34, 875 at revision 33, 857 at revision 32), each with an unmutated control,
@@ -758,8 +861,9 @@ the count asserted; `pnpm test:engine-mutants`: 141 mutants through a real engin
 
 ## Seams
 
-* **WEB-09b** supplies `start(ownership)` for the engine and the dispatcher, the first snapshot, `RecoverySeam` (the default says no recovery is registered, so a `410` stops the
-  engine honestly), and the fields of `sync_state` that are its own.
+* **WEB-09b** supplies (since 10 October 2026) `start(ownership)` for the engine and the dispatcher through the production leader, the first snapshot, the recovery job behind
+  `RecoverySeam` (the default seam, which says no recovery is registered, remains for a page with no leader), the fields of `sync_state` that are its own, and the generic
+  WF-QUEUE-02 dialog with its `CommandSpec.rebuild` and `onlineOnly` seams.
 * **WEB-08c** owns the production decisions on the waits against a back-to-back leader and a frozen owner. P-6 to P-9 **are now measured on a desktop** (`pnpm profile:contention`, the spec `fixture.profile-contention.spec.ts`), with **a fixture leader** (not the production leader of
   WEB-09b), **synthetic** delays and a **synthetic** freeze (a main-thread block, not a real bfcache or freeze), a **scaled** lock wait where a production-length wait would not fit, and one real Chromium renderer crash; each result carries its label and
   `docs/profiling-devices.md` says what each does not show. A **real freeze, a mobile device and the production leader** remain gates.

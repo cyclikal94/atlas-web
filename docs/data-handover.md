@@ -28,9 +28,26 @@ Every outcome type is a closed union. A refusal is a value, never an exception, 
 * **Durable stops** live in three places: `sync_state.local_write_streaks` with failure versions (durable, per incarnation); immutable fallback markers in `localStorage` (`atlas-write-failing:<account>:<incarnation>:<operation>#<page>.<count>`, discovered by one `Object.keys` snapshot plus the slotted directories `atlas-write-dir:…`, whose slots are the Web Locks `atlas-write-slot:<n>`); and a page's memory (`LocalStops`, disclosed as memory-only). Retire only the exact instances and versions an act witnessed. Never read-modify-write a shared `localStorage` record across pages (measured to lose updates in Firefox and WebKit). Never call `navigator.locks.query()` in product code.
 * **Quota:** every input write is admitted by the origin's quota ledger (`quota-ledger.ts`) as a lease the guard renews. Input is refused last; never write around the reservation.
 
+## Production leadership, snapshot and recovery (WEB-09b, 10 October 2026)
+
+*Fixture-evidenced contract; not integration or release evidence. `docs/data-layer.md` ("Snapshot, production leadership and recovery") is the full record.*
+
+* **Production leads.** `boot.tsx` starts ONE sync leader per page at session level (`startDataLeader`, a dynamic import; `BootOptions.dataLeader` defaults to true and
+  `main.tsx` never turns it off). The leader holds the fixed origin-wide Web Lock `atlas-sync-leader` for the page's life and runs the engine, the dispatcher and the recovery
+  job in that page only; other pages follow (their request is queued) and send nothing. Do not start another engine or dispatcher in a production page.
+* **Register once, into the page host.** Feature slices register command kinds and conflict handlers into `getPageDataHost().commands` / `.conflicts` (the leader's
+  dispatcher and every screen read the same registries), not into a registry of their own. `CommandSpec.rebuild(draft, current)` offers "Resend as a new operation" /
+  "Review, then save as new" in WF-QUEUE-02 (nothing is offered without it); `CommandSpec.onlineOnly` selects the dialog's online-only variant.
+* **One runtime and one markers object per page.** With a leader on the page the provider uses the page's runtime (never disposed while the page lives) and the page's markers
+  (`getPageDataHost().markers`, its directory slot leased); anything that needs a writer on that page uses them too.
+* **Recovery is automatic and runs while fenced.** After a re-authentication the job asks `session.recovery.begin`, reads with the recovery class only, makes the data commit,
+  then `finish`; WEB-08c's exposure decides display afterwards. Unsent drafts, their bodies and effects are byte-identical through a recovery; nothing is replayed or deleted.
+* **Status.** `StatusInputs.recovery` may carry the job's `state` and Q24 `notice`; `follower` and `recoveryBlocked` are optional. `DataActions` gained `acknowledgeResync`
+  and `saveAsNew`; `retryUpdates` reaches the job while it holds a stop, pause or the blocking budget.
+
 ## What each following card owns
 
-* **WEB-09b** — the initial snapshot, **production leadership** (`start(ownership)` for the engine and the dispatcher) and recovery (`RecoverySeam`; without it a `410` stops the engine honestly), plus the `sync_state` fields that are its own. Its leader facade and dispatcher must use the same markers, channel, persistence hold and stop publication as above.
+* **WEB-09b** — the initial snapshot, **production leadership** (`start(ownership)` for the engine and the dispatcher) and recovery (`RecoverySeam`; without it a `410` stops the engine honestly), plus the `sync_state` fields that are its own. Its leader facade and dispatcher must use the same markers, channel, persistence hold and stop publication as above. *Delivered for review on 10 October 2026: see the section above.*
 * **WEB-08c** — composed lifecycle journeys and the production waits against a back-to-back leader and a frozen owner (desktop fixture measurements exist; a real freeze, mobile devices and the production leader remain gates).
 * **WEB-09c** — R9/Q9/Q23 measurements and the `WEB-09a:sync-profiling` evidence key for BE-B1/BE-Q23 (page size, dense valid content, memory, queue/quota reserve, request/lock costs, including the healthy-follower reads that `sync_state` hints cause), and the measured bundle budgets that replace the provisional figures in `perf-budget.json`. The fixture build's own initial JavaScript ceiling (its re-recorded baseline plus 10%, authorised for R61 in revision 39) holds only until then. Desktop evidence is not device acceptance.
 * **WEB-09d** — the retained whole functional browser suite, the session matrix, the full released-backend integration, affected performance acceptance, supported-device dense workloads, real lifecycle/freeze and accessibility ownership, and integrated acceptance (gates BE-B1, BE-Q23, BE-B2, BE-CH3).
@@ -38,4 +55,4 @@ Every outcome type is a closed union. A refusal is a value, never an exception, 
 
 ## Not claimed
 
-No PostgreSQL, HTTPS deployment, production leader, real device, real Safari or installed-app evidence. No guarantee of hint delivery after a page is killed. No cross-page serialisation of identity reads (two pages may overlap by one request before a shared pause is read). Fixture evidence is never integration evidence.
+No PostgreSQL, HTTPS deployment, production-leader integration evidence (WEB-09b's leader is fixture-evidenced; its focused integration against the released backend is reported separately and is not WEB-08c's composed acceptance), real device, real Safari or installed-app evidence. No guarantee of hint delivery after a page is killed. No cross-page serialisation of identity reads (two pages may overlap by one request before a shared pause is read). Fixture evidence is never integration evidence.

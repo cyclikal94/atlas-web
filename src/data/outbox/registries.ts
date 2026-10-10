@@ -1,3 +1,4 @@
+import type { EnqueueRequest } from "../model/outbox";
 import type { CacheRow, DraftRow, DraftWithCommand } from "../model/types";
 
 /**
@@ -18,6 +19,20 @@ export interface CommandSpec {
    * body, which the merged read of ONE resource joins for the queued creates against that resource.
    */
   projectCreate?(draft: DraftWithCommand): CacheRow | null;
+  /**
+   * WEB-09b's seam for the generic item-detail dialog (WF-QUEUE-02): a NEW command built from a failed or conflicting draft and the
+   * resource as the cache holds it now, for "Resend as a new operation" / "Review, then save as new". `null`: nothing can be rebuilt.
+   * A kind that registers none is never offered them: the dialog offers only what the store can do (discard).
+   */
+  rebuild?(
+    draft: DraftWithCommand,
+    current: CacheRow | null,
+  ): EnqueueRequest | null;
+  /**
+   * The command needs a connection and is never queued (enrolment, rota consent, a sharing or policy change): the dialog shows the
+   * online-only variant, with nothing to compare or resend.
+   */
+  onlineOnly?: boolean;
 }
 
 /**
@@ -32,6 +47,13 @@ export interface CommandRegistry {
   register(kind: string, spec: CommandSpec): void;
   describe(draft: DraftRow): string | null;
   projectCreate(draft: DraftWithCommand): CacheRow | null;
+  /** Whether the draft's kind registered `rebuild` (the dialog's "save as new" actions are offered only then). */
+  canRebuild(draft: Pick<DraftRow, "kind">): boolean;
+  rebuild(
+    draft: DraftWithCommand,
+    current: CacheRow | null,
+  ): EnqueueRequest | null;
+  onlineOnly(draft: Pick<DraftRow, "kind">): boolean;
 }
 
 export function createCommandRegistry(): CommandRegistry {
@@ -45,6 +67,11 @@ export function createCommandRegistry(): CommandRegistry {
     describe: (draft) => specs.get(commandKind(draft))?.describe(draft) ?? null,
     projectCreate: (draft) =>
       specs.get(commandKind(draft))?.projectCreate?.(draft) ?? null,
+    canRebuild: (draft) =>
+      typeof specs.get(commandKind(draft))?.rebuild === "function",
+    rebuild: (draft, current) =>
+      specs.get(commandKind(draft))?.rebuild?.(draft, current) ?? null,
+    onlineOnly: (draft) => specs.get(commandKind(draft))?.onlineOnly === true,
   };
 }
 
