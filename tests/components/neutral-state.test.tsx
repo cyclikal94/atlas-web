@@ -151,19 +151,6 @@ describe("neutral states (F-NS, F-UI)", () => {
     );
     expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
   });
-
-  test("the provisional 'sign-in isn't available' line is a status after the control", () => {
-    render(
-      <NeutralState
-        state="1b"
-        actions={actions()}
-        unavailable="Sign-in isn't available in this build yet."
-      />,
-    );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Sign-in isn't available in this build yet.",
-    );
-  });
 });
 
 describe("focus and the resume gate", () => {

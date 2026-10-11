@@ -9,6 +9,7 @@ import "../../src/data/plans/fence";
 import "../../src/data/plans/form-recovery";
 import "../../src/data/plans/outbox";
 import "../../src/data/plans/profile";
+import "../../src/data/plans/recovery-writers";
 import "../../src/data/plans/retry-state";
 import "../../src/data/plans/sync-writers";
 import { listPlans } from "../../src/data/plans/registry";

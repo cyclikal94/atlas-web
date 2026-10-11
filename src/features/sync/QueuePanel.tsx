@@ -7,6 +7,7 @@ import {
   type DraftRow,
   useCommandDescription,
   useDataActions,
+  useDataEnv,
   useDraftQueue,
   useQueueSummary,
   useStatusInputs,
@@ -21,6 +22,7 @@ import {
   ACTION_RETRY_BLOCKED,
   ACTION_REVIEW,
   CANNOT_DISCARD,
+  DETAIL_ACTION,
   DISCARD_CONFIRM,
   DISCARD_CONFIRM_NO,
   DISCARD_CONFIRM_YES,
@@ -36,6 +38,8 @@ import {
   PAGER_LABEL,
   PANEL_HEADING,
   PANEL_SUBTITLE,
+  RESYNCING_BANNER_BODY,
+  RESYNCING_BANNER_TITLE,
   ROW_FALLBACK_TITLE,
   SAVED_AT,
   SHOW_NEXT,
@@ -45,7 +49,8 @@ import {
   TAB_DECISION,
   TAB_WAITING,
 } from "./copy";
-import { NoticeList } from "./NoticeBanners";
+import { detailVariant, ItemDetailDialog } from "./ItemDetailDialog";
+import { Banner, NoticeList } from "./NoticeBanners";
 import {
   describeRow,
   formatSavedAt,
@@ -116,6 +121,13 @@ export function QueuePanel({
       <NoticeList />
 
       <Tabs tab={tab} onChange={onTabChange} counts={counts} ids={ids} />
+
+      {tab === "decision" && inputs.recovery.active ? (
+        // A recovery under way is never a decision (tablet amendment, Q24): a non-actionable status banner, never a row.
+        <Banner kind="resyncing" tone="info" title={RESYNCING_BANNER_TITLE}>
+          <p>{RESYNCING_BANNER_BODY}</p>
+        </Banner>
+      ) : null}
 
       <div
         ref={panel}
@@ -277,8 +289,12 @@ function QueueRow({
 }) {
   const view = describeRow(draft, online);
   const actions = useDataActions();
+  const env = useDataEnv();
   const announcer = useAnnouncer();
   const [confirming, setConfirming] = useState(false);
+  // WF-QUEUE-02: a failed row opens the generic item-detail dialog (its only drawn state is the error detail).
+  const variant = detailVariant(draft, env.commands.onlineOnly(draft));
+  const [detail, setDetail] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const [reviewing, setReviewing] = useState(false);
@@ -375,8 +391,16 @@ function QueueRow({
               )}
             </span>
           </div>
-        ) : view.actions.length > 0 ? (
+        ) : view.actions.length > 0 || variant !== null ? (
           <div className="flex flex-wrap gap-2">
+            {variant !== null ? (
+              <Button
+                aria-label={`${DETAIL_ACTION}: ${title}`}
+                onClick={() => setDetail(true)}
+              >
+                {DETAIL_ACTION}
+              </Button>
+            ) : null}
             {view.actions.map((action) => (
               <Button
                 key={action}
@@ -396,6 +420,16 @@ function QueueRow({
       </div>
       {reviewing ? (
         <DefaultsReview draft={draft} onClose={() => setReviewing(false)} />
+      ) : null}
+      {variant !== null && detail ? (
+        <ItemDetailDialog
+          draft={draft}
+          title={title}
+          variant={variant}
+          open={detail}
+          onClose={() => setDetail(false)}
+          onRemoved={onRemoved}
+        />
       ) : null}
     </li>
   );

@@ -18,7 +18,13 @@ export type SyncMessage =
   | { type: "presence_query"; account: AccountId; nonce: string }
   | { type: "presence"; account: AccountId; tab_id: string; nonce: string }
   /** A page committed to these stores of the account; followers refresh their live views (never the authority). */
-  | { type: "data_changed"; account: AccountId; stores: readonly string[] };
+  | { type: "data_changed"; account: AccountId; stores: readonly string[] }
+  /**
+   * WEB-09b (R2 of the review of 10 October 2026): a person pressed "Try again" / "Retry now" / "Retry applying changes" for UPDATES on a
+   * page that does not lead (a follower's notice, or any page's neutral state 3). The leading page applies its own retry when the account
+   * and the epoch are the ones it is bound to; the acts it makes are versioned on the failure that stands, as its own page's are.
+   */
+  | { type: "retry_requested"; account: AccountId; epoch: number };
 
 /**
  * The store a `data_changed` hint names when a page RECORDS a stop of a local write (a durable failure streak reaching its bound) or ENDS
@@ -65,6 +71,13 @@ export function parseSyncMessage(value: unknown): SyncMessage | null {
             tab_id: m.tab_id,
             nonce: m.nonce,
           }
+        : null;
+    case "retry_requested":
+      return str(m.account) &&
+        typeof m.epoch === "number" &&
+        Number.isSafeInteger(m.epoch) &&
+        m.epoch >= 0
+        ? { type: "retry_requested", account: m.account, epoch: m.epoch }
         : null;
     case "data_changed":
       return str(m.account) &&

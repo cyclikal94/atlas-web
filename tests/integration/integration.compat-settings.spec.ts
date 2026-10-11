@@ -21,21 +21,22 @@ test.describe("I-11: api_version", () => {
   const compat = (page: import("@playwright/test").Page) =>
     page.evaluate(() => window.__s.compat.get());
 
-  test("the released backend reports 0.27.0: supported, and sign-in is offered", async ({
+  test("the released backend reports 0.28.0: supported, and sign-in is offered", async ({
     context,
   }) => {
     const page = await bootHarness(context);
     await expect
       .poll(() => compat(page))
-      .toMatchObject({ status: "supported", version: "0.27.0" });
+      .toMatchObject({ status: "supported", version: "0.28.0" });
     await expect(
-      page.getByText("Sign-in isn't available in this build yet."),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
+    await expect(page.getByLabel("Username")).toBeVisible();
   });
 
   for (const [version, status] of [
-    ["0.28.0", "unsupported"],
-    ["0.26.9", "unsupported"],
+    ["0.29.0", "unsupported"],
+    ["0.27.9", "unsupported"],
   ] as const) {
     test(`a proxy that rewrites api_version to ${version}: ${status}; the compatibility screen replaces the sign-in entry`, async ({
       context,
@@ -54,9 +55,7 @@ test.describe("I-11: api_version", () => {
           name: "Atlas can't work with this server yet",
         }),
       ).toBeVisible();
-      await expect(
-        page.getByText("Sign-in isn't available in this build yet."),
-      ).toHaveCount(0);
+      await expect(page.getByLabel("Username")).toHaveCount(0);
     });
   }
 
@@ -91,8 +90,9 @@ test.describe("I-11: api_version", () => {
     const page = await bootHarness(context);
     await expect.poll(() => compat(page)).toEqual({ status: "unreachable" });
     await expect(
-      page.getByText("Sign-in isn't available in this build yet."),
+      page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
+    await expect(page.getByLabel("Username")).toBeVisible();
   });
 
   test("an unsupported server never hides an account that is already settled (only sign-in is gated)", async ({

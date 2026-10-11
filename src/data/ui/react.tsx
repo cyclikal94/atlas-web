@@ -9,15 +9,18 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { apiUrl } from "../../lib/api-client/wire";
 import type { SyncStatusModel } from "../../lib/sync-chip";
 import type { Session } from "../../session";
+import type { DataRuntime } from "../engine/account-service";
 import type {
   Acquisition,
   RefreshOutcome,
   RequestBoundary,
 } from "../engine/defaults-source";
 import { createBroadcastSyncChannel } from "../engine/sync-channel";
-import { createWriteFailureMarkers } from "../engine/write-failure-marker";
+import { getPageDataHost, type PageDataHost } from "../leader/page-host";
+import { leaderStarted } from "../leader/presence";
 import type { MergedResource } from "../model/overlay";
 import type { QueueSummary } from "../model/queue-summary";
 import type { DefaultsRecord } from "../model/sharing-snapshot";
@@ -77,18 +80,21 @@ export function DataProvider({
   session,
   children,
   loadBrowser = () => import("./browser-env"),
+  host = getPageDataHost(),
 }: {
   session: Session;
   children: ReactNode;
   /** The lazy load of the browser composition. Only a test names its own, to decide WHEN the import arrives; production leaves the default. */
   loadBrowser?: () => Promise<BrowserComposition>;
+  /** The page's shared writer state (P-4): the page's own when omitted. A test supplies its own. */
+  host?: PageDataHost;
 }) {
   // CONSTRUCTION IS INERT (R29): a state initialiser runs in render, and development Strict Mode runs it twice and keeps one, so
   // whatever it builds must hold nothing (no subscription, no timer, no channel) and may be dropped without a cleanup. The controller
   // starts in the effect and stops in its cleanup, which is the PAIR React replays (mount, cleanup, mount) and runs at unmount, so a
   // replay leaves the same live controller, never a disposed one, and nothing outlives the tree.
   const [env] = useState<DataEnv>(() =>
-    createProductionEnv(session, loadBrowser),
+    createProductionEnv(session, loadBrowser, host),
   );
   useEffect(() => {
     env.start();
@@ -105,6 +111,7 @@ export function DataProvider({
 function createProductionEnv(
   session: Session,
   loadBrowser: () => Promise<BrowserComposition>,
+  host: PageDataHost,
 ): DataEnv {
   let browser: { dispose(): void } | null = null;
   /**
@@ -123,6 +130,15 @@ function createProductionEnv(
       identity: session.identity,
       loadRuntime: async () => {
         const asked = lifetime;
+        // A production leader runs on this page (P-3): the tree uses the PAGE's runtime, which the leader composed and which lives as long
+        // as the page. It is never disposed here, so unmounting the tree (every fence) closes none of the page's connections. Until it is
+        // there (the leader's chunk is loading) the look waits for it rather than building a second runtime over the same registry.
+        if (leaderStarted() || host.runtime.get() !== null) {
+          const shared = await pageRuntime(host);
+          if (asked !== lifetime)
+            throw new Error("the data layer was disposed");
+          return shared;
+        }
         const module = await loadBrowser();
         const built = module.createBrowserRuntime(session);
         if (asked !== lifetime) {
@@ -150,17 +166,43 @@ function createProductionEnv(
       readMe: readMeThrough(session),
       readDefaultsSnapshot: readDefaultsSnapshotThrough(session),
       currentDeviceId: currentDeviceThrough(session),
+      // R7: WF-QUEUE-02's authorised current-state read is an ORDINARY stamped request of the displayed account and epoch.
+      fetchOrdinary: (account, epoch) =>
+        session.api.fetchFor("ordinary", account, epoch),
+      apiUrl: (path) => apiUrl(path),
+      // R7 (second cycle): the read's whole interpreted result is validated against the durable record before it is handed back.
+      seal: (account, epoch, pending) =>
+        session.api.seal(account, epoch, pending),
       onOnline: (listener) => {
         window.addEventListener("online", listener);
         return () => window.removeEventListener("online", listener);
       },
       channel,
-      markers: createWriteFailureMarkers(),
+      // The page's ONE markers object (R46, P-4), leased: the controller's start takes a lease and its stop gives it back.
+      markers: host.markers,
+      commands: host.commands,
     },
     { start: false },
   );
   const start = env.start.bind(env);
   const dispose = env.dispose.bind(env);
+  // The page's leadership, attached while the controller runs (P-4): the status follows the page's engine, outbox and job, or says
+  // that another page leads (P-11).
+  let detachLeader: (() => void) | null = null;
+  let offLeader: (() => void) | null = null;
+  const followLeader = (): void => {
+    detachLeader?.();
+    detachLeader = null;
+    const attachment = host.leader.get();
+    if (attachment.role === "leader")
+      detachLeader = env.attachLeader({
+        engine: attachment.engine,
+        ...(attachment.outbox ? { outbox: attachment.outbox } : {}),
+        recovery: attachment.recovery,
+      });
+    else if (attachment.role === "follower")
+      detachLeader = env.attachFollower();
+  };
   return {
     ...env,
     start() {
@@ -169,11 +211,17 @@ function createProductionEnv(
       running = true;
       lifetime += 1;
       start();
+      offLeader = host.leader.subscribe(followLeader);
+      followLeader();
     },
     dispose() {
       if (!running) return;
       running = false;
       lifetime += 1;
+      offLeader?.();
+      offLeader = null;
+      detachLeader?.();
+      detachLeader = null;
       dispose();
       browser?.dispose();
       browser = null;
@@ -182,6 +230,20 @@ function createProductionEnv(
       quota.close?.();
     },
   };
+}
+
+/** The page runtime the leader composes, once it is there. */
+function pageRuntime(host: PageDataHost): Promise<DataRuntime> {
+  const now = host.runtime.get();
+  if (now !== null) return Promise.resolve(now.runtime);
+  return new Promise<DataRuntime>((resolve) => {
+    const off = host.runtime.subscribe(() => {
+      const next = host.runtime.get();
+      if (next === null) return;
+      off();
+      resolve(next.runtime);
+    });
+  });
 }
 
 /** Connectivity as the page knows it. */

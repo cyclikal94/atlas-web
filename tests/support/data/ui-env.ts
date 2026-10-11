@@ -12,6 +12,7 @@ import type {
   StatusInputs,
 } from "../../../src/data";
 import { summariseQueue } from "../../../src/data/model/queue-summary";
+import type { CurrentRead } from "../../../src/data/outbox/registries";
 import { createCommandRegistry } from "../../../src/data/outbox/registries";
 import type { Identity, Store } from "../../../src/session";
 
@@ -68,6 +69,12 @@ export interface StubEnv extends DataEnv {
   setResource(id: string, merged: MergedResource | null): void;
   /** Sets the defaults record (and whether the look for it has settled). */
   setDefaults(record: DefaultsRecord | null, settled?: boolean): void;
+  /**
+   * What `readCurrent` (WF-QUEUE-02's authorised current-state read, R7) answers: a value, or a function that answers each call (a
+   * pending promise models a read still loading). Default: `failed`/`unavailable` (no authorised read). Calls are in `reads`.
+   */
+  currentRead: CurrentRead | ((localId: string) => Promise<CurrentRead>);
+  reads: string[];
 }
 
 export function stubEnv(
@@ -134,6 +141,16 @@ export function stubEnv(
     retryUpdates: record("retryUpdates"),
     retryChanges: record("retryChanges"),
     retryLoad: record("retryLoad"),
+    acknowledgeResync: record("acknowledgeResync"),
+    readCurrent: async (localId) => {
+      env.reads.push(localId);
+      const answer = env.currentRead;
+      return typeof answer === "function" ? answer(localId) : answer;
+    },
+    saveAsNew: async (localId, current) => {
+      calls.push({ action: "saveAsNew", args: [localId, current] });
+      return { kind: "refused", reason: "not_rebuildable" };
+    },
     showNextQueue: record("showNextQueue"),
     showPreviousQueue: record("showPreviousQueue"),
     confirmDefaultsReview: async (localId, confirmation) => {
@@ -243,6 +260,7 @@ export function stubEnv(
       for (const listener of [...resourceListeners]) listener();
     },
     attachLeader: () => () => undefined,
+    attachFollower: () => () => undefined,
     start: () => undefined,
     dispose: () => undefined,
     calls,
@@ -253,6 +271,8 @@ export function stubEnv(
       localId: "",
       paused: [],
     },
+    currentRead: { kind: "failed", reason: "unavailable" },
+    reads: [],
     set(patch) {
       inputs.set({ ...inputs.get(), ...patch });
     },

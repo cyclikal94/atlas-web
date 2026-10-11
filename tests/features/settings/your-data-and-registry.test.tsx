@@ -98,10 +98,11 @@ describe("WF-SETTINGS-06 Your data (F-DATA)", () => {
 });
 
 describe("the Settings registry (F-REG)", () => {
-  test("Sessions & devices and Your data are registered by WEB-08, Appearance by WEB-07, in order", () => {
+  test("Signing in, Sessions & devices and Your data are registered by WEB-08, Appearance by WEB-07, in order", () => {
     expect(
       settingsSections().map((s) => [s.id, s.label, s.owner, s.route]),
     ).toEqual([
+      ["signing-in", "Signing in", "WEB-08", "signing-in"],
       ["sessions", "Sessions & devices", "WEB-08", "sessions"],
       ["appearance", "Appearance", "WEB-07", "appearance"],
       ["data", "Your data", "WEB-08", "data"],
@@ -129,9 +130,9 @@ describe("the Settings registry (F-REG)", () => {
     for (const section of settingsSections()) {
       cleanup();
       await mount(`/settings/${section.route}`);
-      if (section.id === "appearance")
+      if (section.id === "appearance" || section.id === "signing-in")
         expect(
-          await screen.findByRole("dialog", { name: "Appearance" }),
+          await screen.findByRole("dialog", { name: section.label }),
         ).toBeInTheDocument();
       else
         expect(
@@ -150,6 +151,8 @@ describe("the Settings registry (F-REG)", () => {
     cleanup();
     await mount("/settings/appearance");
     await screen.findByRole("dialog", { name: "Appearance" });
-    expect(document.querySelectorAll("[data-settings-link]")).toHaveLength(3);
+    expect(document.querySelectorAll("[data-settings-link]")).toHaveLength(
+      settingsSections().length,
+    );
   });
 });

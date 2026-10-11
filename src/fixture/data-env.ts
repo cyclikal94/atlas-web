@@ -253,6 +253,16 @@ export function fixtureData(params: URLSearchParams): FixtureData {
       retryUpdates: () => calls.push({ action: "retryUpdates", args: [] }),
       retryChanges: (id) => calls.push({ action: "retryChanges", args: [id] }),
       retryLoad: () => calls.push({ action: "retryLoad", args: [] }),
+      acknowledgeResync: (id) =>
+        calls.push({ action: "acknowledgeResync", args: [id] }),
+      readCurrent: async (id) => {
+        calls.push({ action: "readCurrent", args: [id] });
+        return { kind: "failed", reason: "unavailable" };
+      },
+      saveAsNew: async (id, current) => {
+        calls.push({ action: "saveAsNew", args: [id, current] });
+        return { kind: "refused", reason: "not_rebuildable" };
+      },
       showNextQueue: () => {
         calls.push({ action: "showNextQueue", args: [] });
         move(1);
@@ -285,6 +295,7 @@ export function fixtureData(params: URLSearchParams): FixtureData {
     service: () => null,
     serviceStore: new Cell(null),
     attachLeader: () => () => undefined,
+    attachFollower: () => () => undefined,
     start: () => undefined,
     dispose: () => undefined,
   };

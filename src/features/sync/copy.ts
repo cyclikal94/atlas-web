@@ -30,6 +30,68 @@ export const PAGE_NOT_SAVED_ACTION = "Retry applying changes";
 export const MEMORY_ONLY_NOTE =
   "This warning is only kept in this tab. It will not survive a reload, so if you reload or close the tab you won't be told again.";
 
+// ---- the automatic restart: `sync-recovery-acknowledge.html`, "After" panels (VERBATIM, Q24) ---------------------------------------
+export const RESYNC_REQUIRED_TITLE = "Resyncing — cache needed a full refresh";
+export const RESYNC_REQUIRED_BODY =
+  "This device fell too far behind, so Atlas is already fetching a fresh copy — that's normal and doesn't lose anything. Nothing to do here.";
+export const ACCESS_CHANGED_TITLE = "Resyncing — what you can see changed";
+export const ACCESS_CHANGED_BODY =
+  "What you can see has changed, so Atlas is already getting a fresh copy that reflects it.";
+/** Dismisses the notice only: recovery is already in progress, shown by the chip. */
+export const RESYNC_ACKNOWLEDGE = "Acknowledge";
+
+// ---- the blocking budget state: WEB-04 design 5.11 (the quoted state VERBATIM; the rest PROPOSED, not accepted) -----------------------
+export const SYNC_BLOCKED_TITLE =
+  "Sync can't proceed on this version of Atlas — try reloading the app";
+export const SYNC_BLOCKED_BODY =
+  "Atlas stopped retrying after the same error came back several times. Your unsent changes are still saved on this device.";
+export const SYNC_BLOCKED_RELOAD = "Reload";
+export const SYNC_BLOCKED_RETRY = "Try again";
+/** The conflict inbox while a recovery runs (tablet amendment, PROPOSED): non-actionable, never a "Needs a decision" row. */
+export const RESYNCING_BANNER_TITLE = "Resyncing automatically";
+/** `tablet/sync-queue-landscape.html` (VERBATIM): the non-actionable status banner that replaced a "Needs a resync" decision row. */
+export const RESYNCING_BANNER_BODY =
+  "This device fell too far behind — resyncing automatically. Nothing to decide here.";
+
+// ---- WF-QUEUE-02, the item-detail dialog: `gaps/queue-02-desktop.html` (VERBATIM where the wireframe's copy is generic) ------------
+export const DETAIL_ACTION = "Details";
+export const DETAIL_VERSION_TITLE = "Someone else changed this first";
+export const DETAIL_VERSION_KIND = "version conflict";
+export const DETAIL_VERSION_BODY =
+  "This edit reached the server for the first time just now — it queued while offline, and the value it targets has since changed, so Atlas won't silently overwrite it. Compare what's saved with what you sent, then decide.";
+export const DETAIL_CURRENTLY_SAVED = "Currently saved";
+export const DETAIL_RETAINED = "Retained, still unsent";
+export const DETAIL_VERSION = (n: number): string => `version ${n}`;
+export const DETAIL_QUEUED_SINCE = (when: string): string =>
+  `queued here since ${when}`;
+export const DETAIL_DISCARD_MINE = "Discard mine";
+export const DETAIL_RESEND = "Resend as a new operation";
+export const DETAIL_OPERATION_TITLE = "Couldn't confirm this specific save";
+export const DETAIL_OPERATION_KIND = "matching request ID, different content";
+export const DETAIL_OPERATION_BODY =
+  "A save with this exact request ID was already recorded, but with different content than what's queued here — Atlas can't tell which one you meant, so it hasn't applied this attempt and hasn't guessed. This usually means an earlier retry sent slightly different content under the same ID (for example, after editing the field again before a stalled send finally went out).";
+export const DETAIL_CURRENTLY_SAVED_ON = (title: string): string =>
+  `Currently saved on “${title}”`;
+export const DETAIL_OPERATION_LIMIT =
+  "this target's current state, from an ordinary authorised read — not confirmed to be this ID's own effect; operation IDs are account-wide, so the ID this error names may belong to a different resource entirely";
+export const DETAIL_DISCARD_ATTEMPT = "Discard queued attempt";
+export const DETAIL_SAVE_NEW = "Review and save as a new attempt";
+export const DETAIL_READ_FAILED =
+  "Couldn't load the current state of this item to compare.";
+/** PROPOSED: the disabled action's reason while the authorised current-state read is loading (the wireframe: disabled until it has loaded). */
+export const DETAIL_READ_LOADING = "Loading the current state…";
+/** PROPOSED: the explicit confirmation the wireframe requires before a new attempt is made without the read. */
+export const DETAIL_PROCEED_WITHOUT = "Continue without comparing";
+export const DETAIL_INDETERMINATE =
+  "Couldn't compare — the item has changed in a way this panel can't summarise.";
+export const DETAIL_ONLINE_ONLY =
+  "This needs a connection and can't be queued. Try again once you're back online.";
+export const DETAIL_REF = (ref: string): string => `ref ${ref}`;
+export const DETAIL_COPY = "copy";
+/** PROPOSED: the outcome of "save as new" when it could not be made; the change is kept either way. */
+export const DETAIL_SAVE_NEW_FAILED =
+  "Couldn't save this as a new change. Your change is kept here.";
+
 // ---- the quota reserve: WEB-04 wireframe 7 (VERBATIM); neither claims an automatic retry --------------------------------------------
 export const STORAGE_FULL_VALID_TITLE =
   "Couldn't finish updating your offline data";

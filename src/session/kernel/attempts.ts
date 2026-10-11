@@ -4,6 +4,9 @@ import type {
   Attempts,
   BeginResult,
   ExchangeResult,
+  InvitationPreview,
+  OidcStartOutcome,
+  RegistrationInput,
 } from "../api";
 import { LOCKS } from "../constants";
 import {
@@ -31,6 +34,7 @@ import type { RawAnswer } from "../ports/transport";
 import { runClosingTransaction } from "./closing";
 import { beginClosing, endClosing } from "./expose";
 import { readIdentity } from "./identity";
+import { jsonResult, ordinaryCall } from "./operations";
 import type { Kernel } from "./state";
 import type { WipeService } from "./wipe";
 
@@ -152,36 +156,212 @@ export class AttemptService implements Attempts {
   }
 
   // ---- step 2: exchange ----------------------------------------------------------------------------------------------
-  async signInWithPassword(
-    handle: AttemptHandle,
-    credentials: { username: string; password: string },
-  ): Promise<AttemptOutcome> {
+  /** The browser's `device_id`, read or created in ONE transaction (decision D-02). */
+  private async deviceId(): Promise<string> {
     const { k } = this;
-    let result: ExchangeResult;
+    const device = await k.transact(
+      (records) =>
+        deviceGetOrCreate(records, {
+          device_id: k.ports.ids.uuid(),
+          now: k.ports.clock.iso(),
+        }),
+      "device",
+    );
+    return device.device_id;
+  }
+
+  /**
+   * The one place a login-family request is made. The browser's `device_id` goes into the body here, so it never reaches a
+   * caller. Null is a network failure, a time-out or an abort.
+   */
+  private async exchange(
+    handle: AttemptHandle,
+    path: "/browser-sessions" | "/browser-registration" | "/oidc/start",
+    body: Record<string, unknown>,
+  ): Promise<RawAnswer | null> {
+    const { k } = this;
     try {
-      const device = await k.transact(
-        (records) =>
-          deviceGetOrCreate(records, {
-            device_id: k.ports.ids.uuid(),
-            now: k.ports.clock.iso(),
-          }),
-        "device",
-      );
-      const answer = await k.ports.unstamped.exchange(
-        "/browser-sessions",
+      return await k.ports.unstamped.exchange(
+        path,
         {
-          username: credentials.username,
-          password: credentials.password,
-          device_id: device.device_id,
+          ...body,
+          device_id: await this.deviceId(),
           attempt_challenge: handle.challenge,
         },
         k.ports.clock.abortAfter(k.config.stampedRequestTimeoutMs),
       );
-      result = toExchangeResult(answer);
     } catch {
-      result = { kind: "network_failure" };
+      return null;
     }
-    return this.completeExchange(handle, result);
+  }
+
+  async signInWithPassword(
+    handle: AttemptHandle,
+    credentials: { username: string; password: string },
+  ): Promise<AttemptOutcome> {
+    const answer = await this.exchange(handle, "/browser-sessions", {
+      username: credentials.username,
+      password: credentials.password,
+    });
+    return this.completeExchange(handle, toExchangeResult(answer));
+  }
+
+  async registerWithInvitation(
+    handle: AttemptHandle,
+    input: RegistrationInput,
+  ): Promise<AttemptOutcome> {
+    if (handle.method !== "registration")
+      throw new TypeError(
+        "registerWithInvitation needs a registration attempt",
+      );
+    const answer = await this.exchange(handle, "/browser-registration", {
+      token: input.token,
+      username: input.username,
+      password: input.password,
+    });
+    // The grant that comes back is recorded and activated exactly as a password grant is (steps 3 to 5).
+    return this.completeExchange(handle, toExchangeResult(answer));
+  }
+
+  async previewInvitation(
+    token: string,
+    signal?: AbortSignal,
+  ): Promise<InvitationPreview> {
+    const { k } = this;
+    const timeout = k.ports.clock.abortAfter(k.config.stampedRequestTimeoutMs);
+    let answer: RawAnswer;
+    try {
+      answer = await k.ports.unstamped.preview(
+        { token },
+        signal ? AbortSignal.any([signal, timeout]) : timeout,
+      );
+    } catch {
+      return { kind: "network_failure" };
+    }
+    if (answer.status >= 200 && answer.status < 300) {
+      const preview = parsePreview(answer.json);
+      return preview ?? { kind: "network_failure" };
+    }
+    const error = answer.atlasError;
+    if (error === null) return { kind: "network_failure" };
+    if (answer.status === 401) return { kind: "unavailable" };
+    return { kind: "refused", error, status: answer.status };
+  }
+
+  async startOidc(handle: AttemptHandle): Promise<OidcStartOutcome> {
+    if (handle.method !== "oidc" && handle.method !== "oidc_link")
+      throw new TypeError("startOidc needs an oidc or oidc_link attempt");
+    if (handle.method === "oidc_link") return this.startLink(handle);
+    const answer = await this.exchange(handle, "/oidc/start", {
+      link: false,
+      attempt_id: String(handle.epoch),
+    });
+    if (answer !== null && answer.status >= 200 && answer.status < 300) {
+      const url = safeAuthorizationUrl(answer.json);
+      if (url === null) {
+        await this.clearOwn(handle.epoch);
+        return { kind: "exchange_failed", status: answer.status };
+      }
+      return this.redirected(handle, url);
+    }
+    const outcome = await this.completeExchange(
+      handle,
+      toExchangeResult(answer),
+    );
+    switch (outcome.kind) {
+      case "refused":
+        return {
+          kind: "refused",
+          error: outcome.error,
+          status: answer?.status ?? 0,
+        };
+      case "exchange_failed":
+        return { kind: "exchange_failed", status: outcome.status };
+      case "superseded":
+        return { kind: "superseded" };
+      default:
+        return { kind: "not_started", reason: "attempt_gone" };
+    }
+  }
+
+  /**
+   * `oidc_link`: authenticated by the settled session's cookie, so it needs that session's CSRF token and is an ORDINARY stamped
+   * request (the released backend answers `403` without the token, and `401` when the session is older than five minutes). Its
+   * `401` is therefore an observation that fails closed, exactly as a password change's wrong current password does.
+   */
+  private async startLink(handle: AttemptHandle): Promise<OidcStartOutcome> {
+    const { k } = this;
+    if (!k.identity.get()) {
+      await this.clearOwn(handle.epoch);
+      return { kind: "not_started", reason: "not_settled" };
+    }
+    let device: string;
+    try {
+      device = await this.deviceId();
+    } catch {
+      await this.clearOwn(handle.epoch);
+      return { kind: "not_started", reason: "attempt_gone" };
+    }
+    const result = await ordinaryCall(
+      k,
+      "POST",
+      "/oidc/start",
+      {
+        body: {
+          link: true,
+          device_id: device,
+          attempt_id: String(handle.epoch),
+          attempt_challenge: handle.challenge,
+        },
+      },
+      (response) =>
+        jsonResult(response, (value) => {
+          const url = safeAuthorizationUrl(value);
+          return url === null ? null : { authorization_url: url };
+        }),
+    );
+    if (result.ok)
+      return this.redirected(handle, result.value.authorization_url);
+    // Every failure ends the attempt (non-gating). A result for an attempt that is no longer the latest is discarded (K-1).
+    const cleared = await this.clearOwn(handle.epoch);
+    if (cleared === "SUPERSEDED") return { kind: "superseded" };
+    switch (result.error) {
+      case "auth_state":
+      case "closed":
+        return { kind: "session_ended" };
+      case "offline":
+        return { kind: "exchange_failed", status: null };
+      case "not_sent":
+        return { kind: "not_started", reason: "attempt_gone" };
+      default:
+        return result.atlasError
+          ? {
+              kind: "refused",
+              error: result.atlasError,
+              status: result.status ?? 0,
+            }
+          : { kind: "exchange_failed", status: result.status ?? null };
+    }
+  }
+
+  /** Durable BEFORE the caller navigates: the verifier is already in the record and the owner lock is released here. */
+  private async redirected(
+    handle: AttemptHandle,
+    url: string,
+  ): Promise<OidcStartOutcome> {
+    const { k } = this;
+    let recorded: "OK" | "SUPERSEDED";
+    try {
+      recorded = await this.recordRedirected(handle);
+    } catch {
+      return { kind: "not_started", reason: "attempt_gone" };
+    } finally {
+      this.releaseOwner(handle.epoch);
+    }
+    // A stale start is discarded: never navigate on it (T3).
+    if (recorded === "SUPERSEDED") return { kind: "superseded" };
+    k.ports.hints.post({ type: "auth_state_changed" });
+    return { kind: "redirect", authorization_url: url };
   }
 
   async completeExchange(
@@ -190,10 +370,18 @@ export class AttemptService implements Attempts {
   ): Promise<AttemptOutcome> {
     const { k } = this;
     if (result.kind !== "grant") {
-      // An error or network failure clears the attempt (under the lock, re-checking the epoch).
-      await this.clearOwn(handle.epoch);
+      // An error or network failure clears the attempt (under the lock, re-checking the epoch). A result for an attempt
+      // that is no longer the latest is discarded, exactly as a stale grant is (matrix O7, T3): the caller is told
+      // `superseded`, never "wrong password" for an attempt nobody is waiting on.
+      const cleared = await this.clearOwn(handle.epoch);
+      if (cleared === "SUPERSEDED") return { kind: "superseded" };
       if (result.kind === "error" && result.error)
-        return { kind: "refused", error: result.error, definitive: true };
+        return {
+          kind: "refused",
+          error: result.error,
+          definitive: true,
+          stage: "exchange",
+        };
       return {
         kind: "exchange_failed",
         status: result.kind === "error" ? result.status : null,
@@ -218,22 +406,35 @@ export class AttemptService implements Attempts {
       this.releaseOwner(handle.epoch);
       return { kind: "superseded" };
     }
-    return this.activate(handle.epoch, result.grant, result.account_id);
+    return this.activate(
+      handle.epoch,
+      result.grant,
+      result.account_id,
+      handle.method,
+    );
+  }
+
+  /** `exchanging` to `redirected` in one transaction: `OK`, or `SUPERSEDED` when the epoch is no longer the latest. */
+  private recordRedirected(
+    handle: AttemptHandle,
+  ): Promise<"OK" | "SUPERSEDED"> {
+    const { k } = this;
+    return k.transact(
+      (records) =>
+        markRedirected(records, {
+          epoch: handle.epoch,
+          expiresAt: new Date(
+            k.ports.clock.now() + k.config.redirectedExpiryMs,
+          ).toISOString(),
+        }),
+      "redirected",
+    );
   }
 
   async markRedirected(handle: AttemptHandle): Promise<void> {
     const { k } = this;
     try {
-      await k.transact(
-        (records) =>
-          markRedirected(records, {
-            epoch: handle.epoch,
-            expiresAt: new Date(
-              k.ports.clock.now() + k.config.redirectedExpiryMs,
-            ).toISOString(),
-          }),
-        "redirected",
-      );
+      await this.recordRedirected(handle);
     } finally {
       this.releaseOwner(handle.epoch);
     }
@@ -271,7 +472,12 @@ export class AttemptService implements Attempts {
       this.releaseOwner(epoch);
       return { kind: "superseded" };
     }
-    return this.activate(epoch, fragment.grant, fragment.account);
+    return this.activate(
+      epoch,
+      fragment.grant,
+      fragment.account,
+      attempt.method,
+    );
   }
 
   async cancel(handle: AttemptHandle): Promise<void> {
@@ -289,6 +495,7 @@ export class AttemptService implements Attempts {
     epoch: Epoch,
     grant: string,
     account: AccountId,
+    method: AttemptMethod,
   ): Promise<AttemptOutcome> {
     const { k } = this;
     // A fresh sign-in for an account whose deletion is outstanding runs the canonical procedure FIRST: a database
@@ -363,7 +570,7 @@ export class AttemptService implements Attempts {
     const verdict = classifyActivation(answer);
     try {
       if (verdict.kind === "settle")
-        return await this.settleAttempt(epoch, verdict.session, auth);
+        return await this.settleAttempt(epoch, verdict.session, auth, method);
       if (verdict.kind === "definitive")
         return await this.refuseAttempt(epoch, verdict.error);
       await this.markIndeterminate(epoch);
@@ -468,6 +675,7 @@ export class AttemptService implements Attempts {
     epoch: Epoch,
     session: BrowserSessionBody,
     auth: LockHandle,
+    method: AttemptMethod,
   ): Promise<AttemptOutcome> {
     const { k } = this;
     const result = await this.settlementClosingWrite(epoch, session, auth);
@@ -484,7 +692,12 @@ export class AttemptService implements Attempts {
       };
       k.ports.hints.post({ type: "auth_state_changed" });
       void k.hooks.evaluate("settled");
-      return { kind: "settled", account_id: session.account_id, epoch };
+      return {
+        kind: "settled",
+        account_id: session.account_id,
+        epoch,
+        method,
+      };
     }
     if (result === "SUPERSEDED") return { kind: "superseded" };
     // The client never adopts a session it could not record: it becomes indeterminate and the person signs in again.
@@ -513,7 +726,7 @@ export class AttemptService implements Attempts {
     }
     k.ports.hints.post({ type: "auth_state_changed" });
     void k.hooks.evaluate("refused");
-    return { kind: "refused", error, definitive: true };
+    return { kind: "refused", error, definitive: true, stage: "activation" };
   }
 
   private async markIndeterminate(epoch: Epoch): Promise<void> {
@@ -710,20 +923,21 @@ export class AttemptService implements Attempts {
     await this.clearUnderAuth(attempt.epoch);
   }
 
-  private async clearOwn(epoch: Epoch): Promise<void> {
+  private async clearOwn(epoch: Epoch): Promise<ClearResult> {
     try {
-      await this.clearUnderAuth(epoch);
+      return await this.clearUnderAuth(epoch);
     } finally {
       this.releaseOwner(epoch);
     }
   }
 
-  private async clearUnderAuth(epoch: Epoch): Promise<void> {
+  /** `SUPERSEDED`: the record no longer holds this epoch's attempt. `UNCHANGED`: it could not be cleared (lock wait, storage). */
+  private async clearUnderAuth(epoch: Epoch): Promise<ClearResult> {
     const { k } = this;
     const auth = await k.ports.locks.acquire(LOCKS.auth, {
       signal: k.ports.clock.abortAfter(k.config.lockWaitMs),
     });
-    if (auth === null) return;
+    if (auth === null) return "UNCHANGED";
     try {
       const cleared = await k.transact(
         (records) => clearNonGating(records, { epoch }),
@@ -732,9 +946,12 @@ export class AttemptService implements Attempts {
       if (cleared === "CLEARED") {
         k.ports.hints.post({ type: "auth_state_changed" });
         void k.hooks.evaluate("attempt_cleared");
+        return "CLEARED";
       }
+      return cleared === "SUPERSEDED" ? "SUPERSEDED" : "UNCHANGED";
     } catch {
       // The attempt stays; expiry or a later page clears it.
+      return "UNCHANGED";
     } finally {
       auth.release();
     }
@@ -768,7 +985,10 @@ export class AttemptService implements Attempts {
   }
 }
 
-function toExchangeResult(answer: RawAnswer): ExchangeResult {
+type ClearResult = "CLEARED" | "SUPERSEDED" | "UNCHANGED";
+
+function toExchangeResult(answer: RawAnswer | null): ExchangeResult {
+  if (answer === null) return { kind: "network_failure" };
   if (answer.status >= 200 && answer.status < 300) {
     const body = answer.json as Record<string, unknown> | undefined;
     if (
@@ -785,6 +1005,41 @@ function toExchangeResult(answer: RawAnswer): ExchangeResult {
       };
   }
   return { kind: "error", error: answer.atlasError, status: answer.status };
+}
+
+function parsePreview(value: unknown): InvitationPreview | null {
+  if (typeof value !== "object" || value === null) return null;
+  const body = value as Record<string, unknown>;
+  if (typeof body.expires_at !== "string") return null;
+  const household = body.household;
+  if (household === null)
+    return { kind: "ok", household: null, expires_at: body.expires_at };
+  if (typeof household !== "object" || household === undefined) return null;
+  const { id, name } = household as Record<string, unknown>;
+  if (typeof id !== "string" || typeof name !== "string") return null;
+  return { kind: "ok", household: { id, name }, expires_at: body.expires_at };
+}
+
+/**
+ * The provider's authorisation URL is the one thing the page is about to navigate to on the server's word, so it is
+ * checked: absolute, `https:`, or `http:` only for a loopback host (a local provider). Anything else is not followed.
+ */
+function safeAuthorizationUrl(value: unknown): string | null {
+  const url = (value as { authorization_url?: unknown } | null)
+    ?.authorization_url;
+  if (typeof url !== "string") return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
+    parsed.hostname,
+  );
+  if (parsed.protocol === "https:" || (parsed.protocol === "http:" && loopback))
+    return parsed.href;
+  return null;
 }
 
 function cancelResult(

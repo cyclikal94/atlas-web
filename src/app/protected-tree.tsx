@@ -1,6 +1,8 @@
 import { RouterProvider } from "@tanstack/react-router";
 import { type ReactNode, useMemo } from "react";
 import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
+import { invitationMemory } from "../features/authentication/handoff";
+import { isJoinPath } from "../features/authentication/public-route";
 import { type Session, SessionProvider } from "../session";
 import { AccountSlot } from "./AccountSlot";
 import { ProtectedProviders } from "./providers";
@@ -14,10 +16,9 @@ type AppRouter = ReturnType<typeof createAppRouter>;
  * The tree that `act` mounts into `#protected-root` (plan decision D-19). It is loaded by a dynamic import at boot, after the
  * canary and BEFORE `expose` starts (D-10), so `act` never awaits an import.
  *
- * The sync chip is driven by the data layer's status model (plan 5.7). Production starts no sync engine and no dispatcher until
- * WEB-09b supplies leadership, so the model reads "Updates stopped" (or "Offline"), which is true: "Up to date" is never shown
- * unless a sync has actually completed. The account slot shows the VERIFIED username only, while it is verified for the current
- * epoch. Production cannot reach this tree until a sign-in surface exists (WEB-08b), so nothing false is ever shown.
+ * The sync chip reads the data layer's status model; the page's production leader drives sync and recovery (WEB-09b).
+ * The account slot shows the verified username for the current epoch. The sign-in and join surfaces (WEB-08b) lead here;
+ * `/join` is normalised below before the router exists, unless this tab still holds an unused invitation.
  */
 function ShellFromData({
   router,
@@ -50,8 +51,20 @@ function ShellFromData({
   return <ShellEnvProvider value={env}>{children}</ShellEnvProvider>;
 }
 
+/**
+ * A person who has just registered must not land on `/join`: it is a public path. It is replaced by `/` BEFORE the router is
+ * created, synchronously, inside the factory. It is kept only when this tab still holds an unused invitation, so a person who
+ * was already signed in (or signed in in another tab) is told why the link does not register anyone (the `/join` route).
+ */
+function normalisePublicPath(): void {
+  if (!isJoinPath(location.pathname) || invitationMemory.peek() !== null)
+    return;
+  history.replaceState(null, "", `/${location.search}`);
+}
+
 export function createProtectedTree(session: Session) {
   return (): ReactNode => {
+    normalisePublicPath();
     // A new router per mount: an account change must not inherit the previous account's location or loaders.
     const router = createAppRouter();
     return (

@@ -20,11 +20,16 @@ checked against it by `scripts/check-route-parity.mjs` (`pnpm check:route-parity
 
 Two facts about the list:
 
-- At the pinned backend release (`v0.27.0-rc.1`) the backend registers `/health`, `/ready` and everything under
+- At the pinned backend release (`v0.28.0-rc.1`) the backend registers `/health`, `/ready` and everything under
   `/api/experimental/v1/`. It has **no** top-level `/auth` or `/oidc` route; the OIDC callback is
   `/api/experimental/v1/oidc/callback`. `/auth` and `/oidc` are defensive reservations, kept because Q10 names authentication
   callback paths and the offline shell must never answer them.
 - `/_web/*` is reserved for the frontend (its own health probe and its provenance), so the backend's `/health` is never shadowed.
+- Two **frontend** routes matter to the sign-in journeys (WEB-08b), and both are plain client routes that every arrangement serves the shell for:
+  `/join` (an invitation link is `https://<origin>/join#t=<64 hex>`: the token is in the fragment, which no proxy or server ever sees) and the
+  **origin root** `/`, where the backend's OIDC callback redirects with `#atlas_grant=…&atlas_attempt=…&atlas_account=…`. Do not rewrite, strip or
+  cache either response, and do not log full URLs of the browser: the fragment never reaches a server, but a browser extension, a screenshot or a
+  history entry can see it, which is why the client strips it before it does anything else.
 
 Client routes must not contain a dot: any other path with a file extension is treated as a file request (404 when absent, never
 the shell). Prefix matching is by path element, so `/apiary` is a client route and `/api/x` is a backend path. Matching is

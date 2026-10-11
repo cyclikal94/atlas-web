@@ -1,5 +1,6 @@
 import type { SyncPhase, SyncStatusModel } from "../../lib/sync-chip";
 import type { DispatcherState } from "../engine/outbox-dispatcher";
+import type { RecoveryJobState, ResyncNotice } from "../engine/recovery-job";
 import type { EngineState } from "../engine/sync-engine";
 import { DATA_CONFIG } from "./config";
 import type { QueueSummary } from "./queue-summary";
@@ -25,12 +26,40 @@ export type CacheState =
    */
   | "unverified";
 
+/**
+ * The durable stops of the sync writers, as a follower page reads them (P-11, R6 of the review of 10 October 2026): the `sync` read caller
+ * paused, a sync-side local write stopped at its bound, the Q23 floor. Read from `sync_state` by `plans/facts.ts`.
+ */
+export interface SyncStops {
+  paused: boolean;
+  pageStopped: boolean;
+  floor: boolean;
+}
+
 export interface StatusInputs {
   /** The page's own knowledge of connectivity (`navigator.onLine` and the `online`/`offline` events). */
   online: boolean;
   /** `null`: no engine exists on this page. */
   engine: EngineState | null;
-  recovery: { registered: boolean; active: boolean };
+  /**
+   * The recovery seam (WEB-09b): whether a job exists and is active, and, with the production leader, the job's own state and its Q24
+   * notice. `state` absent or null: no job on this page (a follower, or no leader).
+   */
+  recovery: {
+    registered: boolean;
+    active: boolean;
+    state?: RecoveryJobState | null;
+    notice?: ResyncNotice | null;
+  };
+  /** Another page of this browser leads sync (P-11): the status is derived from the durable facts this page re-reads. */
+  follower?: boolean;
+  /** The durable recovery budget is at its bound (whichever page recorded it): sync can't proceed until a reload or "Try again". */
+  recoveryBlocked?: boolean;
+  /**
+   * A FOLLOWER's reading of the leader's durable stops (absent on a leader page and on a page with no production leader, whose own
+   * engine and job are what speak). A follower says "Updates stopped" and shows the stop's notice while one stands.
+   */
+  followerStops?: SyncStops;
   /** `unknown`: no account database is open here (nothing is cached or readable, nothing is gated). */
   cache: CacheState;
   lastSyncedAt: string | null;
@@ -49,8 +78,27 @@ export interface StatusInputs {
 export function derivePhase(inputs: StatusInputs, now: number): SyncPhase {
   if (!inputs.online) return "offline";
   if (inputs.recovery.active) return "resyncing";
+  const job = inputs.recovery.state ?? null;
+  if (job?.kind === "stopped" || job?.kind === "paused") return "interrupted";
+  if (inputs.recoveryBlocked === true) return "interrupted";
   const engine = inputs.engine;
-  if (engine === null) return "interrupted";
+  if (engine === null) {
+    // A follower page: another page leads, and this page knows only what the durable facts say (P-11). A valid cache that has
+    // completed a sync is up to date as far as it can tell; a cache that is not valid is being brought back by the leader.
+    if (inputs.follower === true) {
+      const stops = inputs.followerStops;
+      if (
+        stops !== undefined &&
+        (stops.paused || stops.pageStopped || stops.floor)
+      )
+        return "interrupted";
+      if (inputs.cache === "valid")
+        return inputs.lastSyncedAt === null ? "interrupted" : "synced";
+      if (inputs.cache === "unknown") return "interrupted";
+      return "resyncing";
+    }
+    return "interrupted";
+  }
   switch (engine.kind) {
     case "not_started":
       return "interrupted";
@@ -113,7 +161,18 @@ export type Notice =
   | { kind: "device_capacity" }
   | { kind: "unrecognised" }
   /** The 200-entry warning: informational only; nothing is disabled. */
-  | { kind: "queue_warning"; total: number };
+  | { kind: "queue_warning"; total: number }
+  /**
+   * WEB-09b: the persistent, blocking state of the recovery-scoped budgets (reconciliation rows 4 and 6): "Sync can't proceed on this
+   * version of Atlas", with Reload and Try again. No automatic request is issued while it stands.
+   */
+  | { kind: "sync_blocked" }
+  /** WEB-09b (Q24): the server instructed a restart (`410`, `409 access_changed`); dismissible with a single Acknowledge. */
+  | {
+      kind: "resync_notice";
+      reason: "resync_required" | "access_changed";
+      id: string;
+    };
 
 /**
  * Whether the cache must be hidden: the database says it is invalid, OR its display state is not established (R13: the database is
@@ -136,10 +195,23 @@ export function cacheHidden(inputs: StatusInputs): boolean {
 export function deriveNotices(inputs: StatusInputs): Notice[] {
   const out: Notice[] = [];
   const { engine, outbox } = inputs;
-  const stopped = engine?.kind === "stopped" ? engine.cause : null;
+  const job = inputs.recovery.state ?? null;
+  // The engine's stop, else the recovery job's (the engine is stopped while the job has the cache, so at most one of them speaks).
+  const stopped =
+    engine?.kind === "stopped"
+      ? engine.cause
+      : job?.kind === "stopped" && job.cause !== "sync_blocked"
+        ? job.cause
+        : null;
+  const memoryOnly =
+    (engine?.kind === "stopped" && engine.memoryOnly === true) ||
+    (job?.kind === "stopped" && job.memoryOnly === true);
   const cache: "valid" | "invalid" = cacheHidden(inputs) ? "invalid" : "valid";
+  // A follower has no engine or job of its own: the leader's durable stops speak for them (their actions reach the leader, P-11).
+  const follows = engine === null && inputs.follower === true;
+  const stops = follows ? inputs.followerStops : undefined;
 
-  if (stopped === "floor")
+  if (stopped === "floor" || stops?.floor === true)
     out.push({
       kind: "floor",
       variant: cacheHidden(inputs) ? "b" : "a",
@@ -149,11 +221,8 @@ export function deriveNotices(inputs: StatusInputs): Notice[] {
     (outbox?.kind === "stopped" && outbox.cause === "storage_full")
   )
     out.push({ kind: "storage_full", cache });
-  if (stopped === "local_storage")
-    out.push({
-      kind: "page_not_saved",
-      memoryOnly: engine?.kind === "stopped" && engine.memoryOnly === true,
-    });
+  if (stopped === "local_storage" || stops?.pageStopped === true)
+    out.push({ kind: "page_not_saved", memoryOnly });
   if (
     inputs.storageNotResponding ||
     (outbox?.kind === "stopped" && outbox.cause === "local_storage")
@@ -169,7 +238,7 @@ export function deriveNotices(inputs: StatusInputs): Notice[] {
       kind: "compat_paused",
       reason: outbox.reason === "compat_missing" ? "missing" : "unsupported",
     });
-  if (engine?.kind === "paused")
+  if (engine?.kind === "paused" || job?.kind === "paused" || stops?.paused)
     out.push({ kind: "still_trying", scope: "updates", count: 1 });
   if (outbox?.kind === "needs_retry")
     out.push({ kind: "still_trying", scope: "changes", count: outbox.count });
@@ -177,6 +246,14 @@ export function deriveNotices(inputs: StatusInputs): Notice[] {
   if (stopped === "unrecognised") out.push({ kind: "unrecognised" });
   if (inputs.summary?.warn === true)
     out.push({ kind: "queue_warning", total: inputs.summary.total });
+  if (
+    (job?.kind === "stopped" && job.cause === "sync_blocked") ||
+    inputs.recoveryBlocked === true
+  )
+    out.push({ kind: "sync_blocked" });
+  const notice = inputs.recovery.notice ?? null;
+  if (notice !== null)
+    out.push({ kind: "resync_notice", reason: notice.reason, id: notice.id });
   return out;
 }
 
@@ -192,7 +269,13 @@ export type GateState = "open" | "refreshing" | "floor";
 
 export function deriveGate(inputs: StatusInputs): GateState {
   if (!cacheHidden(inputs)) return "open";
-  return inputs.engine?.kind === "stopped" && inputs.engine.cause === "floor"
+  const job = inputs.recovery.state ?? null;
+  return (inputs.engine?.kind === "stopped" &&
+    inputs.engine.cause === "floor") ||
+    (job?.kind === "stopped" && job.cause === "floor") ||
+    (inputs.engine === null &&
+      inputs.follower === true &&
+      inputs.followerStops?.floor === true)
     ? "floor"
     : "refreshing";
 }

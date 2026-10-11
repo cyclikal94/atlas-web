@@ -5,6 +5,7 @@ import {
   type RouterHistory,
   redirect,
 } from "@tanstack/react-router";
+import { joinRoute } from "../features/authentication/route";
 import { peopleRoute } from "../features/people/route";
 import { settingsRoute } from "../features/settings/route";
 import { sharingRoute } from "../features/sharing/route";
@@ -35,6 +36,7 @@ export function createAppRouter(
     sharingRoute(rootRoute),
     settingsRoute(rootRoute),
     syncRoute(rootRoute),
+    joinRoute(rootRoute),
   ]);
   return createRouter({
     routeTree,
