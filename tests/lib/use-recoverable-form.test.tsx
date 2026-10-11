@@ -182,8 +182,13 @@ describe("restore after a reload", () => {
     );
     expect(handle?.restored?.tabInstanceId).toBe("old-2");
     expect(handle?.alternatives.map((c) => c.tabInstanceId)).toEqual(["old-1"]);
-    // A restored form is not dirty until it is edited.
-    expect(registry.dirty()).toHaveLength(0);
+    // ADAPTED (revision 5, R13). Was: "A restored form is not dirty until it is edited" (`toHaveLength(0)`), which trusted the restored copy,
+    // a row other pages may restore and discard too. A restored form is dirty until this page has a copy of its own; restoring still
+    // submits and writes nothing (the store is unchanged).
+    expect(registry.dirty()).toHaveLength(1);
+    expect(
+      (await port.list(CONTEXT)).map((c) => c.tabInstanceId).sort(),
+    ).toEqual(["old-1", "old-2", "open-3"]);
     // The alternative can be chosen instead.
     act(() => handle?.restoreAlternative("old-1"));
     expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe(
@@ -430,7 +435,8 @@ describe("dirty means: a reload would not bring back what the form shows (R2)", 
     await port.save(snapshot("gone", "X", "2026-10-01T09:00:00.000Z"));
     const registry = await mounted(port);
     expect(handle?.restored?.tabInstanceId).toBe("gone");
-    expect(registry.dirty()).toHaveLength(0);
+    // ADAPTED (revision 5, R13). Was `toHaveLength(0)`: a restored copy is not this page's protection, so the form is dirty until saved.
+    expect(registry.dirty()).toHaveLength(1);
     type("Title", "Y");
     // The save another tab's accepted update asks for (a peer flush).
     expect(await registry.dirty()[0]?.flush()).toBe("saved");
@@ -444,7 +450,8 @@ describe("dirty means: a reload would not bring back what the form shows (R2)", 
     const port = new MemoryRecoveryAdapter();
     await port.save(snapshot("gone", "X", "2026-10-01T09:00:00.000Z"));
     const registry = await mounted(port);
-    expect(registry.dirty()).toHaveLength(0);
+    // ADAPTED (revision 5, R13). Was `toHaveLength(0)`: a restored copy is not this page's protection, so the form is dirty until saved.
+    expect(registry.dirty()).toHaveLength(1);
     type("Title", "");
     expect(registry.dirty()).toHaveLength(1);
     expect(await registry.dirty()[0]?.flush()).toBe("saved");

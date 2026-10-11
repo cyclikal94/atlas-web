@@ -45,6 +45,12 @@ import type { RecoveryTab } from "./tab-identity";
  *    (`capture_seq`, `writer_gen`) still orders every write that reaches it.
  *  - ONE BASELINE. What is durable (`persisted.own`) changes only when a save LANDS, and only to a newer save's values than the one it
  *    knows, so a save that completes late never makes an older copy look current.
+ *  - ONLY A COPY OF ITS OWN PROTECTS A PAGE (revision 5, R13). A copy restored from a tab that has gone (`persisted.source`) is shared:
+ *    every page that restores it holds the same row, and any of them may discard it (its own save cleans it up, a submission or a discard
+ *    terminates it) without the others knowing. So a form whose only copy is a restored one is dirty until it has a copy saved under this
+ *    page's own identifier (whose owner lock no other live page can take over); the save captures what THIS form holds, never the shared
+ *    row, so it works whether that row is still there or not. Saving and cleaning up are separate facts: a failed own save never removes the
+ *    restored copy, and a failed clean-up never undoes a landed save (the next save or terminal act tries again).
  *  - ONE SCOPE. A session belongs to one account's database as it was when the session began (`scope`: the account and its incarnation,
  *    `FormRecoveryPort.pin`). Every write is pinned when it is asked for and made only if the port still reaches that same scope (DA-2: a
  *    form that stays mounted while its account's database is deleted and created again writes nothing into the new one). A session is
@@ -98,10 +104,11 @@ export interface Persisted {
   /** Whether this page has ever asked to write a copy under its own identifier (so a discard must reach it). */
   ownAsked: boolean;
   /**
-   * The copy of another (gone) tab this form was restored from, still in the store: the next page would restore it again while this page
-   * has none of its own. `newest`: it is the newest of the copies (an alternative chosen instead may not be).
+   * The copy of another (gone) tab this form was restored from, perhaps still in the store, which this page discards once it has a copy of
+   * its own (or at a submission or discard). It is NEVER this page's protection (revision 5, R13): another page that restored the same copy
+   * may discard it at any moment (its own save, a submission, a discard), and this page would not know.
    */
-  source: { id: string; values: Values; newest: boolean } | null;
+  source: { id: string; values: Values } | null;
   /**
    * The order of the newest discard (a submission, "Discard instead", "Discard and reload anyway") that has not landed, or 0: while it is
    * not 0 copies may come back. Only a discard at least as new clears it, so an older discard landing late never clears a newer debt.
@@ -124,6 +131,11 @@ export interface Attachment {
   readonly show: (view: SessionView) => void;
   /** Stops counting the mount's input events (revision 3, R3). */
   readonly stop: () => void;
+  /**
+   * The session's input revision for a revision of the mount's field state before it attached (revision 5, R3): the same number when the
+   * session was opened with that state, else the translation `adopt` made.
+   */
+  readonly revisionOf: (mountRevision: number) => number;
 }
 
 export interface FormSession extends PageFormSession {
@@ -171,10 +183,13 @@ export const valuesOf = (session: FormSession): Values =>
   capturable(session.fields);
 
 /**
- * What the next page would show for this form if the page went now (R2), field by field (revision 4): dirty when that is not what the form
- * holds. With a copy: the copy must give back every value shown and no other value of a field it holds. With none: every value must be
- * resolved (where the form starts from again, or covered by a terminal act and not edited since: R3). Retained input that is not resolved is
- * an obligation of its own (R11).
+ * What the next page would show for this form if the page went now (R2), field by field (revision 4): dirty when that is not certain to be
+ * what the form holds. With a copy of this page's own (which no other live page can take over or discard: its owner lock is held): the copy
+ * must give back every value shown and no other value of a field it holds. With a copy restored from another tab and none of its own: dirty
+ * (revision 5, R13), whatever the values: that copy is not this page's to keep, and another page that restored it too may discard it before
+ * this one reloads (the next save then makes a copy of this page's own, or discards the copies when nothing is unfinished). With no copy:
+ * every value must be resolved (where the form starts from again, or covered by a terminal act and not edited since: R3). Retained input
+ * that is not resolved is an obligation of its own (R11).
  */
 export const isDirty = (session: FormSession): boolean => {
   const { own, source, owed } = session.persisted;
@@ -182,8 +197,7 @@ export const isDirty = (session: FormSession): boolean => {
   if (owed > 0 || hasDebt(fields)) return true;
   const now = valuesOf(session);
   if (own) return !copyMatches(fields, own.values, now);
-  // A chosen alternative that is not the newest copy is not what the next page would restore: only a copy of this page's own makes it so.
-  if (source) return !source.newest || !copyMatches(fields, source.values, now);
+  if (source) return true;
   return !allResolved(fields, now);
 };
 
@@ -628,9 +642,9 @@ export function changeSchema(
 /**
  * A mount shows the session (revision 4: with its own field state `mount`, read since it mounted, and its committed schema). A new session
  * was opened with that state; a session resumed takes it in (`adopt`): the session's input comes back into every field the person has not
- * typed into in this mount, a field they have typed into keeps what they typed (the session's value stays owed), and the input the session
- * holds for fields this mount does not show stays retained. A freeze in force holds the new element too. From now on the mount's input
- * events are edits of the session's fields.
+ * edited in this mount, a field they have edited keeps what they typed with that edit's provenance (revision 5, R3: even the session's own
+ * text; the session's value stays owed), and the input the session holds for fields this mount does not show stays retained. A freeze in
+ * force holds the new element too. From now on the mount's input events are edits of the session's fields.
  */
 export function attach(
   session: FormSession,
@@ -640,8 +654,9 @@ export function attach(
   show: (view: SessionView) => void,
 ): Attachment {
   const form = (): HTMLFormElement | null => ref.current ?? element;
+  let revisionOf = (mountRevision: number): number => mountRevision;
   if (session.fields === mount) session.fields.form = form;
-  else adopt(session.fields, mount, form);
+  else revisionOf = adopt(session.fields, mount, form);
   const stop = watch(session.fields, element);
   const attachment: Attachment = {
     token: ++tokens,
@@ -649,6 +664,7 @@ export function attach(
     ref,
     show,
     stop,
+    revisionOf,
   };
   session.left = null;
   session.attached = attachment;

@@ -481,6 +481,8 @@ describe("Q5 (R3): while an update reload is prepared, the recovery actions are 
   test("another copy, 'Discard instead' and a new submission change nothing; `locked` says so; the release gives them back", async () => {
     const { port, registry } = await twoCopies();
     expect(handle?.locked).toBe(false);
+    // The restored form owes its own copy (revision 5, R13: a restored copy protects nobody): the refused actions below change nothing.
+    expect(registry.dirty()).toHaveLength(1);
     let release: () => void = () => undefined;
     act(() => {
       release = registry.freeze();
@@ -493,7 +495,9 @@ describe("Q5 (R3): while an update reload is prepared, the recovery actions are 
     expect(title().value).toBe("newer");
     expect(await stored(port)).toEqual(["newer", "older"]);
     expect(handle?.submitting()).toBeNull();
-    expect(registry.dirty()).toHaveLength(0);
+    // ADAPTED (revision 5, R13). Was `toHaveLength(0)` (the restored copy counted as protection); the intent, "the refused actions made no
+    // new work", is the same count as before the freeze.
+    expect(registry.dirty()).toHaveLength(1);
     act(() => release());
     expect(handle?.locked).toBe(false);
     act(() => handle?.restoreAlternative("gone-old"));

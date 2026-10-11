@@ -290,10 +290,26 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     await displayed(second);
     await formReady(second);
     await expect(title(second)).toHaveValue("From the second tab, later");
-    await expect(second.locator("[data-alternatives]")).toHaveAttribute(
-      "data-alternatives",
-      "1",
-    );
+    // ADAPTED (revision 5, R13). Was: `expect(second.locator("[data-alternatives]")).toHaveAttribute("data-alternatives", "1")`, the first
+    // tab's OLD copy (its previous page's, owner gone) offered here while the first tab, still open, showed that very input. Since revision
+    // 5 a restored form owes a copy of its own: asked to save by this tab's update, the first tab saved its input under its LIVE identifier
+    // and cleaned up the old row, so this tab offers nothing (another open tab's copy is never taken over). The intent, "both copies stay
+    // available", is asserted instead: both inputs are durable, and the first tab's is restored once that tab has gone.
+    await expect(second.locator("[data-alternatives]")).toHaveCount(0);
+    await expect(title(first)).toHaveValue("From the first tab");
+    expect(
+      (await recoveryRows(context, generations))
+        .filter((row) => !row.terminal)
+        .map((row) => row.fields.title)
+        .sort(),
+    ).toEqual(["From the first tab", "From the second tab, later"]);
+    // The second tab saves its own copy (so the next page's choice is not a race between two gone copies), then the first tab goes.
+    expect(await flushNow(second)).toBe("saved");
+    await first.close();
+    const third = await openApp(context, generations);
+    await formReady(third);
+    await expect(title(third)).toHaveValue("From the first tab");
+    await expect(restoredBanner(third)).toBeVisible();
   });
 
   test("an opener-copied tab saves under an identifier of its own", async ({
@@ -756,6 +772,7 @@ type FixtureWindow = {
     formContext?: string;
     allow?: string[];
     shown?: string[];
+    unbound?: boolean;
   }) => void;
   __atlasFormMounts?: number;
   __atlasSubmitGate?: Promise<unknown>;
@@ -1486,4 +1503,508 @@ test.describe("revision 4, R11: a field that leaves the page keeps its unfinishe
     await saveAndReload(page);
     await expect(title(page)).toHaveValue("title only");
   });
+});
+
+// ---- revision 5 -------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 5 (review of 11 October 2026: R3 at late binding, incomplete fix; R13, a restored copy taken for protection; design assessment
+ * of 11 October 2026, Q1, Q5-Q8, Q11): over the real `form_recovery` store, Web Locks and, in the update cases, the A/B worker generations
+ * with production timers and headers. FIXTURE evidence (no released backend).
+ */
+const ORIGINAL = "ORIGINAL UNSENT";
+const PEER = "PEER NEW INPUT";
+
+/** How many forms the page's registry lists (sessions with work outstanding, and mounts that have no session yet). */
+const formsCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      (
+        window as unknown as { __atlasForms: { all(): unknown[] } }
+      ).__atlasForms.all().length,
+  );
+/** Every dirty form's flush, as the update coordinator runs them; the results in registry order. */
+const flushAll = (page: Page) =>
+  page.evaluate(() =>
+    Promise.all(
+      (
+        window as unknown as {
+          __atlasForms: { dirty(): Array<{ flush(): Promise<string> }> };
+        }
+      ).__atlasForms
+        .dirty()
+        .map((form) => form.flush()),
+    ),
+  );
+
+/**
+ * TEST INJECTION (revision 5, R3): the form mounted again in its place WITHOUT its port (`unbound`, fixture only), as when the account's
+ * database is not open yet: the new mount has no session until `bindForm`. Checked: the mount counter moved, the old element is gone.
+ */
+async function remountUnbound(page: Page): Promise<void> {
+  const before = await page.evaluate(
+    () => (window as unknown as FixtureWindow).__atlasFormMounts ?? 0,
+  );
+  await fixtureForm(page).evaluate((form) => {
+    (form as unknown as { __old?: boolean }).__old = true;
+  });
+  await page.evaluate(() => {
+    const scope = window as unknown as FixtureWindow;
+    scope.__atlasFormProps?.({ unbound: true });
+    scope.__atlasRemountForm?.();
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as FixtureWindow).__atlasFormMounts ?? 0,
+      ),
+    )
+    .toBe(before + 1);
+  expect(
+    await fixtureForm(page).evaluate(
+      (form) => (form as unknown as { __old?: boolean }).__old === true,
+    ),
+  ).toBe(false);
+  await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+    "data-port",
+    "none",
+  );
+}
+/** The unbound mount gets its port: it binds the page's session for the form and looks for copies. */
+async function bindForm(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    (window as unknown as FixtureWindow).__atlasFormProps?.({ unbound: false }),
+  );
+  await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+    "data-port",
+    "open",
+  );
+  await formReady(page);
+}
+
+/**
+ * TEST INJECTION (revision 5, R13): this page's request for its recovery-identifier lock (`atlas-recovery-tab-<id>`, never an `ifAvailable`
+ * probe) waits until `releaseRecoveryLock`, so its first save is held between its capture and its write. Every other lock is untouched.
+ */
+const holdRecoveryLock = (page: Page) =>
+  page.evaluate(() => {
+    const scope = window as unknown as {
+      __recoveryLockAsked?: number;
+      __releaseRecoveryLock?: () => void;
+    };
+    const request = navigator.locks.request.bind(navigator.locks);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    scope.__releaseRecoveryLock = release;
+    (navigator.locks as unknown as { request: typeof request }).request = ((
+      name: string,
+      options: LockOptions,
+      callback: LockGrantedCallback<unknown>,
+    ) => {
+      if (name.startsWith("atlas-recovery-tab-") && !options.ifAvailable) {
+        scope.__recoveryLockAsked = (scope.__recoveryLockAsked ?? 0) + 1;
+        return gate.then(() => request(name, options, callback));
+      }
+      return request(name, options, callback);
+    }) as typeof request;
+  });
+const recoveryLockAsked = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { __recoveryLockAsked?: number })
+        .__recoveryLockAsked ?? 0,
+  );
+const releaseRecoveryLock = (page: Page) =>
+  page.evaluate(() =>
+    (
+      window as unknown as { __releaseRecoveryLock?: () => void }
+    ).__releaseRecoveryLock?.(),
+  );
+
+/**
+ * A submission that succeeds at once while the title field KEEPS FOCUS with its typed value not yet committed (as a keyboard shortcut or a
+ * control outside the form submits it: `requestSubmit()`, no Enter key and no click, which would both commit the field with a change event
+ * first), and the form says it happened. The removal of that focused field is where Chromium fires its change event (revision 5).
+ */
+async function submitKeepingFocus(page: Page, sent: number): Promise<void> {
+  await title(page).focus();
+  await fixtureForm(page).evaluate((form) =>
+    (form as HTMLFormElement).requestSubmit(),
+  );
+  await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+    "data-submitted",
+    String(sent),
+  );
+  expect(
+    await page.evaluate(
+      () => (document.activeElement as HTMLInputElement | null)?.name ?? null,
+    ),
+  ).toBe("title");
+}
+
+/**
+ * The first page typed ORIGINAL and saved it, then reloaded (a new page, the old one gone): it restores that copy, S. With `peer`, a
+ * second page opened afterwards restores the same S. With `update`, both are on generation A, controlled, and B is waiting.
+ */
+async function restorers(
+  context: BrowserContext,
+  world: Generations,
+  options: { peer: boolean; update: boolean },
+): Promise<{ first: Page; peer: Page | null }> {
+  await seedAccount(context, world);
+  const first = await openApp(context, world);
+  if (options.update) {
+    await workerActive(first);
+    await reloadQuietly(first);
+  }
+  await formReady(first);
+  await title(first).fill(ORIGINAL);
+  expect(await flushNow(first)).toBe("saved");
+  await reloadQuietly(first);
+  await formReady(first);
+  await expect(title(first)).toHaveValue(ORIGINAL);
+  let peer: Page | null = null;
+  if (options.peer) {
+    peer = await openApp(context, world);
+    await formReady(peer);
+    await expect(title(peer)).toHaveValue(ORIGINAL);
+    await quiet(peer);
+  }
+  if (options.update) {
+    await world.serve("fixture-b");
+    await checkForUpdate(first);
+  }
+  await quiet(first);
+  return { first, peer };
+}
+/** A plain reload of the page (no update): the next page, with its form ready. */
+async function nextPage(page: Page): Promise<void> {
+  await reloadQuietly(page);
+  await formReady(page);
+}
+
+test.describe("revision 5, R3: an edit typed before the form had its database keeps its provenance (store and locks, no update)", () => {
+  for (const unbound of [true, false])
+    test(`${unbound ? "" : "control: "}SENT A submitted with the field still focused; ${unbound ? "an UNBOUND" : "a bound"} remount typed SENT A again${unbound ? ", then bound" : ""}: dirty, saved, and the next page restores it`, async ({
+      context,
+      generations,
+    }) => {
+      await seedAccount(context, generations);
+      const page = await openApp(context, generations);
+      await formReady(page);
+      await title(page).fill("SENT A");
+      await submitKeepingFocus(page, 1);
+      expect(await dirtyCount(page)).toBe(0);
+      if (unbound) {
+        // Removes the FOCUSED field (Chromium fires a change event at its removal): the old session stays clean and unlisted, and only
+        // the new mount's provisional handle is listed.
+        await remountUnbound(page);
+        await expect.poll(() => formsCount(page)).toBe(1);
+        expect(await dirtyCount(page)).toBe(0);
+      } else await remountForm(page);
+      await title(page).fill("INTERMEDIATE");
+      await title(page).fill("SENT A");
+      expect(await dirtyCount(page)).toBe(1);
+      if (unbound) {
+        await bindForm(page);
+        await expect(title(page)).toHaveValue("SENT A");
+        expect(await dirtyCount(page)).toBe(1);
+      }
+      expect(await flushAll(page)).toEqual(["saved"]);
+      await nextPage(page);
+      await expect(title(page)).toHaveValue("SENT A");
+      await expect(restoredBanner(page)).toBeVisible();
+    });
+});
+
+test.describe("revision 5, R13: a restored copy is shared; each page that restored it saves its own (store and locks, no update)", () => {
+  type PeerAct = {
+    name: string;
+    deletes: boolean;
+    run: (peer: Page) => Promise<void>;
+  };
+  const acts: PeerAct[] = [
+    {
+      name: "the other page saves different input",
+      deletes: true,
+      run: async (peer) => {
+        await title(peer).fill(PEER);
+        expect(await flushNow(peer)).toBe("saved");
+      },
+    },
+    {
+      name: "control: the other page changes nothing",
+      deletes: false,
+      run: async () => undefined,
+    },
+    {
+      name: "the other page's submission succeeds",
+      deletes: true,
+      run: async (peer) => {
+        await peer
+          .getByRole("button", { name: "Save note", exact: true })
+          .click();
+        await expect(peer.locator("[data-fixture-form]")).toHaveAttribute(
+          "data-submitted",
+          "1",
+        );
+      },
+    },
+    {
+      name: "control: the other page's submission fails",
+      deletes: false,
+      run: async (peer) => {
+        await holdSubmission(peer);
+        await peer
+          .getByRole("button", { name: "Save note", exact: true })
+          .click();
+        await releaseSubmission(peer, false);
+        expect(await pendingCount(peer)).toBe(0);
+      },
+    },
+    {
+      name: "the other page's 'Discard instead'",
+      deletes: true,
+      run: async (peer) => {
+        await peer.getByRole("button", { name: "Discard instead" }).click();
+        await expect(restoredBanner(peer)).toHaveCount(0);
+        await expect(title(peer)).toHaveValue("");
+      },
+    },
+    {
+      name: "control: the other page's 'Discard instead' cannot be written",
+      deletes: false,
+      run: async (peer) => {
+        await failRecoveryWrites(peer, 2);
+        await peer.getByRole("button", { name: "Discard instead" }).click();
+        await expect(title(peer)).toHaveValue("");
+      },
+    },
+  ];
+  for (const act of acts)
+    test(`two pages restored S; ${act.name}; the first page's flush and reload keep ORIGINAL`, async ({
+      context,
+      generations,
+    }) => {
+      const { first, peer } = await restorers(context, generations, {
+        peer: true,
+        update: false,
+      });
+      if (!peer) throw new Error("no peer");
+      await act.run(peer);
+      await expect
+        .poll(async () =>
+          (await liveTitles(context, generations)).includes(ORIGINAL),
+        )
+        .toBe(!act.deletes);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      const results = await flushAll(first);
+      await nextPage(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+      // The first page owned its protection: its flush saved a copy of its own.
+      expect(results).toEqual(["saved"]);
+    });
+
+  for (const peerDeletes of [true, false])
+    test(`${peerDeletes ? "" : "control: "}the first page's save held between capture and write (its identity lock)${peerDeletes ? "; meanwhile the other page saves different input, deleting S" : ""}; the save lands ORIGINAL`, async ({
+      context,
+      generations,
+    }) => {
+      const { first, peer } = await restorers(context, generations, {
+        peer: true,
+        update: false,
+      });
+      if (!peer) throw new Error("no peer");
+      await holdRecoveryLock(first);
+      await first.evaluate(() => {
+        const forms = (
+          window as unknown as {
+            __atlasForms: { dirty(): Array<{ flush(): Promise<string> }> };
+            __flushing?: Promise<string[]>;
+          }
+        ).__atlasForms;
+        (window as unknown as { __flushing?: Promise<string[]> }).__flushing =
+          Promise.all(forms.dirty().map((form) => form.flush()));
+      });
+      await expect.poll(() => recoveryLockAsked(first)).toBeGreaterThan(0);
+      if (peerDeletes) {
+        await title(peer).fill(PEER);
+        expect(await flushNow(peer)).toBe("saved");
+        expect(await liveTitles(context, generations)).toEqual([PEER]);
+      }
+      await releaseRecoveryLock(first);
+      const results = await first.evaluate(
+        () =>
+          (window as unknown as { __flushing?: Promise<string[]> }).__flushing,
+      );
+      await nextPage(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      expect(results).toEqual(["saved"]);
+    });
+
+  for (const fails of [true, false])
+    test(`${fails ? "" : "control: "}the first page's own save ${fails ? "fails once: it stays dirty, S stays; the retry saves" : "succeeds"}; the next page restores ORIGINAL`, async ({
+      context,
+      generations,
+    }) => {
+      const { first } = await restorers(context, generations, {
+        peer: false,
+        update: false,
+      });
+      if (fails) {
+        await failRecoveryWrites(first, 1);
+        expect(await flushAll(first)).toEqual(["failed"]);
+        expect(await dirtyCount(first)).toBe(1);
+        expect(await liveTitles(context, generations)).toEqual([ORIGINAL]);
+      }
+      expect(await flushAll(first)).toEqual(["saved"]);
+      expect(await dirtyCount(first)).toBe(0);
+      await nextPage(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+    });
+
+  for (const third of [true, false])
+    test(`hand-off: the first page closes${third ? "; a third page restores its copy before the next page lists" : " (control: no third page)"}; the next page restores ORIGINAL`, async ({
+      context,
+      generations,
+    }) => {
+      const { first } = await restorers(context, generations, {
+        peer: false,
+        update: false,
+      });
+      expect(await flushAll(first)).toEqual(["saved"]);
+      await first.close();
+      if (third) {
+        const reader = await openApp(context, generations);
+        await formReady(reader);
+        await expect(title(reader)).toHaveValue(ORIGINAL);
+      }
+      const next = await openApp(context, generations);
+      await formReady(next);
+      await expect(title(next)).toHaveValue(ORIGINAL);
+    });
+});
+
+test.describe("revision 5: the real worker update (generations A to B) keeps late-bound and shared-source input", () => {
+  for (const unbound of [true, false])
+    test(`R3: ${unbound ? "" : "control: "}SENT A submitted with the field still focused; ${unbound ? "an unbound" : "a bound"} remount typed SENT A again; 'Save and reload'; B restores it`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await oneTabWithUpdate(context, generations);
+      await title(page).fill("SENT A");
+      await submitKeepingFocus(page, 1);
+      if (unbound) {
+        await remountUnbound(page);
+        await expect.poll(() => formsCount(page)).toBe(1);
+        expect(await dirtyCount(page)).toBe(0);
+      } else await remountForm(page);
+      await title(page).fill("INTERMEDIATE");
+      await title(page).fill("SENT A");
+      if (unbound) await bindForm(page);
+      await expect(title(page)).toHaveValue("SENT A");
+      expect(await dirtyCount(page)).toBe(1);
+      await saveAndReload(page);
+      await expect(title(page)).toHaveValue("SENT A");
+      await expect(restoredBanner(page)).toBeVisible();
+      await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+    });
+
+  for (const peerEdits of [true, false])
+    test(`R13: two pages restored S; ${peerEdits ? "the other page saves different input" : "control: the other page changes nothing"}; the first page's update keeps ORIGINAL with the other page still open`, async ({
+      context,
+      generations,
+    }) => {
+      const { first, peer } = await restorers(context, generations, {
+        peer: true,
+        update: true,
+      });
+      if (!peer) throw new Error("no peer");
+      if (peerEdits) {
+        await title(peer).fill(PEER);
+        expect(await flushNow(peer)).toBe("saved");
+      }
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await saveAndReload(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+      if (peerEdits) await expect(title(peer)).toHaveValue(PEER);
+    });
+
+  for (const peerDeletes of [true, false])
+    test(`R13: ${peerDeletes ? "" : "control: "}the first page's save held at its identity lock after 'Save and reload'${peerDeletes ? " while the other page saves different input" : " (the other page makes no edit; its peer flush still cleans S up)"}; nothing reloads until it lands; B restores ORIGINAL`, async ({
+      context,
+      generations,
+    }) => {
+      const { first, peer } = await restorers(context, generations, {
+        peer: true,
+        update: true,
+      });
+      if (!peer) throw new Error("no peer");
+      await holdRecoveryLock(first);
+      await mark(first);
+      await quiet(first);
+      await updateRegion(first)
+        .getByRole("button", { name: "Save and reload" })
+        .click();
+      await expect.poll(() => recoveryLockAsked(first)).toBeGreaterThan(0);
+      if (peerDeletes) {
+        await title(peer).fill(PEER);
+        expect(await flushNow(peer)).toBe("saved");
+      }
+      // One live row (with the edit: the other page's own copy, S gone; without: S or that page's copy of it): nothing of the first page's.
+      await expect
+        .poll(() => liveTitles(context, generations))
+        .toEqual([peerDeletes ? PEER : ORIGINAL]);
+      expect(
+        (await recoveryRows(context, generations)).filter(
+          (row) => !row.terminal,
+        ),
+      ).toHaveLength(1);
+      expect(await marked(first)).toBe(true);
+      expect(await title(first).inputValue()).toBe(ORIGINAL);
+      await releaseRecoveryLock(first);
+      await reloadedOntoB(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+    });
+
+  for (const fails of [true, false])
+    test(`R13: ${fails ? "" : "control: "}a restored form's own save ${fails ? "fails: 'Save and reload' stops with 'could not save', S stays; 'Retry save' saves" : "succeeds"}; B restores ORIGINAL`, async ({
+      context,
+      generations,
+    }) => {
+      const { first } = await restorers(context, generations, {
+        peer: false,
+        update: true,
+      });
+      await mark(first);
+      if (fails) {
+        await failRecoveryWrites(first, 1);
+        await quiet(first);
+        await updateRegion(first)
+          .getByRole("button", { name: "Save and reload" })
+          .click();
+        await expect(
+          updateRegion(first).getByText(SAVE_FAILED, { exact: true }),
+        ).toBeVisible();
+        expect(await marked(first)).toBe(true);
+        expect(await liveTitles(context, generations)).toEqual([ORIGINAL]);
+        await updateRegion(first)
+          .getByRole("button", { name: "Retry save" })
+          .click();
+        await reloadedOntoB(first);
+      } else await saveAndReload(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+    });
 });

@@ -80,10 +80,11 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  * is discarded once; a submission or "Discard instead" discards both. Only allow-listed fields are captured, and never a sensitive one
  * (`guard.ts`). `formContext` names the form and the route it is on; the account is the port's (one database per account).
  *
- * WHAT "DIRTY" MEANS (revision 1, R2). A form is dirty when a reload would NOT bring back what it shows now: when its values differ from
- * the copy the next page would restore (this page's own latest durable copy, else the copy it was restored from, else nothing: what it showed
- * at mount). A flush of a form whose values are back to the CLEAN state (what it showed at mount, or after a submission or a discard)
- * discards its copies instead of saving one, so the next page shows that state.
+ * WHAT "DIRTY" MEANS (revision 1, R2; revision 5, R13). A form is dirty when a reload is not CERTAIN to bring back what it shows now: when
+ * its values differ from this page's own latest durable copy, or, with no copy, from its clean state (what it showed at mount, or after a
+ * submission or a discard). A form whose only copy is the one it was RESTORED from is dirty until this page has saved a copy of its own,
+ * even unedited: another page may have restored the same copy and may discard it at any time (revision 5, R13), so it protects nobody. A
+ * flush of a form whose values are back to the clean state discards its copies instead of saving one, so the next page shows that state.
  *
  * ONE SESSION PER FORM, WHATEVER MOUNTS IT (revision 2; R2, R4, DA-1, DA-2). The form's state, the order of its saves and discards, what
  * is durable and what is still outstanding belong to its SESSION in the page's registry (`session.ts`), bound to the account's database
@@ -377,7 +378,7 @@ export function useRecoverableForm(
           else
             current.persisted = {
               ...current.persisted,
-              source: { id: newest.tabInstanceId, values, newest: true },
+              source: { id: newest.tabInstanceId, values },
             };
           setView({ restored: newest, alternatives: gone.slice(1) });
         } else if (gone.length > 0)
@@ -450,20 +451,22 @@ export function useRecoverableForm(
     owner.current = current;
     attachment.current = shown;
     // Tickets this mount took before it had a session join it, for this form context only (revision 3, R10), before the mount's own
-    // registration goes, so the coordinator never stops waiting for them. A ticket of the field state the session took keeps its revision;
-    // one of a mount whose state the session took in keeps it only if the mount's input did not change since the send (else unknown).
+    // registration goes, so the coordinator never stops waiting for them. Each keeps its place in the session's order (revision 5, R3): a
+    // ticket of the field state the session took keeps its revision, one of the mount whose state the session took in has it translated
+    // (`adopt`), so every one keeps its own revision and an edit made after it stays the person's. A ticket of any other state, or one whose
+    // revision a submission the session acknowledged already reaches (its answer is not this ticket's), has none: it covers nothing.
+    const acknowledged = current.acknowledged?.input ?? -1;
     for (const ticket of provisionalTickets.current) {
       if (ticket.sent !== null || ticket.formContext !== formContext) continue;
-      const same = ticket.fields === current.fields;
-      const unchangedSince =
-        ticket.fields !== null && ticket.fields.input === ticket.input;
+      const revision =
+        ticket.fields === current.fields
+          ? ticket.input
+          : ticket.fields === mount
+            ? shown.revisionOf(ticket.input)
+            : null;
       ticket.sent = {
         session: current,
-        input: same
-          ? ticket.input
-          : unchangedSince
-            ? current.fields.input
-            : null,
+        input: revision !== null && revision > acknowledged ? revision : null,
         held: ticket.held,
       };
       track(current, ticket.outstanding);
@@ -642,7 +645,7 @@ export function useRecoverableForm(
       // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
       current.persisted = {
         ...current.persisted,
-        source: { id: chosen.tabInstanceId, values, newest: false },
+        source: { id: chosen.tabInstanceId, values },
       };
       setView({
         restored: chosen,

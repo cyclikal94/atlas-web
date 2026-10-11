@@ -15,9 +15,13 @@ import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
  *    value (RETAINED); a field that comes back (the same element or a new one) is given its retained value back when it shows what it
  *    started with (untouched); when the person has already typed something else into it, their new text wins and the retained value stays
  *    owed (`shadowed`). Presence is noticed at every read and, for the restore to show at once, by a MutationObserver.
- *  - EDIT PROVENANCE (`input`, `edited`). Every input/change/reset event, and every restore the hook makes from a copy, moves the input
- *    revision and records which field it changed (all fields when the event names none). Coming back into a field, or a schema change, is
- *    not an edit.
+ *  - EDIT PROVENANCE (`input`, `edited`). Every input/reset event, every change event that reports a value no input event reported, and
+ *    every restore the hook makes from a copy, moves the input revision and records which field it changed (all fields when the event names
+ *    none). Coming back into a field, or a schema change, is not an edit. A change event that only COMMITS the value the field's last edit
+ *    event already reported is not one either (revision 5): every engine fires it when focus leaves an edited field, and Chromium also when a
+ *    focused edited field is removed, possibly AFTER a submission covered that very value (it made the submitted text look unfinished).
+ *    Provenance survives a remount: what the person typed into a new mount, even the same text as before, is newer than everything the
+ *    session knew (`adopt`, revision 5, R3).
  *  - COVERAGE (`covered`). A field's value is RESOLVED, needing no copy, when the next page would show it anyway (its initial value, which
  *    the form starts from again) or when a terminal act covers exactly that value and the field has not been edited since: a successful
  *    submission covers what it sent (and, by the owner's decision, the hidden values of the state it saved), an explicit discard what the
@@ -49,10 +53,17 @@ export interface FieldState {
   edited: Map<string, number>;
   /** The revision of the last edit that changed every field (a reset; an event that names no field). */
   editedAll: number;
+  /** The value each field showed at its last edit event (revision 5): a change event that reports it again commits that edit, nothing more. */
+  evented: Map<string, string>;
   /** The value a terminal act covered for each field, and the revision it covered. */
   covered: Map<string, { value: string; at: number }>;
   /** Retained values a field that came back no longer shows, because the person typed something else into it. */
   shadowed: Values;
+  /**
+   * The revision of the edit that produced each shadowed value, where it is known (a remount's adoption, revision 5): a submission sent
+   * after it that succeeds covers it. Unknown: owed until shown again, submitted unchanged or discarded.
+   */
+  shadowedAt: Map<string, number>;
 }
 
 type Control = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
@@ -112,8 +123,10 @@ export function openFields(
     input: 0,
     edited: new Map(),
     editedAll: 0,
+    evented: new Map(),
     covered: new Map(),
     shadowed: {},
+    shadowedAt: new Map(),
   };
   const element = form();
   if (element)
@@ -167,7 +180,10 @@ export function sync(fields: FieldState): void {
       continue;
     }
     // The person typed something else into it: that is the field's value now, and the retained one is still owed.
-    if (!resolved(fields, name, retained)) fields.shadowed[name] = retained;
+    if (!resolved(fields, name, retained)) {
+      fields.shadowed[name] = retained;
+      fields.shadowedAt.delete(name);
+    }
     fields.ledger[name] = shown;
   }
 }
@@ -298,7 +314,8 @@ export function cover(fields: FieldState, values: Values, at: number): void {
 
 /**
  * A submission sent at revision `at` succeeded although the form changed since: it covers the fields that were NOT edited after it and
- * still hold what it sent, and nothing else (revision 4, R3: never an edit made after the send).
+ * still hold what it sent, and nothing else (revision 4, R3: never an edit made after the send). A shadowed value it sent, produced by an
+ * edit no later than the send (revision 5: a remount typed over it), is what it submitted: no longer owed.
  */
 export function coverUnedited(
   fields: FieldState,
@@ -307,9 +324,15 @@ export function coverUnedited(
 ): void {
   sync(fields);
   const unedited: Values = {};
-  for (const [name, value] of Object.entries(sent))
+  for (const [name, value] of Object.entries(sent)) {
     if (lastEdit(fields, name) <= at && fields.ledger[name] === value)
       unedited[name] = value;
+    const edit = fields.shadowedAt.get(name);
+    if (fields.shadowed[name] === value && edit !== undefined && edit <= at) {
+      delete fields.shadowed[name];
+      fields.shadowedAt.delete(name);
+    }
+  }
   cover(fields, unedited, at);
 }
 
@@ -366,61 +389,101 @@ export function applySnapshot(
 /**
  * A new mount shows the fields a session already holds (a remount: another page's boot remounts the protected tree, F-1). `into` is the
  * session's (no mount shows it), `from` the new mount's, read since it mounted. The new mount's schema is the schema. A field the new mount
- * shows untouched (what it started from) takes the session's value back; one the person has typed into in the new mount keeps their text,
- * and the session's value stays owed; a field the new mount does not show keeps the session's value (retained). What the new mount held
- * before it had a session (its own retained values, its coverage of fields not changed since) joins the session's.
+ * shows UNTOUCHED (no edit event since it mounted, and it shows what it started from) takes the session's value back; a field the person has
+ * EDITED in the new mount keeps what they typed, whatever text that is (the same as the session's, the text of an earlier submission, or
+ * back to where it started), and the session's value stays owed if it is not resolved; a field the new mount does not show keeps the
+ * session's value (retained). What the new mount held before it had a session (its own retained values, its coverage of fields not changed
+ * since) joins the session's.
+ *
+ * PROVENANCE IS TRANSLATED, NOT COMPARED (revision 5, R3; design assessment of 11 October 2026, C2). Revision 4 skipped every field whose
+ * text equalled the session's, so an edit typed in a mount that had no database yet (late binding) to the text of an earlier successful
+ * submission inherited that submission's coverage, looked clean, and was gone after the reload. The new mount's revisions now map into the
+ * session's by one monotone translation, `base + r` with `base` the session's revision at adoption: every edit, coverage stamp and ticket of
+ * the new mount keeps its order, and every edit of the new mount is newer than anything the session knew, so no earlier act covers it.
+ * A value changed in the new mount without any event is an edit of its own, after all of them. Returns the translation (the hook maps the
+ * tickets the mount took before it had a session through it).
  */
 export function adopt(
   into: FieldState,
   from: FieldState,
   form: () => HTMLFormElement | null,
-): void {
+): (revision: number) => number {
   into.allow = from.allow;
   into.schema = from.schema;
   into.form = form;
   sync(from);
   const element = form();
-  const changed: string[] = [];
-  const covered: Values = {};
+  const base = into.input;
+  const translate = (revision: number): number => base + revision;
+  const edits = new Map<string, number>();
+  const unstamped: string[] = [];
+  const covered: [string, string, number][] = [];
   for (const [name, mine] of Object.entries(from.ledger)) {
     if (into.initial[name] === undefined && from.initial[name] !== undefined)
       into.initial[name] = from.initial[name];
     const theirs = into.ledger[name];
+    const edit = lastEdit(from, name);
     const cover = from.covered.get(name);
-    if (cover && cover.value === mine && lastEdit(from, name) <= cover.at)
-      covered[name] = mine;
+    if (cover && cover.value === mine && edit <= cover.at)
+      covered.push([name, mine, translate(cover.at)]);
+    if (edit > 0) {
+      // Edited in the new mount: the person's value, newer than the session's (even the same text).
+      if (
+        theirs !== undefined &&
+        theirs !== mine &&
+        !resolved(into, name, theirs)
+      ) {
+        into.shadowed[name] = theirs;
+        into.shadowedAt.set(name, lastEdit(into, name));
+      }
+      into.ledger[name] = mine;
+      edits.set(name, translate(edit));
+      continue;
+    }
     if (theirs === undefined) {
       into.ledger[name] = mine;
-      if (lastEdit(from, name) > 0) changed.push(name);
       continue;
     }
     if (mine === theirs) continue;
     const shown = from.present.get(name);
-    if (mine === from.initial[name] && shown) {
-      // Untouched in the new mount: the session's value comes back into it.
-      if (element && controlOf(element, name) === shown)
+    if (mine === from.initial[name]) {
+      // Untouched in the new mount: the session's value comes back into it (a field it does not show keeps it, retained).
+      if (shown && element && controlOf(element, name) === shown)
         (shown as Control).value = theirs;
       continue;
     }
-    if (mine === from.initial[name]) continue;
-    if (!resolved(into, name, theirs)) into.shadowed[name] = theirs;
+    // Changed in the new mount without an event: the new text is the field's, an edit after every other; the session's value stays owed.
+    if (!resolved(into, name, theirs)) {
+      into.shadowed[name] = theirs;
+      into.shadowedAt.set(name, lastEdit(into, name));
+    }
     into.ledger[name] = mine;
-    changed.push(name);
+    unstamped.push(name);
   }
   for (const [name, value] of Object.entries(from.shadowed))
-    into.shadowed[name] ??= value;
+    if (into.shadowed[name] === undefined) {
+      into.shadowed[name] = value;
+      const edit = from.shadowedAt.get(name);
+      if (edit === undefined) into.shadowedAt.delete(name);
+      else into.shadowedAt.set(name, translate(edit));
+    }
+  for (const [name, value] of from.evented) into.evented.set(name, value);
   into.present = new Map(from.present);
-  if (changed.length > 0) noteInput(into, changed);
-  cover(into, covered, into.input);
+  into.input = translate(from.input);
+  for (const [name, at] of edits) into.edited.set(name, at);
+  if (unstamped.length > 0) noteInput(into, unstamped);
+  for (const [name, value, at] of covered) cover(into, { [name]: value }, at);
   sync(into);
+  return translate;
 }
 
 const INPUT_EVENTS = ["input", "change", "reset"] as const;
 
 /**
- * Follows the fields of `element` while a mount shows them: every input/change/reset event is an edit of the field it names (every field
- * for a reset, or an event that names none) and is read at once, in the capture phase, before any handler of the page can remove the
- * field; a reset is read again after the browser has reset the form (its event comes first); a field added or removed is noticed at once.
+ * Follows the fields of `element` while a mount shows them: every input/reset event is an edit of the field it names (every field for a
+ * reset, or an event that names none) and is read at once, in the capture phase, before any handler of the page can remove the field; a
+ * change event is an edit only when the field shows another value than at its last edit event (revision 5: otherwise it only commits that
+ * edit); a reset is read again after the browser has reset the form (its event comes first); a field added or removed is noticed at once.
  * Returns the stop.
  */
 export function watch(
@@ -430,15 +493,30 @@ export function watch(
   let stopped = false;
   const onInput = (event: Event): void => {
     const target = event.target;
-    const name =
+    const control =
       event.type !== "reset" &&
       (target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
         target instanceof HTMLSelectElement) &&
       target.name !== ""
-        ? target.name
+        ? target
         : null;
-    noteInput(fields, name === null ? undefined : [name]);
+    if (control === null) {
+      fields.evented.clear();
+      noteInput(fields);
+    } else if (
+      // Only an admitted, non-sensitive field's value is ever read (any other field's event is an edit, as before).
+      !admitted(fields).has(control.name) ||
+      isSensitiveField(control)
+    )
+      noteInput(fields, [control.name]);
+    else if (
+      event.type !== "change" ||
+      fields.evented.get(control.name) !== control.value
+    ) {
+      fields.evented.set(control.name, control.value);
+      noteInput(fields, [control.name]);
+    }
     sync(fields);
     if (event.type === "reset")
       setTimeout(() => {

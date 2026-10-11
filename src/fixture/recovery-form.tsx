@@ -25,7 +25,9 @@ import { useRecoverableForm } from "../lib/form-recovery/use-recoverable-form";
  * allow })` (revision 3, R10/R11) renders the SAME mount with another form context or allow-list (field names; never the password), as a
  * feature form whose route or fields change would; followed by `__atlasRemountForm()` it is a remount with them. Revision 4 (R11): `shown`
  * (field names) says which of the title and notes fields are ON THE PAGE, separately from what is admitted, as a conditional field that a
- * feature form hides would be; given with `allow` in one call, the field and its admission go in the same render.
+ * feature form hides would be; given with `allow` in one call, the field and its admission go in the same render. Revision 5 (R3):
+ * `unbound` withholds the port from the form (as before the account's database is open), so a spec can type into a mount before it binds
+ * the page's session (late binding); `unbound: false` gives it back.
  */
 export const FIXTURE_FORM_CONTEXT = "fixture-note:/today";
 const ALLOW = ["title", "notes"];
@@ -34,6 +36,7 @@ type FixtureProps = {
   formContext: string;
   allow: readonly string[];
   shown: readonly string[];
+  unbound?: boolean;
 };
 type FixtureScope = {
   __atlasRemountForm?: () => void;
@@ -62,8 +65,14 @@ export function FixtureRecoveryForm() {
   return <FixtureRecoveryFormMount key={key} {...props} />;
 }
 
-function FixtureRecoveryFormMount({ formContext, allow, shown }: FixtureProps) {
-  const port = useFormRecoveryPort();
+function FixtureRecoveryFormMount({
+  formContext,
+  allow,
+  shown,
+  unbound,
+}: FixtureProps) {
+  const opened = useFormRecoveryPort();
+  const port = unbound ? null : opened;
   const form = useRef<HTMLFormElement>(null);
   const first = useRef<HTMLInputElement>(null);
   const [submitted, setSubmitted] = useState(0);

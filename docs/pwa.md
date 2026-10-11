@@ -137,10 +137,17 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
 ```
 
 - Only allow-listed fields are captured, never a sensitive one (`guard.ts`: development builds throw, production drops it).
-- **Dirty means a reload would not bring back what the form shows (revision 1, R2; revision 4, R3):** its values differ from this page's own
-  latest durable copy, else from the copy it was restored from; with no copy, some value is UNFINISHED. A value needs no copy only when the
-  next page starts from it anyway (the field's initial value) or a terminal act covers exactly it and the field has not been edited since
-  (`fields.ts`, `resolved`). A flush of a form whose every value needs no copy discards its copies instead of saving one.
+- **Dirty means a reload is not certain to bring back what the form shows (revision 1, R2; revision 4, R3; revision 5, R13):** its values
+  differ from this page's own latest durable copy; with no copy of its own, the form is dirty if it was RESTORED from another tab's copy
+  (whatever its values), and otherwise if some value is UNFINISHED. A restored copy is shared: every page that restored the same gone tab's
+  copy holds the same row, and any of them may discard it (its own save cleans it up, a submission or "Discard instead" terminates it)
+  without the others knowing, so it is never a page's reload protection (revision 5, R13: two pages restored one copy, one saved different
+  input, and the other's update reload lost its original input). Only a copy saved under this page's own identifier, whose owner lock no other
+  live page can take over, protects it; that save captures what the form holds, never the shared row, so it works whether the row still
+  exists or not. A value needs no copy only when the next page starts from it anyway (the field's initial value) or a terminal act covers
+  exactly it and the field has not been edited since (`fields.ts`, `resolved`). A flush of a form whose every value needs no copy discards
+  its copies instead of saving one. Saving and cleaning up stay separate: a failed own save never removes the restored copy, and a failed
+  clean-up never undoes a landed save (the next save or terminal act tries again).
 - **Order (revision 1, R4):** a flush captures the values and takes its place when it is CALLED; a submission or discard asked for while it
   still waits for the page's identifier overtakes it, and it writes nothing (`failed`). The port's `(writer_gen, capture_seq)` order is kept.
 - **Discards answer (revision 1, R6):** `onSubmitted()` and `discard()` answer `discarded` (no copy can come back), `failed` (one may: the
@@ -169,9 +176,13 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
 - **Pinned writes (revision 1; revision 2: the whole scope):** every flush and discard pins the port when it is asked for (`pin()`), so a
   write that waits for the page's identifier can never land in another account's store or another incarnation, and none is made for a
   scope other than the session's.
-- **A submission acknowledges what it SENT (revision 3; R3, R10; revision 4).** `submitting()` records, when it is called, the form's session
-  (account and incarnation included), its input revision (moved by the person's `input`/`change`/`reset` events in the form and by the
-  hook's own restores and discards, recording which field each changed) and everything the form held, field by field. `succeeded()`
+- **A submission acknowledges what it SENT (revision 3; R3, R10; revision 4; revision 5).** `submitting()` records, when it is called, the
+  form's session (account and incarnation included), its input revision (moved by the person's `input`/`reset` events in the form, by a
+  `change` event that reports a value no `input` event reported, and by the hook's own restores and discards, recording which field each
+  changed) and everything the form held, field by field. A `change` event that only commits the value the field's last edit event reported is
+  not an edit (revision 5): every engine fires one when focus leaves an edited field, and Chromium also when a focused edited field is
+  removed, possibly after a submission covered that very value (it made the submitted text look unfinished, so an update would have saved
+  and restored already-submitted input; `.agtx/evidence/WEB-14a/revision-5/diag-chromium`). `succeeded()`
   reconciles in THAT session only, never in whatever the hook shows by then (another form context, a remount, another account): if the form
   still holds exactly what was sent, what was sent is COVERED (needs no copy) and its copies are discarded (`discarded`); if the person
   changed the form after sending, the change stays theirs and stays dirty (`kept`) WHATEVER TEXT IT HOLDS, including the text of this or an
@@ -180,7 +191,12 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   first and restores it. An older
   response never undoes a newer acknowledgement. A ticket completes once: a later `succeeded()`/`failed()` answers the first outcome and does
   nothing. A ticket taken before the form had a database is still waited for by the update coordinator, and joins only the session the same
-  mount binds for the same form context. `onSubmitted()` acknowledges what the form holds when it is called: only in the same task as the
+  mount binds for the same form context, at its own place in the session's order (revision 5, R3: binding translates the mount's revisions
+  into the session's, `base + r`, so every edit typed before binding, even to the session's own text or the text of an earlier submission,
+  is newer than anything the session knew and no earlier act covers it; a ticket whose translated revision an earlier acknowledgement already
+  reaches covers nothing rather than take that acknowledgement's answer). An edit typed into a remount before it binds wins over the
+  session's value even when it returns the field to where it starts; the session's value then stays owed unless a successful submission sent
+  it before it was typed over. `onSubmitted()` acknowledges what the form holds when it is called: only in the same task as the
   send's success. A change made by the caller's code without an `input` event, that returns the form to exactly the sent values, cannot be
   told apart from no change: dispatch an `input` event (or take a new ticket) when code changes the form during a send.
 - **The committed allow-list is the schema; a hidden field keeps its value (revision 3, R11; revision 4; `src/lib/form-recovery/fields.ts`;
