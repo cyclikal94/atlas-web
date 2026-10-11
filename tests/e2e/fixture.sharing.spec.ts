@@ -32,7 +32,8 @@ import { pressTab } from "./helpers";
  * a dismissal discards what the editor's session kept, also before its read lands, offline, and for another kind. Review 3: E-SH14 an
  * unresolved household create survives the browser going offline and back, and is the only command sent until it is resolved. Review 4:
  * E-SH15 a defaults answer asked before the database was deleted and created again (by this page or another) is never written into the
- * replacement, through the harness's production controller and defaults source. Review 5: E-SH16 the editors' household choices and names
+ * replacement, through the harness's production controller and defaults source. Review 6: E-SH17 a household template that could not be
+ * read is unknown, never Private, and a save waits for it. Review 5: E-SH16 the editors' household choices and names
  * come from the complete membership list (`GET /households`), which the stub serves on its own (`memberships`), never from B5's subset.
  */
 const API = "/api/experimental/v1";
@@ -100,6 +101,12 @@ interface Served {
   membershipReads: number;
   /** `GET /policies/{RID}` requests (E-SH16: a membership Try again reads only the list). */
   policyReads: number;
+  /**
+   * While set, EVERY `GET /defaults/templates?household_id=…` answers this refusal (E-SH17); the personal read is never refused. Only the
+   * defaults editor reads templates, so the count is that editor's household reads.
+   */
+  refuseHouseholdTemplates: { status: number; body: unknown } | null;
+  householdTemplateReads: number;
 }
 
 function scope(
@@ -164,6 +171,8 @@ async function serveSharing(context: BrowserContext): Promise<Served> {
     refuseMemberships: null,
     membershipReads: 0,
     policyReads: 0,
+    refuseHouseholdTemplates: null,
+    householdTemplateReads: 0,
   };
   let revision = 500;
   await context.route(`**${API}/**`, async (route: Route) => {
@@ -199,15 +208,14 @@ async function serveSharing(context: BrowserContext): Promise<Served> {
       if (served.holdSnapshot) await served.holdSnapshot;
       return route.fulfill(json(200, served.snapshot));
     }
-    if (path === "/defaults/templates")
-      return route.fulfill(
-        json(
-          200,
-          url.searchParams.get("household_id")
-            ? served.householdTemplates
-            : served.templates,
-        ),
-      );
+    if (path === "/defaults/templates") {
+      if (!url.searchParams.get("household_id"))
+        return route.fulfill(json(200, served.templates));
+      served.householdTemplateReads += 1;
+      const refusal = served.refuseHouseholdTemplates;
+      if (refusal) return route.fulfill(json(refusal.status, refusal.body));
+      return route.fulfill(json(200, served.householdTemplates));
+    }
     if (path === `/policies/${RID}`) {
       served.policyReads += 1;
       return route.fulfill(json(200, served.policy));
@@ -1674,6 +1682,154 @@ test.describe("E-SH16: household choices and names come from the complete member
     recordEvidence(info, "e-sh16-policy", {
       membershipReads: served.membershipReads,
       policyReads: served.policyReads,
+    });
+  });
+});
+
+test.describe("E-SH17: a household template that could not be read is unknown, never Private (A4; R12, review 6)", () => {
+  const HOME_READ = "Primary household “Home” · read";
+  const unknownPreview =
+    "What new records of this kind would start as isn't known yet: the household default hasn't loaded. Existing records are never changed by this edit.";
+  /** Fields: Home's template is shared (read) at version 7 and every household-template read is refused with a 503 until cleared. */
+  async function refused(context: BrowserContext, personalOverride: boolean) {
+    const { served, page } = await setup(
+      context,
+      "/sharing/defaults?kind=field",
+      {
+        resource: false,
+        arrange: (served) => {
+          served.snapshot = snapshotOf(rev(31), {
+            field: personalOverride
+              ? { kind: "private" }
+              : { kind: "primary_household", edit: false },
+          });
+          served.templates = scope({
+            field: personalOverride
+              ? { template: { kind: "private" }, version: 5 }
+              : { template: null, version: 0 },
+          });
+          served.householdTemplates = scope({
+            field: {
+              template: { kind: "primary_household", edit: false },
+              version: 7,
+            },
+          });
+          served.refuseHouseholdTemplates = {
+            status: 503,
+            body: atlas("temporarily_unavailable"),
+          };
+        },
+      },
+    );
+    const dialog = page.getByRole("dialog", {
+      name: "Sharing defaults — Fields",
+    });
+    const household = dialog.locator('[data-layer="household"]');
+    // The state the assertions are about: the refused read is on screen as a failure, and the personal layer has been read.
+    await expect(
+      household.locator('[data-sharing-banner="error"]'),
+    ).toContainText("Couldn't load the current templates.");
+    await expect(dialog.locator("[data-personal-state]")).toBeVisible();
+    expect(served.householdTemplateReads).toBeGreaterThanOrEqual(1);
+    return { served, page, dialog, household };
+  }
+
+  test("E-SH17: no personal override: the personal row, the chain and Inherit say what is unknown; once read, they name Home", async ({
+    context,
+  }, info) => {
+    const { served, dialog, household } = await refused(context, false);
+    const personalState = await dialog
+      .locator("[data-personal-state]")
+      .textContent();
+    const current = await dialog
+      .locator('[data-chain][aria-current="true"]')
+      .count();
+    const inheritLabel = await dialog
+      .locator('[data-layer-form="personal"]')
+      .getByRole("radio", { name: /^Inherit household default/ })
+      .textContent();
+    recordEvidence(info, "e-sh17-unknown", {
+      personalState,
+      current,
+      inheritLabel,
+      householdTemplateReads: served.householdTemplateReads,
+    });
+    expect(personalState).toBe(
+      "No personal override set — what it inherits isn't known yet: the household default hasn't loaded (version 0)",
+    );
+    expect(current).toBe(0);
+    expect(inheritLabel).toBe(
+      "Inherit household default (currently: not loaded)",
+    );
+    // Control: read, the same editor resolves the household layer and names Home; the Try again is the one further read.
+    const before = served.householdTemplateReads;
+    served.refuseHouseholdTemplates = null;
+    await household.getByRole("button", { name: "Try again" }).click();
+    await expect(dialog.locator('[data-chain="household"]')).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    await expect(dialog.locator("[data-personal-state]")).toHaveText(
+      `No personal override set — inherits ${HOME_READ} (version 0)`,
+    );
+    expect(served.householdTemplateReads).toBe(before + 1);
+    expect(served.management).toEqual([]);
+  });
+
+  test("E-SH17: removing a personal override while it is unknown previews nothing false and sends nothing; once read, the same choice saves template:null at the PERSONAL version", async ({
+    context,
+  }, info) => {
+    const { served, dialog, household } = await refused(context, true);
+    const personal = dialog.locator('[data-layer-form="personal"]');
+    // Control: the personal layer's own template is known, so the layer that resolves is known.
+    await expect(dialog.locator("[data-personal-state]")).toHaveText(
+      "Private (your own override, version 5)",
+    );
+    await expect(dialog.locator('[data-chain="personal"]')).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    const inherit = personal.getByRole("radio", {
+      name: /^Inherit household default/,
+    });
+    expect(await inherit.textContent()).toBe(
+      "Inherit household default (currently: not loaded)",
+    );
+    await inherit.click();
+    const preview = await personal.locator("[data-preview]").textContent();
+    const save = personal.locator('[data-save="personal"]');
+    const disabled = await save.isDisabled();
+    recordEvidence(info, "e-sh17-waits", { preview, disabled });
+    expect(preview).toBe(unknownPreview);
+    expect(disabled).toBe(true);
+    expect(served.management).toEqual([]);
+    served.refuseHouseholdTemplates = null;
+    await household.getByRole("button", { name: "Try again" }).click();
+    await expect(personal.locator("[data-preview]")).toHaveText(
+      `New records of this kind would start as: Inherit household default (currently: ${HOME_READ}). Existing records are never changed by this edit.`,
+    );
+    // The read did not reset the choice.
+    await expect(
+      personal.getByRole("radio", {
+        name: `Inherit household default (currently: ${HOME_READ})`,
+      }),
+    ).toBeChecked();
+    await save.click();
+    await expect.poll(() => served.management.length).toBe(1);
+    expect(served.management[0]?.body).toEqual({
+      commands: [
+        {
+          kind: "set_defaults",
+          household_id: null,
+          resource_kind: "field",
+          expected_version: 5,
+          template: null,
+        },
+      ],
+    });
+    recordEvidence(info, "e-sh17-saved", {
+      management: served.management,
+      householdTemplateReads: served.householdTemplateReads,
     });
   });
 });

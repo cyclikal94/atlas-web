@@ -13,6 +13,7 @@ import type { SnapshotHousehold, TemplateKind } from "../../../src/data";
 import type { SharingResult } from "../../../src/features/sharing/api";
 import * as copy from "../../../src/features/sharing/copy";
 import { DefaultsEditor } from "../../../src/features/sharing/DefaultsEditor";
+import { formatWhen } from "../../../src/features/sharing/parts";
 import { forgetAllRetained } from "../../../src/features/sharing/retained";
 import {
   ELSEWHERE,
@@ -25,7 +26,7 @@ import {
   SAM,
   snapshot,
 } from "../../support/data/sharing";
-import { stubEnv } from "../../support/data/ui-env";
+import { type StubEnv, stubEnv } from "../../support/data/ui-env";
 import {
   type Answer,
   emptyScope,
@@ -1345,5 +1346,421 @@ describe("R11: an explicit default can grant any household you are in (the compl
     expect(
       document.querySelector('[data-layer="household"] h3')?.textContent,
     ).toBe(copy.HOUSEHOLD_LAYER("Home"));
+  });
+});
+
+// ---- WEB-12a review 6, R12: unknown is never absent ---------------------------------------------------------------------------------
+describe("R12 (review 6): an unavailable template or snapshot is unknown, never the application default or 'no primary household'", () => {
+  const SHARED = { kind: "primary_household", edit: false } as const;
+  const HOME_READ = "Primary household “Home” · read";
+  const reasonOf = (button: HTMLElement) =>
+    document.getElementById(button.getAttribute("aria-describedby") ?? "")
+      ?.textContent;
+  const personalState = () =>
+    document.querySelector("[data-personal-state]")?.textContent;
+  const highlighted = () =>
+    document.querySelector('[data-chain][aria-current="true"]');
+  const preview = (form: HTMLElement) =>
+    form.querySelector("[data-preview]")?.textContent;
+  const inHousehold = () =>
+    within(document.querySelector('[data-layer="household"]') as HTMLElement);
+
+  /**
+   * The editor of `kind` over a snapshot (or none) and template reads the test answers: the personal scope at once; each household's read
+   * by `replies` (held until `settle` when absent). Every read is recorded.
+   */
+  function arrange(over: {
+    kind?: TemplateKind;
+    record?: ReturnType<typeof record> | null;
+    personal: ReturnType<typeof emptyScope>;
+    replies?: Record<string, SharingResult<ReturnType<typeof emptyScope>>>;
+    /** What the editor's snapshot reads answer (from the opening one on). */
+    refresh?: StubEnv["refreshDefaults"];
+  }) {
+    const env = stubEnv();
+    if (over.refresh) env.refreshDefaults = over.refresh;
+    env.setDefaults(
+      over.record === undefined
+        ? record(snapshot({ primary: HOME }), {
+            fetched_at: Date.now(),
+            issued_at: Date.now(),
+          })
+        : over.record,
+    );
+    const api = fakeSharingApi();
+    api.defaults.households = ok([household({ id: HOME })]);
+    const replies = { ...(over.replies ?? {}) };
+    const held: Array<{
+      id: string;
+      settle(result: SharingResult<ReturnType<typeof emptyScope>>): void;
+    }> = [];
+    api.readTemplates = async (householdId) => {
+      api.calls.push({ op: "readTemplates", args: [householdId] });
+      if (householdId === null) return ok(over.personal);
+      const reply = replies[householdId];
+      if (reply) return reply;
+      return new Promise((resolve) => {
+        held.push({ id: householdId, settle: resolve });
+      });
+    };
+    const view = mountSharing(
+      <DefaultsEditor
+        kind={over.kind ?? "field"}
+        onKindChange={vi.fn()}
+        onClose={vi.fn()}
+      />,
+      { env, api },
+    );
+    return {
+      ...view,
+      held,
+      reply(id: string, result: SharingResult<ReturnType<typeof emptyScope>>) {
+        replies[id] = result;
+      },
+      householdReads: () =>
+        api.calls.filter(
+          (call) => call.op === "readTemplates" && call.args[0] !== null,
+        ).length,
+    };
+  }
+
+  for (const how of ["held", "failed"] as const)
+    test(`MU-S77: a household template read that is ${how}: the personal row, the chain and Inherit say it isn't known (never Private); once read, they name Home`, async () => {
+      const t = arrange({
+        personal: emptyScope(),
+        ...(how === "failed"
+          ? { replies: { [HOME]: { ok: false, kind: "uncertain" } } }
+          : {}),
+      });
+      await waitFor(() => expect(personalState()).toBeTruthy());
+      if (how === "failed")
+        await waitFor(() =>
+          expect(
+            inHousehold().queryByText(copy.TEMPLATES_LOAD_FAILED),
+          ).not.toBeNull(),
+        );
+      else await waitFor(() => expect(t.held).toHaveLength(1));
+      expect(personalState()).toBe(
+        copy.PERSONAL_INHERITS_UNKNOWN(copy.MISSING.household, 0),
+      );
+      expect(personalState()).not.toContain("Private");
+      expect(highlighted()).toBeNull();
+      expect(document.querySelector("[data-chain-unknown]")?.textContent).toBe(
+        copy.CHAIN_UNKNOWN(copy.MISSING.household),
+      );
+      expect(chosen(personalForm())).toBe(
+        copy.CHOICE_INHERIT_PERSONAL(copy.INHERITED_UNKNOWN),
+      );
+      // Read (the control in the same editor): the household layer resolves and every claim names Home.
+      if (how === "held")
+        t.held[0]?.settle(ok(scopeWith({ template: SHARED, version: 7 })));
+      else {
+        t.reply(HOME, ok(scopeWith({ template: SHARED, version: 7 })));
+        fireEvent.click(
+          inHousehold().getByRole("button", { name: copy.TRY_AGAIN }),
+        );
+      }
+      await waitFor(() =>
+        expect(
+          document.querySelector('[data-chain="household"]'),
+        ).toHaveAttribute("aria-current", "true"),
+      );
+      expect(personalState()).toBe(copy.PERSONAL_INHERITS(HOME_READ, 0));
+      expect(chosen(personalForm())).toBe(
+        copy.CHOICE_INHERIT_PERSONAL(HOME_READ),
+      );
+      expect(document.querySelector("[data-chain-unknown]")).toBeNull();
+      expect(t.api.sent).toEqual([]);
+    });
+
+  test("MU-S78: removing a personal override while the household template failed: no Private preview, Save waits (button and action); once read, the same choice saves template:null at the PERSONAL version", async () => {
+    const t = arrange({
+      personal: scopeWith({ template: { kind: "private" }, version: 5 }),
+      replies: { [HOME]: { ok: false, kind: "uncertain" } },
+    });
+    await waitFor(() =>
+      expect(
+        inHousehold().queryByText(copy.TEMPLATES_LOAD_FAILED),
+      ).not.toBeNull(),
+    );
+    // Control: the personal layer's own template is known, so the layer that resolves is known.
+    expect(personalState()).toBe(copy.PERSONAL_OVERRIDE("Private", 5));
+    expect(document.querySelector('[data-chain="personal"]')).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(
+      within(layerGroup(personalForm())).queryByRole("radio", {
+        name: copy.CHOICE_INHERIT_PERSONAL(copy.INHERITED_UNKNOWN),
+      }),
+    ).not.toBeNull();
+    choose(
+      personalForm(),
+      copy.CHOICE_INHERIT_PERSONAL(copy.INHERITED_UNKNOWN),
+    );
+    expect(preview(personalForm())).toBe(
+      copy.PREVIEW_UNKNOWN(copy.MISSING.household),
+    );
+    expect(preview(personalForm())).not.toContain("Private");
+    expect(save("personal")).toBeDisabled();
+    expect(reasonOf(save("personal"))).toBe(copy.SAVE_UNKNOWN_REASON);
+    fireEvent.click(save("personal"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(t.api.sent).toEqual([]);
+    // The household template is read: the SAME choice (never reset by the read) now previews Home and saves.
+    t.reply(HOME, ok(scopeWith({ template: SHARED, version: 7 })));
+    fireEvent.click(
+      inHousehold().getByRole("button", { name: copy.TRY_AGAIN }),
+    );
+    await waitFor(() =>
+      expect(preview(personalForm())).toBe(
+        copy.PREVIEW_CHANGE(copy.CHOICE_INHERIT_PERSONAL(HOME_READ)),
+      ),
+    );
+    expect(chosen(personalForm())).toBe(
+      copy.CHOICE_INHERIT_PERSONAL(HOME_READ),
+    );
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands).toEqual([
+      {
+        kind: "set_defaults",
+        household_id: null,
+        resource_kind: "field",
+        expected_version: 5,
+        template: null,
+      },
+    ]);
+  });
+
+  test("control (Q4): a choice that needs nothing unknown is still saved: Private while the household template failed", async () => {
+    const t = arrange({
+      personal: scopeWith({ template: null, version: 2 }),
+      replies: { [HOME]: { ok: false, kind: "uncertain" } },
+    });
+    await waitFor(() =>
+      expect(
+        inHousehold().queryByText(copy.TEMPLATES_LOAD_FAILED),
+      ).not.toBeNull(),
+    );
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    expect(preview(personalForm())).toBe(copy.PREVIEW_CHANGE("Private"));
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands).toEqual([
+      {
+        kind: "set_defaults",
+        household_id: null,
+        resource_kind: "field",
+        expected_version: 2,
+        template: { kind: "private" },
+      },
+    ]);
+  });
+
+  test("MU-S79: no snapshot on this device: loading, then a failure with Try again, never 'no primary household'; read, a verified absence says so (control)", async () => {
+    let release: (outcome: "failed") => void = () => undefined;
+    const t = arrange({
+      record: null,
+      personal: emptyScope(),
+      refresh: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    await waitFor(() => expect(personalState()).toBeTruthy());
+    expect(document.body.textContent).not.toContain(copy.NO_PRIMARY);
+    expect(inHousehold().queryByText(copy.PRIMARY_LOADING)).not.toBeNull();
+    expect(personalState()).toBe(
+      copy.PERSONAL_INHERITS_UNKNOWN(copy.MISSING.primary, 0),
+    );
+    expect(highlighted()).toBeNull();
+    act(() => release("failed"));
+    await waitFor(() =>
+      expect(inHousehold().queryByText(copy.PRIMARY_FAILED)).not.toBeNull(),
+    );
+    expect(document.body.textContent).not.toContain(copy.NO_PRIMARY);
+    expect(personalState()).not.toContain("Private");
+    // Try again reads it: a snapshot with no primary household is a verified absence.
+    t.env.refreshDefaults = async () => {
+      t.env.setDefaults(record(snapshot({ primary: null })));
+      return "fetched";
+    };
+    fireEvent.click(
+      inHousehold().getByRole("button", { name: copy.TRY_AGAIN }),
+    );
+    await waitFor(() =>
+      expect(inHousehold().queryByText(copy.NO_PRIMARY)).not.toBeNull(),
+    );
+    expect(personalState()).toBe(copy.PERSONAL_INHERITS("Private", 0));
+    expect(
+      document.querySelector('[data-chain="application"]'),
+    ).toHaveAttribute("aria-current", "true");
+  });
+
+  test("MU-S79: People with the primary household unknown: a primary-household override is described as unknown (never 'Private (no primary household)'); choosing it waits, Private does not", async () => {
+    const scope = emptyScope();
+    scope.person = {
+      template: { kind: "primary_household", edit: true },
+      version: 3,
+    };
+    const t = arrange({
+      kind: "person",
+      record: null,
+      personal: scope,
+      refresh: () => new Promise(() => undefined),
+    });
+    await waitFor(() => expect(personalState()).toBeTruthy());
+    expect(personalState()).toBe(
+      copy.PERSONAL_OVERRIDE(copy.PRIMARY_UNKNOWN_SUMMARY(true), 3),
+    );
+    expect(personalState()).not.toContain("Private");
+    expect(document.querySelector('[data-chain="personal"]')).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    choose(personalForm(), copy.CHOICE_PRIMARY_READ);
+    expect(preview(personalForm())).toBe(
+      copy.PREVIEW_UNKNOWN(copy.MISSING.primary),
+    );
+    expect(save("personal")).toBeDisabled();
+    expect(reasonOf(save("personal"))).toBe(copy.SAVE_UNKNOWN_REASON);
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    expect(preview(personalForm())).toBe(copy.PREVIEW_CHANGE("Private"));
+    expect(save("personal")).toBeEnabled();
+    expect(t.api.sent).toEqual([]);
+  });
+
+  test("MU-S80: an uncertain Inherit save is tried again as the SAME operation even once what it inherits is unknown; a new edit waits", async () => {
+    const t = arrange({
+      personal: scopeWith({ template: { kind: "private" }, version: 5 }),
+      replies: { [HOME]: ok(scopeWith({ template: SHARED, version: 7 })) },
+    });
+    await waitFor(() =>
+      expect(document.querySelector('[data-chain="personal"]')).toHaveAttribute(
+        "aria-current",
+        "true",
+      ),
+    );
+    await waitFor(() => expect(householdForm()).not.toBeNull());
+    t.api.next.management.push(
+      { ok: false, kind: "uncertain" },
+      { ok: false, kind: "uncertain" },
+    );
+    choose(personalForm(), copy.CHOICE_INHERIT_PERSONAL(HOME_READ));
+    fireEvent.click(save("personal"));
+    await waitFor(() =>
+      expect(within(personalForm()).queryByText(copy.UNCERTAIN)).not.toBeNull(),
+    );
+    // Another primary household, whose template is still being read: what Inherit would inherit is no longer known.
+    act(() =>
+      t.env.setDefaults(
+        record(
+          snapshot({
+            primary: FLAT,
+            households: [household({ id: FLAT, name: "Flat" })],
+          }),
+          { fetched_at: Date.now(), issued_at: Date.now() },
+        ),
+      ),
+    );
+    await waitFor(() =>
+      expect(preview(personalForm())).toBe(
+        copy.PREVIEW_UNKNOWN(copy.MISSING.household),
+      ),
+    );
+    const retry = within(personalForm()).getByRole("button", {
+      name: copy.TRY_AGAIN,
+    });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(t.api.sent).toHaveLength(2));
+    expect(t.api.sent[1]).toEqual(t.api.sent[0]);
+    expect(t.api.sent[0]?.commands).toEqual([
+      {
+        kind: "set_defaults",
+        household_id: null,
+        resource_kind: "field",
+        expected_version: 5,
+        template: null,
+      },
+    ]);
+    // An edit ends that attempt: the new Inherit is a new save, which waits for the inheritance.
+    await waitFor(() =>
+      expect(within(personalForm()).queryByText(copy.UNCERTAIN)).not.toBeNull(),
+    );
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    choose(
+      personalForm(),
+      copy.CHOICE_INHERIT_PERSONAL(copy.INHERITED_UNKNOWN),
+    );
+    expect(save("personal")).toBeDisabled();
+    expect(reasonOf(save("personal"))).toBe(copy.SAVE_UNKNOWN_REASON);
+  });
+
+  test("Q3: a snapshot on the device whose refresh failed is labelled as last read, with its time; the forms still work; Try again clears it", async () => {
+    const at = Date.now() - 60_000;
+    const t = arrange({
+      record: record(snapshot({ primary: HOME }), {
+        fetched_at: at,
+        issued_at: at,
+      }),
+      personal: emptyScope(),
+      replies: { [HOME]: ok(scopeWith({ template: SHARED, version: 7 })) },
+      refresh: "failed",
+    });
+    const stale = copy.PRIMARY_STALE(formatWhen(at, Date.now()));
+    await waitFor(() =>
+      expect(inHousehold().queryByText(stale)).not.toBeNull(),
+    );
+    // What the last-read snapshot says is still used, and labelled; the forms are there.
+    await waitFor(() => expect(householdForm()).not.toBeNull());
+    expect(personalState()).toBe(copy.PERSONAL_INHERITS(HOME_READ, 0));
+    t.env.refreshDefaults = "fetched";
+    fireEvent.click(
+      inHousehold().getByRole("button", { name: copy.TRY_AGAIN }),
+    );
+    await waitFor(() => expect(inHousehold().queryByText(stale)).toBeNull());
+    expect(t.api.sent).toEqual([]);
+  });
+  test("Q3 control: the editor's own read held back (failed) while a NEWER record lands: nothing is called 'last read'", async () => {
+    const at = Date.now() - 60_000;
+    let release: (outcome: "failed") => void = () => undefined;
+    const t = arrange({
+      record: record(snapshot({ primary: HOME }), {
+        fetched_at: at,
+        issued_at: at,
+      }),
+      personal: emptyScope(),
+      replies: { [HOME]: ok(scopeWith({ template: SHARED, version: 7 })) },
+      refresh: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    await waitFor(() => expect(householdForm()).not.toBeNull());
+    // The source's own read lands a record fetched after the editor asked; then the editor's read reports it was not sent.
+    act(() =>
+      t.env.setDefaults(
+        record(snapshot({ primary: HOME }), {
+          fetched_at: Date.now() + 1,
+          issued_at: Date.now() + 1,
+        }),
+      ),
+    );
+    act(() => release("failed"));
+    await waitFor(() =>
+      expect(
+        document
+          .querySelector('[data-layer="household"]')
+          ?.getAttribute("data-snapshot-read"),
+      ).toBe("failed"),
+    );
+    expect(
+      document.querySelector('[data-layer="household"] [data-sharing-banner]'),
+    ).toBeNull();
+    expect(personalState()).toBe(copy.PERSONAL_INHERITS(HOME_READ, 0));
   });
 });

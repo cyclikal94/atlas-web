@@ -14865,8 +14865,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    void defaults.acquire(defaults.boundary());\n",
-        "    void defaults.refresh();\n",
+        // Re-anchored in revision 7 (R12): the post-save read is now one of the editor's own tracked snapshot reads; same defect.
+        "      async () => (await defaults.acquire(defaults.boundary())).outcome,\n",
+        "      () => defaults.refresh(),\n",
       ),
   },
   {
@@ -15035,8 +15036,9 @@ export const UNIT = [
           "  const retry =\n    retryReason === null ? (\n",
           "  const retry =\n    true ? (\n",
         ),
-        "    if (sending.current || !env.online || !env.writable) return;\n",
-        "    if (sending.current) return;\n",
+        // Re-anchored in revision 7 (R12 added `unresolved`, a separate guard it keeps); the connection and compatibility checks go.
+        "    if (sending.current || !env.online || !env.writable || unresolved) return;\n",
+        "    if (sending.current || unresolved) return;\n",
       ),
   },
   {
@@ -15311,6 +15313,109 @@ export const UNIT = [
         t,
         '          : { status: "failed", failure: result, last: lastOf(prior) },\n',
         '          : { status: "ready", current: { households: [], at: now.current() } },\n',
+      ),
+  },
+  // ---- WEB-12a review 6 R12 and design assessment DA-M2 (revision 7): unknown is never absent ------------------------------------------
+  {
+    id: "MU-1288",
+    title:
+      "WEB-12a review 6 R12: the resolver treats an UNREAD household template as read absent (the application default resolves)",
+    file: "src/features/sharing/model/templates.ts",
+    tests: [
+      "tests/features/sharing/model.test.ts",
+      "tests/features/sharing/defaults-editor.test.tsx",
+    ],
+    expect: /MU-S76|MU-S77|MU-S78/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!input.household.known) return { known: false, missing: "household" };\n',
+        // Not a deletion (the next line would then read an unknown's value and crash): the unread template resolves as read absent.
+        '    if (!input.household.known)\n      return { known: true, layer: "application", template: APPLICATION_DEFAULTS[input.kind] };\n',
+      ),
+  },
+  {
+    id: "MU-1289",
+    title:
+      "WEB-12a review 6 R12: the reviewed defect restored: the defaults editor passes a household read that is loading or failed as a template read absent",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S77|MU-S78/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : UNKNOWN;\n  const personal = personalEvidence.known",
+        "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
+      ),
+  },
+  {
+    id: "MU-1290",
+    title:
+      "WEB-12a review 6 R12: no snapshot on the device is taken as a snapshot naming NO primary household",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S79/,
+    patch: (t) =>
+      sub(
+        t,
+        "    snapshot === null\n      ? UNKNOWN\n",
+        "    snapshot === null\n      ? { known: true, value: null }\n",
+      ),
+  },
+  {
+    id: "MU-1291",
+    title:
+      "WEB-12a review 6 R12: a NEW save is admitted while what it would make new records start as is unknown (button and action)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S78|MU-S79/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const unresolved = missing !== null && !retrying;\n",
+        "  const unresolved = false;\n",
+      ),
+  },
+  {
+    id: "MU-1292",
+    title:
+      "WEB-12a review 6 R12 (assessment invariant 8): an uncertain attempt's Try again is held back once its inheritance becomes unknown",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S80/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const unresolved = missing !== null && !retrying;\n",
+        "  const unresolved = missing !== null;\n",
+      ),
+  },
+  {
+    id: "MU-1293",
+    title:
+      "WEB-12a design assessment DA-M2: offline, an empty B5 household subset says you are in no household",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S82/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ) : shown.from === "snapshot" && shown.list.length === 0 ? (\n',
+        "      ) : false ? (\n",
+      ),
+  },
+  {
+    id: "MU-1294",
+    title:
+      "WEB-12a design assessment DA-M2: offline, a complete list read on the page is labelled with the B5 snapshot's time",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S83/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ? { from: "complete", list: households.value, at: households.at }\n',
+        '      ? { from: "complete", list: households.value, at: defaults.record?.fetched_at ?? households.at }\n',
       ),
   },
 
@@ -18874,6 +18979,21 @@ export const ENGINE = [
         t,
         "    read: () => env.api.readHouseholds(),\n",
         "    read: async () => ({ ok: true, value: snapshot?.households ?? [] }),\n",
+      ),
+  },
+  {
+    id: "MU-1295",
+    title:
+      "WEB-12a review 6 R12: (REAL ENGINE) the reviewed defect restored: a household template read that failed is taken as read absent (Private inherited)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH17:",
+    expect: /E-SH17:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : UNKNOWN;\n  const personal = personalEvidence.known",
+        "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
       ),
   },
 ];

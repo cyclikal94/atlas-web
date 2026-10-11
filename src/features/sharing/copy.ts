@@ -173,6 +173,33 @@ export const PERSONAL_EDIT_LABEL = (kind: string) =>
   `Change your personal default for ${kind}`;
 export const PERSONAL_INHERITS = (summary: string, version: number) =>
   `No personal override set — inherits ${summary} (version ${version})`;
+/** What a resolution is still missing (WEB-12a R12): unknown is never shown as the application default or as "no primary household". */
+export const MISSING: Readonly<
+  Record<"personal" | "primary" | "household", string>
+> = {
+  personal: "your personal default hasn't loaded",
+  primary: "your primary household hasn't loaded",
+  household: "the household default hasn't loaded",
+};
+export const CHAIN_UNKNOWN = (missing: string) =>
+  `Which layer applies isn't known yet: ${missing}.`;
+export const PERSONAL_INHERITS_UNKNOWN = (missing: string, version: number) =>
+  `No personal override set — what it inherits isn't known yet: ${missing} (version ${version})`;
+export const INHERITED_UNKNOWN = "not loaded";
+/** A primary-household template while the snapshot naming your primary household hasn't loaded (never "no primary household"). */
+export const PRIMARY_UNKNOWN_SUMMARY = (edit: boolean) =>
+  `Your primary household (not loaded) · ${edit ? "edit" : "read"}`;
+export const PREVIEW_UNKNOWN = (missing: string) =>
+  `What new records of this kind would start as isn't known yet: ${missing}. Existing records are never changed by this edit.`;
+export const SAVE_UNKNOWN_REASON =
+  "Wait until it's known what new records would start as.";
+export const PRIMARY_LOADING = "Loading your primary household…";
+export const PRIMARY_FAILED = "Couldn't load your primary household.";
+export const PRIMARY_OFFLINE =
+  "You're offline, and your primary household hasn't loaded.";
+/** The editor's own snapshot read failed, so what it shows of your primary household is the last one this device read. */
+export const PRIMARY_STALE = (when: string) =>
+  `Couldn't check your primary household again. Shown as last read ${when}.`;
 export const PERSONAL_OVERRIDE = (summary: string, version: number) =>
   `${summary} (your own override, version ${version})`;
 export const HOUSEHOLD_CURRENT = (summary: string, version: number) =>
@@ -263,6 +290,16 @@ export const HOUSEHOLDS_HEADING = "Your households";
 export const HOUSEHOLDS_SUBSET_NOTE =
   "Create a household and invite people to it. Full household management comes later.";
 export const HOUSEHOLDS_EMPTY = "You're not in a household.";
+/**
+ * Offline, before the complete list was read (WEB-12a design assessment DA-M2): the households the last sharing snapshot recorded, which
+ * are only your primary household and the households your defaults name, never every household you're in.
+ */
+export const HOUSEHOLDS_FROM_SNAPSHOT =
+  "You're offline. These are the households your last sharing defaults named, not necessarily every household you're in.";
+export const HOUSEHOLDS_SNAPSHOT_NONE =
+  "You're offline. Your last sharing defaults named no households; connect to see every household you're in.";
+export const HOUSEHOLDS_LAST_READ = (when: string) =>
+  `You're offline. Your households as last read ${when}.`;
 export const HOUSEHOLDS_OFFLINE_NONE =
   "Offline, and this device hasn't loaded your households yet.";
 export const HOUSEHOLDS_LOADING = "Loading your households…";

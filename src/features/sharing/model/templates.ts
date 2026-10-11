@@ -182,6 +182,55 @@ export function memberLabels(
   return labels;
 }
 
+/**
+ * What the editor KNOWS of one input (WEB-12a review 6, R12): `known` only from a successful answer for that very target (a layer's
+ * template read; the B5 snapshot for the primary household). A read that is idle, loading or failed is `unknown`: it never means "no
+ * template" or "no primary household".
+ */
+export type Known<T> = { known: true; value: T } | { known: false };
+
+/** The input a resolution still lacks: your personal template, which household is your primary one, or that household's template. */
+export type Missing = "personal" | "primary" | "household";
+
+export type Resolution =
+  | { known: true; layer: Layer; template: DefaultTemplate }
+  | { known: false; missing: Missing };
+
+/**
+ * The layer that resolves and its template, as far as the evidence goes (R12). A present personal template resolves on its own. Without
+ * one, the primary household must be known: none means the application's default; one means its template must have been read (present:
+ * the household's; read absent: the application's). Anything less is `unknown`, naming what is missing, never the application default.
+ */
+export function resolveKnown(input: {
+  kind: TemplateKind;
+  personal: Known<LayerRecord>;
+  primary: Known<string | null>;
+  household: Known<LayerRecord>;
+}): Resolution {
+  if (!input.personal.known) return { known: false, missing: "personal" };
+  if (present(input.personal.value))
+    return {
+      known: true,
+      layer: "personal",
+      template: input.personal.value.template,
+    };
+  if (!input.primary.known) return { known: false, missing: "primary" };
+  if (input.primary.value !== null) {
+    if (!input.household.known) return { known: false, missing: "household" };
+    if (present(input.household.value))
+      return {
+        known: true,
+        layer: "household",
+        template: input.household.value.template,
+      };
+  }
+  return {
+    known: true,
+    layer: "application",
+    template: APPLICATION_DEFAULTS[input.kind],
+  };
+}
+
 /** The template that resolves, and its layer: never one layer's value shown as another's. */
 export function effectiveTemplate(input: {
   kind: TemplateKind;

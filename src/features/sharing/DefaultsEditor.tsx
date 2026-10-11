@@ -5,6 +5,7 @@ import { Dialog } from "../../components/ui/dialog";
 import { List } from "../../components/ui/list";
 import {
   type DefaultTemplate,
+  type RefreshOutcome,
   TEMPLATE_KINDS,
   type TemplateKind,
   useSharingDefaults,
@@ -32,10 +33,11 @@ import { type Attempt, canonicalBody, nextAttempt } from "./model/submission";
 import {
   APPLICATION_DEFAULTS,
   describeTemplate,
-  effectiveTemplate,
   KIND_LABEL,
+  type Known,
   type Layer,
   type LayerRecord,
+  resolveKnown,
 } from "./model/templates";
 import { PolicyGrantsEditor } from "./PolicyGrantsEditor";
 import { Banner, ChoiceGroup, formatWhen, useSharingLoad } from "./parts";
@@ -65,6 +67,13 @@ import { type RetainedSession, retainedSession } from "./retained";
  * discard them. What is kept belongs to the editor's SESSION, not to the forms on screen (WEB-12a review 2, R5): a dismissal discards
  * every layer, household and kind the session kept, also while it is offline, still reading, or showing another kind. A full-bleed
  * sheet below the desktop breakpoint, like the policy editor (R6).
+ *
+ * Unknown is never absent (WEB-12a review 6, R12). A layer's template is known only from a successful read for its own target, and the
+ * primary household only from a snapshot: a read that is loading or failed, or no snapshot on the device, leaves it UNKNOWN, never "no
+ * template" (so the application's default) or "no primary household". The chain, the personal row, the "Inherit" choice and the preview
+ * come from one resolution (`resolveKnown`) and say what is still missing; a NEW save whose outcome is not known waits (button and
+ * action), while Private or an explicit policy at a known base never does, and an uncertain attempt's Try again is always the same
+ * operation. The editor's own snapshot read has its loading, failure and Try again; a last-read snapshot is labelled with its time.
  */
 export function DefaultsEditor({
   kind,
@@ -85,6 +94,10 @@ export function DefaultsEditor({
     </SharingBoundary>
   );
 }
+
+const UNKNOWN = { known: false } as const;
+/** A layer read with no template: what the personal layer is when you take it away ("Inherit"). */
+const ABSENT: LayerRecord = { template: null, version: 0 };
 
 /** One editor per displayed identity: another identity starts another session, with nothing carried over (R1, R5). */
 function DefaultsDialogFor(props: {
@@ -110,10 +123,39 @@ function DefaultsDialog({
   const ids = { tabs: useId(), panel: useId() };
   // The editor's session: what the sync control kept of every form, and what a dismissal discards (R5).
   const [session] = useState(() => retainedSession(env.identity, "defaults"));
+  // The editor's OWN snapshot reads, their outcome and when each was asked (R12): a record on the device says nothing of whether this
+  // opening's read worked, and no record is not "no primary household". Each read supersedes the earlier ones; an older outcome is
+  // dropped. A read the session held back is `failed` here too, while the source's own read may have landed a newer record: what is
+  // shown is called "last read" only when it was fetched before the editor asked.
+  const [snapshotRead, setSnapshotRead] = useState<{
+    outcome: "loading" | RefreshOutcome;
+    asked: number;
+  }>(() => ({ outcome: "loading", asked: env.now() }));
+  const snapshotReads = useRef(0);
+  const readSnapshot = (ask: () => Promise<RefreshOutcome>) => {
+    const mine = ++snapshotReads.current;
+    const asked = env.now();
+    setSnapshotRead({ outcome: "loading", asked });
+    ask().then(
+      (outcome) => {
+        if (mine === snapshotReads.current) setSnapshotRead({ outcome, asked });
+      },
+      () => {
+        if (mine === snapshotReads.current)
+          setSnapshotRead({ outcome: "failed", asked });
+      },
+    );
+  };
+  useEffect(
+    () => () => {
+      snapshotReads.current += 1;
+    },
+    [],
+  );
   // Opening the editor asks for the current snapshot (its member names and the primary household).
   // biome-ignore lint/correctness/useExhaustiveDependencies: once per opening, and again when the page comes back online
   useEffect(() => {
-    if (env.online) void defaults.refresh();
+    if (env.online) readSnapshot(() => defaults.refresh());
   }, [env.online]);
   const snapshot = defaults.record?.snapshot ?? null;
   // Every household you are in, for what an explicit template can grant (R11): editing metadata, never merged into the snapshot.
@@ -123,7 +165,21 @@ function DefaultsDialog({
     now: env.now,
     target: [env.api],
   });
-  const primaryId = snapshot?.defaults.primary_household_id ?? null;
+  // Which household is your primary one is known only from a snapshot (R12); with none on this device it is unknown, never "none".
+  const primaryEvidence: Known<string | null> =
+    snapshot === null
+      ? UNKNOWN
+      : { known: true, value: snapshot.defaults.primary_household_id };
+  const primaryId = primaryEvidence.known ? primaryEvidence.value : null;
+  // The time of a record shown although the editor's own read did not get a newer one: "last read", with that time.
+  const fetchedAt = defaults.record?.fetched_at ?? null;
+  const stale =
+    fetchedAt !== null &&
+    env.online &&
+    (snapshotRead.outcome === "failed" || snapshotRead.outcome === "closed") &&
+    fetchedAt < snapshotRead.asked
+      ? fetchedAt
+      : null;
   const primary =
     snapshot?.households.find((household) => household.id === primaryId) ??
     null;
@@ -140,27 +196,46 @@ function DefaultsDialog({
       target: [env.api, primaryId],
     },
   );
-  const personal: LayerRecord | null =
-    personalLoad.status === "ready" ? personalLoad.value[kind] : null;
-  const household: LayerRecord | null =
-    householdLoad.status === "ready" ? householdLoad.value[kind] : null;
-  const resolved = effectiveTemplate({
+  // Each layer's template is known only from a successful read for its own target (R1, R12): loading or failed is unknown, not absent.
+  const personalEvidence: Known<LayerRecord> =
+    personalLoad.status === "ready"
+      ? { known: true, value: personalLoad.value[kind] }
+      : UNKNOWN;
+  const householdEvidence: Known<LayerRecord> =
+    householdLoad.status === "ready"
+      ? { known: true, value: householdLoad.value[kind] }
+      : UNKNOWN;
+  const personal = personalEvidence.known ? personalEvidence.value : null;
+  const household = householdEvidence.known ? householdEvidence.value : null;
+  const resolved = resolveKnown({
     kind,
-    personal,
-    household,
-    primaryHouseholdId: primaryId,
+    personal: personalEvidence,
+    primary: primaryEvidence,
+    household: householdEvidence,
+  });
+  // What the personal layer inherits (and what "Inherit" would make new records start as): the same rules without a personal template.
+  const inherited = resolveKnown({
+    kind,
+    personal: { known: true, value: ABSENT },
+    primary: primaryEvidence,
+    household: householdEvidence,
   });
   // A summary names only the primary household, which B5 always lists: summaries describe B5's resolved defaults and their layers.
   const resolvedHouseholds = snapshot?.households ?? [];
   const describe = (template: DefaultTemplate) =>
-    describeTemplate(template, primaryId, resolvedHouseholds).summary;
-  // What the personal layer inherits: the household's template when it has one, else the application's.
-  const nextLayer = effectiveTemplate({
-    kind,
-    personal: null,
-    household,
-    primaryHouseholdId: primaryId,
-  });
+    template.kind === "primary_household" && !primaryEvidence.known
+      ? copy.PRIMARY_UNKNOWN_SUMMARY(template.edit)
+      : describeTemplate(template, primaryId, resolvedHouseholds).summary;
+  // Why a personal choice's audience is not known yet (null: it is): "Inherit" needs what is inherited, a primary-household choice the
+  // primary household. A Private or explicit choice never waits for either (R12).
+  const personalUnknown = (template: DefaultTemplate | null): string | null =>
+    template === null
+      ? inherited.known
+        ? null
+        : copy.MISSING[inherited.missing]
+      : template.kind === "primary_household" && !primaryEvidence.known
+        ? copy.MISSING.primary
+        : null;
 
   const tabs = useRef<Array<HTMLButtonElement | null>>([]);
   const onTabKey = (event: KeyboardEvent<HTMLButtonElement>, at: number) => {
@@ -189,7 +264,9 @@ function DefaultsDialog({
   const saved = (layer: "personal" | "household") => {
     if (layer === "personal") reloadPersonal();
     else reloadHousehold();
-    void defaults.acquire(defaults.boundary());
+    readSnapshot(
+      async () => (await defaults.acquire(defaults.boundary())).outcome,
+    );
   };
 
   // The open forms, so the sync control can keep what they show (ia.md §1.3.3, §3; R5). A discard is the session's, not theirs.
@@ -265,9 +342,14 @@ function DefaultsDialog({
           className="flex flex-col gap-5"
         >
           <Chain
-            resolves={personalLoad.status === "ready" ? resolved.layer : null}
+            resolves={resolved.known ? resolved.layer : null}
             householdName={primary?.name ?? null}
           />
+          {!resolved.known && (env.online || formsRead) ? (
+            <p className="text-[12.5px] text-ink-2" data-chain-unknown="">
+              {copy.CHAIN_UNKNOWN(copy.MISSING[resolved.missing])}
+            </p>
+          ) : null}
           {!env.online && !formsRead ? (
             <OfflineDefaults
               kind={kind}
@@ -286,8 +368,52 @@ function DefaultsDialog({
                   {copy.DEFAULTS_OFFLINE_EDITING}
                 </p>
               ) : null}
-              <section className="flex flex-col gap-2" data-layer="household">
-                {primaryId === null ? (
+              <section
+                className="flex flex-col gap-2"
+                data-layer="household"
+                data-snapshot-read={snapshotRead.outcome}
+              >
+                {stale !== null ? (
+                  <Banner
+                    tone="note"
+                    message={copy.PRIMARY_STALE(formatWhen(stale, env.now()))}
+                    action={
+                      <Button
+                        onClick={() => readSnapshot(() => defaults.refresh())}
+                      >
+                        {copy.TRY_AGAIN}
+                      </Button>
+                    }
+                  />
+                ) : null}
+                {!primaryEvidence.known ? (
+                  !env.online ? (
+                    <p
+                      className="text-[13px] text-ink-2"
+                      data-primary-unknown=""
+                    >
+                      {copy.PRIMARY_OFFLINE}
+                    </p>
+                  ) : snapshotRead.outcome === "loading" ? (
+                    <p
+                      className="text-[13px] text-ink-2"
+                      data-primary-unknown=""
+                    >
+                      {copy.PRIMARY_LOADING}
+                    </p>
+                  ) : (
+                    <Banner
+                      message={copy.PRIMARY_FAILED}
+                      action={
+                        <Button
+                          onClick={() => readSnapshot(() => defaults.refresh())}
+                        >
+                          {copy.TRY_AGAIN}
+                        </Button>
+                      }
+                    />
+                  )
+                ) : primaryId === null ? (
                   <p className="text-[13px] text-ink-2">{copy.NO_PRIMARY}</p>
                 ) : (
                   <>
@@ -376,15 +502,20 @@ function DefaultsDialog({
                       className="text-[13px] text-ink-1"
                       data-personal-state=""
                     >
-                      {resolved.layer === "personal"
+                      {resolved.known && resolved.layer === "personal"
                         ? copy.PERSONAL_OVERRIDE(
                             describe(resolved.template),
                             personal.version,
                           )
-                        : copy.PERSONAL_INHERITS(
-                            describe(nextLayer.template),
-                            personal.version,
-                          )}
+                        : inherited.known
+                          ? copy.PERSONAL_INHERITS(
+                              describe(inherited.template),
+                              personal.version,
+                            )
+                          : copy.PERSONAL_INHERITS_UNKNOWN(
+                              copy.MISSING[inherited.missing],
+                              personal.version,
+                            )}
                     </p>
                     <LayerForm
                       key={`personal:${kind}:${personal.version}:${personalLoad.status === "ready" ? personalLoad.at : 0}`}
@@ -396,11 +527,14 @@ function DefaultsDialog({
                       record={personal}
                       label={copy.PERSONAL_EDIT_LABEL(KIND_LABEL[kind])}
                       inheritLabel={copy.CHOICE_INHERIT_PERSONAL(
-                        describe(nextLayer.template),
+                        inherited.known
+                          ? describe(inherited.template)
+                          : copy.INHERITED_UNKNOWN,
                       )}
                       membership={membership}
                       onRetryMembership={retryMembership}
                       describe={describe}
+                      unknownOf={personalUnknown}
                       onSaved={() => saved("personal")}
                     />
                   </>
@@ -528,6 +662,7 @@ function LayerForm({
   membership,
   onRetryMembership,
   describe,
+  unknownOf = () => null,
   onSaved,
 }: {
   kind: TemplateKind;
@@ -542,6 +677,8 @@ function LayerForm({
   membership: Membership;
   onRetryMembership(): void;
   describe(template: DefaultTemplate): string;
+  /** Why what a choice would make new records start as is not known yet (null: it is known): such a NEW save waits (R12). */
+  unknownOf?(template: DefaultTemplate | null): string | null;
   onSaved(): void;
 }) {
   const env = useSharingEnv();
@@ -632,21 +769,30 @@ function LayerForm({
     setExplicit((state) => reducePolicy(state, action, env.accountId));
   };
 
+  const commands: ManagementCommand[] = [
+    {
+      kind: "set_defaults",
+      household_id: householdId,
+      resource_kind: kind,
+      // THIS layer's stored template version (or the one kept choices were composed against): a stale one is refused, never
+      // overwritten (WF-SHARING-03 Er).
+      expected_version: base,
+      template: chosen,
+    },
+  ];
+  // A NEW save is admitted only when what it would make new records start as is known (R12): never under an unknown inheritance
+  // shown as the application's. Trying an uncertain attempt again is that same operation (same key and body), so it is never held
+  // back by what is not known now.
+  const missing = changed ? unknownOf(chosen) : null;
+  const retrying =
+    uncertain.current !== null &&
+    uncertain.current.body === canonicalBody(commands);
+  const unresolved = missing !== null && !retrying;
+
   const send = async () => {
-    const commands: ManagementCommand[] = [
-      {
-        kind: "set_defaults",
-        household_id: householdId,
-        resource_kind: kind,
-        // THIS layer's stored template version (or the one kept choices were composed against): a stale one is refused, never
-        // overwritten (WF-SHARING-03 Er).
-        expected_version: base,
-        template: chosen,
-      },
-    ];
-    // Admitted at the action as well as shown on the buttons: offline, unsupported or already sending, nothing is sent and the
-    // outcome on screen (an uncertain attempt's Try again) stays as it is.
-    if (sending.current || !env.online || !env.writable) return;
+    // Admitted at the action as well as shown on the buttons: offline, unsupported, already sending or unresolved, nothing is sent
+    // and the outcome on screen (an uncertain attempt's Try again) stays as it is.
+    if (sending.current || !env.online || !env.writable || unresolved) return;
     const attempt = nextAttempt(uncertain.current, commands, env.newId);
     uncertain.current = attempt;
     const shown = outcome;
@@ -723,7 +869,9 @@ function LayerForm({
         ? copy.SAVE_BUSY_REASON
         : !changed && outcome?.kind !== "uncertain"
           ? copy.SAVE_NO_CHANGE_REASON
-          : null;
+          : unresolved
+            ? copy.SAVE_UNKNOWN_REASON
+            : null;
   const retryReason = !env.online
     ? copy.SAVE_OFFLINE_REASON
     : !env.writable
@@ -790,11 +938,13 @@ function LayerForm({
         />
       ) : null}
       <p className="text-[12.5px] leading-[1.55] text-ink-2" data-preview="">
-        {changed
-          ? copy.PREVIEW_CHANGE(
-              chosen === null ? inheritLabel : describe(chosen),
-            )
-          : copy.PREVIEW_UNCHANGED}
+        {!changed
+          ? copy.PREVIEW_UNCHANGED
+          : missing !== null
+            ? copy.PREVIEW_UNKNOWN(missing)
+            : copy.PREVIEW_CHANGE(
+                chosen === null ? inheritLabel : describe(chosen),
+              )}
       </p>
       {outcome?.kind === "conflict" ? (
         <Banner

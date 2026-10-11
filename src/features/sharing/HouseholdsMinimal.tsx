@@ -31,8 +31,10 @@ interface Unresolved {
  * editor against a real household, not full household management"): your households, create one, invite an existing account by exact
  * username (managers), and "Invitations for you" (accept or decline). WEB-12b owns WF-SHARING-01/02 and replaces or extends this.
  *
- * Online-only. Offline it shows the households of the last sharing snapshot, with its time, and every action disabled. After any
- * success the households and the sharing defaults are read again (membership moves the defaults' revision).
+ * Online-only. Offline it shows the households this page last read, with THAT read's time, or, before any was read, the households the
+ * last sharing snapshot named, with its time and said to be only those (B5 lists the primary household and the households the defaults
+ * name, never every membership: an empty one is not "you're not in a household"; design assessment DA-M2). Every action is disabled
+ * offline. After any success the households and the sharing defaults are read again (membership moves the defaults' revision).
  */
 export function HouseholdsMinimal() {
   const env = useSharingEnv();
@@ -288,11 +290,21 @@ export function HouseholdsMinimal() {
         : null;
   const nameLength = [...name.trim()].length;
 
-  const shown: SnapshotHousehold[] | null =
+  // What is listed, with its scope and its own time (design assessment DA-M2): the complete list this page read (`GET /households`), or,
+  // offline before it was read, the households the last B5 snapshot recorded: only the primary household and those the defaults name.
+  const shown: {
+    from: "complete" | "snapshot";
+    list: SnapshotHousehold[];
+    at: number;
+  } | null =
     households.status === "ready"
-      ? households.value
-      : !env.online
-        ? (defaults.record?.snapshot.households ?? null)
+      ? { from: "complete", list: households.value, at: households.at }
+      : !env.online && defaults.record
+        ? {
+            from: "snapshot",
+            list: defaults.record.snapshot.households,
+            at: defaults.record.fetched_at,
+          }
         : null;
   const primaryId =
     defaults.record?.snapshot.defaults.primary_household_id ?? null;
@@ -354,26 +366,44 @@ export function HouseholdsMinimal() {
         <p className="text-[13px] text-ink-2">
           {env.online ? copy.HOUSEHOLDS_LOADING : copy.HOUSEHOLDS_OFFLINE_NONE}
         </p>
-      ) : shown.length === 0 ? (
-        <p className="text-[13px] text-ink-1">{copy.HOUSEHOLDS_EMPTY}</p>
+      ) : shown.from === "snapshot" && shown.list.length === 0 ? (
+        // B5 names no household: that is not "you're in none" (DA-M2).
+        <div className="flex flex-col gap-1" data-households-from="snapshot">
+          <p className="text-[13px] text-ink-1">
+            {copy.HOUSEHOLDS_SNAPSHOT_NONE}
+          </p>
+          <p className="text-[12px] text-ink-2">
+            {copy.AS_OF(formatWhen(shown.at, env.now()))}
+          </p>
+        </div>
       ) : (
         <>
-          {!env.online && defaults.record ? (
-            <p className="text-[12px] text-ink-2">
-              {copy.AS_OF(formatWhen(defaults.record.fetched_at, env.now()))}
+          {!env.online ? (
+            <p
+              className="text-[12px] text-ink-2"
+              data-households-from={shown.from}
+            >
+              {shown.from === "snapshot"
+                ? `${copy.HOUSEHOLDS_FROM_SNAPSHOT} ${copy.AS_OF(formatWhen(shown.at, env.now()))}`
+                : copy.HOUSEHOLDS_LAST_READ(formatWhen(shown.at, env.now()))}
             </p>
           ) : null}
-          <List className="flex flex-col gap-2">
-            {shown.map((household) => (
-              <HouseholdRow
-                key={household.id}
-                household={household}
-                primary={household.id === primaryId}
-                blocked={blocked}
-                onInvite={(username) => invite(household, username)}
-              />
-            ))}
-          </List>
+          {shown.list.length === 0 ? (
+            // Only the complete list can say this (DA-M2).
+            <p className="text-[13px] text-ink-1">{copy.HOUSEHOLDS_EMPTY}</p>
+          ) : (
+            <List className="flex flex-col gap-2">
+              {shown.list.map((household) => (
+                <HouseholdRow
+                  key={household.id}
+                  household={household}
+                  primary={household.id === primaryId}
+                  blocked={blocked}
+                  onInvite={(username) => invite(household, username)}
+                />
+              ))}
+            </List>
+          )}
         </>
       )}
       <form

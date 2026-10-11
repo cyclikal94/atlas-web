@@ -11,6 +11,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import * as copy from "../../../src/features/sharing/copy";
 import { DirectoryLookup } from "../../../src/features/sharing/DirectoryLookup";
 import { HouseholdsMinimal } from "../../../src/features/sharing/HouseholdsMinimal";
+import { formatWhen } from "../../../src/features/sharing/parts";
 import {
   FLAT,
   HOME,
@@ -487,5 +488,73 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     });
     await act(async () => {});
     expect(invocations(api)).toBe(1);
+  });
+});
+
+describe("DA-M2 (design assessment, review 6): offline, B5's households are said to be only what the snapshot named, with their own time", () => {
+  const T1 = Date.UTC(2026, 9, 9, 8, 15);
+  const T2 = Date.UTC(2026, 9, 11, 9, 30);
+
+  test("MU-S82: offline before the complete list was read, an EMPTY B5 subset is not 'You're not in a household'; a non-empty one is qualified", async () => {
+    const env = stubEnv();
+    env.setDefaults(
+      record(snapshot({ primary: null, households: [] }), { fetched_at: T1 }),
+    );
+    const view = mountSharing(<HouseholdsMinimal />, {
+      env,
+      sharing: { online: false, now: () => T2 },
+    });
+    await waitFor(() =>
+      expect(document.querySelector("[data-households-from]")).not.toBeNull(),
+    );
+    expect(screen.queryByText(copy.HOUSEHOLDS_EMPTY)).toBeNull();
+    expect(screen.queryByText(copy.HOUSEHOLDS_SNAPSHOT_NONE)).not.toBeNull();
+    expect(
+      screen.getByText(copy.AS_OF(formatWhen(T1, T2))),
+    ).toBeInTheDocument();
+    view.unmount();
+    const subset = stubEnv();
+    subset.setDefaults(
+      record(snapshot({ households: [home] }), { fetched_at: T1 }),
+    );
+    mountSharing(<HouseholdsMinimal />, {
+      env: subset,
+      sharing: { online: false, now: () => T2 },
+    });
+    expect(await screen.findByText("Home")).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-households-from="snapshot"]')?.textContent,
+    ).toBe(
+      `${copy.HOUSEHOLDS_FROM_SNAPSHOT} ${copy.AS_OF(formatWhen(T1, T2))}`,
+    );
+  });
+
+  test("control: a complete list read empty is 'You're not in a household'", async () => {
+    const api = fakeSharingApi();
+    api.defaults.households = ok([]);
+    mountSharing(<HouseholdsMinimal />, { api });
+    expect(await screen.findByText(copy.HOUSEHOLDS_EMPTY)).toBeInTheDocument();
+    expect(screen.queryByText(copy.HOUSEHOLDS_SNAPSHOT_NONE)).toBeNull();
+  });
+
+  test("MU-S83: a complete list read on this page, then offline: it is shown with ITS read time, not the snapshot's", async () => {
+    const env = stubEnv();
+    env.setDefaults(
+      record(snapshot({ primary: null, households: [] }), { fetched_at: T1 }),
+    );
+    const api = fakeSharingApi();
+    api.defaults.households = ok([home]);
+    const t = mountSharing(<HouseholdsMinimal />, {
+      env,
+      api,
+      sharing: { now: () => T2 },
+    });
+    expect(await screen.findByText("Home")).toBeInTheDocument();
+    t.setSharing({ online: false });
+    expect(
+      document.querySelector('[data-households-from="complete"]')?.textContent,
+    ).toBe(copy.HOUSEHOLDS_LAST_READ(formatWhen(T2, T2)));
+    expect(screen.queryByText(copy.AS_OF(formatWhen(T1, T2)))).toBeNull();
+    expect(screen.queryByText(copy.HOUSEHOLDS_SNAPSHOT_NONE)).toBeNull();
   });
 });

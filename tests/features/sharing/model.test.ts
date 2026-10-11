@@ -27,6 +27,9 @@ import {
   APPLICATION_DEFAULTS,
   describeTemplate,
   effectiveTemplate,
+  type Known,
+  type LayerRecord,
+  resolveKnown,
   resolvingLayer,
 } from "../../../src/features/sharing/model/templates";
 import {
@@ -359,5 +362,101 @@ describe("the review's Now (D-12a-6)", () => {
       freshForReview(record(undefined, { issued_at: 1_000 }), 1_000),
     ).not.toBeNull();
     expect(freshForReview(null, 0)).toBeNull();
+  });
+});
+
+describe("R12 (review 6): a resolution goes only as far as what was read; unknown is never absent", () => {
+  const KINDS = ["person", "field", "task", "list", "progress"] as const;
+  const read = (
+    template: object | null,
+    version: number,
+  ): Known<LayerRecord> => ({
+    known: true,
+    value: { template: template as never, version },
+  });
+  const UNREAD: Known<LayerRecord> = { known: false };
+  const shared = { kind: "primary_household", edit: false };
+  /** Every way a layer can have NO template: read with none at version 0, a null template at a positive version, a value at version 0. */
+  const absent = [read(null, 0), read(null, 4), read({ kind: "private" }, 0)];
+  const primaries: Array<[string, Known<string | null>]> = [
+    ["unknown", { known: false }],
+    ["none", { known: true, value: null }],
+    ["Home", { known: true, value: HOME }],
+  ];
+  const households: Array<[string, Known<LayerRecord>]> = [
+    ["unread (loading or failed)", UNREAD],
+    ["read absent v0", read(null, 0)],
+    ["read null at v5", read(null, 5)],
+    ["read present", read(shared, 7)],
+  ];
+
+  test("MU-S76: every kind, with no personal template: unknown primary or an unread household template is unknown, never the application default", () => {
+    for (const kind of KINDS)
+      for (const personal of absent)
+        for (const [primaryName, primary] of primaries)
+          for (const [householdName, household] of households) {
+            const got = resolveKnown({ kind, personal, primary, household });
+            const at = `${kind} / primary ${primaryName} / household ${householdName}`;
+            if (!primary.known)
+              expect(got, at).toEqual({ known: false, missing: "primary" });
+            else if (primary.value === null)
+              // Verified: no primary household, so the household layer cannot apply whatever its read said.
+              expect(got, at).toEqual({
+                known: true,
+                layer: "application",
+                template: APPLICATION_DEFAULTS[kind],
+              });
+            else if (!household.known)
+              expect(got, at).toEqual({ known: false, missing: "household" });
+            else if (householdName === "read present")
+              expect(got, at).toEqual({
+                known: true,
+                layer: "household",
+                template: shared,
+              });
+            else
+              expect(got, at).toEqual({
+                known: true,
+                layer: "application",
+                template: APPLICATION_DEFAULTS[kind],
+              });
+          }
+  });
+
+  test("a present personal template resolves on its own, whatever else is unknown; an unread personal layer is unknown", () => {
+    for (const kind of KINDS)
+      for (const [, primary] of primaries)
+        for (const [, household] of households) {
+          expect(
+            resolveKnown({
+              kind,
+              personal: read(shared, 2),
+              primary,
+              household,
+            }),
+          ).toEqual({ known: true, layer: "personal", template: shared });
+          expect(
+            resolveKnown({ kind, personal: UNREAD, primary, household }),
+          ).toEqual({ known: false, missing: "personal" });
+        }
+  });
+
+  test("the application defaults differ by kind: People edit and Progress read with the primary household, the rest Private", () => {
+    const none: Known<string | null> = { known: true, value: null };
+    const of = (kind: (typeof KINDS)[number]) =>
+      resolveKnown({
+        kind,
+        personal: read(null, 0),
+        primary: none,
+        household: UNREAD,
+      });
+    expect(of("person")).toMatchObject({
+      template: { kind: "primary_household", edit: true },
+    });
+    expect(of("progress")).toMatchObject({
+      template: { kind: "primary_household", edit: false },
+    });
+    for (const kind of ["field", "task", "list"] as const)
+      expect(of(kind)).toMatchObject({ template: { kind: "private" } });
   });
 });
