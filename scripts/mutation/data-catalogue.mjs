@@ -16644,6 +16644,63 @@ export const UNIT = [
     expect: /another identity/,
     patch: (t) => sub(t, "      dropped.visit?.dispose();\n", ""),
   },
+  {
+    id: "MU-1429",
+    title:
+      "WEB-13a R11 (Q4): a refresh outcome recorded after its controller was disposed is not announced (the screen mounted before it never shows it)",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: [
+      "tests/features/calendars/refresh-controller.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /adopts the outcome|shows the press's outcome/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (next.run.ended && next.run.view !== null) deps.onLate?.(id);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1430",
+    title:
+      "WEB-13a R11 (Q4): the current controller ignores an outcome another controller recorded after the remount",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: [
+      "tests/features/calendars/refresh-controller.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /adopts the outcome|shows the press's outcome/,
+    patch: (t) =>
+      sub(
+        t,
+        "    adopt(id) {\n      if (disposed) return;\n",
+        "    adopt(id) {\n      return;\n",
+      ),
+  },
+  {
+    id: "MU-1431",
+    title:
+      "WEB-13a R11 (Q4): an adopted outcome replaces a run this screen's own press has going",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect: /unless a run of its own is going/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (entry !== undefined && (!entry.run.ended || entry.run === run))\n",
+        "      if (entry !== undefined && entry.run === run)\n",
+      ),
+  },
+  {
+    id: "MU-1432",
+    title:
+      "WEB-13a R11 (Q4): the screen's controller does not listen for outcomes recorded after the remount",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/visit-screen.test.tsx"],
+    expect: /shows the press's outcome/,
+    patch: (t) => sub(t, "    memory.lateRuns.add(adopt);\n", ""),
+  },
 ];
 
 /**

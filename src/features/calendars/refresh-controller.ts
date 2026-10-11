@@ -36,6 +36,12 @@ export interface RefreshController {
   online(): void;
   /** Clears what a row shows after the person has seen it (for example after a new press elsewhere). */
   forget(sourceId: string): void;
+  /**
+   * An earlier controller of this identity, disposed by a remount, has just recorded the OUTCOME of a run whose answer came after it
+   * (`late`): show it, unless a run of this source is going here (a new press owns the row). Revision 5: the remount can finish before
+   * that answer arrives, and this controller read the memory only when it was built.
+   */
+  adopt(sourceId: string): void;
   subscribe(listener: () => void): () => void;
   /** Stops every run and drops every answer still to come. Idempotent. */
   dispose(): void;
@@ -58,6 +64,8 @@ export function createRefreshController(deps: {
    * nothing: no send, no read, no wait).
    */
   remembered?: Map<string, RefreshRun>;
+  /** A run's outcome was recorded after this controller was disposed (`late`): the next controller is told to `adopt` it. */
+  onLate?(sourceId: string): void;
   /**
    * A run of `sourceId` was admitted (a press of Refresh or "Check again"), before its request: the screen's observer of refresh activity
    * stops observing that source (`observation-controller.ts`, revision 4), so a read it made earlier cannot change what the run shows.
@@ -153,6 +161,7 @@ export function createRefreshController(deps: {
     const next = refreshStep(held.run, event);
     atDisposal.delete(id);
     record(id, next.run);
+    if (next.run.ended && next.run.view !== null) deps.onLate?.(id);
   };
 
   const begin = (id: string, key: () => string): void => {
@@ -204,6 +213,17 @@ export function createRefreshController(deps: {
       if (entry === undefined || !entry.run.ended) return;
       entries.delete(id);
       remembered.delete(id);
+      notify();
+    },
+    adopt(id) {
+      if (disposed) return;
+      const run = remembered.get(id);
+      const entry = entries.get(id);
+      if (run === undefined || !run.ended) return;
+      if (entry !== undefined && (!entry.run.ended || entry.run === run))
+        return;
+      generations += 1;
+      entries.set(id, { run, generation: generations, timer: null });
       notify();
     },
     subscribe(listener) {

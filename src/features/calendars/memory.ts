@@ -18,6 +18,11 @@ export interface IdentityMemory {
   readonly runs: Map<string, RefreshRun>;
   /** Refusal notices by source id (or `link` for the Link form): the words only. */
   readonly notices: Map<string, string>;
+  /**
+   * Told when a disposed refresh controller records a run's outcome (its answer came after the remount): the screen's current controller
+   * adopts it (revision 5).
+   */
+  readonly lateRuns: Set<(sourceId: string) => void>;
   /** The Calendars screen's current visit, or null when none is (`visit.ts`): dropped (disposed) with the memory. */
   visit: CalendarVisit | null;
 }
@@ -36,7 +41,12 @@ export function identityMemory(
     }
   let memory = memories.get(key);
   if (memory === undefined) {
-    memory = { runs: new Map(), notices: new Map(), visit: null };
+    memory = {
+      runs: new Map(),
+      notices: new Map(),
+      lateRuns: new Set(),
+      visit: null,
+    };
     memories.set(key, memory);
   }
   return memory;

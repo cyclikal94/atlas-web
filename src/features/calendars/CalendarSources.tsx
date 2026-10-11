@@ -158,14 +158,21 @@ function useRefresh(api: CalendarApi | null): {
       mintKey: () => crypto.randomUUID(),
       // What must outlive a remount of this screen under the same identity (a `403` is re-checked by the session): `memory.ts`.
       remembered: memory.runs,
+      // An outcome that arrives after a remount is shown by the controller of the screen mounted then (revision 5).
+      onLate: (id) => {
+        for (const adopt of [...memory.lateRuns]) adopt(id);
+      },
       onBegin: (id) => observer.yieldTo(id),
     });
+    const adopt = (id: string) => controller.adopt(id);
+    memory.lateRuns.add(adopt);
     const offController = controller.subscribe(rerender);
     const offObserver = observer.subscribe(rerender);
     setBuilt({ controller, observer, attachment, visit });
     return () => {
       offController();
       offObserver();
+      memory.lateRuns.delete(adopt);
       controller.dispose();
       attachment.detach();
       // The person left the screen (another route, back or forward): the visit ends, and opening the screen again reads afresh.

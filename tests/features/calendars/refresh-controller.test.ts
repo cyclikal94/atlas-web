@@ -1,4 +1,5 @@
 // @vitest-environment node
+
 import { describe, expect, test } from "vitest";
 import {
   type CalendarApi,
@@ -241,6 +242,62 @@ describe("an outcome outlives a remount of the screen under the same identity (t
     // A new press is a new operation: the remembered outcome is forgotten (it would be stale after a remount mid-run).
     second.refresh("S");
     expect(remembered.has("S")).toBe(false);
+  });
+
+  test("revision 5: the NEXT controller is already built when the late answer arrives: it adopts the outcome (told through onLate), unless a run of its own is going", async () => {
+    const remembered = new Map();
+    const h = harness();
+    let answer: (r: never) => void = () => undefined;
+    const api = (refresh: CalendarApi["refresh"]) => ({
+      identity: { account: "acct", epoch: 1 },
+      refresh,
+      liveSources: () => Promise.reject(new Error("not used")),
+      command: () => Promise.reject(new Error("not used")),
+      capabilities: () => Promise.reject(new Error("not used")),
+    });
+    const adopters = new Set<(id: string) => void>();
+    const onLate = (id: string) => {
+      for (const adopt of [...adopters]) adopt(id);
+    };
+    const first = createRefreshController({
+      api: api(() => new Promise((resolve) => (answer = resolve as never))),
+      mintKey: () => "k1",
+      remembered,
+      onLate,
+    });
+    first.refresh("S");
+    first.dispose();
+    // The remount finished first: the next controller is built while the answer is still out.
+    const second = createRefreshController({
+      api: api(() => new Promise(() => undefined)),
+      mintKey: () => "k2",
+      remembered,
+      onLate,
+    });
+    adopters.add((id) => second.adopt(id));
+    let notified = 0;
+    second.subscribe(() => {
+      notified += 1;
+    });
+    expect(second.view("S")).toBeNull();
+    answer({
+      ok: false,
+      kind: "refused",
+      status: 403,
+      code: "forbidden",
+    } as never);
+    await h.flush();
+    expect(second.view("S")).toEqual({ kind: "failed", cause: "unavailable" });
+    expect(second.running("S")).toBe(false);
+    expect(notified).toBe(1);
+    // A press of its own owns the row: a later adoption of an older outcome does not replace it.
+    second.refresh("T");
+    remembered.set("T", remembered.get("S"));
+    second.adopt("T");
+    expect(second.running("T")).toBe(true);
+    // A disposed controller adopts nothing.
+    second.dispose();
+    second.adopt("S");
   });
 
   test("a run that was only WAITING to retry at dispose ends with nothing remembered, and nothing resumes", async () => {

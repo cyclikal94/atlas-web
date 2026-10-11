@@ -243,6 +243,41 @@ describe("a refused automatic read is not made again by the remount it causes (R
   });
 });
 
+describe("a press refused 403 across the remount it causes (Q4)", () => {
+  test("the screen's read held, the press's 403 answered only after the remount: the remounted screen shows the press's outcome, the late read changes nothing, nothing is read or sent again", async () => {
+    fake();
+    const read = held();
+    const press = held();
+    const w = await calendarWorld({
+      cache: [sourceRow()],
+      replies: [
+        ["/calendar-sources", [read.reply]],
+        ["/calendar-sources/{id}/refresh", [press.reply]],
+      ],
+    });
+    fireEvent.click(
+      within(row()).getByRole("button", { name: "Refresh Family calendar" }),
+    );
+    await w.settle();
+    expect(row().dataset.observation).toBe("none");
+    // The session's re-check: the tree is remounted before the refusal reaches the press's (now disposed) controller.
+    await remount(w);
+    expect(row()).not.toHaveTextContent(copy.SOURCE_GONE);
+    press.release(forbidden as never);
+    await w.settle();
+    await waitFor(() => expect(row()).toHaveTextContent(copy.SOURCE_GONE));
+    read.release(live(true) as never);
+    await w.settle();
+    await elapse(w, OBSERVE_LIMIT_MS);
+    expect(row().dataset.observation).toBe("none");
+    expect(row()).not.toHaveTextContent(copy.REFRESHING);
+    expect(reads(w)).toHaveLength(1);
+    expect(
+      w.calls.filter((c) => c.path === "/calendar-sources/{id}/refresh"),
+    ).toHaveLength(1);
+  });
+});
+
 describe("the capability read (DA-1, Q3)", () => {
   test("refused 403: read once in the visit, however often the screen is remounted; unknown pre-disables nothing", async () => {
     fake();

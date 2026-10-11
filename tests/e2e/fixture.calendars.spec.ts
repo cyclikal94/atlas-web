@@ -2185,15 +2185,39 @@ const forbidden403 = () => ({
   body: JSON.parse(atlasError("forbidden")),
 });
 /**
- * Marks the screen's heading element: a remount replaces it (`remounted`), anything else keeps it (`notRemounted`). Found by element,
- * not by role: an open modal (Manage) takes the heading out of the accessibility tree, and a role lookup would wait for the remount.
+ * Marks the screen's heading element and the session trace's length (`markMount`). A remount by the session's protective re-check is
+ * established by the kernel's own record, a `surrender` of a non-identity request answered 401/403 after the mark, AND the marked
+ * heading being replaced (`remounted`); the early boot mounts of a new document replace the heading too, so the element alone is not
+ * evidence. Found by element, not role: an open modal (Manage) takes the heading out of the accessibility tree.
  */
 const markMount = async (page: Page) => {
   const heading = page.locator("h1", { hasText: "Calendar sources" });
   await expect(heading).toHaveCount(1);
-  await heading.evaluate((h) => h.setAttribute("data-probe-mount", "before"));
+  await heading.evaluate((h) => {
+    h.setAttribute("data-probe-mount", "before");
+    (window as unknown as { __probeMark: number }).__probeMark =
+      window.__atlasFixture?.session?.trace.length ?? 0;
+  });
 };
+/** The protective surrenders (a 401/403 to a request that is not an identity read) the kernel recorded since `markMount`. */
+const protectiveSince = (page: Page) =>
+  page.evaluate(() => {
+    const trace = window.__atlasFixture?.session?.trace ?? [];
+    const from = (window as unknown as { __probeMark?: number }).__probeMark;
+    if (from === undefined) throw new Error("markMount was not called");
+    return trace
+      .slice(from)
+      .filter(
+        (e) =>
+          e.event === "surrender" &&
+          (e.data?.status === 401 || e.data?.status === 403) &&
+          e.data?.identityRead !== true,
+      ).length;
+  });
 const remounted = async (page: Page) => {
+  await expect
+    .poll(() => protectiveSince(page), { timeout: 15_000 })
+    .toBeGreaterThanOrEqual(1);
   await expect(page.locator('h1[data-probe-mount="before"]')).toHaveCount(0, {
     timeout: 15_000,
   });
@@ -2201,8 +2225,15 @@ const remounted = async (page: Page) => {
     page.getByRole("heading", { level: 1, name: "Calendar sources" }),
   ).toBeVisible();
 };
-const notRemounted = (page: Page) =>
-  expect(page.locator('h1[data-probe-mount="before"]')).toHaveCount(1);
+/** No protective re-check since `markMount`; with `element`, the marked heading is also still the one shown (a settled page). */
+const notRemounted = async (
+  page: Page,
+  options: { element?: boolean } = {},
+) => {
+  expect(await protectiveSince(page)).toBe(0);
+  if (options.element !== false)
+    await expect(page.locator('h1[data-probe-mount="before"]')).toHaveCount(1);
+};
 /** A held answer: the request arrives and waits until `release`. */
 function holdAnswer() {
   let release: (answer: { status: number; body: unknown }) => void = () =>
@@ -2261,7 +2292,7 @@ test.describe("E-CAL14: automatic reads are once per visit (revision 5, R11)", (
         first.status === 200 ? "idle" : "unknown",
       );
       await page.waitForTimeout(3_000);
-      if (!remounts) await notRemounted(page);
+      if (!remounts) await notRemounted(page, { element: false });
       expect(liveReads(cal, "opened")).toHaveLength(1);
       expect(capabilityReads(cal, "opened")).toHaveLength(1);
       expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
@@ -2441,6 +2472,7 @@ test.describe("E-CAL14: automatic reads are once per visit (revision 5, R11)", (
     await remounted(page);
     await expect(row).toContainText(
       "This calendar source is no longer available to you.",
+      { timeout: 15_000 },
     );
     held.release({
       status: 200,
