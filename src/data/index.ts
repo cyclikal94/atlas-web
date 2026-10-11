@@ -83,6 +83,8 @@ export type {
   CacheRow,
   DraftRow,
   DraftStatus,
+  DraftWithCommand,
+  JsonObject,
   LocalId,
   ProjectionPatch,
   ResourceId,
@@ -114,6 +116,7 @@ export type {
   QueuePage,
   ResourcePage,
 } from "./plans/outbox";
+export type { OutstandingCreatesPage } from "./plans/outstanding-reads";
 export {
   createDataDeletionPorts,
   type DeletionPortsOptions,
@@ -139,6 +142,7 @@ export {
   useDraftQueue,
   useNotices,
   useOptionalDataEnv,
+  useOutstandingCreates,
   useQueueSummary,
   useResourceList,
   useSharingDefaults,
