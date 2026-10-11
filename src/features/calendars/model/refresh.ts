@@ -9,9 +9,10 @@ import type { CalendarResult, LiveSource, LiveSources } from "./result";
  * transient failure, and one retry after a lease that expired with nothing newer running. They stop when the page goes offline, the
  * screen unmounts or the identity changes, and NOTHING resumes on reconnect: a refresh is never queued (Q22).
  *
- * Health is never evidence. A `200` is success whatever `health` says; a `502` stays a failure whatever `health` says (7(d)). The
- * only live signal used is the read-time `refresh_in_progress` of `GET /calendar-sources` (B8 item 4), after a `409 stale_refresh`.
- * It is evidence only for a source the read actually returned: a source the bounded walk did not reach, or a list without it, says
+ * Health is never evidence of OUR press. A `200` is success whatever `health` says; a `502` stays a failure whatever `health` says
+ * (7(d)). A run reads the live list (`GET /calendar-sources`, B8 item 4) only after a `409 stale_refresh`: its read-time
+ * `refresh_in_progress` says whether a lease is held, and its `health` and `last_success` are evidence only of a NEWER refresh's
+ * result (`finishedSince`). It is evidence only for a source the read actually returned: a source the bounded walk did not reach, or a list without it, says
  * nothing, so it permits no retry and finishes nothing (R9). A newer refresh we waited for is finished only when a later read shows
  * the result it wrote (`finishedSince`): the flag turning false alone is also what a lease that lapsed with no completing write, or
  * a settings change that cleared it, looks like.

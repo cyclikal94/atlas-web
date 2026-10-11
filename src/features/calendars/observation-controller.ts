@@ -13,13 +13,22 @@ import type { CalendarResult, LiveSources } from "./model/result";
 import type { Timers } from "./refresh-controller";
 
 /**
- * The refresh activity of the sources ONE mounted calendar screen shows, observed by reading the live list (WEB-13a, D-13a-13;
- * revision 4, R10): it performs what `model/observation.ts` decides and nothing else. It only ever reads `GET /calendar-sources`: it has
- * no key and no way to send a refresh, a command or a draft, and it writes nothing (no cache, no storage, no form).
+ * The refresh activity of the sources the calendar screen shows during ONE VISIT, observed by reading the live list (WEB-13a,
+ * D-13a-13; revision 4, R10; revision 5, R11): it performs what `model/observation.ts` decides and nothing else. It only ever reads
+ * `GET /calendar-sources`: it has no key and no way to send a refresh, a command or a draft, and it writes nothing (no cache, no
+ * storage, no form).
  *
- *  - It reads the sources the screen lists (`watch`, one page of the list): ONE bounded walk serves every source due, never one per row,
- *    and walks never overlap. A source listed later (a new page, a create the cache now holds) is read at once (a poll waiting for its
- *    time is made then, with it), or with the next walk if one is out.
+ *  - It belongs to the visit (`visit.ts`), not to a mounted screen: a screen ATTACHES to it and detaches when it unmounts. An Atlas
+ *    `403` unmounts the protected tree and mounts it again under the same identity (the session's re-check), so a screen's lifetime
+ *    cannot bound anything; the observer's entries, their time limits, their final states and the read still out all outlive a
+ *    detachment, and the next attachment continues them: it never reads afresh what was already read (R11). Nothing is read while no
+ *    screen is attached (a read out is not admitted another page or another attempt), and a walk's answer is the visit's evidence
+ *    whichever attachment is current when it arrives.
+ *  - It reads the sources the attached screen lists (`watch`, one page of the list): ONE bounded walk serves every source due, never
+ *    one per row, and walks never overlap. A source listed later (a new page, a create the cache now holds) is read at once (a poll
+ *    waiting for its time is made then, with it), or with the next walk if one is out. A source the SAME attachment stops listing (the
+ *    cache gate closing, another page) keeps what was observed and its time limit; listed again by that attachment while still
+ *    observed, it is read at once within that limit. Nothing listed by an earlier attachment is read again because a new one lists it.
  *  - A source seen busy is read again every `OBSERVE_POLL_MS`, until a read returns it idle, fails or does not return it, or its
  *    `OBSERVE_LIMIT_MS` (from the first walk that included it) runs out. The time limit is not extended by anything, and a read still out
  *    at it is not waited for: its answer is dropped for that source, and no further page of the walk is admitted.
@@ -27,14 +36,14 @@ import type { Timers } from "./refresh-controller";
  *    run shows what it learns, and a read made before the press can no longer change the row.
  *  - It reads only once the server is known to be compatible, and only while online. Going offline (or the server becoming incompatible)
  *    stops it for good: nothing it did is resumed, and coming back online reads nothing more until the screen is opened again.
- *  - The screen builds one per client (identity) and disposes it on unmount: a read still out is then dropped.
+ *  - The visit disposes it when the person leaves the screen or the identity changes: a read still out is then dropped.
  */
 export interface SourceObserver {
-  /** The sources the screen lists now. Unchanged ids keep their observation (and its time limit); removed ones are dropped. */
-  watch(ids: readonly string[]): void;
+  /** A mounted screen attaches (one at a time: a newer attachment replaces an older one). */
+  attach(): ObserverAttachment;
   /** A refresh of `id` was started on this screen: its observation ends here, and nothing more is read for it. */
   yieldTo(id: string): void;
-  /** What was observed of `id`, or null when it is not observed. */
+  /** What was observed of `id`, or null when it is not observed (or not listed by the attached screen). */
   observation(id: string): Observation | null;
   /** Whether the server is compatible: nothing is read until it is, and it stops for good if it no longer is. */
   compatible(ok: boolean): void;
@@ -45,6 +54,17 @@ export interface SourceObserver {
   dispose(): void;
 }
 
+/** One mounted screen's hold on the observer. Both methods do nothing once it is detached or replaced. */
+export interface ObserverAttachment {
+  /**
+   * The sources the screen lists now. Unchanged ids keep their observation (and its time limit); ids no longer listed keep theirs too,
+   * but are neither shown nor read until listed again.
+   */
+  watch(ids: readonly string[]): void;
+  /** The screen unmounted: nothing more is read until a screen attaches again (which continues, never restarts). Idempotent. */
+  detach(): void;
+}
+
 interface Watched {
   observation: Observation;
   /** Bumped whenever the observation changes or stops: a read made for an older generation is dropped. */
@@ -52,6 +72,12 @@ interface Watched {
   /** When the observation's time runs out (`now()`), set by the first walk that includes it. */
   deadline: number | null;
   deadlineTimer: unknown;
+  /** Whether the attached screen lists it now: only a listed source is shown or makes a read due. */
+  listed: boolean;
+  /** The attachment that stopped listing it (the cache gate, another page), so that ITS listing it again reads it at once. */
+  leftBy: number | null;
+  /** Listed again by the attachment that left it while still observed: read with the next walk, at once. */
+  due: boolean;
 }
 
 export function createSourceObserver(deps: {
@@ -74,6 +100,9 @@ export function createSourceObserver(deps: {
   let compatible = false;
   let walking = false;
   let pollTimer: unknown = null;
+  /** The attached screen (its number), or null while none is: nothing is read then. */
+  let attached: number | null = null;
+  let attachments = 0;
 
   const notify = (): void => {
     for (const listener of [...listeners]) listener();
@@ -111,19 +140,21 @@ export function createSourceObserver(deps: {
     notify();
   };
 
-  /** Reads the live list for every source due; false when none is (or a walk is out). */
+  /** Reads the live list for every source due; false when none is (or a walk is out, or no screen is attached). */
   const walk = (): boolean => {
-    if (stopped || !compatible || walking) return false;
+    if (stopped || !compatible || walking || attached === null) return false;
     const started = now();
     const cohort = [...watched]
       .filter(
         ([, entry]) =>
+          entry.listed &&
           observing(entry.observation) &&
           (entry.deadline === null || started < entry.deadline),
       )
       .map(([id, entry]) => ({ id, entry, generation: entry.generation }));
     if (cohort.length === 0) return false;
-    for (const { id, entry } of cohort)
+    for (const { id, entry } of cohort) {
+      entry.due = false;
       if (entry.deadline === null) {
         entry.deadline = started + OBSERVE_LIMIT_MS;
         entry.deadlineTimer = timers.setTimeout(() => {
@@ -132,14 +163,20 @@ export function createSourceObserver(deps: {
           schedule();
         }, OBSERVE_LIMIT_MS);
       }
+    }
     walking = true;
-    // Every page (and every wait for one to be sent) is admitted only while some source of the walk is still observed in time.
+    // Every page (and every wait for one to be sent) is admitted only while some source of the walk is still listed (so a screen is
+    // attached: a detachment unlists everything) and observed in time. A walk refused a page this way ends as `closed`: its sources
+    // end, they are not read afresh.
     const live = (): boolean =>
       compatible &&
       cohort.some(
         ({ id, entry, generation }) =>
-          current(id, generation) !== null && now() < (entry.deadline ?? 0),
+          current(id, generation) !== null &&
+          entry.listed &&
+          now() < (entry.deadline ?? 0),
       );
+    // The answer is the visit's: it is taken whichever screen is attached by then (or none), so a remount never reads it again.
     const answer = (result: CalendarResult<LiveSources>): void => {
       walking = false;
       if (disposed) return;
@@ -147,6 +184,7 @@ export function createSourceObserver(deps: {
       for (const { id, generation } of cohort) {
         const entry = current(id, generation);
         if (entry === null) continue;
+        entry.due = false;
         if (entry.deadline !== null && now() >= entry.deadline)
           set(entry, expire(entry.observation));
         else set(entry, observe(entry.observation, id, result));
@@ -166,9 +204,15 @@ export function createSourceObserver(deps: {
    * after `OBSERVE_POLL_MS` for one seen busy.
    */
   const schedule = (): void => {
-    if (stopped || !compatible || walking) return;
-    const entries = [...watched.values()];
-    if (entries.some((entry) => entry.observation.kind === "checking")) {
+    if (stopped || !compatible || walking || attached === null) return;
+    const entries = [...watched.values()].filter((entry) => entry.listed);
+    if (
+      entries.some(
+        (entry) =>
+          entry.observation.kind === "checking" ||
+          (entry.due && observing(entry.observation)),
+      )
+    ) {
       const waiting = pollTimer;
       pollTimer = null;
       if (walk()) {
@@ -189,38 +233,84 @@ export function createSourceObserver(deps: {
 
   const stop = (): void => {
     stopped = true;
-    if (pollTimer !== null) timers.clearTimeout(pollTimer);
-    pollTimer = null;
+    clearPoll();
     for (const entry of watched.values()) {
       drop(entry);
       entry.observation = ENDED;
     }
   };
 
+  const clearPoll = (): void => {
+    if (pollTimer !== null) timers.clearTimeout(pollTimer);
+    pollTimer = null;
+  };
+
+  const watch = (attachment: number, ids: readonly string[]): void => {
+    if (disposed || attached !== attachment) return;
+    const listed = new Set(ids);
+    let changed = false;
+    for (const [id, entry] of watched)
+      if (entry.listed && !listed.has(id)) {
+        entry.listed = false;
+        entry.leftBy = attachment;
+        entry.due = false;
+        changed = true;
+      }
+    for (const id of listed) {
+      const entry = watched.get(id);
+      if (entry !== undefined) {
+        if (entry.listed) continue;
+        entry.listed = true;
+        entry.due = entry.leftBy === attachment && observing(entry.observation);
+        entry.leftBy = null;
+        changed = true;
+      } else if (!yielded.has(id)) {
+        generations += 1;
+        watched.set(id, {
+          observation: stopped ? ENDED : CHECKING,
+          generation: generations,
+          deadline: null,
+          deadlineTimer: null,
+          listed: true,
+          leftBy: null,
+          due: false,
+        });
+        changed = true;
+      }
+    }
+    // Nothing listed is busy any more: a poll waiting for its time has nothing to read.
+    if (
+      ![...watched.values()].some((e) => e.listed && observing(e.observation))
+    )
+      clearPoll();
+    if (changed) notify();
+    schedule();
+  };
+
+  const detach = (attachment: number): void => {
+    if (attached !== attachment) return;
+    attached = null;
+    clearPoll();
+    // What the screen listed is not "left" by it: a later screen listing it again continues it, it does not read it afresh.
+    for (const entry of watched.values()) {
+      entry.listed = false;
+      entry.leftBy = null;
+      entry.due = false;
+    }
+  };
+
   return {
-    watch(ids) {
-      if (disposed) return;
-      const listed = new Set(ids);
-      let changed = false;
-      for (const [id, entry] of watched)
-        if (!listed.has(id)) {
-          drop(entry);
-          watched.delete(id);
-          changed = true;
-        }
-      for (const id of listed)
-        if (!watched.has(id) && !yielded.has(id)) {
-          generations += 1;
-          watched.set(id, {
-            observation: stopped ? ENDED : CHECKING,
-            generation: generations,
-            deadline: null,
-            deadlineTimer: null,
-          });
-          changed = true;
-        }
-      if (changed) notify();
-      schedule();
+    attach() {
+      attachments += 1;
+      const attachment = attachments;
+      if (!disposed) {
+        if (attached !== null) detach(attached);
+        attached = attachment;
+      }
+      return {
+        watch: (ids) => watch(attachment, ids),
+        detach: () => detach(attachment),
+      };
     },
     yieldTo(id) {
       if (disposed) return;
@@ -231,7 +321,10 @@ export function createSourceObserver(deps: {
       watched.delete(id);
       notify();
     },
-    observation: (id) => watched.get(id)?.observation ?? null,
+    observation: (id) => {
+      const entry = watched.get(id);
+      return entry?.listed ? entry.observation : null;
+    },
     compatible(ok) {
       if (disposed || stopped) return;
       if (ok) {

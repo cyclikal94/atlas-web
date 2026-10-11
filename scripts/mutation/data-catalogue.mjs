@@ -16262,10 +16262,11 @@ export const UNIT = [
     file: "src/features/calendars/CalendarSources.tsx",
     tests: ["tests/features/calendars/observation-screen.test.tsx"],
     expect: /Refreshing… and holds Refresh back|view-only source is observed/,
+    // Re-anchored in revision 5 (the screen watches through its attachment to the visit's observer); the same mutation.
     patch: (t) =>
       sub(
         t,
-        '    observer.watch(listed === "" ? [] : listed.split("\\n"));\n',
+        '    attachment.watch(listed === "" ? [] : listed.split("\\n"));\n',
         "",
       ),
   },
@@ -16336,8 +16337,9 @@ export const UNIT = [
           "        if (entry.deadline !== null && now() >= entry.deadline)\n",
           "        if (false)\n",
         ),
-        "current(id, generation) !== null && now() < (entry.deadline ?? 0)",
-        "current(id, generation) !== null",
+        // Re-anchored in revision 5 (page admission also asks that the source is listed); the same mutation.
+        "          entry.listed &&\n          now() < (entry.deadline ?? 0),\n",
+        "          entry.listed,\n",
       ),
   },
   {
@@ -16365,11 +16367,12 @@ export const UNIT = [
     file: "src/features/calendars/observation-controller.ts",
     tests: ["tests/features/calendars/observation.test.ts"],
     expect: /ordinary re-render/,
+    // Re-anchored in revision 5 (a listed source keeps its entry for the visit): the same mutation, every id listed gets a new entry.
     patch: (t) =>
       sub(
         t,
-        "        if (!watched.has(id) && !yielded.has(id)) {\n",
-        "        if (!yielded.has(id)) {\n",
+        "      if (entry !== undefined) {\n        if (entry.listed) continue;\n",
+        "      if (entry !== undefined && false) {\n        if (entry.listed) continue;\n",
       ),
   },
   {
@@ -16395,14 +16398,15 @@ export const UNIT = [
     expect: /walks never overlap/,
     patch: (t) =>
       // Both guards (the scheduler's and the walk's own): either alone keeps walks apart, so a one-site mutant is equivalent.
+      // Re-anchored in revision 5 (both also ask for an attached screen); the same mutation.
       sub(
         sub(
           t,
-          "    if (stopped || !compatible || walking) return false;\n",
-          "    if (stopped || !compatible) return false;\n",
+          "    if (stopped || !compatible || walking || attached === null) return false;\n",
+          "    if (stopped || !compatible || attached === null) return false;\n",
         ),
-        "    if (stopped || !compatible || walking) return;\n",
-        "    if (stopped || !compatible) return;\n",
+        "    if (stopped || !compatible || walking || attached === null) return;\n",
+        "    if (stopped || !compatible || attached === null) return;\n",
       ),
   },
   {
@@ -16454,19 +16458,191 @@ export const UNIT = [
     expect: /compatible/,
     patch: (t) =>
       // Every site that asks (the scheduler, the walk and its page admission): any one alone keeps the read back.
+      // Re-anchored in revision 5 (the scheduler and the walk also ask for an attached screen); the same mutation.
       sub(
         sub(
           sub(
             t,
-            "    if (stopped || !compatible || walking) return false;\n",
-            "    if (stopped || walking) return false;\n",
+            "    if (stopped || !compatible || walking || attached === null) return false;\n",
+            "    if (stopped || walking || attached === null) return false;\n",
           ),
-          "    if (stopped || !compatible || walking) return;\n",
-          "    if (stopped || walking) return;\n",
+          "    if (stopped || !compatible || walking || attached === null) return;\n",
+          "    if (stopped || walking || attached === null) return;\n",
         ),
         "      compatible &&\n      cohort.some(",
         "      cohort.some(",
       ),
+  },
+  {
+    id: "MU-1414",
+    title:
+      "WEB-13a R11: every unmount ends the visit, so the remount a 403 causes reads the live list and the capability again",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/visit-screen.test.tsx"],
+    expect:
+      /six remounts: ONE list read|answer arriving after the remount|a remount: nothing is read again|without reading again|read once in the visit/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
+        "      visit.dispose();\n",
+      ),
+  },
+  {
+    id: "MU-1415",
+    title:
+      "WEB-13a R11: leaving the screen does not end the visit (opening it again reads nothing afresh)",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/visit-screen.test.tsx"],
+    expect: /leaves and opens the screen again|leaving while a read is out/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1416",
+    title:
+      "WEB-13a R11: a screen's detachment drops the read still out (its answer is lost, so the next screen reads again)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /first read is refused 403 while the screen is remounted|the other order|Strict Mode|poll refused 403 and the remount/,
+    patch: (t) =>
+      sub(
+        t,
+        "    for (const entry of watched.values()) {\n      entry.listed = false;\n      entry.leftBy = null;\n",
+        "    for (const entry of watched.values()) {\n      drop(entry);\n      entry.listed = false;\n      entry.leftBy = null;\n",
+      ),
+  },
+  {
+    id: "MU-1417",
+    title:
+      "WEB-13a R11: a read answered while no screen is attached is dropped (the next screen reads it again)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /answered while NO screen is attached/,
+    patch: (t) =>
+      sub(
+        t,
+        "      walking = false;\n      if (disposed) return;\n",
+        "      walking = false;\n      if (disposed || attached === null) return;\n",
+      ),
+  },
+  {
+    id: "MU-1418",
+    title:
+      "WEB-13a R11: a walk's next page (or wait to be sent) is admitted while no screen is attached (or for sources no longer listed)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /nothing is admitted while no screen is attached|another page/,
+    // The listing is the guard: a detachment unlists every source (a separate attachment check in the admission was redundant).
+    patch: (t) =>
+      sub(
+        t,
+        "          entry.listed &&\n          now() < (entry.deadline ?? 0),\n",
+        "          now() < (entry.deadline ?? 0),\n",
+      ),
+  },
+  {
+    id: "MU-1419",
+    title:
+      "WEB-13a R11: a new screen listing a source reads it at once (each remount reads a source still observed afresh)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /NEW screen lists a source|the other order|remounts neither restart/,
+    patch: (t) =>
+      sub(
+        t,
+        "        entry.due = entry.leftBy === attachment && observing(entry.observation);\n",
+        "        entry.due = observing(entry.observation);\n",
+      ),
+  },
+  {
+    id: "MU-1420",
+    title:
+      "WEB-13a R11: a source listed again restarts its time limit (a remount extends the observation)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /remounts neither restart nor extend the time limit|within its first limit/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (entry.listed) continue;\n        entry.listed = true;\n",
+        "        if (entry.listed) continue;\n        if (entry.deadlineTimer !== null) timers.clearTimeout(entry.deadlineTimer);\n        entry.deadlineTimer = null;\n        entry.deadline = null;\n        entry.listed = true;\n",
+      ),
+  },
+  {
+    id: "MU-1421",
+    title:
+      "WEB-13a R11 (DA-1): the capability is read on every mount, not once per visit",
+    file: "src/features/calendars/visit.ts",
+    tests: [
+      "tests/features/calendars/visit.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect:
+      /a remount's read asks nothing|however often the screen is mounted|read once in the visit|without reading again/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (disposed || state !== "unread") return;\n',
+        "        if (disposed) return;\n",
+      ),
+  },
+  {
+    id: "MU-1422",
+    title:
+      "WEB-13a R11 (DA-1): the capability read is taken only when its answer arrives (a mount while it is out reads it again)",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /a remount's read asks nothing|admitted for the screen mounted NOW/,
+    patch: (t) => sub(t, '        state = "reading";\n', ""),
+  },
+  {
+    id: "MU-1423",
+    title:
+      "WEB-13a R11 (C3): a capability read never sent counts as made (the visit never reads it)",
+    file: "src/features/calendars/visit.ts",
+    tests: [
+      "tests/features/calendars/visit.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect:
+      /never SENT|caller gone before the request was admitted|offline when the screen opens/,
+    patch: (t) =>
+      sub(
+        t,
+        '                  result.kind === "not_sent" ||\n                  (result.kind === "closed" && declined)\n',
+        "                  false\n",
+      ),
+  },
+  {
+    id: "MU-1424",
+    title:
+      "WEB-13a R11: a capability read out across a remount asks the unmounted screen whether it is still wanted",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /admitted for the screen mounted NOW/,
+    patch: (t) =>
+      sub(
+        sub(t, "        caller = live;\n", ""),
+        '        state = "reading";\n',
+        '        state = "reading";\n        caller = live;\n',
+      ),
+  },
+  {
+    id: "MU-1425",
+    title:
+      "WEB-13a R11: another identity does not end the visit (a read out for the old identity stays current)",
+    file: "src/features/calendars/memory.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /another identity/,
+    patch: (t) => sub(t, "      dropped.visit?.dispose();\n", ""),
   },
 ];
 
@@ -19163,5 +19339,50 @@ export const ENGINE = [
     grep: "revision 4, R10",
     expect: /revision 4, R10/,
     patch: (t) => sub(t, "    deps.onBegin?.(id);\n", ""),
+  },
+  {
+    id: "MU-1426",
+    title:
+      "WEB-13a R11: (REAL ENGINE) every unmount ends the visit, so the session's remount after a 403 reads the live list and the capability again",
+    file: "src/features/calendars/CalendarSources.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL14",
+    expect: /E-CAL14/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
+        "      visit.dispose();\n",
+      ),
+  },
+  {
+    id: "MU-1427",
+    title:
+      "WEB-13a R11 (DA-1): (REAL ENGINE) the capability is read on every mount, not once per visit",
+    file: "src/features/calendars/visit.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL14",
+    expect: /E-CAL14/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (disposed || state !== "unread") return;\n',
+        "        if (disposed) return;\n",
+      ),
+  },
+  {
+    id: "MU-1428",
+    title:
+      "WEB-13a R11: (REAL ENGINE) leaving the screen does not end the visit (opening it again reads nothing afresh)",
+    file: "src/features/calendars/CalendarSources.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL14",
+    expect: /E-CAL14/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
+        "",
+      ),
   },
 ];

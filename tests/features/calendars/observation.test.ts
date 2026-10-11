@@ -75,6 +75,8 @@ function harness() {
     timers: fakeTimers,
     now: () => clock,
   });
+  // One mounted screen (revision 5: the screen attaches to the visit's observer).
+  const attachment = observer.attach();
   let notified = 0;
   observer.subscribe(() => {
     notified += 1;
@@ -83,6 +85,7 @@ function harness() {
   return {
     api,
     observer,
+    attachment,
     reads,
     forbidden,
     timers,
@@ -176,7 +179,7 @@ describe("the pure model", () => {
 describe("reading the live list (S1, S4, S5)", () => {
   test("nothing is read before the server is known compatible; then ONE walk serves every listed source", async () => {
     const h = harness();
-    h.observer.watch(["A", "B"]);
+    h.attachment.watch(["A", "B"]);
     expect(h.reads).toHaveLength(0);
     expect(h.state("A")).toBe("checking");
     h.observer.compatible(true);
@@ -190,7 +193,7 @@ describe("reading the live list (S1, S4, S5)", () => {
   test("busy is read again after 5 s, until a read returns it idle: then nothing more is read, and nothing is sent", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(true) }));
     expect(h.reads).toHaveLength(1);
     await h.advance(OBSERVE_POLL_MS - 1);
@@ -210,7 +213,7 @@ describe("reading the live list (S1, S4, S5)", () => {
   test("S4: idle at once: one read, no polling, no timer left", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(false) }));
     await h.advance(10 * OBSERVE_LIMIT_MS);
     expect(h.reads).toHaveLength(1);
@@ -226,7 +229,7 @@ describe("reading the live list (S1, S4, S5)", () => {
   ])("S5: %s is unknown, not idle: nothing more is read", async (_, read) => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(read);
     expect(h.observer.observation("S")).toEqual({
       kind: "unknown",
@@ -243,7 +246,7 @@ describe("reading the live list (S1, S4, S5)", () => {
     ]) {
       const h = harness();
       h.observer.compatible(true);
-      h.observer.watch(["S"]);
+      h.attachment.watch(["S"]);
       await h.answer(list({ S: source(true) }));
       await h.advance(OBSERVE_POLL_MS);
       await h.answer(later);
@@ -257,7 +260,7 @@ describe("reading the live list (S1, S4, S5)", () => {
   test("S7: busy then not, with nothing written (a lapsed lease): idle, never a success (the model has no success state)", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(true) }));
     await h.advance(OBSERVE_POLL_MS);
     await h.answer(list({ S: source(false) }));
@@ -272,7 +275,7 @@ describe("reading the live list (S1, S4, S5)", () => {
       now: h.now,
     });
     observer.compatible(true);
-    observer.watch(["S"]);
+    observer.attach().watch(["S"]);
     await h.flush();
     expect(observer.observation("S")).toEqual({
       kind: "unknown",
@@ -285,7 +288,7 @@ describe("the time limit (S13)", () => {
   test("busy throughout: reads stop at 75 s from the first walk and it ends unknown after busy; at most 16 walks", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     // Every read is answered busy as soon as it is made.
     let answered = 0;
     for (let i = 0; i < 40; i += 1) {
@@ -312,7 +315,7 @@ describe("the time limit (S13)", () => {
   test("a read still out at the limit is not waited for: unknown AT the limit, its pages are no longer admitted, its late answer changes nothing", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(true) }));
     await h.advance(OBSERVE_LIMIT_MS - 1_000);
     const held = h.reads.at(-1);
@@ -343,7 +346,7 @@ describe("the time limit (S13)", () => {
       now: () => clock,
     });
     observer.compatible(true);
-    observer.watch(["S"]);
+    observer.attach().watch(["S"]);
     clock = OBSERVE_LIMIT_MS + 1;
     reads[0]?.(list({ S: source(true) }));
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -356,12 +359,12 @@ describe("the time limit (S13)", () => {
   test("S19: listing the same sources again (an ordinary re-render) neither reads again nor moves the limit", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(true) }));
     await h.advance(OBSERVE_LIMIT_MS - OBSERVE_POLL_MS - 1);
     const reads = h.reads.length;
-    h.observer.watch(["S"]);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
+    h.attachment.watch(["S"]);
     expect(h.reads).toHaveLength(reads);
     await h.answer(list({ S: source(true) }));
     await h.advance(OBSERVE_POLL_MS + 1);
@@ -373,14 +376,14 @@ describe("a press on this screen (S9, C4)", () => {
   test("a read held across a press: its answer changes nothing for the pressed source, and nothing more is read for it", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S", "T"]);
+    h.attachment.watch(["S", "T"]);
     h.observer.yieldTo("S");
     expect(h.observer.observation("S")).toBeNull();
     await h.answer(list({ S: source(true), T: source(true) }));
     expect(h.observer.observation("S")).toBeNull();
     expect(h.state("T")).toBe("busy");
     // Listing it again does not observe it again.
-    h.observer.watch(["S", "T"]);
+    h.attachment.watch(["S", "T"]);
     expect(h.observer.observation("S")).toBeNull();
     await h.advance(OBSERVE_POLL_MS);
     expect(h.reads).toHaveLength(2);
@@ -410,7 +413,7 @@ describe("a press on this screen (S9, C4)", () => {
       },
     });
     h.observer.compatible(true);
-    h.observer.watch(["S", "T"]);
+    h.attachment.watch(["S", "T"]);
     controller.offline();
     controller.refresh("T");
     expect(order).toEqual([]);
@@ -428,10 +431,10 @@ describe("what the screen lists (S10)", () => {
   test("a source listed while a walk is out is read with the NEXT walk (walks never overlap), with its own limit", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["A"]);
+    h.attachment.watch(["A"]);
     await h.answer(list({ A: source(true) }));
     await h.advance(OBSERVE_LIMIT_MS / 2);
-    h.observer.watch(["A", "B"]);
+    h.attachment.watch(["A", "B"]);
     // A's poll read is out (or due): B joins the next one.
     expect(h.reads.filter((r) => r.live()).length).toBeLessThanOrEqual(1);
     await h.answer(list({ A: source(true) }));
@@ -453,11 +456,11 @@ describe("what the screen lists (S10)", () => {
   test("a source listed while a poll waits for its time is read AT ONCE, in one walk with the busy one; the waiting poll is not made as well", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["A"]);
+    h.attachment.watch(["A"]);
     await h.answer(list({ A: source(true) }));
     expect(h.timers.size).toBe(2);
     await h.advance(1_000);
-    h.observer.watch(["A", "B"]);
+    h.attachment.watch(["A", "B"]);
     expect(h.reads).toHaveLength(2);
     await h.answer(list({ A: source(true), B: source(false) }));
     expect(h.state("A")).toBe("busy");
@@ -472,9 +475,9 @@ describe("what the screen lists (S10)", () => {
   test("another page: the old sources are dropped (a read out for them changes nothing), the new ones are read", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["A"]);
+    h.attachment.watch(["A"]);
     const old = h.reads.at(-1);
-    h.observer.watch(["B"]);
+    h.attachment.watch(["B"]);
     expect(h.observer.observation("A")).toBeNull();
     expect(old?.live()).toBe(false);
     expect(h.reads).toHaveLength(1);
@@ -491,11 +494,11 @@ describe("what the screen lists (S10)", () => {
   test("nothing listed: nothing read; the list emptied (the cache gate closed) drops every observation and its timers", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch([]);
+    h.attachment.watch([]);
     expect(h.reads).toHaveLength(0);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(true) }));
-    h.observer.watch([]);
+    h.attachment.watch([]);
     expect(h.observer.observation("S")).toBeNull();
     await h.advance(10 * OBSERVE_LIMIT_MS);
     expect(h.reads).toHaveLength(1);
@@ -507,7 +510,7 @@ describe("offline, compatibility, identity and unmount (S11, S12, S17)", () => {
   test("S11: offline mid-observation stops everything for good: nothing shown, a held read changes nothing, coming back online reads nothing", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(true) }));
     await h.advance(OBSERVE_POLL_MS);
     const held = h.reads.at(-1);
@@ -518,7 +521,7 @@ describe("offline, compatibility, identity and unmount (S11, S12, S17)", () => {
     await h.flush();
     expect(h.state("S")).toBe("ended");
     h.observer.compatible(true);
-    h.observer.watch(["S", "T"]);
+    h.attachment.watch(["S", "T"]);
     expect(h.state("T")).toBe("ended");
     await h.advance(10 * OBSERVE_LIMIT_MS);
     expect(h.reads).toHaveLength(2);
@@ -528,7 +531,7 @@ describe("offline, compatibility, identity and unmount (S11, S12, S17)", () => {
 
   test("S11: offline when the screen opens: nothing is ever read", async () => {
     const h = harness();
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     h.observer.offline();
     h.observer.compatible(true);
     await h.advance(OBSERVE_LIMIT_MS);
@@ -539,7 +542,7 @@ describe("offline, compatibility, identity and unmount (S11, S12, S17)", () => {
   test("S17: an incompatible server is never read; one that stops being compatible ends it", async () => {
     const h = harness();
     h.observer.compatible(false);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     expect(h.reads).toHaveLength(0);
     h.observer.compatible(true);
     await h.answer(list({ S: source(true) }));
@@ -552,7 +555,7 @@ describe("offline, compatibility, identity and unmount (S11, S12, S17)", () => {
   test("S12: dispose (unmount, another identity) drops a read still out and every timer; nothing is notified after", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer(list({ S: source(true) }));
     await h.advance(OBSERVE_POLL_MS);
     const held = h.reads.at(-1);
@@ -565,17 +568,274 @@ describe("offline, compatibility, identity and unmount (S11, S12, S17)", () => {
     expect(h.notified()).toBe(notified);
     expect(h.reads).toHaveLength(2);
     expect(h.timers.size).toBe(0);
-    h.observer.watch(["T"]);
+    h.attachment.watch(["T"]);
     expect(h.reads).toHaveLength(2);
   });
 
   test("a read whose session closed (identity changed while it ran) ends the observation: nothing shown", async () => {
     const h = harness();
     h.observer.compatible(true);
-    h.observer.watch(["S"]);
+    h.attachment.watch(["S"]);
     await h.answer({ ok: false, kind: "closed" });
     expect(h.state("S")).toBe("ended");
     await h.advance(OBSERVE_LIMIT_MS);
+    expect(h.reads).toHaveLength(1);
+  });
+});
+
+/**
+ * Revision 5 (R11; design assessment C1, C2, Q1, Q2, Q6, Q7, Q14): the observer belongs to the screen's VISIT, and a mounted screen only
+ * attaches to it. An Atlas `403` unmounts the protected tree and mounts it again (the session's re-check): the screen detaches and a new
+ * one attaches. What the visit read is never read again because of that, and its time limits are not restarted.
+ */
+describe("a visit outlives its screen (revision 5, R11)", () => {
+  const refused: Read = {
+    ok: false,
+    kind: "refused",
+    status: 403,
+    code: "forbidden",
+  };
+
+  test("Q1: the first read is refused 403 while the screen is remounted: ONE read in all, however often it is remounted; nothing is sent", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    expect(h.reads).toHaveLength(1);
+    // The session takes its hold and closes the display before the answer reaches the caller: the screen unmounts.
+    h.attachment.watch([]);
+    h.attachment.detach();
+    // ... and mounts again under the same identity, while the read is still out.
+    let screen = h.observer.attach();
+    screen.watch(["S"]);
+    expect(h.reads).toHaveLength(1);
+    await h.answer(refused);
+    expect(h.state("S")).toBe("unknown");
+    for (let i = 0; i < 6; i += 1) {
+      screen.watch([]);
+      screen.detach();
+      screen = h.observer.attach();
+      screen.watch(["S"]);
+      await h.advance(OBSERVE_POLL_MS);
+    }
+    expect(h.reads).toHaveLength(1);
+    expect(h.observer.observation("S")).toEqual({
+      kind: "unknown",
+      seenBusy: false,
+    });
+    await h.advance(10 * OBSERVE_LIMIT_MS);
+    expect(h.reads).toHaveLength(1);
+    expect(h.timers.size).toBe(0);
+    expect(h.forbidden).toEqual([]);
+  });
+
+  test("Q1, the other order: the screen's cleanup runs after its detachment; the answer comes once the new screen is attached; one read", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    h.attachment.detach();
+    // A late call of the old screen's cleanup changes nothing.
+    h.attachment.watch([]);
+    const screen = h.observer.attach();
+    screen.watch(["S"]);
+    await h.answer(list({ S: source(true) }));
+    expect(h.state("S")).toBe("busy");
+    expect(h.reads).toHaveLength(1);
+    // Read again only at the 5 s pace (from when the new screen attached).
+    await h.advance(OBSERVE_POLL_MS - 1);
+    expect(h.reads).toHaveLength(1);
+    await h.advance(1);
+    expect(h.reads).toHaveLength(2);
+  });
+
+  test("Q1: a read answered while NO screen is attached is still the visit's: the next screen shows it and reads nothing", async () => {
+    for (const [answer, shown, pollsAfter] of [
+      [refused, { kind: "unknown", seenBusy: false }, 1],
+      [list({ S: source(true) }), { kind: "busy" }, 2],
+    ] as const) {
+      const h = harness();
+      h.observer.compatible(true);
+      h.attachment.watch(["S"]);
+      h.attachment.watch([]);
+      h.attachment.detach();
+      await h.answer(answer);
+      const screen = h.observer.attach();
+      screen.watch(["S"]);
+      expect(h.observer.observation("S")).toEqual(shown);
+      expect(h.reads).toHaveLength(1);
+      // A busy answer is followed at the 5 s pace, as if no remount had happened.
+      await h.advance(OBSERVE_POLL_MS);
+      expect(h.reads).toHaveLength(pollsAfter);
+    }
+  });
+
+  test("Q2: busy, then the poll refused 403 and the remount: two reads, no third; it could not check (after busy)", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    await h.answer(list({ S: source(true) }));
+    await h.advance(OBSERVE_POLL_MS);
+    expect(h.reads).toHaveLength(2);
+    h.attachment.watch([]);
+    h.attachment.detach();
+    const screen = h.observer.attach();
+    screen.watch(["S"]);
+    await h.answer(refused);
+    expect(h.observer.observation("S")).toEqual({
+      kind: "unknown",
+      seenBusy: true,
+    });
+    await h.advance(10 * OBSERVE_LIMIT_MS);
+    expect(h.reads).toHaveLength(2);
+  });
+
+  test("Q12: nothing is admitted while no screen is attached: a page (or a wait for one) asked then ends the observation, which a later screen does not restart", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    const out = h.reads.at(-1);
+    expect(out?.live()).toBe(true);
+    h.attachment.detach();
+    expect(out?.live()).toBe(false);
+    // The walk's next page is not admitted: the read ends `closed`.
+    await h.answer({ ok: false, kind: "closed" });
+    h.observer.attach().watch(["S"]);
+    expect(h.state("S")).toBe("ended");
+    await h.advance(OBSERVE_LIMIT_MS);
+    expect(h.reads).toHaveLength(1);
+    expect(h.observer.observation("S")).toEqual({ kind: "ended" });
+  });
+
+  test("Q6 (Strict Mode): attach, detach and attach again in one go, before the read is answered: one read, and its answer is shown", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    h.attachment.watch([]);
+    h.attachment.detach();
+    const screen = h.observer.attach();
+    screen.watch(["S"]);
+    expect(h.reads.at(-1)?.live()).toBe(true);
+    await h.answer(list({ S: source(false) }));
+    expect(h.state("S")).toBe("idle");
+    expect(h.reads).toHaveLength(1);
+  });
+
+  test("Q7/Q14: remounts neither restart nor extend the time limit: busy throughout with a remount every 4 s, it ends at 75 s from the first walk", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    await h.answer(list({ S: source(true) }));
+    let screen = h.attachment;
+    let answered = 1;
+    for (let t = 0; t < OBSERVE_LIMIT_MS - 4_000; t += 4_000) {
+      screen.watch([]);
+      screen.detach();
+      screen = h.observer.attach();
+      screen.watch(["S"]);
+      await h.advance(4_000);
+      while (answered < h.reads.length) {
+        h.reads[answered]?.answer(list({ S: source(true) }));
+        answered += 1;
+        await h.flush();
+      }
+    }
+    expect(h.state("S")).toBe("busy");
+    // A remount every 4 s holds each 5 s poll back: nothing is read early.
+    expect(h.reads).toHaveLength(1);
+    // The last screen's poll is due 5 s after it attached (within the limit); its answer is still out at 75 s.
+    await h.advance(4_000 + 1);
+    expect(h.now()).toBeGreaterThanOrEqual(OBSERVE_LIMIT_MS);
+    expect(h.observer.observation("S")).toEqual({
+      kind: "unknown",
+      seenBusy: true,
+    });
+    expect(h.reads).toHaveLength(2);
+    expect(h.reads[1]?.live()).toBe(false);
+    const after = h.observer.attach();
+    after.watch(["S"]);
+    await h.advance(10 * OBSERVE_LIMIT_MS);
+    expect(h.reads).toHaveLength(2);
+    expect(h.timers.size).toBe(0);
+  });
+
+  test("Q7: the SAME screen lists a source again (the cache gate opened again) while it is still observed: it is read at once, within its first limit", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    await h.answer(list({ S: source(true) }));
+    await h.advance(1_000);
+    h.attachment.watch([]);
+    expect(h.observer.observation("S")).toBeNull();
+    // Hidden: not read while not listed.
+    await h.advance(OBSERVE_POLL_MS);
+    expect(h.reads).toHaveLength(1);
+    h.attachment.watch(["S"]);
+    expect(h.state("S")).toBe("busy");
+    expect(h.reads).toHaveLength(2);
+    await h.answer(list({ S: source(true) }));
+    // The limit is still the first walk's: at 75 s it ends.
+    for (let i = 0; i < 20 && h.state("S") === "busy"; i += 1) {
+      await h.advance(OBSERVE_POLL_MS);
+      if (h.reads.at(-1)?.live()) await h.answer(list({ S: source(true) }));
+    }
+    expect(h.state("S")).toBe("unknown");
+    expect(h.now()).toBeLessThanOrEqual(OBSERVE_LIMIT_MS + OBSERVE_POLL_MS);
+  });
+
+  test("Q7: listed again after a FINAL answer (refused, idle, the limit, offline) by the same screen: nothing is read again", async () => {
+    for (const final of [refused, list({ S: source(false) })]) {
+      const h = harness();
+      h.observer.compatible(true);
+      h.attachment.watch(["S"]);
+      await h.answer(final);
+      h.attachment.watch([]);
+      h.attachment.watch(["S"]);
+      await h.advance(OBSERVE_LIMIT_MS);
+      expect(h.reads).toHaveLength(1);
+    }
+  });
+
+  test("Q7: a NEW screen lists a source the old one had stopped listing: continued, not read at once", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    await h.answer(list({ S: source(true) }));
+    h.attachment.watch([]);
+    h.attachment.detach();
+    const screen = h.observer.attach();
+    screen.watch(["S"]);
+    expect(h.reads).toHaveLength(1);
+    await h.advance(OBSERVE_POLL_MS);
+    expect(h.reads).toHaveLength(2);
+  });
+
+  test("Q8: a press yields the source for the visit: a later screen of the same visit does not observe it again", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S", "T"]);
+    h.observer.yieldTo("S");
+    await h.answer(list({ S: source(true), T: source(false) }));
+    h.attachment.detach();
+    const screen = h.observer.attach();
+    screen.watch(["S", "T"]);
+    expect(h.observer.observation("S")).toBeNull();
+    expect(h.state("T")).toBe("idle");
+    await h.advance(OBSERVE_LIMIT_MS);
+    expect(h.reads).toHaveLength(1);
+  });
+
+  test("an older screen's calls do nothing once a newer one is attached; a disposed observer's attachment does nothing", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    const newer = h.observer.attach();
+    h.attachment.watch(["S"]);
+    expect(h.reads).toHaveLength(0);
+    expect(h.observer.observation("S")).toBeNull();
+    h.attachment.detach();
+    newer.watch(["S"]);
+    expect(h.reads).toHaveLength(1);
+    h.observer.dispose();
+    const late = h.observer.attach();
+    late.watch(["T"]);
     expect(h.reads).toHaveLength(1);
   });
 });

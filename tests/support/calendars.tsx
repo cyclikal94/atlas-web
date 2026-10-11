@@ -94,6 +94,15 @@ export interface CalendarWorld {
   ): object[];
   snapshot(): Record<string, object[]> | null;
   /**
+   * Revision 5 (R11): the protected tree unmounted and mounted again at the SAME address under the same identity, as the session's
+   * re-check of a `403` does (a new router, a new screen; the per-identity memory and the document stay). Settles after.
+   */
+  remount(): Promise<void>;
+  /** Revision 5: an in-app navigation (the router's own), then settles. */
+  navigate(to: string): Promise<void>;
+  /** Revision 5: the current address of the mounted tree's router. */
+  path(): string;
+  /**
    * Commits a change to the account database through the production store, as a sync or a recovery would (one transaction), then
    * settles: `put` rows into `cache` or `sync_state`, or `remove` cache rows by id. Live queries observe it as they observe any write.
    */
@@ -247,10 +256,10 @@ export async function calendarWorld(
       api: { client: () => client, fetchFor: () => fetch } as never,
     },
   );
-  const router = createAppRouter({
+  let router = createAppRouter({
     initialPath: options.route ?? "/settings/calendars",
   });
-  render(
+  const tree = () => (
     <SessionProvider session={session}>
       <ProtectedProviders>
         <DataEnvProvider env={env}>
@@ -264,8 +273,9 @@ export async function calendarWorld(
           </ShellEnvProvider>
         </DataEnvProvider>
       </ProtectedProviders>
-    </SessionProvider>,
+    </SessionProvider>
   );
+  let mounted = render(tree());
   const settle = async () => {
     await act(async () => {
       for (let i = 0; i < 20; i += 1) {
@@ -287,6 +297,20 @@ export async function calendarWorld(
     settle,
     rows: (store) => world.idb.snapshot(DB)?.[store] ?? [],
     snapshot: () => world.idb.snapshot(DB),
+    async remount() {
+      const at = router.history.location.pathname;
+      act(() => mounted.unmount());
+      router = createAppRouter({ initialPath: at });
+      mounted = render(tree());
+      await settle();
+    },
+    async navigate(to) {
+      await act(async () => {
+        await router.navigate({ to: to as never });
+      });
+      await settle();
+    },
+    path: () => router.history.location.pathname,
     async commit(change) {
       const service = env.service();
       if (service === null) throw new Error("no account database");

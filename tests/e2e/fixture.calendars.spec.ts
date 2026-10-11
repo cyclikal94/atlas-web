@@ -2069,8 +2069,8 @@ test.describe("E-CAL4: a refresh holding the lease when the screen opens (revisi
     const rowA = a.locator(`[data-source-row="${SOURCE}"]`);
     await expect(rowB).toHaveAttribute("data-observation", "busy");
     await expect(rowB).toContainText("Refreshing…");
-    // Tab A is independent: booting B may remount A's protected tree (a fixture trait, WEB-09a), and its screen, opened again, reads
-    // the list itself; either way it has no run of its own and sends nothing.
+    // Tab A is independent: booting B may remount A's protected tree (a fixture trait, WEB-09a); since revision 5 (R11) its remounted
+    // screen continues its visit and reads nothing again. Either way it has no run of its own and sends nothing.
     await expect(rowA.locator("[data-refresh]")).toHaveCount(0);
     cal.phase = "released";
     cal.live = [leased(false)];
@@ -2164,5 +2164,346 @@ test.describe("E-CAL4: a refresh holding the lease when the screen opens (revisi
     await page.waitForTimeout(7_000);
     expect(liveReads(cal, "left")).toEqual([]);
     expect(refreshes(cal)).toEqual([]);
+  });
+});
+
+/**
+ * Revision 5 (R11; design assessment C1-C4, Q1-Q4, Q6, Q15): what the screen reads by itself (the live list and the capability) is read
+ * ONCE PER VISIT. An Atlas `403`, an ordinary refusal included, makes the session hold, close the protected display and mount the tree
+ * again under the same identity (the required protective closure, which also closes any open form): the remounted screen continues the
+ * visit and reads nothing already read, so a refusing server cannot make it read again and again. A new document, or leaving the screen
+ * and opening it again, is a new visit. Through the PRODUCTION session and protected tree; requests are counted per phase and per
+ * endpoint, and the remount itself is observed (the heading element present before it is gone), so suppression cannot pass merely
+ * because the screen never came back. The 5 s pace is the production one; the 3 s windows only bound what an absent read would be.
+ */
+const capabilityReads = (cal: CalendarStub, phase: string) =>
+  cal.wire.filter(
+    (w) => w.path === "/notification-capabilities" && w.phase === phase,
+  );
+const forbidden403 = () => ({
+  status: 403,
+  body: JSON.parse(atlasError("forbidden")),
+});
+/**
+ * Marks the screen's heading element: a remount replaces it (`remounted`), anything else keeps it (`notRemounted`). Found by element,
+ * not by role: an open modal (Manage) takes the heading out of the accessibility tree, and a role lookup would wait for the remount.
+ */
+const markMount = async (page: Page) => {
+  const heading = page.locator("h1", { hasText: "Calendar sources" });
+  await expect(heading).toHaveCount(1);
+  await heading.evaluate((h) => h.setAttribute("data-probe-mount", "before"));
+};
+const remounted = async (page: Page) => {
+  await expect(page.locator('h1[data-probe-mount="before"]')).toHaveCount(0, {
+    timeout: 15_000,
+  });
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Calendar sources" }),
+  ).toBeVisible();
+};
+const notRemounted = (page: Page) =>
+  expect(page.locator('h1[data-probe-mount="before"]')).toHaveCount(1);
+/** A held answer: the request arrives and waits until `release`. */
+function holdAnswer() {
+  let release: (answer: { status: number; body: unknown }) => void = () =>
+    undefined;
+  const wait = new Promise<{ status: number; body: unknown }>((resolve) => {
+    release = resolve;
+  });
+  return {
+    answer: { wait } as Answer,
+    release: (a: { status: number; body: unknown }) => release(a),
+  };
+}
+/** A new document of the same page whose FIRST live read is held: returns once it has arrived, with the heading marked. */
+async function reopenHeld(page: Page, cal: CalendarStub, phase: string) {
+  const held = holdAnswer();
+  cal.answers.set("/calendar-sources", [held.answer]);
+  cal.phase = phase;
+  await reopen(page, { settle: false });
+  await expect.poll(() => liveReads(cal, phase).length).toBe(1);
+  await markMount(page);
+  return held;
+}
+
+test.describe("E-CAL14: automatic reads are once per visit (revision 5, R11)", () => {
+  for (const [label, first, remounts] of [
+    ["refused 403 (an ordinary refusal)", forbidden403(), true],
+    [
+      "control: answered 200 (idle)",
+      { status: 200, body: { items: [leased(false)], next_after: null } },
+      false,
+    ],
+    [
+      "control: refused 503 (no remount)",
+      { status: 503, body: JSON.parse(atlasError("temporarily_unavailable")) },
+      false,
+    ],
+  ] as const)
+    test(`a new document's first live read ${label}: ONE list read and ONE capability read, however the session answers; nothing sent`, async ({
+      context,
+    }) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      const held = await reopenHeld(page, cal, "opened");
+      // Every later read would be refused too (the review's six-refusal diagnostic): none may be made.
+      cal.answers.set(
+        "/calendar-sources",
+        Array.from({ length: 6 }, () => forbidden403()),
+      );
+      held.release(first);
+      const row = page.locator(`[data-source-row="${SOURCE}"]`);
+      if (remounts) await remounted(page);
+      await expect(row).toHaveAttribute(
+        "data-observation",
+        first.status === 200 ? "idle" : "unknown",
+      );
+      await page.waitForTimeout(3_000);
+      if (!remounts) await notRemounted(page);
+      expect(liveReads(cal, "opened")).toHaveLength(1);
+      expect(capabilityReads(cal, "opened")).toHaveLength(1);
+      expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
+      await expect(
+        row.getByRole("button", { name: "Refresh Work rota" }),
+      ).toBeEnabled();
+    });
+
+  test("busy, then the 5 s poll refused 403 with Manage open and edited: the remount closes Manage (the required protective closure), the row says it could not check, and nothing more is read", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(true)];
+    cal.phase = "opened";
+    await reopen(page);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "busy");
+    cal.answers.set(
+      "/calendar-sources",
+      Array.from({ length: 6 }, () => forbidden403()),
+    );
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByLabel("Timezone", { exact: true }).fill("Asia/Tokyo");
+    await markMount(page);
+    await expect
+      .poll(() => liveReads(cal, "opened").length, {
+        timeout: 15_000,
+      })
+      .toBe(2);
+    await remounted(page);
+    await expect(dialog).toHaveCount(0);
+    await expect(row).toHaveAttribute("data-observation", "unconfirmed");
+    await expect(row).toContainText(
+      "We couldn't check whether this calendar is still refreshing.",
+    );
+    // Beyond the next 5 s poll: nothing more is read.
+    await page.waitForTimeout(7_000);
+    expect(liveReads(cal, "opened")).toHaveLength(2);
+    expect(capabilityReads(cal, "opened")).toHaveLength(1);
+    expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
+    expect(await rows(page, "drafts")).toEqual([]);
+    expect(await everywhere(page)).not.toContain("Asia/Tokyo");
+  });
+
+  for (const [label, poll] of [
+    [
+      "503",
+      { status: 503, body: JSON.parse(atlasError("temporarily_unavailable")) },
+    ],
+    [
+      "idle",
+      { status: 200, body: { items: [leased(false)], next_after: null } },
+    ],
+  ] as const)
+    test(`control: busy, then the 5 s poll answered ${label} with Manage open and edited: no remount, Manage keeps the edit, nothing more is read`, async ({
+      context,
+    }) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      cal.live = [leased(true)];
+      cal.phase = "opened";
+      await reopen(page);
+      const row = page.locator(`[data-source-row="${SOURCE}"]`);
+      await expect(row).toHaveAttribute("data-observation", "busy");
+      cal.answers.set("/calendar-sources", [poll]);
+      await page.getByRole("button", { name: "Manage Work rota" }).click();
+      const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+      const timezone = dialog.getByLabel("Timezone", { exact: true });
+      await timezone.fill("Asia/Tokyo");
+      await markMount(page);
+      await expect
+        .poll(() => liveReads(cal, "opened").length, {
+          timeout: 15_000,
+        })
+        .toBe(2);
+      await expect(row).toHaveAttribute(
+        "data-observation",
+        label === "idle" ? "idle" : "unconfirmed",
+      );
+      await page.waitForTimeout(7_000);
+      await notRemounted(page);
+      await expect(timezone).toHaveValue("Asia/Tokyo");
+      expect(liveReads(cal, "opened")).toHaveLength(2);
+    });
+
+  test("busy, then the 5 s poll refused 403 with Replace… open and a feed URL typed: the remount discards the secret (never kept, stored or shown again); nothing is sent or read again", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(true)];
+    cal.phase = "opened";
+    await reopen(page);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "busy");
+    cal.answers.set(
+      "/calendar-sources",
+      Array.from({ length: 6 }, () => forbidden403()),
+    );
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await dialog.getByRole("button", { name: "Replace…" }).click();
+    await dialog
+      .getByLabel("URL (required)")
+      .fill(`https://feed.example/poll-${SENTINEL}.ics`);
+    await markMount(page);
+    await expect
+      .poll(() => liveReads(cal, "opened").length, { timeout: 15_000 })
+      .toBe(2);
+    await remounted(page);
+    await expect(dialog).toHaveCount(0);
+    await expect(row).toHaveAttribute("data-observation", "unconfirmed");
+    // Opening Manage again shows an empty connection form: nothing typed was kept.
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    await dialog.getByRole("button", { name: "Replace…" }).click();
+    await expect(dialog.getByLabel("URL (required)")).toHaveValue("");
+    await page.waitForTimeout(7_000);
+    expect(liveReads(cal, "opened")).toHaveLength(2);
+    expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
+    expect(await everywhere(page)).not.toContain(SENTINEL);
+  });
+
+  test("DA-1: the capability read refused 403 (the list healthy): the remount reads neither again; Link is not pre-disabled", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    let release: (answer: { status: number; body: unknown }) => void = () =>
+      undefined;
+    cal.answers.set("/notification-capabilities", [
+      {
+        wait: new Promise((resolve) => {
+          release = resolve;
+        }),
+      },
+      ...Array.from({ length: 6 }, () => forbidden403()),
+    ]);
+    cal.live = [leased(false)];
+    cal.phase = "opened";
+    await reopen(page, { settle: false });
+    await expect.poll(() => capabilityReads(cal, "opened").length).toBe(1);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "idle");
+    await markMount(page);
+    release(forbidden403());
+    await remounted(page);
+    await page.waitForTimeout(3_000);
+    expect(capabilityReads(cal, "opened")).toHaveLength(1);
+    expect(liveReads(cal, "opened")).toHaveLength(1);
+    await expect(row).toHaveAttribute("data-observation", "idle");
+    await expect(
+      page.getByRole("button", { name: "Link a calendar…" }),
+    ).toBeEnabled();
+  });
+
+  test("Q4: a manual Refresh refused 403 while the screen's own read is held: the remount does not read again; the press's outcome stands and the late read changes nothing", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const held = await reopenHeld(page, cal, "opened");
+    cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [forbidden403()]);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await remounted(page);
+    await expect(row).toContainText(
+      "This calendar source is no longer available to you.",
+    );
+    held.release({
+      status: 200,
+      body: { items: [leased(true)], next_after: null },
+    });
+    await page.waitForTimeout(6_000);
+    await expect(row).not.toContainText("Refreshing…");
+    await expect(row).toHaveAttribute("data-observation", "none");
+    expect(liveReads(cal, "opened")).toHaveLength(1);
+    expect(capabilityReads(cal, "opened")).toHaveLength(1);
+    expect(refreshes(cal)).toHaveLength(1);
+  });
+
+  test("Q6: after a refused read, leaving the screen and opening it again is a new visit: ONE new list read and ONE new capability read", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const held = await reopenHeld(page, cal, "opened");
+    held.release(forbidden403());
+    await remounted(page);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "unknown");
+    await page
+      .locator("#main")
+      .getByRole("link", { name: "Settings", exact: true })
+      .click();
+    await expect(row).toHaveCount(0);
+    cal.phase = "returned";
+    cal.live = [leased(true)];
+    await page.getByRole("link", { name: "Calendars" }).click();
+    await expect(row).toHaveAttribute("data-observation", "busy");
+    await expect(row).toContainText("Refreshing…");
+    expect(liveReads(cal, "returned")).toHaveLength(1);
+    expect(capabilityReads(cal, "returned")).toHaveLength(1);
+    expect(liveReads(cal, "opened")).toHaveLength(1);
+    expect(refreshes(cal)).toEqual([]);
+  });
+
+  test("Q15: the first live read refused 403 credential_mismatch (an invalidating answer): one read, nothing sent, nothing read again", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const held = await reopenHeld(page, cal, "opened");
+    cal.answers.set(
+      "/calendar-sources",
+      Array.from({ length: 6 }, () => forbidden403()),
+    );
+    held.release({
+      status: 403,
+      body: JSON.parse(atlasError("credential_mismatch")),
+    });
+    await expect(page.locator('h1[data-probe-mount="before"]')).toHaveCount(0, {
+      timeout: 15_000,
+    });
+    await page.waitForTimeout(3_000);
+    expect(liveReads(cal, "opened")).toHaveLength(1);
+    expect(capabilityReads(cal, "opened").length).toBeLessThanOrEqual(1);
+    expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
   });
 });

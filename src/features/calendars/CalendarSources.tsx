@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useRouter } from "@tanstack/react-router";
 import {
   useCallback,
   useEffect,
@@ -45,9 +45,9 @@ import { LinkCalendarDialog } from "./LinkCalendarDialog";
 import { ManageSourceDialog } from "./ManageSourceDialog";
 import { identityMemory } from "./memory";
 import { type Compat, type Environment, headerActions } from "./model/status";
-import {
-  createSourceObserver,
-  type SourceObserver,
+import type {
+  ObserverAttachment,
+  SourceObserver,
 } from "./observation-controller";
 import {
   createRefreshController,
@@ -55,6 +55,7 @@ import {
 } from "./refresh-controller";
 import { projectSourceCreate } from "./register";
 import { PendingRow, SourceRow } from "./SourceRow";
+import { type CalendarVisit, enterVisit } from "./visit";
 
 /**
  * "Calendar sources" (WEB-13a; `wireframes/q21/calendar-journeys.html`), the Settings registry's Calendars page. It lists the cached
@@ -64,7 +65,8 @@ import { PendingRow, SourceRow } from "./SourceRow";
  *
  * A queued create is stored and shown as pending, and is sent by the production leader (WEB-09b, `app/data-leader.ts`) when this
  * device's leader runs. When the screen opens it reads the live list once for the sources it shows, and follows a refresh it finds
- * running elsewhere until it ends (`observation-controller.ts`, D-13a-13): it sends nothing.
+ * running elsewhere until it ends (`observation-controller.ts`, D-13a-13): it sends nothing. What it reads by itself (that list and the
+ * capability) is read once per VISIT, which a remount under the same identity continues (`visit.ts`, revision 5, R11).
  */
 export function CalendarSources() {
   const env = useOptionalDataEnv();
@@ -121,16 +123,24 @@ function useCompat(): Compat {
 }
 
 /**
- * One refresh controller and one observer of refresh activity per calendar client: replaced with the identity, disposed on unmount
- * (Strict Mode safe). A press admitted by the controller ends that source's observation (revision 4, R10).
+ * One refresh controller per calendar client: replaced with the identity, disposed on unmount (Strict Mode safe). The observer of
+ * refresh activity and the capability read are the VISIT's (`visit.ts`, revision 5, R11): the mount attaches to the identity's current
+ * visit and detaches on unmount. The visit ends only when the screen unmounts because the person left it (the address changed): a
+ * remount at the same address (the session's re-check of a `403`, a router made again, Strict Mode) continues it, reading nothing
+ * again. A press admitted by the controller ends that source's observation (revision 4, R10).
  */
 function useRefresh(api: CalendarApi | null): {
   controller: RefreshController | null;
   observer: SourceObserver | null;
+  attachment: ObserverAttachment | null;
+  visit: CalendarVisit | null;
 } {
+  const router = useRouter();
   const [built, setBuilt] = useState<{
     controller: RefreshController;
     observer: SourceObserver;
+    attachment: ObserverAttachment;
+    visit: CalendarVisit;
   } | null>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   useEffect(() => {
@@ -138,29 +148,41 @@ function useRefresh(api: CalendarApi | null): {
       setBuilt(null);
       return;
     }
-    const observer = createSourceObserver({ api });
+    const memory = identityMemory(api.identity.account, api.identity.epoch);
+    const visit = enterVisit(memory, api);
+    const observer = visit.observer;
+    const attachment = observer.attach();
+    const opened = router.history.location.pathname;
     const controller = createRefreshController({
       api,
       mintKey: () => crypto.randomUUID(),
       // What must outlive a remount of this screen under the same identity (a `403` is re-checked by the session): `memory.ts`.
-      remembered: identityMemory(api.identity.account, api.identity.epoch).runs,
+      remembered: memory.runs,
       onBegin: (id) => observer.yieldTo(id),
     });
     const offController = controller.subscribe(rerender);
     const offObserver = observer.subscribe(rerender);
-    setBuilt({ controller, observer });
+    setBuilt({ controller, observer, attachment, visit });
     return () => {
       offController();
       offObserver();
       controller.dispose();
-      observer.dispose();
+      attachment.detach();
+      // The person left the screen (another route, back or forward): the visit ends, and opening the screen again reads afresh.
+      // Unmounted at the same address, the tree was only remounted: the visit goes on.
+      if (router.history.location.pathname !== opened) visit.dispose();
     };
-  }, [api]);
+  }, [api, router]);
   return {
     controller: built?.controller ?? null,
     observer: built?.observer ?? null,
+    attachment: built?.attachment ?? null,
+    visit: built?.visit ?? null,
   };
 }
+
+const NO_CAPABILITY = (): boolean | null => null;
+const NO_LISTENER = () => () => undefined;
 
 function Sources() {
   const env = useOptionalDataEnv();
@@ -173,24 +195,26 @@ function Sources() {
     () => env?.serviceStore.get() ?? null,
   );
   const online = inputs.online;
-  const { controller, observer } = useRefresh(api);
-  const [calendarLinks, setCalendarLinks] = useState<boolean | null>(null);
+  const { controller, observer, attachment, visit } = useRefresh(api);
+  const capability = visit?.capability ?? null;
+  const calendarLinks = useSyncExternalStore(
+    capability?.subscribe ?? NO_LISTENER,
+    capability?.get ?? NO_CAPABILITY,
+    capability?.get ?? NO_CAPABILITY,
+  );
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [awaiting, setAwaiting] = useState<AwaitingSync>(new Map());
 
-  // The capability is read once per client while online (D-13a-10); unknown (offline, or a failed read) pre-disables nothing.
+  // The capability is read once per VISIT while online (D-13a-10; revision 5, R11: a remount does not read it again); unknown
+  // (offline, or a failed read) pre-disables nothing.
   useEffect(() => {
-    if (api === null || !online) return;
+    if (capability === null || !online) return;
     let current = true;
-    void api
-      .capabilities(() => current)
-      .then((result) => {
-        if (current && result.ok) setCalendarLinks(result.value.calendarLinks);
-      });
+    capability.read(() => current);
     return () => {
       current = false;
     };
-  }, [api, online]);
+  }, [capability, online]);
 
   // Offline stops every refresh and admits no new one; nothing resumes when the page comes back online (a new press may start one).
   // It also ends the observation of refresh activity for good: only opening the screen again reads the live list again.
@@ -291,6 +315,7 @@ function Sources() {
                 environment={environment}
                 controller={controller}
                 observer={observer}
+                attachment={attachment}
                 notices={memory?.notices ?? null}
                 onDialog={setDialog}
               />
@@ -344,12 +369,14 @@ function CachedSources({
   environment,
   controller,
   observer,
+  attachment,
   notices,
   onDialog,
 }: {
   environment: Environment;
   controller: RefreshController | null;
   observer: SourceObserver | null;
+  attachment: ObserverAttachment | null;
   notices: Map<string, string> | null;
   onDialog(dialog: Dialog): void;
 }) {
@@ -363,17 +390,17 @@ function CachedSources({
     limit: 100,
   });
   // The sources listed now are the ones whose refresh activity is observed (D-13a-13): one key for the page, so an ordinary re-render
-  // (a health or draft change) neither reads again nor restarts a time limit. Leaving the list (the cache gate closing, the screen
-  // closing) drops them.
+  // (a health or draft change) neither reads again nor restarts a time limit. Leaving the list (the cache gate closing, another page)
+  // hides them; the visit keeps what was observed (revision 5, R11).
   const listed =
     page.status === "ready"
       ? page.value.rows.map((row) => row.base.id).join("\n")
       : null;
   useEffect(() => {
-    if (observer === null || listed === null) return;
-    observer.watch(listed === "" ? [] : listed.split("\n"));
-  }, [observer, listed]);
-  useEffect(() => () => observer?.watch([]), [observer]);
+    if (attachment === null || listed === null) return;
+    attachment.watch(listed === "" ? [] : listed.split("\n"));
+  }, [attachment, listed]);
+  useEffect(() => () => attachment?.watch([]), [attachment]);
   if (page.status === "loading")
     return (
       <div aria-busy="true" className="flex flex-col gap-2">
