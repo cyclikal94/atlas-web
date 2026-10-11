@@ -137,9 +137,10 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
 ```
 
 - Only allow-listed fields are captured, never a sensitive one (`guard.ts`: development builds throw, production drops it).
-- **Dirty means a reload would not bring back what the form shows (revision 1, R2):** its values differ from this page's own latest durable
-  copy, else from the copy it was restored from, else from its clean values (what it showed at mount, or when it was submitted or
-  discarded). A flush of a form back at its clean values discards its copies instead of saving one.
+- **Dirty means a reload would not bring back what the form shows (revision 1, R2; revision 4, R3):** its values differ from this page's own
+  latest durable copy, else from the copy it was restored from; with no copy, some value is UNFINISHED. A value needs no copy only when the
+  next page starts from it anyway (the field's initial value) or a terminal act covers exactly it and the field has not been edited since
+  (`fields.ts`, `resolved`). A flush of a form whose every value needs no copy discards its copies instead of saving one.
 - **Order (revision 1, R4):** a flush captures the values and takes its place when it is CALLED; a submission or discard asked for while it
   still waits for the page's identifier overtakes it, and it writes nothing (`failed`). The port's `(writer_gen, capture_seq)` order is kept.
 - **Discards answer (revision 1, R6):** `onSubmitted()` and `discard()` answer `discarded` (no copy can come back), `failed` (one may: the
@@ -168,26 +169,36 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
 - **Pinned writes (revision 1; revision 2: the whole scope):** every flush and discard pins the port when it is asked for (`pin()`), so a
   write that waits for the page's identifier can never land in another account's store or another incarnation, and none is made for a
   scope other than the session's.
-- **A submission acknowledges what it SENT (revision 3; R3, R10).** `submitting()` records, when it is called, the form's session (account
-  and incarnation included), its input revision (moved by the person's `input`/`change`/`reset` events in the form and by the hook's own
-  restores and discards), its allow-list and its values. `succeeded()` reconciles in THAT session only, never in whatever the hook shows by
-  then (another form context, a remount, another account): if the form still holds exactly what was sent, what was sent becomes its clean
-  state and its copies are discarded (`discarded`); if the person changed the form after sending (even back to the same text), the change
-  stays theirs and stays dirty (`kept`): a copy of it replaces any obsolete one, and an update reload saves it first and restores it. An older
+- **A submission acknowledges what it SENT (revision 3; R3, R10; revision 4).** `submitting()` records, when it is called, the form's session
+  (account and incarnation included), its input revision (moved by the person's `input`/`change`/`reset` events in the form and by the
+  hook's own restores and discards, recording which field each changed) and everything the form held, field by field. `succeeded()`
+  reconciles in THAT session only, never in whatever the hook shows by then (another form context, a remount, another account): if the form
+  still holds exactly what was sent, what was sent is COVERED (needs no copy) and its copies are discarded (`discarded`); if the person
+  changed the form after sending, the change stays theirs and stays dirty (`kept`) WHATEVER TEXT IT HOLDS, including the text of this or an
+  EARLIER successful submission (revision 4, R3: coverage belongs to the field as the act left it, and any later edit of the field ends it);
+  only the fields not edited since the send are covered. A copy of the later input replaces any obsolete one, and an update reload saves it
+  first and restores it. An older
   response never undoes a newer acknowledgement. A ticket completes once: a later `succeeded()`/`failed()` answers the first outcome and does
   nothing. A ticket taken before the form had a database is still waited for by the update coordinator, and joins only the session the same
   mount binds for the same form context. `onSubmitted()` acknowledges what the form holds when it is called: only in the same task as the
   send's success. A change made by the caller's code without an `input` event, that returns the form to exactly the sent values, cannot be
   told apart from no change: dispatch an `input` event (or take a new ticket) when code changes the form during a send.
-- **The mounted allow-list is the schema (revision 3; R11).** Every read, capture, carry and restore of the form's session admits the fields
-  of the allow-list of the mount that shows it; a mount with another list, or a list changed while mounted (the same fields in another order
-  are the same list), makes a transition. Carried input of fields both lists admit is put back (into every field the person has not typed
-  into since this mount appeared); a newly admitted field starts from what the form shows for it; a capture already made keeps its own list;
-  comparisons with durable copies are made in the current list (a field the copy lacks would show its initial value). Input in a field the
-  list NO LONGER admits is never captured and never silently dropped: the form stays dirty and its saves fail, so an update stops with
-  "Couldn't save your unfinished form…" and offers "Discard and reload anyway" (explicit), until the field is admitted again (its input comes
-  back) or the form is discarded. Do not narrow an allow-list while a removed field may hold unfinished input; whether such input may be
-  dropped, and how a person would be asked, is the form owner's decision (design assessment D1, not decided here).
+- **The committed allow-list is the schema; a hidden field keeps its value (revision 3, R11; revision 4; `src/lib/form-recovery/fields.ts`;
+  PRODUCT-DECISIONS-20261011 item 2).** Every read, capture and restore admits the fields of the allow-list the mount COMMITTED (a layout
+  effect at the commit; the empty list is a list like any other; the same fields in another order are the same list); a mount with another
+  list, or a list changed while mounted, makes a transition, and a capture already made keeps its own list. The session keeps a LEDGER: the
+  latest value of every admitted field, read at each input event in the capture phase (before the page's own handlers can remove the field),
+  at every read, and while the hook renders. A field that leaves the page (a conditional field hidden, its admission removed, or both in one
+  render) keeps its value, retained in memory; content typed into a field that is not admitted is never read. When the field is shown again
+  untouched its value comes back into it (the owner's decision: retained while editing, restored if the field reappears); if the person has
+  typed something else into it, their text stays and the retained value stays owed. Retained input that is not covered cannot be written into
+  a copy (it is not admitted, or not on the page to be checked) and is never silently dropped: the form stays dirty and its saves fail, so an
+  update stops with "Couldn't save your unfinished form…" and offers "Retry save" (after showing the field again) or "Discard and reload
+  anyway" (explicit). A successful submission of the form's visible state covers the hidden values of the state it saved (no warning, no
+  block: the owner's decision); a failed or uncertain one covers nothing, and edits made after the send are never covered by it. Comparisons
+  with durable copies: a field the copy lacks would show its initial value, and no field the copy holds may bring back another value than the
+  form holds. Code that changes a field's value must do it through the DOM with an `input` event, or before the hook's component renders
+  again; a value changed silently in the same commit that removes its field cannot be kept.
 - **Ownership precedes exposure (revision 3; R12).** A page's recovery identifier is its own only once its Web Lock is GRANTED: a candidate
   being acquired is not reported (`current()` is null), and a lock request that rejects or throws fails every waiter with
   `RecoveryIdentityError`, so the save fails honestly (`failed`, input kept, nothing written) and the next save makes a new acquisition. A page

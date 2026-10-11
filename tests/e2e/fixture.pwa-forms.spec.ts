@@ -755,6 +755,7 @@ type FixtureWindow = {
   __atlasFormProps?: (props: {
     formContext?: string;
     allow?: string[];
+    shown?: string[];
   }) => void;
   __atlasFormMounts?: number;
   __atlasSubmitGate?: Promise<unknown>;
@@ -1104,18 +1105,10 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
 /** TEST INJECTION (revision 3, R10/R11): the same mount renders with another form context or allow-list (`__atlasFormProps`, fixture only). */
 const formProps = async (
   page: Page,
-  props: { formContext?: string; allow?: string[] },
+  props: { formContext?: string; allow?: string[]; shown?: string[] },
 ): Promise<void> => {
   await page.evaluate(
-    (next) =>
-      (
-        window as unknown as {
-          __atlasFormProps?: (props: {
-            formContext?: string;
-            allow?: string[];
-          }) => void;
-        }
-      ).__atlasFormProps?.(next),
+    (next) => (window as unknown as FixtureWindow).__atlasFormProps?.(next),
     props,
   );
   if (props.formContext)
@@ -1374,5 +1367,123 @@ test.describe("revision 3, R12: a page saves a copy only under an identifier who
     await formReady(second);
     await expect(title(second)).toHaveValue("still editing in the first tab");
     await expect(restoredBanner(second)).toBeVisible();
+  });
+});
+
+// ---- revision 4 -------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 4 (review of 11 October 2026, R3 and R11; design assessment Q1, Q4, Q5, Q11): the reviewer's three reproductions and their
+ * controls, maintained, over the real `form_recovery` store, Web Locks, the A/B worker generations, production timers and headers.
+ */
+test.describe("revision 4, R3: a later edit back to an EARLIER successful submission survives the update reload", () => {
+  for (const later of ["FIRST SUBMITTED", "LATER NEW INPUT"])
+    test(`A succeeded; B saved and sent; the person types ${later === "FIRST SUBMITTED" ? "A again" : "a distinct later text (control)"}; 'Save and reload' waits for B; B succeeds; B restores the later input`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await oneTabWithUpdate(context, generations);
+      await title(page).fill("FIRST SUBMITTED");
+      await page
+        .getByRole("button", { name: "Save note", exact: true })
+        .click();
+      await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "1",
+      );
+      expect(await dirtyCount(page)).toBe(0);
+      await title(page).fill("SECOND SEND");
+      expect(await flushNow(page)).toBe("saved");
+      await holdSubmission(page);
+      await page
+        .getByRole("button", { name: "Save note", exact: true })
+        .click();
+      expect(await pendingCount(page)).toBe(1);
+      await title(page).fill(later);
+      expect(await dirtyCount(page)).toBe(1);
+      await mark(page);
+      await quiet(page);
+      await updateRegion(page)
+        .getByRole("button", { name: "Save and reload" })
+        .click();
+      await expect(fixtureForm(page)).toHaveAttribute("inert", "");
+      expect(await title(page).inputValue()).toBe(later);
+      expect(await marked(page)).toBe(true);
+      await releaseSubmission(page, true);
+      await reloadedOntoB(page);
+      await expect(title(page)).toHaveValue(later);
+      await expect(restoredBanner(page)).toBeVisible();
+      await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+      expect(await liveTitles(context, generations)).toEqual([later]);
+    });
+});
+
+test.describe("revision 4, R11: the committed allow-list admits, the empty list included", () => {
+  test("the list narrowed to none while the form is blank: the title typed afterwards is never captured", async ({
+    context,
+    generations,
+  }) => {
+    await seedAccount(context, generations);
+    const page = await openApp(context, generations);
+    await formReady(page);
+    await formProps(page, { allow: [] });
+    await title(page).fill("EXCLUDED AFTER EMPTY LIST");
+    expect(await dirtyCount(page)).toBe(0);
+    expect(await flushNow(page)).toBe("clean");
+    expect(await liveRows(context, generations)).toEqual([]);
+  });
+});
+
+test.describe("revision 4, R11: a field that leaves the page keeps its unfinished input", () => {
+  for (const narrowed of [true, false])
+    test(`notes typed, then the field removed${narrowed ? " with its admission in one render" : " from the page only (a conditional field hidden)"}: 'Save and reload' cannot save and says so; shown again, 'Retry save' saves it and B restores it`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await oneTabWithUpdate(context, generations);
+      await notes(page).fill("UNFINISHED NOTES");
+      await formProps(
+        page,
+        narrowed
+          ? { allow: ["title"], shown: ["title"] }
+          : { shown: ["title"] },
+      );
+      await expect(notes(page)).toHaveCount(0);
+      expect(await dirtyCount(page)).toBe(1);
+      await mark(page);
+      await quiet(page);
+      await updateRegion(page)
+        .getByRole("button", { name: "Save and reload" })
+        .click();
+      await expect(
+        updateRegion(page).getByText(SAVE_FAILED, { exact: true }),
+      ).toBeVisible();
+      expect(await marked(page)).toBe(true);
+      expect(await liveRows(context, generations)).toEqual([]);
+      await formProps(page, {
+        allow: ["title", "notes"],
+        shown: ["title", "notes"],
+      });
+      await expect(notes(page)).toHaveValue("UNFINISHED NOTES");
+      await updateRegion(page)
+        .getByRole("button", { name: "Retry save" })
+        .click();
+      await reloadedOntoB(page);
+      await expect(notes(page)).toHaveValue("UNFINISHED NOTES");
+      await expect(restoredBanner(page)).toBeVisible();
+    });
+
+  test("control: a removed field that was never edited is no obligation; the update saves the title and reloads", async ({
+    context,
+    generations,
+  }) => {
+    const page = await oneTabWithUpdate(context, generations);
+    await title(page).fill("title only");
+    await formProps(page, { allow: ["title"], shown: ["title"] });
+    await saveAndReload(page);
+    await expect(title(page)).toHaveValue("title only");
   });
 });

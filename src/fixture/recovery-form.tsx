@@ -23,12 +23,18 @@ import { useRecoverableForm } from "../lib/form-recovery/use-recoverable-form";
  * TEST INJECTION: `__atlasRemountForm()` mounts the form again in its place (a new key), as another page's boot does to the protected tree,
  * so a spec can force the remount schedule the peer boot only sometimes produces (revision 2, R2/R4). `__atlasFormProps({ formContext,
  * allow })` (revision 3, R10/R11) renders the SAME mount with another form context or allow-list (field names; never the password), as a
- * feature form whose route or fields change would; followed by `__atlasRemountForm()` it is a remount with them.
+ * feature form whose route or fields change would; followed by `__atlasRemountForm()` it is a remount with them. Revision 4 (R11): `shown`
+ * (field names) says which of the title and notes fields are ON THE PAGE, separately from what is admitted, as a conditional field that a
+ * feature form hides would be; given with `allow` in one call, the field and its admission go in the same render.
  */
 export const FIXTURE_FORM_CONTEXT = "fixture-note:/today";
 const ALLOW = ["title", "notes"];
 
-type FixtureProps = { formContext: string; allow: readonly string[] };
+type FixtureProps = {
+  formContext: string;
+  allow: readonly string[];
+  shown: readonly string[];
+};
 type FixtureScope = {
   __atlasRemountForm?: () => void;
   __atlasFormProps?: (props: Partial<FixtureProps>) => void;
@@ -41,6 +47,7 @@ export function FixtureRecoveryForm() {
   const [props, setProps] = useState<FixtureProps>({
     formContext: FIXTURE_FORM_CONTEXT,
     allow: ALLOW,
+    shown: ALLOW,
   });
   useEffect(() => {
     const scope = window as unknown as FixtureScope;
@@ -55,7 +62,7 @@ export function FixtureRecoveryForm() {
   return <FixtureRecoveryFormMount key={key} {...props} />;
 }
 
-function FixtureRecoveryFormMount({ formContext, allow }: FixtureProps) {
+function FixtureRecoveryFormMount({ formContext, allow, shown }: FixtureProps) {
   const port = useFormRecoveryPort();
   const form = useRef<HTMLFormElement>(null);
   const first = useRef<HTMLInputElement>(null);
@@ -133,14 +140,18 @@ function FixtureRecoveryFormMount({ formContext, allow }: FixtureProps) {
         }}
         className="flex flex-col gap-2"
       >
-        <label className="flex flex-col gap-1">
-          Title
-          <input ref={first} name="title" defaultValue="" />
-        </label>
-        <label className="flex flex-col gap-1">
-          Notes
-          <textarea name="notes" defaultValue="" />
-        </label>
+        {shown.includes("title") ? (
+          <label className="flex flex-col gap-1">
+            Title
+            <input ref={first} name="title" defaultValue="" />
+          </label>
+        ) : null}
+        {shown.includes("notes") ? (
+          <label className="flex flex-col gap-1">
+            Notes
+            <textarea name="notes" defaultValue="" />
+          </label>
+        ) : null}
         <label className="flex flex-col gap-1">
           Password
           <input name="password" type="password" defaultValue="" />
