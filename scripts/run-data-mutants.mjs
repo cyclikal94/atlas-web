@@ -41,8 +41,8 @@ const only = value("--only", "").split(",").filter(Boolean);
 const jobs = Number(value("--jobs", "3"));
 const check = flag("--check");
 
-const EXPECTED_UNIT = 1058; // WEB-08d adds MU-1600 to MU-1659 (MU-1633 to MU-1640: review R1; MU-1641 to MU-1659: review R1/R3, revision 2)
-const EXPECTED_ENGINE = 154;
+const EXPECTED_UNIT = 1147; // Accepted WEB-12a baseline (1087) plus WEB-08d MU-1600 to MU-1659 (60).
+const EXPECTED_ENGINE = 163;
 
 const selected = UNIT.filter((m) => only.length === 0 || only.includes(m.id));
 mkdirSync(outDir, { recursive: true });
