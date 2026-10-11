@@ -687,7 +687,7 @@ test.describe("revision 1, F-1 (reassessed): a page that boots does not cost ano
     // Another page boots: every open tab checks its session, which MAY mount its protected tree again (WEB-08a/09a behaviour; not on every
     // boot, and Playwright's WebKit shows no such check: WEB-09a revision 23). Up to three real boots, each followed by up to 5 s for the
     // remount; the input must be there whether or not one came, and the report says whether the carry was exercised. The deterministic
-    // schedules are the unit cases (`use-recoverable-form.test.tsx`, MU-1188..MU-1193). The first driver attempt of revision 1 required a
+    // schedules are the unit cases (`use-recoverable-form.test.tsx`, MU-1796..MU-1801). The first driver attempt of revision 1 required a
     // remount in Chromium and Firefox and failed there when none came (run 2026-10-10T17-48-39.299Z-27de41e8, preserved).
     // Revision 2 (harness budget, labelled): Playwright's WebKit never shows the remount, so this case always runs its whole designed loop
     // (three real boots, each followed by 50 polls of 100 ms plus the poll itself). Under load one poll took 0.13-0.2 s and the third

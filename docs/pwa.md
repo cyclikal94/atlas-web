@@ -85,7 +85,7 @@ The Dexie adapter opens an account database and reads the version the engine act
 (`DECLARED_IDB_VERSION`, IndexedDB 20 for schema 2) another tab's newer build upgraded it: the open fails `closed` before reading anything,
 the account is latched `upgrade_pending`, `upgraded` is reported once, and every later open on the page is refused. An upgrading
 `versionchange` while the page holds the database does the same. The tab then shows "Atlas was updated in another tab and needs to reload here
-to keep working. [Reload here]" (PROPOSED). Dexie 4 alone would open the newer database silently (the real-engine spec and mutant MU-1166
+to keep working. [Reload here]" (PROPOSED). Dexie 4 alone would open the newer database silently (the real-engine spec and mutant MU-1817
 show it).
 
 **The person's form keeps a recovery path (revision 1, R7; WEB-04 8).** The superseded page uses the database for nothing else, but its open

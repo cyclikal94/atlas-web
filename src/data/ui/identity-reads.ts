@@ -6,6 +6,7 @@ import {
   parseCurrentDeviceId,
 } from "../model/identity-bodies";
 import { isFailureStatus } from "../model/retry";
+import { parseSharingSnapshot } from "../model/sharing-snapshot";
 import type { AccountId, Epoch } from "../model/types";
 
 /**
@@ -91,6 +92,31 @@ export function currentDeviceThrough(
         case "closed":
           return { kind: "closed" };
       }
+    } catch (error) {
+      return classifyFailure(error);
+    }
+  };
+}
+
+/**
+ * `GET /defaults/snapshot` (B5, WEB-12a), classified like `GET /me`: a `200` whose body is not the contract's snapshot is an
+ * unrecognised answer, never a value. The account's own sharing defaults, read through the stamped client for `(account, epoch)`.
+ */
+export function readDefaultsSnapshotThrough(
+  session: Session,
+): (account: AccountId, epoch: Epoch) => Promise<ReadResult<unknown>> {
+  return async (account, epoch) => {
+    try {
+      const { data, response } = await session.api
+        .client("ordinary", account, epoch)
+        .GET("/defaults/snapshot");
+      if (!response.ok) {
+        const kind = classifyStatus(response.status);
+        return { kind };
+      }
+      return parseSharingSnapshot(data) === null
+        ? { kind: "unrecognised" }
+        : { kind: "ok", value: data };
     } catch (error) {
       return classifyFailure(error);
     }

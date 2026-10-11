@@ -9,6 +9,7 @@ import {
   BLOCKED_BODY,
   CONFIRMING,
   CONFLICT_READ_ONLY,
+  DEFAULTS_REVIEW_BODY,
   NOT_SHOWING,
   PAUSED,
   REJECTED_BODY,
@@ -24,12 +25,13 @@ import {
  *
  * "Waiting to send" holds what is on its way: `queued`, `in_flight` (including a retry that is backing off or paused) and an
  * acknowledged draft that is still being confirmed. "Needs a decision" holds everything the person must look at: the conflicts and
- * a defaults review (shown READ-ONLY with a kind badge: WF-CONFLICT-01/02 are unowned and not built, decision D-17), a rejected
+ * a defaults review (with "Review sharing", WEB-12a's review of WEB-04 §5.7; the version and operation conflicts stay READ-ONLY with a kind
+ * badge: WF-CONFLICT-01/02 are unowned and not built, decision D-17), a rejected
  * change and a capacity-blocked one (each with the actions the store provides). The two tab counts add up to the chip's
  * `pendingCount` and `conflictCount`.
  */
 export type Tab = "waiting" | "decision";
-export type RowAction = "discard" | "retry" | "dismiss";
+export type RowAction = "review" | "discard" | "retry" | "dismiss";
 
 export interface RowView {
   tab: Tab;
@@ -71,13 +73,14 @@ export function describeRow(draft: DraftRow, online: boolean): RowView | null {
   const base = { tab, attempts, body: null, cannotDiscard: false };
   switch (draft.status) {
     case "queued":
+      // Blocked on review before it was ever sent (WEB-12a, D-12a-5): reviewed, or discarded (nothing was sent).
       if (draft.review_block !== null)
         return {
           ...base,
           badge: BADGE_REVIEW,
           status: WAITING,
-          body: CONFLICT_READ_ONLY,
-          actions: [],
+          body: DEFAULTS_REVIEW_BODY,
+          actions: ["review", "discard"],
         };
       return {
         ...base,
@@ -92,9 +95,9 @@ export function describeRow(draft: DraftRow, online: boolean): RowView | null {
           ...base,
           badge: BADGE_REVIEW,
           status: WAITING,
-          body: CONFLICT_READ_ONLY,
+          body: DEFAULTS_REVIEW_BODY,
           // A defaults review was DEFINITIVELY not executed (the server said so), so it may be discarded.
-          actions: ["discard"],
+          actions: ["review", "discard"],
         };
       if (draft.retry_state?.state === "paused")
         return {
