@@ -24,6 +24,7 @@ import {
   deviceRow,
   sessionDouble,
   sessionRow,
+  WITHDRAW,
 } from "../../helpers/session-double";
 
 /**
@@ -465,6 +466,7 @@ describe("naming (D-8d-09, D-8d-10)", () => {
       expect(session.operations.nameDevice).toHaveBeenCalledWith(
         "dev-3",
         value,
+        WITHDRAW,
       ),
     );
     await waitFor(() => expect(polite()).toBe("Name saved."));
@@ -510,7 +512,11 @@ describe("naming (D-8d-09, D-8d-10)", () => {
       within(dialog).getByRole("button", { name: "Remove name" }),
     );
     await waitFor(() =>
-      expect(session.operations.nameDevice).toHaveBeenCalledWith("dev-2", null),
+      expect(session.operations.nameDevice).toHaveBeenCalledWith(
+        "dev-2",
+        null,
+        WITHDRAW,
+      ),
     );
     await waitFor(() => expect(polite()).toBe("Name removed."));
   });
@@ -631,11 +637,16 @@ describe("naming (D-8d-09, D-8d-10)", () => {
     },
   );
 
-  test("a result that arrives after the dialog was closed changes and says nothing", async () => {
+  // Adapted, labelled (WEB-08d review R1, revision 2): this case used to require that NO list was read after the dialog closed (the
+  // plan's D-8d-10 "changes nothing"). Review R1 showed that leaves both lists stale after a change the server made: dismissing the
+  // dialog does not undo a request already sent. Its no-announcement intent is kept; the lists must now be read again.
+  test("a result that arrives after the dialog was closed says nothing, but both lists are read again", async () => {
     let release: (value: Result<"named">) => void = () => {};
     const readDevices = vi.fn(async () => labelledDevices());
+    const listSessions = vi.fn(async () => labelledSessions());
     const { dialog } = await open({
       readDevices,
+      listSessions,
       nameDevice: vi.fn(
         () =>
           new Promise<Result<"named">>((resolve) => {
@@ -644,14 +655,20 @@ describe("naming (D-8d-09, D-8d-10)", () => {
       ) as unknown as Operations["nameDevice"],
     });
     const before = readDevices.mock.calls.length;
+    const beforeSessions = listSessions.mock.calls.length;
     type(dialog, "Den");
     save(dialog);
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await act(async () => release(ok("named" as const)));
+    await waitFor(() => expect(readDevices.mock.calls.length).toBe(before + 1));
+    await waitFor(() =>
+      expect(listSessions.mock.calls.length).toBe(beforeSessions + 1),
+    );
     await act(async () => new Promise((r) => setTimeout(r, 30)));
     expect(polite()).toBe("");
-    expect(readDevices.mock.calls.length).toBe(before);
+    expect(assertive()).toBe("");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   test("offline: Name and Rename are disabled with the reason beside them, and nothing can be sent", async () => {
@@ -729,6 +746,7 @@ describe("confirmations name the selected item (D-8d-12)", () => {
     await waitFor(() =>
       expect(retireOtherDevice).toHaveBeenCalledWith(
         expect.objectContaining({ id: "dev-2", state_token: "tok-2" }),
+        WITHDRAW,
       ),
     );
   });

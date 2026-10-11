@@ -13,6 +13,7 @@ import {
   checkNewPassword,
   FIELD_MESSAGE,
 } from "../../authentication/validation";
+import { useInteractions } from "../sessions-devices/ownership";
 import { untilSent } from "../sessions-devices/until-sent";
 import { leavesOutcomeUnknown } from "./outcome";
 import { Unconfirmed } from "./Unconfirmed";
@@ -70,6 +71,7 @@ function messageForStatus(status: number | undefined): MessageId {
  */
 export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
   const session = useSession();
+  const interactions = useInteractions();
   const announcer = useAnnouncer();
   const online = useOnline();
   const [current, setCurrent] = useState("");
@@ -119,12 +121,18 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
     if (!fresh.ok) return fail("next", FIELD_MESSAGE[fresh.reason]);
     inflight.current = true;
     setPhase({ kind: "busy" });
-    const result = await untilSent(() =>
-      session.operations.changePassword({
-        current: old.value,
-        next: fresh.value,
-      }),
+    // WEB-08d review R3: a change refused before it was sent is tried again only while this form is mounted; leaving the screen
+    // withdraws one still waiting to be issued. One already sent is never withdrawn: its answer decides.
+    const interaction = interactions.begin();
+    const result = await untilSent(
+      () =>
+        session.operations.changePassword(
+          { current: old.value, next: fresh.value },
+          { withdraw: interaction.withdraw },
+        ),
+      { isCurrent: interaction.current },
     ).catch(() => null);
+    interaction.end();
     inflight.current = false;
     // A password never outlives its submit.
     setCurrent("");

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
@@ -20,7 +20,8 @@ import {
   sessionPhrase,
   sessionTitle,
 } from "./labels";
-import { outcomeUnknown } from "./outcome";
+import { mayHaveChanged } from "./outcome";
+import { reconcileLists, useInteractions, useListChanges } from "./ownership";
 import { untilSent } from "./until-sent";
 import { useLoad } from "./useLoad";
 
@@ -43,56 +44,65 @@ export const sessionMeta = (row: SessionSummary, now: Date): string =>
     `Expires ${formatIn(row.expires_at, now)}`,
   ].join(" · ");
 
+/** A row's own state: each sign-out is its own interaction, so one row's answer never clears or overwrites another's (review A2). */
+type RowState = { kind: "busy" } | { kind: "failed"; requestId?: string };
+
 export function SessionsSection({
   onSignOutCurrent,
-  refresh = 0,
-  onChanged,
 }: {
   /** Opens the logout warning for the current row (the row is passed so the warning can name it). */
   onSignOutCurrent(row: SessionSummary): void;
-  /** Changes when the server may have changed what this list shows (in either section): the list is read again. */
-  refresh?: number;
-  /**
-   * A sign-out here was confirmed, or its outcome is unknown: the devices list changes too (a never-synced device leaves with its
-   * last session; a synced one's session count drops). The owner reads both lists again; without one, this list reloads itself.
-   */
-  onChanged?(): void;
 }) {
   const session = useSession();
   const announcer = useAnnouncer();
   const [load, reload] = useLoad(() => session.operations.listSessions());
-  const [failed, setFailed] = useState<{
-    id: string;
-    requestId?: string;
-  } | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  // Review R1: a change made anywhere on this page for this identity (a sign-out here, a retirement or a name in the devices list,
+  // even from a screen since left) may change this list, so it is read again when one is reported.
+  useListChanges(reload);
+  const interactions = useInteractions();
+  const [rows, setRows] = useState<ReadonlyMap<string, RowState>>(new Map());
+  const pending = useRef(new Set<string>());
+  const setRow = (id: string, state: RowState | null) =>
+    setRows((current) => {
+      const next = new Map(current);
+      if (state) next.set(id, state);
+      else next.delete(id);
+      return next;
+    });
   const now = new Date();
-  const lastRefresh = useRef(refresh);
-  useEffect(() => {
-    if (lastRefresh.current === refresh) return;
-    lastRefresh.current = refresh;
-    reload();
-  }, [refresh, reload]);
-  const changed = () => (onChanged ? onChanged() : reload());
 
   const revoke = async (row: SessionSummary) => {
     const id = row.id;
-    setBusy(id);
-    setFailed(null);
-    const result = await untilSent(() =>
-      session.operations.revokeOtherSession(id),
+    // Synchronous: a second press before the busy state renders sends nothing more.
+    if (pending.current.has(id)) return;
+    pending.current.add(id);
+    const interaction = interactions.begin();
+    setRow(id, { kind: "busy" });
+    const result = await untilSent(
+      () =>
+        session.operations.revokeOtherSession(id, {
+          withdraw: interaction.withdraw,
+        }),
+      { isCurrent: interaction.current },
     ).catch(() => null);
-    setBusy(null);
+    pending.current.delete(id);
+    // Ended, or it may have ended anyway (an answer lost after sending, a server error): both lists are read again, whoever is still
+    // looking. The row's failure stays shown while it is still listed, and signing it out again is safe (an ended session answers
+    // `gone`).
+    if (mayHaveChanged(result)) reconcileLists(session, interaction.scope);
+    // The screen was left, or the identity moved on: nothing is shown.
+    if (!interaction.current()) return;
+    interaction.end();
     const named = decodeClientLabel(row.client) !== null;
     if (result?.ok) {
+      setRow(id, null);
       announcer.announce(
         named ? signedOut(sessionInSentence(row)) : SIGN_IN_ENDED,
       );
-      changed();
       return;
     }
-    setFailed({
-      id,
+    setRow(id, {
+      kind: "failed",
       requestId:
         result && !result.ok ? result.atlasError?.request_id : undefined,
     });
@@ -100,9 +110,6 @@ export function SessionsSection({
       named ? signOutFailed(sessionInSentence(row)) : REVOKE_FAILED,
       "assertive",
     );
-    // The session may have ended anyway (an answer lost after sending, a server error): read again. The row's failure stays shown
-    // while it is still listed, and signing it out again is safe (an ended session answers `gone`).
-    if (outcomeUnknown(result)) changed();
   };
 
   return (
@@ -135,6 +142,7 @@ export function SessionsSection({
           {load.value.sessions.map((row) => {
             const device = decodeDeviceName(row.device_name);
             const label = `Sign out ${sessionPhrase(row, now)}`;
+            const state = rows.get(row.id);
             return (
               <li
                 key={row.id}
@@ -173,7 +181,7 @@ export function SessionsSection({
                     >
                       Sign out
                     </Button>
-                  ) : busy === row.id ? (
+                  ) : state?.kind === "busy" ? (
                     <Button disabled reason="Working…" aria-label={label}>
                       Sign out
                     </Button>
@@ -188,10 +196,10 @@ export function SessionsSection({
                     {CURRENT_NOTE}
                   </p>
                 ) : null}
-                {failed?.id === row.id ? (
+                {state?.kind === "failed" ? (
                   <p data-error="" className="mt-2 text-[12.5px] text-ink-1">
                     {REVOKE_FAILED}
-                    {failed.requestId ? ` Request ID: ${failed.requestId}` : ""}
+                    {state.requestId ? ` Request ID: ${state.requestId}` : ""}
                   </p>
                 ) : null}
               </li>

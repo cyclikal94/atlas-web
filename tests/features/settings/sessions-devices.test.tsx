@@ -19,6 +19,7 @@ import {
   deviceRow,
   sessionDouble,
   sessionRow,
+  WITHDRAW,
 } from "../../helpers/session-double";
 
 installMatchMedia({ width: 1440 });
@@ -299,7 +300,7 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
     const before = listSessions.mock.calls.length;
     fireEvent.click(button);
     await waitFor(() =>
-      expect(revokeOtherSession).toHaveBeenCalledWith("sess-2"),
+      expect(revokeOtherSession).toHaveBeenCalledWith("sess-2", WITHDRAW),
     );
     await waitFor(() =>
       expect(listSessions.mock.calls.length).toBe(before + 1),
@@ -586,6 +587,7 @@ describe("device retirement (F-SET)", () => {
     await waitFor(() =>
       expect(retireOtherDevice).toHaveBeenCalledWith(
         expect.objectContaining({ id: "dev-2", state_token: "tok-2" }),
+        WITHDRAW,
       ),
     );
     await waitFor(() => expect(readDevices.mock.calls.length).toBe(before + 1));

@@ -14,3 +14,11 @@ export const outcomeUnknown = (result: Result<unknown> | null): boolean =>
         (result.status === undefined ||
           result.status < 400 ||
           result.status >= 500))));
+
+/**
+ * WEB-08d (review R1): whether the lists must be read again after a change request, whoever is still looking. A confirmed answer
+ * (`gone` included: the server says so now) or an outcome nobody can confirm; never `not_sent`, a definite refusal, `closed` or
+ * `auth_state`. Retirement's `rejected_stale` is a definite refusal and its caller says so.
+ */
+export const mayHaveChanged = (result: Result<unknown> | null): boolean =>
+  result?.ok === true || outcomeUnknown(result);

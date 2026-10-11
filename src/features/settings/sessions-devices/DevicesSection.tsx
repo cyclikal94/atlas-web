@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { type DeviceRow, useSession } from "../../../session";
@@ -14,6 +14,7 @@ import {
 } from "./label-copy";
 import { deviceDisplay, devicePhrase, hasDuplicateTitles } from "./labels";
 import { NameDeviceDialog } from "./NameDeviceDialog";
+import { type Interaction, useInteractions, useListChanges } from "./ownership";
 import { RetireOtherDialog } from "./RetireOtherDialog";
 import { useLoad, useOnline } from "./useLoad";
 import { WipeConfirmDialog } from "./WipeConfirmDialog";
@@ -36,30 +37,39 @@ export const deviceMeta = (row: DeviceRow, now: Date): string =>
       : "Never synced",
   ].join(" · ");
 
-export function DevicesSection({
-  refresh = 0,
-  onChanged,
-}: {
-  /** Changes when the server may have changed what this list shows (in either section): the list is read again. */
-  refresh?: number;
-  /**
-   * A retirement or a naming change here was confirmed, or its outcome is unknown: the sessions list changes too (a retired device's
-   * sessions end; it shows device names). The owner reads both lists again; without one, this list reloads itself.
-   */
-  onChanged?(): void;
-} = {}) {
+interface Open {
+  readonly row: DeviceRow;
+  readonly interaction: Interaction;
+}
+
+export function DevicesSection() {
   const session = useSession();
   const online = useOnline();
   const [load, reload] = useLoad(() => session.operations.readDevices());
-  const lastRefresh = useRef(refresh);
-  useEffect(() => {
-    if (lastRefresh.current === refresh) return;
-    lastRefresh.current = refresh;
-    reload();
-  }, [refresh, reload]);
-  const changed = () => (onChanged ? onChanged() : reload());
-  const [retiring, setRetiring] = useState<DeviceRow | null>(null);
-  const [naming, setNaming] = useState<DeviceRow | null>(null);
+  // Review R1: a change made anywhere on this page for this identity (a retirement or a name here, a sign-out in the sessions list,
+  // even from a screen since left) may change this list, so it is read again when one is reported.
+  useListChanges(reload);
+  const interactions = useInteractions();
+  const [retiring, setRetiring] = useState<Open | null>(null);
+  const [naming, setNaming] = useState<Open | null>(null);
+  // Review R3: each opening of a dialog is its own interaction, and a dialog closes only itself. Closing ends its interaction first,
+  // so nothing it began is sent or shown afterwards; a late answer of an older dialog cannot close the one open now.
+  const openRetiring = (row: DeviceRow) => {
+    retiring?.interaction.end();
+    setRetiring({ row, interaction: interactions.begin() });
+  };
+  const closeRetiring = (interaction: Interaction) => {
+    interaction.end();
+    setRetiring((open) => (open?.interaction === interaction ? null : open));
+  };
+  const openNaming = (row: DeviceRow) => {
+    naming?.interaction.end();
+    setNaming({ row, interaction: interactions.begin() });
+  };
+  const closeNaming = (interaction: Interaction) => {
+    interaction.end();
+    setNaming((open) => (open?.interaction === interaction ? null : open));
+  };
   const now = new Date();
   // BE-Q25 servers carry `sync_capacity` in every answer; an older server has no naming endpoint, so no control is offered.
   const canName =
@@ -146,7 +156,7 @@ export function DevicesSection({
                             aria-label={nameLabel}
                             onClick={() => {
                               // The hook's state can lag the browser by a render.
-                              if (navigator.onLine) setNaming(row);
+                              if (navigator.onLine) openNaming(row);
                             }}
                           >
                             {nameText}
@@ -164,7 +174,7 @@ export function DevicesSection({
                       {online ? (
                         <Button
                           aria-label={retireLabel}
-                          onClick={() => setRetiring(row)}
+                          onClick={() => openRetiring(row)}
                         >
                           Retire…
                         </Button>
@@ -185,24 +195,27 @@ export function DevicesSection({
           </List>
         </>
       )}
-      {retiring?.current ? (
+      {retiring?.row.current ? (
         <WipeConfirmDialog
+          key={retiring.interaction.id}
           kind="retire"
-          device={retiring}
-          onClose={() => setRetiring(null)}
+          device={retiring.row}
+          onClose={() => closeRetiring(retiring.interaction)}
         />
       ) : retiring ? (
         <RetireOtherDialog
-          device={retiring}
-          onChanged={changed}
-          onClose={() => setRetiring(null)}
+          key={retiring.interaction.id}
+          device={retiring.row}
+          interaction={retiring.interaction}
+          onClose={() => closeRetiring(retiring.interaction)}
         />
       ) : null}
       {naming ? (
         <NameDeviceDialog
-          device={naming}
-          onChanged={changed}
-          onClose={() => setNaming(null)}
+          key={naming.interaction.id}
+          device={naming.row}
+          interaction={naming.interaction}
+          onClose={() => closeNaming(naming.interaction)}
         />
       ) : null}
     </section>

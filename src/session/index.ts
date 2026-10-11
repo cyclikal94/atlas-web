@@ -48,6 +48,7 @@ export type {
   RequestAdmission,
   RequestClass,
   Result,
+  SendOptions,
   Session,
   SessionNotice,
   SessionSummary,

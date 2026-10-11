@@ -3,6 +3,7 @@ import { useState } from "react";
 import { PageHeading } from "../../../components/ui/page-heading";
 import type { SessionSummary } from "../../../session";
 import { DevicesSection } from "./DevicesSection";
+import { type Interaction, useInteractions } from "./ownership";
 import { SessionsSection } from "./SessionsSection";
 import { WipeConfirmDialog } from "./WipeConfirmDialog";
 
@@ -12,12 +13,17 @@ import { WipeConfirmDialog } from "./WipeConfirmDialog";
  * precedes a wipe; on another row they call the ordinary operations directly.
  */
 export function SessionsDevices() {
-  const [loggingOut, setLoggingOut] = useState<SessionSummary | null>(null);
-  // One server change touches both lists: retiring a device ends its sessions, signing out a never-synced device's last session
-  // removes that device (and changes a synced one's session count), and a device's name is shown on the sessions list. So a change
-  // made in either section, or one whose outcome is unknown, reads BOTH lists again (each keeps its own loading and error state).
-  const [changes, setChanges] = useState(0);
-  const changed = () => setChanges((n) => n + 1);
+  const interactions = useInteractions();
+  // Review R3: the logout warning closes only itself (a late answer of an older warning cannot close a newer one). Both lists read
+  // again after a change through `ownership.ts` (review R1), whichever section or dialog made it.
+  const [loggingOut, setLoggingOut] = useState<{
+    row: SessionSummary;
+    interaction: Interaction;
+  } | null>(null);
+  const closeLogout = (interaction: Interaction) => {
+    interaction.end();
+    setLoggingOut((open) => (open?.interaction === interaction ? null : open));
+  };
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
@@ -30,16 +36,18 @@ export function SessionsDevices() {
         <PageHeading>Sessions &amp; devices</PageHeading>
       </div>
       <SessionsSection
-        onSignOutCurrent={(row) => setLoggingOut(row)}
-        refresh={changes}
-        onChanged={changed}
+        onSignOutCurrent={(row) => {
+          loggingOut?.interaction.end();
+          setLoggingOut({ row, interaction: interactions.begin() });
+        }}
       />
-      <DevicesSection refresh={changes} onChanged={changed} />
+      <DevicesSection />
       {loggingOut ? (
         <WipeConfirmDialog
+          key={loggingOut.interaction.id}
           kind="logout"
-          current={loggingOut}
-          onClose={() => setLoggingOut(null)}
+          current={loggingOut.row}
+          onClose={() => closeLogout(loggingOut.interaction)}
         />
       ) : null}
     </div>

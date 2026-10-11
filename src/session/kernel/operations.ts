@@ -7,6 +7,7 @@ import type {
   OperationStart,
   Operations,
   Result,
+  SendOptions,
   SessionSummary,
   SessionsRead,
   Store,
@@ -184,6 +185,8 @@ export async function ordinaryCall<T>(
     selfRevoking?: "password" | "unlink";
     /** False for a call that needs only the status: the body is discarded, not read. Default true. */
     readBody?: boolean;
+    /** WEB-08d (review R3): see `SendOptions`. Withdrawn before it is issued, the request is never sent (`not_sent`). */
+    withdraw?: AbortSignal;
   },
   read: (response: Response) => Result<T> | Promise<Result<T>>,
 ): Promise<Result<T>> {
@@ -205,6 +208,7 @@ export async function ordinaryCall<T>(
     epoch: identity.epoch,
     request,
     selfRevoking: options.selfRevoking,
+    withdraw: options.withdraw,
     onAnswer: handleOrdinaryAnswer,
   });
   switch (outcome.kind) {
@@ -663,11 +667,14 @@ export class OperationService implements Operations {
   nameDevice(
     id: DeviceId,
     name: string | null,
+    send: SendOptions = {},
   ): Promise<Result<"named" | "cleared" | "gone">> {
     return this.ordinary(
       name === null ? "DELETE" : "PUT",
       `/devices/${encodeURIComponent(id)}/name`,
-      name === null ? {} : { body: { name } },
+      name === null
+        ? { withdraw: send.withdraw }
+        : { body: { name }, withdraw: send.withdraw },
       async (response): Promise<Result<"named" | "cleared" | "gone">> => {
         if (response.status === 204)
           return { ok: true, value: name === null ? "cleared" : "named" };
@@ -684,7 +691,10 @@ export class OperationService implements Operations {
     );
   }
 
-  async revokeOtherSession(id: SessionId): Promise<Result<"revoked" | "gone">> {
+  async revokeOtherSession(
+    id: SessionId,
+    send: SendOptions = {},
+  ): Promise<Result<"revoked" | "gone">> {
     const identity = this.k.identity.get();
     // The current session ends only through `logout`, which raises a fence and an envelope first.
     if (identity && identity.session_id === id)
@@ -692,7 +702,7 @@ export class OperationService implements Operations {
     return this.ordinary(
       "DELETE",
       `/sessions/${encodeURIComponent(id)}`,
-      { readBody: false },
+      { readBody: false, withdraw: send.withdraw },
       (response): Result<"revoked" | "gone"> => {
         if (response.status === 204) return { ok: true, value: "revoked" };
         if (response.status === 404) return { ok: true, value: "gone" };
@@ -703,6 +713,7 @@ export class OperationService implements Operations {
 
   async retireOtherDevice(
     read: DeviceRow,
+    send: SendOptions = {},
   ): Promise<Result<"confirmed_applied" | "superseded" | "rejected_stale">> {
     // SA-10: an ordinary request with a fresh key; no fence and no wipe (it cannot revoke this session).
     const operationId = this.k.ports.ids.uuid();
@@ -714,6 +725,7 @@ export class OperationService implements Operations {
           "Idempotency-Key": operationId,
           "Atlas-Device-State": read.state_token,
         },
+        withdraw: send.withdraw,
       },
       async (
         response,
@@ -738,10 +750,13 @@ export class OperationService implements Operations {
     );
   }
 
-  changePassword(input: {
-    current: string;
-    next: string;
-  }): Promise<Result<"changed">> {
+  changePassword(
+    input: {
+      current: string;
+      next: string;
+    },
+    send: SendOptions = {},
+  ): Promise<Result<"changed">> {
     return this.ordinary(
       "POST",
       "/password",
@@ -749,6 +764,7 @@ export class OperationService implements Operations {
         body: { current_password: input.current, new_password: input.next },
         selfRevoking: "password",
         readBody: false,
+        withdraw: send.withdraw,
       },
       (response): Result<"changed"> =>
         response.status >= 200 && response.status < 300
@@ -782,11 +798,19 @@ export class OperationService implements Operations {
     );
   }
 
-  unlinkOidc(issuer: string): Promise<Result<"unlinked">> {
+  unlinkOidc(
+    issuer: string,
+    send: SendOptions = {},
+  ): Promise<Result<"unlinked">> {
     return this.ordinary(
       "DELETE",
       "/oidc/identities",
-      { body: { issuer }, selfRevoking: "unlink", readBody: false },
+      {
+        body: { issuer },
+        selfRevoking: "unlink",
+        readBody: false,
+        withdraw: send.withdraw,
+      },
       (response): Result<"unlinked"> =>
         response.status >= 200 && response.status < 300
           ? { ok: true, value: "unlinked" }

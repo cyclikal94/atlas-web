@@ -310,6 +310,16 @@ export type Result<T> =
       status?: number;
       atlasError?: AtlasError;
     };
+/**
+ * WEB-08d (review R3): passed with an ordinary change request by a caller whose intent can end before the request is sent (a dialog
+ * dismissed or replaced, a screen left). Aborting `withdraw` removes the permission to send: a request not yet issued is never issued
+ * and the call returns `not_sent`, wherever it was waiting (the CSRF token, the cover, a lock). It grants nothing: the request is still
+ * stamped, covered and checked as before. It is never a rollback either: a request already issued is not aborted, and its answer is
+ * returned as usual, because the server may have applied it.
+ */
+export interface SendOptions {
+  readonly withdraw?: AbortSignal;
+}
 /** `GET /me`: the contract's own fields and nothing else (no display name, no link date). */
 export interface AccountSummary {
   readonly id: AccountId;
@@ -335,11 +345,16 @@ export interface Operations {
   nameDevice(
     id: DeviceId,
     name: string | null,
+    send?: SendOptions,
   ): Promise<Result<"named" | "cleared" | "gone">>;
   /** An ordinary DELETE without a key; refuses `settled.session_id` (use `logout`). */
-  revokeOtherSession(id: SessionId): Promise<Result<"revoked" | "gone">>;
+  revokeOtherSession(
+    id: SessionId,
+    send?: SendOptions,
+  ): Promise<Result<"revoked" | "gone">>;
   retireOtherDevice(
     read: DeviceRow,
+    send?: SendOptions,
   ): Promise<Result<"confirmed_applied" | "superseded" | "rejected_stale">>;
   /** Both raise the fence and envelope in ONE closing-write transaction, then send. The person has confirmed. */
   logout(confirmation: { unsynced: LocalWorkSummary }): Promise<OperationStart>;
@@ -347,17 +362,20 @@ export interface Operations {
     read: DeviceRow;
     unsynced: LocalWorkSummary;
   }): Promise<OperationStart>;
-  changePassword(input: {
-    current: string;
-    next: string;
-  }): Promise<Result<"changed">>;
+  changePassword(
+    input: {
+      current: string;
+      next: string;
+    },
+    send?: SendOptions,
+  ): Promise<Result<"changed">>;
   /**
    * An ordinary GET `/me`, sealed like `listSessions`: nothing is returned for an identity that is no longer settled.
    * Never cached by this module.
    */
   readAccount(): Promise<Result<AccountSummary>>;
   /** `DELETE /oidc/identities` with the body `{ issuer }` the contract requires; the issuer is taken verbatim from `readAccount`. */
-  unlinkOidc(issuer: string): Promise<Result<"unlinked">>;
+  unlinkOidc(issuer: string, send?: SendOptions): Promise<Result<"unlinked">>;
   /** Re-drives every operation fence: at boot, on online, on becoming visible, after a settlement. */
   resume(options?: { force?: boolean }): void;
   readonly pending: Store<

@@ -15223,8 +15223,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "name === null ? {} : { body: { name } },",
-        "name === null ? {} : { body: { name: name.trim() } },",
+        // Review R3 (revision 2) adaptation: the body now sits beside the caller's `withdraw`; same mutation, same intent.
+        ": { body: { name }, withdraw: send.withdraw },",
+        ": { body: { name: name.trim() }, withdraw: send.withdraw },",
       ),
   },
   {
@@ -15391,8 +15392,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "if (inflight.current || !isOnlineNow()) return;",
-        "if (inflight.current) return;",
+        // Review R3 (revision 2) adaptation: the guard now also asks whether the interaction is current; same mutation, same intent.
+        "if (inflight.current || !isOnlineNow() || !interaction.current()) return;",
+        "if (inflight.current || !interaction.current()) return;",
       ),
   },
   {
@@ -15400,9 +15402,19 @@ export const UNIT = [
     title:
       "WEB-08d: a naming result that arrives after the dialog was closed is still acted on",
     file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
+    // Review R1/R3 (revision 2) adaptation: the dialog's `live` flag became its interaction. The mutant removes the presentation guard
+    // that replaced it (the lists are still read again, which is now required); the test still requires that nothing is said.
+    tests: [
+      "tests/features/settings/name-device.test.tsx",
+      "tests/features/settings/interaction-ownership.test.tsx",
+    ],
     expect: /arrives after the dialog was closed/,
-    patch: (t) => sub(t, "    if (!live.current) return;", "    void live;"),
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!interaction.current()) return;\n    if (result?.ok) {",
+        "    if (result?.ok) {",
+      ),
   },
   {
     id: "MU-1628",
@@ -15421,20 +15433,15 @@ export const UNIT = [
     id: "MU-1629",
     title:
       "WEB-08d: a naming change does not read the sessions list again (its device_name goes stale)",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    // Review R1 adaptation: naming now reports through the section's shared `changed` (both lists via the composed screen); the
-    // mutant keeps its intent by reloading only the devices list.
+    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
+    // Review R1 adaptation (revision 1): naming reported through the section's shared `changed`. Revision 2 adaptation: a change is
+    // reported to every list on the page (`ownership.ts`); the mutant keeps its intent by leaving the sessions list unsubscribed.
     tests: [
       "tests/features/settings/name-device.test.tsx",
       "tests/features/settings/cross-list.test.tsx",
     ],
     expect: /BOTH lists are read again/,
-    patch: (t) =>
-      sub(
-        t,
-        "          device={naming}\n          onChanged={changed}",
-        "          device={naming}\n          onChanged={reload}",
-      ),
+    patch: (t) => sub(t, "  useListChanges(reload);", "  void useListChanges;"),
   },
   {
     id: "MU-1630",
@@ -15475,56 +15482,57 @@ export const UNIT = [
     id: "MU-1633",
     title:
       "WEB-08d R1: retiring another device reads only the devices list (its ended sessions and the sign-in capacity stay on screen)",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    // Review R3 (revision 2) adaptation: a retirement reports to every list through `reconcileLists`, not to the devices section; the
+    // mutant reports nothing, so its ended sessions and the sign-in capacity stay on screen as before.
     tests: ["tests/features/settings/cross-list.test.tsx"],
     expect: /retiring another device ends its sessions/,
     patch: (t) =>
       sub(
         t,
-        "          device={retiring}\n          onChanged={changed}",
-        "          device={retiring}\n          onChanged={reload}",
+        "      reconcileLists(session, interaction.scope);\n    if (!interaction.current()) return;",
+        "      void reconcileLists;\n    if (!interaction.current()) return;",
       ),
   },
   {
     id: "MU-1634",
     title:
       "WEB-08d R1: signing out another session reads only the sessions list (a removed device keeps its row and controls)",
-    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
+    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
+    // Review R1/R3 (revision 2) adaptation: the devices list is told through its subscription; the mutant leaves it unsubscribed.
     tests: ["tests/features/settings/cross-list.test.tsx"],
     expect: /last session removes the device and its controls/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const changed = () => (onChanged ? onChanged() : reload());",
-        "  const changed = () => reload();",
-      ),
+    patch: (t) => sub(t, "  useListChanges(reload);", "  void useListChanges;"),
   },
   {
     id: "MU-1635",
     title:
       "WEB-08d R1: the composed screen does not pass the change signal to the devices list",
-    file: "src/features/settings/sessions-devices/SessionsDevices.tsx",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    // Review R1/R3 (revision 2) adaptation: the composed screen no longer relays the signal; the page's reconciler does. The mutant
+    // tells only the first list subscribed (the sessions list), so the devices list misses the change, as before.
     tests: ["tests/features/settings/cross-list.test.tsx"],
     expect: /last session removes the device and its controls/,
     patch: (t) =>
       sub(
         t,
-        "<DevicesSection refresh={changes} onChanged={changed} />",
-        "<DevicesSection onChanged={changed} />",
+        "  for (const reload of [...(readers.get(session) ?? [])]) reload();",
+        "  for (const reload of [...(readers.get(session) ?? [])].slice(0, 1)) reload();",
       ),
   },
   {
     id: "MU-1636",
     title:
       "WEB-08d R1: the composed screen does not pass the change signal to the sessions list",
-    file: "src/features/settings/sessions-devices/SessionsDevices.tsx",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    // Review R1/R3 (revision 2) adaptation: as MU-1635, telling only the last list subscribed (the devices list).
     tests: ["tests/features/settings/cross-list.test.tsx"],
     expect: /retiring another device ends its sessions/,
     patch: (t) =>
       sub(
         t,
-        "        refresh={changes}\n        onChanged={changed}",
-        "        onChanged={changed}",
+        "  for (const reload of [...(readers.get(session) ?? [])]) reload();",
+        "  for (const reload of [...(readers.get(session) ?? [])].slice(-1)) reload();",
       ),
   },
   {
@@ -15535,10 +15543,11 @@ export const UNIT = [
     tests: ["tests/features/settings/cross-list.test.tsx"],
     expect: /sign-out, a 503 for a session that is still there/,
     patch: (t) =>
+      // Review R1/R3 (revision 2) adaptation: the rule is now `mayHaveChanged`; the mutant reads again only after a confirmed answer.
       sub(
         t,
-        "    if (outcomeUnknown(result)) changed();",
-        "    void outcomeUnknown;",
+        "    if (mayHaveChanged(result)) reconcileLists(session, interaction.scope);",
+        "    if (result?.ok) reconcileLists(session, interaction.scope);",
       ),
   },
   {
@@ -15549,10 +15558,11 @@ export const UNIT = [
     tests: ["tests/features/settings/cross-list.test.tsx"],
     expect: /retirement, a 503/,
     patch: (t) =>
+      // Review R3 (revision 2) adaptation: the rule now precedes the presentation guard; same intent.
       sub(
         t,
-        "    if (outcomeUnknown(result)) onChanged();",
-        "    void outcomeUnknown;",
+        '"rejected_stale" : outcomeUnknown(result))',
+        '"rejected_stale" : false)',
       ),
   },
   {
@@ -15577,6 +15587,252 @@ export const UNIT = [
     tests: ["tests/features/settings/cross-list.test.tsx"],
     expect: /offline after sending/,
     patch: (t) => sub(t, '    (result.error === "offline" ||', "    (false ||"),
+  },
+  {
+    id: "MU-1641",
+    title:
+      "WEB-08d R1 (revision 2): a naming change reaches the lists only while its dialog is open (the dismissed-dialog defect)",
+    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /save, then Cancel\/Keep, then the success/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (mayHaveChanged(result)) reconcileLists(session, interaction.scope);",
+        "    if (mayHaveChanged(result) && interaction.current())\n      reconcileLists(session, interaction.scope);",
+      ),
+  },
+  {
+    id: "MU-1642",
+    title:
+      "WEB-08d R1 (revision 2): an outcome nobody can confirm is not reported to the lists",
+    file: "src/features/settings/sessions-devices/outcome.ts",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /dismissed, then a 503: both lists are read again/,
+    patch: (t) =>
+      sub(
+        t,
+        "  result?.ok === true || outcomeUnknown(result);",
+        "  result?.ok === true;",
+      ),
+  },
+  {
+    id: "MU-1643",
+    title:
+      "WEB-08d R3 (revision 2): a retirement refused before sending is tried again after its dialog was dismissed",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /not_sent held, Cancel\/Keep, then released/,
+    patch: (t) =>
+      sub(t, "      { isCurrent: interaction.current },", "      {},"),
+  },
+  {
+    id: "MU-1644",
+    title:
+      "WEB-08d R3 (revision 2): untilSent makes its first call for an owner that has already gone",
+    file: "src/features/settings/sessions-devices/until-sent.ts",
+    tests: ["tests/features/settings/until-sent.test.ts"],
+    expect: /already superseded makes no call/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!isCurrent()) return last;\n    last = await call();",
+        "    last = await call();",
+      ),
+  },
+  {
+    id: "MU-1645",
+    title:
+      "WEB-08d R3 (revision 2): untilSent waits out a retry delay for an owner that ended during the call",
+    file: "src/features/settings/sessions-devices/until-sent.ts",
+    tests: [
+      "tests/features/settings/until-sent.test.ts",
+      "tests/features/settings/interaction-ownership.test.tsx",
+    ],
+    expect: /no wait and no further call|no retry is even scheduled/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (delay === undefined || !isCurrent()) return last;",
+        "    if (delay === undefined) return last;",
+      ),
+  },
+  {
+    id: "MU-1646",
+    title:
+      "WEB-08d R3 (revision 2): closing a retirement warning closes whichever one is open (a late start of an older one closes the newer)",
+    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /this device's retirement: confirmed, Stay, opened again/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setRetiring((open) => (open?.interaction === interaction ? null : open));",
+        "    setRetiring(null);",
+      ),
+  },
+  {
+    id: "MU-1647",
+    title:
+      "WEB-08d R3 (revision 2): closing the logout warning closes whichever one is open",
+    file: "src/features/settings/sessions-devices/SessionsDevices.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /logging out: confirmed, Stay, opened again/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setLoggingOut((open) => (open?.interaction === interaction ? null : open));",
+        "    setLoggingOut(null);",
+      ),
+  },
+  {
+    id: "MU-1648",
+    title:
+      "WEB-08d A2 (revision 2): one row's confirmed sign-out clears every row's state (another pending row is released)",
+    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /two rows pending/,
+    patch: (t) =>
+      sub(t, "      setRow(id, null);", "      setRows(new Map());"),
+  },
+  {
+    id: "MU-1649",
+    title:
+      "WEB-08d Q7 (revision 2): an interaction stays current after the identity moved on",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect:
+      /settles while a naming answer is held|a retry of the old identity is never made/,
+    patch: (t) =>
+      sub(
+        t,
+        "      scope !== null &&\n      scopeOf(session.identity.get()) === scope,",
+        "      scope !== null,",
+      ),
+  },
+  {
+    id: "MU-1650",
+    title:
+      "WEB-08d Q7 (revision 2): a change of an identity no longer settled makes the new identity's lists read again",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /settles while a naming answer is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (scope === null || scopeOf(session.identity.get()) !== scope) return;",
+        "  if (scope === null) return;",
+      ),
+  },
+  {
+    id: "MU-1651",
+    title:
+      "WEB-08d R3 (revision 2): the kernel's ordinary call does not pass the caller's withdraw signal to the send loop",
+    file: "src/session/kernel/operations.ts",
+    tests: ["tests/session/operations-withdraw.test.ts"],
+    expect: /a signal already aborted sends nothing/,
+    patch: (t) => sub(t, "    withdraw: options.withdraw,\n", ""),
+  },
+  {
+    id: "MU-1652",
+    title:
+      "WEB-08d R3 (revision 2): the send loop's guards do not see a withdrawn intent (only its abort event cancels)",
+    file: "src/session/kernel/send.ts",
+    tests: ["tests/session/operations-withdraw.test.ts"],
+    expect: /a signal already aborted sends nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    spec.callerSignal?.aborted === true || spec.withdraw?.aborted === true;",
+        "    spec.callerSignal?.aborted === true;",
+      ),
+  },
+  {
+    id: "MU-1653",
+    title:
+      "WEB-08d R3 (revision 2): withdrawing aborts a request already issued (its answer is lost although the server applied it)",
+    file: "src/session/kernel/send.ts",
+    tests: ["tests/session/operations-withdraw.test.ts"],
+    expect: /withdrawn while its answer is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "      k.ports.clock.abortAfter(k.config.stampedRequestTimeoutMs),\n      spec.callerSignal,\n    ),",
+        "      k.ports.clock.abortAfter(k.config.stampedRequestTimeoutMs),\n      combineSignals(\n        spec.withdraw ?? new AbortController().signal,\n        spec.callerSignal,\n      ),\n    ),",
+      ),
+  },
+  {
+    id: "MU-1654",
+    title:
+      "WEB-08d R1/R3 (revision 2): a naming request refused before sending is tried again after its dialog was dismissed",
+    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect:
+      /refused before sending, then dismissed: the name is not tried again/,
+    patch: (t) =>
+      sub(t, "      { isCurrent: interaction.current },", "      {},"),
+  },
+  {
+    id: "MU-1655",
+    title:
+      "WEB-08d R3 (revision 2): the retirement does not carry its interaction's withdraw signal (a dismissal cannot stop one waiting to be issued)",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /not_sent held, Cancel\/Keep, then released/,
+    patch: (t) =>
+      sub(
+        t,
+        "        session.operations.retireOtherDevice(device, {\n          withdraw: interaction.withdraw,\n        }),",
+        "        session.operations.retireOtherDevice(device),",
+      ),
+  },
+  {
+    id: "MU-1656",
+    title:
+      "WEB-08d A3 (revision 2): leaving the screen does not end its interactions (a sign-out refused before sending is tried again)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /then the screen left: not tried again/,
+    patch: (t) =>
+      sub(
+        t,
+        "      for (const interaction of owned) interaction.end();",
+        "      void owned;",
+      ),
+  },
+  {
+    id: "MU-1657",
+    title:
+      "WEB-08d Q9 (revision 2): a password change refused before sending is tried again after its dialog was closed",
+    file: "src/features/settings/signing-in/ChangePasswordForm.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /a password change refused before sending, its dialog closed/,
+    patch: (t) =>
+      sub(t, "      { isCurrent: interaction.current },", "      {},"),
+  },
+  {
+    id: "MU-1658",
+    title:
+      "WEB-08d Q9 (revision 2): an identity removal refused before sending is tried again after the screen was left",
+    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /an identity removal refused before sending, the screen unmounted/,
+    patch: (t) =>
+      sub(t, "      { isCurrent: interaction.current },", "      {},"),
+  },
+  {
+    id: "MU-1659",
+    title:
+      "WEB-08d Q9 (revision 2): the account card's logout warning closes whichever one is open",
+    file: "src/features/settings/account/AccountCard.tsx",
+    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
+    expect: /the account card's logout warning/,
+    patch: (t) =>
+      sub(
+        t,
+        "            setLoggingOut((open) => (open === loggingOut ? null : open));",
+        "            setLoggingOut(null);",
+      ),
   },
 ];
 

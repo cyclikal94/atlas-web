@@ -14,6 +14,12 @@ export const NOT_SENT_DELAYS_MS: readonly number[] = [
 const wait = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/**
+ * WEB-08d (review R3): `isCurrent` is asked before EVERY call, the first included, so an owner that has gone (a dialog dismissed or
+ * replaced, a screen left, the identity moved on) never makes another one: the result is then `not_sent`, which is true, since this
+ * helper sent nothing more. A call already made is not withdrawn by this helper; the caller passes its own `withdraw` signal to the
+ * operation for that (`SendOptions`).
+ */
 export async function untilSent<T>(
   call: () => Promise<Result<T>>,
   options: {
@@ -24,12 +30,13 @@ export async function untilSent<T>(
 ): Promise<Result<T>> {
   const isCurrent = options.isCurrent ?? (() => true);
   const sleep = options.sleep ?? wait;
+  let last: Result<T> = { ok: false, error: "not_sent" };
   for (let attempt = 0; ; attempt += 1) {
-    const result = await call();
-    if (result.ok || result.error !== "not_sent") return result;
+    if (!isCurrent()) return last;
+    last = await call();
+    if (last.ok || last.error !== "not_sent") return last;
     const delay = NOT_SENT_DELAYS_MS[attempt];
-    if (delay === undefined || !isCurrent()) return result;
+    if (delay === undefined || !isCurrent()) return last;
     await sleep(delay);
-    if (!isCurrent()) return result;
   }
 }

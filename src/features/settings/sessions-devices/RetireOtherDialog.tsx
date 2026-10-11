@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { List } from "../../../components/ui/list";
@@ -6,6 +6,7 @@ import { type DeviceRow, useSession } from "../../../session";
 import { retireOtherTitle } from "./label-copy";
 import { deviceInSentence } from "./labels";
 import { outcomeUnknown } from "./outcome";
+import { type Interaction, reconcileLists } from "./ownership";
 import { untilSent } from "./until-sent";
 import { summaryLines } from "./wipe-copy";
 
@@ -25,49 +26,64 @@ export const RETIRE_OTHER_STALE =
 export const RETIRE_OTHER_FAILED =
   "Couldn't retire this device — please try again.";
 
+/**
+ * Review R3 (revision 2): this dialog is one `interaction`. "Keep this device", Escape or Close ends it at once: a retirement refused
+ * before it was sent (`not_sent`) is not tried again, and one still waiting to be issued is withdrawn. A retirement already sent is not
+ * undone by closing the dialog: when its answer shows it applied (or cannot show it did not), the lists are read again (R1) whoever
+ * is looking, but only the dialog that is still current shows the outcome or closes itself, so a late answer never closes or changes
+ * a newer dialog (this device's retirement included).
+ */
 export function RetireOtherDialog({
   device,
-  onChanged,
+  interaction,
   onClose,
 }: {
   device: DeviceRow;
-  /**
-   * Called after a confirmed retirement, or one whose outcome is unknown, so the lists are read again: retiring a device also ends
-   * its sessions.
-   */
-  onChanged(): void;
+  /** This opening of the dialog: begun by the opener, ended when the dialog is dismissed or replaced. */
+  interaction: Interaction;
   onClose(): void;
 }) {
   const session = useSession();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const inflight = useRef(false);
 
   const confirm = async () => {
+    if (inflight.current || !interaction.current()) return;
+    inflight.current = true;
     setBusy(true);
     setMessage(null);
-    const result = await untilSent(() =>
-      session.operations.retireOtherDevice(device),
+    const result = await untilSent(
+      () =>
+        session.operations.retireOtherDevice(device, {
+          withdraw: interaction.withdraw,
+        }),
+      { isCurrent: interaction.current },
     ).catch(() => null);
+    inflight.current = false;
+    // Applied (or superseded: retired already), or an outcome nobody can confirm: retiring a device also ends its sessions, so both
+    // lists are read again, even if the dialog was closed meanwhile. `rejected_stale` and a definite refusal changed nothing.
+    if (result?.ok ? result.value !== "rejected_stale" : outcomeUnknown(result))
+      reconcileLists(session, interaction.scope);
+    if (!interaction.current()) return;
     setBusy(false);
     if (result?.ok) {
       if (result.value === "rejected_stale") {
         setMessage(RETIRE_OTHER_STALE);
         return;
       }
-      onChanged();
       onClose();
       return;
     }
     const requestId =
       result && !result.ok ? result.atlasError?.request_id : undefined;
+    // When the device may have been retired anyway (an answer lost after sending, a server error), the lists behind the dialog have
+    // been read again above, and the failure stays shown here.
     setMessage(
       requestId
         ? `${RETIRE_OTHER_FAILED} Request ID: ${requestId}`
         : RETIRE_OTHER_FAILED,
     );
-    // The device may have been retired anyway (an answer lost after sending, a server error): the lists behind the dialog are read
-    // again, and the failure stays shown here.
-    if (outcomeUnknown(result)) onChanged();
   };
 
   return (

@@ -506,4 +506,285 @@ test.describe("I-8d: BE-Q25 labels, names and capacities against the released ba
       }
     }
   });
+
+  test("I-8d-9 (review R1, revision 2): a name saved, then its dialog dismissed while the committed answer is held, is shown in both lists; nothing is announced; a dialog left open is the control", async ({
+    context,
+  }) => {
+    await rawSignIn("kate", "kate-phone", { userAgent: SAFARI_IPHONE });
+    const page = await settled(context, "kate");
+    const main = page.locator("main");
+    const device = main.locator("[data-device-row=other]");
+    const session = main.locator("[data-session-row=other]");
+    const polite = main.page().locator("[aria-live=polite]").first();
+    // The actual public answers, as the screen received them (observed, never invented).
+    await page.evaluate(() => {
+      const operations = window.__s.operations;
+      const original = operations.nameDevice.bind(operations);
+      window.__t.named = [];
+      operations.nameDevice = async (...args) => {
+        const result = await original(...args);
+        (window.__t.named as unknown[]).push(result);
+        return result;
+      };
+    });
+
+    // Control: the dialog left open says so, closes itself, and both lists show the name.
+    await device.getByRole("button", { name: /^Name / }).click();
+    await page
+      .getByRole("dialog")
+      .getByLabel("Device name")
+      .fill("Kate's phone");
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Save name" })
+      .click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(device.locator("bdi[data-device-name]")).toHaveText(
+      "Kate's phone",
+    );
+    await expect(session.locator("[data-device-name] bdi")).toHaveText(
+      "Kate's phone",
+    );
+
+    // Rename, then Cancel while the server's answer is held (the proxy holds the response: the server has applied it).
+    for (const [how, value, method] of [
+      ["Cancel", "Dismissed phone", "PUT"],
+      ["Close", null, "DELETE"],
+    ] as const) {
+      const rule = await proxy.addRule({
+        method,
+        path: NAME_PATH,
+        action: "hold",
+        ordinal: 1,
+      });
+      await device.getByRole("button", { name: /^Rename / }).click();
+      const dialog = page.getByRole("dialog");
+      if (value === null)
+        await dialog.getByRole("button", { name: "Remove name" }).click();
+      else {
+        await dialog.getByLabel("Device name").fill(value);
+        await dialog.getByRole("button", { name: "Save name" }).click();
+      }
+      await untilHeld(rule.id);
+      const announced = await polite.textContent();
+      await dialog.getByRole("button", { name: how, exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await proxy.release(rule.id);
+      await expect
+        .poll(() => page.evaluate(() => (window.__t.named as unknown[]).at(-1)))
+        .toEqual({ ok: true, value: value === null ? "cleared" : "named" });
+      const server = (await devicesOf(page)).devices.find(
+        (d) => d.id === "kate-phone",
+      );
+      expect(server?.name ?? null).toBe(value);
+      if (value === null) {
+        await expect(device.locator("bdi[data-device-name]")).toHaveCount(0);
+        await expect(session.locator("[data-device-name]")).toHaveCount(0);
+      } else {
+        await expect(device.locator("bdi[data-device-name]")).toHaveText(value);
+        await expect(session.locator("[data-device-name] bdi")).toHaveText(
+          value,
+        );
+      }
+      // Nothing was said for a dialog that had gone.
+      expect(await polite.textContent()).toBe(announced);
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+    }
+  });
+
+  test("I-8d-10 (review R3, revision 2): a retirement refused before sending is not tried again after Keep, over the whole bounded retry schedule; a dialog left open retries once and retires (control)", async ({
+    context,
+  }) => {
+    await rawSignIn("liam", "liam-phone-a", { userAgent: SAFARI_IPHONE });
+    await rawSignIn("liam", "liam-phone-b", { userAgent: FIREFOX_WINDOWS });
+    const page = await settled(context, "liam");
+    const main = page.locator("main");
+    // The first call of each round answers `not_sent` when the test says so (a SYNTHETIC public `not_sent`: the kernel's own admission
+    // boundary is F-WD in operations-withdraw.test.ts); every later call is the real operation against the released backend.
+    await page.evaluate(() => {
+      const operations = window.__s.operations;
+      const original = operations.retireOtherDevice.bind(operations);
+      window.__t.round = { calls: 0, results: [] as unknown[] };
+      operations.retireOtherDevice = async (...args) => {
+        const round = window.__t.round as {
+          calls: number;
+          results: unknown[];
+          refuse?: () => void;
+        };
+        round.calls += 1;
+        if (round.calls === 1)
+          return new Promise((resolve) => {
+            round.refuse = () => resolve({ ok: false, error: "not_sent" });
+          });
+        const result = await original(...args);
+        round.results.push(result);
+        return result;
+      };
+    });
+    const round = () =>
+      page.evaluate(() => {
+        const r = window.__t.round as { calls: number; results: unknown[] };
+        return { calls: r.calls, results: r.results };
+      });
+    const start = () =>
+      page.evaluate(() => {
+        window.__t.round = { calls: 0, results: [] };
+      });
+    const ids = async () => (await devicesOf(page)).devices.map((d) => d.id);
+
+    // Control: left open, the retry is made once (the unchanged 50 ms delay) and applies.
+    await start();
+    await main
+      .locator("[data-device-row=other]", { hasText: "Safari on iOS" })
+      .getByRole("button", { name: /^Retire / })
+      .click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Retire device", exact: true })
+      .click();
+    await expect.poll(async () => (await round()).calls).toBe(1);
+    await page.evaluate(() =>
+      (window.__t.round as { refuse: () => void }).refuse(),
+    );
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await round()).toEqual({
+      calls: 2,
+      results: [{ ok: true, value: "confirmed_applied" }],
+    });
+    expect(await ids()).not.toContain("liam-phone-a");
+    await expect(
+      main.locator("[data-device-row=other]", { hasText: "Safari on iOS" }),
+    ).toHaveCount(0);
+
+    // Dismissed with Keep before the refusal arrives: no further call over the whole bounded schedule, and the device stays.
+    await start();
+    await main
+      .locator("[data-device-row=other]", { hasText: "Firefox on Windows" })
+      .getByRole("button", { name: /^Retire / })
+      .click();
+    const dialog = page.getByRole("dialog");
+    await dialog
+      .getByRole("button", { name: "Retire device", exact: true })
+      .click();
+    await expect.poll(async () => (await round()).calls).toBe(1);
+    await dialog
+      .getByRole("button", { name: "Keep this device", exact: true })
+      .click();
+    await expect(dialog).toHaveCount(0);
+    await page.evaluate(() =>
+      (window.__t.round as { refuse: () => void }).refuse(),
+    );
+    // Only the OTHER rows are named here: Playwright's desktop Firefox reports Windows, so this engine's own rows read "Firefox on
+    // Windows" too (driver run 1 of revision 2 matched the current row).
+    // The helper's retry budget is bounded (NOT_SENT_DELAYS_MS, 5,550 ms in all, production values): observing past its whole
+    // schedule, not a short silence window, is what shows no retry can still come.
+    await page.waitForTimeout(6_500);
+    expect(await round()).toEqual({ calls: 1, results: [] });
+    expect(await ids()).toContain("liam-phone-b");
+    await expect(
+      main.locator("[data-device-row=other]", {
+        hasText: "Firefox on Windows",
+      }),
+    ).toHaveCount(1);
+  });
+
+  test("I-8d-11 (review R3, revision 2): an older retirement's late answer updates both lists but never closes or changes a newer dialog (this device's retirement, another device's retirement, a naming dialog)", async ({
+    context,
+  }) => {
+    const UAS = [SAFARI_IPHONE, FIREFOX_WINDOWS, SAMSUNG_ANDROID] as const;
+    for (const [index, ua] of UAS.entries())
+      await rawSignIn("mia", `mia-old-${index}`, { userAgent: ua });
+    const page = await settled(context, "mia");
+    const main = page.locator("main");
+    const rows = main.locator("[data-device-row]");
+    await expect(rows).toHaveCount(4);
+    const cases = [
+      {
+        target: "Safari on iOS",
+        id: "mia-old-0",
+        open: () =>
+          main
+            .locator("[data-device-row=current]")
+            .getByRole("button", { name: /^Retire / })
+            .click(),
+        newer: page.getByRole("dialog", { name: "Retire this device?" }),
+        close: "Stay logged in",
+      },
+      {
+        target: "Firefox on Windows",
+        id: "mia-old-1",
+        open: () =>
+          main
+            .locator("[data-device-row=other]", {
+              hasText: "Firefox on Windows",
+            })
+            .getByRole("button", { name: /^Retire / })
+            .click(),
+        newer: page.getByRole("dialog", { name: "Retire Firefox on Windows?" }),
+        close: "Keep this device",
+      },
+      {
+        target: "Samsung Internet on Android",
+        id: "mia-old-2",
+        open: async () => {
+          await main
+            .locator("[data-device-row=current]")
+            .getByRole("button", { name: /^Name / })
+            .click();
+          await page
+            .getByRole("dialog")
+            .getByLabel("Device name")
+            .fill("New draft");
+        },
+        newer: page.getByRole("dialog", { name: "Name this device" }),
+        close: "Cancel",
+      },
+    ];
+    let listed = 4;
+    for (const step of cases) {
+      const rule = await proxy.addRule({
+        method: "DELETE",
+        path: `/api/experimental/v1/devices/${step.id}`,
+        action: "hold",
+        ordinal: 1,
+      });
+      await main
+        .locator("[data-device-row=other]", { hasText: step.target })
+        .getByRole("button", { name: /^Retire / })
+        .click();
+      const older = page.getByRole("dialog");
+      await older
+        .getByRole("button", { name: "Retire device", exact: true })
+        .click();
+      await untilHeld(rule.id);
+      await older
+        .getByRole("button", { name: "Keep this device", exact: true })
+        .click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await step.open();
+      await expect(step.newer).toBeVisible();
+      await proxy.release(rule.id);
+      listed -= 1;
+      // The server applied it; the lists behind the newer dialog follow.
+      await expect(rows).toHaveCount(listed);
+      expect((await devicesOf(page)).devices.map((d) => d.id)).not.toContain(
+        step.id,
+      );
+      await expect(
+        main.locator("[data-session-row=other]", { hasText: step.target }),
+      ).toHaveCount(0);
+      // The newer dialog is still the only one, untouched.
+      await expect(page.getByRole("dialog")).toHaveCount(1);
+      await expect(step.newer).toBeVisible();
+      await expect(step.newer.locator("[data-refusal]")).toHaveCount(0);
+      if (step.close === "Cancel")
+        await expect(step.newer.getByLabel("Device name")).toHaveValue(
+          "New draft",
+        );
+      await step.newer
+        .getByRole("button", { name: step.close, exact: true })
+        .click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+    }
+  });
 });

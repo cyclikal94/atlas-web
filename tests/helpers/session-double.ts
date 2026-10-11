@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 import {
   type AttemptHandle,
   type Attempts,
@@ -61,6 +61,15 @@ export function attemptsDouble(over: Partial<Attempts> = {}): Attempts {
     ...over,
   };
 }
+
+/**
+ * WEB-08d review R3 (revision 2): the options an ordinary change request is now called with. A screen passes the `withdraw` signal of
+ * the interaction that made the request (`SendOptions`), so a call assertion names it as the last argument. Adapted, labelled: the
+ * earlier assertions named only the operation's own arguments; their intent is unchanged.
+ */
+export const WITHDRAW = expect.objectContaining({
+  withdraw: expect.any(AbortSignal),
+});
 
 export function sessionDouble(
   operations: Partial<Operations> = {},

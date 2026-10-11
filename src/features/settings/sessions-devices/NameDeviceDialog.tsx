@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useId, useRef, useState } from "react";
+import { type FormEvent, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
@@ -26,6 +26,8 @@ import {
   SAVE_NAME,
 } from "./label-copy";
 import { checkDeviceName, deviceDisplay, isolate } from "./labels";
+import { mayHaveChanged } from "./outcome";
+import { type Interaction, reconcileLists } from "./ownership";
 import { untilSent } from "./until-sent";
 
 type Phase =
@@ -39,17 +41,22 @@ type Phase =
 /**
  * D-8d-09/10: naming a listed device (BE-Q25 `PUT`/`DELETE /devices/{id}/name`). The typed text is sent exactly as typed: it is
  * checked against the server's own `DeviceName` rules first and never trimmed or normalised. A name is display metadata only; it
- * is not part of the device's state token, so naming never stales a retirement confirmation. A result that arrives after the dialog
- * has gone, or after the identity moved on (`closed`), or with the session ended (`auth_state`), changes and says nothing.
+ * is not part of the device's state token, so naming never stales a retirement confirmation.
+ *
+ * Review R1/R3 (revision 2): this dialog is one `interaction`. A change the server may have made (confirmed, `gone`, or unknown) is
+ * reported for the lists whether or not the dialog is still open: dismissing it cannot undo a request already sent. Only while the
+ * interaction is current (not dismissed or replaced, the identity unchanged) is another attempt made or the outcome shown. The
+ * request carries the interaction's `withdraw`, so one dismissed before it was issued is never sent. (This supersedes the plan's
+ * D-8d-10 "a result after the dialog has gone changes nothing": it shows nothing; the lists still reconcile.)
  */
 export function NameDeviceDialog({
   device,
-  onChanged,
+  interaction,
   onClose,
 }: {
   device: DeviceRow;
-  /** Called when the list should be read again (a change was made, or its outcome is unknown). */
-  onChanged(): void;
+  /** This opening of the dialog: begun by the opener, ended when the dialog is dismissed or replaced. */
+  interaction: Interaction;
   onClose(): void;
 }) {
   const session = useSession();
@@ -59,39 +66,35 @@ export function NameDeviceDialog({
   const [value, setValue] = useState(display.named ? display.title : "");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const inflight = useRef(false);
-  const live = useRef(true);
   const field = useRef<HTMLInputElement>(null);
   const formId = useId();
   const problemId = useId();
   const describedId = useId();
-  useEffect(() => {
-    // Set on every mount, not only at creation: StrictMode mounts, unmounts and mounts again.
-    live.current = true;
-    return () => {
-      live.current = false;
-    };
-  }, []);
 
   const send = async (name: string | null) => {
-    if (inflight.current || !isOnlineNow()) return;
+    if (inflight.current || !isOnlineNow() || !interaction.current()) return;
     inflight.current = true;
     setPhase({ kind: "busy" });
     const result: Result<"named" | "cleared" | "gone"> | null = await untilSent(
-      () => session.operations.nameDevice(device.id, name),
-      { isCurrent: () => live.current },
+      () =>
+        session.operations.nameDevice(device.id, name, {
+          withdraw: interaction.withdraw,
+        }),
+      { isCurrent: interaction.current },
     ).catch(() => null);
     inflight.current = false;
-    // Unmounted (the tree moved on, or the person closed it): the answer is nobody's.
-    if (!live.current) return;
+    // First what the server may have changed (both lists show the name), whoever is still looking: the person may have closed the
+    // dialog after the request was sent, and that does not undo it.
+    if (mayHaveChanged(result)) reconcileLists(session, interaction.scope);
+    // Dismissed, replaced, or the identity moved on: the answer is nobody's to show.
+    if (!interaction.current()) return;
     if (result?.ok) {
       if (result.value === "gone") {
         setPhase({ kind: "message", text: NAME_GONE, gone: true });
         announcer.announce(NAME_GONE, "assertive");
-        onChanged();
         return;
       }
       announcer.announce(result.value === "named" ? NAME_SAVED : NAME_REMOVED);
-      onChanged();
       onClose();
       return;
     }
@@ -111,10 +114,10 @@ export function NameDeviceDialog({
                 : ""
             }`
           : NAME_UNCONFIRMED;
+    // An outcome nobody can confirm (offline after sending, a 5xx, a lost answer) has already had the lists read again above, so the
+    // person can check.
     setPhase({ kind: "message", text });
     announcer.announce(text, "assertive");
-    // An outcome nobody can confirm (offline after sending, a 5xx, a lost answer): the list is read again so the person can check.
-    if (text === NAME_UNCONFIRMED) onChanged();
   };
 
   const save = (event: FormEvent) => {

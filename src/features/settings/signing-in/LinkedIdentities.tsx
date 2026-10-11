@@ -6,6 +6,7 @@ import { startSso } from "../../authentication/controller";
 import { RequestId } from "../../authentication/MessageText";
 import { MESSAGE_TEXT } from "../../authentication/outcome-copy";
 import { isOnlineNow, useOnline } from "../../authentication/use-online";
+import { useInteractions } from "../sessions-devices/ownership";
 import { untilSent } from "../sessions-devices/until-sent";
 import { leavesOutcomeUnknown } from "./outcome";
 import { Unconfirmed } from "./Unconfirmed";
@@ -73,6 +74,7 @@ export function LinkedIdentities({
   navigate?(url: string): void;
 }) {
   const session = useSession();
+  const interactions = useInteractions();
   const online = useOnline();
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<{
@@ -91,9 +93,16 @@ export function LinkedIdentities({
     if (!online || !isOnlineNow() || recheck()) return;
     setBusy(issuer);
     setProblem(null);
-    const result = await untilSent(() =>
-      session.operations.unlinkOidc(issuer),
+    // WEB-08d review R3: retried only while this screen is mounted; leaving it withdraws a removal still waiting to be issued.
+    const interaction = interactions.begin();
+    const result = await untilSent(
+      () =>
+        session.operations.unlinkOidc(issuer, {
+          withdraw: interaction.withdraw,
+        }),
+      { isCurrent: interaction.current },
     ).catch(() => null);
+    interaction.end();
     setBusy(null);
     if (result === null || leavesOutcomeUnknown(result))
       return setUnconfirmed(true);
