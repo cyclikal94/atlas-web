@@ -201,6 +201,10 @@ export const BLOCKED_BODY =
   "There isn't room to save this change yet. It's kept here. Make some room, then retry.";
 
 export const ACTION_DISCARD = "Discard";
+/** WEB-12a: a defaults review is resolved in the sharing review (WEB-04 §5.7). PROPOSED copy. */
+export const ACTION_REVIEW = "Review sharing";
+export const DEFAULTS_REVIEW_BODY =
+  "Check who this will be shared with before it is sent.";
 export const ACTION_RETRY = "Retry now";
 export const ACTION_RETRY_BLOCKED = "Retry";
 export const ACTION_DISMISS = "Dismiss";

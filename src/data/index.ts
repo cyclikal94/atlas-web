@@ -8,6 +8,12 @@
  * `src/data` modules side-effect free, so a boot that uses only the ports does not pull the rest of this file's graph along.
  */
 
+export type {
+  Acquisition,
+  DefaultsSource,
+  RefreshOutcome,
+  RequestBoundary,
+} from "./engine/defaults-source";
 export type { ReadResult } from "./engine/identity-task";
 export type {
   RecoveryJobState,
@@ -28,7 +34,45 @@ export { OutboxRequestError } from "./model/outbox";
 // ---- status, queue and profile for the UI (plan 5.7, 5.8) -----------------------------------------------------------------------
 export type { MergedResource } from "./model/overlay";
 export type { QueueSummary } from "./model/queue-summary";
+export {
+  type ReviewConfirmation,
+  type ReviewedDraft,
+  reviewedOf,
+} from "./model/review-confirmation";
 export { accountDatabaseName } from "./model/schema";
+// ---- the sharing defaults (WEB-12a, B5): the record, its capture for queued creates and the review's cases --------------------------
+export {
+  type CapturedAccount,
+  type CapturedHousehold,
+  type CapturedKind,
+  captureDefaults,
+  type DefaultsCapture,
+  type DefaultsContextV1,
+  type DefaultsRecord,
+  type DefaultsReviewCase,
+  type DefaultTemplate,
+  defaultsReviewCase,
+  type HouseholdMember,
+  type HouseholdRole,
+  householdsNamedBy,
+  isUuid,
+  MAX_EXCLUSIONS,
+  MAX_GRANTS,
+  type Policy,
+  type PrincipalGrant,
+  parseDefaultsContext,
+  parseHousehold,
+  parsePolicy,
+  parseSharingSnapshot,
+  parseTemplate,
+  type ResolvedDefaults,
+  reviewKinds,
+  type SharingSnapshot,
+  type SnapshotHousehold,
+  TEMPLATE_KINDS,
+  type TemplateKind,
+  type UnavailableHousehold,
+} from "./model/sharing-snapshot";
 export type {
   CacheState,
   GateState,
@@ -45,6 +89,7 @@ export type {
   ResourceKind,
 } from "./model/types";
 export type {
+  ConfirmReviewOutcome,
   DiscardOutcome,
   EditOutcome,
   EnqueueOutcome,
@@ -102,6 +147,7 @@ export {
   useOptionalDataEnv,
   useQueueSummary,
   useResourceList,
+  useSharingDefaults,
   useStatusInputs,
   useSyncStatusModel,
 } from "./ui/react";
