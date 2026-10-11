@@ -151,6 +151,47 @@ export async function holdableAuth(context: BrowserContext) {
   });
 }
 
+/**
+ * TEST-ONLY (T22 t2, "the frozen tab receives no broadcast"): while the page reports itself hidden (`allowFreeze`'s `window.__visibility`),
+ * a session hint on `atlas-auth-hints` is dropped and counted (`window.__missedHints`). A frozen Chromium page delivers the hints it queued
+ * the moment it is resumed, before the test can make it visible, and Firefox and WebKit cannot freeze a page at all; without this the
+ * resumed page has already learned branch (i) or (ii) and never runs the held local check the trace is about. The matrix's own rule is that
+ * a page resumed after MISSING the hint is decided by the record (3.7.2 step 3), which is what this exercises. Nothing else is dropped.
+ */
+export async function missHintsWhileHidden(context: BrowserContext) {
+  await context.addInitScript(() => {
+    const w = window as unknown as {
+      __visibility?: string;
+      __missedHints?: number;
+    };
+    const handler = Object.getOwnPropertyDescriptor(
+      BroadcastChannel.prototype,
+      "onmessage",
+    );
+    if (!handler?.set || !handler.get) return;
+    const { get, set } = handler;
+    Object.defineProperty(BroadcastChannel.prototype, "onmessage", {
+      configurable: true,
+      enumerable: handler.enumerable ?? false,
+      get() {
+        return get.call(this);
+      },
+      set(this: BroadcastChannel, fn: unknown) {
+        if (this.name !== "atlas-auth-hints" || typeof fn !== "function")
+          return set.call(this, fn);
+        const deliver = fn as (this: BroadcastChannel, e: MessageEvent) => void;
+        set.call(this, function (this: BroadcastChannel, event: MessageEvent) {
+          if (w.__visibility === "hidden") {
+            w.__missedHints = (w.__missedHints ?? 0) + 1;
+            return;
+          }
+          deliver.call(this, event);
+        });
+      },
+    });
+  });
+}
+
 /** The `atlas-lease-<id>` locks held in this origin now (a TEST may use `query()` to show a real lock exists). */
 export async function findLeaseLocks(page: Page): Promise<string[]> {
   await expect

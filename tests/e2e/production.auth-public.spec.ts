@@ -41,8 +41,10 @@ interface Surface {
  * `dexie-adapter`) as "Failed to load resource: WebKit encountered an internal error", a console text that names no URL; it is tolerated for
  * this one surface, which goes offline on purpose, and in WebKit only.
  */
+// Revision 1 (campaign 2026-10-11T12-25-06.329Z-f3732be4): Firefox cut `browser-env`, the next module of the SAME lazy chain (its warning names
+// `browser-leader` as the importer). The chain's three modules, as the WebKit trace named them, and nothing else, are tolerated here.
 const LEADER_MODULE_FAILED_OFFLINE =
-  /^\[JavaScript Warning: "Loading failed for the module with source “http:\/\/127\.0\.0\.1:\d+\/assets\/browser-leader-[\w-]+\.js”\."/;
+  /^\[JavaScript Warning: "Loading failed for the module with source “http:\/\/127\.0\.0\.1:\d+\/assets\/(browser-leader|browser-env|dexie-adapter)-[\w-]+\.js”\."/;
 const OFFLINE_LOAD_CUT_WEBKIT =
   /^Failed to load resource: WebKit encountered an internal error$/;
 const TRANSACTION_ABORTED_BY_NAVIGATION =

@@ -809,6 +809,260 @@ test.describe("E-L7/E-L8: 'Review this device' and 'Confirm it's you' put the pe
   });
 });
 
+/**
+ * R1 of the review of 11 October 2026 (WF-SWITCH-02 states.md: Cancel, "no change made"; G-23's Cancel). The incoming exchange is HELD
+ * at the stub; the person leaves the credential step; the held answer is then released. The late grant must activate nothing: the
+ * activation is never requested, the cookie is the outgoing session's, and the outgoing account is displayed. The window after the
+ * released answer is a bounded NEGATIVE observation: the control shows the same continuation activating within it.
+ */
+const LATE_GRANT_WINDOW_MS = 1_500;
+
+async function switchToOtherHeld(page: Page, stub: AuthStub, b: string) {
+  const exchangesBefore = stub.count("POST", API);
+  await page.getByRole("button", { name: /, switch account$/ }).click();
+  await page
+    .getByRole("dialog", { name: "Switch account" })
+    .getByRole("option")
+    .last()
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Sign in to another account",
+  });
+  const held = stub.hold(isExchange, 1);
+  await dialog.getByLabel("Username").fill(b);
+  await dialog.getByLabel("Password").fill(passwordOf(b));
+  await dialog.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect.poll(() => stub.count("POST", API)).toBe(exchangesBefore + 1);
+  return { dialog, held };
+}
+
+/** Releases the held exchange and waits for its answer to reach the page. */
+async function releaseExchange(page: Page, held: { release(): void }) {
+  const answered = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith(`/api/experimental/v1${API}`),
+  );
+  held.release();
+  await answered;
+}
+
+test.describe("E-L10 (R1): leaving the credential step while the exchange is held makes no change", () => {
+  test("control: the same held switch, NOT cancelled, activates the incoming account within the observation window", async ({
+    page,
+    context,
+  }) => {
+    const a = marker("alice");
+    const b = marker("bob");
+    const { stub } = await newStub(context, a, b);
+    await signInAndDisplay(page, a);
+    const original = stub.cookie;
+    const activations = stub.count("POST", ACTIVATE);
+    const { held } = await switchToOtherHeld(page, stub, b);
+    await releaseExchange(page, held);
+    await expect
+      .poll(() => stub.count("POST", ACTIVATE), {
+        timeout: LATE_GRANT_WINDOW_MS,
+      })
+      .toBe(activations + 1);
+    await displayedAs(page, b);
+    expect(stub.cookie).not.toBe(original);
+  });
+
+  for (const leave of ["Cancel — stay as …", "Escape"] as const)
+    test(`${leave} while the switch's exchange is held: the late grant activates nothing; the outgoing account stays displayed with its own session`, async ({
+      page,
+      context,
+    }) => {
+      const a = marker("alice");
+      const b = marker("bob");
+      const { stub } = await newStub(context, a, b);
+      await signInAndDisplay(page, a);
+      const original = stub.cookie;
+      const activations = stub.count("POST", ACTIVATE);
+      const { dialog, held } = await switchToOtherHeld(page, stub, b);
+      if (leave === "Escape") {
+        await dialog.press("Escape");
+        await expect(dialog).toHaveCount(0);
+      } else {
+        await dialog
+          .getByRole("button", { name: `Cancel — stay as ${a}` })
+          .click();
+        await expect(
+          page.getByRole("dialog", { name: "Switch account" }),
+        ).toBeVisible();
+      }
+      await releaseExchange(page, held);
+      await page.waitForTimeout(LATE_GRANT_WINDOW_MS);
+      expect(stub.count("POST", ACTIVATE)).toBe(activations);
+      expect(stub.cookie).toBe(original);
+      // The picker (after Cancel) is closed too, so the rail behind it is perceivable again.
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await displayedAs(page, a);
+      await expectAbsent(page, b);
+    });
+
+  test("'Confirm it's you' Cancel while its exchange is held: the late grant activates nothing; the same session stays", async ({
+    page,
+    context,
+  }) => {
+    const a = marker("alice");
+    const { stub } = await newStub(context, a);
+    await signInAndDisplay(page, a);
+    const original = stub.cookie ?? "";
+    const row = stub.sessions.get(original);
+    if (row) row.createdAt = Date.now() - 10 * 60_000;
+    await openSettings(page);
+    await page.getByRole("link", { name: /Signing in/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Signing in" });
+    await dialog.getByRole("button", { name: "Confirm it's you" }).click();
+    const region = dialog.getByRole("region", { name: "Confirm it's you" });
+    const activations = stub.count("POST", ACTIVATE);
+    const exchanges = stub.count("POST", API);
+    const held = stub.hold(isExchange, 1);
+    await region.getByLabel("Password").fill(passwordOf(a));
+    await region.getByRole("button", { name: "Confirm it's you" }).click();
+    await expect.poll(() => stub.count("POST", API)).toBe(exchanges + 1);
+    await region.getByRole("button", { name: "Cancel" }).click();
+    await expect(region).toHaveCount(0);
+    await releaseExchange(page, held);
+    await page.waitForTimeout(LATE_GRANT_WINDOW_MS);
+    expect(stub.count("POST", ACTIVATE)).toBe(activations);
+    expect(stub.cookie).toBe(original);
+    await expect(
+      dialog.getByRole("button", { name: "Link single sign-on" }),
+    ).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await displayedAs(page, a);
+  });
+});
+
+/**
+ * R3 of the review of 11 October 2026 (K-2): "Confirm it's you" refused at the ACTIVATION with the supported definitive
+ * `503 device_capacity`, intercepted BEFORE the stub processes it (a page route, which runs before the context's stub; an answer replaced
+ * after processing is not a refusal). The page must not stay on "Couldn't finish catching up": the same account and session display
+ * again, the "Signing in" dialog shows the refusal under the section, and nothing changed. The exchange refusal is the control.
+ */
+test.describe("E-L11 (R3): a re-authentication refused at activation returns to Settings with the refusal", () => {
+  for (const stage of ["exchange", "activation"] as const)
+    test(`${stage === "exchange" ? "control: refused at the exchange" : "refused at the activation (503 device_capacity)"}: the same session displays again and the refusal is under 'Confirm it's you'`, async ({
+      page,
+      context,
+      provokes,
+    }) => {
+      provokes(503);
+      const a = marker("alice");
+      const { stub } = await newStub(context, a);
+      await signInAndDisplay(page, a);
+      const original = stub.cookie ?? "";
+      const row = stub.sessions.get(original);
+      if (row) row.createdAt = Date.now() - 10 * 60_000;
+      await openSettings(page);
+      await page.getByRole("link", { name: /Signing in/ }).click();
+      const dialog = page.getByRole("dialog", { name: "Signing in" });
+      await dialog.getByRole("button", { name: "Confirm it's you" }).click();
+      const region = dialog.getByRole("region", { name: "Confirm it's you" });
+      const path = stage === "exchange" ? API : ACTIVATE;
+      let refused = 0;
+      await page.route(`**/api/experimental/v1${path}`, async (route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        refused += 1;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "device_capacity",
+            message: "device_capacity",
+            request_id: "req-e-l11",
+            details: [],
+          }),
+        });
+      });
+      const activations = stub.count("POST", ACTIVATE);
+      await region.getByLabel("Password").fill(passwordOf(a));
+      await region.getByRole("button", { name: "Confirm it's you" }).click();
+      await expect.poll(() => refused).toBe(1);
+      await expect(page.getByText("Couldn't finish catching up")).toHaveCount(
+        0,
+        { timeout: 15_000 },
+      );
+      await expect(page.locator("#protected-root:not([inert])")).toHaveCount(
+        1,
+        { timeout: 15_000 },
+      );
+      const back = page.getByRole("dialog", { name: "Signing in" });
+      await expect(back).toContainText(
+        "This device has too many active sign-ins for this account.",
+        { timeout: 15_000 },
+      );
+      await expect(page.getByText("Couldn't finish catching up")).toHaveCount(
+        0,
+      );
+      expect(stub.count("POST", ACTIVATE)).toBe(activations);
+      expect(stub.cookie).toBe(original);
+      await page.keyboard.press("Escape");
+      await expect(back).toHaveCount(0);
+      await displayedAs(page, a);
+    });
+});
+
+test.describe("E-L11b (R3, K-2 family): a switch refused at activation returns to the outgoing account with the refusal", () => {
+  test("the switch's activation answered 503 device_capacity before processing: A displays again (never state 3), the refusal is in the switch dialog, nothing changed", async ({
+    page,
+    context,
+    provokes,
+  }) => {
+    provokes(503);
+    const a = marker("alice");
+    const b = marker("bob");
+    const { stub } = await newStub(context, a, b);
+    await signInAndDisplay(page, a);
+    const original = stub.cookie;
+    let refused = 0;
+    await page.route(`**/api/experimental/v1${ACTIVATE}`, async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      refused += 1;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "device_capacity",
+          message: "device_capacity",
+          request_id: "req-e-l11b",
+          details: [],
+        }),
+      });
+    });
+    await page.getByRole("button", { name: `${a}, switch account` }).click();
+    await page
+      .getByRole("dialog", { name: "Switch account" })
+      .getByRole("option")
+      .last()
+      .click();
+    await switchSignIn(page, {
+      username: b,
+      password: passwordOf(b),
+      submit: "Sign in",
+    });
+    await expect.poll(() => refused).toBe(1);
+    const dialog = page.getByRole("dialog", {
+      name: "Sign in to another account",
+    });
+    await expect(dialog).toContainText(
+      "This device has too many active sign-ins for this account.",
+      { timeout: 15_000 },
+    );
+    await expect(page.getByText("Couldn't finish catching up")).toHaveCount(0);
+    expect(stub.cookie).toBe(original);
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await displayedAs(page, a);
+    await expectAbsent(page, b);
+  });
+});
+
 test.describe("E-L9: the neutral cards these traces reach, in light and dark at 320 and 1280 px (axe including contrast)", () => {
   for (const scheme of ["light", "dark"] as const)
     for (const width of [320, 1280])

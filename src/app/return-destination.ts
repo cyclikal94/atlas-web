@@ -34,6 +34,13 @@ export const returnDestination = {
     pending = null;
   },
   /**
+   * Drops `destination` if it is still the pending one (WEB-08c, R2 of the review of 11 October 2026): a request that set a destination
+   * and then ended without a settlement cleans up ITS OWN, never a newer request's for the same account.
+   */
+  clearIf(destination: ReturnDestination): void {
+    if (pending === destination) pending = null;
+  },
+  /**
    * The destination for the account that has just mounted, consumed; or null. A destination for ANOTHER account, or one that has
    * expired, is dropped. One that is the same account's but waits for a newer epoch than this mount's is KEPT (a remount of the old
    * session before the new one settles must not spend it).

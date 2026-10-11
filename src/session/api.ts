@@ -357,6 +357,12 @@ export type RecoveryBegin =
         | "unresolved_lease"
         | "stale"
         | "offline";
+      /**
+       * WEB-08c K-2: for a refusal decided on the durable record, the admission revision (`api.admission`, recovery class) of the SAME
+       * read. A caller that waits for the refusal to end compares later probes with it: a gate that ended before its first probe is then
+       * a change, not that probe's baseline. Absent when nothing was read (offline, an unreadable record, lease work).
+       */
+      readonly revision?: string;
     };
 export interface Recovery {
   begin(account: AccountId): Promise<RecoveryBegin>;

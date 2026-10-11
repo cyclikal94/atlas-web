@@ -53,6 +53,42 @@ const probe = async (
   return answer;
 };
 
+describe("WEB-08c K-2 (R3 of the review of 11 October 2026): a refusal's own revision and attempts that come and go", () => {
+  test("a displayed account's same-account sign-in gates it; `begin` refuses with the revision of its read; the refusal clears the gate before any probe, and the first probe differs from it (nothing fenced: still blocked)", async () => {
+    const f = await newWorld();
+    const l = await signedInPage(f);
+    installAttempt(f, { epoch: 2, phase: "activating" });
+    stateOf(f).latest_epoch = 2;
+    const begun = await f.runWith(l.page.session.recovery.begin(l.account));
+    expect(begun).toMatchObject({
+      kind: "ineligible",
+      reason: "attempt_gating",
+      revision: expect.any(String),
+    });
+    const refusedAt = begun.kind === "ineligible" ? begun.revision : null;
+    // The activation is refused at once: the attempt is cleared before the waiter's first probe.
+    stateOf(f).attempt = null;
+    const first = await probe(f, l.page, "recovery", l.account, l.epoch);
+    expect(first.blocked).toBe(true);
+    expect(first.revision).not.toBe(refusedAt);
+    // And `begin` now says why recovery has nothing to do.
+    expect(
+      await f.runWith(l.page.session.recovery.begin(l.account)),
+    ).toMatchObject({ kind: "ineligible", reason: "no_fence" });
+  });
+  test("an attempt that begins and ends between two probes leaves the rest of the record as it was, and still changes the revision (`latest_epoch`)", async () => {
+    const f = await newWorld();
+    const l = await signedInPage(f);
+    const before = await probe(f, l.page, "recovery", l.account, l.epoch);
+    stateOf(f).latest_epoch += 1;
+    installAttempt(f, { epoch: stateOf(f).latest_epoch, phase: "activating" });
+    stateOf(f).attempt = null;
+    const after = await probe(f, l.page, "recovery", l.account, l.epoch);
+    expect(after.blocked).toBe(before.blocked);
+    expect(after.revision).not.toBe(before.revision);
+  });
+});
+
 describe("session.api.admission (R3, second cycle)", () => {
   test("a displayed account: the ordinary class is open, the recovery class blocked (no fence to recover from)", async () => {
     const f = await newWorld();

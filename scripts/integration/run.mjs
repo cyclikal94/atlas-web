@@ -112,6 +112,13 @@ const STACKS = NARROWED
         args: ["tests/integration/integration.lifecycle.spec.ts"],
         oidc: false,
       },
+      // WEB-08c (R5 of the review of 11 October 2026): the composed RESTART journeys (I-L8, I-L11). They log out and retire devices, so
+      // they have a stack (and a fresh backend) of their own.
+      {
+        suffix: "-lifecycle-restart",
+        args: ["tests/integration/integration.lifecycle-restart.spec.ts"],
+        oidc: false,
+      },
     ];
 
 const children = [];

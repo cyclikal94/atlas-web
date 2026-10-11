@@ -19,7 +19,12 @@ import SwitchFlow, {
 } from "../../../src/features/switch/SwitchFlow";
 import { switchFlow } from "../../../src/features/switch/state";
 import { SWITCH_COPY } from "../../../src/features/switch/switch-copy";
-import { type Session, SessionProvider } from "../../../src/session";
+import {
+  type AttemptHandle,
+  type BeginResult,
+  type Session,
+  SessionProvider,
+} from "../../../src/session";
 import { UiProviders } from "../../helpers/providers";
 import {
   attemptsDouble,
@@ -390,6 +395,10 @@ describe("WF-SWITCH-02, Sign in as …", () => {
   });
 
   test("single sign-on starts an ordinary OIDC attempt and navigates only after it is durably redirected", async () => {
+    // SETUP ADAPTED (R1 of the review of 11 October 2026): the credential step is now an owned journey of the page-memory flow, and a
+    // step that is not the flow's current one starts nothing; the flow is opened at this step as `SwitchFlow` would render it.
+    switchFlow.open(OWNER, null);
+    switchFlow.choose(OWNER, sam);
     const session = sessionDouble({}, { attempts: attemptsDouble() });
     const navigate = vi.fn();
     mount(
@@ -513,6 +522,150 @@ describe("the switch is an ordinary sign-in, and its outcome belongs to the flow
       ]),
     );
     expect(switchFlow.get().stage).toBe("sign-in");
+  });
+});
+
+describe("R1 of the review of 11 October 2026: leaving the credential step cancels the sign-in in flight (no change made)", () => {
+  const sam = { kind: "retained" as const, account_id: BOB, name: "sam" };
+  type Outcome = Awaited<ReturnType<Session["attempts"]["signInWithPassword"]>>;
+  const refused: Outcome = {
+    kind: "refused",
+    error: { code: "unauthenticated", message: "x" } as never,
+    definitive: true,
+    stage: "exchange",
+  };
+
+  /** The switch's sign-in is submitted and its exchange is outstanding (or, with `holdBegin`, its `begin` has not returned). */
+  async function inFlight(options: { holdBegin?: boolean } = {}) {
+    switchFlow.open(OWNER, null);
+    switchFlow.choose(OWNER, sam);
+    let answer: (outcome: Outcome) => void = () => undefined;
+    let started: () => void = () => undefined;
+    const handle: AttemptHandle = {
+      epoch: 7,
+      method: "password",
+      challenge: "c".repeat(43),
+    };
+    const attempts = attemptsDouble({
+      begin: vi.fn(
+        () =>
+          new Promise<BeginResult>((resolve) => {
+            started = () => resolve({ kind: "started", handle });
+            if (!options.holdBegin) started();
+          }),
+      ),
+      signInWithPassword: vi.fn(
+        () =>
+          new Promise<Outcome>((resolve) => {
+            answer = resolve;
+          }),
+      ),
+    });
+    const session = sessionDouble({}, { attempts });
+    mount(<SwitchFlow owner={OWNER} />, { session });
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in as sam",
+    });
+    fireEvent.change(within(dialog).getByLabelText("Password"), {
+      target: { value: "correct-horse-battery-9271" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Sign in as sam" }),
+    );
+    if (options.holdBegin)
+      await waitFor(() => expect(attempts.begin).toHaveBeenCalled());
+    else
+      await waitFor(() =>
+        expect(attempts.signInWithPassword).toHaveBeenCalled(),
+      );
+    return {
+      attempts,
+      handle,
+      dialog,
+      answer: (outcome: Outcome) => answer(outcome),
+      start: () => started(),
+    };
+  }
+
+  test("control: the same submission, not cancelled, keeps its refusal for the form", async () => {
+    const { answer, attempts } = await inFlight();
+    answer(refused);
+    expect(
+      await screen.findByText("That username or password isn't right."),
+    ).toBeInTheDocument();
+    expect(attempts.cancel).not.toHaveBeenCalled();
+  });
+
+  test("'Cancel — stay as …' while the exchange is outstanding cancels THAT attempt; what arrives afterwards is dropped, with no banner", async () => {
+    const { answer, attempts, handle, dialog } = await inFlight();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^Cancel — stay as / }),
+    );
+    expect(switchFlow.get().stage).toBe("picker");
+    expect(attempts.cancel).toHaveBeenCalledWith(handle);
+    // The session discards a cancelled attempt's late result as superseded.
+    answer({ kind: "superseded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(switchFlow.get().stage).toBe("picker");
+    expect(authFeedback.get()).toEqual([]);
+    expect(authFeedback.carriedFailure()).toBeNull();
+  });
+
+  test("Escape while the exchange is outstanding closes the flow and cancels the attempt; a late refusal is neither shown nor carried", async () => {
+    const { answer, attempts, handle, dialog } = await inFlight();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(switchFlow.get().stage).toBe("closed"));
+    expect(attempts.cancel).toHaveBeenCalledWith(handle);
+    answer(refused);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(switchFlow.get().stage).toBe("closed");
+    expect(authFeedback.carriedFailure()).toBeNull();
+    expect(authFeedback.get()).toEqual([]);
+  });
+
+  test("Close while the exchange is outstanding cancels the attempt", async () => {
+    const { attempts, handle, dialog } = await inFlight();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(switchFlow.get().stage).toBe("closed"));
+    expect(attempts.cancel).toHaveBeenCalledWith(handle);
+  });
+
+  test("cancelled BEFORE `begin` returned: the attempt is cancelled as soon as it exists and nothing is sent", async () => {
+    const { attempts, handle, dialog, start } = await inFlight({
+      holdBegin: true,
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^Cancel — stay as / }),
+    );
+    start();
+    await waitFor(() => expect(attempts.cancel).toHaveBeenCalledWith(handle));
+    expect(attempts.signInWithPassword).not.toHaveBeenCalled();
+    expect(switchFlow.get().stage).toBe("picker");
+  });
+
+  test("another account displaying, or signing out, cancels it too (the flow is no longer anyone's)", async () => {
+    const first = await inFlight();
+    switchFlow.dropUnless(BOB);
+    expect(first.attempts.cancel).toHaveBeenCalledWith(first.handle);
+    cleanup();
+    const second = await inFlight();
+    switchFlow.close();
+    expect(second.attempts.cancel).toHaveBeenCalledWith(second.handle);
+  });
+
+  test("a left journey's late refusal is never applied to the next one", async () => {
+    const { answer, dialog } = await inFlight();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^Cancel — stay as / }),
+    );
+    switchFlow.choose(OWNER, sam);
+    const again = await screen.findByRole("dialog", { name: "Sign in as sam" });
+    answer(refused);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(switchFlow.get()).toMatchObject({ stage: "sign-in", failure: null });
+    expect(
+      within(again).queryByText("That username or password isn't right."),
+    ).toBeNull();
   });
 });
 

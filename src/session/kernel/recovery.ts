@@ -3,6 +3,7 @@ import { LOCKS } from "../constants";
 import { finishRecovery } from "../model/reducers/operation";
 import type { AccountId } from "../model/types";
 import { isGating } from "../model/types";
+import { admissionFrom } from "./admission";
 import { readRecords } from "./evaluate";
 import { convertOlderEpochLeases, verifyUnresolved } from "./identity";
 import type { Kernel } from "./state";
@@ -45,17 +46,27 @@ export class RecoveryService implements Recovery {
       const settled = state.settled;
       if (!settled || settled.account_id !== account)
         return { kind: "ineligible", reason: "stale" };
-      if (isGating(state.attempt))
-        return { kind: "ineligible", reason: "attempt_gating" };
+      // WEB-08c K-2: a refusal carries the admission revision of THIS read, so a waiter's baseline is what the refusal was decided on.
+      const refused = (
+        reason: Exclude<
+          Extract<RecoveryBegin, { kind: "ineligible" }>["reason"],
+          "stale" | "offline" | "unresolved_lease"
+        >,
+      ): RecoveryBegin => ({
+        kind: "ineligible",
+        reason,
+        revision: admissionFrom(k, records, "recovery", account, settled.epoch)
+          .revision,
+      });
+      if (isGating(state.attempt)) return refused("attempt_gating");
       const fences = state.fences[account] ?? [];
-      if (fences.length === 0)
-        return { kind: "ineligible", reason: "no_fence" };
+      if (fences.length === 0) return refused("no_fence");
       if (fences.some((fence) => fence.kind === "operation"))
-        return { kind: "ineligible", reason: "operation_pending" };
+        return refused("operation_pending");
       if (fences.some((fence) => fence.kind === "credential_unverified"))
-        return { kind: "ineligible", reason: "credential_unverified" };
+        return refused("credential_unverified");
       if (fences.some((fence) => fence.epoch >= settled.epoch))
-        return { kind: "ineligible", reason: "current_epoch_entry" };
+        return refused("current_epoch_entry");
 
       // Like any cover, wait (outside atlas-auth) for every foreign lease of the account to be released to this page.
       const foreign = Object.entries(state.leases).filter(

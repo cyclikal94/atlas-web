@@ -277,6 +277,47 @@ describe("the gate dialog's own contract", () => {
     expect(element.open).toBe(false);
   });
 
+  test("WEB-08c R4 (matrix 3.7.2 'Read pending', T22 t4): shown again while the gate is open, its status says 'Checking your account' ONCE; not while hidden; cleared by close", async () => {
+    let visibility: "visible" | "hidden" = "hidden";
+    Object.defineProperty(document, "visibilityState", {
+      get: () => visibility,
+      configurable: true,
+    });
+    try {
+      const gate = createGateDialog();
+      gate.open();
+      const status = document.querySelector(
+        `#${GATE_ID} [role="status"]`,
+      ) as HTMLElement;
+      const writes: string[] = [];
+      const observer = new MutationObserver(() =>
+        writes.push(status.textContent ?? ""),
+      );
+      observer.observe(status, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(status.textContent).toBe("");
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("pageshow"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+      expect(status.textContent).toBe(GATE_HEADING);
+      expect(writes.filter((text) => text === GATE_HEADING)).toHaveLength(1);
+      gate.close();
+      expect(status.textContent).toBe("");
+      // Closed: a later return writes nothing.
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(status.textContent).toBe("");
+      observer.disconnect();
+    } finally {
+      Reflect.deleteProperty(document, "visibilityState");
+    }
+  });
+
   test("opening twice does not add a second dialog", () => {
     const gate = createGateDialog();
     gate.open();

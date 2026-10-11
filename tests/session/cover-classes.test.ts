@@ -173,7 +173,9 @@ describe("a first failing lease write sends nothing", () => {
       (e: { kind?: string }) => e.kind,
     );
     await f.world.runUntilIdle();
-    await f.world.advance(5000);
+    // ADAPTED (WEB-08c R4 of the review of 11 October 2026): was `advance(5000)`. A stall is decided BEYOND the bound, after the kernel's
+    // `stallGraceMs`; the lease write still never completes and the request is still never sent.
+    await f.world.advance(5000 + l.page.kernel.config.stallGraceMs);
     expect(await outcome).toBe("not_covered");
     expect(
       f.world.logs.some(

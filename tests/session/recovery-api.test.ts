@@ -247,7 +247,22 @@ describe("H: the eligibility rule refuses", () => {
     const { f, l } = await reauthenticated();
     mutate(f, l.account);
     const begun = await f.runWith(l.page.session.recovery.begin(l.account));
-    expect(begun).toEqual({ kind: "ineligible", reason });
+    // ADAPTED (WEB-08c K-2, R3 of the review of 11 October 2026): was `toEqual({ kind: "ineligible", reason })`. The refusal keeps its
+    // reason and now also carries the admission revision of the read it was decided on: exactly what the recovery-class probe answers
+    // for the same record, so a waiter's baseline is the refusal's own state.
+    const probed = await f.runWith(
+      l.page.session.api.admission(
+        "recovery",
+        l.account,
+        stateOf(f).settled?.epoch ?? 0,
+      ),
+    );
+    expect(probed?.blocked).toBe(true);
+    expect(begun).toEqual({
+      kind: "ineligible",
+      reason,
+      revision: probed?.revision,
+    });
   };
   test("(ii) an operation entry: the operation resolves first", () =>
     ineligible((f, a) => {

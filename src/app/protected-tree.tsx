@@ -92,7 +92,18 @@ function normalisePublicPath(): void {
 }
 
 export function createProtectedTree(session: Session) {
-  return (): ReactNode => {
+  /** The account this page mounted a tree for last (page memory). */
+  let lastMounted: string | null = null;
+  return (account?: string): ReactNode => {
+    // WEB-08c (R4 of the review of 11 October 2026; matrix 3.7.2 "the settled account changed", T22 t5(i), lifecycle row 7): a tree for a
+    // DIFFERENT account than this page mounted last starts at `/`, so nothing of the previous account's location survives (its route, a
+    // Settings dialog's route, a search) and focus goes to the new shell's main heading. The page's first tree keeps the address it was
+    // opened at (a deep link, a reload), and the same account's tree keeps its place.
+    if (account !== undefined) {
+      if (lastMounted !== null && lastMounted !== account)
+        history.replaceState(null, "", "/");
+      lastMounted = account;
+    }
     normalisePublicPath();
     // A new router per mount: an account change must not inherit the previous account's location or loaders.
     const router = createAppRouter();

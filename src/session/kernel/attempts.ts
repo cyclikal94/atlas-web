@@ -100,6 +100,13 @@ export class AttemptService implements Attempts {
   /** `atlas-attempt-<epoch>` locks this page holds: a liveness signal only. */
   private readonly owned = new Map<Epoch, LockHandle>();
   private resolving = false;
+  /**
+   * WEB-08c (R1 of the review of 11 October 2026): attempts this page's person cancelled. `cancel` clears the record when it can, but
+   * its clear waits for `atlas-auth`, and a late exchange result may get there first: the mark makes the cancellation hold in this page
+   * anyway. A cancelled attempt's grant is discarded, and its activation is never issued (the activating write is abandoned, or, if it
+   * has committed, the request is not sent and the terminal-cancellation protocol resolves it, exactly as for a hidden page).
+   */
+  private readonly cancelled = new Set<Epoch>();
   private activation: AbortController | null = null;
   /**
    * Open from the moment an activation is committed to until its request is issued: the wait for `atlas-auth`, for other
@@ -387,6 +394,11 @@ export class AttemptService implements Attempts {
         status: result.kind === "error" ? result.status : null,
       };
     }
+    // WEB-08c R1: the person cancelled while the exchange was outstanding; the grant is never recorded or activated.
+    if (this.cancelled.has(handle.epoch)) {
+      await this.clearOwn(handle.epoch);
+      return { kind: "superseded" };
+    }
     let recorded: "OK" | "SUPERSEDED";
     try {
       recorded = await k.transact(
@@ -481,6 +493,7 @@ export class AttemptService implements Attempts {
   }
 
   async cancel(handle: AttemptHandle): Promise<void> {
+    this.cancelled.add(handle.epoch);
     await this.clearOwn(handle.epoch);
   }
 
@@ -526,18 +539,25 @@ export class AttemptService implements Attempts {
     const watch = { hidden: false };
     this.activationWindow = watch;
     const hiddenNow = () => watch.hidden || !k.ports.page.isVisible();
+    const cancelledNow = () => this.cancelled.has(epoch);
     let started: Awaited<ReturnType<AttemptService["activatingClosingWrite"]>>;
     try {
-      started = await this.activatingClosingWrite(epoch, hiddenNow);
+      started = await this.activatingClosingWrite(
+        epoch,
+        () => hiddenNow() || cancelledNow(),
+      );
     } catch (error) {
       this.activationWindow = null;
       throw error;
     }
     if (started.kind !== "started") {
       this.activationWindow = null;
-      // Hidden while it waited, before anything was committed: the attempt is cleared, exactly as when the wait was for visibility.
-      if (started.kind === "abandoned") await this.clearOwn(epoch);
-      else this.releaseOwner(epoch);
+      // Hidden (or cancelled, WEB-08c R1) while it waited, before anything was committed: the attempt is cleared, exactly as when the
+      // wait was for visibility. A cancelled attempt's result is discarded.
+      if (started.kind === "abandoned") {
+        await this.clearOwn(epoch);
+        if (cancelledNow()) return { kind: "superseded" };
+      } else this.releaseOwner(epoch);
       return started.outcome;
     }
     const { verifier, auth } = started;
@@ -545,10 +565,12 @@ export class AttemptService implements Attempts {
     // hidden while the write waited for `atlas-auth` or its transaction completed; `activating` is already committed, so the
     // attempt is resolved by the terminal-cancellation protocol (below), never by discarding the verifier.
     const hidden = hiddenNow();
+    const cancelled = cancelledNow();
     this.activationWindow = null;
     // The lock is held until a definitive result, an abort or failure, or destruction.
     let answer: RawAnswer | null = null;
-    if (!hidden) {
+    if (cancelled) k.emit("activation.not_sent_cancelled", { epoch });
+    else if (!hidden) {
       const controller = new AbortController();
       this.activation = controller;
       const timer = k.ports.clock.setTimeout(

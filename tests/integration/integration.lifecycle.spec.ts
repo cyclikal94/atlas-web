@@ -6,7 +6,9 @@ import {
   ACCOUNTS,
   expect,
   exposeSession,
+  OIDC,
   ORIGIN,
+  provider,
   proxy,
   raw,
   rawSignIn as rawSignInUnpaced,
@@ -16,6 +18,7 @@ import {
   untilView,
   type Who,
 } from "./helpers";
+import { followNavigation } from "./web08b-support";
 
 /**
  * WEB-08c, Layer 4: composed lifecycle journeys against the RELEASED backend (v0.27.0-rc.1, SHA-256 verified by the runner) on a disposable
@@ -357,11 +360,14 @@ test.describe("I-L5: T13/T24 composed with switching", () => {
         cookie: other.cookie,
         headers: { "x-csrf-token": other.csrf },
       });
+    // A TRIGGER only: the page's own sync leader may meet the 401 first, and the navigation is then gone (Firefox, campaign
+    // 2026-10-11T13-30-08.975Z-c180297a; the same race as I-L7 and I-L10).
     await page
       .getByRole("navigation")
       .getByRole("link", { name: "Settings" })
       .first()
-      .click();
+      .click({ timeout: 2_000 })
+      .catch(() => undefined);
     await untilView(page, "neutral", "1b", 60_000);
     await expectAbsent(page, name("nora"));
     await page.getByRole("button", { name: "Reconnect" }).click();
@@ -442,11 +448,14 @@ test.describe("I-L7: T21 and K-1 against the backend", () => {
     const other = await rawSignIn("alice");
     await swapCookie(context, other);
     const since = (await proxy.log()).length;
+    // A TRIGGER only: the page's own sync leader may make the next request first and detect the mismatch itself, after which the
+    // navigation is gone (Firefox, campaign 2026-10-11T12-53-28.484Z-7b30b88e); either request is the backend's own answer.
     await page
       .getByRole("navigation")
       .getByRole("link", { name: "Settings" })
       .first()
-      .click();
+      .click({ timeout: 2_000 })
+      .catch(() => undefined);
     await untilView(page, "neutral", "1d", 60_000);
     await expectAbsent(page, name("quinn"));
     await expectAbsent(page, name("alice"));
@@ -464,7 +473,7 @@ test.describe("I-L7: T21 and K-1 against the backend", () => {
 });
 
 test.describe("I-L9: G-23, 'Confirm it's you' against the backend's own five-minute rule (opt-in, REAL time)", () => {
-  test("I-L9: after 305 s of real time Link is disabled with its reason; 'Confirm it's you' re-authenticates in place (a new session at a newer epoch); back on Signing in, Link is enabled and focused", async ({
+  test("I-L9: after 305 s of real time Link is disabled with its reason; 'Confirm it's you' re-authenticates in place (a new session at a newer epoch); back on Signing in, Link is enabled and focused; the backend then LINKS single sign-on and, within the five minutes, UNLINKS it", async ({
     context,
   }) => {
     test.skip(
@@ -497,6 +506,39 @@ test.describe("I-L9: G-23, 'Confirm it's you' against the backend's own five-min
     const after = await identity(page);
     expect(after?.account_id).toBe(first.account_id);
     expect(after?.epoch).toBeGreaterThan(first.epoch);
+
+    // R5 of the review of 11 October 2026 (plan §6.5): the confirmation is what makes the backend's link AND unlink possible.
+    test.skip(
+      !OIDC,
+      "the link and unlink need the stub OpenID Connect provider (run with --oidc on)",
+    );
+    await provider.subject(`il9-${Date.now().toString(36)}`);
+    await followNavigation(page, () => link.click());
+    await untilView(page, "displaying");
+    await expect(
+      page.locator('[data-notice="feedback-message"]'),
+    ).toContainText("Single sign-on is now linked to your account.", {
+      timeout: 30_000,
+    });
+    const readMe = async () => {
+      const probe = await rawSignIn("bob");
+      return (
+        await raw("GET", "/me", {
+          cookie: probe.cookie,
+          headers: { "x-csrf-token": probe.csrf },
+        })
+      ).json as { oidc_issuers: string[] };
+    };
+    expect((await readMe()).oidc_issuers).toEqual([OIDC?.issuer]);
+    // Within the five minutes the confirmation started, the link is removed: the backend removes it and ends the session (1b).
+    await openSettings(page);
+    await page.getByRole("link", { name: /Signing in/ }).click();
+    await page
+      .getByRole("dialog", { name: "Signing in" })
+      .getByRole("button", { name: /^Remove / })
+      .click();
+    await untilView(page, "neutral", "1b", 60_000);
+    expect((await readMe()).oidc_issuers).toEqual([]);
   });
 });
 
@@ -534,6 +576,12 @@ test.describe("I-L10: T23 E/F/L composed: a recording that cannot be saved, ever
     const page = await leaderPage(context);
     await signedIn(page, "carol");
     await railShows(page, "carol");
+    // The named fault is armed BEFORE carol's session ends: the page's own sync leader may meet the 401 first (it matches only the write
+    // that adds an `invalid_session` fence, so nothing earlier is affected).
+    await page.evaluate(() => {
+      (window as unknown as { __failAuthRecords: boolean }).__failAuthRecords =
+        true;
+    });
     // carol's session ends elsewhere (the backend's own 401 at the next request).
     const other = await rawSignIn("carol");
     const sessions = await raw("GET", "/sessions", {
@@ -547,15 +595,13 @@ test.describe("I-L10: T23 E/F/L composed: a recording that cannot be saved, ever
         cookie: other.cookie,
         headers: { "x-csrf-token": other.csrf },
       });
-    await page.evaluate(() => {
-      (window as unknown as { __failAuthRecords: boolean }).__failAuthRecords =
-        true;
-    });
+    // A TRIGGER only: the leader's own request may detect it first, and the navigation is then gone.
     await page
       .getByRole("navigation")
       .getByRole("link", { name: "Settings" })
       .first()
-      .click();
+      .click({ timeout: 2_000 })
+      .catch(() => undefined);
     await expect
       .poll(
         () =>

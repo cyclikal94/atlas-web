@@ -19,6 +19,13 @@ export interface SessionConfig {
   /** A recording or cover transaction with no `complete`. */
   recordingStallMs: number;
   coverStallMs: number;
+  /**
+   * WEB-08c (R4 of the review of 11 October 2026): how long after a stall bound the verdict waits for an answer that was already due
+   * at the bound. "Stalls BEYOND 5 s" (matrix 3.6.1, 3.6.2 step 5): an answer that falls due at the bound must not lose to the bound's
+   * own timer because of the engine's timer ordering or coalescing (measured in WebKit under host load). Only a fail-closed wait is
+   * lengthened: nothing is exposed or sent meanwhile.
+   */
+  stallGraceMs: number;
   /** Every stamped request; also the give-up interval of a deferred cover. */
   stampedRequestTimeoutMs: number;
   /** Resume verification and the displaying page's scan. */
@@ -71,6 +78,7 @@ export const DEFAULT_CONFIG: SessionConfig = Object.freeze({
   backoffMaxMs: 60_000,
   recordingStallMs: 5_000,
   coverStallMs: 5_000,
+  stallGraceMs: 250,
   stampedRequestTimeoutMs: 30_000,
   resumeVerificationMinIntervalMs: 30_000,
   scanIntervalMs: 30_000,

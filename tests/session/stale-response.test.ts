@@ -654,7 +654,12 @@ describe("a record that cannot be read when the answer is released is not eviden
 
   test("a read that never completes is abandoned at the stall interval: `stale`", async () => {
     const { f, l, pending } = await released("pending");
-    await f.world.advance(l.page.kernel.config.recordingStallMs + 1);
+    // ADAPTED (WEB-08c R4): was `recordingStallMs + 1`; the stall is decided after the bound's grace (`stallGraceMs`).
+    await f.world.advance(
+      l.page.kernel.config.recordingStallMs +
+        l.page.kernel.config.stallGraceMs +
+        1,
+    );
     expect((await pending)?.kind).toBe("stale");
     expect(leaseIds(f)).toEqual([]);
     expect(checkProperties(f)).toEqual([]);
@@ -839,7 +844,12 @@ describe("the verdict is taken where the record is read", () => {
     const result = watch(ordinaryGet(l.page, l.account, l.epoch));
     await f.world.runUntilIdle();
     expect(f.world.heldCount("store_start")).toBe(1);
-    await f.world.advance(l.page.kernel.config.recordingStallMs + 1);
+    // ADAPTED (WEB-08c R4): was `recordingStallMs + 1`; the stall is decided after the bound's grace (`stallGraceMs`).
+    await f.world.advance(
+      l.page.kernel.config.recordingStallMs +
+        l.page.kernel.config.stallGraceMs +
+        1,
+    );
     expect(result.error?.kind).toBe("stale");
     // The store gets to it after all; the page had given up, and the next request is answered normally.
     f.world.clearKnobs();

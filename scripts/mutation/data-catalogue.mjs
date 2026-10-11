@@ -14656,10 +14656,11 @@ export const UNIT = [
     expect: /R3 \(/,
     // Redefined in review cycle 2 (R3): `awaitsRecord` is gone; the same defect in the new mechanism is a `begin` refusal on the record
     // that is left as a bare event wait (no admission wait, so a resolution in the same epoch is never noticed).
+    // Anchor moved (WEB-08c, R3 of the review of 11 October 2026): the call now passes `begin`'s own revision; same mutation.
     patch: (t) =>
       sub(
         t,
-        'return awaitAdmission(b, "recovery", epoch, "begin");',
+        'return awaitAdmission(b, "recovery", epoch, "begin", revision);',
         'return { when: "event" };',
       ),
   },
@@ -15211,11 +15212,12 @@ export const UNIT = [
     file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
     tests: ["tests/features/settings/confirm-its-you.test.tsx"],
     expect: /whatever the field holds/,
+    // Anchor moved (WEB-08c, R1 of the review of 11 October 2026): the sign-in is now `confirmSignIn`'s journey; same mutation.
     patch: (t) =>
       sub(
         t,
-        "      username,\n      password: credentials.password,",
-        "      username: credentials.username,\n      password: credentials.password,",
+        "confirmSignIn(session, owner, username, credentials.password)",
+        "confirmSignIn(session, owner, credentials.username, credentials.password)",
       ),
   },
   {
@@ -15291,6 +15293,214 @@ export const UNIT = [
         t,
         "    if (replaces === undefined) return;",
         "    if (replaces === undefined || (true as boolean)) return;",
+      ),
+  },
+  // WEB-08c revision 1 (review of 11 October 2026): R1 cancellation, R2 return-destination ownership, R3 recovery report and refusal continuity.
+  {
+    id: "MU-8C-R1a",
+    title:
+      "WEB-08c R1: `attempts.cancel` does not mark the attempt cancelled in page memory (a late grant activates when the clear has to wait for atlas-auth)",
+    file: "src/session/kernel/attempts.ts",
+    tests: ["tests/session/web08c-cancel.test.ts"],
+    expect:
+      /cancelled while another page holds atlas-auth|cancelled while the activating write waits/,
+    patch: (t) => sub(t, "    this.cancelled.add(handle.epoch);\n", ""),
+  },
+  {
+    id: "MU-8C-R1b",
+    title:
+      "WEB-08c R1: a cancelled attempt's grant is recorded and activated when its exchange answers",
+    file: "src/session/kernel/attempts.ts",
+    tests: ["tests/session/web08c-cancel.test.ts"],
+    expect: /cancelled while another page holds atlas-auth/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (this.cancelled.has(handle.epoch)) {",
+        "    if (this.cancelled.has(handle.epoch) && (false as boolean)) {",
+      ),
+  },
+  {
+    id: "MU-8C-R1c",
+    title:
+      "WEB-08c R1: the activating write is not abandoned for a cancellation that came while it waited for atlas-auth",
+    file: "src/session/kernel/attempts.ts",
+    tests: ["tests/session/web08c-cancel.test.ts"],
+    expect: /cancelled while the activating write waits/,
+    patch: (t) =>
+      sub(
+        t,
+        "        () => hiddenNow() || cancelledNow(),\n",
+        "        hiddenNow,\n",
+      ),
+  },
+  {
+    id: "MU-8C-R1d",
+    title:
+      "WEB-08c R1: the controller never cancels the attempt when its caller's signal aborts",
+    file: "src/features/authentication/controller.ts",
+    tests: ["tests/features/switch/switch-flow.test.tsx"],
+    expect: /while the exchange is outstanding|cancels it too/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const cancel = () => void session.attempts.cancel(handle);",
+        "  const cancel = () => undefined;",
+      ),
+  },
+  {
+    id: "MU-8C-R1e",
+    title:
+      "WEB-08c R1: 'Cancel — stay as …' returns to the picker without cancelling the sign-in in flight",
+    file: "src/features/switch/state.ts",
+    tests: ["tests/features/switch/switch-flow.test.tsx"],
+    expect:
+      /Cancel — stay as …' while the exchange|cancelled BEFORE `begin` returned/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (state.stage !== "sign-in" || state.owner !== owner) return;\n    abandon();\n    set({ stage: "picker", owner });',
+        '    if (state.stage !== "sign-in" || state.owner !== owner) return;\n    set({ stage: "picker", owner });',
+      ),
+  },
+  {
+    id: "MU-8C-R1f",
+    title:
+      "WEB-08c R1: Escape or Close ends the switch flow without cancelling the sign-in in flight",
+    file: "src/features/switch/state.ts",
+    tests: ["tests/features/switch/switch-flow.test.tsx"],
+    expect:
+      /Escape while the exchange is outstanding|Close while the exchange is outstanding/,
+    patch: (t) =>
+      sub(t, "  close(): void {\n    abandon();\n", "  close(): void {\n"),
+  },
+  {
+    id: "MU-8C-R1g",
+    title:
+      "WEB-08c R1: 'Confirm it's you' Cancel closes the section without cancelling the sign-in in flight",
+    file: "src/features/settings/signing-in/confirm-state.ts",
+    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
+    expect: /R1: Cancel while the confirmation is in flight/,
+    patch: (t) =>
+      sub(t, "  cancel(): void {\n    abandon();\n", "  cancel(): void {\n"),
+  },
+  {
+    id: "MU-8C-R2a",
+    title:
+      "WEB-08c R2: an indeterminate (gating) re-authentication drops its return destination",
+    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
+    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
+    expect: /an indeterminate activation keeps the destination/,
+    patch: (t) =>
+      sub(t, '  if (result.kind === "gating") return result;\n', ""),
+  },
+  {
+    id: "MU-8C-R2b",
+    title:
+      "WEB-08c R2: a re-authentication's terminal result drops whatever destination is pending, including a newer request's",
+    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
+    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
+    expect: /R2: an older request's terminal result/,
+    patch: (t) =>
+      sub(
+        t,
+        "  returnDestination.clearIf(destination);",
+        "  returnDestination.clear();",
+      ),
+  },
+  {
+    id: "MU-8C-R3a",
+    title:
+      "WEB-08c R3: the recovery job's admission wait ignores `begin`'s own revision (a gate that ended before the first probe strands state 3)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect:
+      /R3 \((attempt_gating|operation_pending)\): begin reported the gate/,
+    patch: (t) =>
+      sub(t, "      admission.revision = baseline;", "      void baseline;"),
+  },
+  {
+    id: "MU-8C-R3b",
+    title:
+      "WEB-08c R3: the session's `recovery.begin` refusal carries no admission revision",
+    file: "src/session/kernel/recovery.ts",
+    tests: [
+      "tests/session/admission-probe.test.ts",
+      "tests/session/recovery-api.test.ts",
+    ],
+    expect:
+      /refuses with the revision of its read|a gating attempt|no fence at all/,
+    patch: (t) =>
+      sub(
+        t,
+        '        revision: admissionFrom(k, records, "recovery", account, settled.epoch)\n          .revision,',
+        "        revision: undefined,",
+      ),
+  },
+  {
+    id: "MU-8C-R3c",
+    title:
+      "WEB-08c R3: the admission revision ignores `latest_epoch` (an attempt that came and went between two probes is invisible)",
+    file: "src/session/kernel/admission.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /still changes the revision/,
+    patch: (t) => sub(t, "        state.latest_epoch,\n", ""),
+  },
+  {
+    id: "MU-8C-R4a",
+    title:
+      "WEB-08c R4: the stall bound decides 'stalled' AT the bound's timer, with no grace (an answer due at 5 s loses to the engine's timer order; T22's restore fails)",
+    file: "src/session/kernel/state.ts",
+    tests: ["tests/session/web08c-stall-bound.test.ts"],
+    expect:
+      /the answer falls due at the same instant as the bound|within the grace/,
+    patch: (t) =>
+      sub(
+        t,
+        '          () => resolve("stalled"),\n          this.config.stallGraceMs,',
+        '          () => resolve("stalled"),\n          0,',
+      ),
+  },
+  {
+    id: "MU-8C-R4b",
+    title:
+      "WEB-08c R4: the resume gate's polite status never says 'Checking your account' while the local check is pending",
+    file: "src/components/ui/gate-dialog.ts",
+    tests: ["tests/session/resume-gate.test.tsx"],
+    expect: /Read pending/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (message.textContent === "") message.textContent = GATE_HEADING;',
+        "    void GATE_HEADING;",
+      ),
+  },
+  {
+    id: "MU-8C-R4c",
+    title:
+      "WEB-08c R4: a tree for a different account keeps the previous account's address (a Settings dialog route opens again; focus is not the main heading)",
+    file: "src/app/protected-tree.tsx",
+    tests: ["tests/app/protected-tree-join.test.tsx"],
+    expect: /where a tree starts/,
+    patch: (t) =>
+      sub(
+        t,
+        '        history.replaceState(null, "", "/");\n      lastMounted = account;',
+        "        void account;\n      lastMounted = account;",
+      ),
+  },
+  {
+    id: "MU-8C-R3d",
+    title:
+      "WEB-08c R3: a re-authentication refusal is not kept in page memory (lost when the activation's gate remounts the tree)",
+    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
+    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
+    expect: /R3: a refusal that arrives after the activation's gate/,
+    patch: (t) =>
+      sub(
+        t,
+        "    confirmFlow.fail(journey, result.message);",
+        "    void journey;",
       ),
   },
 ];
@@ -17709,10 +17919,11 @@ export const ENGINE = [
     grep: "E-R10 T24 H and R3|E-R12 T24 H and R3",
     expect: /E-R10 T24 H and R3|E-R12 T24 H and R3/,
     // Redefined in review cycle 2 (R3), like MU-1239: `awaitsRecord` is gone; the defect is a record refusal left as a bare event wait.
+    // Anchor moved (WEB-08c, R3 of the review of 11 October 2026), as MU-1239's: the call passes `begin`'s own revision; same mutation.
     patch: (t) =>
       sub(
         t,
-        'return awaitAdmission(b, "recovery", epoch, "begin");',
+        'return awaitAdmission(b, "recovery", epoch, "begin", revision);',
         'return { when: "event" };',
       ),
   },

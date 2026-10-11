@@ -1347,3 +1347,85 @@ describe("WEB-08c K-2: a gate that ends with nothing to recover clears the repor
     expect(w.calls.filter((c) => c.call === "report")).toEqual([]);
   });
 });
+describe("WEB-08c K-2, R3 of the review of 11 October 2026: a gate that ended BEFORE the admission wait's first probe", () => {
+  const reportsOf = (w: Awaited<ReturnType<typeof recoveryWorld>>) =>
+    w.calls
+      .filter((c) => c.call === "report")
+      .map((c) => (c as { phase: string | null }).phase);
+  const beginsOf = (w: Awaited<ReturnType<typeof recoveryWorld>>) =>
+    w.calls.filter((c) => c.call === "begin").length;
+
+  for (const reason of ["attempt_gating", "operation_pending"] as const)
+    test(`R3 (${reason}): begin reported the gate, the gate ended before the first probe (nothing fenced): the probe differs from begin's own revision, begin is asked again and the failure is withdrawn`, async () => {
+      // The reviewer's production schedule: "Confirm it's you" raises the gate, the job's `begin` says attempt_gating and reports
+      // `failed`, and the activation is refused at once, so the attempt is cleared BEFORE the wait's first probe. That probe's baseline is
+      // already the ungated record: blocked (nothing is fenced) and never changing again.
+      const w = await recoveryWorld({
+        cursor: "d1",
+        phase: "delta",
+        cacheStatus: "valid",
+        displayed: false,
+      });
+      w.begins.push({ kind: "ineligible", reason });
+      w.afterBegin = (answer) => {
+        if (answer.kind !== "ineligible" || answer.reason !== reason) return;
+        w.afterBegin = undefined;
+        w.setGate(null);
+        w.unfenced = true;
+        w.begins.push({ kind: "ineligible", reason: "no_fence" });
+      };
+      await w.bindJob();
+      await w.settle();
+      await w.advance(60_000);
+      expect(reportsOf(w)).toEqual(["failed", null]);
+      expect(beginsOf(w)).toBe(2);
+      expect(w.job.state.get().kind).toBe("idle");
+      expect(w.requests).toEqual([]);
+    });
+
+  test("control: the gate ends AFTER the first probe (nothing fenced, the faithful probe): the changed revision asks begin again and the failure is withdrawn", async () => {
+    const w = await recoveryWorld({
+      cursor: "d1",
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+    w.begins.push({ kind: "ineligible", reason: "attempt_gating" });
+    await w.bindJob();
+    await w.settle();
+    expect(reportsOf(w)).toEqual(["failed"]);
+    w.begins.push({ kind: "ineligible", reason: "no_fence" });
+    w.setGate(null);
+    w.unfenced = true;
+    w.fire();
+    await w.settle();
+    await w.advance(60_000);
+    expect(reportsOf(w)).toEqual(["failed", null]);
+    expect(w.requests).toEqual([]);
+  });
+
+  test("no loop: a gate that still stands at the first probe asks nothing more until the revision changes", async () => {
+    const w = await recoveryWorld({
+      cursor: "d1",
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+    w.setGate("attempt_gating");
+    w.reportNotifies = true;
+    await w.bindJob();
+    await w.settle();
+    await w.advance(10 * 60_000);
+    expect(beginsOf(w)).toBe(1);
+    expect(reportsOf(w)).toEqual(["failed"]);
+    // The gate ends: the revision changes, begin is asked, and nothing being fenced, the failure is withdrawn.
+    w.setGate(null);
+    w.unfenced = true;
+    w.begins.push({ kind: "ineligible", reason: "no_fence" });
+    w.fire();
+    await w.settle();
+    expect(beginsOf(w)).toBe(2);
+    expect(reportsOf(w)).toEqual(["failed", null]);
+    expect(w.requests).toEqual([]);
+  });
+});

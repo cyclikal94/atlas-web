@@ -142,14 +142,14 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
   finishLanding = completeLanding;
   // The session and the surface refer to each other only through this closure: the surface asks for the tree, and the
   // tree needs the session for its screens.
-  let renderTree: (() => ReactNode) | null = null;
+  let renderTree: ((account: string) => ReactNode) | null = null;
   const surface = createProtectedSurface({
-    renderTree: () => {
+    renderTree: (account) => {
       if (!renderTree)
         throw new Error(
           "The protected tree was asked for before the session existed",
         );
-      return renderTree();
+      return renderTree(account);
     },
     gateDialog: createGateDialog(),
     liveRegions,

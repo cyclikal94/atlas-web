@@ -1,12 +1,20 @@
-import { useId, useState } from "react";
-import { returnDestination } from "../../../app/return-destination";
+import { useId, useSyncExternalStore } from "react";
+import {
+  type ReturnDestination,
+  returnDestination,
+} from "../../../app/return-destination";
 import { Button } from "../../../components/ui/button";
-import { useSession } from "../../../session";
-import { signIn, startSso } from "../../authentication/controller";
+import { type Session, useSession } from "../../../session";
+import {
+  type SignInResult,
+  type SsoResult,
+  signIn,
+  startSso,
+} from "../../authentication/controller";
 import { authFeedback } from "../../authentication/feedback";
-import type { Message } from "../../authentication/outcome-copy";
 import { SignInForm } from "../../authentication/SignInForm";
 import { useOnline } from "../../authentication/use-online";
+import { type ConfirmOwner, confirmFlow } from "./confirm-state";
 
 /** [P] (gap G-23): no accepted wireframe exists for in-place re-authentication. */
 export const CONFIRM_LABEL = "Confirm it's you";
@@ -26,6 +34,11 @@ export const CONFIRM_CANCEL = "Cancel";
  * It is shown inline in the "Signing in" dialog, not as a second dialog on top of it (the package's dialog makes the page behind it
  * inert; two stacked would contend for that). Single sign-on leaves the page, so it carries no return destination (page memory does not
  * survive the round trip).
+ *
+ * Whether it is open, and a refusal to show, live in page memory bound to this session (`confirm-state.ts`), so a refusal that arrives
+ * after the activation's gate has closed and re-opened the tree is still shown here (R3 of the review of 11 October 2026). Cancel
+ * cancels a sign-in in flight (R1). Leaving the "Signing in" dialog does not: a submitted confirmation of the SAME account completes, and
+ * its return destination brings the person back here.
  */
 export function ConfirmItsYou({
   username,
@@ -36,45 +49,31 @@ export function ConfirmItsYou({
 }) {
   const session = useSession();
   const online = useOnline();
-  const [open, setOpen] = useState(false);
-  const [failure, setFailure] = useState<Message | null>(null);
+  const identity = useSyncExternalStore(
+    session.identity.subscribe,
+    session.identity.get,
+    session.identity.get,
+  );
+  const owner: ConfirmOwner | null =
+    identity === null
+      ? null
+      : { account: identity.account_id, epoch: identity.epoch };
+  const stage = useSyncExternalStore(
+    confirmFlow.subscribe,
+    () => confirmFlow.for(owner),
+    () => confirmFlow.for(owner),
+  );
   const headingId = useId();
 
-  if (!open)
+  if (stage === null || owner === null)
     return (
       <div className="flex flex-col items-start gap-2" data-confirm-its-you="">
-        <Button onClick={() => setOpen(true)}>{CONFIRM_LABEL}</Button>
+        <Button onClick={() => owner && confirmFlow.open(owner)}>
+          {CONFIRM_LABEL}
+        </Button>
         <p className="text-[12.5px] leading-[1.6] text-ink-2">{CONFIRM_HINT}</p>
       </div>
     );
-
-  const submit = async (credentials: {
-    username: string;
-    password: string;
-  }) => {
-    const identity = session.identity.get();
-    if (identity !== null)
-      returnDestination.set({
-        account: identity.account_id,
-        epoch: identity.epoch,
-        when: "newer",
-        path: "/settings/signing-in",
-        focusKey: "link-sso",
-        requestedAt: Date.now(),
-      });
-    const result = await signIn(session, {
-      // The read-only field: whatever the form holds, it is this account's username.
-      username,
-      password: credentials.password,
-    });
-    if (result.kind === "settled") return result;
-    // Not settled: nothing to come back to.
-    const pending = returnDestination.peek();
-    if (identity !== null && pending?.account === identity.account_id)
-      returnDestination.clear();
-    if (result.kind === "failed") setFailure(result.message);
-    return result;
-  };
 
   return (
     <section
@@ -91,18 +90,78 @@ export function ConfirmItsYou({
         usernameReadOnly
         submitLabel={CONFIRM_LABEL}
         backLabel={CONFIRM_CANCEL}
-        onBack={() => {
-          setOpen(false);
-          setFailure(null);
-        }}
-        carried={failure}
+        onBack={() => confirmFlow.cancel()}
+        carried={stage.failure}
         onCarriedShown={() => {
-          setFailure(null);
+          confirmFlow.failureShown(owner);
           authFeedback.takeFailure();
         }}
-        onSubmit={submit}
-        onSso={() => startSso(session, { link: false }, { navigate })}
+        onSubmit={(credentials) =>
+          confirmSignIn(session, owner, username, credentials.password)
+        }
+        onSso={() => confirmSso(session, owner, navigate)}
       />
     </section>
   );
+}
+
+/** Single sign-on from the open section, as the same kind of journey: Cancel before it navigates cancels it. */
+export async function confirmSso(
+  session: Session,
+  owner: ConfirmOwner,
+  navigate: (url: string) => void,
+): Promise<SsoResult> {
+  const journey = confirmFlow.submit(owner);
+  if (journey === null) return { kind: "cancelled" };
+  const result = await startSso(
+    session,
+    { link: false },
+    { navigate },
+    journey.signal,
+  );
+  confirmFlow.finish(journey);
+  return result;
+}
+
+/**
+ * The confirmation's sign-in, as a journey of the page-memory flow (`confirmFlow.submit`): Cancel aborts it and the controller cancels
+ * its attempt with the session. The username is the read-only field's: whatever the form holds, it is this account's own.
+ *
+ * The return destination (D-8c-03) is set for THIS request and belongs to it (R2 of the review of 11 October 2026):
+ *  - `settled`: kept; the same account mounts at the newer epoch and takes it;
+ *  - `gating`: kept; the activation's outcome is unknown, and a later settlement of the same account at a newer epoch still takes it
+ *    (another account mounting, a remount at the old epoch after 120 s, or a newer request's own destination still drop or replace it);
+ *  - anything else (a refusal, a newer attempt, a busy lock, Cancel): nothing is coming back, so ITS destination is dropped, and never one
+ *    that a newer request set meanwhile.
+ * A refusal is kept in the flow for whichever mount of this session's tree shows it (the activation's gate unmounts the one that asked).
+ */
+export async function confirmSignIn(
+  session: Session,
+  owner: ConfirmOwner,
+  username: string,
+  password: string,
+): Promise<SignInResult> {
+  const journey = confirmFlow.submit(owner);
+  if (journey === null) return { kind: "cancelled" };
+  const destination: ReturnDestination = {
+    account: owner.account,
+    epoch: owner.epoch,
+    when: "newer",
+    path: "/settings/signing-in",
+    focusKey: "link-sso",
+    requestedAt: Date.now(),
+  };
+  returnDestination.set(destination);
+  const result = await signIn(session, { username, password }, journey.signal);
+  const current = confirmFlow.finish(journey);
+  // Confirmed: the section's work is done (the newer session's tree opens at the return destination).
+  if (result.kind === "settled") {
+    if (current) confirmFlow.cancel();
+    return result;
+  }
+  if (result.kind === "gating") return result;
+  returnDestination.clearIf(destination);
+  if (current && result.kind === "failed")
+    confirmFlow.fail(journey, result.message);
+  return result;
 }

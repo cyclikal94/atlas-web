@@ -482,7 +482,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         });
         if (!alive(b)) return { when: "event" };
         if (begun.kind === "ineligible")
-          return ineligible(b, identity.epoch, begun.reason);
+          return ineligible(b, identity.epoch, begun.reason, begun.revision);
         beginWaits = 0;
         handle = begun.handle;
         trigger ??= "reauthenticated";
@@ -687,12 +687,19 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
    * exactly as they were when any of these ends, so the job does not wait for the fingerprint: it stands in an explicit wait whose steps
    * PROBE the session's admission revision (a read: no capture, no request, no write) on every notification and, paced, without one (a
    * hint can be lost). The wait is installed BEFORE the first probe, so a change that came first is seen by it.
+   *
+   * A `begin` refusal brings the admission revision of the read it was decided on (`baseline`), and the wait starts from it (WEB-08c
+   * K-2, R3 of the review of 11 October 2026). Without it the first probe was the baseline: a gate that ended between `begin`'s read and
+   * that probe (an activation refused at once, an operation's outcome) left a blocked record that never changed again (in recovery mode
+   * an account with nothing fenced stays blocked), and the job stood in the wait with `failed` reported, keeping state 3 over an account
+   * that had nothing to catch up.
    */
   function awaitAdmission(
     b: Binding,
     mode: RecoveryMode,
     epoch: number,
     cause: AdmissionEpisode["cause"],
+    baseline?: string,
   ): Next {
     const episode = admission;
     if (
@@ -713,6 +720,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         retryAt: null,
       };
     else episode.cause = cause;
+    if (baseline !== undefined && admission !== null)
+      admission.revision = baseline;
     waiting = true;
     return { when: "now" };
   }
@@ -854,6 +863,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     b: Binding,
     epoch: number,
     reason: Exclude<RecoveryBegin, { kind: "eligible" }>["reason"],
+    revision?: string,
   ): Next {
     if (reason === "no_fence") {
       // WEB-08c K-2: nothing is fenced, so nothing is left to recover. A failure this job reported while a gate stood (an attempt that
@@ -880,7 +890,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     }
     if (reason === "offline") return { when: "event" };
     report("failed");
-    return awaitAdmission(b, "recovery", epoch, "begin");
+    return awaitAdmission(b, "recovery", epoch, "begin", revision);
   }
   function stop(
     next: Extract<RecoveryJobState, { kind: "stopped" }>,

@@ -15,7 +15,12 @@ import {
   useQueueSummary,
 } from "../../data";
 import { type Session, useSession } from "../../session";
-import { signIn, startSso } from "../authentication/controller";
+import {
+  type SignInResult,
+  type SsoResult,
+  signIn,
+  startSso,
+} from "../authentication/controller";
 import { authFeedback } from "../authentication/feedback";
 import type { Message } from "../authentication/outcome-copy";
 import { SignInForm } from "../authentication/SignInForm";
@@ -382,7 +387,7 @@ export function SwitchSignIn({
             authFeedback.takeFailure();
           }}
           onSubmit={(credentials) => submitSwitch(session, owner, credentials)}
-          onSso={() => startSso(session, { link: false }, { navigate })}
+          onSso={() => submitSwitchSso(session, owner, navigate)}
         />
       </div>
     </Dialog>
@@ -390,21 +395,28 @@ export function SwitchSignIn({
 }
 
 /**
- * The sign-in, and what it means for THIS flow. The result can arrive after the outgoing account's tree has unmounted (the incoming
- * attempt's `activating` write closes it), so it is applied to the page-memory flow, never to component state:
+ * The sign-in, and what it means for THIS flow. It is a journey of the page-memory flow (`switchFlow.submit`): leaving the credential
+ * step (Cancel, Escape or Close, another account, signing out) aborts it, and the controller cancels its attempt with the session, so a
+ * held exchange answered afterwards activates nothing (R1 of the review of 11 October 2026). The result can arrive after the outgoing
+ * account's tree has unmounted (the incoming attempt's `activating` write closes it), so it is applied to the flow, never to component
+ * state, and ONLY while it is still the flow's journey:
  *  - `settled`: another account (or a new epoch of this one) mounts; the flow is over;
  *  - `gating` / `superseded`: the neutral gate or a newer attempt owns the screen; the flow is over (the controller publishes the
  *    superseded banner);
  *  - `failed`: kept for the form, which shows it once on whichever mount of the outgoing account's tree is displayed then (an
  *    activation refused after the gate re-renders that account);
- *  - `lock_timeout`: the controller publishes the "another tab is finishing a sign-in" banner; the form stays to try again.
+ *  - `lock_timeout`: the controller publishes the "another tab is finishing a sign-in" banner; the form stays to try again;
+ *  - `cancelled`: the person left; nothing changed and there is nothing to apply.
  */
 export async function submitSwitch(
   session: Session,
   owner: string,
   credentials: { username: string; password: string },
-) {
-  const result = await signIn(session, credentials);
+): Promise<SignInResult> {
+  const journey = switchFlow.submit(owner);
+  if (journey === null) return { kind: "cancelled" };
+  const result = await signIn(session, credentials, journey.signal);
+  if (!switchFlow.finish(journey)) return result;
   switch (result.kind) {
     case "settled":
     case "gating":
@@ -415,8 +427,28 @@ export async function submitSwitch(
       switchFlow.fail(owner, result.message);
       break;
     case "lock_timeout":
+    case "cancelled":
       break;
   }
+  return result;
+}
+
+/** Single sign-on from the credential step, as the same kind of journey: leaving the step before it navigates cancels it. */
+export async function submitSwitchSso(
+  session: Session,
+  owner: string,
+  navigate: (url: string) => void,
+): Promise<SsoResult> {
+  const journey = switchFlow.submit(owner);
+  if (journey === null) return { kind: "cancelled" };
+  const result = await startSso(
+    session,
+    { link: false },
+    { navigate },
+    journey.signal,
+  );
+  if (switchFlow.finish(journey) && result.kind === "gating")
+    switchFlow.close();
   return result;
 }
 

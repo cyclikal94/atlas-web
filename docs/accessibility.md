@@ -87,14 +87,16 @@ it and focus a link in the navigation instead). Put the cursor in "Current passw
 submitting. Open the same site in a second tab or window (on a phone: a second tab) and sign in there only when a branch says so.
 
 **Delaying the local check (test-only, nothing ships).** Before each return to the tab, run this snippet in the developer tools console of the tab under test (on iOS
-and Android use the remote inspector). It holds the completion of the NEXT `atlas-auth` transaction, the local check, for 4 s, then disarms itself. 4 s stays inside the
-application's own 5 s stall bound: a longer hold is treated as a stalled store and fails closed (finding O-3), which is a different branch.
+and Android use the remote inspector). It holds the completion of the NEXT `atlas-auth` transaction, the local check, until **5 s after that transaction began** (the
+matrix's 5 s), then disarms itself. The application treats a store as stalled only when it has not answered 250 ms BEYOND 5 s (an answer due at 5 s is an answer: R4 of the
+WEB-08c review of 11 October 2026), so this is the approved t4 branch; a longer hold is a stalled store that fails closed (finding O-3), which is a different branch.
 
 ```js
 (() => { const t = IDBDatabase.prototype.transaction; let armed = true;
   IDBDatabase.prototype.transaction = function (...a) { const tx = t.apply(this, a);
     if (!armed || this.name !== "atlas-auth") return tx; armed = false; let h = null;
-    tx.addEventListener("complete", (e) => setTimeout(() => h && h.call(tx, e), 4000));
+    const until = performance.now() + 5000;
+    tx.addEventListener("complete", (e) => setTimeout(() => h && h.call(tx, e), Math.max(0, until - performance.now())));
     Object.defineProperty(tx, "oncomplete", { configurable: true, get: () => h, set: (f) => { h = f; } });
     return tx; }; })();
 ```
@@ -107,10 +109,10 @@ application's own 5 s stall bound: a longer hold is treated as a stalled store a
 | t1 | Wait long enough for the platform to suspend the tab where it does (a minute or more; on mobile, lock the screen) | — |
 | t2 | In the second tab: **(i)** sign in as another account Y; **(ii)** end C's session (sign out of C everywhere, or change C's password) and use the second tab once so it notices; **(iii)** do nothing | — |
 | t3 | Run the snippet, then return to the tab | The first thing presented is the gate: heading "Checking your account". Tab, Shift+Tab, the virtual cursor, the rotor and swipe navigation reach nothing but the gate. Nothing of C is spoken |
-| t4 | During the 4 s hold, try to reach the form | Still only the gate. "Checking your account" is announced once, politely (it does not interrupt) |
+| t4 | During the 5 s hold, try to reach the form | Still only the gate, for the whole 5 s. "Checking your account" is announced once, politely (it does not interrupt) |
 | t5 (i) | Wait | Y's shell is shown; "This window now shows a different account." is announced, no name is spoken; focus is on Y's main heading; nothing points into C's form, and the typed characters are gone |
 | t5 (ii) | Wait | "Reconnect to keep going" (state 1b) is shown and announced as an alert; focus is on its heading; nothing of C is reachable |
-| t5 (iii) | Wait | The page comes back as it was: focus is back in "Current password" with the typed characters, and nothing extra is announced |
+| t5 (iii) | Wait | The page comes back as it was: focus is back in "Current password" with the typed characters, and nothing extra is announced. In a run without the open dialog (the Settings page scrolled down, focus on a link), the scroll position is back where it was |
 
 **Fails:** any protected text or control reachable by keyboard, virtual cursor, rotor, swipe or find-in-page during t3–t4; after t5 (i) or (ii), any restored focus that
 points into the old account; any account name spoken by the gate or a neutral state.

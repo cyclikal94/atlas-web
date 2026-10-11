@@ -12,6 +12,7 @@ import { ProtectedProviders } from "../../../src/app/providers";
 import { returnDestination } from "../../../src/app/return-destination";
 import { authFeedback } from "../../../src/features/authentication/feedback";
 import { CONFIRM_LABEL } from "../../../src/features/settings/signing-in/ConfirmItsYou";
+import { confirmFlow } from "../../../src/features/settings/signing-in/confirm-state";
 import {
   LinkedIdentities,
   STALE_REASON,
@@ -39,12 +40,14 @@ const setOnline = (value: boolean) =>
 beforeEach(() => {
   returnDestination.clear();
   authFeedback.clearOnBegin();
+  confirmFlow.cancel();
 });
 afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
   setOnline(true);
   returnDestination.clear();
+  confirmFlow.cancel();
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
@@ -165,7 +168,9 @@ describe("Confirm it's you (G-23)", () => {
     fireEvent.change(within(region).getByLabelText("Password"), {
       target: { value: "correct-horse-battery-9271" },
     });
-    fireEvent.click(within(region).getByRole("button", { name: CONFIRM_LABEL }));
+    fireEvent.click(
+      within(region).getByRole("button", { name: CONFIRM_LABEL }),
+    );
     await waitFor(() => expect(attempts.signInWithPassword).toHaveBeenCalled());
     await waitFor(() =>
       expect(within(region).getByLabelText("Password")).toHaveValue(""),
@@ -198,6 +203,107 @@ describe("Confirm it's you (G-23)", () => {
     ).toBeInTheDocument();
     expect(returnDestination.peek()).toBeNull();
     expect(authFeedback.carriedFailure()).toBeNull();
+  });
+
+  // WEB-08c R1/R2/R3 of the review of 11 October 2026.
+  async function confirmHeld() {
+    let answer: (outcome: AttemptOutcome) => void = () => undefined;
+    const { attempts, session } = mount(ago(10 * 60_000));
+    vi.mocked(attempts.signInWithPassword).mockImplementation(
+      () =>
+        new Promise<AttemptOutcome>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: CONFIRM_LABEL }));
+    const region = screen.getByRole("region", { name: CONFIRM_LABEL });
+    fireEvent.change(within(region).getByLabelText("Password"), {
+      target: { value: "correct-horse-battery-9271" },
+    });
+    fireEvent.click(
+      within(region).getByRole("button", { name: CONFIRM_LABEL }),
+    );
+    await waitFor(() => expect(attempts.signInWithPassword).toHaveBeenCalled());
+    return {
+      attempts,
+      session,
+      region,
+      answer: (o: AttemptOutcome) => answer(o),
+    };
+  }
+
+  test("R1: Cancel while the confirmation is in flight cancels its attempt; the section closes and its return destination goes when the cancelled result comes", async () => {
+    const { attempts, region, answer } = await confirmHeld();
+    const handle = (await vi.mocked(attempts.begin).mock.results[0]?.value)
+      ?.handle;
+    expect(returnDestination.peek()).not.toBeNull();
+    fireEvent.click(within(region).getByRole("button", { name: "Cancel" }));
+    expect(attempts.cancel).toHaveBeenCalledWith(handle);
+    expect(
+      screen.queryByRole("region", { name: CONFIRM_LABEL }),
+    ).not.toBeInTheDocument();
+    answer({ kind: "superseded" });
+    await waitFor(() => expect(returnDestination.peek()).toBeNull());
+    expect(authFeedback.get()).toEqual([]);
+  });
+
+  test("R2: an older request's terminal result drops only ITS destination, never a newer request's for the same account", async () => {
+    const { answer } = await confirmHeld();
+    // Another confirmation of the same account (a newer request) has set its own destination meanwhile.
+    const newer = {
+      account: "acct",
+      epoch: 1,
+      when: "newer" as const,
+      path: "/settings/signing-in",
+      focusKey: "link-sso",
+      requestedAt: Date.now(),
+    };
+    returnDestination.set(newer);
+    answer({
+      kind: "refused",
+      error: { code: "unauthenticated", message: "x" },
+      definitive: true,
+      stage: "exchange",
+    } as AttemptOutcome);
+    expect(
+      await screen.findByText("That username or password isn't right."),
+    ).toBeInTheDocument();
+    expect(returnDestination.peek()).toBe(newer);
+  });
+
+  test("R3: a refusal that arrives after the activation's gate closed the tree is shown when the SAME session's tree renders again", async () => {
+    const { answer, unmountTree } = await (async () => {
+      const held = await confirmHeld();
+      return { ...held, unmountTree: () => cleanup() };
+    })();
+    // The activating write closes the protected tree.
+    unmountTree();
+    answer({
+      kind: "refused",
+      error: { code: "device_capacity", message: "x" },
+      definitive: true,
+      stage: "activation",
+    } as AttemptOutcome);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The same account and epoch display again: the section is open with the refusal under it.
+    mount(ago(10 * 60_000));
+    const region = screen.queryByRole("region", { name: CONFIRM_LABEL });
+    expect(region).not.toBeNull();
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/This device has too many active sign-ins/),
+      ).not.toBeNull(),
+    );
+    expect(returnDestination.peek()).toBeNull();
+  });
+
+  test("R3 control: a stage left by an earlier session is not shown to a newer one", async () => {
+    confirmFlow.open({ account: "acct", epoch: 0 });
+    mount(ago(10 * 60_000));
+    expect(
+      screen.queryByRole("region", { name: CONFIRM_LABEL }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: CONFIRM_LABEL })).toBeEnabled();
   });
 
   test("the link and remove controls carry the focus keys the return destination names", () => {
