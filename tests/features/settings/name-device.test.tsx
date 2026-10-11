@@ -409,7 +409,12 @@ describe("capacity (D-8d-11)", () => {
     expect(screen.getByText("Loading your devices…")).toBeInTheDocument();
     answer = "fail";
     await act(async () => release({ ok: false, error: "http", status: 500 }));
-    await screen.findByText("Couldn't load your devices — please try again.");
+    // Adapted, labelled (WEB-08d revision 3): the lookup is scoped to the page (<main>). LoadFailed also announces this sentence in the
+    // assertive live region one animation frame later, so an unscoped lookup found TWO elements whenever that frame ran before it (a
+    // loaded machine: driver run 1 of revision 3; reproduced deterministically in .agtx/evidence/revision-3/diag-name-device). Intent unchanged.
+    await within(screen.getByRole("main")).findByText(
+      "Couldn't load your devices — please try again.",
+    );
     expect(document.querySelector("[data-capacity=devices]")).toBeNull();
   });
 });

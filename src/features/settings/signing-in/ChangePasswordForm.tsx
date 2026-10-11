@@ -132,11 +132,16 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
         ),
       { isCurrent: interaction.current },
     ).catch(() => null);
+    // WEB-08d review R4: asked BEFORE ending it. A form that was dismissed, left or replaced, or whose identity moved on, may not show
+    // the outcome: the announcer outlives the form, so an old answer would speak over whatever the person is doing now. The session
+    // still observes what the request did (a success or a 401 ends the session everywhere, the neutral state takes over).
+    const owned = interaction.current();
     interaction.end();
     inflight.current = false;
-    // A password never outlives its submit.
+    // A password never outlives its submit. These are this form's own fields: a reopened form is another one, which this cannot touch.
     setCurrent("");
     setNext("");
+    if (!owned) return setPhase({ kind: "idle" });
     if (result === null || leavesOutcomeUnknown(result))
       return setPhase({ kind: "unconfirmed" });
     if (result.ok) return setPhase({ kind: "idle" });

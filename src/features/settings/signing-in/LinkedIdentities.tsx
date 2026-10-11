@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { type AccountSummary, useSession } from "../../../session";
@@ -6,7 +6,10 @@ import { startSso } from "../../authentication/controller";
 import { RequestId } from "../../authentication/MessageText";
 import { MESSAGE_TEXT } from "../../authentication/outcome-copy";
 import { isOnlineNow, useOnline } from "../../authentication/use-online";
-import { useInteractions } from "../sessions-devices/ownership";
+import {
+  type Interaction,
+  useInteractions,
+} from "../sessions-devices/ownership";
 import { untilSent } from "../sessions-devices/until-sent";
 import { leavesOutcomeUnknown } from "./outcome";
 import { Unconfirmed } from "./Unconfirmed";
@@ -49,6 +52,21 @@ export function issuerLabel(issuer: string): string {
 
 const browserNavigate = (url: string) => location.assign(url);
 
+/** What one action reports when it fails: shown under the row (or the Link control) that started it. */
+interface Problem {
+  text: string;
+  requestId?: string;
+}
+/** Each removal (one per issuer) and the link are separate actions, which can be in progress at the same time. */
+type ActionKey = `remove:${string}` | "link";
+const removal = (issuer: string): ActionKey => `remove:${issuer}`;
+
+const without = <T,>(set: ReadonlySet<T>, item: T): ReadonlySet<T> => {
+  const next = new Set(set);
+  next.delete(item);
+  return next;
+};
+
 /**
  * "Linked accounts": one row per issuer from `GET /me` (the contract has no link date and no provider name, so neither is
  * shown), Remove, and Link. Remove and Link need a session created within five minutes, which the page checks against the
@@ -62,6 +80,10 @@ const browserNavigate = (url: string) => location.assign(url);
  * refuse to start. That is a hint, never the evidence for an outcome: a removal that started online is judged by its answer, and
  * an answer that cannot show the removal was not made (a lost one, or a `5xx`) is unconfirmed (review R6), because removal ends
  * the session in the same transaction and a retry could not authenticate.
+ *
+ * WEB-08d (review R4, design assessment A5): every action owns its own progress and its own failure. Removing one issuer while
+ * another removal or a link is in progress neither releases the other's "Removing…" nor replaces its message, and an action whose
+ * screen was left (or whose identity moved on) shows nothing when its answer comes.
  */
 export function LinkedIdentities({
   account,
@@ -76,25 +98,56 @@ export function LinkedIdentities({
   const session = useSession();
   const interactions = useInteractions();
   const online = useOnline();
-  const [busy, setBusy] = useState<string | null>(null);
-  const [problem, setProblem] = useState<{
-    for: string;
-    text: string;
-    requestId?: string;
-  } | null>(null);
+  const [pending, setPending] = useState<ReadonlySet<ActionKey>>(
+    () => new Set(),
+  );
+  const [problems, setProblems] = useState<ReadonlyMap<ActionKey, Problem>>(
+    () => new Map(),
+  );
   const [unconfirmed, setUnconfirmed] = useState(false);
+  // Synchronous, per action: a second press before "Removing…" renders sends nothing more.
+  const actions = useRef(new Map<ActionKey, Interaction>());
   const headingId = useId();
   // WF-SETTINGS-03 (states.md, "Removed"): the sign-out-everywhere consequence is disclosed BEFORE Remove and is associated with
   // the button through `aria-describedby`, on the mobile sheet as well as the desktop dialog (one component serves both).
   const consequenceId = useId();
   const { stale, recheck } = useStaleSession(currentSessionStartedAt);
 
+  /** Starts the action `key`, or returns null if it is already in progress. Clears only its own earlier failure. */
+  const start = (key: ActionKey): Interaction | null => {
+    if (actions.current.has(key)) return null;
+    const interaction = interactions.begin();
+    actions.current.set(key, interaction);
+    setPending((now) => new Set(now).add(key));
+    setProblems((now) => {
+      const next = new Map(now);
+      next.delete(key);
+      return next;
+    });
+    return interaction;
+  };
+  /**
+   * Ends the action `key` begun as `interaction` and releases ITS progress only. True when it may still show its outcome: asked
+   * before it ends (review R4), so a dismissed or superseded action says nothing.
+   */
+  const finish = (key: ActionKey, interaction: Interaction): boolean => {
+    const owned = interaction.current();
+    interaction.end();
+    if (actions.current.get(key) === interaction) {
+      actions.current.delete(key);
+      setPending((now) => without(now, key));
+    }
+    return owned;
+  };
+  const fail = (key: ActionKey, problem: Problem) =>
+    setProblems((now) => new Map(now).set(key, problem));
+
   const remove = async (issuer: string) => {
     if (!online || !isOnlineNow() || recheck()) return;
-    setBusy(issuer);
-    setProblem(null);
+    const key = removal(issuer);
     // WEB-08d review R3: retried only while this screen is mounted; leaving it withdraws a removal still waiting to be issued.
-    const interaction = interactions.begin();
+    const interaction = start(key);
+    if (!interaction) return;
     const result = await untilSent(
       () =>
         session.operations.unlinkOidc(issuer, {
@@ -102,14 +155,12 @@ export function LinkedIdentities({
         }),
       { isCurrent: interaction.current },
     ).catch(() => null);
-    interaction.end();
-    setBusy(null);
+    if (!finish(key, interaction)) return;
     if (result === null || leavesOutcomeUnknown(result))
       return setUnconfirmed(true);
     if (result.ok) return;
     if (result.error === "auth_state" || result.error === "closed") return;
-    setProblem({
-      for: issuer,
+    fail(key, {
       text: MESSAGE_TEXT[
         result.error === "not_sent" ? "busy_window" : "unlink_refused"
       ],
@@ -118,17 +169,18 @@ export function LinkedIdentities({
 
   const link = async () => {
     if (!online || !isOnlineNow() || recheck()) return;
-    setBusy("link");
-    setProblem(null);
+    // The interaction only decides who may show the outcome: the sign-in attempt and its navigation keep their own protocol.
+    const interaction = start("link");
+    if (!interaction) return;
     const result = await startSso(session, { link: true }, { navigate });
-    setBusy(null);
+    if (!finish("link", interaction)) return;
     if (result.kind === "failed")
-      setProblem({
-        for: "link",
+      fail("link", {
         text: MESSAGE_TEXT[result.message.id],
         requestId: result.message.requestId,
       });
   };
+  const linkProblem = problems.get("link");
 
   // What is true now comes first, then what has to be true before the control can ever work: while there is no connection that
   // is the thing to fix, and the other reason is still there to read when it returns.
@@ -158,65 +210,68 @@ export function LinkedIdentities({
         <p className="text-[13px] text-ink-2">{NO_LINKS}</p>
       ) : (
         <List className="flex flex-col gap-2">
-          {account.oidc_issuers.map((issuer) => (
-            <li
-              key={issuer}
-              data-issuer-row=""
-              className="list-none rounded-row border border-hairline-strong bg-panel p-3"
-            >
-              <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
-                {/* The host takes the room it needs and the control wraps below it, so a host is only broken inside a word when
+          {account.oidc_issuers.map((issuer) => {
+            const problem = problems.get(removal(issuer));
+            return (
+              <li
+                key={issuer}
+                data-issuer-row=""
+                className="list-none rounded-row border border-hairline-strong bg-panel p-3"
+              >
+                <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
+                  {/* The host takes the room it needs and the control wraps below it, so a host is only broken inside a word when
                     it is longer than the row (`break-words`), never because a neighbour squeezed it. */}
-                <span className="flex min-w-0 flex-1 basis-48 items-center gap-3">
-                  <span
-                    aria-hidden="true"
-                    className="shrink-0 rounded-control border border-hairline-strong px-1.5 py-0.5 text-[11px] text-ink-2"
-                  >
-                    SSO
+                  <span className="flex min-w-0 flex-1 basis-48 items-center gap-3">
+                    <span
+                      aria-hidden="true"
+                      className="shrink-0 rounded-control border border-hairline-strong px-1.5 py-0.5 text-[11px] text-ink-2"
+                    >
+                      SSO
+                    </span>
+                    <span
+                      data-issuer=""
+                      className="min-w-0 break-words text-[14px] text-ink-1"
+                    >
+                      {issuerLabel(issuer)}
+                    </span>
                   </span>
-                  <span
-                    data-issuer=""
-                    className="min-w-0 break-words text-[14px] text-ink-1"
+                  {pending.has(removal(issuer)) ? (
+                    <Button
+                      disabled
+                      reason="Removing…"
+                      aria-describedby={consequenceId}
+                    >
+                      Remove
+                    </Button>
+                  ) : removeReason ? (
+                    <Button
+                      disabled
+                      reason={removeReason}
+                      aria-describedby={consequenceId}
+                    >
+                      Remove
+                    </Button>
+                  ) : (
+                    <Button
+                      aria-label={`Remove ${issuerLabel(issuer)}`}
+                      aria-describedby={consequenceId}
+                      onClick={() => void remove(issuer)}
+                    >
+                      Remove
+                    </Button>
+                  )}
+                </div>
+                {problem ? (
+                  <p
+                    data-error=""
+                    className="mt-2 text-[12.5px] leading-[1.6] text-ink-1"
                   >
-                    {issuerLabel(issuer)}
-                  </span>
-                </span>
-                {busy === issuer ? (
-                  <Button
-                    disabled
-                    reason="Removing…"
-                    aria-describedby={consequenceId}
-                  >
-                    Remove
-                  </Button>
-                ) : removeReason ? (
-                  <Button
-                    disabled
-                    reason={removeReason}
-                    aria-describedby={consequenceId}
-                  >
-                    Remove
-                  </Button>
-                ) : (
-                  <Button
-                    aria-label={`Remove ${issuerLabel(issuer)}`}
-                    aria-describedby={consequenceId}
-                    onClick={() => void remove(issuer)}
-                  >
-                    Remove
-                  </Button>
-                )}
-              </div>
-              {problem?.for === issuer ? (
-                <p
-                  data-error=""
-                  className="mt-2 text-[12.5px] leading-[1.6] text-ink-1"
-                >
-                  {problem.text}
-                </p>
-              ) : null}
-            </li>
-          ))}
+                    {problem.text}
+                  </p>
+                ) : null}
+              </li>
+            );
+          })}
         </List>
       )}
       {account.oidc_issuers.length > 0 ? (
@@ -237,7 +292,7 @@ export function LinkedIdentities({
         <Unconfirmed check={() => session.operations.readAccount()} />
       ) : null}
       <div className="flex flex-col items-start gap-2">
-        {busy === "link" ? (
+        {pending.has("link") ? (
           <Button disabled reason="Opening your provider…">
             {LINK_LABEL}
           </Button>
@@ -249,10 +304,10 @@ export function LinkedIdentities({
           <Button onClick={() => void link()}>{LINK_LABEL}</Button>
         )}
         <p className="text-[12.5px] leading-[1.6] text-ink-2">{LINK_HINT}</p>
-        {problem?.for === "link" ? (
+        {linkProblem ? (
           <p data-error="" className="text-[12.5px] leading-[1.6] text-ink-1">
-            {problem.text}
-            <RequestId id={problem.requestId} />
+            {linkProblem.text}
+            <RequestId id={linkProblem.requestId} />
           </p>
         ) : null}
       </div>

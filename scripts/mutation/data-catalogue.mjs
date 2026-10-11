@@ -17138,6 +17138,156 @@ export const UNIT = [
         "            setLoggingOut(null);",
       ),
   },
+  {
+    id: "MU-1660",
+    title:
+      "WEB-08d R4 (revision 3): a password form's completion shows its outcome without asking whether it still owns it (a dismissed form announces)",
+    file: "src/features/settings/signing-in/ChangePasswordForm.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect: /Close, then a refusal \(422\): no announcement/,
+    patch: (t) =>
+      sub(t, '    if (!owned) return setPhase({ kind: "idle" });\n', ""),
+  },
+  {
+    id: "MU-1661",
+    title:
+      "WEB-08d R4 (revision 3): the password completion asks for ownership AFTER ending its interaction (a form still open never shows its outcome)",
+    file: "src/features/settings/signing-in/ChangePasswordForm.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect: /control: left open, a refusal is shown and announced at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const owned = interaction.current();\n    interaction.end();\n",
+        "    interaction.end();\n    const owned = interaction.current();\n",
+      ),
+  },
+  {
+    id: "MU-1662",
+    title:
+      "WEB-08d R4 (revision 3): an interaction is owned by the account only (a new sign-in of the same account inherits an old answer)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect:
+      /password answer for an identity that moved on is not shown a new sign-in of the same account \(epoch\)/,
+    patch: (t) =>
+      sub(
+        t,
+        /identity \? `\$\{identity\.account_id\}:\$\{identity\.epoch\}` : null;/,
+        "identity ? identity.account_id : null;",
+      ),
+  },
+  {
+    id: "MU-1663",
+    title:
+      "WEB-08d A4 (revision 3): Check now shows its answer without asking whether it still owns it (a dismissed check announces)",
+    file: "src/features/settings/signing-in/Unconfirmed.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect:
+      /dismissed \(Close\) while checking, a working session: nothing is said/,
+    patch: (t) => sub(t, '    if (!owned) return setState("idle");\n', ""),
+  },
+  {
+    id: "MU-1664",
+    title:
+      "WEB-08d R4 (revision 3): dismissing Signing in does not end its forms' interactions until they unmount (an answer in between is shown)",
+    file: "src/features/settings/signing-in/SigningInDialog.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect:
+      /arrives after Close is pressed, before the route has changed, is not shown/,
+    patch: (t) => sub(t, "        scope.dismiss();\n", ""),
+  },
+  {
+    id: "MU-1665",
+    title:
+      "WEB-08d R4 (revision 3): an interaction begun inside a dismissal scope is not tracked by it (the dismissal ends nothing)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect:
+      /arrives after Close is pressed, before the route has changed, is not shown/,
+    patch: (t) => sub(t, "        dismissal?.track(interaction);\n", ""),
+  },
+  {
+    id: "MU-1666",
+    title:
+      "WEB-08d A5 (revision 3): a linked-identity action that ends releases every action's progress",
+    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect:
+      /two removals in progress, X first answered: the other stays in progress/,
+    patch: (t) =>
+      sub(
+        t,
+        "      setPending((now) => without(now, key));",
+        "      setPending(new Set());",
+      ),
+  },
+  {
+    id: "MU-1667",
+    title:
+      "WEB-08d A5 (revision 3): starting a linked-identity action clears every action's failure",
+    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect: /starting a removal clears only its own earlier failure/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setProblems((now) => {\n      const next = new Map(now);\n      next.delete(key);\n      return next;\n    });",
+        "    setProblems(new Map());",
+      ),
+  },
+  {
+    id: "MU-1668",
+    title:
+      "WEB-08d A5 (revision 3): a removal shows its outcome after its identity moved on (no ownership check)",
+    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect: /the identity moved on during a removal: another account/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!finish(key, interaction)) return;",
+        "    finish(key, interaction);",
+      ),
+  },
+  {
+    id: "MU-1669",
+    title:
+      "WEB-08d A5 (revision 3): a link shows its outcome after its identity moved on (no ownership check)",
+    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect: /the identity moved on during a link: another account/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!finish("link", interaction)) return;',
+        '    finish("link", interaction);',
+      ),
+  },
+  {
+    id: "MU-1670",
+    title:
+      "WEB-08d A5 (revision 3): no synchronous per-action guard (a double press of Remove sends twice)",
+    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect: /a double press of one Remove sends one request/,
+    patch: (t) =>
+      sub(t, "    if (actions.current.has(key)) return null;\n", ""),
+  },
+  {
+    id: "MU-1671",
+    title:
+      "WEB-08d A4 (revision 3): no synchronous guard on Check now (a double press asks twice)",
+    file: "src/features/settings/signing-in/Unconfirmed.tsx",
+    tests: ["tests/features/settings/completion-ownership.test.tsx"],
+    expect: /a double press of Check now, before Checking… renders, asks once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (checking.current || !online || !isOnlineNow()) return;",
+        "    if (!online || !isOnlineNow()) return;",
+      ),
+  },
 ];
 
 /**

@@ -211,7 +211,10 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
       listSessions,
       readDevices: vi.fn(async () => twoDevices()),
     });
-    const banner = await screen.findByText(
+    // Adapted, labelled (WEB-08d revision 3): the lookup is scoped to the page (<main>). LoadFailed also announces this sentence in the
+    // assertive live region one animation frame later, so an unscoped lookup found TWO elements whenever that frame ran before it (a
+    // loaded machine: driver run 1 of revision 3; reproduced deterministically in .agtx/evidence/revision-3/diag-name-device). Intent unchanged.
+    const banner = await within(screen.getByRole("main")).findByText(
       "Couldn't load your sign-ins — please try again.",
     );
     expect(screen.getByText("Request ID: req-1")).toBeInTheDocument();
@@ -237,8 +240,11 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
       })),
       readDevices: vi.fn(async () => twoDevices()),
     });
+    // Adapted, labelled (WEB-08d revision 3): the lookup is scoped to the page (<main>). LoadFailed also announces this sentence in the
+    // assertive live region one animation frame later, so an unscoped lookup found TWO elements whenever that frame ran before it (a
+    // loaded machine: driver run 1 of revision 3; reproduced deterministically in .agtx/evidence/revision-3/diag-name-device). Intent unchanged.
     expect(
-      await screen.findByText(
+      await within(screen.getByRole("main")).findByText(
         "You're offline, so we can't load your sign-ins right now.",
       ),
     ).toBeInTheDocument();

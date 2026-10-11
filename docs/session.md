@@ -286,7 +286,12 @@ request's User-Agent: a recognition hint, never identity), `device_name` to sess
     handler, keys its dialog (reopening the same row is a new dialog) and ends at once when the dialog is dismissed (Cancel, Keep, Escape, Close, the sync control),
     replaced, its screen is left, or the identity (account and epoch) moves on. Only a current interaction makes another `not_sent` attempt (`untilSent` asks
     before every call, the first included) or shows its outcome; a dialog closes only itself, so a late answer of an older dialog never closes or changes a newer
-    one. Each row of the sessions list has its own pending and failure state.
+    one. Each row of the sessions list has its own pending and failure state. **Revision 3 (review R4, design assessment A4/A5):** a completion asks whether
+    its interaction is still current BEFORE it ends it, and only then changes what the person sees (fields, busy state, a message, focus, an announcement: the
+    announcer outlives every form, so an obsolete answer would otherwise speak over a newer one); ending its own operation needs no permission. This covers the
+    Signing in callers too: the password change, each linked-identity removal and the link (each its own action, with its own progress and failure), and "Check
+    now" (its read is still observed by the session; a dismissed check says nothing). Signing in is dismissed by navigating away, so its forms would unmount a
+    moment later: its close handler ends every interaction begun inside it first (`DismissalScopeProvider`), and an answer in between shows nothing.
   - what an **issued** request may have changed (a confirmed answer, `gone`, or an outcome nobody can confirm) is reported with `reconcileLists` for the identity
     it was made under, **even after its dialog was dismissed**: dismissing a dialog does not undo a request already sent. Every list on the page for that identity
     reads again, whichever screen made the change (a screen left and returned to included; a newly mounted screen reads anyway). Nothing is read for an identity

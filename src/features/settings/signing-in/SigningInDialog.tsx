@@ -1,6 +1,10 @@
 import { Dialog } from "../../../components/ui/dialog";
 import { useSession } from "../../../session";
 import { LoadFailed } from "../sessions-devices/LoadFailed";
+import {
+  DismissalScopeProvider,
+  useDismissalScope,
+} from "../sessions-devices/ownership";
 import { useLoad } from "../sessions-devices/useLoad";
 import { ChangePasswordForm } from "./ChangePasswordForm";
 import { LinkedIdentities } from "./LinkedIdentities";
@@ -57,14 +61,22 @@ export function SigningInDialog({
   onClose(): void;
   onCloseAutoFocus?(event: Event): void;
 }) {
+  // WEB-08d review R4: dismissing the dialog ends the forms' interactions at once, before the route changes and they unmount, so
+  // an answer that arrives in between shows nothing (no message, announcement or focus) and starts no further attempt.
+  const scope = useDismissalScope();
   return (
     <Dialog
       open={open}
-      onClose={onClose}
+      onClose={() => {
+        scope.dismiss();
+        onClose();
+      }}
       onCloseAutoFocus={onCloseAutoFocus}
       title="Signing in"
     >
-      <SigningInBody />
+      <DismissalScopeProvider scope={scope}>
+        <SigningInBody />
+      </DismissalScopeProvider>
     </Dialog>
   );
 }

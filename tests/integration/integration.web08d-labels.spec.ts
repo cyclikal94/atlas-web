@@ -1,6 +1,7 @@
-import type { Page } from "@playwright/test";
+import type { BrowserContext, Page } from "@playwright/test";
 import { runAxe } from "../e2e/helpers";
 import {
+  ACCOUNTS,
   API,
   bootHarness,
   engineLabel,
@@ -13,7 +14,9 @@ import {
   test,
   untilHeld,
   untilView,
+  type Who,
 } from "./helpers";
+import { credentialsWork, strongPassword } from "./web08b-support";
 
 /**
  * I-8d (WEB-08d, plan section 7): recognisable sessions and devices, device names and both capacities against the RELEASED BE-Q25
@@ -786,5 +789,269 @@ test.describe("I-8d: BE-Q25 labels, names and capacities against the released ba
         .click();
       await expect(page.getByRole("dialog")).toHaveCount(0);
     }
+  });
+
+  /**
+   * Review R4 (revision 3): a password change, or a "Check now", belongs to the Signing in form that made it. The first call of a round
+   * answers when the test says so; a SYNTHETIC public `not_sent` (as the review's own probe, and I-8d-10): the kernel's admission
+   * boundary is F-WD in operations-withdraw.test.ts. Every later call is the real operation against the released backend.
+   */
+  async function openSigningIn(context: BrowserContext, who: Who) {
+    const page = await bootHarness(context, "/settings/signing-in");
+    expect((await signIn(page, who)).kind).toBe("settled");
+    await untilView(page, "displaying");
+    const dialog = page.getByRole("dialog", { name: "Signing in" });
+    await expect(dialog.getByLabel("Current password")).toBeVisible();
+    await page.evaluate(() => {
+      const operations = window.__s.operations;
+      const original = operations.changePassword.bind(operations);
+      window.__t.password = { calls: 0 };
+      operations.changePassword = async (...args) => {
+        const round = window.__t.password as {
+          calls: number;
+          answer?: unknown;
+          release?: () => void;
+        };
+        round.calls += 1;
+        if (round.calls === 1 && round.answer !== undefined)
+          return new Promise((resolve) => {
+            round.release = () => resolve(round.answer as never);
+          });
+        return original(...args);
+      };
+    });
+    return { page, dialog };
+  }
+  /** The next round: its first call is held and then answered `answer`. */
+  const holdPassword = (page: Page, answer: unknown) =>
+    page.evaluate((value) => {
+      window.__t.password = { calls: 0, answer: value };
+    }, answer);
+  const passwordCalls = (page: Page) =>
+    page.evaluate(() => (window.__t.password as { calls: number }).calls);
+  const releasePassword = (page: Page) =>
+    page.evaluate(() =>
+      (window.__t.password as { release: () => void }).release(),
+    );
+  /** Two animation frames: the announcer writes a region on the frame after it is asked to. */
+  const frames = (page: Page) =>
+    page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+  const sentPasswords = async () =>
+    (await proxy.log()).filter(
+      (e) => e.method === "POST" && /\/password$/.test(e.path),
+    ).length;
+
+  test("I-8d-12 (review R4, revision 3): a password change refused before sending, then Signing in closed: nothing is announced, nothing more is sent and the password is unchanged; a form opened again meanwhile keeps its values, its message and its focus", async ({
+    context,
+  }) => {
+    const { page, dialog } = await openSigningIn(context, "olga");
+    const assertive = page.locator("[aria-live=assertive]");
+    const sentBefore = await sentPasswords();
+
+    // Closed, then the refusal: silence, over the whole bounded retry schedule.
+    await holdPassword(page, { ok: false, error: "not_sent" });
+    await dialog.getByLabel("Current password").fill(ACCOUNTS.olga.password);
+    await dialog.getByLabel("New password").fill(strongPassword());
+    await dialog
+      .getByRole("button", { name: "Change password", exact: true })
+      .click();
+    await expect.poll(() => passwordCalls(page)).toBe(1);
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await releasePassword(page);
+    // The helper's retry budget is bounded (NOT_SENT_DELAYS_MS, 5,550 ms in all, production values): observe past all of it.
+    await page.waitForTimeout(6_500);
+    await frames(page);
+    expect(await passwordCalls(page)).toBe(1);
+    expect(await assertive.textContent()).toBe("");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    // Closed, opened again, and the NEW form says something of its own; then the old form's refusal arrives.
+    await holdPassword(page, { ok: false, error: "not_sent" });
+    await page.locator('[data-settings-link="signing-in"]').click();
+    const first = page.getByRole("dialog", { name: "Signing in" });
+    await first.getByLabel("Current password").fill(ACCOUNTS.olga.password);
+    await first.getByLabel("New password").fill(strongPassword());
+    await first
+      .getByRole("button", { name: "Change password", exact: true })
+      .click();
+    await expect.poll(() => passwordCalls(page)).toBe(1);
+    await first.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page.locator('[data-settings-link="signing-in"]').click();
+    const reopened = page.getByRole("dialog", { name: "Signing in" });
+    await reopened.getByLabel("Current password").fill("typed-again");
+    await reopened.getByLabel("New password").fill("short");
+    await reopened
+      .getByRole("button", { name: "Change password", exact: true })
+      .click();
+    const message = "Use at least 12 characters.";
+    await expect(assertive).toHaveText(message);
+    await expect(reopened.getByLabel("New password")).toBeFocused();
+    await releasePassword(page);
+    await page.waitForTimeout(6_500);
+    await frames(page);
+    expect(await passwordCalls(page)).toBe(1);
+    expect(await assertive.textContent()).toBe(message);
+    await expect(page.getByRole("dialog")).toHaveCount(1);
+    await expect(reopened.getByLabel("Current password")).toHaveValue(
+      "typed-again",
+    );
+    await expect(reopened.getByLabel("New password")).toHaveValue("short");
+    await expect(reopened.getByLabel("New password")).toBeFocused();
+    await expect(reopened.locator("[data-error]")).toHaveText([message]);
+
+    // Nothing was put on the wire and the password still works.
+    expect(await sentPasswords()).toBe(sentBefore);
+    expect(
+      await credentialsWork(ACCOUNTS.olga.username, ACCOUNTS.olga.password),
+    ).toBe(true);
+    await untilView(page, "displaying");
+  });
+
+  test("I-8d-13 (review R4, revision 3, control): a password change refused before sending, its form left open, is tried again once and applies", async ({
+    context,
+  }) => {
+    const { page, dialog } = await openSigningIn(context, "pete");
+    const next = strongPassword();
+    await holdPassword(page, { ok: false, error: "not_sent" });
+    await dialog.getByLabel("Current password").fill(ACCOUNTS.pete.password);
+    await dialog.getByLabel("New password").fill(next);
+    await dialog
+      .getByRole("button", { name: "Change password", exact: true })
+      .click();
+    await expect.poll(() => passwordCalls(page)).toBe(1);
+    await releasePassword(page);
+    await expect.poll(() => passwordCalls(page)).toBe(2);
+    await untilView(page, "neutral");
+    expect(await credentialsWork(ACCOUNTS.pete.username, next)).toBe(true);
+  });
+
+  test("I-8d-14 (review R4, revision 3): a password change already sent, whose committed answer is held while Signing in is closed, still ends the session everywhere; the closed form says nothing", async ({
+    context,
+  }) => {
+    const { page, dialog } = await openSigningIn(context, "bob");
+    // Read without waiting: once the committed change has revoked this session (which another request of the page can observe
+    // before the held answer is released), the protected tree and its live regions are gone. A region that is gone says nothing.
+    const assertive = () =>
+      page.evaluate(
+        () =>
+          document.querySelector("[aria-live=assertive]")?.textContent ?? "",
+      );
+    const next = strongPassword();
+    const rule = await proxy.addRule({
+      method: "POST",
+      path: "/api/experimental/v1/password",
+      action: "hold",
+      ordinal: 1,
+    });
+    await dialog.getByLabel("Current password").fill(ACCOUNTS.bob.password);
+    await dialog.getByLabel("New password").fill(next);
+    await dialog
+      .getByRole("button", { name: "Change password", exact: true })
+      .click();
+    await untilHeld(rule.id);
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await assertive()).toBe("");
+    await proxy.release(rule.id);
+    // The session observes what the request did: the change committed, so every session ended, this one included.
+    await untilView(page, "neutral");
+    await frames(page);
+    expect(await assertive()).toBe("");
+    expect(await passwordCalls(page)).toBe(1);
+    expect(await credentialsWork(ACCOUNTS.bob.username, next)).toBe(true);
+  });
+
+  test("I-8d-15 (design assessment A4, revision 3): a Check now whose answer comes after Signing in was closed says nothing; a form left open says the change is still unconfirmed (control)", async ({
+    context,
+  }) => {
+    const { page, dialog } = await openSigningIn(context, "alice");
+    const polite = page.locator("[aria-live=polite]");
+    // The change's outcome is unknown (a SYNTHETIC `offline` answer; nothing is sent), and the next account read the test holds.
+    await page.evaluate(() => {
+      const operations = window.__s.operations;
+      operations.changePassword = async () => ({
+        ok: false,
+        error: "offline",
+      });
+      const read = operations.readAccount.bind(operations);
+      window.__t.check = { armed: false, reads: 0 };
+      operations.readAccount = async (...args) => {
+        const check = window.__t.check as {
+          armed: boolean;
+          reads: number;
+          release?: () => void;
+        };
+        if (!check.armed) return read(...args);
+        check.armed = false;
+        check.reads += 1;
+        await new Promise<void>((resolve) => {
+          check.release = resolve;
+        });
+        return read(...args);
+      };
+    });
+    const arm = () =>
+      page.evaluate(() => {
+        (window.__t.check as { armed: boolean }).armed = true;
+      });
+    const release = () =>
+      page.evaluate(() =>
+        (window.__t.check as { release: () => void }).release(),
+      );
+    const unknown = async (form: typeof dialog) => {
+      await form.getByLabel("Current password").fill(ACCOUNTS.alice.password);
+      await form.getByLabel("New password").fill(strongPassword());
+      await form
+        .getByRole("button", { name: "Change password", exact: true })
+        .click();
+      await expect(form.locator("[data-unconfirmed]")).toBeVisible();
+    };
+
+    // Closed while checking: the read is answered (the session still works), and nothing is said.
+    await unknown(dialog);
+    await arm();
+    await dialog
+      .getByRole("button", { name: "Check now", exact: true })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window.__t.check as { reads: number }).reads),
+      )
+      .toBe(1);
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await frames(page);
+    const before = await polite.textContent();
+    await release();
+    await frames(page);
+    expect(await polite.textContent()).toBe(before);
+    expect(before).not.toContain("still signed in");
+
+    // Control: opened again, left open, the same answer is shown and said.
+    await page.locator('[data-settings-link="signing-in"]').click();
+    const reopened = page.getByRole("dialog", { name: "Signing in" });
+    await unknown(reopened);
+    await arm();
+    await reopened
+      .getByRole("button", { name: "Check now", exact: true })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window.__t.check as { reads: number }).reads),
+      )
+      .toBe(2);
+    await release();
+    const still = reopened.locator("[data-still-unconfirmed]");
+    await expect(still).toBeVisible();
+    await frames(page);
+    expect(await polite.textContent()).toBe(await still.textContent());
+    await untilView(page, "displaying");
   });
 });
