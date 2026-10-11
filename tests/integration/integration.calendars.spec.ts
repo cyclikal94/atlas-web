@@ -15,12 +15,12 @@ import {
 } from "./helpers";
 
 /**
- * I-CAL1 to I-CAL10 (WEB-13a): the Calendars screen's PRODUCTION code (the production session and its adapters, the protected tree with
+ * I-CAL1 to I-CAL10 (WEB-13a; I-CAL6(c) added in revision 4): the Calendars screen's PRODUCTION code (the production session and its adapters, the protected tree with
  * its `DataProvider` and the application's command registry, Dexie, the stamped client of the online-only actions) in a real engine
  * against the RELEASED backend (v0.27.0-rc.1) on a disposable SQLite database, behind the delaying proxy, with a loopback ICS feed the
  * backend fetches linked calendars from (`scripts/integration/calendar-feed.mjs`; the runner gives the backend a disposable integration
- * key and an outbound exception for the feed's exact origin). Queued commands are sent by the FIXTURE test leader (production starts no
- * dispatcher until WEB-09b) and the snapshot is the FIXTURE seeder. Answers the proxy INJECTS are labelled so.
+ * key and an outbound exception for the feed's exact origin). Queued commands are sent by the FIXTURE test leader (the production leader
+ * of WEB-09b is not used here) and the snapshot is the FIXTURE seeder. Answers the proxy INJECTS are labelled so.
  *
  * FOCUSED EVIDENCE FOR A FIXTURE-STAGE TASK, not integration acceptance: BE-Q22, BE-B8 and BE-CH3 have no completion record
  * (`integration_passed` stays false). No PostgreSQL (the backend container cannot reach a loopback feed), no HTTPS, no real device.
@@ -343,7 +343,7 @@ async function link(
 
 /**
  * Wakes the fixture leader's dispatcher. It is woken by saves of its OWN facade; a save the screen makes goes through the tree's
- * facade, which only posts its `data_changed` hint (production has no dispatcher until WEB-09b, whose leader must wake on that hint).
+ * facade, which only posts its `data_changed` hint (the production leader of WEB-09b wakes on that hint; this fixture leader does not).
  */
 const wakeLeader = (page: Page) =>
   page.evaluate(() => window.__atlasData?.retryOutbox());
@@ -758,6 +758,78 @@ test.describe("I-CAL6: same-key recovery (case 6)", () => {
     );
     expect(new Set(refreshes(wire, id).map((w) => w.key)).size).toBe(1);
     expect(await served(path)).toBeGreaterThan(before + 1);
+  });
+
+  // Revision 4 (R10, D-13a-13): the reload clause of 6(a). A refresh in flight at a reload is never resent; the new document reads the
+  // live list and shows "Refreshing…" while the backend's REAL lease is held (its fetch held at the feed), then the synced history.
+  test("6(c): a reload while the refresh's fetch is held: the new document shows Refreshing… from the live list (Refresh held back, no Check again) and sends nothing; after the release the row shows its history, with no success claimed", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const path = await newFeed("ical6c");
+    const id = await link(page, wire, "I-CAL6c Feed", path);
+    await untilQuiet(page, id);
+    await feedCtl("hold", { path });
+    await row(page, id)
+      .getByRole("button", { name: /^Refresh/ })
+      .click();
+    await expect.poll(() => heldAt(path), { timeout: 20_000 }).toBe(1);
+    // The lease is the backend's own: its live list says so.
+    await expect
+      .poll(async () => (await source(page, id))?.value.refresh_in_progress, {
+        timeout: 20_000,
+      })
+      .toBe(true);
+    const sent = refreshes(wire, id).length;
+    expect(sent).toBe(1);
+    await reopen(page);
+    await expect(row(page, id).locator("[data-observed]")).toHaveAttribute(
+      "data-observed",
+      "busy",
+      { timeout: 30_000 },
+    );
+    await expect(row(page, id)).toContainText("Refreshing…");
+    await expect(
+      row(page, id).getByRole("button", { name: /^Refresh/ }),
+    ).toBeDisabled();
+    await expect(
+      row(page, id).getByRole("button", { name: "Check again" }),
+    ).toHaveCount(0);
+    // No run was restored: the progress is the observation's.
+    await expect(row(page, id).locator("[data-refresh]")).toHaveCount(0);
+    await feedCtl("release", { path });
+    await expect(row(page, id)).toHaveAttribute("data-observation", "idle", {
+      timeout: 60_000,
+    });
+    await expect(row(page, id)).not.toContainText("Refreshing…");
+    await expect(row(page, id)).not.toContainText("Refreshed.");
+    await expect(
+      row(page, id).locator("[data-status-line]").first(),
+    ).toBeVisible();
+    await expect(
+      row(page, id).getByRole("button", { name: /^Refresh/ }),
+    ).toBeEnabled();
+    expect(refreshes(wire, id)).toHaveLength(sent);
+  });
+
+  test("6(c) control: the same reload with no refresh running: the live list says so, nothing is shown as refreshing, and nothing is sent", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const path = await newFeed("ical6c-idle");
+    const id = await link(page, wire, "I-CAL6c Idle", path);
+    await untilQuiet(page, id);
+    const before = await served(path);
+    await reopen(page);
+    await expect(row(page, id)).toHaveAttribute("data-observation", "idle", {
+      timeout: 30_000,
+    });
+    await expect(row(page, id)).not.toContainText("Refreshing…");
+    await expect(
+      row(page, id).getByRole("button", { name: /^Refresh/ }),
+    ).toBeEnabled();
+    expect(refreshes(wire, id)).toEqual([]);
+    expect(await served(path)).toBe(before);
   });
 });
 

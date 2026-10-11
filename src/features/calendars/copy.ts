@@ -238,6 +238,16 @@ export const REFRESH_UNCONFIRMED = "We couldn't confirm this refresh.";
 export const successorFinished = (what: string): string =>
   `The newer refresh finished: ${what}`;
 export const SUCCESSOR_HEALTHY = "it succeeded.";
+/** Provisional: a newer refresh stopped running, but no read showed its result (R9). */
+export const SUCCESSOR_UNCONFIRMED =
+  "We couldn't confirm that the newer refresh finished — refresh again to check.";
+
+/**
+ * Provisional (revision 4, D-13a-13): a refresh this screen saw running when it opened (started elsewhere, or before a reload) that no
+ * later read showed ending, within the observation's time. Nothing is retried; Refresh starts a new one.
+ */
+export const OBSERVED_UNCONFIRMED =
+  "We couldn't check whether this calendar is still refreshing.";
 
 /** The synced health values, as words (historical context only). Provisional except where they reuse a cause's verbatim copy. */
 export const HEALTH_WORDS: Readonly<Record<string, string>> = {

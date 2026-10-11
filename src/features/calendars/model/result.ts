@@ -29,6 +29,8 @@ export type CalendarResult<T> =
 export interface LiveSource {
   refreshInProgress: boolean;
   health: string | null;
+  /** `last_success` (unix seconds), or null when the source has none (or the value does not say). */
+  lastSuccess: number | null;
 }
 
 /** The live list: `complete` is false when the bounded walk stopped before its end (an absent id is then unknown, not gone). */

@@ -58,6 +58,11 @@ export function createRefreshController(deps: {
    * nothing: no send, no read, no wait).
    */
   remembered?: Map<string, RefreshRun>;
+  /**
+   * A run of `sourceId` was admitted (a press of Refresh or "Check again"), before its request: the screen's observer of refresh activity
+   * stops observing that source (`observation-controller.ts`, revision 4), so a read it made earlier cannot change what the run shows.
+   */
+  onBegin?(sourceId: string): void;
 }): RefreshController {
   const timers: Timers = deps.timers ?? {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -156,6 +161,7 @@ export function createRefreshController(deps: {
     if (old !== undefined && !old.run.ended) return;
     if (old?.timer) timers.clearTimeout(old.timer);
     const { run, effect } = startRefresh(key());
+    deps.onBegin?.(id);
     remembered.delete(id);
     generations += 1;
     const entry: Entry = { run, generation: generations, timer: null };

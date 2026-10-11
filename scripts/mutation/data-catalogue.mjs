@@ -15393,8 +15393,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '        run: { ...run, checking: "superseded", waitedMs: 0 },\n        effect: { type: "live" },',
-        '        run: { ...run, checking: "superseded", waitedMs: 0 },\n        effect: { type: "send" },',
+        '        run: { ...run, checking: "superseded", waitedMs: 0, seen: null },\n        effect: { type: "live" },',
+        '        run: { ...run, checking: "superseded", waitedMs: 0, seen: null },\n        effect: { type: "send" },',
       ),
   },
   {
@@ -15807,7 +15807,8 @@ export const UNIT = [
     file: "src/features/calendars/CalendarSources.tsx",
     tests: ["tests/features/calendars/sources-screen.test.tsx"],
     expect: /online again, it resends under the run's key/,
-    patch: (t) => sub(t, "    else controller?.online();\n", ""),
+    // Re-anchored in revision 4 (the effect also stops the observer offline); the same mutation: the online branch is removed.
+    patch: (t) => sub(t, "    } else controller?.online();\n", "    }\n"),
   },
   {
     id: "MU-1356",
@@ -16139,6 +16140,332 @@ export const UNIT = [
         t,
         "  const submit = async () => {\n    if (inFlight.current) return;\n",
         "  const submit = async () => {\n",
+      ),
+  },
+  {
+    id: "MU-1386",
+    title:
+      "WEB-13a R9: a lease_expired retry is sent although the live read did not return the source (beyond the bounded walk, or absent)",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: [
+      "tests/features/calendars/refresh.test.ts",
+      "tests/features/calendars/api.test.ts",
+    ],
+    expect: /does not return the source|a source beyond the bounded walk/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (entry === undefined)\n    // The read did not return this source (the bounded walk stopped before it, or the list no longer has it): whether anything is\n    // running is unknown, exactly as when the read fails. No automatic retry, the cause\'s own copy.\n    return end(run, { kind: "failed", cause: checking });\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1387",
+    title:
+      "WEB-13a R9: a newer refresh seen running whose source a later read does not return is shown as finished",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /missing from a later read/,
+    patch: (t) =>
+      sub(
+        t,
+        '      entry !== undefined && finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry.health }',
+        '      entry === undefined || finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry?.health ?? null }',
+      ),
+  },
+  {
+    id: "MU-1388",
+    title:
+      "WEB-13a R9: the refresh_in_progress flag turning false alone finishes a newer refresh (a lapsed lease or a settings change counts as its result)",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /NO completing write|settings change that cleared|finishedSince/,
+    patch: (t) =>
+      sub(
+        t,
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n",
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n  return true;\n",
+      ),
+  },
+  {
+    id: "MU-1389",
+    title:
+      "WEB-13a R9: a settings change's health reset (pending) counts as a newer refresh's result",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /settings change that cleared|reset to pending/,
+    patch: (t) => sub(t, '    now.health !== "pending" &&\n', ""),
+  },
+  {
+    id: "MU-1390",
+    title:
+      "WEB-13a R9: the comparison is with the LATEST read that saw a newer refresh running, not the first",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /FIRST read that saw it running/,
+    patch: (t) => sub(t, "        seen: run.seen ?? {\n", "        seen: {\n"),
+  },
+  {
+    id: "MU-1391",
+    title:
+      "WEB-13a R9: an unchanged last_success counts as a newer refresh's success",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /NO completing write|finishedSince: unchanged/,
+    patch: (t) =>
+      sub(
+        t,
+        "now.lastSuccess > seen.lastSuccess",
+        "now.lastSuccess >= seen.lastSuccess",
+      ),
+  },
+  {
+    id: "MU-1392",
+    title:
+      "WEB-13a R9: the same health again counts as a newer refresh's result",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /NO completing write|the same failure again/,
+    patch: (t) => sub(t, " &&\n    now.health !== seen.health", ""),
+  },
+  {
+    id: "MU-1393",
+    title:
+      "WEB-13a R9: the live list's last_success is not read (a written success cannot be told from a lapsed lease)",
+    file: "src/features/calendars/api.ts",
+    tests: ["tests/features/calendars/api.test.ts"],
+    expect: /last_success is read/,
+    patch: (t) =>
+      sub(
+        t,
+        '        lastSuccess:\n          typeof lastSuccess === "number" && Number.isFinite(lastSuccess)\n            ? lastSuccess\n            : null,\n',
+        "        lastSuccess: null,\n",
+      ),
+  },
+  {
+    id: "MU-1394",
+    title: "WEB-13a R9: the row says an unconfirmed newer refresh finished",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /unconfirmed newer refresh is unconfirmed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "successor_unconfirmed":\n      return SUCCESSOR_UNCONFIRMED;\n',
+        '    case "successor_unconfirmed":\n      return successorFinished(SUCCESSOR_HEALTHY);\n',
+      ),
+  },
+  {
+    id: "MU-1397",
+    title:
+      "WEB-13a R10: the screen never reads the live list when it opens (no observation of a refresh held elsewhere or before a reload)",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /Refreshing… and holds Refresh back|view-only source is observed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    observer.watch(listed === "" ? [] : listed.split("\\n"));\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1398",
+    title:
+      "WEB-13a R10: a source the read did not return counts as idle (absence taken as evidence)",
+    file: "src/features/calendars/model/observation.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /is unknown, not idle|only a read that RETURNED/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (entry === undefined) return { kind: "unknown", seenBusy };\n',
+        '  if (entry === undefined) return { kind: "idle" };\n',
+      ),
+  },
+  {
+    id: "MU-1399",
+    title:
+      "WEB-13a R10: a refresh seen running elsewhere does not hold Refresh back",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /holds Refresh back/,
+    patch: (t) =>
+      sub(
+        t,
+        '    refreshing: running || observation?.kind === "busy",\n',
+        "    refreshing: running,\n",
+      ),
+  },
+  {
+    id: "MU-1400",
+    title:
+      "WEB-13a R10: a press on this screen does not end the source's observation (a read made before it can change the row)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect: /read held across a press|press's own outcome is shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (entry === undefined) return;\n      drop(entry);\n      watched.delete(id);\n      notify();\n",
+        "      if (entry === undefined) return;\n      notify();\n",
+      ),
+  },
+  {
+    id: "MU-1401",
+    title:
+      "WEB-13a R10: the observation has no time limit (a refresh seen running is read for ever, a read out at the limit is waited for)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect:
+      /time limit|75 s limit|still out at the limit|suspended timer|at most 16 walks/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  const lapse = (id: string, entry: Watched): void => {\n",
+            "  const lapse = (id: string, entry: Watched): void => {\n    return;\n",
+          ),
+          "        if (entry.deadline !== null && now() >= entry.deadline)\n",
+          "        if (false)\n",
+        ),
+        "current(id, generation) !== null && now() < (entry.deadline ?? 0)",
+        "current(id, generation) !== null",
+      ),
+  },
+  {
+    id: "MU-1402",
+    title: "WEB-13a R10: going offline does not stop the screen's observation",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /offline while running is observed|offline when the screen opens/,
+    patch: (t) => sub(t, "      observer?.offline();\n", ""),
+  },
+  {
+    id: "MU-1403",
+    title:
+      "WEB-13a R10: a stopped observation (offline, incompatible, disposed) starts reading again when asked",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /coming back online reads nothing|offline when the screen opens|stops being compatible ends it|dispose/,
+    patch: (t) => sub(t, "    stopped = true;\n", ""),
+  },
+  {
+    id: "MU-1404",
+    title:
+      "WEB-13a R10: listing the same sources again (a re-render) reads them again and restarts their time limit",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /ordinary re-render/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!watched.has(id) && !yielded.has(id)) {\n",
+        "        if (!yielded.has(id)) {\n",
+      ),
+  },
+  {
+    id: "MU-1405",
+    title:
+      "WEB-13a R10: a source seen idle after running is shown as refreshed (an observation claims a success)",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /no success claimed/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (observation?.kind === "busy") return REFRESHING;\n',
+        '  if (observation?.kind === "busy") return REFRESHING;\n  if (observation?.kind === "idle") return REFRESHED;\n',
+      ),
+  },
+  {
+    id: "MU-1406",
+    title:
+      "WEB-13a R10: walks of the live list overlap (a source listed while one is out starts another at once)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /walks never overlap/,
+    patch: (t) =>
+      // Both guards (the scheduler's and the walk's own): either alone keeps walks apart, so a one-site mutant is equivalent.
+      sub(
+        sub(
+          t,
+          "    if (stopped || !compatible || walking) return false;\n",
+          "    if (stopped || !compatible) return false;\n",
+        ),
+        "    if (stopped || !compatible || walking) return;\n",
+        "    if (stopped || !compatible) return;\n",
+      ),
+  },
+  {
+    id: "MU-1407",
+    title:
+      "WEB-13a R10: dispose (unmount, another identity) leaves a read still out current",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /dispose/,
+    patch: (t) =>
+      sub(
+        t,
+        "      disposed = true;\n      stop();\n      listeners.clear();\n",
+        "      disposed = true;\n      listeners.clear();\n",
+      ),
+  },
+  {
+    id: "MU-1408",
+    title:
+      "WEB-13a R10: a refresh seen running whose end no read showed is dropped silently (no could-not-check line)",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /could not check|75 s limit/,
+    patch: (t) =>
+      sub(t, "    return OBSERVED_UNCONFIRMED;\n", "    return null;\n"),
+  },
+  {
+    id: "MU-1409",
+    title:
+      "WEB-13a R10: the refresh controller does not tell the screen's observer that a press was admitted",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect:
+      /yields the source when a press is ADMITTED|press's own outcome is shown/,
+    patch: (t) => sub(t, "    deps.onBegin?.(id);\n", ""),
+  },
+  {
+    id: "MU-1410",
+    title:
+      "WEB-13a R10: the live list is read before the server is known to be compatible",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect: /compatible/,
+    patch: (t) =>
+      // Every site that asks (the scheduler, the walk and its page admission): any one alone keeps the read back.
+      sub(
+        sub(
+          sub(
+            t,
+            "    if (stopped || !compatible || walking) return false;\n",
+            "    if (stopped || walking) return false;\n",
+          ),
+          "    if (stopped || !compatible || walking) return;\n",
+          "    if (stopped || walking) return;\n",
+        ),
+        "      compatible &&\n      cohort.some(",
+        "      cohort.some(",
       ),
   },
 ];
@@ -18763,5 +19090,78 @@ export const ENGINE = [
         "  const entry = online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
         "  const entry = {};",
       ),
+  },
+  {
+    id: "MU-1395",
+    title:
+      "WEB-13a R9: (REAL ENGINE) the live re-read infers what it did not observe: a source the bounded walk did not return permits the lease retry, and a newer refresh no longer running (gone, or only its flag changed) is shown as finished",
+    file: "src/features/calendars/model/refresh.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL12",
+    expect: /E-CAL12/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            '  if (entry === undefined)\n    // The read did not return this source (the bounded walk stopped before it, or the list no longer has it): whether anything is\n    // running is unknown, exactly as when the read fails. No automatic retry, the cause\'s own copy.\n    return end(run, { kind: "failed", cause: checking });\n',
+            "",
+          ),
+          '      entry !== undefined && finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry.health }',
+          '      entry === undefined || finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry?.health ?? null }',
+        ),
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n",
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n  return true;\n",
+      ),
+  },
+  {
+    id: "MU-1396",
+    title:
+      "WEB-13a S6: (REAL ENGINE) the enqueue transaction does not check the observation a save states (two tabs: B saves London over A's queued Tokyo)",
+    file: "src/data/plans/outbox.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL13",
+    expect: /E-CAL13/,
+    patch: (t) =>
+      sub(
+        t,
+        '    // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.\n    if (!stillObserved(input.request, reads.observed))\n      return { result: { kind: "refused", reason: "changed" } };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1411",
+    title:
+      "WEB-13a R10: (REAL ENGINE) the screen reads the live list but neither shows a refresh held elsewhere nor holds Refresh back for it (R10's missing half)",
+    file: "src/features/calendars/SourceRow.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "revision 4, R10",
+    expect: /revision 4, R10/,
+    patch: (t) =>
+      sub(
+        sub(t, '  if (observation?.kind === "busy") return REFRESHING;\n', ""),
+        '    refreshing: running || observation?.kind === "busy",\n',
+        "    refreshing: running,\n",
+      ),
+  },
+  {
+    id: "MU-1412",
+    title:
+      "WEB-13a R10: (REAL ENGINE) going offline does not stop the screen's observation",
+    file: "src/features/calendars/CalendarSources.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "revision 4, R10",
+    expect: /revision 4, R10/,
+    patch: (t) => sub(t, "      observer?.offline();\n", ""),
+  },
+  {
+    id: "MU-1413",
+    title:
+      "WEB-13a R10: (REAL ENGINE) a press on this screen does not end the source's observation",
+    file: "src/features/calendars/refresh-controller.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "revision 4, R10",
+    expect: /revision 4, R10/,
+    patch: (t) => sub(t, "    deps.onBegin?.(id);\n", ""),
   },
 ];

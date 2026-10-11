@@ -15,7 +15,7 @@ import { expect, pressTab, runAxe, test } from "./helpers";
  * E-CAL1 to E-CAL6 (WEB-13a): the Calendars screen in a real engine, through the PRODUCTION composition (`/__session`: the production
  * session, its adapters, the protected tree with its `DataProvider` and the application's command registry, Dexie and real IndexedDB),
  * with the network stubbed by `page.route` (`/me` and `/sessions` served, so nothing hot-loops) and the fixture-only test leader of the
- * data harness sending what the screen queued (production starts no dispatcher until WEB-09b). FIXTURE evidence: there is no backend
+ * data harness sending what the screen queued (the production leader of WEB-09b is not used here). FIXTURE evidence: there is no backend
  * behind any of it (the I-CAL specs run the same journeys against the released one).
  */
 const API = "/api/experimental/v1";
@@ -28,10 +28,20 @@ interface Wire {
   path: string;
   key: string | null;
   body: string;
+  /**
+   * Revision 4: the test's phase when the request ARRIVED (`CalendarStub.phase`): `open` while `calendarsPage` waits for the screen's
+   * first read of the live list (its observation of refresh activity, D-13a-13), then `test`, or whatever the test names next. Reads
+   * are counted per phase, so a read of one purpose is never counted as another's.
+   */
+  phase: string;
+  /** When it arrived (`Date.now()`). */
+  at: number;
 }
 type Answer =
   | { status: number; body: unknown }
   | { abort: true }
+  /** Revision 4: answered only once the promise settles (a request that has arrived and is held). */
+  | { wait: Promise<{ status: number; body: unknown }> }
   | ((wire: Wire) => { status: number; body: unknown } | { abort: true });
 
 /** The calendar endpoints, scripted: every request recorded; each path answers from its own queue, then its default. */
@@ -41,6 +51,8 @@ interface CalendarStub {
   /** What `GET /calendar-sources` lists (each item a projection with the read-time flag). */
   live: Array<Record<string, unknown>>;
   calendarLinks: boolean;
+  /** The phase recorded on each request as it arrives (revision 4). */
+  phase: string;
 }
 
 async function stubCalendars(context: BrowserContext): Promise<CalendarStub> {
@@ -49,6 +61,7 @@ async function stubCalendars(context: BrowserContext): Promise<CalendarStub> {
     answers: new Map(),
     live: [],
     calendarLinks: true,
+    phase: "open",
   };
   let revision = 200;
   const handle = async (route: Route) => {
@@ -60,11 +73,14 @@ async function stubCalendars(context: BrowserContext): Promise<CalendarStub> {
       path,
       key: request.headers()["idempotency-key"] ?? null,
       body: request.postData() ?? "",
+      phase: stub.phase,
+      at: Date.now(),
     };
     stub.wire.push(wire);
     const queue = stub.answers.get(path) ?? [];
     let next = queue.shift();
     if (typeof next === "function") next = next(wire);
+    if (next !== undefined && "wait" in next) next = await next.wait;
     if (next === undefined) {
       if (path === "/notification-capabilities")
         next = {
@@ -163,7 +179,7 @@ async function calendarsPage(
     // The fixture leader binds the same database (it sends what the screen queues once `beginOutbox` is called).
     await startOutbox(page, ACCOUNT, { start: false });
     await untilTreeSettled(page, { connections: 2 });
-    if (options.cache)
+    if (options.cache) {
       await page.evaluate(
         ({ a, rows }) =>
           window.__atlasData?.put(
@@ -173,9 +189,28 @@ async function calendarsPage(
           ),
         { a: ACCOUNT, rows: options.cache },
       );
+      // Revision 4 (D-13a-13): the screen reads the live list for the sources it lists as it shows them. That read is answered (by
+      // `cal.live`: empty here, so nothing is seen running) before the test arms any answer of its own, so it never takes one meant for
+      // a later read; it is recorded in the `open` phase.
+      for (const row of options.cache)
+        await expect(
+          page.locator(`[data-source-row="${String(row.id)}"]`),
+        ).toHaveAttribute("data-observation", OBSERVED);
+    }
   }
+  cal.phase = "test";
   return { page, net, cal };
 }
+
+/** A row whose observation has had its read (or was stopped). */
+const OBSERVED = /^(busy|idle|unknown|unconfirmed|ended)$/;
+
+/** The `GET /calendar-sources` reads that arrived in `phase` (revision 4: the screen's own first read is `open`). */
+const liveReads = (cal: CalendarStub, phase = "test") =>
+  cal.wire.filter(
+    (w) =>
+      w.method === "GET" && w.path === "/calendar-sources" && w.phase === phase,
+  );
 
 /**
  * The rows of one store of the account database, read through the data harness. A remount of the protected tree (the session's
@@ -742,9 +777,9 @@ test.describe("E-CAL4: the manual refresh (online-only, never queued; B8 causes)
       "A newer change replaced this refresh — refresh again to get the latest.",
     );
     expect(refreshes(cal)).toHaveLength(1);
-    expect(cal.wire.filter((w) => w.path === "/calendar-sources")).toHaveLength(
-      1,
-    );
+    // Adapted (revision 4): reads counted per phase; the screen's own first read is the `open` one.
+    expect(liveReads(cal, "open")).toHaveLength(1);
+    expect(liveReads(cal)).toHaveLength(1);
     // Health was healthy throughout: it is not read as success.
     await expect(row).not.toContainText("Refreshed.");
     cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
@@ -793,6 +828,7 @@ test.describe("E-CAL4: the manual refresh (online-only, never queued; B8 causes)
     ]);
     await row.getByRole("button", { name: "Refresh Work rota" }).click();
     await expect.poll(() => refreshes(cal).length).toBe(2);
+    cal.phase = "reloaded";
     await page.goto(ROUTE);
     await page.waitForFunction(
       () => window.__atlasFixture?.session?.booted !== undefined,
@@ -801,6 +837,16 @@ test.describe("E-CAL4: the manual refresh (online-only, never queued; B8 causes)
     await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
     await page.waitForTimeout(7_000);
     expect(refreshes(cal)).toHaveLength(2);
+    // Revision 4 (D-13a-13, S5): the new document read the live list once; a list without the source says nothing, so nothing is
+    // shown as running.
+    expect(liveReads(cal, "reloaded")).toHaveLength(1);
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toHaveAttribute(
+      "data-observation",
+      "unknown",
+    );
+    await expect(
+      page.locator(`[data-source-row="${SOURCE}"]`),
+    ).not.toContainText("Refreshing…");
   });
 
   test("CH3 / 7(f): 503 temporarily_unavailable is generic: retried with the same key after 10 s", async ({
@@ -1493,4 +1539,630 @@ test.describe("E-CAL11: connection details are entered online only (revision 2, 
         bearer: `token-${SENTINEL}`,
       });
     });
+});
+
+/** A `GET /calendar-sources` page answer. */
+const livePage = (
+  items: Array<Record<string, unknown>>,
+  next: string | null = null,
+) => ({ status: 200, body: { items, next_after: next } });
+
+test.describe("E-CAL12: a refresh's live re-read is evidence only for the source it returned (revision 3, R9)", () => {
+  for (const reached of [false, true])
+    test(`cause 5: the bounded walk (five full pages, each with a continuation) ${reached ? "returns the source, not running: ONE same-key retry (control)" : "never reaches the source: no retry, the cause 5 copy"}`, async ({
+      context,
+    }) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+        {
+          status: 409,
+          body: {
+            ...JSON.parse(atlasError("stale_refresh")),
+            reason: "lease_expired",
+          },
+        },
+        { status: 200, body: { revision: 201 } },
+      ]);
+      cal.answers.set(
+        "/calendar-sources",
+        Array.from({ length: 5 }, (_, p) =>
+          livePage(
+            Array.from({ length: 200 }, (_, i) =>
+              reached && p === 2 && i === 100
+                ? projection({
+                    value: {
+                      health: "healthy",
+                      last_success: 1_790_000_000,
+                      refresh_in_progress: false,
+                    },
+                  })
+                : projection({
+                    id: `00000000-0000-4000-8000-${String(1000 + p * 200 + i).padStart(12, "0")}`,
+                    label: `Other ${p}-${i}`,
+                    value: { health: "healthy", refresh_in_progress: false },
+                  }),
+            ),
+            `00000000-0000-4000-8000-${String(1000 + p * 200 + 199).padStart(12, "0")}`,
+          ),
+        ),
+      );
+      const row = page.locator(`[data-source-row="${SOURCE}"]`);
+      await row.getByRole("button", { name: "Refresh Work rota" }).click();
+      await expect(row.locator("[data-refresh]")).not.toHaveAttribute(
+        "data-refresh",
+        "refreshing",
+        { timeout: 15_000 },
+      );
+      // Adapted (revision 4): reads counted per phase; the screen's own first read is the `open` one.
+      expect(liveReads(cal, "open")).toHaveLength(1);
+      expect(liveReads(cal), "the walk stops at five pages").toHaveLength(5);
+      const sent = refreshes(cal);
+      if (reached) {
+        await expect(row).toContainText(
+          "Refreshed. New events appear after the next sync.",
+        );
+        expect(sent).toHaveLength(2);
+        expect(sent[1]?.key).toBe(sent[0]?.key);
+      } else {
+        await expect(row).toContainText(
+          "Couldn't finish refreshing this source — try again",
+        );
+        expect(
+          sent,
+          "a source the read did not return permits no retry",
+        ).toHaveLength(1);
+      }
+    });
+
+  const outcomes = {
+    written: {
+      title:
+        "it wrote its result (last_success moved on): ITS outcome is shown (control)",
+      items: [
+        projection({
+          value: {
+            health: "healthy",
+            last_success: 1_790_000_900,
+            refresh_in_progress: false,
+          },
+        }),
+      ],
+      state: "successor_finished",
+      words: "The newer refresh finished: it succeeded.",
+    },
+    gone: {
+      title: "the source is missing from the complete list: not finished",
+      items: [],
+      state: "successor_unconfirmed",
+      words:
+        "We couldn't confirm that the newer refresh finished — refresh again to check.",
+    },
+    lapsed: {
+      title:
+        "only the flag changed (its lease lapsed with no completing write): not finished",
+      items: [
+        projection({
+          value: {
+            health: "healthy",
+            last_success: 1_790_000_000,
+            refresh_in_progress: false,
+          },
+        }),
+      ],
+      state: "successor_unconfirmed",
+      words:
+        "We couldn't confirm that the newer refresh finished — refresh again to check.",
+    },
+  } as const;
+  for (const [name, outcome] of Object.entries(outcomes))
+    test(`cause 4: a newer refresh is seen running; 5 s later the read says ${outcome.title} (${name})`, async ({
+      context,
+    }) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+        {
+          status: 409,
+          body: {
+            ...JSON.parse(atlasError("stale_refresh")),
+            reason: "generation_changed",
+          },
+        },
+      ]);
+      cal.answers.set("/calendar-sources", [
+        livePage([
+          projection({
+            value: {
+              health: "healthy",
+              last_success: 1_790_000_000,
+              refresh_in_progress: true,
+            },
+          }),
+        ]),
+        livePage([...outcome.items]),
+      ]);
+      const row = page.locator(`[data-source-row="${SOURCE}"]`);
+      const began = Date.now();
+      await row.getByRole("button", { name: "Refresh Work rota" }).click();
+      await expect(row.locator("[data-refresh]")).toHaveAttribute(
+        "data-refresh",
+        outcome.state,
+        { timeout: 15_000 },
+      );
+      // The real 5 s wait between the two reads (SUCCESSOR_POLL_MS) is kept.
+      expect(Date.now() - began).toBeGreaterThanOrEqual(5_000);
+      await expect(row).toContainText(outcome.words);
+      if (outcome.state !== "successor_finished")
+        await expect(row).not.toContainText("The newer refresh finished");
+      // Adapted (revision 4): reads counted per phase; the screen's own first read is the `open` one.
+      expect(liveReads(cal, "open")).toHaveLength(1);
+      expect(liveReads(cal)).toHaveLength(2);
+      expect(refreshes(cal), "nothing is resent").toHaveLength(1);
+    });
+});
+
+/**
+ * A second tab of the same origin on the Calendars screen (its own production session, protected tree and Dexie), whose OBSERVATION of
+ * the other tabs' writes can be held: Dexie tells a page of another page's commit through one `BroadcastChannel`
+ * (`x-storagemutated-1`), and this tab's deliveries on that channel alone are kept while `hold()` is in force and delivered, in order, on
+ * `release()`. Its own writes, its transactions, the other channels (the session's, `atlas-sync`) and the other tab are untouched. A
+ * FIXTURE injection of a schedule (a tab that has not yet re-read what another committed), not of a product fault.
+ */
+async function peerTab(context: BrowserContext, other: Page): Promise<Page> {
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    const Native = window.BroadcastChannel;
+    const held: Array<() => void> = [];
+    let holding = false;
+    class Observed extends Native {
+      override set onmessage(fn: ((event: MessageEvent) => unknown) | null) {
+        if (this.name !== "x-storagemutated-1" || fn === null) {
+          super.onmessage = fn;
+          return;
+        }
+        super.onmessage = (event: MessageEvent) => {
+          if (holding) held.push(() => fn.call(this, event));
+          else fn.call(this, event);
+        };
+      }
+      override get onmessage() {
+        return super.onmessage;
+      }
+    }
+    window.BroadcastChannel = Observed;
+    (window as unknown as { __peer: unknown }).__peer = {
+      hold() {
+        holding = true;
+      },
+      held: () => held.length,
+      release() {
+        holding = false;
+        for (const deliver of held.splice(0)) deliver();
+      },
+    };
+  });
+  await page.goto(ROUTE);
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Calendar sources" }),
+  ).toBeVisible();
+  await untilTreeSettled(page, { connections: 2 });
+  // A page that boots can remount the other tab's tree: both are settled, and both list the source, before anything is opened.
+  await untilTreeSettled(other, { connections: 2 });
+  for (const tab of [other, page])
+    await expect(
+      tab.getByRole("button", { name: "Manage Work rota" }),
+    ).toBeEnabled();
+  return page;
+}
+
+const peer = (page: Page, act: "hold" | "release") =>
+  page.evaluate(
+    (a) =>
+      (window as unknown as { __peer: Record<string, () => void> }).__peer[
+        a
+      ]?.(),
+    act,
+  );
+const heldDeliveries = (page: Page) =>
+  page.evaluate(() =>
+    (window as unknown as { __peer: { held(): number } }).__peer.held(),
+  );
+
+/** Tab A queues Tokyo for the source through its own Manage. */
+async function queueTokyo(a: Page) {
+  await a.getByRole("button", { name: "Manage Work rota" }).click();
+  const dialog = a.getByRole("dialog", { name: "Manage — Work rota" });
+  await dialog.getByLabel("Timezone", { exact: true }).fill("Asia/Tokyo");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect
+    .poll(() => queuedSettings(a))
+    .toEqual([
+      {
+        kind: "configure_source",
+        id: SOURCE,
+        expected_version: 2,
+        timezone: "Asia/Tokyo",
+        enabled: true,
+      },
+    ]);
+}
+
+test.describe("E-CAL13: two tabs save the same source (revision 3, design assessment S6)", () => {
+  test("tab B has not yet seen tab A's queued Tokyo when it turns the source off and saves: the save is refused as changed, nothing is queued with London; once B sees Tokyo, its change keeps it", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const { page: a } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const b = await peerTab(context, a);
+    await b.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = b.getByRole("dialog", { name: "Manage — Work rota" });
+    const timezone = dialog.getByLabel("Timezone", { exact: true });
+    await expect(timezone).toHaveValue("Europe/London");
+    await peer(b, "hold");
+    await queueTokyo(a);
+    // The hold is in force: B has been told of A's commit and has not delivered it, so it still shows what it read before.
+    await expect.poll(() => heldDeliveries(b)).toBeGreaterThan(0);
+    await expect(timezone).toHaveValue("Europe/London");
+    await dialog.getByLabel("Enabled", { exact: true }).uncheck();
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(
+      dialog.getByText(
+        "Not saved — this calendar changed while you were saving. Check the values and save again.",
+      ),
+    ).toBeVisible();
+    expect(
+      await queuedSettings(a),
+      "the save B made on London was refused, not queued",
+    ).toEqual([
+      {
+        kind: "configure_source",
+        id: SOURCE,
+        expected_version: 2,
+        timezone: "Asia/Tokyo",
+        enabled: true,
+      },
+    ]);
+    // B now sees A's change: the untouched timezone follows it, B's own change (off) is kept, and saving again keeps Tokyo.
+    await peer(b, "release");
+    await expect(timezone).toHaveValue("Asia/Tokyo");
+    await expect(
+      dialog.getByLabel("Enabled", { exact: true }),
+    ).not.toBeChecked();
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const queued = await queuedSettings(a);
+    expect(queued.at(-1)).toMatchObject({
+      kind: "configure_source",
+      id: SOURCE,
+      timezone: "Asia/Tokyo",
+      enabled: false,
+    });
+    expect(
+      queued.filter((c) => c?.timezone === "Europe/London"),
+      "never London",
+    ).toEqual([]);
+  });
+
+  test("control: the same hold with the source unchanged: B's save is queued as it was made", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page: a } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const b = await peerTab(context, a);
+    await b.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = b.getByRole("dialog", { name: "Manage — Work rota" });
+    await peer(b, "hold");
+    await dialog.getByLabel("Enabled", { exact: true }).uncheck();
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await peer(b, "release");
+    await expect
+      .poll(() => queuedSettings(a))
+      .toEqual([
+        {
+          kind: "configure_source",
+          id: SOURCE,
+          expected_version: 2,
+          timezone: "Europe/London",
+          enabled: false,
+        },
+      ]);
+  });
+
+  test("control: B sees A's queued Tokyo before it saves: its change keeps Tokyo", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page: a } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    const b = await peerTab(context, a);
+    await b.getByRole("button", { name: "Manage Work rota" }).click();
+    const dialog = b.getByRole("dialog", { name: "Manage — Work rota" });
+    const timezone = dialog.getByLabel("Timezone", { exact: true });
+    await expect(timezone).toHaveValue("Europe/London");
+    await queueTokyo(a);
+    await expect(timezone).toHaveValue("Asia/Tokyo");
+    await dialog.getByLabel("Enabled", { exact: true }).uncheck();
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const queued = await queuedSettings(a);
+    expect(queued).toHaveLength(2);
+    expect(queued[1]).toMatchObject({
+      kind: "configure_source",
+      id: SOURCE,
+      timezone: "Asia/Tokyo",
+      enabled: false,
+    });
+  });
+});
+
+/** The source as the live list says it is now, with its lease held or not. */
+const leased = (held: boolean) =>
+  projection({
+    value: {
+      health: "healthy",
+      last_success: 1_790_000_000,
+      coverage_start: null,
+      coverage_end: null,
+      timezone: "Europe/London",
+      refresh_in_progress: held,
+    },
+  });
+
+/** The same production composition booted again in a NEW document of the same page (a reload), settled with its row listed. */
+async function reopen(page: Page, options: { settle?: boolean } = {}) {
+  await page.goto(ROUTE);
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+  // A read held by the test keeps the tree from settling (a request out): such a test waits for the read's arrival instead.
+  if (options.settle !== false)
+    await untilTreeSettled(page, { connections: 2 });
+}
+
+/** Presses Refresh, answered `409 refresh_in_progress`, and waits until the POST has ARRIVED (the row says "Refreshing…" before). */
+async function pressHeldRefresh(page: Page, cal: CalendarStub) {
+  cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+    { status: 409, body: JSON.parse(atlasError("refresh_in_progress")) },
+  ]);
+  const row = page.locator(`[data-source-row="${SOURCE}"]`);
+  await row.getByRole("button", { name: "Refresh Work rota" }).click();
+  await expect.poll(() => refreshes(cal).length).toBe(1);
+  await expect(row.locator("[data-refresh]")).toHaveAttribute(
+    "data-refresh",
+    "refreshing",
+  );
+}
+
+/**
+ * Revision 4 (R10; D-13a-13, design assessment S1, S2, S5, S7, S9, S11, S18): a refresh that holds a source's lease when the screen
+ * opens (one in flight at a reload, another tab's, another device's or the server's own) is shown as "Refreshing…" from the live list,
+ * and the synced history after it; the screen sends nothing for it, never resumes one, and never says it succeeded. The 5 s pace is
+ * the production one (real time). Each request is recorded with the phase in which it arrived, so a read made by the new document is
+ * told apart from every other.
+ */
+test.describe("E-CAL4: a refresh holding the lease when the screen opens (revision 4, R10, D-13a-13)", () => {
+  test("a reload while the refresh is held: the new document reads the list, says Refreshing… (Refresh held back, no Check again), then the history once the lease is gone; nothing is resent, no success is claimed", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(true)];
+    await pressHeldRefresh(page, cal);
+    cal.phase = "reloaded";
+    await reopen(page);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row.locator("[data-observed]")).toHaveAttribute(
+      "data-observed",
+      "busy",
+    );
+    await expect(row).toContainText("Refreshing…");
+    await expect(
+      row.getByRole("button", { name: "Refresh Work rota" }),
+    ).toBeDisabled();
+    await expect(row.getByRole("button", { name: "Check again" })).toHaveCount(
+      0,
+    );
+    // No run was restored: the progress is the observation's.
+    await expect(row.locator("[data-refresh]")).toHaveCount(0);
+    await expect(row).toContainText("Last success");
+    expect(liveReads(cal, "reloaded").length).toBeGreaterThanOrEqual(1);
+    // The lease ends with nothing written (it lapsed, or another refresh's write is not synced yet).
+    cal.phase = "released";
+    cal.live = [leased(false)];
+    await expect(row).toHaveAttribute("data-observation", "idle", {
+      timeout: 15_000,
+    });
+    await expect(row).not.toContainText("Refreshing…");
+    await expect(row).not.toContainText("Refreshed.");
+    await expect(row).toContainText("Last success");
+    await expect(
+      row.getByRole("button", { name: "Refresh Work rota" }),
+    ).toBeEnabled();
+    const released = liveReads(cal, "released");
+    expect(released).toHaveLength(1);
+    // The real 5 s pace between reads.
+    const before = liveReads(cal, "reloaded").at(-1)?.at ?? 0;
+    expect((released[0]?.at ?? 0) - before).toBeGreaterThanOrEqual(5_000);
+    // Nothing more is read once it is idle, and the refresh is never sent again.
+    await page.waitForTimeout(6_000);
+    expect(liveReads(cal, "released")).toHaveLength(1);
+    expect(refreshes(cal)).toHaveLength(1);
+    expect(await rows(page, "drafts")).toEqual([]);
+  });
+
+  test("control: the same press and reload with no lease held: one read, no progress, Refresh available, nothing resent", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(false)];
+    await pressHeldRefresh(page, cal);
+    cal.phase = "reloaded";
+    await reopen(page);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "idle");
+    await expect(row).not.toContainText("Refreshing…");
+    await expect(
+      row.getByRole("button", { name: "Refresh Work rota" }),
+    ).toBeEnabled();
+    await page.waitForTimeout(6_000);
+    expect(liveReads(cal, "reloaded")).toHaveLength(1);
+    expect(refreshes(cal)).toHaveLength(1);
+  });
+
+  test("control: no reload: the press's own run shows its progress and outcome; the screen reads nothing for it", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(true)];
+    await pressHeldRefresh(page, cal);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "none");
+    // Its own same-key retry after 5 s is answered 200.
+    await expect(row).toContainText(
+      "Refreshed. New events appear after the next sync.",
+      { timeout: 15_000 },
+    );
+    await expect(row.locator("[data-observed]")).toHaveCount(0);
+    const [a, b] = refreshes(cal);
+    expect(b?.key).toBe(a?.key);
+    expect(liveReads(cal)).toEqual([]);
+  });
+
+  test("another tab opens while the lease is held elsewhere (its data hints held): it shows Refreshing… without pressing anything, then the history; the first tab has no run of its own; nothing is sent", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const { page: a, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(true)];
+    cal.phase = "peer";
+    const b = await peerTab(context, a);
+    await peer(b, "hold");
+    const rowB = b.locator(`[data-source-row="${SOURCE}"]`);
+    const rowA = a.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(rowB).toHaveAttribute("data-observation", "busy");
+    await expect(rowB).toContainText("Refreshing…");
+    // Tab A is independent: booting B may remount A's protected tree (a fixture trait, WEB-09a), and its screen, opened again, reads
+    // the list itself; either way it has no run of its own and sends nothing.
+    await expect(rowA.locator("[data-refresh]")).toHaveCount(0);
+    cal.phase = "released";
+    cal.live = [leased(false)];
+    await expect(rowB).toHaveAttribute("data-observation", "idle", {
+      timeout: 15_000,
+    });
+    await expect(rowB).not.toContainText("Refreshing…");
+    await expect(rowB).not.toContainText("Refreshed.");
+    await expect(rowA).not.toContainText("Refreshing…", { timeout: 15_000 });
+    await peer(b, "release");
+    expect(refreshes(cal)).toEqual([]);
+    expect(calendarCommands(cal)).toEqual([]);
+  });
+
+  test("a press while the new document's read is still out: the press's outcome stands; the read, answered busy afterwards, changes nothing", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    let release: (answer: { status: number; body: unknown }) => void = () =>
+      undefined;
+    cal.answers.set("/calendar-sources", [
+      {
+        wait: new Promise((resolve) => {
+          release = resolve;
+        }),
+      },
+    ]);
+    cal.phase = "reloaded";
+    await reopen(page, { settle: false });
+    await expect.poll(() => liveReads(cal, "reloaded").length).toBe(1);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "checking");
+    await row.getByRole("button", { name: "Refresh Work rota" }).click();
+    await expect(row).toContainText(
+      "Refreshed. New events appear after the next sync.",
+    );
+    release({ status: 200, body: { items: [leased(true)], next_after: null } });
+    await page.waitForTimeout(6_000);
+    await expect(row).toContainText("Refreshed.");
+    await expect(row).toHaveAttribute("data-observation", "none");
+    await expect(row.locator("[data-observed]")).toHaveCount(0);
+    expect(refreshes(cal)).toHaveLength(1);
+    expect(liveReads(cal, "reloaded")).toHaveLength(1);
+  });
+
+  test("offline while it is observed: Refreshing… goes; back online nothing is read or sent", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(true)];
+    cal.phase = "reloaded";
+    await reopen(page);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "busy");
+    await context.setOffline(true);
+    await expect(row).toHaveAttribute("data-observation", "ended");
+    await expect(row).not.toContainText("Refreshing…");
+    cal.phase = "offline";
+    await page.waitForTimeout(2_000);
+    await context.setOffline(false);
+    await page.waitForTimeout(7_000);
+    expect(liveReads(cal, "offline")).toEqual([]);
+    await expect(row).not.toContainText("Refreshing…");
+    expect(refreshes(cal)).toEqual([]);
+  });
+
+  test("leaving the screen while it is observed: nothing more is read", async ({
+    context,
+  }) => {
+    test.setTimeout(60_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [projection()],
+    });
+    cal.live = [leased(true)];
+    cal.phase = "reloaded";
+    await reopen(page);
+    const row = page.locator(`[data-source-row="${SOURCE}"]`);
+    await expect(row).toHaveAttribute("data-observation", "busy");
+    await page
+      .locator("#main")
+      .getByRole("link", { name: "Settings", exact: true })
+      .click();
+    await expect(row).toHaveCount(0);
+    cal.phase = "left";
+    await page.waitForTimeout(7_000);
+    expect(liveReads(cal, "left")).toEqual([]);
+    expect(refreshes(cal)).toEqual([]);
+  });
 });

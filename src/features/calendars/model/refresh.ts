@@ -1,4 +1,4 @@
-import type { CalendarResult, LiveSources } from "./result";
+import type { CalendarResult, LiveSource, LiveSources } from "./result";
 
 /**
  * The manual refresh (WEB-13a, D-13a-6), as PURE functions: what an answer means (`classifyRefresh`) and what happens next
@@ -11,6 +11,10 @@ import type { CalendarResult, LiveSources } from "./result";
  *
  * Health is never evidence. A `200` is success whatever `health` says; a `502` stays a failure whatever `health` says (7(d)). The
  * only live signal used is the read-time `refresh_in_progress` of `GET /calendar-sources` (B8 item 4), after a `409 stale_refresh`.
+ * It is evidence only for a source the read actually returned: a source the bounded walk did not reach, or a list without it, says
+ * nothing, so it permits no retry and finishes nothing (R9). A newer refresh we waited for is finished only when a later read shows
+ * the result it wrote (`finishedSince`): the flag turning false alone is also what a lease that lapsed with no completing write, or
+ * a settings change that cleared it, looks like.
  */
 
 /** Same-key retries after `409 refresh_in_progress`: 65 s in all, longer than the server's 60 s lease. */
@@ -111,6 +115,8 @@ export type RefreshView =
     }
   /** A newer refresh ran while ours was superseded: ITS result, from the live list (never a reinterpretation of ours). */
   | { kind: "successor_finished"; health: string | null }
+  /** A newer refresh we waited for stopped holding its lease, but no read showed that it wrote a result (or the source was gone). */
+  | { kind: "successor_unconfirmed" }
   | { kind: "needs_connection" };
 
 export interface RefreshRun {
@@ -125,9 +131,39 @@ export interface RefreshRun {
   checking: "superseded" | "lease_expired" | null;
   /** How long a newer refresh has been waited for. */
   waitedMs: number;
+  /**
+   * The source as the FIRST live read that found a newer refresh running returned it, or null while none was seen. A later read can
+   * only show that refresh finished by differing from this (`finishedSince`).
+   */
+  seen: SeenSource | null;
   view: RefreshView | null;
   /** Whether the run has ended (nothing more is sent or read). */
   ended: boolean;
+}
+
+/** What a live read said about the source, kept to compare with a later read. */
+export interface SeenSource {
+  health: string | null;
+  lastSuccess: number | null;
+}
+
+/**
+ * Whether `now` shows a refresh that finished after `seen` was read. The server writes a refresh's result in the same transaction that
+ * releases its lease: a success advances `last_success` (and says `healthy`); a failure records its cause in `health`. A settings
+ * change writes `pending`, and a lease that lapses writes nothing. So only an advanced `last_success`, or a new health other than
+ * `pending`, is a result; anything else (the same values, or `pending`) is not known to be one.
+ */
+export function finishedSince(seen: SeenSource, now: LiveSource): boolean {
+  if (
+    now.lastSuccess !== null &&
+    (seen.lastSuccess === null || now.lastSuccess > seen.lastSuccess)
+  )
+    return true;
+  return (
+    now.health !== null &&
+    now.health !== "pending" &&
+    now.health !== seen.health
+  );
 }
 
 export type RefreshEvent =
@@ -153,6 +189,7 @@ export function startRefresh(key: string): {
       leaseRetried: false,
       checking: null,
       waitedMs: 0,
+      seen: null,
       view: { kind: "refreshing" },
       ended: false,
     },
@@ -211,14 +248,14 @@ export function refreshStep(
     }
     case "superseded":
       return {
-        run: { ...run, checking: "superseded", waitedMs: 0 },
+        run: { ...run, checking: "superseded", waitedMs: 0, seen: null },
         effect: { type: "live" },
       };
     case "lease_expired":
       if (run.leaseRetried)
         return end(run, { kind: "failed", cause: "lease_expired" });
       return {
-        run: { ...run, checking: "lease_expired", waitedMs: 0 },
+        run: { ...run, checking: "lease_expired", waitedMs: 0, seen: null },
         effect: { type: "live" },
       };
     case "feed_unreadable":
@@ -255,17 +292,28 @@ function liveStep(
       run: {
         ...run,
         waitedMs: run.waitedMs + SUCCESSOR_POLL_MS,
+        seen: run.seen ?? {
+          health: entry.health,
+          lastSuccess: entry.lastSuccess,
+        },
         view: { kind: "refreshing" },
       },
       effect: { type: "wait", ms: SUCCESSOR_POLL_MS, after: "live" },
     };
   }
-  if (run.waitedMs > 0)
-    // We waited for a newer refresh and it has finished: show ITS outcome, from the same live read.
-    return end(run, {
-      kind: "successor_finished",
-      health: entry?.health ?? null,
-    });
+  if (run.seen !== null)
+    // We waited for a newer refresh and it no longer holds the lease. ITS outcome is shown only when this read shows the result it
+    // wrote; a source this read did not return, or one that changed in no way a result does, is not known to have finished.
+    return end(
+      run,
+      entry !== undefined && finishedSince(run.seen, entry)
+        ? { kind: "successor_finished", health: entry.health }
+        : { kind: "successor_unconfirmed" },
+    );
+  if (entry === undefined)
+    // The read did not return this source (the bounded walk stopped before it, or the list no longer has it): whether anything is
+    // running is unknown, exactly as when the read fails. No automatic retry, the cause's own copy.
+    return end(run, { kind: "failed", cause: checking });
   if (checking === "lease_expired")
     // Nothing else is running: ONE retry, under the same key (a fresh attempt and a fresh lease on the server).
     return {

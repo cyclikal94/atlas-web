@@ -79,7 +79,10 @@ export function decodeReceipt(data: unknown): { revision: number } | null {
     : null;
 }
 
-/** One page of `ResourcePage` for calendar sources: each item's id, its read-time `refresh_in_progress` and its health. */
+/**
+ * One page of `ResourcePage` for calendar sources: each item's id, its read-time `refresh_in_progress`, its health and its
+ * `last_success` (what a finished refresh writes, `model/refresh.ts` `finishedSince`; a value that is not a number is null).
+ */
 export function decodeSourcePage(
   data: unknown,
 ): { items: Array<[string, LiveSource]>; next: string | null } | null {
@@ -95,11 +98,16 @@ export function decodeSourcePage(
     const flag = value?.refresh_in_progress;
     if (typeof flag !== "boolean") return null;
     const health = value?.health;
+    const lastSuccess = value?.last_success;
     items.push([
       item.id,
       {
         refreshInProgress: flag,
         health: typeof health === "string" ? health : null,
+        lastSuccess:
+          typeof lastSuccess === "number" && Number.isFinite(lastSuccess)
+            ? lastSuccess
+            : null,
       },
     ]);
   }

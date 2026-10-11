@@ -4,8 +4,13 @@ import {
   createCalendarApi,
   decodeReceipt,
   decodeSourcePage,
+  LIVE_PAGE_SIZE,
   LIVE_PAGES,
 } from "../../../src/features/calendars/api";
+import {
+  refreshStep,
+  startRefresh,
+} from "../../../src/features/calendars/model/refresh";
 import { StampedRequestError } from "../../../src/session";
 
 /**
@@ -252,9 +257,20 @@ describe("the live list and the capability", () => {
     expect(result).toEqual({
       ok: true,
       value: {
+        // Adapted in revision 3 (R9): each source also carries `lastSuccess` (these items have none).
         sources: new Map([
-          ["a", { refreshInProgress: true, health: "healthy" }],
-          ["b", { refreshInProgress: false, health: "fetch_failed" }],
+          [
+            "a",
+            { refreshInProgress: true, health: "healthy", lastSuccess: null },
+          ],
+          [
+            "b",
+            {
+              refreshInProgress: false,
+              health: "fetch_failed",
+              lastSuccess: null,
+            },
+          ],
         ]),
         complete: true,
       },
@@ -275,6 +291,70 @@ describe("the live list and the capability", () => {
     const result = await w.api.liveSources();
     expect(w.calls.length).toBe(LIVE_PAGES);
     expect(result.ok && result.value.complete).toBe(false);
+  });
+
+  test("R9: composed with the reducer, a source beyond the bounded walk is not evidence: no lease retry is sent", async () => {
+    const pages = (withTarget: boolean) =>
+      Array.from({ length: LIVE_PAGES }, (_, i) => ({
+        status: 200,
+        json: {
+          items: [
+            ...Array.from({ length: LIVE_PAGE_SIZE - 1 }, (_, j) =>
+              item(`s${i}-${j}`, false),
+            ),
+            item(withTarget && i === 2 ? "target" : `s${i}-x`, false),
+          ],
+          next_after: `s${i}`,
+        },
+      }));
+    for (const withTarget of [false, true]) {
+      const w = world(pages(withTarget));
+      const result = await w.api.liveSources();
+      expect(w.calls.length).toBe(LIVE_PAGES);
+      expect(result.ok && result.value.complete).toBe(false);
+      const checking = refreshStep(startRefresh("same").run, {
+        type: "answer",
+        answer: {
+          ok: false,
+          kind: "refused",
+          status: 409,
+          code: "stale_refresh",
+          reason: "lease_expired",
+        },
+      });
+      const next = refreshStep(checking.run, {
+        type: "live",
+        id: "target",
+        result,
+      });
+      // The control: the same bounded, incomplete walk that DID return the source, not running, permits the one retry.
+      expect(next.effect).toEqual(
+        withTarget ? { type: "send" } : { type: "stop" },
+      );
+      expect(next.run.key).toBe("same");
+    }
+  });
+
+  test("R9: last_success is read as a number, or null when absent or not a number", () => {
+    const page = (last: unknown) =>
+      decodeSourcePage({
+        items: [
+          {
+            ...item("a", false),
+            value: {
+              health: "healthy",
+              refresh_in_progress: false,
+              ...(last === undefined ? {} : { last_success: last }),
+            },
+          },
+        ],
+        next_after: null,
+      })?.items[0]?.[1].lastSuccess;
+    expect(page(1_700_000_000)).toBe(1_700_000_000);
+    expect(page(null)).toBeNull();
+    expect(page(undefined)).toBeNull();
+    expect(page("1700000000")).toBeNull();
+    expect(page(Number.NaN)).toBeNull();
   });
 
   test("a page whose source lacks the read-time flag is not the contract's answer", () => {

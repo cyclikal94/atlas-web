@@ -138,6 +138,9 @@ export async function calendarWorld(
     drafts?: DraftWithCommand[];
     route?: string;
     calendarLinks?: boolean;
+    /** Revision 4: answers queued BEFORE the screen mounts (its first live read is made as it opens). */
+    replies?: ReadonlyArray<readonly [string, WireReply[]]>;
+    compat?: ApiCompatibility;
   } = {},
 ): Promise<CalendarWorld> {
   // The per-identity memory outlives a mount by design (`memory.ts`); each test starts without one.
@@ -158,10 +161,12 @@ export async function calendarWorld(
     session_id: "s",
   });
   const online = new Cell(options.online ?? true);
-  const compat = new Cell<ApiCompatibility>({
-    status: "supported",
-    version: "0.27.0",
-  });
+  const compat = new Cell<ApiCompatibility>(
+    options.compat ?? {
+      status: "supported",
+      version: "0.27.0",
+    },
+  );
   const runtime = new world.modules.accountService.DataRuntime({
     identity,
     persistence: world.modules.accountService.unorderedPersistence,
@@ -190,7 +195,9 @@ export async function calendarWorld(
   });
 
   const calls: WireCall[] = [];
-  const replies = new Map<string, WireReply[]>();
+  const replies = new Map<string, WireReply[]>(
+    (options.replies ?? []).map(([path, queue]) => [path, [...queue]]),
+  );
   const reply = async (call: WireCall) => {
     calls.push(call);
     const queue = replies.get(call.path);

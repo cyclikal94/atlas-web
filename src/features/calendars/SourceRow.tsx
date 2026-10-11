@@ -28,6 +28,7 @@ import {
   HEALTH_WORDS,
   MANAGE,
   NEEDS_CONNECTION,
+  OBSERVED_UNCONFIRMED,
   REFRESH,
   REFRESH_TRANSIENT,
   REFRESH_UNCONFIRMED,
@@ -36,11 +37,13 @@ import {
   REVIEW,
   STILL_REFRESHING,
   SUCCESSOR_HEALTHY,
+  SUCCESSOR_UNCONFIRMED,
   successorFinished,
   TURN_ON,
   UPDATE_CONNECTION,
 } from "./copy";
 import { CONFIGURE_SOURCE } from "./model/commands";
+import type { Observation } from "./model/observation";
 import type { RefreshView } from "./model/refresh";
 import {
   type Enablement,
@@ -63,6 +66,29 @@ function RowActions({ source }: { source: CalendarSourceView }) {
   );
 }
 
+/**
+ * The words an OBSERVED refresh activity is shown with (D-13a-13), or null when there is nothing to say: a refresh seen running, or one
+ * seen running whose end no read showed. An idle source, one never seen running and a stopped observation show the synced history only.
+ */
+export function observationMessage(
+  observation: Observation | null,
+): string | null {
+  if (observation?.kind === "busy") return REFRESHING;
+  if (observation?.kind === "unknown" && observation.seenBusy)
+    return OBSERVED_UNCONFIRMED;
+  return null;
+}
+
+/** The row's `data-observation`: the observation's state, for tests and diagnostics. */
+const observationState = (observation: Observation | null): string =>
+  observation === null
+    ? "none"
+    : observation.kind === "unknown"
+      ? observation.seenBusy
+        ? "unconfirmed"
+        : "unknown"
+      : observation.kind;
+
 /** The words a refresh outcome is shown with (`copy.ts`). */
 export function refreshMessage(view: RefreshView): string {
   switch (view.kind) {
@@ -80,6 +106,8 @@ export function refreshMessage(view: RefreshView): string {
           ? SUCCESSOR_HEALTHY
           : `${HEALTH_WORDS[view.health ?? "pending"] ?? REFRESH_TRANSIENT}.`,
       );
+    case "successor_unconfirmed":
+      return SUCCESSOR_UNCONFIRMED;
     case "failed":
       switch (view.cause) {
         case "connection_unavailable":
@@ -202,6 +230,7 @@ export function SourceRow({
   row,
   environment,
   controller,
+  observation = null,
   notice,
   onDismissNotice,
   onDialog,
@@ -209,6 +238,8 @@ export function SourceRow({
   row: ListedResource;
   environment: Environment;
   controller: RefreshController | null;
+  /** What the screen observed of this source's refresh activity (`observation-controller.ts`), or null. */
+  observation?: Observation | null;
   /** A refusal kept across a remount (`memory.ts`), or undefined. */
   notice?: string;
   onDismissNotice?(): void;
@@ -220,12 +251,15 @@ export function SourceRow({
   const counts: OutstandingCounts | null =
     outstanding.status === "ready" ? outstanding.value : null;
   const view = controller?.view(id) ?? null;
-  const refreshing = controller?.running(id) ?? false;
+  const running = controller?.running(id) ?? false;
+  // A run of this screen shows what it learns; an observed activity is shown beside an ENDED run's outcome, never as part of it.
+  const observed = running ? null : observationMessage(observation);
   const status = sourceStatus({
     merged: row.merged,
     outstanding: counts,
     env: environment,
-    refreshing,
+    // A refresh seen running elsewhere holds Refresh back as this screen's own does (not "Check again": an observation has no run).
+    refreshing: running || observation?.kind === "busy",
   });
   const announcer = useAnnouncer();
   const label = row.merged.label;
@@ -235,11 +269,19 @@ export function SourceRow({
     announced.current = view;
     announcer.announce(`${label}: ${refreshMessage(view)}`);
   }, [view, label, announcer]);
+  // Once per change of what is said (not per read): "Refreshing…" when first seen, the could-not-check line if it comes.
+  const announcedObservation = useRef<string | null>(null);
+  useEffect(() => {
+    if (observed === announcedObservation.current) return;
+    announcedObservation.current = observed;
+    if (observed !== null) announcer.announce(`${label}: ${observed}`);
+  }, [observed, label, announcer]);
   const manage = (extra: Partial<Extract<Dialog, { kind: "manage" }>> = {}) =>
     onDialog({ kind: "manage", row: row.merged, cached: true, ...extra });
   return (
     <li
       data-source-row={id}
+      data-observation={observationState(observation)}
       className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
     >
       <div className="flex flex-wrap items-center gap-3">
@@ -315,6 +357,14 @@ export function SourceRow({
               {TURN_ON}
             </Button>
           ) : null}
+        </div>
+      ) : null}
+      {observed !== null ? (
+        <div
+          data-observed={observation?.kind === "busy" ? "busy" : "unconfirmed"}
+          className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] leading-[1.6] text-ink-1"
+        >
+          <span>{observed}</span>
         </div>
       ) : null}
     </li>

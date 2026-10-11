@@ -46,6 +46,10 @@ import { ManageSourceDialog } from "./ManageSourceDialog";
 import { identityMemory } from "./memory";
 import { type Compat, type Environment, headerActions } from "./model/status";
 import {
+  createSourceObserver,
+  type SourceObserver,
+} from "./observation-controller";
+import {
   createRefreshController,
   type RefreshController,
 } from "./refresh-controller";
@@ -58,8 +62,9 @@ import { PendingRow, SourceRow } from "./SourceRow";
  * wireframe separates: "Add source" (credential-free, QUEUED, offline or online) and "Link a calendar…" (with a connection, ONLINE
  * ONLY, never stored). Every row's status and every enablement comes from `model/status.ts`.
  *
- * Production starts no outbox dispatcher until WEB-09b supplies leadership: a queued create is stored and shown as pending, and is sent
- * by a leader when one runs. The online-only actions work now.
+ * A queued create is stored and shown as pending, and is sent by the production leader (WEB-09b, `app/data-leader.ts`) when this
+ * device's leader runs. When the screen opens it reads the live list once for the sources it shows, and follows a refresh it finds
+ * running elsewhere until it ends (`observation-controller.ts`, D-13a-13): it sends nothing.
  */
 export function CalendarSources() {
   const env = useOptionalDataEnv();
@@ -115,31 +120,46 @@ function useCompat(): Compat {
   );
 }
 
-/** One refresh controller per calendar client: replaced with the identity, disposed on unmount (Strict Mode safe). */
-function useRefreshController(
-  api: CalendarApi | null,
-): RefreshController | null {
-  const [controller, setController] = useState<RefreshController | null>(null);
+/**
+ * One refresh controller and one observer of refresh activity per calendar client: replaced with the identity, disposed on unmount
+ * (Strict Mode safe). A press admitted by the controller ends that source's observation (revision 4, R10).
+ */
+function useRefresh(api: CalendarApi | null): {
+  controller: RefreshController | null;
+  observer: SourceObserver | null;
+} {
+  const [built, setBuilt] = useState<{
+    controller: RefreshController;
+    observer: SourceObserver;
+  } | null>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   useEffect(() => {
     if (api === null) {
-      setController(null);
+      setBuilt(null);
       return;
     }
-    const built = createRefreshController({
+    const observer = createSourceObserver({ api });
+    const controller = createRefreshController({
       api,
       mintKey: () => crypto.randomUUID(),
       // What must outlive a remount of this screen under the same identity (a `403` is re-checked by the session): `memory.ts`.
       remembered: identityMemory(api.identity.account, api.identity.epoch).runs,
+      onBegin: (id) => observer.yieldTo(id),
     });
-    const off = built.subscribe(rerender);
-    setController(built);
+    const offController = controller.subscribe(rerender);
+    const offObserver = observer.subscribe(rerender);
+    setBuilt({ controller, observer });
     return () => {
-      off();
-      built.dispose();
+      offController();
+      offObserver();
+      controller.dispose();
+      observer.dispose();
     };
   }, [api]);
-  return controller;
+  return {
+    controller: built?.controller ?? null,
+    observer: built?.observer ?? null,
+  };
 }
 
 function Sources() {
@@ -153,7 +173,7 @@ function Sources() {
     () => env?.serviceStore.get() ?? null,
   );
   const online = inputs.online;
-  const controller = useRefreshController(api);
+  const { controller, observer } = useRefresh(api);
   const [calendarLinks, setCalendarLinks] = useState<boolean | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [awaiting, setAwaiting] = useState<AwaitingSync>(new Map());
@@ -173,10 +193,18 @@ function Sources() {
   }, [api, online]);
 
   // Offline stops every refresh and admits no new one; nothing resumes when the page comes back online (a new press may start one).
+  // It also ends the observation of refresh activity for good: only opening the screen again reads the live list again.
   useEffect(() => {
-    if (!online) controller?.offline();
-    else controller?.online();
-  }, [online, controller]);
+    if (!online) {
+      controller?.offline();
+      observer?.offline();
+    } else controller?.online();
+  }, [online, controller, observer]);
+
+  // The live list is read only for a compatible server (the ordinary requests' own rule, `direct` in `model/status.ts`).
+  useEffect(() => {
+    observer?.compatible(compat === "supported");
+  }, [compat, observer]);
 
   const environment: Environment = {
     online,
@@ -262,6 +290,7 @@ function Sources() {
               <CachedSources
                 environment={environment}
                 controller={controller}
+                observer={observer}
                 notices={memory?.notices ?? null}
                 onDialog={setDialog}
               />
@@ -314,11 +343,13 @@ function EntryPoint({
 function CachedSources({
   environment,
   controller,
+  observer,
   notices,
   onDialog,
 }: {
   environment: Environment;
   controller: RefreshController | null;
+  observer: SourceObserver | null;
   notices: Map<string, string> | null;
   onDialog(dialog: Dialog): void;
 }) {
@@ -331,6 +362,18 @@ function CachedSources({
     after,
     limit: 100,
   });
+  // The sources listed now are the ones whose refresh activity is observed (D-13a-13): one key for the page, so an ordinary re-render
+  // (a health or draft change) neither reads again nor restarts a time limit. Leaving the list (the cache gate closing, the screen
+  // closing) drops them.
+  const listed =
+    page.status === "ready"
+      ? page.value.rows.map((row) => row.base.id).join("\n")
+      : null;
+  useEffect(() => {
+    if (observer === null || listed === null) return;
+    observer.watch(listed === "" ? [] : listed.split("\n"));
+  }, [observer, listed]);
+  useEffect(() => () => observer?.watch([]), [observer]);
   if (page.status === "loading")
     return (
       <div aria-busy="true" className="flex flex-col gap-2">
@@ -372,6 +415,7 @@ function CachedSources({
               row={row}
               environment={environment}
               controller={controller}
+              observation={observer?.observation(row.base.id) ?? null}
               notice={notices?.get(row.base.id)}
               onDismissNotice={() => {
                 notices?.delete(row.base.id);
