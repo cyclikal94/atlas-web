@@ -83,6 +83,8 @@ export type {
   CacheRow,
   DraftRow,
   DraftStatus,
+  DraftWithCommand,
+  JsonObject,
   LocalId,
   ProjectionPatch,
   ResourceId,
@@ -114,6 +116,13 @@ export type {
   QueuePage,
   ResourcePage,
 } from "./plans/outbox";
+// ---- outstanding work, reads by id and the whole-kind walk (WEB-10a) ------------------------------------------------------------------
+export type {
+  CachePosition,
+  OutstandingByKindPage,
+  OutstandingForResource,
+  OutstandingPage,
+} from "./plans/outstanding-reads";
 export {
   createDataDeletionPorts,
   type DeletionPortsOptions,
@@ -125,6 +134,12 @@ export {
   type DataEnv,
   type DataEnvDeps,
 } from "./ui/env";
+export {
+  useCachedResources,
+  useCachePosition,
+  useOutstanding,
+  useOutstandingByKind,
+} from "./ui/outstanding";
 export {
   type ConflictRow,
   DataEnvProvider,
@@ -145,3 +160,4 @@ export {
   useStatusInputs,
   useSyncStatusModel,
 } from "./ui/react";
+export { readResourcesNow, type ScanEnd, scanResources } from "./ui/scan";

@@ -427,7 +427,7 @@ export function useSharingDefaults(): {
 // ---- cache reads (never create a database) ------------------------------------------------------------------------------------
 const ABSENT: Loadable<never> = { status: "unavailable", reason: "absent" };
 
-function useWatch<T>(
+export function useWatch<T>(
   make: (env: DataEnv) => Watchable<T> | null,
   deps: readonly unknown[],
 ): Loadable<T> {

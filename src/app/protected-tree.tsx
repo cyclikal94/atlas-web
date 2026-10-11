@@ -1,6 +1,11 @@
 import { RouterProvider } from "@tanstack/react-router";
 import { type ReactNode, useMemo } from "react";
-import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
+import {
+  DataProvider,
+  getPageDataHost,
+  useAccountLabel,
+  useSyncStatusModel,
+} from "../data";
 import { invitationMemory } from "../features/authentication/handoff";
 import { isJoinPath } from "../features/authentication/public-route";
 import { type Session, SessionProvider } from "../session";
@@ -63,6 +68,12 @@ function normalisePublicPath(): void {
 }
 
 export function createProtectedTree(session: Session) {
+  // WEB-10a: the task kinds are registered once into the page's registry (the leader's dispatcher and the queue screens share it), so
+  // `/sync` describes and offers task drafts whichever screen is open first.
+  // Loaded as its own chunk (it is not needed to draw the shell, and the fixture's initial bundle has no room for it).
+  void import("../features/tasks/register").then(({ registerTaskCommands }) =>
+    registerTaskCommands(getPageDataHost().commands),
+  );
   return (): ReactNode => {
     normalisePublicPath();
     // A new router per mount: an account change must not inherit the previous account's location or loaders.

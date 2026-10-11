@@ -1,5 +1,11 @@
 import type { EnqueueRequest } from "../model/outbox";
-import type { CacheRow, DraftRow, DraftWithCommand } from "../model/types";
+import { projectionTarget } from "../model/overlay";
+import type {
+  CacheRow,
+  DraftRow,
+  DraftWithCommand,
+  ResourceId,
+} from "../model/types";
 
 /**
  * The seams through which feature slices teach the generic outbox what its commands mean (plan 5.9). The data layer knows
@@ -16,9 +22,14 @@ export interface CommandSpec {
   describe(draft: DraftRow): string;
   /**
    * A projection of a create that is not in the cache yet, so the merged reads can show it. `null`: nothing to show. It sees the
-   * body, which the merged read of ONE resource joins for the queued creates against that resource.
+   * body, which the merged read of ONE resource joins for the queued creates against that resource, and the id of THAT resource: a
+   * create that introduces several resources (a task, its details, its first occurrence and progress) returns the row of the one
+   * asked for. A row with any other id is never shown in its place (`mergeResource`).
    */
-  projectCreate?(draft: DraftWithCommand): CacheRow | null;
+  projectCreate?(
+    draft: DraftWithCommand,
+    resourceId: ResourceId,
+  ): CacheRow | null;
   /**
    * WEB-09b's seam for the generic item-detail dialog (WF-QUEUE-02): a NEW command built from a failed or conflicting draft and `current`,
    * the value of the authorised current read (`readCurrent`) the person reviewed, or `null` when they continued without it (never the
@@ -81,7 +92,11 @@ export function commandKind(draft: Pick<DraftRow, "kind">): string {
 export interface CommandRegistry {
   register(kind: string, spec: CommandSpec): void;
   describe(draft: DraftRow): string | null;
-  projectCreate(draft: DraftWithCommand): CacheRow | null;
+  /** `resourceId`: the resource asked for (else the draft's only target). A projection of another resource is `null`. */
+  projectCreate(
+    draft: DraftWithCommand,
+    resourceId?: ResourceId,
+  ): CacheRow | null;
   /** Whether the draft's kind registered `rebuild` (the dialog's "save as new" actions are offered only then). */
   canRebuild(draft: Pick<DraftRow, "kind">): boolean;
   rebuild(
@@ -102,8 +117,13 @@ export function createCommandRegistry(): CommandRegistry {
       specs.set(kind, spec);
     },
     describe: (draft) => specs.get(commandKind(draft))?.describe(draft) ?? null,
-    projectCreate: (draft) =>
-      specs.get(commandKind(draft))?.projectCreate?.(draft) ?? null,
+    projectCreate(draft, resourceId) {
+      const target = projectionTarget(draft, resourceId);
+      const project = specs.get(commandKind(draft))?.projectCreate;
+      if (target === null || project === undefined) return null;
+      const projected = project(draft, target);
+      return projected !== null && projected.id === target ? projected : null;
+    },
     canRebuild: (draft) =>
       typeof specs.get(commandKind(draft))?.rebuild === "function",
     rebuild: (draft, current) =>
