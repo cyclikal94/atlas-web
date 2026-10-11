@@ -67,7 +67,16 @@ async function shownAs(page: Page, username: string | RegExp) {
     .getByRole("navigation")
     .getByRole("link", { name: "Settings" })
     .first();
-  await nav.click();
+  // WEB-08c HF-1: right after a settlement every page checks its session (`1e.checking`, a few milliseconds), and the protected tree is
+  // torn down and mounted again with a new router at the current URL, so a click delivered inside that check navigates nowhere (the
+  // trace of run-IMx8ZR, `.agtx/evidence/WEB-08c/hf1/`). Opening Settings is the means, not what is tested: the click is repeated until
+  // the card is drawn; the account it names is asserted exactly as before.
+  await expect(async () => {
+    await nav.click({ timeout: 2_000 });
+    await expect(page.locator("[data-account-card]")).toBeVisible({
+      timeout: 3_000,
+    });
+  }).toPass({ timeout: 20_000 });
   await expect(page.locator("[data-account-card]")).toContainText(username, {
     timeout: 20_000,
   });

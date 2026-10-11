@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
+import contractPin from "../../contract-pin.json" with { type: "json" };
 import {
   engineOf,
   PROFILE_OUT,
@@ -460,7 +461,7 @@ test("W2: what the released backend can actually produce (a feasibility probe, w
   );
   recordValue("W2 feasibility", engine, {
     status: "measured",
-    server: "the released v0.27.0-rc.1 on SQLite behind the delaying proxy",
+    server: `the released ${contractPin.backend_tag} on SQLite behind the delaying proxy`,
     probe,
     captured: {
       phase: body.phase,

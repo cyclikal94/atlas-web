@@ -1,11 +1,14 @@
 import { RouterProvider } from "@tanstack/react-router";
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useEffect, useMemo } from "react";
+import { SyncStatusProvider } from "../components/ui/sync-status";
 import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
 import { invitationMemory } from "../features/authentication/handoff";
 import { isJoinPath } from "../features/authentication/public-route";
-import { type Session, SessionProvider } from "../session";
+import { SwitchHost } from "../features/switch/entry";
+import { type Session, SessionProvider, useSessionView } from "../session";
 import { AccountSlot } from "./AccountSlot";
 import { ProtectedProviders } from "./providers";
+import { focusWhenPresent, returnDestination } from "./return-destination";
 import { createAppRouter } from "./router";
 import { SessionNotices } from "./SessionNotices";
 import { type ShellEnv, ShellEnvProvider } from "./shell/env";
@@ -29,6 +32,18 @@ function ShellFromData({
 }) {
   const syncModel = useSyncStatusModel();
   const label = useAccountLabel();
+  const view = useSessionView();
+  const account = view.kind === "displaying" ? view.account_id : null;
+  const epoch = view.kind === "displaying" ? view.epoch : null;
+  // WEB-08c (D-8c-03): put the person back where an in-place re-authentication or "Review this device" was asked from, once, and only
+  // for the same account at the epoch the destination asks for (`return-destination.ts`). A navigation convenience, never a permission.
+  useEffect(() => {
+    if (account === null || epoch === null) return;
+    const destination = returnDestination.take(account, epoch, Date.now());
+    if (destination === null) return;
+    void router.navigate({ to: destination.path as "/settings" });
+    return focusWhenPresent(destination.focusKey);
+  }, [account, epoch, router]);
   const env = useMemo<ShellEnv>(
     () => ({
       syncModel,
@@ -38,17 +53,31 @@ function ShellFromData({
           search: { tab: destination === "conflicts" ? "conflicts" : "queue" },
         });
       },
-      ...(label === null
+      ...(label === null || account === null
         ? {}
         : {
             accountSlot: ({ collapsed }: { collapsed: boolean }) => (
-              <AccountSlot label={label} collapsed={collapsed} />
+              <AccountSlot
+                label={label}
+                account={account}
+                collapsed={collapsed}
+              />
             ),
           }),
     }),
-    [syncModel, label, router],
+    [syncModel, label, account, router],
   );
-  return <ShellEnvProvider value={env}>{children}</ShellEnvProvider>;
+  return (
+    <ShellEnvProvider value={env}>
+      {children}
+      {/* WEB-08c: the switcher's host, beside the routed shell. Its dialogs carry the in-dialog sync control, so it has the same sync status. */}
+      <SyncStatusProvider
+        value={{ model: env.syncModel, onOpen: env.onOpenSync }}
+      >
+        <SwitchHost />
+      </SyncStatusProvider>
+    </ShellEnvProvider>
+  );
 }
 
 /**

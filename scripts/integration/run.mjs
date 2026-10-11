@@ -77,7 +77,7 @@ const STACKS = NARROWED
         suffix: "",
         args: [
           "--grep-invert",
-          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W)[0-9]|I-2[0-9]|I-30",
+          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|L)[0-9]|I-2[0-9]|I-30",
         ],
         oidc: false,
       },
@@ -105,6 +105,13 @@ const STACKS = NARROWED
       },
       { suffix: "-oidc-off", args: ["--grep", "I-28b"], oidc: false },
       { suffix: "-settings", args: ["--grep", "I-29|I-30"], oidc: false },
+      // WEB-08c: the composed lifecycle journeys (switching, T7/T8/T12/T13/T17/T21/T23, G-23). They sign in often and change accounts'
+      // passwords and sessions, so they have a stack of their own.
+      {
+        suffix: "-lifecycle",
+        args: ["tests/integration/integration.lifecycle.spec.ts"],
+        oidc: false,
+      },
     ];
 
 const children = [];

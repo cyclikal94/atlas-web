@@ -73,7 +73,13 @@ export function MoreSheet({
         </li>
       </List>
       {account ? (
-        <div className="mt-4 border-t border-hairline pt-4">{account}</div>
+        // The account control opens the switcher (WEB-08c), which is a dialog of its own: More closes first, so two sheets are never
+        // stacked. A keyboard activation of the button is a click too, so this covers it.
+        // biome-ignore lint/a11y/useKeyWithClickEvents: only bubbles the account button's own activation
+        // biome-ignore lint/a11y/noStaticElementInteractions: as above, the button inside is the interactive element
+        <div className="mt-4 border-t border-hairline pt-4" onClick={choose}>
+          {account}
+        </div>
       ) : null}
     </Dialog>
   );

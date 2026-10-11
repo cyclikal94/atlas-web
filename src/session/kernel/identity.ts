@@ -121,6 +121,8 @@ export async function handleIdentityAnswer(
           ? "unresolved_response"
           : undefined,
       retire,
+      // T21 t4b/t4c: this read's answer replaces the credential_unverified entries it was sent to verify (matrix "replaced by").
+      replaces_unverified: inflight.fenceSeq,
       hold_id: holdId,
     });
     return { kind: "observation", observation: kind } as const;

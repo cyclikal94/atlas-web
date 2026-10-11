@@ -37,6 +37,14 @@ export interface RecordObservationInput {
   /** Overrides the reason of an `invalid_session` fence: `unlinked` for the OIDC unlink, `unresolved_response` for E4. */
   reason?: InvalidReason;
   retire?: readonly LeaseId[];
+  /**
+   * WEB-08c (T21 t4b/t4c): set only by an IDENTITY READ's own `current_401` or `different_account` answer, to the `fence_seq` it captured
+   * before it was sent. The `credential_unverified` entries it covers (`seq <= replaces_unverified`) are REPLACED by the fence this
+   * observation adds, in this transaction (matrix T21: "replaced by drift" / "replaced by invalid_session"). Without it they stayed beside
+   * the stronger fence and every evaluation restarted the O11 verification, which read the same answer again with no back-off. An entry
+   * recorded after the read was sent (`seq` above it) is not covered and stays, exactly as rule 9 clears on a match.
+   */
+  replaces_unverified?: number;
 }
 export function recordObservation(
   records: Readonly<AuthRecords>,
@@ -52,8 +60,23 @@ export function recordObservation(
   )
     return { write: { auth_state: state }, result: "STALE" };
   const account = input.account_id;
-  if (hasObservation(state, account, input.obs_id))
+  // The replacement is applied even when another page recorded this observation first (from its hint, which carries no
+  // `replaces_unverified`): the entries it covers are this read's to replace, whoever added the stronger fence.
+  const replaces = input.replaces_unverified;
+  const replace = (): void => {
+    if (replaces === undefined) return;
+    const list = state.fences[account] ?? [];
+    if (!list.some((fence) => fence.kind !== "credential_unverified")) return;
+    state.fences[account] = list.filter(
+      (fence) =>
+        !(fence.kind === "credential_unverified" && fence.seq <= replaces),
+    );
+    tidyFences(state, account);
+  };
+  if (hasObservation(state, account, input.obs_id)) {
+    replace();
     return { write: { auth_state: state }, result: "DONE" };
+  }
   const gating = isGating(state.attempt);
   switch (input.kind) {
     case "unauthenticated":
@@ -124,6 +147,7 @@ export function recordObservation(
     }
   }
   if (input.retire) deleteLeases(state, input.retire);
+  replace();
   return { write: { auth_state: state }, result: "DONE" };
 }
 

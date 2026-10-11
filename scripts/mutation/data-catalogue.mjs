@@ -15039,6 +15039,260 @@ export const UNIT = [
         "void k.disposed;",
       ),
   },
+  // ---- WEB-08c (session-lifecycle integration): the switcher, the retained-account directory, 1c.ended, the return destination and
+  // K-1. Each is killed by the test written for it (`expect`); the unmutated control of the same tests runs beside it. ----------------
+  {
+    id: "MU-8C-01",
+    title:
+      "WEB-08c §2.1: a rejected indeterminate listing (indexedDB.databases()) is reported as 'no other accounts'",
+    file: "src/data/store/retained-accounts.ts",
+    tests: [
+      "tests/data/retained-accounts.test.ts",
+      "tests/features/switch/switch-flow.test.tsx",
+    ],
+    expect: /MU-8C-01/,
+    patch: (t) =>
+      sub(
+        t,
+        '    names = await deps.host.list();\n  } catch {\n    return { kind: "unknown" };',
+        '    names = await deps.host.list();\n  } catch {\n    return { kind: "ok", accounts: [] };',
+      ),
+  },
+  {
+    id: "MU-8C-02",
+    title:
+      "WEB-08c §2.1: the settled account is not excluded from the retained list",
+    file: "src/data/store/retained-accounts.ts",
+    tests: ["tests/data/retained-accounts.test.ts"],
+    expect: /MU-8C-02/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (account === null || account === options.exclude || seen.has(account))",
+        "if (account === null || seen.has(account))",
+      ),
+  },
+  {
+    id: "MU-8C-03",
+    title:
+      "WEB-08c §2.1 (D-8c-01): an account without its own profile record is labelled with another account's name",
+    file: "src/data/store/retained-accounts.ts",
+    tests: ["tests/data/retained-accounts.test.ts"],
+    expect: /MU-8C-03/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read !== null) accounts.push(read);",
+        "    if (read !== null)\n      accounts.push(\n        read.lastVerifiedName === null && accounts.length > 0\n          ? { ...read, lastVerifiedName: accounts[accounts.length - 1].lastVerifiedName }\n          : read,\n      );",
+      ),
+  },
+  {
+    id: "MU-8C-04",
+    title:
+      "WEB-08c §2.1: an account this page latched closed_for_deletion is still listed (and read)",
+    file: "src/data/store/retained-accounts.ts",
+    tests: ["tests/data/retained-accounts.test.ts"],
+    expect: /MU-8C-04/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (deps.registry.latch(account) === "closed_for_deletion") continue;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-8C-05",
+    title:
+      "WEB-08c G-9: the rail's account control is given a name that is not verified for the current epoch (the account id)",
+    file: "src/app/protected-tree.tsx",
+    tests: ["tests/app/web08c-composition.test.tsx"],
+    expect: /MU-8C-05/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "...(label === null || account === null",
+          "...(account === null",
+        ),
+        "                label={label}",
+        "                label={label ?? account}",
+      ),
+  },
+  {
+    id: "MU-8C-06",
+    title: "WEB-08c WF-SWITCH-02: the queued caution is shown at zero",
+    file: "src/features/switch/SwitchFlow.tsx",
+    tests: ["tests/features/switch/switch-flow.test.tsx"],
+    expect: /MU-8C-06/,
+    patch: (t) =>
+      sub(
+        t,
+        '        {waiting !== null && waiting > 0 ? (\n          <div\n            role="note"',
+        '        {waiting !== null && waiting >= 0 ? (\n          <div\n            role="note"',
+      ),
+  },
+  {
+    id: "MU-8C-07",
+    title:
+      "WEB-08c D-8c-04: 'That sign-in didn't finish' is raised on an exit to a fence (1b, 1d, 1a, 1e) or catching up",
+    file: "src/features/authentication/attempt-end.ts",
+    tests: ["tests/features/authentication/attempt-end.test.ts"],
+    expect: /MU-8C-07/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (view.kind === "displaying") return true;\n  return view.kind === "signed_out" && view.state === null;',
+        '  return view.kind !== "booting";',
+      ),
+  },
+  {
+    id: "MU-8C-08",
+    title:
+      "WEB-08c D-8c-04: 'That sign-in didn't finish' is raised although a newer epoch settled",
+    file: "src/features/authentication/attempt-end.ts",
+    tests: ["tests/features/authentication/attempt-end.test.ts"],
+    expect: /MU-8C-08/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (advanced || !endedExit(view)) return;",
+        "if (!endedExit(view)) return;",
+      ),
+  },
+  {
+    id: "MU-8C-09",
+    title:
+      "WEB-08c D-8c-03: a return destination is applied for (or survives) another account",
+    file: "src/app/return-destination.ts",
+    tests: ["tests/app/web08c-composition.test.tsx"],
+    expect: /MU-8C-09/,
+    patch: (t) => sub(t, "      found.account !== account ||\n", ""),
+  },
+  {
+    id: "MU-8C-10",
+    title:
+      "WEB-08c D-8c-03: a return destination ignores the epoch it asks for",
+    file: "src/app/return-destination.ts",
+    tests: ["tests/app/web08c-composition.test.tsx"],
+    expect: /MU-8C-10/,
+    patch: (t) => sub(t, "    if (!due) return null;\n", ""),
+  },
+  {
+    id: "MU-8C-11",
+    title: "WEB-08c G-10: boot does not pass onReviewDevice",
+    file: "src/app/boot.tsx",
+    tests: ["tests/app/web08c-composition.test.tsx"],
+    expect: /MU-8C-11/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onReviewDevice: () => lifecycle.reviewDevice(session),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-8C-12",
+    title:
+      "WEB-08c D-8c-02: the switch sends the picked account's id instead of an ordinary attempt with what was typed",
+    file: "src/features/switch/SwitchFlow.tsx",
+    tests: ["tests/features/switch/switch-flow.test.tsx"],
+    expect: /MU-8C-12/,
+    patch: (t) =>
+      sub(
+        t,
+        "onSubmit={(credentials) => submitSwitch(session, owner, credentials)}",
+        'onSubmit={(credentials) =>\n            submitSwitch(session, owner, {\n              ...credentials,\n              username: target.kind === "retained" ? target.account_id : credentials.username,\n            })\n          }',
+      ),
+  },
+  {
+    id: "MU-8C-13",
+    title:
+      "WEB-08c G-23: 'Confirm it's you' sends whatever username the (read-only) field holds instead of this account's",
+    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
+    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
+    expect: /whatever the field holds/,
+    patch: (t) =>
+      sub(
+        t,
+        "      username,\n      password: credentials.password,",
+        "      username: credentials.username,\n      password: credentials.password,",
+      ),
+  },
+  {
+    id: "MU-8C-14",
+    title:
+      "WEB-08c §3: the switch flow opened by one account is shown over another account's display",
+    file: "src/features/switch/entry.tsx",
+    tests: ["tests/features/switch/switch-flow.test.tsx"],
+    expect: /belongs to the account it was opened for/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '    if (account !== null && stage.stage !== "closed" && stage.owner !== account)\n      switchFlow.dropUnless(account);',
+          "    void switchFlow;",
+        ),
+        '  if (account === null || stage.stage === "closed" || stage.owner !== account)',
+        '  if (account === null || stage.stage === "closed")',
+      ),
+  },
+  {
+    id: "MU-8C-15",
+    title:
+      "WEB-08c D-8c-04: the password sign-in does not tell the watcher that its activation is indeterminate (a page that resolves its own activation before 1c.resolving is published raises no 1c.ended)",
+    file: "src/features/authentication/controller.ts",
+    tests: ["tests/features/authentication/attempt-end.test.ts"],
+    expect: /MU-8C-15/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (outcome.kind === "gating") attemptEnd.indeterminate(before);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-8C-E1",
+    title:
+      "WEB-08c D-8c-05: the switch journey is imported statically into the protected tree (no behavioural difference in an engine: the static lazy-load check and check-initial-chunk are its detectors)",
+    file: "src/features/switch/entry.tsx",
+    tests: ["tests/features/switch/switch-copy.test.ts"],
+    expect: /D-8c-05/,
+    patch: (t) =>
+      sub(
+        t,
+        'const SwitchFlow = lazy(() => import("./SwitchFlow"));',
+        'import SwitchFlowEager from "./SwitchFlow";\nconst SwitchFlow = SwitchFlowEager;\nvoid lazy;',
+      ),
+  },
+  {
+    id: "MU-8C-K1a",
+    title:
+      "WEB-08c K-1: an identity read's 200-other-account / 401 answer leaves the credential_unverified entry beside the stronger fence (the unbounded re-verification)",
+    file: "src/session/kernel/identity.ts",
+    tests: [
+      "tests/session/web08c-k1.test.ts",
+      "tests/session/web08c-traces.test.ts",
+    ],
+    expect: /K-1|T21/,
+    patch: (t) => sub(t, "      replaces_unverified: inflight.fenceSeq,\n", ""),
+  },
+  {
+    id: "MU-8C-K1b",
+    title:
+      "WEB-08c K-1: the recording transaction does not replace the covered credential_unverified entries",
+    file: "src/session/model/reducers/observation.ts",
+    tests: [
+      "tests/session/web08c-k1.test.ts",
+      "tests/session/web08c-traces.test.ts",
+    ],
+    expect: /K-1|T21/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (replaces === undefined) return;",
+        "    if (replaces === undefined || (true as boolean)) return;",
+      ),
+  },
 ];
 
 /**

@@ -33,9 +33,9 @@ default `0`) and gzip level 9. Two runs over the same `dist/` produce the same S
 
 ```json
 {
-  "atlas_backend_ref": { "tag": "v0.27.0-rc.1", "commit": "<full backend commit>" },
+  "atlas_backend_ref": { "tag": "v0.28.0-rc.1", "commit": "<full backend commit>" },
   "contract_hash": "<SHA-256 of api/openapi.json>",
-  "api_types_version": "0.27.0-rc.1",
+  "api_types_version": "0.28.0-rc.1",
   "api_types_tarball_sha256": "<SHA-256>",
   "frontend_ref": { "tag": null, "commit": "<full frontend commit>", "dirty": false },
   "ci_run_id": "local",
@@ -79,7 +79,7 @@ the notices. That second check reads the output itself, so it does not trust the
 | No fixture code | `scripts/check-no-fixture.mjs` | `fixture.html`, the fixture entry and the `ATLAS_FIXTURE_ONLY` marker are in no directory, archive or image filesystem. |
 | No off-origin request | `scripts/check-external-urls.mjs` | Nothing in `dist/` loads from off the origin. Fonts are self-hosted. The few inert URL strings (XML namespaces, a licence banner, two documentation links inside library messages) are listed in the evidence. |
 | Complete notices | `scripts/check-notices.mjs` | Every package bundled into the application and into `sw.js` has a notice with its licence text (see Third-party notices). |
-| Size budgets | `scripts/check-budgets.mjs` | Initial JavaScript and CSS (gzip) and font bytes stay within the provisional budgets and within 10% of the recorded baseline (`perf-budget.json`). A build may carry its own ceiling (`provisional_by_build`, with its authority recorded beside it). Only the fixture build does (WEB-09a R61), until WEB-09c's measurements replace the provisional figures. |
+| Size budgets | `scripts/check-budgets.mjs` | Initial JavaScript and CSS (gzip) and font bytes stay within the provisional budgets and within 10% of the recorded baseline (`perf-budget.json`). A build may carry its own ceiling (`provisional_by_build`, with its authority recorded beside it). Only the fixture build does (WEB-09a R61; for WEB-08c, operator decision FB-20261010-08C-14A: the fixture baseline re-recorded at 241,970 B initial JavaScript and its ceiling fixed at 266,167 B, with no automatic increase for a changed candidate), until WEB-09c's measurements replace the provisional figures. The production figures are unchanged. |
 | One route list | `scripts/check-route-parity.mjs` | The dev proxy, service worker, both nginx configs and the Ingress list the same backend prefixes. |
 | Archive | `scripts/smoke-archive.mjs` | Deterministic, complete, served by a plain static server, provenance valid. |
 | Image | `scripts/smoke-image.sh` | Both architectures: non-root, read-only, routing, headers, gzip, byte-identical to `dist/`, provenance, no fixture code; the production browser suite passes against the container. |

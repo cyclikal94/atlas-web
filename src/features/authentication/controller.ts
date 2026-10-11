@@ -5,6 +5,7 @@ import type {
   RegistrationInput,
   Session,
 } from "../../session";
+import { attemptEnd } from "./attempt-signal";
 import { authFeedback } from "./feedback";
 import type { OidcLanding } from "./handoff";
 import { invitationMemory } from "./handoff";
@@ -117,14 +118,20 @@ export async function signIn(
   credentials: { username: string; password: string },
 ): Promise<SignInResult> {
   authFeedback.clearOnBegin();
+  const before = session.identity.get();
   const begun = await session.attempts.begin("password");
-  const result =
-    begun.kind !== "started"
-      ? notStarted(begun)
-      : fromOutcome(
-          await session.attempts.signInWithPassword(begun.handle, credentials),
-          "sign_in",
-        );
+  if (begun.kind !== "started") {
+    const result = notStarted(begun);
+    if (result.kind === "failed") authFeedback.carryFailure(result.message);
+    return result;
+  }
+  const outcome = await session.attempts.signInWithPassword(
+    begun.handle,
+    credentials,
+  );
+  // WEB-08c (D-8c-04): an indeterminate activation; "That sign-in didn't finish" follows if it resolves with nothing settled.
+  if (outcome.kind === "gating") attemptEnd.indeterminate(before);
+  const result = fromOutcome(outcome, "sign_in");
   if (result.kind === "failed") authFeedback.carryFailure(result.message);
   return result;
 }
@@ -272,6 +279,7 @@ export async function completeLanding(
     });
     return;
   }
+  const before = session.identity.get();
   const outcome = await session.attempts.landing(landing.fragment);
   switch (outcome.kind) {
     case "settled":
@@ -304,7 +312,8 @@ export async function completeLanding(
       });
       return;
     case "gating":
-      // The 1c card owns the screen until the attempt resolves.
+      // The 1c card owns the screen until the attempt resolves; if it resolves with nothing settled, "That sign-in didn't finish".
+      attemptEnd.indeterminate(before);
       return;
   }
 }

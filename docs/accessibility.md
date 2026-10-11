@@ -71,3 +71,51 @@ For each core journey (open the app, move between destinations, open Appearance 
 
 The three combinations, a manual pass through the core journeys, and the recorded results are required before release. A keyboard-only walkthrough of the fixture shell,
 run by hand on the host, is informational and does not satisfy Q13.
+
+## T22: the resume gate with a screen reader (WEB-08c script; Q13 release evidence collected by WEB-15)
+
+Matrix T22 (`account-lifecycle-matrix.md`, lines 3464–3487) is a **working-client check with real assistive technology**. WEB-08c writes this script and an automated
+counterpart; the manual runs need a person and the devices below and are **not run** until an operator runs them against a WEB-08c candidate (or reassigns them, OD-1 in
+the WEB-08c report). The automated counterpart (`tests/e2e/production.lifecycle-a11y.spec.ts`, three engines) checks the accessibility tree, focus, Tab order and the polite
+status that a screen reader would be given; it is **not** assistive-technology evidence.
+
+**Combinations (each one run, plus one run with an open protected modal dialog):** NVDA with Firefox and with Chrome (Windows); VoiceOver with Safari on iOS and on iPadOS,
+in the browser and as the installed app; TalkBack with Chrome (Android).
+
+**Setup.** Sign in as account C on a build of the candidate. Open Settings → "Signing in" (a protected modal dialog: this is the open-modal run; for the other runs, close
+it and focus a link in the navigation instead). Put the cursor in "Current password" (it carries `data-focus-key="password-current"`) and type some characters without
+submitting. Open the same site in a second tab or window (on a phone: a second tab) and sign in there only when a branch says so.
+
+**Delaying the local check (test-only, nothing ships).** Before each return to the tab, run this snippet in the developer tools console of the tab under test (on iOS
+and Android use the remote inspector). It holds the completion of the NEXT `atlas-auth` transaction, the local check, for 4 s, then disarms itself. 4 s stays inside the
+application's own 5 s stall bound: a longer hold is treated as a stalled store and fails closed (finding O-3), which is a different branch.
+
+```js
+(() => { const t = IDBDatabase.prototype.transaction; let armed = true;
+  IDBDatabase.prototype.transaction = function (...a) { const tx = t.apply(this, a);
+    if (!armed || this.name !== "atlas-auth") return tx; armed = false; let h = null;
+    tx.addEventListener("complete", (e) => setTimeout(() => h && h.call(tx, e), 4000));
+    Object.defineProperty(tx, "oncomplete", { configurable: true, get: () => h, set: (f) => { h = f; } });
+    return tx; }; })();
+```
+
+**Steps.**
+
+| Step | Do | Pass criteria |
+| --- | --- | --- |
+| t0 | Switch to another tab or app (the tab is hidden) | The screen reader announces nothing about C; the focused field is no longer reachable; find-in-page finds nothing of C |
+| t1 | Wait long enough for the platform to suspend the tab where it does (a minute or more; on mobile, lock the screen) | — |
+| t2 | In the second tab: **(i)** sign in as another account Y; **(ii)** end C's session (sign out of C everywhere, or change C's password) and use the second tab once so it notices; **(iii)** do nothing | — |
+| t3 | Run the snippet, then return to the tab | The first thing presented is the gate: heading "Checking your account". Tab, Shift+Tab, the virtual cursor, the rotor and swipe navigation reach nothing but the gate. Nothing of C is spoken |
+| t4 | During the 4 s hold, try to reach the form | Still only the gate. "Checking your account" is announced once, politely (it does not interrupt) |
+| t5 (i) | Wait | Y's shell is shown; "This window now shows a different account." is announced, no name is spoken; focus is on Y's main heading; nothing points into C's form, and the typed characters are gone |
+| t5 (ii) | Wait | "Reconnect to keep going" (state 1b) is shown and announced as an alert; focus is on its heading; nothing of C is reachable |
+| t5 (iii) | Wait | The page comes back as it was: focus is back in "Current password" with the typed characters, and nothing extra is announced |
+
+**Fails:** any protected text or control reachable by keyboard, virtual cursor, rotor, swipe or find-in-page during t3–t4; after t5 (i) or (ii), any restored focus that
+points into the old account; any account name spoken by the gate or a neutral state.
+
+**Recording template (one row per run; WEB-15 collects them):**
+
+| Date | Tester | Device / OS version | Browser / version (installed app?) | Screen reader / version | Branch (i/ii/iii, open modal?) | t3–t4 result | t5 result | Notes / recording link |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |

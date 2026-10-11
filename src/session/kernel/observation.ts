@@ -142,6 +142,8 @@ export interface Observation {
   kind: ObservationKind;
   reason?: InvalidReason;
   retire?: readonly LeaseId[];
+  /** An identity read's `fence_seq` at sending: the `credential_unverified` entries its answer replaces (WEB-08c, T21). */
+  replaces_unverified?: number;
   /** The hold this recording releases when it completes. */
   hold_id: string;
 }
@@ -188,6 +190,9 @@ export async function recordAndHold(
             now: k.ports.clock.iso(),
             reason: observation.reason,
             retire: observation.retire,
+            ...(observation.replaces_unverified === undefined
+              ? {}
+              : { replaces_unverified: observation.replaces_unverified }),
           }),
         { durability: "strict", label: "record" },
       );

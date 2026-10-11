@@ -33,6 +33,11 @@ export interface DialogProps {
    * may not hold focus: Safari and iOS do not focus a button on click or tap.
    */
   returnFocusRef?: RefObject<HTMLElement | null>;
+  /**
+   * Whether the header carries the in-dialog sync control (default true). WF-SWITCH-02 is the one documented exception: it is a
+   * credential step for a DIFFERENT account, so it reports no sync state (`wireframes/switch/states.md`, the I1 exception).
+   */
+  syncControl?: boolean;
 }
 
 /**
@@ -52,6 +57,7 @@ export function Dialog({
   onCloseAutoFocus,
   initialFocusSelector,
   returnFocusRef,
+  syncControl = true,
 }: DialogProps) {
   const container = useRequiredPortalContainer();
   const opener = useRef<HTMLElement | null>(null);
@@ -134,13 +140,15 @@ export function Dialog({
               ) : null}
             </div>
             <div className="ml-auto flex min-w-0 items-center gap-2">
-              <SyncStatusChip
-                variant="dialog"
-                onBeforeOpen={() => {
-                  onRetainDraft?.();
-                  onClose();
-                }}
-              />
+              {syncControl ? (
+                <SyncStatusChip
+                  variant="dialog"
+                  onBeforeOpen={() => {
+                    onRetainDraft?.();
+                    onClose();
+                  }}
+                />
+              ) : null}
               <DialogPrimitive.Close
                 aria-label="Close"
                 onClick={(event) => {

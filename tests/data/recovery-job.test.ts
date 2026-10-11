@@ -1305,3 +1305,45 @@ describe("review cycle 2: a request refused before it was sent is an explicit ad
     expect(w.sync().cursor).toBe("d2");
   });
 });
+
+describe("WEB-08c K-2: a gate that ends with nothing to recover clears the reported failure (state 3 never strands the display)", () => {
+  for (const reason of ["attempt_gating", "operation_pending"] as const)
+    test(`K-2 (${reason}): the job reported 'failed' during the gate; once begin says no_fence it reports null`, async () => {
+      // A switch or an in-place re-authentication gates the account (not displayed); its attempt then resolves back to the SAME account
+      // with no fence (not_activated, or a same-account settlement), or a stale retirement leaves no fence. Nothing is left to recover.
+      const w = await recoveryWorld({
+        cursor: "d1",
+        phase: "delta",
+        cacheStatus: "valid",
+        displayed: false,
+      });
+      w.begins.push({ kind: "ineligible", reason });
+      await w.bindJob();
+      await w.settle();
+      const reports = () =>
+        w.calls
+          .filter((c) => c.call === "report")
+          .map((c) => (c as { phase: string | null }).phase);
+      expect(reports()).toEqual(["failed"]);
+      w.begins.push({ kind: "ineligible", reason: "no_fence" });
+      w.setGate(null);
+      w.fire();
+      await w.settle();
+      await w.advance(60_000);
+      expect(reports()).toEqual(["failed", null]);
+      expect(w.requests).toEqual([]);
+    });
+
+  test("control: no_fence with nothing reported reports nothing", async () => {
+    const w = await recoveryWorld({
+      cursor: "d1",
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+    w.begins.push({ kind: "ineligible", reason: "no_fence" });
+    await w.bindJob();
+    await w.settle();
+    expect(w.calls.filter((c) => c.call === "report")).toEqual([]);
+  });
+});

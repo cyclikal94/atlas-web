@@ -5,10 +5,10 @@
     "css_gzip": 30720,
     "fonts": 256000
   },
-  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline.",
+  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. Superseded for WEB-08c by FB-20261010-08C-14A (Kieran, 10 October 2026; atlas-orchestrator approval/web08c-web14a-fixture-budgets-20261010.json, SHA-256 777f7db96d3c30abd00f6bc9706c2630b3a5d2e4d867d6ad93d04d69914e1223): the dist-fixture baseline was re-recorded with `check-budgets.mjs dist-fixture --record` for the WEB-08c candidate (241,970 / 7,227 / 83,736) and its initial JavaScript ceiling fixed at 266,167 (that figure + 10 %, rounded down; a changed candidate gets no further increase). WEB-09c owns the measured successor budget. Production figures are unchanged.",
   "provisional_by_build": {
     "dist-fixture": {
-      "initial_js_gzip": 241544
+      "initial_js_gzip": 266167
     }
   },
   "tolerance": 0.1,
@@ -19,8 +19,8 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 219586,
-      "css_gzip": 6873,
+      "initial_js_gzip": 241970,
+      "css_gzip": 7227,
       "fonts": 83736
     }
   }

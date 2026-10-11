@@ -29,7 +29,24 @@ interface Surface {
   open(page: Page, stub: AuthStub): Promise<void>;
   /** The heading that should hold focus once the surface has settled. */
   focusHeading?: boolean;
+  /** Exact engine messages that this surface's OWN actions cause (`toleratesNavigationAbort`: one engine, one message each). */
+  tolerates?: Array<[engine: string, message: RegExp]>;
 }
+
+/**
+ * WEB-08c (HF-8, a flake of the accepted base: 3 of 30 base runs, 2 of 30 candidate runs, Firefox only, the same two warnings). Going
+ * offline right after the sign-in heading can fail the lazily loaded sync leader's module, which the product retries on `online`; the
+ * next width's `setOffline(false)` then fires `online`, and the test's own `about:blank` navigation aborts the retried leader's first
+ * transaction (an aborted transaction commits nothing). WebKit reports the same cut module loads (traced once: `browser-leader`, `browser-env`,
+ * `dexie-adapter`) as "Failed to load resource: WebKit encountered an internal error", a console text that names no URL; it is tolerated for
+ * this one surface, which goes offline on purpose, and in WebKit only.
+ */
+const LEADER_MODULE_FAILED_OFFLINE =
+  /^\[JavaScript Warning: "Loading failed for the module with source “http:\/\/127\.0\.0\.1:\d+\/assets\/browser-leader-[\w-]+\.js”\."/;
+const OFFLINE_LOAD_CUT_WEBKIT =
+  /^Failed to load resource: WebKit encountered an internal error$/;
+const TRANSACTION_ABORTED_BY_NAVIGATION =
+  /^\[JavaScript Warning: "An IndexedDB transaction that was not yet complete has been aborted due to page navigation\."/;
 
 const heading = (page: Page, name: string | RegExp) =>
   page.getByRole("heading", { level: 1, name }).waitFor();
@@ -76,6 +93,11 @@ const SURFACES: Surface[] = [
   },
   {
     name: "sign-in-offline",
+    tolerates: [
+      ["firefox", LEADER_MODULE_FAILED_OFFLINE],
+      ["firefox", TRANSACTION_ABORTED_BY_NAVIGATION],
+      ["webkit", OFFLINE_LOAD_CUT_WEBKIT],
+    ],
     open: async (page) => {
       await page.goto("/");
       await heading(page, "Sign in to Atlas");
@@ -204,95 +226,105 @@ for (const scheme of ["dark", "light"] as const) {
   test.describe(`public surfaces, rendered checks, ${scheme}`, () => {
     test.use({ colorScheme: scheme });
     for (const surface of SURFACES) {
-      test(surface.name, async ({ page, context, provokes }, testInfo) => {
-        provokes(...(surface.provokes ?? []));
-        const engine = testInfo.project.name.replace("production-", "");
-        const stub = new AuthStub();
-        await stub.install(context);
-        for (const [width, height] of WIDTHS) {
-          // A FRESH document each time: a fragment-only navigation does not reload the page.
-          await context.setOffline(false);
-          await page.goto("about:blank");
-          await page.setViewportSize({ width, height });
-          await surface.open(page, stub);
-          const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
+      test(
+        surface.name,
+        async ({
+          page,
+          context,
+          provokes,
+          toleratesNavigationAbort,
+        }, testInfo) => {
+          provokes(...(surface.provokes ?? []));
+          for (const [engine, message] of surface.tolerates ?? [])
+            toleratesNavigationAbort(engine, message);
+          const engine = testInfo.project.name.replace("production-", "");
+          const stub = new AuthStub();
+          await stub.install(context);
+          for (const [width, height] of WIDTHS) {
+            // A FRESH document each time: a fragment-only navigation does not reload the page.
+            await context.setOffline(false);
+            await page.goto("about:blank");
+            await page.setViewportSize({ width, height });
+            await surface.open(page, stub);
+            const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
 
-          // 1. No horizontal scrolling.
-          expect(
-            await page.evaluate(
-              () =>
-                document.documentElement.scrollWidth <=
-                document.documentElement.clientWidth,
-            ),
-            `${label}: horizontal scroll`,
-          ).toBe(true);
-
-          // 2. axe, including colour contrast in the real layout.
-          const violations = await runAxe(page);
-          expect(
-            violations.map(
-              (v) =>
-                `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`,
-            ),
-            `${label}: axe`,
-          ).toEqual([]);
-
-          // 3. Targets are at least 44 px high.
-          const small = await page.evaluate(() =>
-            Array.from(
-              document.querySelectorAll<HTMLElement>(
-                "main button, main a[href], main input",
-              ),
-            )
-              .filter((el) => el.getBoundingClientRect().height > 0)
-              .filter((el) => el.getBoundingClientRect().height < 43.5)
-              .map(
-                (el) =>
-                  `${el.tagName.toLowerCase()} "${(el.textContent ?? "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`,
-              ),
-          );
-          expect(small, `${label}: targets under 44px`).toEqual([]);
-
-          // 4. The page's heading is the programmatic focus target for a state that has just appeared.
-          if (surface.focusHeading)
+            // 1. No horizontal scrolling.
             expect(
-              await page.evaluate(() => document.activeElement?.tagName),
-              `${label}: focus target`,
-            ).toBe("H1");
+              await page.evaluate(
+                () =>
+                  document.documentElement.scrollWidth <=
+                  document.documentElement.clientWidth,
+              ),
+              `${label}: horizontal scroll`,
+            ).toBe(true);
 
-          // 5. A visible focus ring on the first control reached by keyboard.
-          if (
-            (await page
-              .locator("main :is(button, a[href], input):visible:enabled")
-              .count()) > 0
-          ) {
-            await pressTab(page);
-            const ring = await page.evaluate(() => {
-              const active = document.activeElement as HTMLElement | null;
-              if (!active || active === document.body) return null;
-              const style = getComputedStyle(active);
-              return {
-                outline:
-                  style.outlineStyle !== "none" &&
-                  Number.parseFloat(style.outlineWidth) >= 2,
-                shadow: style.boxShadow !== "none",
-              };
-            });
+            // 2. axe, including colour contrast in the real layout.
+            const violations = await runAxe(page);
             expect(
-              ring && (ring.outline || ring.shadow),
-              `${label}: focus ring`,
-            ).toBeTruthy();
-          }
+              violations.map(
+                (v) =>
+                  `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`,
+              ),
+              `${label}: axe`,
+            ).toEqual([]);
 
-          if (engine === "chromium") {
-            mkdirSync(`${EVIDENCE}/chromium`, { recursive: true });
-            await page.screenshot({
-              path: `${EVIDENCE}/chromium/${surface.name}-${width}-${scheme}.png`,
-              fullPage: true,
-            });
+            // 3. Targets are at least 44 px high.
+            const small = await page.evaluate(() =>
+              Array.from(
+                document.querySelectorAll<HTMLElement>(
+                  "main button, main a[href], main input",
+                ),
+              )
+                .filter((el) => el.getBoundingClientRect().height > 0)
+                .filter((el) => el.getBoundingClientRect().height < 43.5)
+                .map(
+                  (el) =>
+                    `${el.tagName.toLowerCase()} "${(el.textContent ?? "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`,
+                ),
+            );
+            expect(small, `${label}: targets under 44px`).toEqual([]);
+
+            // 4. The page's heading is the programmatic focus target for a state that has just appeared.
+            if (surface.focusHeading)
+              expect(
+                await page.evaluate(() => document.activeElement?.tagName),
+                `${label}: focus target`,
+              ).toBe("H1");
+
+            // 5. A visible focus ring on the first control reached by keyboard.
+            if (
+              (await page
+                .locator("main :is(button, a[href], input):visible:enabled")
+                .count()) > 0
+            ) {
+              await pressTab(page);
+              const ring = await page.evaluate(() => {
+                const active = document.activeElement as HTMLElement | null;
+                if (!active || active === document.body) return null;
+                const style = getComputedStyle(active);
+                return {
+                  outline:
+                    style.outlineStyle !== "none" &&
+                    Number.parseFloat(style.outlineWidth) >= 2,
+                  shadow: style.boxShadow !== "none",
+                };
+              });
+              expect(
+                ring && (ring.outline || ring.shadow),
+                `${label}: focus ring`,
+              ).toBeTruthy();
+            }
+
+            if (engine === "chromium") {
+              mkdirSync(`${EVIDENCE}/chromium`, { recursive: true });
+              await page.screenshot({
+                path: `${EVIDENCE}/chromium/${surface.name}-${width}-${scheme}.png`,
+                fullPage: true,
+              });
+            }
           }
-        }
-      });
+        },
+      );
     }
   });
 }

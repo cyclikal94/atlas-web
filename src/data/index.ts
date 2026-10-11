@@ -74,6 +74,12 @@ export {
   type DeletionPortsOptions,
 } from "./ports/deletion-ports";
 export type { Loadable } from "./store/port";
+// ---- the retained-account directory (WEB-08c, WF-SWITCH-01): only the switcher's lazy chunk imports it ---------------------------
+export {
+  listRetainedAccounts,
+  type RetainedAccount,
+  type RetainedListing,
+} from "./store/retained-accounts";
 export {
   createDataEnv,
   type DataActions,

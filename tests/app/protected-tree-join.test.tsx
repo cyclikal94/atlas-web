@@ -86,9 +86,13 @@ describe("notices about a sign-in that finished while an account displays", () =
     );
     const notices = screen.getByRole("region", { name: "Notices" });
     fireEvent.click(notices.querySelector("button") as HTMLElement);
+    // The dismissed notice is gone. (The same words are also announced into the polite live region one animation frame after the
+    // notice appears; that announcement is not the notice, so the check is of the notice itself, not of the text anywhere.)
+    expect(notice).not.toBeInTheDocument();
     expect(
-      screen.queryByText(NEUTRAL_COPY["1c.superseded"].message),
+      document.querySelector('[data-notice="feedback-superseded"]'),
     ).toBeNull();
+    expect(screen.queryByRole("region", { name: "Notices" })).toBeNull();
   });
 
   test("linking single sign-on says so", async () => {

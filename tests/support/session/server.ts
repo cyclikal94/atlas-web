@@ -3,8 +3,9 @@ import { base64url, EPOCH_BASE, sha256Base64url } from "./env";
 import type { World } from "./world";
 
 /**
- * A small stateful STAND-IN for the documented contract of plan section 3 (pinned `v0.27.0-rc.1`, API 0.27.0), written
- * from the OpenAPI facts. It is a stub of the contract, NOT a port of the backend, and a passing test against it is
+ * A small stateful STAND-IN for the session-lifecycle projection of plan section 3, written from the OpenAPI facts.
+ * /health follows the current pin. List responses intentionally retain the pre-BE-Q25 projection: this stub does not model
+ * client labels, names, rename operations or capacity reporting. It is not validation of the full API 0.28 response schema. It is a stub of the contract, NOT a port of the backend, and a passing test against it is
  * fixture evidence, never integration evidence. Every answer can be delayed, dropped, rewritten or held (`Rule`).
  */
 export const API = "/api/experimental/v1";
@@ -123,7 +124,7 @@ export class StubServer {
   oidcIssuer = "https://idp.example.test";
   /** The browser's cookie jar for the origin: shared by every page. */
   cookie: string | null = null;
-  apiVersion: string | undefined = "0.27.0";
+  apiVersion: string | undefined = "0.28.0";
   rules: Rule[] = [];
   readonly requests: RecordedRequest[] = [];
   /** Make the next activations answer `503 device_capacity`. */

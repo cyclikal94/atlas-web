@@ -855,7 +855,14 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     epoch: number,
     reason: Exclude<RecoveryBegin, { kind: "eligible" }>["reason"],
   ): Next {
-    if (reason === "no_fence") return quiet();
+    if (reason === "no_fence") {
+      // WEB-08c K-2: nothing is fenced, so nothing is left to recover. A failure this job reported while a gate stood (an attempt that
+      // was gating, an operation pending) is not true any longer and is withdrawn: otherwise the session kept state 3 ("Couldn't finish
+      // catching up") over an account that has nothing to catch up, and a failed switch, an in-place re-authentication or a stale
+      // retirement left the page stranded there (the job reports `null` only once the account displays, which state 3 prevents).
+      if (reported !== null) report(null);
+      return quiet();
+    }
     exclusive.set(true);
     setState({ kind: "eligible_wait", reason });
     // A lease or a record that is not settled yet is asked again, paced; offline waits for `online`. A gate of the durable record (a

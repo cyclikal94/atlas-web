@@ -1,11 +1,12 @@
-import type { ReactNode } from "react";
+import { createElement, type ReactNode } from "react";
+import { SwitchAction } from "../../switch/entry";
 
 /**
- * The seam WEB-08c appends to: controls that sit beside "Sign out" on the account card, in order ("Switch account" is the
- * first). WEB-08b ships it EMPTY on purpose: the switch journey is WEB-08c's, and a control that led to a missing or fake flow
- * would be worse than none (docs/session.md, decisions D-8b-08 and gap G-20). Each entry is a function so it can use hooks.
+ * The seam for controls that sit beside "Sign out" on the account card, in order. WEB-08b shipped it empty (D-8b-08, G-20); WEB-08c
+ * appends "Switch account", which opens WF-SWITCH-01 (the switch journey itself is lazily loaded). Each entry is a function so it can
+ * use hooks.
  */
 export const accountActions: readonly {
   readonly id: string;
   readonly render: () => ReactNode;
-}[] = [];
+}[] = [{ id: "switch-account", render: () => createElement(SwitchAction) }];

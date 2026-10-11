@@ -135,14 +135,19 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
                 });
                 return void req.socket.destroy();
               case "rewrite_status":
+                // NONE of the backend's headers, as documented above: a gateway's error carries no Set-Cookie. (WEB-08c HF-5: the
+                // backend's headers used to be forwarded, so a rewritten `activate` still set the new session's cookie, unlike a gateway.)
                 return deliver({
                   status: rule.status ?? 502,
+                  headers: {},
                   body: Buffer.from("{}"),
                   contentType: "application/json",
                 });
               case "replace_response":
+                // None of the backend's headers, as documented above (WEB-08c HF-5, as for `rewrite_status`).
                 return deliver({
                   status: rule.status ?? 502,
+                  headers: {},
                   body: Buffer.from(JSON.stringify(rule.json ?? {})),
                   contentType: "application/json",
                 });
