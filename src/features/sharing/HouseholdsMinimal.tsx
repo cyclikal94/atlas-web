@@ -7,6 +7,7 @@ import { type SnapshotHousehold, useSharingDefaults } from "../../data";
 import {
   type Invitation,
   type ManagementCommand,
+  type SharingApi,
   type SharingFailure,
   type SharingResult,
   untilSent,
@@ -15,6 +16,15 @@ import * as copy from "./copy";
 import { useSharingEnv } from "./env";
 import { type Attempt, nextAttempt } from "./model/submission";
 import { Banner, formatWhen, useSharingLoad } from "./parts";
+
+/** An attempt whose outcome is not known, with the identity that made it (see `uncertain` below). */
+interface Unresolved {
+  attempt: Attempt;
+  done: string;
+  identity: string;
+  /** Whether it may have reached the server (an uncertain answer), not only been held back. */
+  sent: boolean;
+}
 
 /**
  * WEB-12a's DEMONSTRATION subset of household management (delivery-slices: "the household-invitation UI needed only to demonstrate the
@@ -44,14 +54,28 @@ export function HouseholdsMinimal() {
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
   /**
-   * An attempt whose outcome is not known (it may have committed). Its command carries an id this page chose (a household's, an
-   * invitation's), so it is never rebuilt: Try again resends it as it is (same key, same body), and nothing new is sent until it is
-   * resolved or the person reloads to see what happened.
+   * The attempt whose outcome is not known, for the identity that made it. Its command carries an id this page chose (a household's, an
+   * invitation's), so it is never rebuilt: Try again resends it as it is (same key, same body). `sent` says whether it may have reached
+   * the server (an uncertain answer) rather than only been held back (`not_sent`). Only a receipt or the server's own refusal ends it: a
+   * Try again that is not sent (offline, held back, the session closing) proves nothing about the earlier request, so the attempt is kept
+   * and nothing new is sent until it is resolved (R8). Reload shows the households again but does not end it either: a list read is not
+   * proof the earlier request cannot still commit. It lives as long as this page (D-12a-2; a reload of the app does not keep it).
    */
-  const [uncertain, setUncertain] = useState<{
-    attempt: Attempt;
-    done: string;
-  } | null>(null);
+  const [uncertain, setUncertainState] = useState<Unresolved | null>(null);
+  const held = useRef<Unresolved | null>(null);
+  const hold = (next: Unresolved | null) => {
+    held.current = next;
+    setUncertainState(next);
+  };
+  /**
+   * The one operation that owns sending (with its invite lookup), taken SYNCHRONOUSLY when it is admitted: a second click, a Try again
+   * or a lookup's continuation cannot start another command while one is being prepared or sent (DA-H1). `live` is the env of the
+   * latest render, so a continuation checks the connection, the server's compatibility and the identity as they are NOW.
+   */
+  const operation = useRef<{ token: number; identity: string } | null>(null);
+  const tokens = useRef(0);
+  const live = useRef(env);
+  live.current = env;
   const mounted = useRef(true);
   useEffect(
     () => () => {
@@ -80,44 +104,188 @@ export function HouseholdsMinimal() {
     });
   };
 
-  /** One management command, idempotent per body (D-12a-2); after a success everything it may have moved is read again. */
-  const run = (command: ManagementCommand, done: string) =>
-    send(nextAttempt(null, [command], env.newId), done);
-  const send = async (attempt: Attempt, done: string) => {
+  /** The unresolved attempt of the identity now displayed (one held for another identity is never shown or sent under this one). */
+  const unresolved = (): Unresolved | null =>
+    held.current !== null && held.current.identity === live.current.identity
+      ? held.current
+      : null;
+  /** Why an operation cannot start now, or null. A new command waits for an unresolved one; a Try again is only for it. */
+  const refusal = (retry: boolean): string | null => {
+    const now = live.current;
+    if (!now.online) return copy.SAVE_OFFLINE_REASON;
+    if (!now.writable) return copy.SAVE_COMPAT_REASON;
+    if (operation.current !== null) return copy.SAVE_BUSY_REASON;
+    if (retry) return unresolved() === null ? copy.UNCERTAIN_PENDING : null;
+    return unresolved() !== null ? copy.UNCERTAIN_PENDING : null;
+  };
+  /** Admits an operation, or returns null. Synchronous: what it checked cannot change before the operation is owned. */
+  const admit = (retry: boolean): number | null => {
+    if (!mounted.current || refusal(retry) !== null) return null;
+    tokens.current += 1;
+    operation.current = {
+      token: tokens.current,
+      identity: live.current.identity,
+    };
     setBusy(true);
     setProblem(null);
+    return tokens.current;
+  };
+  /** Whether `token` still owns the page for the identity that started it. */
+  const owns = (token: number) =>
+    mounted.current &&
+    operation.current?.token === token &&
+    operation.current.identity === live.current.identity;
+  const release = (token: number) => {
+    if (operation.current?.token !== token) return;
+    operation.current = null;
+    if (mounted.current) setBusy(false);
+  };
+
+  /**
+   * One management command under the admitted operation `token`, idempotent per body (D-12a-2); after a success everything it may have
+   * moved is read again. `api` is the client of the identity that admitted it.
+   */
+  const send = async (
+    token: number,
+    api: SharingApi,
+    attempt: Attempt,
+    done: string,
+  ) => {
     const result: SharingResult<{ revision: number }> = await untilSent(
-      () => env.api.management(JSON.parse(attempt.body), attempt.key),
-      { isCurrent: () => mounted.current },
+      () => api.management(JSON.parse(attempt.body), attempt.key),
+      { isCurrent: () => owns(token) },
     );
-    if (!mounted.current) return false;
-    setBusy(false);
+    if (!owns(token)) {
+      // Unmounted, or another identity is displayed: nothing here is for it (the attempt stays with the identity that made it).
+      release(token);
+      return false;
+    }
+    release(token);
+    const identity = live.current.identity;
+    // The unresolved attempt this send was a Try again of, if it was one.
+    const earlier =
+      unresolved()?.attempt.key === attempt.key ? unresolved() : null;
     if (result.ok) {
-      setUncertain(null);
+      if (earlier !== null) hold(null);
       announcer.announce(done);
       reloadHouseholds();
       reloadInvitations();
-      void defaults.refresh();
+      // Asked AFTER the change (R7): a snapshot read already under way may predate it.
+      void defaults.acquire(defaults.boundary());
       return true;
     }
-    setUncertain(
-      result.kind === "uncertain" || result.kind === "not_sent"
-        ? { attempt, done }
-        : null,
-    );
+    switch (result.kind) {
+      case "uncertain":
+        hold({ attempt, done, identity, sent: true });
+        break;
+      case "not_sent":
+        hold({ attempt, done, identity, sent: earlier?.sent === true });
+        break;
+      case "offline":
+      case "closed":
+        // Not sent this time: an earlier attempt that may have committed stays exactly as it was (R8). A first attempt was never sent.
+        if (earlier !== null) {
+          setProblem({
+            message: earlier.sent ? copy.UNCERTAIN : copy.NOT_SENT,
+          });
+          return false;
+        }
+        break;
+      default:
+        // The server's own refusal of this key and body: it was not made.
+        if (earlier !== null) hold(null);
+    }
     failed(result);
     return false;
   };
 
+  const run = (command: ManagementCommand, done: string) => {
+    const token = admit(false);
+    if (token === null) return Promise.resolve(false);
+    return send(
+      token,
+      live.current.api,
+      nextAttempt(null, [command], env.newId),
+      done,
+    );
+  };
+  const retry = () => {
+    const earlier = unresolved();
+    const token = earlier === null ? null : admit(true);
+    if (earlier === null || token === null) return;
+    void send(token, live.current.api, earlier.attempt, earlier.done);
+  };
+  const invite = async (household: SnapshotHousehold, username: string) => {
+    // The lookup is part of the operation: the page is owned from the click, so nothing else is sent while the answer is awaited.
+    const token = admit(false);
+    if (token === null) return false;
+    const api = live.current.api;
+    const found = await untilSent(() => api.lookup(username), {
+      isCurrent: () => owns(token),
+    });
+    if (!owns(token)) {
+      release(token);
+      return false;
+    }
+    const reason = !live.current.online
+      ? copy.SAVE_OFFLINE_REASON
+      : !live.current.writable
+        ? copy.SAVE_COMPAT_REASON
+        : null;
+    if (reason !== null) {
+      release(token);
+      setProblem({ message: reason });
+      return false;
+    }
+    const match = found.ok
+      ? found.value.find((entry) => entry.username === username)
+      : undefined;
+    if (!found.ok || match === undefined) {
+      release(token);
+      if (!found.ok) failed(found);
+      else setProblem({ message: copy.INVITE_NOT_FOUND });
+      return false;
+    }
+    return send(
+      token,
+      api,
+      nextAttempt(
+        null,
+        [
+          {
+            kind: "invite_to_household",
+            id: env.newId(),
+            household_id: household.id,
+            recipient_id: match.id,
+            expected_version: household.version,
+          },
+        ],
+        env.newId,
+      ),
+      copy.INVITED,
+    );
+  };
+
+  const shownUncertain =
+    uncertain !== null && uncertain.identity === env.identity
+      ? uncertain
+      : null;
   const blocked = !env.online
     ? copy.SAVE_OFFLINE_REASON
     : !env.writable
       ? copy.SAVE_COMPAT_REASON
       : busy
         ? copy.SAVE_BUSY_REASON
-        : uncertain !== null
+        : shownUncertain !== null
           ? copy.UNCERTAIN_PENDING
           : null;
+  const retryBlocked = !env.online
+    ? copy.SAVE_OFFLINE_REASON
+    : !env.writable
+      ? copy.SAVE_COMPAT_REASON
+      : busy
+        ? copy.SAVE_BUSY_REASON
+        : null;
   const nameLength = [...name.trim()].length;
 
   const shown: SnapshotHousehold[] | null =
@@ -148,18 +316,19 @@ export function HouseholdsMinimal() {
           message={problem.message}
           requestId={problem.requestId}
           action={
-            uncertain !== null ? (
+            shownUncertain !== null ? (
               <span className="flex flex-wrap gap-2">
-                <Button
-                  onClick={() => void send(uncertain.attempt, uncertain.done)}
-                >
-                  {copy.TRY_AGAIN}
-                </Button>
+                {retryBlocked !== null ? (
+                  <Button disabled reason={retryBlocked}>
+                    {copy.TRY_AGAIN}
+                  </Button>
+                ) : (
+                  <Button onClick={retry}>{copy.TRY_AGAIN}</Button>
+                )}
                 <Button
                   variant="quiet"
                   onClick={() => {
-                    setUncertain(null);
-                    setProblem(null);
+                    // Shows the households and invitations again; the unconfirmed change stays to be tried again (R8).
                     reloadHouseholds();
                     reloadInvitations();
                   }}
@@ -201,31 +370,7 @@ export function HouseholdsMinimal() {
                 household={household}
                 primary={household.id === primaryId}
                 blocked={blocked}
-                onInvite={async (username) => {
-                  const found = await untilSent(() => env.api.lookup(username));
-                  if (!mounted.current) return false;
-                  const match = found.ok
-                    ? found.value.find((entry) => entry.username === username)
-                    : undefined;
-                  if (!found.ok) {
-                    failed(found);
-                    return false;
-                  }
-                  if (match === undefined) {
-                    setProblem({ message: copy.INVITE_NOT_FOUND });
-                    return false;
-                  }
-                  return run(
-                    {
-                      kind: "invite_to_household",
-                      id: env.newId(),
-                      household_id: household.id,
-                      recipient_id: match.id,
-                      expected_version: household.version,
-                    },
-                    copy.INVITED,
-                  );
-                }}
+                onInvite={(username) => invite(household, username)}
               />
             ))}
           </List>

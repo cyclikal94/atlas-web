@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   screen,
@@ -8,11 +9,15 @@ import {
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { captureDefaults, type DraftRow } from "../../../src/data";
+import { createDefaultsSource } from "../../../src/data/engine/defaults-source";
+import type { ReadResult } from "../../../src/data/engine/identity-task";
 import * as copy from "../../../src/features/sharing/copy";
 import { DefaultsReview } from "../../../src/features/sharing/DefaultsReview";
 import * as syncCopy from "../../../src/features/sync/copy";
 import { QueuePanel } from "../../../src/features/sync/QueuePanel";
 import { describeRow } from "../../../src/features/sync/rows";
+import type { Identity } from "../../../src/session";
+import { Cell } from "../../support/data/defaults-world";
 import { draftRow } from "../../support/data/rows";
 import {
   ELSEWHERE,
@@ -508,5 +513,354 @@ describe("R2: the confirmation names the draft exactly as the review showed it",
       }),
     ).toBeInTheDocument();
     expect(t.onClose).not.toHaveBeenCalled();
+  });
+});
+
+// ---- WEB-12a review 2 ------------------------------------------------------------------------------------------------------------
+/**
+ * The PRODUCTION defaults source, started, with a screen already using it (its first read answered: following is done), and a
+ * controlled clock; every read is held until the test answers it. The review is mounted over it, as any screen embedding it would be.
+ */
+async function overSource(connection: { online: boolean } = { online: true }) {
+  let time = 100;
+  const held: Array<(result: ReadResult<unknown>) => void> = [];
+  const identity = new Cell<Identity | null>({
+    account_id: "11111111-1111-4111-8111-111111111111",
+    epoch: 1,
+    session_id: "s",
+  });
+  const source = createDefaultsSource({
+    identity,
+    online: () => connection.online,
+    onOnline: () => () => undefined,
+    service: () => null,
+    clock: { now: () => time },
+    quota: {
+      reserve: async () => {
+        throw new Error("no database");
+      },
+    },
+    readSnapshot: () =>
+      new Promise((resolve) => {
+        held.push(resolve);
+      }),
+  });
+  const stop = source.start();
+  const unuse = source.use();
+  await act(async () => {
+    await Promise.resolve();
+  });
+  held.shift()?.({ kind: "ok", value: snapshot() });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(held).toHaveLength(0);
+  const env = stubEnv();
+  Object.assign(env, { defaults: source });
+  return {
+    env,
+    source,
+    held,
+    setTime: (next: number) => {
+      time = next;
+    },
+    mount: (draft: DraftRow, online = true) =>
+      mountSharing(<DefaultsReview draft={draft} onClose={vi.fn()} />, {
+        env,
+        sharing: { now: () => time, online },
+      }),
+    stop: () => {
+      unuse();
+      stop();
+    },
+  };
+}
+const blocked = () =>
+  draftRow({
+    defaults_context: null,
+    defaults_revision: null,
+    review_block: { kind: "defaults", kinds: ["person"] },
+  });
+
+describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => {
+  test("control: a review opened with no read under way asks once and offers Confirm on that answer", async () => {
+    const t = await overSource();
+    t.setTime(200);
+    t.mount(blocked());
+    expect(t.held).toHaveLength(1);
+    await act(async () => {
+      t.held.shift()?.({
+        kind: "ok",
+        value: snapshot({ revision: revision(4) }),
+      });
+    });
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    t.stop();
+  });
+
+  test("MU-S49: an older refresh under way when the review opens is not its answer: the review asks for its own snapshot, and Confirm comes on THAT one", async () => {
+    const t = await overSource();
+    t.setTime(150);
+    const older = t.source.refresh();
+    t.setTime(200);
+    t.mount(blocked());
+    // Its own read is issued at once, beside the older one.
+    expect(t.held).toHaveLength(2);
+    const [a, b] = t.held.splice(0, 2);
+    await act(async () => {
+      a?.({ kind: "ok", value: snapshot({ revision: revision(2) }) });
+      await older;
+    });
+    // The older answer (issued before the review opened) is not "Now".
+    expect(confirmButton()).toBeDisabled();
+    expect(screen.getByText(copy.REVIEW_NOW_LOADING)).toBeInTheDocument();
+    await act(async () => {
+      b?.({ kind: "ok", value: snapshot({ revision: revision(3) }) });
+    });
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    fireEvent.click(confirmButton());
+    await waitFor(() =>
+      expect(
+        t.env.calls.some((c) => c.action === "confirmDefaultsReview"),
+      ).toBe(true),
+    );
+    const call = t.env.calls.find((c) => c.action === "confirmDefaultsReview");
+    expect(call?.args[1]).toMatchObject({ defaultsRevision: revision(3) });
+    t.stop();
+  });
+
+  test("MU-S49: its own read failing beside an older success is a failure the person can retry (never an endless loading), and Retry asks again", async () => {
+    const t = await overSource();
+    t.setTime(150);
+    const older = t.source.refresh();
+    t.setTime(200);
+    t.mount(blocked());
+    const [a, b] = t.held.splice(0, 2);
+    await act(async () => {
+      a?.({ kind: "ok", value: snapshot({ revision: revision(2) }) });
+      await older;
+      b?.({ kind: "failure" });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
+    );
+    const retry = screen.queryByRole("button", { name: copy.TRY_AGAIN });
+    expect(retry).not.toBeNull();
+    expect(confirmButton()).toBeDisabled();
+    fireEvent.click(retry as HTMLElement);
+    expect(t.held).toHaveLength(1);
+    await act(async () => {
+      t.held.shift()?.({
+        kind: "ok",
+        value: snapshot({ revision: revision(3) }),
+      });
+    });
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    t.stop();
+  });
+
+  test("MU-S50: an answer that still predates the opening (the clock went back) is not 'Now': a retryable failure, Confirm disabled", async () => {
+    const env = stubEnv();
+    let issued = 1;
+    env.refreshDefaults = async () => {
+      env.setDefaults(
+        record(snapshot({ revision: revision(6) }), {
+          issued_at: issued,
+          fetched_at: issued,
+        }),
+      );
+      return "fetched";
+    };
+    mountReview(reviewDraft(record(), ["person"]), env);
+    await waitFor(() =>
+      expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
+    );
+    expect(confirmButton()).toBeDisabled();
+    expect(screen.queryByText(copy.REVIEW_NOW_FAILED)).not.toBeNull();
+    const retry = screen.queryByRole("button", { name: copy.TRY_AGAIN });
+    expect(retry).not.toBeNull();
+    issued = Date.now() + 1;
+    fireEvent.click(retry as HTMLElement);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+  });
+
+  test("MU-S51: an answer landing after the page went offline does not replace the offline state", async () => {
+    const env = stubEnv();
+    let deliver: () => void = () => undefined;
+    env.refreshDefaults = () =>
+      new Promise((resolve) => {
+        deliver = () => {
+          const now = Date.now() + 1;
+          env.setDefaults(
+            record(snapshot({ revision: revision(3) }), {
+              issued_at: now,
+              fetched_at: now,
+            }),
+          );
+          resolve("fetched");
+        };
+      });
+    const t = mountReview(reviewDraft(record(), ["person"]), env);
+    await screen.findByText(copy.REVIEW_NOW_LOADING);
+    t.setSharing({ online: false });
+    await act(async () => {
+      deliver();
+    });
+    expect(document.querySelector("[data-review-now] p")?.textContent).toBe(
+      copy.REVIEW_NOW_NEEDS_CONNECTION,
+    );
+    expect(confirmButton()).toBeDisabled();
+  });
+
+  test("the snapshot shown is the one confirmed: a newer record reaching the page meanwhile changes neither", async () => {
+    const env = stubEnv();
+    serveNow(env, snapshot({ revision: revision(8) }));
+    mountReview(reviewDraft(record(), ["person"]), env);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    const now = document.querySelector("[data-review-now]")?.textContent;
+    act(() =>
+      env.setDefaults(
+        record(
+          snapshot({
+            revision: revision(9),
+            templates: { person: { kind: "private" } },
+          }),
+          { issued_at: Date.now() + 5, fetched_at: Date.now() + 5 },
+        ),
+      ),
+    );
+    expect(document.querySelector("[data-review-now]")?.textContent).toBe(now);
+    fireEvent.click(confirmButton());
+    await waitFor(() =>
+      expect(env.calls.some((c) => c.action === "confirmDefaultsReview")).toBe(
+        true,
+      ),
+    );
+    expect(
+      env.calls.find((c) => c.action === "confirmDefaultsReview")?.args[1],
+    ).toMatchObject({ defaultsRevision: revision(8) });
+  });
+});
+
+describe("DA-C1 (review 3 design assessment): each load after the opening asks for a read issued after IT", () => {
+  test("MU-S64: a read under way when the connection drops is not 'Now' once it returns: the review asks again at once, and Confirm comes only on that read", async () => {
+    const connection = { online: true };
+    const t = await overSource(connection);
+    t.setTime(200);
+    const view = t.mount(blocked());
+    expect(t.held).toHaveLength(1);
+    t.setTime(250);
+    connection.online = false;
+    view.setSharing({ online: false });
+    expect(confirmButton()).toBeDisabled();
+    t.setTime(300);
+    connection.online = true;
+    view.setSharing({ online: true });
+    // Asserted before anything is answered: reconnecting issues its own read beside the one from before the disconnection.
+    expect(t.held).toHaveLength(2);
+    const [a, b] = t.held.splice(0, 2);
+    await act(async () => {
+      a?.({ kind: "ok", value: snapshot({ revision: revision(2) }) });
+    });
+    expect(confirmButton()).toBeDisabled();
+    expect(screen.getByText(copy.REVIEW_NOW_LOADING)).toBeInTheDocument();
+    await act(async () => {
+      b?.({ kind: "ok", value: snapshot({ revision: revision(3) }) });
+    });
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    fireEvent.click(confirmButton());
+    await waitFor(() =>
+      expect(
+        t.env.calls.find((c) => c.action === "confirmDefaultsReview")?.args[1],
+      ).toMatchObject({ defaultsRevision: revision(3) }),
+    );
+    t.stop();
+  });
+
+  test("MU-S65: Try again asks for a read issued after it, not one another screen started after the opening", async () => {
+    const t = await overSource();
+    t.setTime(200);
+    t.mount(blocked());
+    expect(t.held).toHaveLength(1);
+    // Another screen asks after the opening (it would satisfy the opening's boundary) but before Try again.
+    t.setTime(250);
+    const other = t.source.acquire(t.source.boundary());
+    expect(t.held).toHaveLength(2);
+    const [own, shared] = t.held.splice(0, 2);
+    await act(async () => {
+      own?.({ kind: "failure" });
+    });
+    const retry = await screen.findByRole("button", { name: copy.TRY_AGAIN });
+    t.setTime(300);
+    fireEvent.click(retry);
+    // Asserted before anything is answered: Try again issues its own read.
+    expect(t.held).toHaveLength(1);
+    await act(async () => {
+      shared?.({ kind: "ok", value: snapshot({ revision: revision(2) }) });
+      await other;
+    });
+    expect(confirmButton()).toBeDisabled();
+    await act(async () => {
+      t.held.shift()?.({
+        kind: "ok",
+        value: snapshot({ revision: revision(3) }),
+      });
+    });
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    fireEvent.click(confirmButton());
+    await waitFor(() =>
+      expect(
+        t.env.calls.find((c) => c.action === "confirmDefaultsReview")?.args[1],
+      ).toMatchObject({ defaultsRevision: revision(3) }),
+    );
+    t.stop();
+  });
+
+  test("control: opened offline, the first read after the connection returns is the review's own, and its answer is 'Now'", async () => {
+    const connection = { online: true };
+    const t = await overSource(connection);
+    connection.online = false;
+    t.setTime(200);
+    const view = t.mount(blocked(), false);
+    expect(t.held).toHaveLength(0);
+    expect(confirmButton()).toBeDisabled();
+    t.setTime(300);
+    connection.online = true;
+    view.setSharing({ online: true });
+    expect(t.held).toHaveLength(1);
+    await act(async () => {
+      t.held.shift()?.({
+        kind: "ok",
+        value: snapshot({ revision: revision(4) }),
+      });
+    });
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    t.stop();
+  });
+});
+
+describe("C3 (plan §4.6): Confirm needs the connection and the review's own read", () => {
+  test("MU-S54: going offline after a fresh read disables Confirm with the connection reason; back online it is offered again only after the review reads again", async () => {
+    const env = stubEnv();
+    serveNow(env, snapshot({ revision: revision(8) }));
+    const t = mountReview(reviewDraft(record(), ["person"]), env);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    const reads = () =>
+      env.calls.filter((c) => c.action === "refreshDefaults").length;
+    expect(reads()).toBe(1);
+    t.setSharing({ online: false });
+    expect(confirmButton()).toBeDisabled();
+    expect(
+      document.getElementById(
+        confirmButton().getAttribute("aria-describedby") ?? "",
+      )?.textContent,
+    ).toBe(copy.REVIEW_NOW_NEEDS_CONNECTION);
+    fireEvent.click(confirmButton());
+    expect(env.calls.some((c) => c.action === "confirmDefaultsReview")).toBe(
+      false,
+    );
+    t.setSharing({ online: true });
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+    expect(reads()).toBe(2);
   });
 });

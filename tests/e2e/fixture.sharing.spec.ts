@@ -15,6 +15,7 @@ import {
   startLeader,
   startOutbox,
   stubNetwork,
+  untilTreeSettled,
   waitForState,
 } from "./data-sync-helpers";
 import { pressTab } from "./helpers";
@@ -27,7 +28,12 @@ import { pressTab } from "./helpers";
  *
  * E-SH1 open, effective visibility and save; E-SH2 offline and an uncertain save retried; E-SH3 the directory lookup; E-SH4 the defaults
  * editor's layers and conflict; E-SH5 a locally blocked draft, reviewed and confirmed, then sent; E-SH6 W14 in real IndexedDB; E-SH7 a
- * keyboard-only journey; E-SH8 the viewports.
+ * keyboard-only journey; E-SH8 the viewports. Review cycle 1: E-SH9 a non-owner's editor, E-SH10/E-SH11 kept drafts. Review 2: E-SH12/E-SH13
+ * a dismissal discards what the editor's session kept, also before its read lands, offline, and for another kind. Review 3: E-SH14 an
+ * unresolved household create survives the browser going offline and back, and is the only command sent until it is resolved. Review 4:
+ * E-SH15 a defaults answer asked before the database was deleted and created again (by this page or another) is never written into the
+ * replacement, through the harness's production controller and defaults source. Review 5: E-SH16 the editors' household choices and names
+ * come from the complete membership list (`GET /households`), which the stub serves on its own (`memberships`), never from B5's subset.
  */
 const API = "/api/experimental/v1";
 const RID = "55555555-5555-4555-8555-555555555555";
@@ -80,6 +86,20 @@ interface Served {
   snapshotReads: number;
   /** Holds every snapshot answer until released (E-SH6). */
   holdSnapshot: Promise<void> | null;
+  /**
+   * `GET /households`: the caller's COMPLETE membership list, served on its own (WEB-12a R11, design assessment DA-T1). B5's
+   * `snapshot.households` names only the primary household and the households the resolved defaults name, so the two differ whenever
+   * you are in a household no resolved default names; by default they coincide (Home only).
+   */
+  memberships: unknown[];
+  /**
+   * While set, EVERY `GET /households` answers this refusal, else `200 memberships`. Every reader is refused alike: the Sharing page's
+   * household demonstration under an editor reads the list too, so a refusal of only the next read would go to whichever read came first.
+   */
+  refuseMemberships: { status: number; body: unknown } | null;
+  membershipReads: number;
+  /** `GET /policies/{RID}` requests (E-SH16: a membership Try again reads only the list). */
+  policyReads: number;
 }
 
 function scope(
@@ -140,6 +160,10 @@ async function serveSharing(context: BrowserContext): Promise<Served> {
     managementScript: [],
     snapshotReads: 0,
     holdSnapshot: null,
+    memberships: [homeHousehold()],
+    refuseMemberships: null,
+    membershipReads: 0,
+    policyReads: 0,
   };
   let revision = 500;
   await context.route(`**${API}/**`, async (route: Route) => {
@@ -184,16 +208,20 @@ async function serveSharing(context: BrowserContext): Promise<Served> {
             : served.templates,
         ),
       );
-    if (path === `/policies/${RID}`)
+    if (path === `/policies/${RID}`) {
+      served.policyReads += 1;
       return route.fulfill(json(200, served.policy));
+    }
     if (path === `/policies/${OTHER_RID}`)
       return route.fulfill(
         json(200, { version: 1, policy: { grants: [], exclude_accounts: [] } }),
       );
-    if (path === "/households")
-      return route.fulfill(
-        json(200, (served.snapshot as { households: unknown }).households),
-      );
+    if (path === "/households") {
+      served.membershipReads += 1;
+      const refusal = served.refuseMemberships;
+      if (refusal) return route.fulfill(json(refusal.status, refusal.body));
+      return route.fulfill(json(200, served.memberships));
+    }
     if (path === "/invitations") return route.fulfill(json(200, []));
     if (path === "/directory") {
       const username = url.searchParams.get("username") ?? "";
@@ -1103,5 +1131,549 @@ test.describe("E-SH11: the defaults editor keeps unsaved choices offline and thr
     await expect(privateChoice()).toHaveAttribute("aria-checked", "false");
     await expect(personal().locator("[data-layer-restored]")).toHaveCount(0);
     recordEvidence(info, "e-sh11", { management: served.management });
+  });
+});
+
+// ---- WEB-12a review 2 (R5): a dismissal discards what the session kept, whatever is on screen -----------------------------------------
+/** The in-dialog sync control: keeps what the editor shows and opens the queue. */
+async function keepThroughSync(page: Page): Promise<void> {
+  await page.getByRole("dialog").locator("[data-sync-tone]").click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page).toHaveURL(/\/sync/);
+}
+/** The editor closed itself (its close navigates to /sharing): wait for that navigation before navigating again (WebKit, cycle 1). */
+async function closedToSharing(page: Page): Promise<void> {
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page).toHaveURL(/\/sharing$/);
+}
+/** The browser's own connectivity (navigator.onLine follows it), so a remounted boundary sees it (review 2's corrected precondition). */
+async function connectivity(
+  context: BrowserContext,
+  page: Page,
+  online: boolean,
+): Promise<void> {
+  await context.setOffline(!online);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(online);
+}
+
+test.describe("E-SH12: the policy editor's dismissal discards a kept draft even before its read lands (R5, review 2)", () => {
+  test("kept Read → Edit; reopened with GET /policies held: released, the kept draft is restored (control); kept again, reopened held and Escape: released and reopened, the read policy is shown; a page reload keeps nothing; nothing was saved", async ({
+    context,
+  }, info) => {
+    const { served, page } = await setup(context, `/sharing/items/${RID}`);
+    const dialog = () => page.getByRole("dialog", { name: editorTitle });
+    const choice = (name: "Read" | "Edit") =>
+      dialog()
+        .getByRole("radiogroup", { name: "Home: Read or Edit" })
+        .getByRole("radio", { name, exact: true });
+    let release: () => void = () => undefined;
+    let requested = 0;
+    /** Holds the next GET /policies/{id} until `release`. */
+    const holdNextRead = async () => {
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      requested = 0;
+      await context.route(
+        `**${API}/policies/${RID}`,
+        async (route) => {
+          requested += 1;
+          await gate;
+          await route.fulfill(json(200, served.policy));
+        },
+        { times: 1 },
+      );
+    };
+    await expect(dialog().locator("[data-audience]")).toBeVisible();
+    await choice("Edit").click();
+    await keepThroughSync(page);
+    // Control: the held reopening restores the kept draft once its read lands.
+    await holdNextRead();
+    await navigateInApp(page, `/sharing/items/${RID}`);
+    await expect(dialog()).toBeVisible();
+    await expect.poll(() => requested).toBe(1);
+    await expect(dialog().locator("[data-audience]")).toHaveCount(0);
+    release();
+    await expect(dialog().locator("[data-policy-restored]")).toBeVisible();
+    await expect(choice("Edit")).toHaveAttribute("aria-checked", "true");
+    // Kept again; reopened with the read held, then dismissed by Escape before it lands.
+    await keepThroughSync(page);
+    await holdNextRead();
+    await navigateInApp(page, `/sharing/items/${RID}`);
+    await expect(dialog()).toBeVisible();
+    await expect.poll(() => requested).toBe(1);
+    await expect(dialog().locator("[data-audience]")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await closedToSharing(page);
+    release();
+    await navigateInApp(page, `/sharing/items/${RID}`);
+    await expect(dialog().locator("[data-audience]")).toBeVisible();
+    await expect(choice("Read")).toHaveAttribute("aria-checked", "true");
+    await expect(dialog().locator("[data-policy-restored]")).toHaveCount(0);
+    // Lifetime boundary: kept again, then the page is loaded again. Kept input lives in the page's memory only (no storage), so the
+    // reloaded editor starts from the read policy; nothing was sent.
+    await choice("Edit").click();
+    await keepThroughSync(page);
+    await reopen(page, `/sharing/items/${RID}`);
+    await expect(dialog().locator("[data-audience]")).toBeVisible();
+    await expect(choice("Read")).toHaveAttribute("aria-checked", "true");
+    await expect(dialog().locator("[data-policy-restored]")).toHaveCount(0);
+    expect(served.management).toEqual([]);
+    recordEvidence(info, "e-sh12", { management: served.management });
+  });
+});
+
+test.describe("E-SH13: the defaults editor's Done discards every kept choice, offline or on another kind (R5, review 2)", () => {
+  test("kept Private; reopened offline (no forms) and back online without Done, it is restored (control); kept again, reopened offline and Done: back online it is gone. Kept again; Fields → Tasks → Fields restores it (control); Tasks then Done: Fields shows the stored template", async ({
+    context,
+  }, info) => {
+    const path = "/sharing/defaults?kind=field";
+    const { served, page } = await setup(context, path, { resource: false });
+    const dialog = () => page.getByRole("dialog");
+    const personal = () => dialog().locator('[data-layer-form="personal"]');
+    const privateChoice = () =>
+      personal().getByRole("radio", { name: "Private", exact: true });
+    const done = () => dialog().getByRole("button", { name: "Done" }).click();
+    const keepPrivate = async () => {
+      await privateChoice().click();
+      await keepThroughSync(page);
+    };
+    await keepPrivate();
+    // Control: reopened offline (the read-only snapshot, no form), then back online in the open editor: the kept choice returns.
+    await connectivity(context, page, false);
+    await navigateInApp(page, path);
+    await expect(dialog().locator("[data-defaults-offline]")).toBeVisible();
+    await expect(personal()).toHaveCount(0);
+    await connectivity(context, page, true);
+    await expect(personal().locator("[data-layer-restored]")).toBeVisible();
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "true");
+    // Kept again; reopened offline and Done with no form on screen.
+    await keepThroughSync(page);
+    await connectivity(context, page, false);
+    await navigateInApp(page, path);
+    await expect(dialog().locator("[data-defaults-offline]")).toBeVisible();
+    await expect(personal()).toHaveCount(0);
+    await done();
+    await closedToSharing(page);
+    await connectivity(context, page, true);
+    await navigateInApp(page, path);
+    await expect(personal()).toBeVisible();
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "false");
+    await expect(personal().locator("[data-layer-restored]")).toHaveCount(0);
+    // Control: kept, then Fields → Tasks → Fields without a dismissal gives it back.
+    await keepPrivate();
+    await navigateInApp(page, path);
+    await expect(personal().locator("[data-layer-restored]")).toBeVisible();
+    await dialog().getByRole("tab", { name: "Tasks", exact: true }).click();
+    await expect(dialog()).toHaveAccessibleName("Sharing defaults — Tasks");
+    await expect(personal().locator("[data-layer-restored]")).toHaveCount(0);
+    await dialog().getByRole("tab", { name: "Fields", exact: true }).click();
+    await expect(dialog()).toHaveAccessibleName("Sharing defaults — Fields");
+    await expect(personal().locator("[data-layer-restored]")).toBeVisible();
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "true");
+    // Then Tasks and Done: the Fields choice kept earlier is discarded too.
+    await dialog().getByRole("tab", { name: "Tasks", exact: true }).click();
+    await expect(dialog()).toHaveAccessibleName("Sharing defaults — Tasks");
+    await done();
+    await closedToSharing(page);
+    await navigateInApp(page, path);
+    await expect(dialog()).toHaveAccessibleName("Sharing defaults — Fields");
+    await expect(personal()).toBeVisible();
+    await expect(privateChoice()).toHaveAttribute("aria-checked", "false");
+    await expect(personal().locator("[data-layer-restored]")).toHaveCount(0);
+    expect(served.management).toEqual([]);
+    recordEvidence(info, "e-sh13", { management: served.management });
+  });
+});
+
+// ---- WEB-12a review 3 (R8): a Try again that is not sent proves nothing about the earlier request -----------------------------------
+test.describe("E-SH14: an unresolved household create is kept across the browser going offline (R8, review 3)", () => {
+  test("the create's response is lost (uncertain); offline, Try again and Create are disabled and nothing is sent; back online Create stays blocked and Try again sends the SAME key and body; its receipt frees Create, whose next create is a new command", async ({
+    context,
+  }, info) => {
+    const { served, page } = await setup(context, "/sharing", {
+      resource: false,
+    });
+    const create = page.getByRole("button", {
+      name: "Create household",
+      exact: true,
+    });
+    // The unresolved attempt's own Try again (a failed list read has its own "Try again" in another banner).
+    const retry = page
+      .locator("[data-sharing-banner]")
+      .filter({ hasText: "We couldn't confirm the change was saved" })
+      .getByRole("button", { name: "Try again", exact: true });
+    // Precondition: the households and invitations have been read, so going offline cannot interrupt a read still under way
+    // (WebKit fails such a read, campaign 1 of revision 3; nothing here is about reads).
+    await expect(page.locator("[data-household]")).toHaveCount(1);
+    await expect(page.getByText("No pending invitations")).toBeVisible();
+    await page
+      .getByLabel("Household name", { exact: true })
+      .fill("Review household");
+    served.managementScript.push("abort");
+    await create.click();
+    await expect(retry).toBeVisible();
+    expect(served.management).toHaveLength(1);
+    const original = structuredClone(served.management[0]);
+    // The browser's own connectivity, as the person would lose it.
+    await connectivity(context, page, false);
+    await expect(retry).toBeDisabled();
+    await expect(create).toBeDisabled();
+    await retry.click({ force: true });
+    await connectivity(context, page, true);
+    // Asserted before anything else is clicked: no request was made offline, and the earlier one is still the one to resolve.
+    expect(served.management).toHaveLength(1);
+    await expect(create).toBeDisabled();
+    await expect(retry).toBeEnabled();
+    await retry.click();
+    await expect.poll(() => served.management.length).toBe(2);
+    expect(served.management[1]).toEqual(original);
+    await expect(retry).toHaveCount(0);
+    await expect(create).toBeEnabled();
+    await page.getByLabel("Household name", { exact: true }).fill("Another");
+    await create.click();
+    await expect.poll(() => served.management.length).toBe(3);
+    expect(served.management[2]?.key).not.toBe(original?.key);
+    recordEvidence(info, "e-sh14", { management: served.management });
+  });
+});
+
+test.describe("E-SH15: a defaults answer belongs to the database it was asked under (A10; R10, review 4)", () => {
+  type Acquired = { outcome: string; record: unknown };
+  /**
+   * The page's PRODUCTION controller (the harness's gate) with its PRODUCTION defaults source over the account's real database, and every
+   * `GET /defaults/snapshot` held until the spec releases it with a revision. The page shows Today, which reads no defaults of its own.
+   */
+  async function heldDefaults(context: BrowserContext) {
+    const { page } = await setup(context, "/today");
+    const held: Array<(revision: number) => void> = [];
+    await context.route(`**${API}/defaults/snapshot`, async (route) => {
+      const revision = await new Promise<number>((resolve) =>
+        held.push(resolve),
+      );
+      await route.fulfill(json(200, snapshotOf(rev(revision))));
+    });
+    await page.evaluate(
+      (a) => window.__atlasData?.startGate(a, { defaults: true }),
+      ACCOUNT,
+    );
+    const incarnation = await page.evaluate(() =>
+      window.__atlasData?.gateIncarnation(),
+    );
+    expect(incarnation).toBeTruthy();
+    return { page, held, incarnation: incarnation as string };
+  }
+  /** Asks the gate's source for a snapshot issued now; the acquisition is kept on the page until `acquired` collects it. */
+  const acquire = (page: Page) =>
+    page.evaluate(() => {
+      const defaults = window.__atlasData?.gateDefaults();
+      if (!defaults) throw new Error("no gate defaults");
+      (window as unknown as { eSh15?: Promise<unknown> }).eSh15 =
+        defaults.acquire(defaults.boundary());
+    });
+  const acquired = (page: Page) =>
+    page.evaluate(
+      () => (window as unknown as { eSh15?: Promise<unknown> }).eSh15,
+    ) as Promise<Acquired>;
+  /** The record persisted in the account's database now, read through the harness's own connection (it never creates one). */
+  const storedRevision = async (page: Page) => {
+    const found = await page.evaluate(async (a) => {
+      const h = window.__atlasData;
+      if (!h) throw new Error("no harness");
+      h.setIdentity(a);
+      const opened = await h.open(a);
+      return {
+        opened,
+        revision:
+          (await h.defaultsRecord(a))?.snapshot.defaults.revision ?? null,
+      };
+    }, ACCOUNT);
+    // A refused open (the page's registry closed under the harness) is not a database to read: say so, not "no open store" later.
+    expect(found.opened).not.toMatch(/^absent$|^refused/);
+    return found.revision;
+  };
+  /** The account's database deleted and created again (a new incarnation) by `by`, then the controller of `page` looks again. */
+  async function replaceDatabase(page: Page, by: Page, before: string) {
+    const replaced = await by.evaluate(async (a) => {
+      const h = window.__atlasData;
+      if (!h) throw new Error("no harness");
+      h.stopSync();
+      await h.ports.database.closeOwnConnections(a);
+      const deleted = await h.ports.database.delete(a);
+      h.close(a);
+      h.setIdentity(a);
+      const opened = await h.open(a, { create: true });
+      return {
+        deleted,
+        opened,
+        incarnation: h.incarnation(a),
+        stored: await h.defaultsRecord(a),
+      };
+    }, ACCOUNT);
+    expect(replaced.deleted).toMatch(/deleted/);
+    // An explicit creation answers `created` (review 4's corrected harness expectation), never `opened`.
+    expect(replaced.opened).toBe("created");
+    expect(replaced.incarnation).not.toBe(before);
+    expect(replaced.stored).toBeNull();
+    await page.evaluate(() => dispatchEvent(new Event("online")));
+    await expect
+      .poll(() => page.evaluate(() => window.__atlasData?.gateIncarnation()))
+      .toBe(replaced.incarnation);
+    return replaced.incarnation as string;
+  }
+
+  test("control: an answer whose database stands is persisted into the incarnation it was asked under, and returned", async ({
+    context,
+  }, info) => {
+    const { page, held, incarnation } = await heldDefaults(context);
+    await acquire(page);
+    await expect.poll(() => held.length).toBe(1);
+    held.shift()?.(44);
+    const got = await acquired(page);
+    expect(got.outcome).toBe("fetched");
+    expect(await storedRevision(page)).toBe(rev(44));
+    expect(
+      await page.evaluate(() => window.__atlasData?.gateIncarnation()),
+    ).toBe(incarnation);
+    recordEvidence(info, "e-sh15-control", { incarnation, got: got.outcome });
+  });
+
+  test("an answer asked before this page's database was deleted and created again is never written into the replacement; a fresh one is", async ({
+    context,
+  }, info) => {
+    const { page, held, incarnation } = await heldDefaults(context);
+    await acquire(page);
+    await expect.poll(() => held.length).toBe(1);
+    const release = held.shift();
+    const replacement = await replaceDatabase(page, page, incarnation);
+    release?.(44);
+    const got = await acquired(page);
+    // Asserted on the database first: the forbidden write is what review 4 observed in every engine.
+    expect(await storedRevision(page)).toBeNull();
+    expect(got).toEqual({ outcome: "closed", record: null });
+    expect(
+      await page.evaluate(() => window.__atlasData?.gateDefaults()?.revision()),
+    ).toBeNull();
+    // A fresh request, asked under the replacement, is persisted into it.
+    await acquire(page);
+    await expect.poll(() => held.length).toBe(1);
+    held.shift()?.(45);
+    expect((await acquired(page)).outcome).toBe("fetched");
+    expect(await storedRevision(page)).toBe(rev(45));
+    recordEvidence(info, "e-sh15-replaced", {
+      before: incarnation,
+      after: replacement,
+      late: got,
+    });
+  });
+
+  test("another page deletes and recreates the database while this page's answer is held: the answer is never written into the replacement", async ({
+    context,
+  }, info) => {
+    const { page, held, incarnation } = await heldDefaults(context);
+    await acquire(page);
+    await expect.poll(() => held.length).toBe(1);
+    const release = held.shift();
+    const other = await bootAt(context, "/today");
+    const replacement = await replaceDatabase(page, other, incarnation);
+    release?.(44);
+    const got = await acquired(page);
+    expect(await storedRevision(other)).toBeNull();
+    expect(got).toEqual({ outcome: "closed", record: null });
+    // Durable state, read by a page that loads afresh.
+    const fresh = await bootAt(context, "/today");
+    // A page that has just booted remounts its tree once (WEB-09a r19/r23), and that disposal closes the page's registry, the harness's
+    // store included (revision 5: reproduced in Firefox, a `closed_for_deletion` from the tree's dispose 131 ms after boot, then "no open
+    // store"). The harness reads only once the page has settled (no binding required). `other` above keeps its original schedule: there
+    // the replacement itself makes its tree remount, so waiting first only moves that disposal onto the read (diagnosed, not adopted).
+    await untilTreeSettled(fresh, { account: ACCOUNT, connections: 0 });
+    expect(await storedRevision(fresh)).toBeNull();
+    recordEvidence(info, "e-sh15-other-page", {
+      before: incarnation,
+      after: replacement,
+      late: got,
+    });
+  });
+});
+
+test.describe("E-SH16: household choices and names come from the complete membership list, not B5's subset (A4; R11, review 5)", () => {
+  /** A household you are in that no resolved default names: the complete list has it, B5 does not. */
+  const second = {
+    id: ELSEWHERE,
+    name: "Second household",
+    version: 1,
+    role: "member",
+    members: [
+      { account_id: ACCOUNT, username: "me", role: "member" },
+      { account_id: PRIYA, username: "priya", role: "manager" },
+    ],
+  };
+  const grantingSecond = {
+    kind: "explicit",
+    policy: {
+      grants: [{ kind: "household", id: ELSEWHERE, edit: false }],
+      exclude_accounts: [],
+    },
+  };
+  /** The B5 answer names only Home (fixture contract: the stub's two endpoints really differ here). */
+  const b5Households = (served: Served) =>
+    (served.snapshot as { households: Array<{ id: string }> }).households.map(
+      (household) => household.id,
+    );
+
+  for (const layer of ["personal", "household"] as const)
+    test(`${layer} layer: a membership B5 does not name is offered beside Home, and the save sends it at that layer's version`, async ({
+      context,
+    }, info) => {
+      const { served, page } = await setup(
+        context,
+        "/sharing/defaults?kind=field",
+        {
+          resource: false,
+          arrange: (served) => {
+            served.memberships = [homeHousehold(), second];
+            served.templates = scope({ field: { template: null, version: 6 } });
+          },
+        },
+      );
+      expect(b5Households(served)).toEqual([HOME]);
+      const dialog = page.getByRole("dialog", {
+        name: "Sharing defaults — Fields",
+      });
+      const form = dialog.locator(`[data-layer-form="${layer}"]`);
+      await form.getByRole("radio", { name: "Explicit policy…" }).click();
+      await form.getByRole("button", { name: "+ Add household grant" }).click();
+      const picker = form.locator("[data-household-picker]");
+      // Control and requirement together: Home (which B5 names) and Second household (which it does not) are both offered.
+      await expect(picker.getByRole("button")).toHaveText([
+        "Home",
+        "Second household",
+        "Cancel",
+      ]);
+      await picker.getByRole("button", { name: "Second household" }).click();
+      await form.locator(`[data-save="${layer}"]`).click();
+      await expect.poll(() => served.management.length).toBe(1);
+      expect(served.management[0]?.body).toEqual({
+        commands: [
+          {
+            kind: "set_defaults",
+            household_id: layer === "personal" ? null : HOME,
+            resource_kind: "field",
+            expected_version: layer === "personal" ? 6 : 4,
+            template: grantingSecond,
+          },
+        ],
+      });
+      expect(served.membershipReads).toBeGreaterThanOrEqual(1);
+      recordEvidence(info, `e-sh16-${layer}`, {
+        management: served.management,
+        membershipReads: served.membershipReads,
+      });
+    });
+
+  test("an overridden household template's grant of a household you are in is named (B5 omits it); with no primary household it is still offered", async ({
+    context,
+  }, info) => {
+    const { served, page } = await setup(
+      context,
+      "/sharing/defaults?kind=field",
+      {
+        resource: false,
+        arrange: (served) => {
+          served.memberships = [homeHousehold(), second];
+          // The personal layer overrides the household template, so the resolved field default is Private and B5 names only Home.
+          served.templates = scope({
+            field: { template: { kind: "private" }, version: 2 },
+          });
+          served.householdTemplates = scope({
+            field: { template: grantingSecond, version: 5 },
+          });
+        },
+      },
+    );
+    expect(b5Households(served)).toEqual([HOME]);
+    const dialog = page.getByRole("dialog", {
+      name: "Sharing defaults — Fields",
+    });
+    const household = dialog.locator('[data-layer-form="household"]');
+    await expect(
+      household.locator(
+        `[data-grant="household"][data-principal="${ELSEWHERE}"]`,
+      ),
+    ).toContainText("Second household");
+    await expect(household).not.toContainText("A household you're not in");
+    // No primary household and private defaults: B5 names no household, and your memberships are still offered.
+    served.snapshot = snapshotOf(
+      rev(2),
+      {
+        primary_household_id: null,
+        person: { kind: "private" },
+        progress: { kind: "private" },
+      },
+      [],
+    );
+    served.memberships = [second];
+    await reopen(page, "/sharing/defaults?kind=field");
+    const reopened = page.getByRole("dialog", {
+      name: "Sharing defaults — Fields",
+    });
+    await expect(reopened.locator('[data-layer="household"]')).toContainText(
+      "You don't have a primary household",
+    );
+    const personal = reopened.locator('[data-layer-form="personal"]');
+    await personal.getByRole("radio", { name: "Explicit policy…" }).click();
+    await personal
+      .getByRole("button", { name: "+ Add household grant" })
+      .click();
+    await expect(
+      personal.locator("[data-household-picker]").getByRole("button"),
+    ).toHaveText(["Second household", "Cancel"]);
+    recordEvidence(info, "e-sh16-labels", {
+      membershipReads: served.membershipReads,
+    });
+  });
+
+  test("the policy editor: a refused membership read is unchecked (never 'not in'); its own Try again reads only the list and names the household", async ({
+    context,
+  }, info) => {
+    const { served, page } = await setup(context, `/sharing/items/${RID}`, {
+      arrange: (served) => {
+        served.refuseMemberships = {
+          status: 503,
+          body: atlas("unavailable", "d3a10000-0000-4000-8000-000000000000"),
+        };
+      },
+    });
+    const dialog = page.getByRole("dialog", { name: editorTitle });
+    const failed = dialog.locator('[data-membership="failed"]');
+    await expect(failed).toContainText("Couldn't load your households.");
+    const grant = dialog.locator(
+      `[data-grant="household"][data-principal="${HOME}"]`,
+    );
+    await expect(grant).toContainText("A household (name not loaded)");
+    const audience = dialog.locator("[data-audience]");
+    await expect(audience).toContainText(
+      "Members of 1 household that couldn't be loaded",
+    );
+    await expect(audience).not.toContainText("you're not in");
+    await expect(
+      dialog.getByRole("button", { name: "+ Add household grant" }),
+    ).toBeDisabled();
+    // Two readers asked once each and were refused: the editor and the Sharing page's household demonstration beneath it.
+    await expect.poll(() => served.membershipReads).toBe(2);
+    expect(served.policyReads).toBe(1);
+    served.refuseMemberships = null;
+    await failed.getByRole("button", { name: "Try again" }).click();
+    await expect(grant).toContainText("Home");
+    await expect(failed).toHaveCount(0);
+    await expect(audience).toContainText("Can read: sam");
+    // The editor's Try again read the list once more, and nothing else: not the policy.
+    expect(served.membershipReads).toBe(3);
+    expect(served.policyReads).toBe(1);
+    expect(served.management).toEqual([]);
+    recordEvidence(info, "e-sh16-policy", {
+      membershipReads: served.membershipReads,
+      policyReads: served.policyReads,
+    });
   });
 });

@@ -81,9 +81,17 @@ export const EXCLUDED_NOTE = "excluded from every audience grant above";
 export const ALREADY_EXCLUDED =
   "Excluded: this grant has no effect until the exclusion is removed.";
 export const HOUSEHOLD_UNKNOWN = "A household you're not in";
+/** A granted household while your households are loading or couldn't be loaded (WEB-12a R11): not evidence that you're not in it. */
+export const HOUSEHOLD_UNCHECKED = "A household (name not loaded)";
 export const HOUSEHOLD_PICKER = "Choose a household";
 export const NO_HOUSEHOLDS_TO_ADD =
   "You're not in any household you could add.";
+export const ADD_HOUSEHOLD_LOADING_REASON =
+  "Waiting for your households to load.";
+export const ADD_HOUSEHOLD_FAILED_REASON =
+  "Your households couldn't be loaded.";
+export const ADD_HOUSEHOLD_OFFLINE_REASON =
+  "You're offline, and your households haven't loaded.";
 export const REFUSED_OWNER =
   "You always keep access as owner, so you can't be granted or excluded.";
 export const REFUSED_GRANT_LIMIT = "A policy can have at most 100 grants.";
@@ -96,6 +104,10 @@ export const UNKNOWN_HOUSEHOLDS = (n: number) =>
   n === 1
     ? "Members of 1 household you're not in"
     : `Members of ${n} households you're not in`;
+export const UNCHECKED_HOUSEHOLDS = (n: number) =>
+  n === 1
+    ? "Members of 1 household that couldn't be loaded"
+    : `Members of ${n} households that couldn't be loaded`;
 export const EXCLUDED_PEOPLE = "Excluded";
 export const OWNER = (label: string) => `${label} (owner)`;
 export const SAVE_POLICY = "Replace policy";
@@ -112,7 +124,7 @@ export const UNCERTAIN =
   "We couldn't confirm the change was saved. Try again sends the same change, so it can't be made twice.";
 export const NOT_SENT = "Couldn't send the change. Try again.";
 export const UNCERTAIN_PENDING =
-  "Try the unconfirmed change again, or reload to see whether it was made.";
+  "Try the unconfirmed change again first. It is sent exactly as before, so it can't be made twice.";
 export const REFUSED = (message: string | undefined) =>
   message
     ? `The server refused this change: ${message}`

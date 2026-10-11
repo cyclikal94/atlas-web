@@ -1,21 +1,29 @@
 import { useId, useState } from "react";
 import { Button } from "../../components/ui/button";
 import { List } from "../../components/ui/list";
-import type { Policy, PrincipalGrant, SnapshotHousehold } from "../../data";
+import type { Policy, PrincipalGrant } from "../../data";
 import * as copy from "./copy";
+import { useSharingEnv } from "./env";
+import { knownMembership, type Membership } from "./membership";
 import type { PolicyAction, PolicyRefusal } from "./model/policy-draft";
-import { ChoiceGroup } from "./parts";
+import { Banner, ChoiceGroup } from "./parts";
 
 /**
  * The grant and exclusion editor shared by WF-SHARING-04 (a resource's policy) and WF-SHARING-03 (an explicit template): account grants,
  * household grants and exclusions, each with its add and remove controls and a Read/Edit radio group per grant. "+ Add account grant"
  * and "+ Add exclusion" open the directory lookup (the caller swaps the view); "+ Add household grant" offers the households you are in.
  * A household you are not in (named by a policy someone else shared with you) is shown as such.
+ *
+ * "The households you are in" is the caller's COMPLETE membership list (`GET /households`, WEB-12a R11), never the B5 record's subset.
+ * Only a complete list of the latest read offers households to add or says a household is one you are not in. While it is loading or
+ * couldn't be loaded, adding a household waits (the button says why), a granted household keeps the name the last list gave it or is
+ * shown neutrally, and a failure offers its own Try again. Nothing already granted is removed or changed by any of this.
  */
 export function PolicyGrantsEditor({
   policy,
   labels,
-  households,
+  membership,
+  onRetryMembership,
   disabled,
   refused,
   dispatch,
@@ -23,26 +31,43 @@ export function PolicyGrantsEditor({
 }: {
   policy: Policy;
   labels: ReadonlyMap<string, string>;
-  /** The households you are in (their names, for labels and the picker). */
-  households: readonly SnapshotHousehold[];
+  /** The households you are in (their names, for labels and the picker), as the editor's own membership read has them. */
+  membership: Membership;
+  /** Reads the membership list again (its failure's Try again). */
+  onRetryMembership(): void;
   disabled: boolean;
   refused: PolicyRefusal | null;
   dispatch(action: PolicyAction): void;
   onLookup(purpose: "grant" | "exclude"): void;
 }) {
+  const env = useSharingEnv();
   const ids = { accounts: useId(), households: useId(), excluded: useId() };
   const [picking, setPicking] = useState(false);
   const accounts = policy.grants.filter((g) => g.kind === "account");
   const householdGrants = policy.grants.filter((g) => g.kind === "household");
   const excluded = new Set(policy.exclude_accounts);
+  // The complete list of the latest read, or null: only it can offer a household or say you are not in one.
+  const complete =
+    membership.status === "ready" ? membership.current.households : null;
+  const known = knownMembership(membership)?.households ?? [];
   const nameOf = (grant: PrincipalGrant) =>
     grant.kind === "account"
       ? copy.accountLabel(grant.id, labels)
-      : (households.find((h) => h.id === grant.id)?.name ??
-        copy.HOUSEHOLD_UNKNOWN);
-  const addable = households.filter(
+      : (known.find((h) => h.id === grant.id)?.name ??
+        (complete !== null
+          ? copy.HOUSEHOLD_UNKNOWN
+          : copy.HOUSEHOLD_UNCHECKED));
+  const addable = (complete ?? []).filter(
     (h) => !householdGrants.some((g) => g.id === h.id),
   );
+  const addReason =
+    complete !== null
+      ? null
+      : membership.status === "loading"
+        ? copy.ADD_HOUSEHOLD_LOADING_REASON
+        : !env.online
+          ? copy.ADD_HOUSEHOLD_OFFLINE_REASON
+          : copy.ADD_HOUSEHOLD_FAILED_REASON;
 
   const grantRow = (grant: PrincipalGrant) => {
     const name = nameOf(grant);
@@ -142,7 +167,38 @@ export function PolicyGrantsEditor({
             {householdGrants.map(grantRow)}
           </List>
         )}
-        {disabled ? null : picking ? (
+        {membership.status === "loading" ? (
+          <p className="text-[12.5px] text-ink-2" data-membership="loading">
+            {copy.HOUSEHOLDS_LOADING}
+          </p>
+        ) : membership.status === "failed" ? (
+          <div data-membership="failed">
+            <Banner
+              message={copy.HOUSEHOLDS_FAILED}
+              requestId={
+                "requestId" in membership.failure
+                  ? membership.failure.requestId
+                  : undefined
+              }
+              action={
+                env.online ? (
+                  <Button onClick={onRetryMembership}>{copy.TRY_AGAIN}</Button>
+                ) : (
+                  <Button disabled reason={copy.SAVE_OFFLINE_REASON}>
+                    {copy.TRY_AGAIN}
+                  </Button>
+                )
+              }
+            />
+          </div>
+        ) : null}
+        {disabled ? null : addReason !== null ? (
+          <span>
+            <Button variant="quiet" disabled reason={addReason}>
+              {copy.ADD_HOUSEHOLD}
+            </Button>
+          </span>
+        ) : picking ? (
           <div className="flex flex-col gap-1.5" data-household-picker="">
             <span className="text-[12.5px] text-ink-2">
               {copy.HOUSEHOLD_PICKER}

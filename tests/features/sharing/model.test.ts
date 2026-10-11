@@ -153,6 +153,7 @@ describe("the effective audience", () => {
         exclude_accounts: [PRIYA],
       },
       households: [home],
+      complete: true,
       labels,
       parentLimited: false,
     });
@@ -174,6 +175,7 @@ describe("the effective audience", () => {
         exclude_accounts: [],
       },
       households: [home],
+      complete: true,
       labels,
       parentLimited: true,
     });
@@ -197,13 +199,36 @@ describe("the effective audience", () => {
         exclude_accounts: [],
       },
       households: [home],
+      complete: true,
       labels,
       parentLimited: false,
     });
     expect(audience.unknownHouseholds).toEqual([{ id: FLAT, edit: true }]);
+    expect(audience.uncheckedHouseholds).toEqual([]);
     expect(audience.readers.map((p) => p.label)).toEqual([
       anonymousLabel("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
     ]);
+  });
+
+  test("MU-S67: without a complete membership list, a granted household it does not name is unchecked, never one you are not in (R11, DA-M1)", () => {
+    const audience = effectiveAudience({
+      ownerId: ME,
+      policy: {
+        grants: [
+          { kind: "household", id: HOME, edit: false },
+          { kind: "household", id: FLAT, edit: true },
+        ],
+        exclude_accounts: [],
+      },
+      // The last list this editor read (a re-read is under way or failed): it still names Home's members.
+      households: [home],
+      complete: false,
+      labels,
+      parentLimited: false,
+    });
+    expect(audience.unknownHouseholds).toEqual([]);
+    expect(audience.uncheckedHouseholds).toEqual([{ id: FLAT, edit: true }]);
+    expect(audience.readers.map((p) => p.label)).toEqual(["priya", "sam"]);
   });
 });
 

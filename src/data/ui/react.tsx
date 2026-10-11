@@ -11,7 +11,11 @@ import {
 } from "react";
 import type { SyncStatusModel } from "../../lib/sync-chip";
 import type { Session } from "../../session";
-import type { RefreshOutcome } from "../engine/defaults-source";
+import type {
+  Acquisition,
+  RefreshOutcome,
+  RequestBoundary,
+} from "../engine/defaults-source";
 import { createBroadcastSyncChannel } from "../engine/sync-channel";
 import { createWriteFailureMarkers } from "../engine/write-failure-marker";
 import type { MergedResource } from "../model/overlay";
@@ -331,11 +335,15 @@ export function useAccountLabel(): string | null {
  * review that opened). Using this hook is what makes the data layer read them at all (`DefaultsSource.use`): nothing is asked on the
  * boot path or by a page that never shows sharing. `status`: `loading` while the account's record is still being looked for, `ready`
  * with a record, `none` when no record exists (never fetched on this device): a queued create then captures `never_fetched`.
+ * `boundary()` and `acquire(boundary)` are for a caller that needs a snapshot asked for AFTER a moment (a review that opened, a change
+ * just saved): see `DefaultsSource.acquire`.
  */
 export function useSharingDefaults(): {
   record: DefaultsRecord | null;
   status: "loading" | "ready" | "none";
   refresh(): Promise<RefreshOutcome>;
+  boundary(): RequestBoundary | null;
+  acquire(boundary: RequestBoundary | null): Promise<Acquisition>;
 } {
   const env = useDataEnv();
   useEffect(() => env.defaults.use(), [env]);
@@ -346,6 +354,9 @@ export function useSharingDefaults(): {
       record,
       status: record !== null ? "ready" : settled ? "none" : "loading",
       refresh: () => env.defaults.refresh(),
+      boundary: () => env.defaults.boundary(),
+      acquire: (boundary: RequestBoundary | null) =>
+        env.defaults.acquire(boundary),
     }),
     [record, settled, env],
   );

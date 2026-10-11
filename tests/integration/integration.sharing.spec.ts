@@ -25,6 +25,8 @@ import {
  * I-SH1 a generic cached resource opens in the editor and a policy change commits (A1); I-SH2 SHARE-9 (a) (A2); I-SH3 SHARE-9 (b) and the
  * editor's conflict (A3); I-SH4 the B5 record and the defaults editor (A4); I-SH5 a real `defaults_changed`, reviewed and confirmed (A5);
  * I-SH6 a lost response retried with the same key and no duplicate (A6); I-SH7 the household demonstration (A8); I-SH8 owner-only (A7).
+ * Review 5: I-SH9 a household you are in that B5 does not name (the real `GET /households` and B5 differ) is offered by the defaults
+ * editor and saved at the layer's version (A4; R11).
  */
 const API = "/api/experimental/v1";
 
@@ -906,5 +908,116 @@ test.describe("I-SH7 and I-SH8: the household demonstration, and owner-only", ()
       await owner.close();
       await member.close();
     }
+  });
+});
+
+test.describe("I-SH9: a membership B5 does not name is offered by the defaults editor (A4; R11, review 5)", () => {
+  test("the real /households lists a household the real B5 answer omits; the personal layer grants it at its own version; afterwards B5 names it", async ({
+    context,
+  }, info) => {
+    const { page, id } = await bootMain(context);
+    // Two real households of this account; whichever one is primary, the newest is not, and no resolved default names it yet.
+    const suffix = Date.now() % 100_000;
+    const names = [`I-SH9 Home ${suffix}`, `I-SH9 Second ${suffix}`];
+    for (const name of names) {
+      const made = await raw(
+        page,
+        id,
+        "POST",
+        "/management-commands",
+        {
+          commands: [
+            { kind: "create_household", id: crypto.randomUUID(), name },
+          ],
+        },
+        crypto.randomUUID(),
+      );
+      expect(made.status).toBe(200);
+    }
+    const households = (await raw(page, id, "GET", "/households"))
+      .body as Array<{ id: string; name: string }>;
+    const second = households.find((h) => h.name === names[1]);
+    if (!second) throw new Error("the second household is not listed");
+    const before = (await raw(page, id, "GET", "/defaults/snapshot")).body as {
+      defaults: { primary_household_id: string | null };
+      households: Array<{ id: string }>;
+    };
+    // Precondition (the contract's two endpoints really differ): B5 omits the second household.
+    expect(before.defaults.primary_household_id).not.toBe(second.id);
+    expect(before.households.map((h) => h.id)).not.toContain(second.id);
+    const scope = (await raw(page, id, "GET", "/defaults/templates")).body as {
+      list: { version: number };
+    };
+    await go(page, "/sharing/defaults?kind=list");
+    const dialog = page.getByRole("dialog", {
+      name: "Sharing defaults — Lists",
+    });
+    const personal = dialog.locator('[data-layer-form="personal"]');
+    await personal
+      .getByRole("radio", { name: "Explicit policy…" })
+      .click({ timeout: 30_000 });
+    await personal
+      .getByRole("button", { name: "+ Add household grant" })
+      .click({ timeout: 30_000 });
+    await personal
+      .locator("[data-household-picker]")
+      .getByRole("button", { name: names[1], exact: true })
+      .click({ timeout: 30_000 });
+    const sent = recordManagement(page);
+    await personal.locator('[data-save="personal"]').click();
+    await expect.poll(() => sent.length, { timeout: 30_000 }).toBe(1);
+    expect(JSON.parse(sent[0]?.body ?? "null")).toEqual({
+      commands: [
+        {
+          kind: "set_defaults",
+          household_id: null,
+          resource_kind: "list",
+          expected_version: scope.list.version,
+          template: {
+            kind: "explicit",
+            policy: {
+              grants: [{ kind: "household", id: second.id, edit: false }],
+              exclude_accounts: [],
+            },
+          },
+        },
+      ],
+    });
+    const granted = {
+      kind: "explicit",
+      policy: {
+        grants: [{ kind: "household", id: second.id, edit: false }],
+        exclude_accounts: [],
+      },
+    };
+    await expect
+      .poll(
+        async () =>
+          (
+            (await raw(page, id, "GET", "/defaults/templates")).body as {
+              list: { template: unknown };
+            }
+          ).list.template,
+        { timeout: 30_000 },
+      )
+      .toEqual(granted);
+    const saved = (await raw(page, id, "GET", "/defaults/templates")).body as {
+      list: { version: number };
+    };
+    expect(saved.list.version).toBeGreaterThan(scope.list.version);
+    // Now a resolved default names it, so B5 lists it.
+    const after = (await raw(page, id, "GET", "/defaults/snapshot")).body as {
+      households: Array<{ id: string }>;
+    };
+    expect(after.households.map((h) => h.id)).toContain(second.id);
+    info.annotations.push({
+      type: "evidence",
+      description: JSON.stringify({
+        second: second.id,
+        b5Before: before.households.map((h) => h.id),
+        b5After: after.households.map((h) => h.id),
+        version: scope.list.version,
+      }),
+    });
   });
 });

@@ -21,7 +21,8 @@ export function AudienceSummary({
   const nobody =
     audience.readers.length === 0 &&
     audience.editors.length === 0 &&
-    audience.unknownHouseholds.length === 0;
+    audience.unknownHouseholds.length === 0 &&
+    audience.uncheckedHouseholds.length === 0;
   return (
     <section
       aria-labelledby={heading}
@@ -46,6 +47,11 @@ export function AudienceSummary({
       {audience.unknownHouseholds.length > 0 ? (
         <p data-audience-unknown="">
           {copy.UNKNOWN_HOUSEHOLDS(audience.unknownHouseholds.length)}
+        </p>
+      ) : null}
+      {audience.uncheckedHouseholds.length > 0 ? (
+        <p data-audience-unchecked="">
+          {copy.UNCHECKED_HOUSEHOLDS(audience.uncheckedHouseholds.length)}
         </p>
       ) : null}
       {audience.excluded.length > 0 ? (

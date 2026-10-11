@@ -7,16 +7,20 @@ import {
   within,
 } from "@testing-library/react";
 import { axe } from "jest-axe";
+import { useState } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { TemplateKind } from "../../../src/data";
+import type { SnapshotHousehold, TemplateKind } from "../../../src/data";
+import type { SharingResult } from "../../../src/features/sharing/api";
 import * as copy from "../../../src/features/sharing/copy";
 import { DefaultsEditor } from "../../../src/features/sharing/DefaultsEditor";
 import { forgetAllRetained } from "../../../src/features/sharing/retained";
 import {
+  ELSEWHERE,
   FLAT,
   HOME,
   household,
   ME,
+  PRIYA,
   record,
   SAM,
   snapshot,
@@ -27,6 +31,7 @@ import {
   emptyScope,
   fakeSharingApi,
   ok,
+  sharingEnv,
 } from "../../support/sharing/fake-api";
 import { mountSharing } from "../../support/sharing/mount";
 
@@ -45,6 +50,10 @@ function setup(
     household?: { template: object | null; version: number };
     online?: boolean;
     primary?: string | null;
+    /** `GET /households` (R11): the complete membership list; by default exactly the households the snapshot names. */
+    memberships?: SnapshotHousehold[];
+    /** Answers to the membership reads in turn (then `memberships`). */
+    membershipReads?: Answer<SnapshotHousehold[]>[];
   } = {},
 ) {
   const env = stubEnv();
@@ -68,6 +77,8 @@ function setup(
     record(snap, { fetched_at: Date.now(), issued_at: Date.now() }),
   );
   const api = fakeSharingApi();
+  api.defaults.households = ok(over.memberships ?? snap.households);
+  api.next.households.push(...(over.membershipReads ?? []));
   api.defaults.templates = (householdId) => {
     const scope = emptyScope();
     const layer = householdId === null ? over.personal : over.household;
@@ -603,5 +614,736 @@ describe("R5: unsaved choices survive going offline and the sync control; Done d
       copy.CHOICE_HOUSEHOLD_EDIT,
     );
     expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
+  });
+});
+
+// ---- WEB-12a review 2 ------------------------------------------------------------------------------------------------------------
+describe("R5 (review 2): what the session kept is discarded by a dismissal, whichever forms are on screen", () => {
+  /** The route's host: the editor open on a kind, closed by its own onClose, reopened in page memory (no reload). */
+  function defaultsHost(primary: string | null = HOME) {
+    const env = stubEnv();
+    env.setDefaults(
+      primary === null
+        ? record(snapshot({ primary: null }), {
+            fetched_at: Date.now(),
+            issued_at: Date.now(),
+          })
+        : snapWith(primary, "Home"),
+    );
+    const api = fakeSharingApi();
+    let setOpen: (open: boolean) => void = () => undefined;
+    function Host() {
+      const [open, set] = useState(true);
+      const [kind, setKind] = useState<TemplateKind>("field");
+      setOpen = set;
+      return open ? (
+        <DefaultsEditor
+          kind={kind}
+          onKindChange={setKind}
+          onClose={() => set(false)}
+        />
+      ) : null;
+    }
+    const view = mountSharing(<Host />, { env, api });
+    return { ...view, env, api, reopen: () => act(() => setOpen(true)) };
+  }
+  const dialogOpen = () => screen.queryByRole("dialog") !== null;
+  const syncControl = () =>
+    screen.getByRole("dialog").querySelector("[data-sync-tone]") as Element;
+  const done = () =>
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: copy.CLOSE,
+      }),
+    );
+  const tab = (name: string) =>
+    fireEvent.click(screen.getByRole("tab", { name }));
+  /** Inherit → Private on the personal Fields layer, then the sync control: kept, the dialog closed, nothing sent. */
+  async function keepPrivate(t: ReturnType<typeof defaultsHost>) {
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    fireEvent.click(syncControl());
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    expect(t.api.sent).toEqual([]);
+  }
+  /** Reopens and waits until the personal Fields form is on screen. */
+  async function reopenForms(t: ReturnType<typeof defaultsHost>) {
+    t.reopen();
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+  }
+
+  test("control: reopened offline (no forms), then back online WITHOUT a dismissal, the kept choice is restored", async () => {
+    const t = defaultsHost();
+    await keepPrivate(t);
+    t.setSharing({ online: false });
+    t.reopen();
+    expect(document.querySelector("[data-defaults-offline]")).not.toBeNull();
+    expect(personalForm()).toBeNull();
+    t.setSharing({ online: true });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE);
+    expect(screen.getByText(copy.RESTORED_UNSAVED)).toBeInTheDocument();
+  });
+
+  test("MU-S45: Done while reopened offline (no form on screen) discards the kept choice: back online, reopening shows the stored template", async () => {
+    const t = defaultsHost();
+    await keepPrivate(t);
+    t.setSharing({ online: false });
+    t.reopen();
+    expect(personalForm()).toBeNull();
+    done();
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    t.setSharing({ online: true });
+    await reopenForms(t);
+    expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE);
+    expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
+    expect(t.api.sent).toEqual([]);
+  });
+
+  test("MU-S45: Escape while the reopened editor is still reading its templates discards the kept choice; the late read restores nothing", async () => {
+    const t = defaultsHost(null);
+    await keepPrivate(t);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    t.api.next.templates.push(async () => {
+      await gate;
+      return ok(emptyScope());
+    });
+    t.reopen();
+    expect(personalForm()).toBeNull();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    release();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await reopenForms(t);
+    expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE);
+    expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
+  });
+
+  test("control: switching Fields → Tasks → Fields WITHOUT a dismissal gives the kept Fields choice back", async () => {
+    const t = defaultsHost();
+    await keepPrivate(t);
+    await reopenForms(t);
+    expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE);
+    tab("Tasks");
+    await waitFor(() =>
+      expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE),
+    );
+    tab("Fields");
+    await waitFor(() =>
+      expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE),
+    );
+  });
+
+  test("MU-S46: Done on another kind discards the kept Fields choice too (it is the session's, not the form on screen's)", async () => {
+    const t = defaultsHost();
+    await keepPrivate(t);
+    await reopenForms(t);
+    expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE);
+    tab("Tasks");
+    await waitFor(() =>
+      expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE),
+    );
+    done();
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    await reopenForms(t);
+    tab("Tasks");
+    tab("Fields");
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE);
+    expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
+    expect(t.api.sent).toEqual([]);
+  });
+
+  test("MU-S46: Done after the primary household changed discards the earlier household's kept choice too", async () => {
+    const t = defaultsHost();
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    choose(householdForm() as HTMLElement, copy.CHOICE_HOUSEHOLD_EDIT);
+    fireEvent.click(syncControl());
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    await reopenForms(t);
+    await waitFor(() =>
+      expect(chosen(householdForm() as HTMLElement)).toBe(
+        copy.CHOICE_HOUSEHOLD_EDIT,
+      ),
+    );
+    // The snapshot now names another primary household: Home's form is gone, Flat's is shown.
+    act(() => t.env.setDefaults(snapWith(FLAT, "Flat")));
+    await waitFor(() =>
+      expect(
+        householdForm()?.closest("[data-layer]")?.textContent ?? "",
+      ).toContain("Flat"),
+    );
+    done();
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    act(() => t.env.setDefaults(snapWith(HOME, "Home")));
+    await reopenForms(t);
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    expect(chosen(householdForm() as HTMLElement)).not.toBe(
+      copy.CHOICE_HOUSEHOLD_EDIT,
+    );
+    expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
+  });
+
+  test("MU-S47: saving one layer forgets only that layer: the other layer's kept choice is still restored (an unmount is not a dismissal)", async () => {
+    const t = defaultsHost();
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    choose(householdForm() as HTMLElement, copy.CHOICE_HOUSEHOLD_EDIT);
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    fireEvent.click(syncControl());
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    await reopenForms(t);
+    expect(screen.getAllByText(copy.RESTORED_UNSAVED)).toHaveLength(2);
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands[0]).toMatchObject({
+      household_id: null,
+      template: { kind: "private" },
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    // The page leaves the editor without a dismissal (its tree unmounts), then the editor is opened again.
+    cleanup();
+    const again = defaultsHost();
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    expect(chosen(householdForm() as HTMLElement)).toBe(
+      copy.CHOICE_HOUSEHOLD_EDIT,
+    );
+    expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE);
+    expect(screen.getAllByText(copy.RESTORED_UNSAVED)).toHaveLength(1);
+    expect(again.api.sent).toEqual([]);
+  });
+
+  test("MU-S48: a template conflict's Reload abandons the kept choice even when the new read fails", async () => {
+    const t = defaultsHost(null);
+    await keepPrivate(t);
+    await reopenForms(t);
+    expect(chosen(personalForm())).toBe(copy.CHOICE_PRIVATE);
+    t.api.next.management.push({
+      ok: false,
+      kind: "conflict",
+      requestId: "rq",
+    });
+    fireEvent.click(save("personal"));
+    await screen.findByText(copy.TEMPLATE_CONFLICT, {
+      selector: "[data-sharing-banner] p",
+    });
+    t.api.next.templates.push({ ok: false, kind: "invalid" });
+    fireEvent.click(screen.getByRole("button", { name: copy.RELOAD }));
+    await screen.findByText(copy.TEMPLATES_LOAD_FAILED, {
+      selector: "[data-sharing-banner] p",
+    });
+    // The sync control has no form to keep; reopening shows the stored template, never the abandoned choice.
+    fireEvent.click(syncControl());
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    await reopenForms(t);
+    expect(chosen(personalForm())).not.toBe(copy.CHOICE_PRIVATE);
+    expect(screen.queryByText(copy.RESTORED_UNSAVED)).toBeNull();
+    expect(t.api.sent).toHaveLength(1);
+  });
+});
+
+describe("R7: after a save the snapshot is asked for AFTER it", () => {
+  test("MU-S52: a successful save asks for a snapshot read issued after the success (an acquisition with a boundary), never a refresh that could share an older read", async () => {
+    const t = setup({ personal: { template: null, version: 0 } });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    const before = t.env.calls.length;
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    await waitFor(() =>
+      expect(
+        t.env.calls
+          .slice(before)
+          .filter((c) => c.action === "refreshDefaults" && c.args.length === 1),
+      ).toHaveLength(1),
+    );
+    expect(
+      t.env.calls
+        .slice(before)
+        .filter((c) => c.action === "refreshDefaults" && c.args.length === 0),
+    ).toHaveLength(0);
+  });
+});
+
+// ---- WEB-12a review 3 ------------------------------------------------------------------------------------------------------------
+describe("R8 (review 3): a defaults Try again is admitted like Save, and one not sent keeps the uncertain attempt", () => {
+  const reasonOf = (button: HTMLElement) =>
+    document.getElementById(button.getAttribute("aria-describedby") ?? "")
+      ?.textContent;
+  async function uncertainSave() {
+    const t = setup({ personal: { template: null, version: 2 } });
+    t.api.next.management.push({ ok: false, kind: "uncertain" });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    fireEvent.click(save("personal"));
+    expect(await screen.findByText(copy.UNCERTAIN)).toBeInTheDocument();
+    return { t, first: structuredClone(t.api.sent[0]) };
+  }
+
+  test("MU-S62: offline with an uncertain save, Try again is disabled with the connection reason and sends nothing; back online it resends the same key and body", async () => {
+    const { t, first } = await uncertainSave();
+    t.setSharing({ online: false });
+    const offlineRetry = screen.getByRole("button", { name: copy.TRY_AGAIN });
+    expect(offlineRetry).toBeDisabled();
+    expect(reasonOf(offlineRetry)).toBe(copy.SAVE_OFFLINE_REASON);
+    fireEvent.click(offlineRetry);
+    await act(async () => {});
+    expect(t.api.calls.filter((c) => c.op === "management")).toHaveLength(1);
+    t.setSharing({ online: true });
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await waitFor(() => expect(t.api.sent).toHaveLength(2));
+    expect(t.api.sent[1]).toEqual(first);
+  });
+
+  test("MU-S63: a Try again the adapter answers offline still says the change is unconfirmed, and the next one resends it", async () => {
+    const { t, first } = await uncertainSave();
+    t.api.next.management.push({ ok: false, kind: "offline" });
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await waitFor(() =>
+      expect(t.api.calls.filter((c) => c.op === "management")).toHaveLength(2),
+    );
+    await act(async () => {});
+    expect(screen.queryByText(copy.UNCERTAIN)).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await waitFor(() => expect(t.api.sent).toHaveLength(3));
+    expect(t.api.sent[2]).toEqual(first);
+  });
+});
+
+describe("DA-P1 (Q15) comparison: the defaults editor keeps an uncertain attempt through a closed Try again", () => {
+  test("answered closed, the change is still said to be unconfirmed and the next Try again resends the same key and body", async () => {
+    const t = setup({ personal: { template: null, version: 2 } });
+    t.api.next.management.push({ ok: false, kind: "uncertain" });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    choose(personalForm(), copy.CHOICE_PRIVATE);
+    fireEvent.click(save("personal"));
+    expect(await screen.findByText(copy.UNCERTAIN)).toBeInTheDocument();
+    const first = structuredClone(t.api.sent[0]);
+    t.api.next.management.push({ ok: false, kind: "closed" });
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await waitFor(() =>
+      expect(t.api.calls.filter((c) => c.op === "management")).toHaveLength(2),
+    );
+    await act(async () => {});
+    // The banner's own Try again (the announcer's live region also repeats the message, so the text alone proves nothing).
+    expect(
+      screen.queryByRole("button", { name: copy.TRY_AGAIN }),
+    ).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await waitFor(() => expect(t.api.sent).toHaveLength(3));
+    expect(t.api.sent[2]).toEqual(first);
+  });
+});
+
+// ---- WEB-12a review 5, R11 (and design assessment Q1-Q7) ----------------------------------------------------------------------------
+describe("R11: an explicit default can grant any household you are in (the complete membership list, never B5's subset)", () => {
+  const homeOf = (name = "Home") =>
+    household({
+      id: HOME,
+      name,
+      role: "manager",
+      members: [
+        { account_id: ME, username: "me", role: "manager" },
+        { account_id: SAM, username: "sam", role: "member" },
+      ],
+    });
+  /** A household you are in that no resolved default names, so B5 does not list it. */
+  const second = household({
+    id: FLAT,
+    name: "Second household",
+    role: "member",
+    members: [
+      { account_id: ME, username: "me", role: "member" },
+      { account_id: PRIYA, username: "priya", role: "manager" },
+    ],
+  });
+  const grantingSecond = (edit = false) => ({
+    kind: "explicit",
+    policy: {
+      grants: [{ kind: "household", id: FLAT, edit }],
+      exclude_accounts: [],
+    },
+  });
+  /** A membership answer held until it is settled with a result. */
+  const gated = () => {
+    let settle!: (result: SharingResult<SnapshotHousehold[]>) => void;
+    const gate = new Promise<SharingResult<SnapshotHousehold[]>>((resolve) => {
+      settle = resolve;
+    });
+    const answer: Answer<SnapshotHousehold[]> = () => gate;
+    return { answer, settle };
+  };
+  const reasonOf = (button: HTMLElement) =>
+    document.getElementById(button.getAttribute("aria-describedby") ?? "")
+      ?.textContent;
+  const membershipReads = (api: { calls: Array<{ op: string }> }) =>
+    api.calls.filter((call) => call.op === "readHouseholds").length;
+  const templateReads = (api: { calls: Array<{ op: string }> }) =>
+    api.calls.filter((call) => call.op === "readTemplates").length;
+  const flush = () => act(async () => {});
+  const picker = (form: HTMLElement) =>
+    form.querySelector<HTMLElement>("[data-household-picker]");
+  /** The households the open picker offers, by name. */
+  const offered = (form: HTMLElement) =>
+    within(picker(form) as HTMLElement)
+      .queryAllByRole("button")
+      .map((button) => button.textContent)
+      .filter((name) => name !== copy.CANCEL);
+  const addButton = (form: HTMLElement) =>
+    within(form).getByRole("button", {
+      name: copy.ADD_HOUSEHOLD,
+    }) as HTMLButtonElement;
+  const grantName = (form: HTMLElement, id: string) =>
+    form.querySelector(`[data-grant="household"][data-principal="${id}"] span`)
+      ?.textContent;
+
+  for (const layer of ["personal", "household"] as const)
+    test(`MU-S68 (Q1, ${layer} layer): a membership B5 does not name is offered, and saving sends it at THIS layer's version`, async () => {
+      const t = setup({
+        personal: { template: null, version: 4 },
+        household: { template: { kind: "private" }, version: 7 },
+        memberships: [homeOf(), second],
+      });
+      await waitFor(() => expect(householdForm()).toBeTruthy());
+      await flush();
+      // Precondition: the B5 record names only Home (the primary household); Second household is a membership it need not list.
+      expect(
+        t.env.defaults.record.get()?.snapshot.households.map((h) => h.id),
+      ).toEqual([HOME]);
+      const form = (
+        layer === "personal" ? personalForm() : householdForm()
+      ) as HTMLElement;
+      choose(form, copy.CHOICE_EXPLICIT);
+      fireEvent.click(addButton(form));
+      expect(offered(form)).toEqual(["Home", "Second household"]);
+      fireEvent.click(
+        within(picker(form) as HTMLElement).getByRole("button", {
+          name: "Second household",
+        }),
+      );
+      expect(grantName(form, FLAT)).toBe("Second household");
+      fireEvent.click(save(layer));
+      await waitFor(() => expect(t.api.sent).toHaveLength(1));
+      expect(t.api.sent[0]?.commands).toEqual([
+        {
+          kind: "set_defaults",
+          household_id: layer === "personal" ? null : HOME,
+          resource_kind: "field",
+          expected_version: layer === "personal" ? 4 : 7,
+          template: grantingSecond(),
+        },
+      ]);
+    });
+
+  test("MU-S68 control: the primary household (which B5 names) is offered and saved as before", async () => {
+    const t = setup({
+      personal: { template: null, version: 4 },
+      memberships: [homeOf(), second],
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    await flush();
+    choose(personalForm(), copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(personalForm()));
+    fireEvent.click(
+      within(picker(personalForm()) as HTMLElement).getByRole("button", {
+        name: "Home",
+      }),
+    );
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands[0]).toMatchObject({
+      household_id: null,
+      expected_version: 4,
+      template: {
+        policy: { grants: [{ kind: "household", id: HOME, edit: false }] },
+      },
+    });
+  });
+
+  test("MU-S69 (Q1): with no primary household and private defaults (B5 names no household), your memberships are still offered", async () => {
+    const t = setup({
+      primary: null,
+      personal: { template: null, version: 1 },
+      memberships: [second],
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    await flush();
+    expect(t.env.defaults.record.get()?.snapshot.households).toEqual([]);
+    // The household layer stays unavailable: there is no primary household to edit.
+    expect(
+      document.querySelector('[data-layer="household"]')?.textContent,
+    ).toBe(copy.NO_PRIMARY);
+    choose(personalForm(), copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(personalForm()));
+    expect(offered(personalForm())).toEqual(["Second household"]);
+    fireEvent.click(
+      within(picker(personalForm()) as HTMLElement).getByRole("button", {
+        name: "Second household",
+      }),
+    );
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands[0]).toMatchObject({
+      household_id: null,
+      expected_version: 1,
+      template: grantingSecond(),
+    });
+  });
+
+  test("MU-S69 control: a COMPLETE empty list is the real empty state, and a granted household is one you are not in", async () => {
+    setup({
+      primary: null,
+      personal: { template: grantingSecond(), version: 2 },
+      memberships: [],
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    await flush();
+    expect(grantName(personalForm(), FLAT)).toBe(copy.HOUSEHOLD_UNKNOWN);
+    fireEvent.click(addButton(personalForm()));
+    expect(picker(personalForm())?.textContent).toContain(
+      copy.NO_HOUSEHOLDS_TO_ADD,
+    );
+  });
+
+  test("MU-S70 (Q2): an overridden household template's grant of a household you are in is named, though B5 omits it", async () => {
+    const t = setup({
+      personal: { template: { kind: "private" }, version: 2 },
+      household: { template: grantingSecond(), version: 5 },
+      memberships: [homeOf(), second],
+    });
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    await flush();
+    // The personal layer overrides it, so the resolved field default is Private and B5 names only Home.
+    expect(
+      t.env.defaults.record.get()?.snapshot.households.map((h) => h.id),
+    ).toEqual([HOME]);
+    const form = householdForm() as HTMLElement;
+    expect(grantName(form, FLAT)).toBe("Second household");
+    expect(form.textContent).not.toContain(copy.HOUSEHOLD_UNKNOWN);
+  });
+
+  test("MU-S70 control: when the complete list does not name a granted household, it IS one you are not in", async () => {
+    setup({
+      personal: { template: { kind: "private" }, version: 2 },
+      household: { template: grantingSecond(), version: 5 },
+      memberships: [homeOf()],
+    });
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    await flush();
+    expect(grantName(householdForm() as HTMLElement, FLAT)).toBe(
+      copy.HOUSEHOLD_UNKNOWN,
+    );
+  });
+
+  test("MU-S71 (Q3): loading and failed lists prove nothing: a granted household is unchecked, nothing can be added, Try again recovers without resetting the form", async () => {
+    const first = gated();
+    const t = setup({
+      personal: { template: grantingSecond(), version: 3 },
+      membershipReads: [first.answer],
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    await flush();
+    const form = personalForm();
+    // Loading: neither "not in" nor a picker; adding waits and says why.
+    expect(form.querySelector('[data-membership="loading"]')).not.toBeNull();
+    expect(grantName(form, FLAT)).toBe(copy.HOUSEHOLD_UNCHECKED);
+    expect(addButton(form)).toBeDisabled();
+    expect(reasonOf(addButton(form))).toBe(copy.ADD_HOUSEHOLD_LOADING_REASON);
+    // An unsaved change made meanwhile: Second household gets Edit.
+    fireEvent.click(
+      within(
+        within(form).getByRole("radiogroup", {
+          name: `${copy.HOUSEHOLD_UNCHECKED}: ${copy.READ} or ${copy.EDIT}`,
+        }),
+      ).getByRole("radio", { name: copy.EDIT }),
+    );
+    // A malformed answer (the reader's `uncertain`, no request id).
+    first.settle({ ok: false, kind: "uncertain" });
+    await flush();
+    const failed = () =>
+      form.querySelector<HTMLElement>('[data-membership="failed"]');
+    expect(failed()?.textContent).toContain(copy.HOUSEHOLDS_FAILED);
+    expect(grantName(form, FLAT)).toBe(copy.HOUSEHOLD_UNCHECKED);
+    expect(form.textContent).not.toContain(copy.HOUSEHOLD_UNKNOWN);
+    expect(addButton(form)).toBeDisabled();
+    expect(reasonOf(addButton(form))).toBe(copy.ADD_HOUSEHOLD_FAILED_REASON);
+    // A classified refusal, then success: each Try again is the membership banner's own and reads only the list.
+    t.api.next.households.push(
+      { ok: false, kind: "invalid", requestId: "req-memberships" },
+      ok([homeOf(), second]),
+    );
+    fireEvent.click(
+      within(failed() as HTMLElement).getByRole("button", {
+        name: copy.TRY_AGAIN,
+      }),
+    );
+    await flush();
+    expect(failed()?.textContent).toContain("req-memberships");
+    fireEvent.click(
+      within(failed() as HTMLElement).getByRole("button", {
+        name: copy.TRY_AGAIN,
+      }),
+    );
+    await flush();
+    expect(membershipReads(t.api)).toBe(3);
+    expect(templateReads(t.api)).toBe(2);
+    expect(failed()).toBeNull();
+    expect(grantName(form, FLAT)).toBe("Second household");
+    // The form was not remounted or reset: the unsaved Edit is still chosen and still unsaved.
+    expect(personalForm()).toBe(form);
+    expect(
+      within(
+        within(form).getByRole("radiogroup", {
+          name: `Second household: ${copy.READ} or ${copy.EDIT}`,
+        }),
+      )
+        .getByRole("radio", { name: copy.EDIT })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+    fireEvent.click(addButton(form));
+    expect(offered(form)).toEqual(["Home"]);
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands[0]).toMatchObject({
+      expected_version: 3,
+      template: grantingSecond(true),
+    });
+  });
+
+  test("MU-S72 (Q4): reconnects supersede earlier membership reads; answers arriving backwards never replace the latest", async () => {
+    const reads = [gated(), gated(), gated()];
+    const t = setup({
+      personal: { template: null, version: 1 },
+      membershipReads: reads.map((read) => read.answer),
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    t.setSharing({ online: false });
+    t.setSharing({ online: true });
+    t.setSharing({ online: false });
+    t.setSharing({ online: true });
+    await flush();
+    expect(membershipReads(t.api)).toBe(3);
+    reads[2]?.settle(ok([homeOf(), second]));
+    await flush();
+    reads[1]?.settle(ok([homeOf()]));
+    reads[0]?.settle(ok([]));
+    await flush();
+    choose(personalForm(), copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(personalForm()));
+    expect(offered(personalForm())).toEqual(["Home", "Second household"]);
+  });
+
+  test("Q4: another identity's membership answer, held across the switch, never reaches the new identity's editor", async () => {
+    const elsewhere = household({
+      id: ELSEWHERE,
+      name: "Only account A's",
+      role: "member",
+    });
+    const heldA = gated();
+    const t = setup({
+      personal: { template: null, version: 1 },
+      membershipReads: [heldA.answer],
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    const apiB = fakeSharingApi();
+    apiB.defaults.households = ok([homeOf()]);
+    t.setSharing({
+      ...sharingEnv(apiB),
+      identity: "99999999-9999-4999-8999-999999999999:1",
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    await flush();
+    heldA.settle(ok([homeOf(), elsewhere]));
+    await flush();
+    choose(personalForm(), copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(personalForm()));
+    expect(offered(personalForm())).toEqual(["Home"]);
+  });
+
+  test("MU-S73 (Q5): coming back online reads the list again (the last one names grants meanwhile); the draft, its version and the templates stay", async () => {
+    const again = gated();
+    const t = setup({
+      personal: { template: null, version: 6 },
+      membershipReads: [ok([homeOf()]), again.answer],
+    });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    await flush();
+    const form = personalForm();
+    choose(form, copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(form));
+    fireEvent.click(
+      within(picker(form) as HTMLElement).getByRole("button", { name: "Home" }),
+    );
+    t.setSharing({ online: false });
+    expect(reasonOf(save("personal"))).toBe(copy.SAVE_OFFLINE_REASON);
+    t.setSharing({ online: true });
+    await flush();
+    expect(membershipReads(t.api)).toBe(2);
+    // While the new read is under way: the last list still names Home; nothing can be added; nothing was re-read but the list.
+    expect(grantName(form, HOME)).toBe("Home");
+    expect(addButton(form)).toBeDisabled();
+    expect(templateReads(t.api)).toBe(2);
+    again.settle(ok([homeOf(), second]));
+    await flush();
+    expect(personalForm()).toBe(form);
+    expect(chosen(form)).toBe(copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(form));
+    fireEvent.click(
+      within(picker(form) as HTMLElement).getByRole("button", {
+        name: "Second household",
+      }),
+    );
+    fireEvent.click(save("personal"));
+    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    expect(t.api.sent[0]?.commands[0]).toMatchObject({
+      expected_version: 6,
+      template: {
+        kind: "explicit",
+        policy: {
+          grants: [
+            { kind: "household", id: HOME, edit: false },
+            { kind: "household", id: FLAT, edit: false },
+          ],
+        },
+      },
+    });
+  });
+
+  test("Q5: opened offline, nothing is read; back online the list is read for the first time", async () => {
+    const t = setup({ online: false, memberships: [homeOf(), second] });
+    await flush();
+    expect(membershipReads(t.api)).toBe(0);
+    t.setSharing({ online: true });
+    await waitFor(() => expect(personalForm()).toBeTruthy());
+    await flush();
+    expect(membershipReads(t.api)).toBe(1);
+    choose(personalForm(), copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(personalForm()));
+    expect(offered(personalForm())).toEqual(["Home", "Second household"]);
+  });
+
+  test("Q7: the list is editing metadata only: the B5 record (its revision evidence) is never changed by it, and B5's names stay on what B5 describes", async () => {
+    const t = setup({
+      personal: { template: null, version: 1 },
+      household: { template: { kind: "private" }, version: 2 },
+      memberships: [homeOf("Home, renamed since"), second],
+    });
+    const before = structuredClone(t.env.defaults.record.get());
+    await waitFor(() => expect(householdForm()).toBeTruthy());
+    await flush();
+    choose(personalForm(), copy.CHOICE_EXPLICIT);
+    fireEvent.click(addButton(personalForm()));
+    expect(offered(personalForm())).toEqual([
+      "Home, renamed since",
+      "Second household",
+    ]);
+    expect(t.env.defaults.record.get()).toEqual(before);
+    expect(
+      document.querySelector('[data-layer="household"] h3')?.textContent,
+    ).toBe(copy.HOUSEHOLD_LAYER("Home"));
   });
 });

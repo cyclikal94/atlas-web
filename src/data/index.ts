@@ -9,8 +9,10 @@
  */
 
 export type {
+  Acquisition,
   DefaultsSource,
   RefreshOutcome,
+  RequestBoundary,
 } from "./engine/defaults-source";
 export type { ReadResult } from "./engine/identity-task";
 export type {

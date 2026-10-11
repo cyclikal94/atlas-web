@@ -9,37 +9,96 @@
  * and is only ever given back to that identity and that target. Keeping an entry for an identity forgets every other identity's, so a
  * different account (or a later sign-in of the same one) never sees them. A restored entry carries the version it was composed against
  * and its uncertain attempt, so Save stays guarded by that version and a resend keeps its key; nothing is ever sent by restoring.
+ *
+ * Every entry is OWNED by an editor session (WEB-12a review 2, R5): the policy editor of one resource, or the defaults editor, whose
+ * entries span every layer, household and kind it has kept. A session outlives its dialog while it has kept input (the sync control
+ * suspends it, reopening the same editor resumes it) and ends when the person dismisses the editor: `discard` forgets EVERY entry the
+ * session owns, whether or not its read has landed or the form that kept it is on screen, and nothing the ended session does afterwards
+ * (a late keep, a late save's forget) can bring an entry back or remove a later session's. Other owners' entries are never touched.
+ * There is one defaults editor (the `/sharing/defaults/$kind` route); a second simultaneous host would need its own owner name.
  */
 const LIMIT = 20;
-const entries = new Map<string, { identity: string; value: unknown }>();
 
-const keyOf = (identity: string, target: string) =>
-  `${identity}\u0000${target}`;
+/** One editor session. `ended` once dismissed (or once its identity is no longer the one keeping input): it can do nothing more. */
+interface Owner {
+  identity: string;
+  name: string;
+  ended: boolean;
+}
 
-/** Keeps `value` for this identity and target (replacing an earlier one), forgetting every other identity's entries. */
-export function retain(identity: string, target: string, value: unknown): void {
-  for (const [key, entry] of entries)
-    if (entry.identity !== identity) entries.delete(key);
-  const key = keyOf(identity, target);
-  entries.delete(key);
-  entries.set(key, { identity, value });
-  if (entries.size > LIMIT) {
-    const oldest = entries.keys().next().value;
-    if (oldest !== undefined) entries.delete(oldest);
+const entries = new Map<string, { owner: Owner; value: unknown }>();
+const owners = new Map<string, Owner>();
+
+const keyOf = (identity: string, name: string) => `${identity}\u0000${name}`;
+
+/** The handle an editor holds for its session: what it reads, keeps and forgets goes through it. */
+export interface RetainedSession {
+  /** What this session kept for `target`, if anything (nothing once the session has ended). */
+  retained<T>(target: string): T | undefined;
+  /** Keeps `value` for `target` (replacing an earlier one), forgetting every other identity's entries. Ignored once ended. */
+  retain(target: string, value: unknown): void;
+  /** Forgets one target (a successful save, a Reload): the session's other entries stay. Ignored once ended. */
+  forget(target: string): void;
+  /** The person dismissed the editor: forgets every entry the session owns and ends it. Repeating it does nothing. */
+  discard(): void;
+}
+
+/**
+ * The session `name` of `identity`: the one suspended by the sync control if there is one (its entries are given back), otherwise a new
+ * one. Calling it again before the session ends returns the same session (React may render a component twice).
+ */
+export function retainedSession(
+  identity: string,
+  name: string,
+): RetainedSession {
+  const ownerKey = keyOf(identity, name);
+  let owner = owners.get(ownerKey);
+  if (owner === undefined || owner.ended) {
+    owner = { identity, name, ended: false };
+    owners.set(ownerKey, owner);
   }
+  const self = owner;
+  return {
+    retained<T>(target: string) {
+      if (self.ended) return undefined;
+      const entry = entries.get(keyOf(identity, target));
+      return entry?.owner === self ? (entry.value as T) : undefined;
+    },
+    retain(target, value) {
+      if (self.ended) return;
+      for (const [key, entry] of entries)
+        if (entry.owner.identity !== identity) entries.delete(key);
+      for (const [key, other] of owners)
+        if (other.identity !== identity) {
+          other.ended = true;
+          owners.delete(key);
+        }
+      const key = keyOf(identity, target);
+      entries.delete(key);
+      entries.set(key, { owner: self, value });
+      if (entries.size > LIMIT) {
+        const oldest = entries.keys().next().value;
+        if (oldest !== undefined) entries.delete(oldest);
+      }
+    },
+    forget(target) {
+      if (self.ended) return;
+      const key = keyOf(identity, target);
+      if (entries.get(key)?.owner === self) entries.delete(key);
+    },
+    discard() {
+      if (self.ended) return;
+      self.ended = true;
+      for (const [key, entry] of entries)
+        if (entry.owner === self) entries.delete(key);
+      if (owners.get(ownerKey) === self) owners.delete(ownerKey);
+    },
+  };
 }
 
-/** What was retained for exactly this identity and target, if anything. It stays until `forget` (a discard or a successful save). */
-export function retained<T>(identity: string, target: string): T | undefined {
-  return entries.get(keyOf(identity, target))?.value as T | undefined;
-}
-
-/** Discards what was retained for this identity and target. */
-export function forget(identity: string, target: string): void {
-  entries.delete(keyOf(identity, target));
-}
-
-/** For tests: forget everything. */
+/** For tests: forget everything (every session ends). */
 export function forgetAllRetained(): void {
+  for (const owner of owners.values()) owner.ended = true;
+  owners.clear();
   entries.clear();
 }

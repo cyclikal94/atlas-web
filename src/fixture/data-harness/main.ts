@@ -85,6 +85,7 @@ import type { AccountStore, Plan } from "../../data/store/port";
 import { StoreFailure, w } from "../../data/store/port";
 import { createRegistry, getPageRegistry } from "../../data/store/registry";
 import { createDataEnv, type DataEnv } from "../../data/ui/env";
+import { readDefaultsSnapshotThrough } from "../../data/ui/identity-reads";
 import { createProductionQuota } from "../../data/ui/production-quota";
 import { NOT_SENT_DELAYS_MS } from "../../features/settings/sessions-devices/until-sent";
 import { apiUrl } from "../../lib/api-client/wire";
@@ -312,8 +313,26 @@ export interface DataHarness {
    */
   startGate(
     account: AccountId,
-    options?: { established?: boolean; isolated?: boolean },
+    options?: {
+      established?: boolean;
+      isolated?: boolean;
+      /**
+       * WEB-12a review 4 (R10): the controller reads the sharing defaults through the production reader (`GET /defaults/snapshot` on the
+       * session's stamped client), so a spec can drive its PRODUCTION defaults source over real IndexedDB.
+       */
+      defaults?: boolean;
+    },
   ): Promise<void>;
+  /**
+   * WEB-12a review 4 (R10): the defaults source of the controller of `startGate({ defaults: true })` and the incarnation of the database
+   * it is bound to (null: none bound). FIXTURE.
+   */
+  gateDefaults(): {
+    boundary: DataEnv["defaults"]["boundary"];
+    acquire: DataEnv["defaults"]["acquire"];
+    revision: () => string | null;
+  } | null;
+  gateIncarnation(): string | null;
   /**
    * The reads of the sync facts that the controller of `startGate` has made itself, since it was started (R49, revision 30): `starts` is
    * the live queries it began (a bind, or a re-read after a marker or a failure), `emissions` the results they delivered, and `calls` EVERY
@@ -2063,6 +2082,9 @@ const harness: DataHarness = {
         return () => window.removeEventListener("online", listener);
       },
       markers,
+      ...(options.defaults === true
+        ? { readDefaultsSnapshot: readDefaultsSnapshotThrough(session) }
+        : {}),
     });
     gateEnv = env;
     gateSeen = [];
@@ -2096,6 +2118,18 @@ const harness: DataHarness = {
       throw new Error(`the controller never read the facts of ${account}`);
   },
   gate: () => (gateEnv === null ? null : deriveGate(gateEnv.inputs.get())),
+  gateDefaults: () => {
+    const defaults = gateEnv?.defaults;
+    return defaults === undefined
+      ? null
+      : {
+          boundary: () => defaults.boundary(),
+          acquire: (after) => defaults.acquire(after),
+          revision: () =>
+            defaults.record.get()?.snapshot.defaults.revision ?? null,
+        };
+  },
+  gateIncarnation: () => gateEnv?.service()?.incarnationId ?? null,
   gateCache: () => (gateEnv === null ? null : gateEnv.inputs.get().cache),
   gateHistory: () => [...gateSeen],
   resetGateHistory() {

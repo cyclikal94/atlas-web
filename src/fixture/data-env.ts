@@ -243,6 +243,8 @@ export function fixtureData(params: URLSearchParams): FixtureData {
       record: new Cell(null),
       settled: new Cell(true),
       refresh: async () => "closed",
+      boundary: () => null,
+      acquire: async () => ({ outcome: "closed", record: null }),
       use: () => () => undefined,
       start: () => () => undefined,
     },

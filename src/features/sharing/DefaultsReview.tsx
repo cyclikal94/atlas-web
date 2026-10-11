@@ -7,10 +7,12 @@ import {
   type CapturedAccount,
   type CapturedHousehold,
   captureDefaults,
+  type DefaultsRecord,
   type DefaultTemplate,
   type DraftRow,
   defaultsReviewCase,
   parseDefaultsContext,
+  type RequestBoundary,
   reviewedOf,
   reviewKinds,
   type SnapshotHousehold,
@@ -45,6 +47,13 @@ import { Banner, formatWhen } from "./parts";
  * labelled only from what was captured with the draft and "Now" only from the current snapshot; an account neither names is shown by an
  * abbreviated id. The confirmation is conditional on the draft exactly as shown (R2): edited elsewhere meanwhile, it is refused and the
  * person reviews it again.
+ *
+ * "Now" is the snapshot the review's OWN read fetched, asked for after the review opened (WEB-12a review 2, R7): a read already under
+ * way when it opened is not waited for or accepted, and an answer that still predates the opening is a failure the person can retry,
+ * never an endless "loading". That snapshot is the one shown AND the one confirmed. Confirm needs the connection and that read
+ * (plan §4.6): offline, or after the connection returns until the review's read lands again, it is disabled with its reason. The read
+ * after the connection returns, and a Try again, must each follow THEIR OWN start (DA-C1): a read still under way from before is not
+ * accepted for them.
  */
 export function DefaultsReview({
   draft,
@@ -55,8 +64,19 @@ export function DefaultsReview({
 }) {
   return (
     <SharingBoundary>
-      <ReviewDialog draft={draft} onClose={onClose} />
+      <ReviewDialogFor draft={draft} onClose={onClose} />
     </SharingBoundary>
+  );
+}
+
+/** One review per displayed identity and draft: either changing opens a new review, with its own opening and read (R7). */
+function ReviewDialogFor(props: { draft: DraftRow; onClose(): void }) {
+  const env = useSharingEnv();
+  return (
+    <ReviewDialog
+      key={`${env.identity}\u0000${props.draft.local_id}`}
+      {...props}
+    />
   );
 }
 
@@ -64,7 +84,7 @@ type Status =
   | { kind: "loading" }
   | { kind: "offline" }
   | { kind: "failed" }
-  | { kind: "ready" };
+  | { kind: "ready"; record: DefaultsRecord };
 
 function ReviewDialog({
   draft,
@@ -78,6 +98,8 @@ function ReviewDialog({
   const actions = useDataActions();
   const announcer = useAnnouncer();
   const [openedAt] = useState(() => env.now());
+  // The review's place in the source's reads as it opened: only a read issued after it can be "Now" (R7).
+  const [opened] = useState(() => defaults.boundary());
   // The replacement's identity, chosen once: a retry of a confirmation whose completion was lost uses the same one (R24).
   const [replacementId] = useState(() => env.newId());
   const [status, setStatus] = useState<Status>({ kind: "loading" });
@@ -90,28 +112,51 @@ function ReviewDialog({
     },
     [],
   );
+  // Each load supersedes the one before: an earlier answer landing late never replaces a newer state.
+  const loads = useRef(0);
+  // What the current load's read must follow: the opening for the first load; a load after the connection returns, or a Try again,
+  // renews it (DA-C1), so a read already under way before the connection dropped (or before the retry) can never be "Now".
+  const since = useRef<{ after: RequestBoundary | null; at: number }>({
+    after: opened,
+    at: openedAt,
+  });
+  const loaded = useRef(false);
 
   const load = () => {
+    const current = ++loads.current;
+    if (loaded.current)
+      since.current = { after: defaults.boundary(), at: env.now() };
+    loaded.current = true;
     if (!env.online) {
       setStatus({ kind: "offline" });
       return;
     }
     setStatus({ kind: "loading" });
-    void defaults.refresh().then((outcome) => {
-      if (!mounted.current) return;
-      setStatus(
-        outcome === "fetched"
-          ? { kind: "ready" }
-          : outcome === "offline"
-            ? { kind: "offline" }
-            : { kind: "failed" },
-      );
-    });
+    const settle = (next: Status) => {
+      if (mounted.current && current === loads.current) setStatus(next);
+    };
+    const { after, at } = since.current;
+    defaults.acquire(after).then(
+      (got) => {
+        // The read's own snapshot, still checked against the time its load began: one that predates it is never "Now" (a clock that
+        // went back), and the person can try again.
+        const fresh =
+          got.outcome === "fetched" ? freshForReview(got.record, at) : null;
+        settle(
+          fresh !== null
+            ? { kind: "ready", record: fresh }
+            : got.outcome === "offline"
+              ? { kind: "offline" }
+              : { kind: "failed" },
+        );
+      },
+      () => settle({ kind: "failed" }),
+    );
   };
   // biome-ignore lint/correctness/useExhaustiveDependencies: asked when the review opens and when the page comes back online
   useEffect(load, [env.online]);
 
-  const now = freshForReview(defaults.record, openedAt);
+  const now = status.kind === "ready" ? status.record : null;
   const kinds = reviewKinds(draft);
   const was = parseDefaultsContext(draft.defaults_context);
   const reviewCase =
@@ -173,7 +218,7 @@ function ReviewDialog({
   };
 
   const confirmReason =
-    now === null
+    now === null || !env.online
       ? !env.online || status.kind === "offline"
         ? copy.REVIEW_NOW_NEEDS_CONNECTION
         : copy.REVIEW_CONFIRM_REASON

@@ -176,6 +176,7 @@ export function stubEnv(
     },
   };
   const defaultsRecord = new Cell<DefaultsRecord | null>(null);
+  let acquisitions = 0;
   const defaultsSettled = new Cell(true);
   const defaults = {
     record: defaultsRecord,
@@ -185,6 +186,22 @@ export function stubEnv(
       const next = env.refreshDefaults;
       if (typeof next === "function") return next();
       return next;
+    },
+    // The double's boundary counts acquisitions; `acquire` answers like `refresh` and, when `fetched`, with the record then set (a
+    // test that delivers a record issued before the review opened therefore sees the review refuse it, as the source's answer would).
+    boundary: () => ({ identity: "stub", issued: acquisitions }),
+    acquire: async (boundary: unknown) => {
+      acquisitions += 1;
+      calls.push({ action: "refreshDefaults", args: [boundary] });
+      const next = env.refreshDefaults;
+      const outcome = typeof next === "function" ? await next() : next;
+      const now = defaultsRecord.get();
+      return outcome === "fetched" && now !== null
+        ? { outcome, record: now }
+        : {
+            outcome: outcome === "fetched" ? "failed" : outcome,
+            record: null,
+          };
     },
     use: () => {
       calls.push({ action: "useDefaults", args: [] });
