@@ -10,7 +10,13 @@ import {
   UPDATE_CHECK_UNSUPPORTED_MIN_MS,
   UPDATE_CHECK_VISIBLE_MIN_MS,
 } from "../../src/lib/pwa/coordinator";
-import { FakeOrigin, flush } from "./coordinator-world";
+import {
+  type FakeForm,
+  FakeOrigin,
+  type FakeWorker,
+  flush,
+  type Tab,
+} from "./coordinator-world";
 
 /**
  * WEB-14a D-P4/D-P5: the app-update coordinator of each tab, over a double of the registration (capability rows 400 and 473; WEB-04 8;
@@ -573,5 +579,254 @@ describe("'Discard and reload anyway' discards (R6)", () => {
     await origin.clock.advance(FLUSH_START_GRACE_MS);
     expect(skipWaitings(waiting)).toBe(1);
     expect(form.discards).toBe(1);
+  });
+});
+
+/**
+ * Revision 2, R3 (the design assessment's Q6, Q7 and Q12): EVERY way to the reload goes through one checkpoint, made in the same step as
+ * the reload: nothing of the tab's forms is outstanding, every form is held still, none is dirty. Work that arrives during the waits (a
+ * form mounted again with its input, a submission that succeeds) is settled first; what cannot be settled stops this tab's reload.
+ */
+describe("the reload checkpoint (revision 2, R3)", () => {
+  type Branch = {
+    name: string;
+    controlled?: boolean;
+    /** Before "Save and reload". */
+    prepare?(origin: FakeOrigin, tab: Tab, waiting: FakeWorker): void;
+    /** After the local save; returns once the tab has tried to reload. */
+    arrive(
+      origin: FakeOrigin,
+      tab: Tab,
+      waiting: FakeWorker,
+      late: () => FakeForm,
+    ): Promise<FakeForm>;
+  };
+  const midGrace = async (origin: FakeOrigin, late: () => FakeForm) => {
+    await origin.clock.advance(FLUSH_START_GRACE_MS - 1);
+    const form = late();
+    await origin.clock.advance(1);
+    return form;
+  };
+  const branches: Branch[] = [
+    {
+      name: "the controller change",
+      arrive: async (origin, _tab, waiting, late) => {
+        await origin.clock.advance(FLUSH_START_GRACE_MS);
+        const form = late();
+        await origin.activate(waiting);
+        return form;
+      },
+    },
+    {
+      name: "the waiting worker's activation (an uncontrolled tab)",
+      controlled: false,
+      arrive: async (origin, _tab, waiting, late) => {
+        await origin.clock.advance(FLUSH_START_GRACE_MS);
+        const form = late();
+        await origin.activate(waiting);
+        return form;
+      },
+    },
+    {
+      name: "the activation fallback",
+      arrive: async (origin, _tab, _waiting, late) => {
+        await origin.clock.advance(FLUSH_START_GRACE_MS);
+        const form = late();
+        await origin.clock.advance(ACTIVATION_FALLBACK_MS);
+        return form;
+      },
+    },
+    {
+      name: "a skip-waiting message that cannot be posted",
+      prepare: (_origin, _tab, waiting) => {
+        waiting.postMessage = () => {
+          throw new Error("detached");
+        };
+      },
+      arrive: (origin, _tab, _waiting, late) => midGrace(origin, late),
+    },
+    {
+      name: "a worker already activated by another tab",
+      prepare: (_origin, _tab, waiting) => {
+        waiting.state = "activated";
+      },
+      arrive: (origin, _tab, _waiting, late) => midGrace(origin, late),
+    },
+    {
+      name: "no waiting worker (updated in another tab)",
+      prepare: (_origin, tab) => {
+        tab.registration.waiting = null;
+      },
+      arrive: (origin, _tab, _waiting, late) => midGrace(origin, late),
+    },
+  ];
+
+  const start = async (branch: Branch) => {
+    const origin = new FakeOrigin();
+    const tab = await origin
+      .tab({ controlled: branch.controlled ?? true })
+      .start();
+    const mine = tab.form();
+    mine.dirty = true;
+    const waiting = await origin.installNew(2);
+    branch.prepare?.(origin, tab, waiting);
+    return { origin, tab, mine, waiting };
+  };
+
+  test.each(branches)(
+    "$name: a form that comes back dirty during the waits is saved before the reload, which happens once",
+    async (branch) => {
+      const { origin, tab, mine, waiting } = await start(branch);
+      tab.actions?.accept();
+      await flush();
+      expect(mine.saves).toBe(1);
+      const form = await branch.arrive(origin, tab, waiting, () => {
+        const late = tab.form("task-edit:/tasks/9");
+        late.dirty = true;
+        late.result = "hold";
+        return late;
+      });
+      // The reload waits for the late form's save.
+      expect(form.frozen).toBe(true);
+      expect(form.saves).toBe(1);
+      expect(tab.reloads).toBe(0);
+      form.release("saved");
+      await flush();
+      expect(tab.reloads).toBe(1);
+      await origin.clock.advance(ACTIVATION_FALLBACK_MS * 2);
+      expect(tab.reloads).toBe(1);
+    },
+  );
+
+  test.each(branches)(
+    "$name: a late form whose save fails stops this tab's reload; the forms are released and nothing reloads later",
+    async (branch) => {
+      const { origin, tab, waiting } = await start(branch);
+      tab.actions?.accept();
+      await flush();
+      const form = await branch.arrive(origin, tab, waiting, () => {
+        const late = tab.form("task-edit:/tasks/9");
+        late.dirty = true;
+        late.result = "failed";
+        return late;
+      });
+      await flush();
+      expect(tab.state).toEqual({ kind: "save_failed", refused: false });
+      expect(form.frozen).toBe(false);
+      await origin.clock.advance(ACTIVATION_FALLBACK_MS * 2);
+      expect(tab.reloads).toBe(0);
+      // "Retry save" settles it and reloads.
+      form.result = "saved";
+      tab.actions?.retrySave();
+      await origin.clock.advance(FLUSH_START_GRACE_MS);
+      await origin.clock.advance(ACTIVATION_FALLBACK_MS);
+      expect(tab.reloads).toBe(1);
+    },
+  );
+
+  test("a submission sent before 'Save and reload' is waited for; its success discards the copies, and the submitted input is never saved", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    form.dirty = true;
+    const sent = form.submit();
+    const waiting = await origin.installNew(2);
+    tab.actions?.accept();
+    await origin.clock.advance(FLUSH_MAX_MS);
+    expect(tab.state).toEqual({ kind: "saving" });
+    expect(form.frozen).toBe(true);
+    expect(form.saves).toBe(0);
+    expect(skipWaitings(waiting)).toBe(0);
+    sent.succeeded();
+    await origin.clock.advance(FLUSH_START_GRACE_MS);
+    expect(form.saves).toBe(0);
+    expect(form.discards).toBe(1);
+    expect(skipWaitings(waiting)).toBe(1);
+    await origin.activate(waiting);
+    expect(tab.reloads).toBe(1);
+  });
+
+  test("a submission sent before 'Save and reload' that fails: the input is saved, then the update proceeds", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    form.dirty = true;
+    const sent = form.submit();
+    const waiting = await origin.installNew(2);
+    tab.actions?.accept();
+    await flush();
+    sent.failed();
+    await origin.clock.advance(FLUSH_START_GRACE_MS);
+    expect(form.saves).toBe(1);
+    await origin.activate(waiting);
+    expect(tab.reloads).toBe(1);
+  });
+
+  test("a submission that succeeds while the tab waits for the activation is settled before the reload", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    const waiting = await origin.installNew(2);
+    tab.actions?.accept();
+    await origin.clock.advance(FLUSH_START_GRACE_MS);
+    // A caller that only reports the success after the fact (`onSubmitted`): its discard is outstanding when the worker activates.
+    form.discardResult = "discarded";
+    const discarding = form.discard();
+    await origin.activate(waiting);
+    await discarding;
+    await flush();
+    expect(tab.reloads).toBe(1);
+  });
+
+  test("a form that cannot be held still is never taken for safe: no reload, and the person is told", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    tab.forms.register({
+      formContext: "legacy",
+      isDirty: () => false,
+      flush: async () => "saved",
+    });
+    const waiting = await origin.installNew(2);
+    tab.actions?.accept();
+    await origin.clock.advance(FLUSH_START_GRACE_MS);
+    expect(tab.state).toEqual({ kind: "save_failed", refused: false });
+    expect(skipWaitings(waiting)).toBe(0);
+    await origin.clock.advance(ACTIVATION_FALLBACK_MS * 2);
+    expect(tab.reloads).toBe(0);
+  });
+
+  test("disposed while saving: nothing reloads afterwards, and the forms are released", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    form.dirty = true;
+    form.result = "hold";
+    const waiting = await origin.installNew(2);
+    tab.actions?.accept();
+    await flush();
+    expect(form.frozen).toBe(true);
+    tab.coordinator?.dispose();
+    expect(form.frozen).toBe(false);
+    form.release("saved");
+    await origin.clock.advance(ACTIVATION_FALLBACK_MS * 2);
+    await origin.activate(waiting);
+    expect(tab.reloads).toBe(0);
+    expect(skipWaitings(waiting)).toBe(0);
+  });
+
+  test("'Save and reload' asked twice saves once and reloads once", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    form.dirty = true;
+    const waiting = await origin.installNew(2);
+    tab.actions?.accept();
+    tab.actions?.accept();
+    await origin.clock.advance(FLUSH_START_GRACE_MS);
+    tab.actions?.accept();
+    expect(form.saves).toBe(1);
+    expect(skipWaitings(waiting)).toBe(1);
+    await origin.activate(waiting);
+    expect(tab.reloads).toBe(1);
   });
 });

@@ -98,6 +98,11 @@ declared(
     await page.waitForFunction(
       () => navigator.serviceWorker.controller !== null,
     );
+    // WEB-14a revision 2 (readiness, labelled): the reloaded page still loads its lazy chunks (the update banner and the form registry)
+    // after "load"; going offline and navigating away while one is in flight aborts it, and Firefox logs that abort as "A ServiceWorker
+    // intercepted the request and encountered an unexpected error" (driver attempt 6, run 2026-10-10T22-59-09.801Z-ac97c236: the old
+    // page's request was the one aborted; the new page loaded the same chunk from the worker). The page settles first; nothing is relaxed.
+    await page.waitForLoadState("networkidle");
     await context.setOffline(true);
     const token = "d".repeat(64);
     await page.goto(`/join#t=${token}`);

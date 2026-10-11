@@ -18,7 +18,7 @@ import {
  *  1. MISSING: paused, "can't be sure"; the paced re-check (30 s, a production constant, waited for in real time) lifts it once the
  *     server reports a supported version ("Atlas will keep checking").
  *  2. MATCHING: no screen, the ordinary entry.
- *  3. MISMATCHED (0.28.0): paused; the coordinator looks for a newer client at once, finds B, and the screen offers "Reload to update";
+ *  3. MISMATCHED (0.29.0): paused; the coordinator looks for a newer client at once, finds B, and the screen offers "Reload to update";
  *     reloading onto B (whose range is the same: no build with another range is made) still shows the mismatch, and the gate lifts when the
  *     server reports a version in range again, at the next reconnect, without a reload.
  *
@@ -63,7 +63,7 @@ test("case 1, missing: paused and checking; the paced re-check lifts it once the
   await generations.health({ status: "ok" });
   const page = await openSignedOut(context, generations);
   await expect(page.getByText(MISSING)).toBeVisible();
-  await generations.health({ status: "ok", api_version: "0.27.0" });
+  await generations.health({ status: "ok", api_version: "0.28.0" });
   // Nothing else happens on the page: the session's own paced re-check (first after 30 s) finds the supported version.
   await expect(page.getByText(ENTRY)).toBeVisible({ timeout: 45_000 });
   await expect(page.getByText(MISSING)).toHaveCount(0);
@@ -94,8 +94,8 @@ test("case 3, mismatched: paused; a newer client is looked for and offered; the 
   await page.waitForLoadState("load");
   await expect(page.getByText(ENTRY)).toBeVisible();
 
-  // The server moves to 0.28.0, and a newer client (B) is deployed with it.
-  await generations.health({ status: "ok", api_version: "0.28.0" });
+  // The server moves to 0.29.0, and a newer client (B) is deployed with it.
+  await generations.health({ status: "ok", api_version: "0.29.0" });
   await generations.serve("fixture-b");
   await reconnect(context, page, browserName);
   await expect(page.getByText(UNSUPPORTED)).toBeVisible();
@@ -118,7 +118,7 @@ test("case 3, mismatched: paused; a newer client is looked for and offered; the 
   ).toHaveCount(0);
 
   // The server is in range again: the next reconnect lifts the gate without a reload.
-  await generations.health({ status: "ok", api_version: "0.27.3" });
+  await generations.health({ status: "ok", api_version: "0.28.3" });
   await mark(page);
   await reconnect(context, page, browserName);
   await expect(page.getByText(ENTRY)).toBeVisible();

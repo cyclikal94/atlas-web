@@ -34,6 +34,9 @@ import { withFixtureServer as serveFixture } from "./lib/fixture-server.mjs";
 import { initialScripts } from "./lib/initial-chunk.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const contractPin = JSON.parse(
+  readFileSync(join(root, "contract-pin.json"), "utf8"),
+);
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const value = (name, fallback) => {
@@ -417,7 +420,7 @@ function assembleHandoff(bundleRecord) {
       provenance: machineRecord.atlas_web,
       node: machineRecord.node,
       playwright: machineRecord.playwright,
-      backend: "released v0.27.0-rc.1 (integration measurements only)",
+      backend: `configured target ${contractPin.backend_tag}; use each measurement's recorded backend attribution (historical results may differ)`,
       api_pin: "contract-pin.json",
       date: machineRecord.recorded_at,
       operator: "the Running-phase agent; no person has reviewed this record",

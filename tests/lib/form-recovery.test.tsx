@@ -21,6 +21,7 @@ import {
   RecoveryBanner,
   SAVE_FAILED_TEXT,
   SAVE_REFUSED_TEXT,
+  UNAVAILABLE_WHILE_RELOADING,
 } from "../../src/lib/form-recovery/RecoveryBanner";
 import {
   UPDATE_TEXT,
@@ -289,6 +290,23 @@ describe("RecoveryBanner", () => {
     expect(screen.getByRole("status")).toHaveTextContent(RESTORED_TEXT);
     fireEvent.click(screen.getByRole("button", { name: "Discard instead" }));
     expect(onDiscard).toHaveBeenCalledTimes(1);
+    expect((await axe(container)).violations).toEqual([]);
+  });
+
+  test("state 3, restored, while an update reload is prepared (revision 2, R3): 'Discard instead' is disabled and says why", async () => {
+    const onDiscard = vi.fn();
+    const { container } = render(
+      withAnnouncer(
+        <RecoveryBanner
+          state={{ kind: "restored", onDiscard, disabled: true }}
+        />,
+      ),
+    );
+    const button = screen.getByRole("button", { name: "Discard instead" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(UNAVAILABLE_WHILE_RELOADING);
+    fireEvent.click(button);
+    expect(onDiscard).not.toHaveBeenCalled();
     expect((await axe(container)).violations).toEqual([]);
   });
 

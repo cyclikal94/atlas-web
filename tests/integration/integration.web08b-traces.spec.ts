@@ -28,7 +28,7 @@ import {
 
 /**
  * I-20, I-22 and I-23 (WEB-08b plan 9.3): the ordering traces of the account-lifecycle matrix that WEB-08b owns (T1, T3, T15), run
- * through the session module and its PRODUCTION adapters in a real engine against the RELEASED backend (v0.27.0-rc.1, SQLite),
+ * through the session module and its PRODUCTION adapters in a real engine against the RELEASED backend (the version in contract-pin.json, SQLite),
  * with the delaying proxy ordering when the backend PROCESSES a request (`hold_request`) and when its answer is DELIVERED (`hold`).
  *
  * What they prove: in every ordering the cookie changes only at the newest attempt's own activation, a late grant or a late error is

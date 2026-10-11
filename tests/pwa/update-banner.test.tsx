@@ -218,8 +218,8 @@ describe("the API compatibility screen offers the update (D-P9)", () => {
         issues={[]}
         api={{
           status: "unsupported",
-          version: "0.28.0",
-          supported: ">=0.27.0 <0.28.0",
+          version: "0.29.0",
+          supported: ">=0.28.0 <0.29.0",
         }}
       />,
     );

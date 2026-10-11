@@ -127,9 +127,16 @@ test("backend paths and the OIDC callback are never answered with the shell, onl
     expect(response?.status(), path).toBe(
       path.startsWith("/health") || path === "/ready" ? 200 : 404,
     );
+    // ADAPTED in revision 2 (labelled): the worker SCRIPT's update check (`/sw.js`) is also excluded, as `/favicon.ico` was. The
+    // browser makes it for the registration on its own schedule (here when the probe's neutral page registers the app's worker, as every
+    // page of the app does); it is neither a backend path nor the shell. In driver attempt 7 (run 2026-10-10T23-10-15.198Z-f3d7f9de)
+    // WebKit's check fell inside the `/api` window, with no page request for it in the trace. The intent is unchanged: each backend
+    // navigation reaches the server exactly once, and nothing else of the app does.
     const seen = (await generations.log())
       .map((entry) => entry.path)
-      .filter((seenPath) => seenPath !== "/favicon.ico");
+      .filter(
+        (seenPath) => seenPath !== "/favicon.ico" && seenPath !== "/sw.js",
+      );
     expect(seen, path).toEqual([path]);
   }
 

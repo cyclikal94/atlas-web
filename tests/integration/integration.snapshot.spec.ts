@@ -21,7 +21,7 @@ import {
 
 /**
  * WEB-09b focused ADAPTER integration: the PRODUCTION leader (`?leader=production`: the election, the engine, the dispatcher and the
- * recovery job, composed by the boot sequence) in a real engine against the RELEASED backend (v0.27.0-rc.1) on a disposable SQLite
+ * recovery job, composed by the boot sequence) in a real engine against the RELEASED backend (the version in contract-pin.json) on a disposable SQLite
  * database, behind the delaying proxy. No fixture seeder and no fixture leader is used. Anything the proxy injects is labelled
  * PROXY-INJECTED. This is not BE-Q19 acceptance, not WEB-08c's composed lifecycle acceptance, not PostgreSQL and not device evidence.
  *

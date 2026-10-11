@@ -2,6 +2,7 @@ import type { DiscardResult, SaveResult } from "../form-recovery/port";
 import {
   discardDirty,
   flushDirty,
+  type RecoverableFormHandle,
   type RecoverableFormRegistry,
 } from "../form-recovery/registry";
 import {
@@ -26,8 +27,14 @@ import type { AppUpdatesActions, UpdateState } from "./store";
  *  - A tab whose version another tab replaced shows "updated in another tab": a controller change it did not ask for, or a report
  *    answered with a newer active generation (which also covers a frozen tab that missed both, when it comes back).
  *  - From the moment the person accepts until the page reloads, every form of this tab is FROZEN (revision 1, R3): the waits for the
- *    other tabs and the activation can last seconds, and input typed after the last save would be lost by the reload. A failure (a save or a
- *    discard that did not land) releases them: the person keeps working.
+ *    other tabs and the activation can last seconds, and input typed after the last save would be lost by the reload. The freeze is also
+ *    the forms' LOCK (revision 2, R3): the recovery actions that would change a form (another copy, "Discard instead", a new submission)
+ *    are refused while it stands. A failure (a save or a discard that did not land) releases them: the person keeps working.
+ *  - A RELOAD NEEDS A CHECKPOINT (revision 2, R3). Every way to the reload (the activation, the controller change, the fallback, no
+ *    waiting worker, a refused skip-waiting message) goes through ONE check, made in the same step as the reload: nothing of this tab's
+ *    forms is outstanding (a save, a discard, a submission sent before the person accepted), every form is held still, and none is dirty
+ *    (in a discard, none still holds input that was not discarded). Work that arrived during the waits (a form mounted again with its
+ *    input, a submission that succeeded) is settled first; what cannot be settled stops this tab's reload and is shown, never lost.
  *  - "Discard and reload anyway" DISCARDS the copies of the dirty forms (revision 1, R6: the copy saved earlier and the one a form was
  *    restored from would otherwise come back after the reload); a discard that does not land says so (`discard_failed`) and reloads nothing.
  *  - It NEVER reloads on its own: only `accept`, `retrySave`, `discardAndReload` and `reloadAnyway` lead to `reload()`.
@@ -128,6 +135,11 @@ export interface AppUpdateCoordinator {
   registration(): Promise<RegistrationLike | null>;
 }
 
+type Mode = "save" | "discard" | "anyway";
+
+/** How many times the forms are settled before a reload is given up (work keeps arriving): each round waits for what is outstanding. */
+const SETTLE_ROUNDS = 3;
+
 type Busy =
   | { kind: "saving" }
   | { kind: "save_failed"; refused: boolean }
@@ -188,12 +200,47 @@ export function startAppUpdates(
     deps.publish(state, actions);
   };
 
+  /** The act this tab's reload is for (revision 2): what the checkpoint asks of the forms. */
+  let mode: Mode = "save";
+  /** The forms whose discard was refused in this act (the account is being signed out: the database goes with every copy). */
+  let refused = new Set<RecoverableFormHandle>();
+  /** Whether the reload may happen NOW (R3): read in the same step as the reload, never across an await. */
+  const sealed = (): boolean => {
+    if (mode === "anyway") return true;
+    const forms = deps.forms;
+    if (forms.pending() > 0 || forms.unheld() > 0) return false;
+    return forms.dirty().every((form) => refused.has(form));
+  };
+  let resealing = false;
+  /** The ONLY way to `deps.reload()`: checked and done in one step; otherwise this tab's forms are settled again first. */
   const reload = (): void => {
     if (reloaded || disposed) return;
+    if (!sealed()) {
+      void reseal();
+      return;
+    }
     reloaded = true;
     busy = { kind: "reloading" };
     publish();
     deps.reload();
+  };
+  /** Work arrived after the forms were settled (a remount, a submission's success): settled again, then the check; or this tab stays. */
+  const reseal = async (): Promise<void> => {
+    if (resealing) return;
+    resealing = true;
+    const settledAgain = await settleForms(mode);
+    resealing = false;
+    if (disposed || reloaded) return;
+    if (settledAgain && sealed()) {
+      reload();
+      return;
+    }
+    // This tab does not reload: the person keeps working (a worker may have activated for the other tabs; this tab's input is not lost).
+    stopAccepting();
+    if (!busy || busy.kind === "reloading" || busy.kind === "saving")
+      busy = { kind: "save_failed", refused: false };
+    publish();
+    unfreeze();
   };
 
   // ---- other tabs ----------------------------------------------------------------------------------------------------------------
@@ -459,19 +506,65 @@ export function startAppUpdates(
   })();
 
   // ---- the person's actions ------------------------------------------------------------------------------------------------------
-  /** Saves this tab's dirty forms; `true` when every save succeeded (or nothing was dirty). */
-  const saveOwn = async (): Promise<boolean> => {
-    if (deps.forms.dirty().length === 0) return true;
-    busy = { kind: "saving" };
-    publish();
-    const failed = verdict(await flushDirty(deps.forms));
-    if (disposed) return false;
-    if (failed) {
-      busy = failed;
-      publish();
-      return false;
+  /**
+   * Settles this tab's forms for the act (revision 2, R3): waits for what is outstanding (a save, a discard, a submission sent before the
+   * person accepted), then saves (or, in a discard, discards) every form that still needs it, until the checkpoint holds; `true` when it
+   * does. A save or discard that does not land is shown (`save_failed`, `discard_failed`) and nothing reloads.
+   */
+  const settleForms = async (act: Mode): Promise<boolean> => {
+    if (act === "anyway") return true;
+    for (let round = 0; round < SETTLE_ROUNDS; round += 1) {
+      if (deps.forms.pending() > 0) {
+        busy = { kind: "saving" };
+        publish();
+        await deps.forms.settled();
+        if (disposed) return false;
+        // What settled may have started more (a submission's success discards the copies): that is waited for first.
+        if (deps.forms.pending() > 0) continue;
+      }
+      if (sealed()) return true;
+      if (act === "save") {
+        if (deps.forms.dirty().length > 0) {
+          busy = { kind: "saving" };
+          publish();
+          const failed = verdict(await flushDirty(deps.forms));
+          if (disposed) return false;
+          if (failed) {
+            busy = failed;
+            publish();
+            return false;
+          }
+        }
+      } else {
+        const forms = deps.forms.dirty().filter((form) => !refused.has(form));
+        const results: DiscardResult[] = await discardDirty(deps.forms, forms);
+        if (disposed) return false;
+        if (results.includes("failed")) {
+          busy = { kind: "discard_failed" };
+          publish();
+          return false;
+        }
+        forms.forEach((form, index) => {
+          if (results[index] === "refused") refused.add(form);
+        });
+      }
+      if (sealed()) return true;
     }
-    return true;
+    if (deps.forms.pending() > 0) await deps.forms.settled();
+    if (disposed) return false;
+    if (sealed()) return true;
+    // Work kept arriving (or a form cannot be held still): this tab does not reload, and says it could not save.
+    busy = { kind: "save_failed", refused: false };
+    publish();
+    return false;
+  };
+
+  /** The fallback of the act waiting for the activation; cancelled when the act stops. */
+  let fallback: unknown = null;
+  const stopAccepting = (): void => {
+    accepting = false;
+    cancel(fallback);
+    fallback = null;
   };
 
   /** The other tabs save, then this tab moves onto the newer version: the waiting worker is activated, or (another tab's) the page reloads. */
@@ -488,7 +581,10 @@ export function startAppUpdates(
     }
     accepting = true;
     follow(waiting);
-    after(ACTIVATION_FALLBACK_MS, reload);
+    fallback = after(ACTIVATION_FALLBACK_MS, () => {
+      fallback = null;
+      if (accepting) reload();
+    });
     try {
       waiting.postMessage({ type: "atlas:skip-waiting" });
     } catch {
@@ -500,22 +596,6 @@ export function startAppUpdates(
       reload();
   };
 
-  /**
-   * The person's discard of this tab's unsaved input: the copies of every dirty form are discarded, so none comes back after the reload
-   * (R6). `refused`: the account is being signed out, and its database is deleted with every copy in it. A discard that FAILED leaves a copy
-   * that may come back: nothing reloads, and the person is told.
-   */
-  const discardOwn = async (): Promise<boolean> => {
-    const results: DiscardResult[] = await discardDirty(deps.forms);
-    if (disposed) return false;
-    if (results.includes("failed")) {
-      busy = { kind: "discard_failed" };
-      publish();
-      return false;
-    }
-    return true;
-  };
-
   /** The freeze in force while this tab acts (R3), released when the act ends without a reload. */
   let frozen: (() => void) | null = null;
   const unfreeze = (): void => {
@@ -525,19 +605,20 @@ export function startAppUpdates(
   offs.push(unfreeze);
 
   let acting = false;
-  const act = async (mode: "save" | "discard" | "anyway"): Promise<void> => {
-    if (acting || reloaded || disposed) return;
+  const act = async (next: Mode): Promise<void> => {
+    if (acting || accepting || resealing || reloaded || disposed) return;
     acting = true;
+    mode = next;
+    refused = new Set();
     // Synchronously, before the save reads the forms: nothing typed from now on could be saved before the reload.
     frozen ??= deps.forms.freeze();
     try {
-      if (mode === "save" && !(await saveOwn())) return;
-      if (mode === "discard" && !(await discardOwn())) return;
+      if (!(await settleForms(next))) return;
       await apply();
     } finally {
       acting = false;
       // The reload has been asked for (the page goes with its forms frozen), or the act stopped: the person keeps working.
-      if (!reloaded && !accepting) unfreeze();
+      if (!reloaded && !accepting && !resealing) unfreeze();
     }
   };
 

@@ -25,7 +25,7 @@ import {
 
 /**
  * I-29 and I-30 (WEB-08b plan 9.3): the Settings account card and "Signing in" dialog, and the production sign-in surface, through the
- * real UI against the RELEASED backend (v0.27.0-rc.1, SQLite). What passing proves: the contract's own `GET /me` fields are what the
+ * real UI against the RELEASED backend (the version in contract-pin.json, SQLite). What passing proves: the contract's own `GET /me` fields are what the
  * screens show; a password change signs the session out everywhere and the new password works; a WRONG current password is a `401`
  * that ends the session into "Reconnect to keep going" (design gap G-16, recorded not fixed); the sign-in surface refuses, throttles
  * and recovers as designed. What it does NOT prove: recovery after re-authentication (state 2 stays until WEB-09b), real Safari, or

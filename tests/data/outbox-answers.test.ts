@@ -252,8 +252,8 @@ describe("F-O11: the compatibility pause (decision D-21)", () => {
     [
       {
         status: "unsupported",
-        version: "0.28.0",
-        supported: ">=0.27.0 <0.28.0",
+        version: "0.29.0",
+        supported: ">=0.28.0 <0.29.0",
       } as const,
       { kind: "paused", reason: "compat_unsupported" },
     ],
@@ -298,7 +298,7 @@ describe("F-O11: the compatibility pause (decision D-21)", () => {
     await enqueue(w, create("b"));
     await w.settle();
     expect(w.sent).toEqual([]);
-    w.compat.set({ status: "supported", version: "0.27.0-rc.1" });
+    w.compat.set({ status: "supported", version: "0.28.0" });
     await w.settle();
     expect(w.sent.map((s) => JSON.parse(s.body).id)).toEqual(["a", "b"]);
     expect(w.drafts().map((d) => d.status)).toEqual([
@@ -345,7 +345,7 @@ describe("F-O12: account switch and a draft held by a lifecycle state", () => {
     });
     await w.settle();
     // The queue becomes sendable while the page shows ANOTHER account: nothing of the outgoing account is sent.
-    w.compat.set({ status: "supported", version: "0.27.0-rc.1" });
+    w.compat.set({ status: "supported", version: "0.28.0" });
     await w.settle();
     await w.advance(5 * 60_000);
     expect(w.sent).toEqual([]);
@@ -601,7 +601,7 @@ describe("F-O14: the queue warning blocks nothing", () => {
     });
     const more = await w.outbox.enqueue(create("one-more"));
     expect(more.kind).toBe("queued");
-    w.compat.set({ status: "supported", version: "0.27.0-rc.1" });
+    w.compat.set({ status: "supported", version: "0.28.0" });
     await w.settle();
     for (let i = 0; i < 40; i += 1) {
       if (w.sent.length >= 201) break;
@@ -725,7 +725,7 @@ describe("the facade", () => {
     });
     // The compat gate opens, the draft is sent and acknowledged: with its overlay cleared by a page it would leave; until then it
     // is `held` only when a flag is set, so an ordinary acknowledged draft is simply not counted.
-    w.compat.set({ status: "supported", version: "0.27.0-rc.1" });
+    w.compat.set({ status: "supported", version: "0.28.0" });
     await w.settle();
     expect(w.outbox.summary.get()).toMatchObject({
       status: "ready",

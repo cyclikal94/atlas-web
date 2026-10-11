@@ -163,7 +163,7 @@ test("P-P3: the API compatibility screen offers the update when the server is ne
 }) => {
   await openNeutral(page, generations);
   await workerActive(page);
-  await generations.health({ status: "ok", api_version: "0.28.0" });
+  await generations.health({ status: "ok", api_version: "0.29.0" });
   await generations.serve("production-b");
   await quiet(page);
   await page.reload();

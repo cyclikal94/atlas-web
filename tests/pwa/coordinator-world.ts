@@ -280,19 +280,47 @@ export class FakeChannel implements ChannelLike {
   }
 }
 
+/**
+ * A recoverable form as the coordinator sees it (its registry handle). Revision 2: it behaves as the real form does in the two ways the
+ * reload checkpoint reads: a save that lands makes it clean unless it was edited after the save captured it (`dirty = true` is an edit),
+ * a discard that lands makes it clean, and every save, discard or `submit()` is OUTSTANDING (`settled`) until it settles.
+ */
 export class FakeForm {
-  dirty = false;
+  private edited = false;
+  private edits = 0;
+  get dirty(): boolean {
+    return this.edited;
+  }
+  set dirty(value: boolean) {
+    this.edited = value;
+    if (value) this.edits += 1;
+  }
   saves = 0;
   /** What each save answers; `hold` keeps it pending until `release`. */
   result: SaveResult | "hold" = "saved";
   private pending: Array<(result: SaveResult) => void> = [];
+  private outstanding = new Set<Promise<unknown>>();
   constructor(readonly formContext: string) {}
+  private track<T>(operation: Promise<T>): Promise<T> {
+    this.outstanding.add(operation);
+    const settle = () => this.outstanding.delete(operation);
+    operation.then(settle, settle);
+    return operation;
+  }
   isDirty = () => this.dirty;
   flush = (): Promise<SaveResult> => {
     this.saves += 1;
-    if (this.result === "hold")
-      return new Promise((resolve) => this.pending.push(resolve));
-    return Promise.resolve(this.result);
+    const captured = this.edits;
+    const answer: Promise<SaveResult> =
+      this.result === "hold"
+        ? new Promise((resolve) => this.pending.push(resolve))
+        : Promise.resolve(this.result);
+    return this.track(
+      answer.then((result) => {
+        if (result === "saved" && this.edits === captured) this.edited = false;
+        return result;
+      }),
+    );
   };
   release(result: SaveResult = "saved"): void {
     for (const resolve of this.pending.splice(0)) resolve(result);
@@ -302,8 +330,37 @@ export class FakeForm {
   discardResult: DiscardResult = "discarded";
   discard = (): Promise<DiscardResult> => {
     this.discards += 1;
-    return Promise.resolve(this.discardResult);
+    const result = this.discardResult;
+    return this.track(
+      Promise.resolve(result).then((answer) => {
+        if (answer === "discarded") this.edited = false;
+        return answer;
+      }),
+    );
   };
+  /**
+   * Revision 2 (R3): a submission sent before the person accepted, answered when the test says: `succeeded` discards the form's copies
+   * (the form is then clean: it shows what was submitted), `failed` leaves it as it was.
+   */
+  submit(): { succeeded(): void; failed(): void } {
+    let settle: () => void = () => undefined;
+    this.track(
+      new Promise<void>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    return {
+      succeeded: () => {
+        void this.discard();
+        settle();
+      },
+      failed: () => settle(),
+    };
+  }
+  settled = (): Promise<void> | null =>
+    this.outstanding.size === 0
+      ? null
+      : Promise.allSettled([...this.outstanding]).then(() => undefined);
   /** Revision 1 (R3): whether the form is frozen now, and how often it was. */
   frozen = false;
   freezes = 0;

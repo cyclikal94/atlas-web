@@ -15224,11 +15224,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /a failed save keeps the form, shows retry or discard/,
     // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '      if (mode === "save" && !(await saveOwn())) return;\n',
-        '      if (mode === "save") await saveOwn();\n',
+        "      if (!(await settleForms(next))) return;\n",
+        "      await settleForms(next);\n",
       ),
   },
   {
@@ -15251,7 +15252,13 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
       /activation that never happens: the tab reloads after ACTIVATION_FALLBACK_MS/,
-    patch: (t) => sub(t, "    after(ACTIVATION_FALLBACK_MS, reload);\n", ""),
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    fallback = after(ACTIVATION_FALLBACK_MS, () => {\n      fallback = null;\n      if (accepting) reload();\n    });\n",
+        "",
+      ),
   },
   {
     id: "MU-1135",
@@ -15513,11 +15520,12 @@ export const UNIT = [
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /the identifier is minted at the first save, not at load/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    const fields = latest.current.allow;\n",
-        "    const fields = latest.current.allow;\n    void tab.id();\n",
+        "    mountValues.current = readValues(element, fields.current);\n",
+        "    mountValues.current = readValues(element, fields.current);\n    void tab.id();\n",
       ),
   },
   {
@@ -15525,14 +15533,18 @@ export const UNIT = [
     title:
       "WEB-14a: a remounted form does not restore this page's own copy first",
     file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    tests: [
+      "tests/lib/use-recoverable-form.test.tsx",
+      "tests/lib/recoverable-form-session.test.tsx",
+    ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /restores this page's own copy first/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      const own = tab.current();\n      const gone",
-        "      const own = null;\n      const gone",
+        "        const own = current.tab.current();\n        const gone",
+        "        const own = null;\n        const gone",
       ),
   },
   {
@@ -15543,11 +15555,12 @@ export const UNIT = [
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /never restored over input typed before the look finished/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      if (newest && current && !typed) {",
-        "      if (newest && current) {",
+        "          sameValues(readValues(form, fields.current), current.initial) &&\n",
+        "",
       ),
   },
   {
@@ -15557,41 +15570,44 @@ export const UNIT = [
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /the look is made once per mount/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      if (!finished) looked.current = false;",
-        "      looked.current = false;",
+        '      return bound.look === "none" ? look(bound, shownBefore, port) : undefined;',
+        "      return look(bound, shownBefore, port);",
       ),
   },
   {
     id: "MU-1159",
     title:
       "WEB-14a: the copy restored from is discarded even when this page's own save failed",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /a failed own save does not discard the restored-from copy/,
     // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '    if (result !== "saved") return result;\n',
-        '    if (result !== "saved") {\n      const lost = persisted.current.source;\n      if (lost !== null) await current.discard(context, lost.id);\n      return result;\n    }\n',
+        '  if (result !== "saved") return result;\n',
+        '  if (result !== "saved") {\n    const lost = session.persisted.source;\n    if (lost !== null) await target.discard(session.formContext, lost.id);\n    return result;\n  }\n',
       ),
   },
   {
     id: "MU-1160",
     title: "WEB-14a: a submission leaves this page's own copy behind",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /submission discards both copies/,
     // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      if (own !== null && (state.ownAsked || state.own !== null)) ids.add(own);\n",
+        "  if (own !== null && (state.ownAsked || state.own !== null)) ids.add(own);\n",
         "",
       ),
   },
@@ -15689,53 +15705,53 @@ export const UNIT = [
     id: "MU-1170",
     title:
       "WEB-14a revision 1, R2: dirty is judged against the mount values only (a form back at them after a save looks clean)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /saved, then cleared back to the mount value|back to X: dirty/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
-      sub(t, "    if (own) return !sameValues(now, own.values);\n", ""),
+      sub(t, "  if (own) return !sameValues(now, own.values);\n", ""),
   },
   {
     id: "MU-1171",
     title:
       "WEB-14a revision 1, R2: a form back at its clean values saves a copy instead of discarding its copies",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
       /saved, then cleared back to the mount value|cleared back to the mount value: dirty, and the next page shows it empty/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
-      sub(
-        t,
-        "    if (sameValues(now, clean.current ?? {})) {",
-        "    if (false) {",
-      ),
+      sub(t, "  if (sameValues(now, session.clean)) {", "  if (false) {"),
   },
   {
     id: "MU-1172",
     title:
       "WEB-14a revision 1, R4: a flush overtaken by a submission or discard while it waits for its identifier is still written",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /first identifier still being granted|still overtakes it/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
-      sub(t, '    if (order.current.lastTerminal > op) return "failed";\n', ""),
+      sub(t, '  if (session.order.lastTerminal > op) return "failed";\n', ""),
   },
   {
     id: "MU-1173",
     title:
       "WEB-14a revision 1, R6: a discard that did not land is reported as discarded (nothing is owed)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /whose discard fails/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '        } else outcome = outcome === "refused" ? outcome : result;',
-        "        }",
+        '    } else outcome = outcome === "refused" ? outcome : result;',
+        "    }",
       ),
   },
   {
@@ -15783,10 +15799,11 @@ export const UNIT = [
     tests: ["tests/pwa/coordinator.test.ts"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /frozen from accept/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      if (!reloaded && !accepting) unfreeze();",
+        "      if (!reloaded && !accepting && !resealing) unfreeze();",
         "      if (!reloaded) unfreeze();",
       ),
   },
@@ -15899,60 +15916,60 @@ export const UNIT = [
     id: "MU-1188",
     title:
       "WEB-14a revision 1: a flush is not pinned when it is asked for (a write that waits lands in whichever account is displayed then)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /the copy lands in the form's account only|changed under the form/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '      const current = unpinned ? targetOf(unpinned) : null;\n      if (!form || !current) return "failed";',
-        '      const current = unpinned;\n      if (!form || !current) return "failed";',
+        '  const target = targetOf(session);\n  if (!target) return "failed";',
+        '  const target = session.port;\n  if (!target) return "failed";',
       ),
   },
   {
     id: "MU-1189",
     title:
       "WEB-14a revision 1: a write is made for another account than the one the form was mounted for",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /changed under the form|unmounts after the account changed/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
-      sub(
-        t,
-        "        pinned.account !== mountedAccount.current\n",
-        "        false\n",
-      ),
+      sub(t, "  if (pinned.scope !== session.scope) return null;\n", ""),
   },
   {
     id: "MU-1190",
     title:
       "WEB-14a revision 1 (F-1): a form that unmounts dirty leaves nothing for its remount (the input is lost)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /leaves its input \(memory only\)/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      if (element && scope !== null && dirtyOf(element)) {",
-        "      if (false) {",
+        "  session.left = { values, sensitive };",
+        "  session.left = null;",
       ),
   },
   {
     id: "MU-1191",
     title:
       "WEB-14a revision 1 (F-1): the form mounted again does not take back what its previous mount left",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    file: "src/lib/form-recovery/session.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /leaves its input \(memory only\)/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    if (carried && sameValues(read(form, fields), initial.current ?? {})) {",
-        "    if (false) {",
+        "  if (\n    left &&\n    sameValues(",
+        "  if (\n    false &&\n    sameValues(",
       ),
   },
   {
@@ -15974,15 +15991,417 @@ export const UNIT = [
     id: "MU-1193",
     title:
       "WEB-14a revision 1 (F-1): what a form left at a remount is handed to another account or a re-created database",
-    file: "src/lib/form-recovery/registry.ts",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
     tests: ["tests/lib/use-recoverable-form.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /never to another account, nor/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        sub(t, "    retireOtherScopes(registry, scope);\n", ""),
+        "      existing.scope === scope &&\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1282",
+    title:
+      "WEB-14a revision 2, R2: each mount numbers its saves from zero again (a later save looks older than the baseline)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saves 'one' and 'two', 'three' carried by a remount/,
     patch: (t) =>
       sub(
         t,
-        "      return form.scope === scope ? form : null;",
-        "      return form;",
+        "  session.left = null;\n  session.attached = attachment;",
+        "  session.left = null;\n  session.order.next = 0;\n  session.order.lastTerminal = 0;\n  session.attached = attachment;",
+      ),
+  },
+  {
+    id: "MU-1283",
+    title:
+      "WEB-14a revision 2, R4: a save keeps the terminal order of the mount that asked for it (a later mount's submission cannot overtake it)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is overtaken by the next mount's/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  session.order.next += 1;\n  const op = session.order.next;\n  const now = valuesOf(session);",
+            "  const order = session.order;\n  session.order.next += 1;\n  const op = session.order.next;\n  const now = valuesOf(session);",
+          ),
+          '  if (session.order.lastTerminal > op) return "failed";\n',
+          '  if (order.lastTerminal > op) return "failed";\n',
+        ),
+        "  session.left = null;\n  session.attached = attachment;",
+        "  session.left = null;\n  session.order = { ...session.order };\n  session.attached = attachment;",
+      ),
+  },
+  {
+    id: "MU-1284",
+    title:
+      "WEB-14a revision 2, R2/R4: a save that completes late sets the baseline whatever its order",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /completes after the next mount's/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (session.order.lastTerminal < op && (state.own?.op ?? -1) < op)",
+        "  if (session.order.lastTerminal < op)",
+      ),
+  },
+  {
+    id: "MU-1285",
+    title:
+      "WEB-14a revision 2, DA-1: a look answered after a submission or discard still restores the copy it found",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is offered, not put in the form|the last owner probe is held/,
+    patch: (t) => sub(t, "          current.order.next === began &&\n", ""),
+  },
+  {
+    id: "MU-1286",
+    title:
+      "WEB-14a revision 2, R3: a look answered while an update reload is prepared restores its copy into the held form",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /look answers during a freeze/,
+    patch: (t) =>
+      sub(
+        t,
+        "          current.order.next === began &&\n          !current.registry.frozen();",
+        "          current.order.next === began;",
+      ),
+  },
+  {
+    id: "MU-1287",
+    title:
+      "WEB-14a revision 2, R3: another copy can be put in the form while an update reload is prepared",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    patch: (t) =>
+      sub(
+        t,
+        "      // Refused while an update reload is prepared (R3): it would change the form after its last save.\n      if (registry.frozen()) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1288",
+    title:
+      "WEB-14a revision 2, R3: 'Discard instead' changes the form while an update reload is prepared",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    patch: (t) => sub(t, '    if (registry.frozen()) return "failed";\n', ""),
+  },
+  {
+    id: "MU-1289",
+    title:
+      "WEB-14a revision 2, R3: a submission can be started while an update reload is prepared",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    patch: (t) => sub(t, "    if (registry.frozen()) return null;\n", ""),
+  },
+  {
+    id: "MU-1290",
+    title:
+      "WEB-14a revision 2, R3: a submission sent is not outstanding (an update reload does not wait for it)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a submission ticket is outstanding until it settles|a ticket outlives a remount/,
+    patch: (t) => sub(t, "    if (current) track(current, outstanding);\n", ""),
+  },
+  {
+    id: "MU-1291",
+    title:
+      "WEB-14a revision 2, DA-2: only the account is compared, not its database's incarnation (a mounted form writes into the re-created database)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /deleted and created again while it stays mounted/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (pinned.scope !== session.scope) return null;",
+        "  if (pinned.account !== session.account) return null;",
+      ),
+  },
+  {
+    id: "MU-1292",
+    title:
+      "WEB-14a revision 2: an older discard landing late clears the debt of a newer one that failed",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an older discard landing late/,
+    patch: (t) =>
+      sub(t, "    if (next.owed <= op) next.owed = 0;", "    next.owed = 0;"),
+  },
+  {
+    id: "MU-1293",
+    title:
+      "WEB-14a revision 2, R3: a form that unmounts leaves the registry at once, unsaved input and all",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is still listed|a ticket outlives a remount/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (session.look === "running") session.look = "none";\n  unlistIfIdle(session);',
+        '  if (session.look === "running") session.look = "none";\n  retire(session);',
+      ),
+  },
+  {
+    id: "MU-1294",
+    title:
+      "WEB-14a revision 2: the sessions of another scope are not retired when a form binds to a new one",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /retires the sessions of the old one|unsaved input of the first account is dropped/,
+    patch: (t) => sub(t, "    retireOtherScopes(registry, scope);\n", ""),
+  },
+  {
+    id: "MU-1295",
+    title:
+      "WEB-14a revision 2, R3: a form mounted again during a freeze is not held still as it attaches",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /held still as it attaches/,
+    patch: (t) =>
+      sub(
+        t,
+        "  session.attached = attachment;\n  list(session);\n  holdAttached(session);\n  return attachment;",
+        "  session.attached = attachment;\n  list(session);\n  return attachment;",
+      ),
+  },
+  {
+    id: "MU-1296",
+    title:
+      "WEB-14a revision 2, R3: the reload is not checked (work that arrived during the waits is lost to it)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /comes back dirty during the waits is saved before the reload|a late form whose save fails stops this tab's reload|cannot be held still/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!sealed()) {\n      void reseal();\n      return;\n    }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1297",
+    title:
+      "WEB-14a revision 2, R3: the tab does not wait for work already outstanding (a submission sent before accepting is saved over)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is waited for; its success discards the copies/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (deps.forms.pending() > 0) {\n        busy = { kind: "saving" };\n        publish();\n        await deps.forms.settled();\n        if (disposed) return false;\n        // What settled may have started more (a submission\'s success discards the copies): that is waited for first.\n        if (deps.forms.pending() > 0) continue;\n      }\n      if (sealed()) return true;\n      if (act === "save") {',
+        '      if (sealed()) return true;\n      if (act === "save") {',
+      ),
+  },
+  {
+    id: "MU-1298",
+    title:
+      "WEB-14a revision 2, R3: a form that cannot be held still is taken for safe",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot be held still is never taken for safe/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (forms.pending() > 0 || forms.unheld() > 0) return false;",
+        "    if (forms.pending() > 0) return false;",
+      ),
+  },
+  {
+    id: "MU-1299",
+    title:
+      "WEB-14a revision 2, R3: the registry never says a freeze is in force (the recovery actions stay available)",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    patch: (t) =>
+      sub(t, "    frozen: () => freezes.size > 0,", "    frozen: () => false,"),
+  },
+  {
+    id: "MU-1300",
+    title:
+      "WEB-14a revision 2, R3: a form without a freeze counts as held still",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot be held still is never taken for safe/,
+    patch: (t) =>
+      sub(
+        t,
+        "      held.set(handle, handle.freeze ? handle.freeze() : null);",
+        "      held.set(handle, handle.freeze ? handle.freeze() : () => undefined);",
+      ),
+  },
+  {
+    id: "MU-1301",
+    title:
+      "WEB-14a revision 2, R3: 'Discard instead' stays enabled while an update reload is prepared",
+    file: "src/lib/form-recovery/RecoveryBanner.tsx",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard instead' is disabled and says why/,
+    patch: (t) => sub(t, "        {state.disabled ? (", "        {false ? ("),
+  },
+  {
+    id: "MU-1302",
+    title:
+      "WEB-14a revision 2, R3: a checkpoint that cannot be met leaves the tab accepting (a retry is ignored; the fallback can still fire)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a late form whose save fails stops this tab's reload/,
+    patch: (t) =>
+      sub(
+        t,
+        "    // This tab does not reload: the person keeps working (a worker may have activated for the other tabs; this tab's input is not lost).\n    stopAccepting();\n",
+        "    // This tab does not reload: the person keeps working (a worker may have activated for the other tabs; this tab's input is not lost).\n",
+      ),
+  },
+  {
+    id: "MU-1303",
+    title:
+      "WEB-14a revision 2: a save of the form is not counted as outstanding",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /with a save outstanding is listed/,
+    patch: (t) => sub(t, "  session.pending.add(operation);\n", ""),
+  },
+  {
+    id: "MU-1304",
+    title:
+      "WEB-14a revision 2, R3: a clean session is forgotten when its mount goes (the next mount starts afresh: an empty form during a freeze)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a CLEAN form \(its input saved\) mounted again while a freeze stands/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (session.registry.session(session.formContext) === session)\n    unlist(session);\n  else retire(session);",
+        "  retire(session);",
+      ),
+  },
+  {
+    id: "MU-1305",
+    title:
+      "WEB-14a revision 2: a mount resuming its session does not offer the copies other tabs left since",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restores this page's own copy first/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return look(current, shown, port, "offer");',
+        "      setReady(true);\n      return;",
+      ),
+  },
+  {
+    id: "MU-1306",
+    title:
+      "WEB-14a revision 2: a mount resuming its session says it is ready before the copies other tabs left since are known",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /not ready until the copies other tabs left since are known/,
+    patch: (t) =>
+      sub(
+        t,
+        '      offerOwed.current = true;\n      return look(current, shown, port, "offer");',
+        '      offerOwed.current = true;\n      setReady(true);\n      return look(current, shown, port, "offer");',
       ),
   },
   {

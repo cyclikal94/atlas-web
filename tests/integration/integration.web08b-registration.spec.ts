@@ -27,7 +27,7 @@ import {
 } from "./web08b-support";
 
 /**
- * I-24, I-25 and I-26 (WEB-08b plan 9.3): invitation registration against the RELEASED backend (v0.27.0-rc.1, SQLite). Invitations
+ * I-24, I-25 and I-26 (WEB-08b plan 9.3): invitation registration against the RELEASED backend (the version in contract-pin.json, SQLite). Invitations
  * are the backend's own operator invitations (`atlas-server invite`), one per slot, so no test depends on another's.
  *
  * What they prove: the registration answer carries a grant and NO cookie, only `activate` sets one; an unknown outcome leaves the

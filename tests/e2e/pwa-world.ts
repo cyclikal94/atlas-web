@@ -245,9 +245,20 @@ export async function navigate(page: Page, url: string): Promise<void> {
       const entry = performance.getEntriesByType("navigation")[0] as
         | (PerformanceNavigationTiming & { responseStatus?: number })
         | undefined;
+      // WEB-14a revision 2 (harness, labelled): while the page is still at about:blank, Firefox names its navigation entry "document",
+      // which `new URL` refuses; a poll that lands before the navigation commits threw, and the throw reached the page as a page error
+      // (driver attempt 7, run 2026-10-10T23-10-15.198Z-f3d7f9de). Such an entry is simply not the requested page yet.
+      let requested = false;
+      try {
+        requested =
+          entry !== undefined &&
+          new URL(entry.name).href === new URL(target).href;
+      } catch {
+        requested = false;
+      }
       return (
         entry !== undefined &&
-        new URL(entry.name).href === new URL(target).href &&
+        requested &&
         (entry.responseStatus === undefined || entry.responseStatus === 200) &&
         document.readyState === "complete"
       );

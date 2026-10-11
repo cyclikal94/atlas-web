@@ -3,7 +3,7 @@
 // when --direct is given, compares every proxied answer with the same request sent straight to the backend. Layer C evidence
 // only when the origin is the reference proxy (nginx) and the backend is a released artefact; the report says which was used.
 //
-// It follows the released contract (v0.27.0-rc.1): POST /browser-sessions returns a one-time grant and sets no cookie;
+// It follows the released contract (the version in contract-pin.json): POST /browser-sessions returns a one-time grant and sets no cookie;
 // POST /browser-sessions/activate is the only response that sets the session cookie and returns the CSRF token.
 //
 //   node scripts/smoke-backend.mjs --origin http://127.0.0.1:8090 --direct http://127.0.0.1:3100 \

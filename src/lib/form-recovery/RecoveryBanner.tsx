@@ -19,7 +19,11 @@ export type RecoveryBannerState =
    * reloads until the person tries again or chooses to reload anyway. PROPOSED copy, not accepted.
    */
   | { kind: "discard-failed"; onRetry(): void; onReloadAnyway(): void }
-  | { kind: "restored"; onDiscard(): void };
+  /**
+   * `disabled` (WEB-14a revision 2, R3): this tab is preparing an update reload (`useRecoverableForm().locked`), so "Discard instead" would
+   * change the form after its last save; it is shown unavailable, with its reason (PROPOSED copy, not accepted).
+   */
+  | { kind: "restored"; onDiscard(): void; disabled?: boolean };
 
 export interface RecoveryBannerProps {
   state: RecoveryBannerState;
@@ -33,6 +37,9 @@ export const SAVE_REFUSED_TEXT =
   "Can't save your unfinished form while you're signing out. Nothing was lost — your form is still here.";
 export const DISCARD_FAILED_TEXT =
   "Couldn't clear the saved copy of your unfinished form. If you reload now, that copy may be restored afterwards. Your form is still here.";
+/** PROPOSED copy (WEB-14a revision 2, R3), not accepted: why a recovery action is unavailable while the tab reloads onto an update. */
+export const UNAVAILABLE_WHILE_RELOADING =
+  "Unavailable while Atlas saves your form and reloads.";
 export const RESTORED_TEXT =
   "Restored your unfinished form from before the update. Nothing was submitted automatically — review and submit when ready.";
 
@@ -124,9 +131,15 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
     >
       <p className="text-[13.5px] leading-[1.6] text-ink-1">{RESTORED_TEXT}</p>
       <div className="flex flex-wrap gap-2">
-        <Button variant="quiet" onClick={state.onDiscard}>
-          Discard instead
-        </Button>
+        {state.disabled ? (
+          <Button variant="quiet" disabled reason={UNAVAILABLE_WHILE_RELOADING}>
+            Discard instead
+          </Button>
+        ) : (
+          <Button variant="quiet" onClick={state.onDiscard}>
+            Discard instead
+          </Button>
+        )}
       </div>
     </div>
   );

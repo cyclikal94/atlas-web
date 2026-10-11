@@ -4,8 +4,9 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
-import { buildSnapshot, restoreSnapshot } from "./guard";
+import { restoreSnapshot } from "./guard";
 import type {
   DiscardResult,
   FormRecoveryPort,
@@ -13,7 +14,30 @@ import type {
   RecoverySnapshot,
   SaveResult,
 } from "./port";
-import { pageFormRegistry, type RecoverableFormRegistry } from "./registry";
+import {
+  pageFormRegistry,
+  type RecoverableFormHandle,
+  type RecoverableFormRegistry,
+} from "./registry";
+import {
+  type Attachment,
+  attach,
+  detach,
+  elementOf,
+  type FormSession,
+  holdElement,
+  openSession,
+  readValues,
+  retireOtherScopes,
+  type SessionView,
+  sameValues,
+  setSessionView,
+  terminalAct,
+  track,
+  UNSCOPED,
+  type Values,
+  valuesOf,
+} from "./session";
 import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
 
 /**
@@ -21,8 +45,10 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  *
  *   const port = useFormRecoveryPort();            // from src/data: the displayed account's store, or null
  *   const recovery = useRecoverableForm({ formContext: `task-edit:${path}`, allow, formRef, port });
- *   ... {recovery.restored && <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard }} firstFieldRef={...} />}
- *   ... on a successful submission: await recovery.onSubmitted();   // "discarded", or "failed"/"refused": a copy may come back
+ *   ... {recovery.restored && <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard, disabled: recovery.locked }} .../>}
+ *   ... alternatives: <Button disabled={recovery.locked} ...> (revision 2: unavailable while this tab prepares an update reload)
+ *   ... submitting:  const ticket = recovery.submitting(); if (!ticket) return;   // null: an update reload is being prepared; send nothing
+ *                    send(...).then(() => ticket.succeeded(), () => ticket.failed());   // "discarded", or "failed"/"refused": a copy may come back
  *
  * While mounted the form is in the page's registry, so an accepted update saves its copy first (and another tab's accepted update asks
  * it to). On mount it restores the newest copy of the same form left by a tab that has GONE (one reload ago, or a closed tab), never
@@ -32,21 +58,22 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  *
  * WHAT "DIRTY" MEANS (revision 1, R2). A form is dirty when a reload would NOT bring back what it shows now: when its values differ from
  * the copy the next page would restore (this page's own latest durable copy, else the copy it was restored from, else nothing: what it showed
- * at mount). Revision 0 compared only with the mount (or restore) values, so a form returned to them after a save looked clean while its
- * obsolete copy was restored by the next page. A flush of a form whose values are back to the CLEAN state (what it showed at mount, or after
- * a submission or a discard) discards its copies instead of saving one, so the next page shows that state.
+ * at mount). A flush of a form whose values are back to the CLEAN state (what it showed at mount, or after a submission or a discard)
+ * discards its copies instead of saving one, so the next page shows that state.
  *
- * THE ORDER OF CAPTURES AND DISCARDS IS FIXED WHEN THEY ARE ASKED FOR (revision 1, R4). A flush captures the values and takes its place in
- * the hook's order SYNCHRONOUSLY, at the call; the page's recovery identifier may still be on its way (its Web Lock), and a submission or
- * discard asked for meanwhile overtakes it: the flush then writes nothing ("failed": an obsolete capture), so it can never bring back input
- * that was submitted or discarded after it was asked for. The port's own order (`capture_seq`, `writer_gen`) still orders every write.
+ * ONE SESSION PER FORM, WHATEVER MOUNTS IT (revision 2; R2, R4, DA-1, DA-2). The form's state, the order of its saves and discards, what
+ * is durable and what is still outstanding belong to its SESSION in the page's registry (`session.ts`), bound to the account's database
+ * the port reaches when the form first has one; a mount is only a view of it. A mount that goes (another page's boot remounts the
+ * protected tree, F-1) leaves its input to the session (memory only), and the same form mounted again in this page for the same database
+ * shows it again, with the session's restored copy and alternatives; a save the old mount asked for still lands in the session, and a
+ * submission or discard in the new mount still overtakes it (it then writes nothing: R4). A look for copies whose answer comes after any
+ * save, discard or submission of the session, or while an update reload is prepared, restores nothing (DA-1); the copies are offered.
  *
- * NEVER INTO ANOTHER ACCOUNT, AND NOT LOST TO A REMOUNT (revision 1). Every flush and discard PINS the port when it is asked for
- * (`FormRecoveryPort.pin`): a write that waits can never land in another account's store, and one made for an account other than the one
- * the form was mounted for is not made at all. A form that UNMOUNTS dirty (another page's boot remounts the protected tree, finding F-1)
- * leaves its input and its recovery state in the page's registry (memory only: nothing is written while the tree is torn down, when the
- * account's service may already have ended), and the same form mounted again in its place in this page, for the same account's database
- * (`pin().scope`), takes them back before it looks for copies: the person's input is where it was.
+ * WHILE THIS TAB PREPARES AN UPDATE RELOAD (revision 2, R3). From "Save and reload" until the page reloads (or the reload is abandoned),
+ * `locked` is true: the form is held still (`inert`), and `restoreAlternative`, `discard` and `submitting` refuse (they would change the
+ * form after its last save). Controls outside the form must be disabled with `locked`. A submission SENT before (a `submitting` ticket
+ * not yet settled) is waited for: its success discards the copies before the reload, so the submitted input never comes back. A caller
+ * that only calls `onSubmitted()` after the fact cannot be waited for (use `submitting`).
  *
  * A DISCARD SAYS WHAT IT DID (revision 1, R6). `onSubmitted`, `discard` and the registry's `discard` answer `discarded` only when no copy of
  * the form can come back; otherwise the copies are still owed a discard, the form counts as dirty, and the next flush (an update's save) tries
@@ -63,454 +90,375 @@ export interface UseRecoverableFormOptions {
   tab?: RecoveryTab;
 }
 
+/** A submission sent while the form is mounted (revision 2, R3): the update coordinator waits for it before a reload. */
+export interface SubmissionTicket {
+  /** The submission succeeded: as `onSubmitted()`. */
+  succeeded(): Promise<DiscardResult>;
+  /** It did not (or was not sent): the form keeps its input and its copies. */
+  failed(): void;
+}
+
 export interface RecoverableForm {
   /** The copy restored at mount (or chosen from the alternatives), or null. */
   restored: RecoverySnapshot | null;
   /** Other restorable copies of this form, newest first. */
   alternatives: readonly RecoverySnapshot[];
+  /** Puts another copy in the form. Refused (nothing changes) while `locked`. */
   restoreAlternative(tabInstanceId: string): void;
   /** Whether the look for a copy to restore has finished. */
   ready: boolean;
+  /** Revision 2 (R3): this tab is preparing an update reload; the recovery actions are unavailable (disable their controls). */
+  locked: boolean;
+  /** Before sending a submission (revision 2, R3); null while `locked`: send nothing then. */
+  submitting(): SubmissionTicket | null;
   /** The form was submitted: its copies are discarded. `failed`/`refused`: a copy may still come back after a reload. */
   onSubmitted(): Promise<DiscardResult>;
-  /** "Discard instead": the copies are discarded and the form shows what it showed before the restore. */
+  /** "Discard instead": the copies are discarded and the form shows what it showed before the restore. `failed` (nothing done) while `locked`. */
   discard(): Promise<DiscardResult>;
 }
 
-type Values = Record<string, string>;
-const read = (
-  form: HTMLFormElement,
-  allow: readonly RecoverableFieldSpec[],
-): Values =>
-  // Never throws for a sensitive field here (that is the save's strict check): it is only compared.
-  buildSnapshot({
-    form,
-    formContext: "",
-    tabInstanceId: "",
-    allow,
-    strict: false,
-  }).values;
-const sameValues = (a: Values, b: Values): boolean => {
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const key of keys) if (a[key] !== b[key]) return false;
-  return true;
-};
-
-/** What this page believes is durable for the form, and what it owes. */
-interface Persisted {
-  /** This page's own latest durable copy (its values), and the order of the flush that wrote it. */
-  own: { values: Values; op: number } | null;
-  /** Whether this page has ever asked to write a copy under its own identifier (so a discard must reach it). */
-  ownAsked: boolean;
-  /**
-   * The copy of another (gone) tab this form was restored from, still in the store: the next page would restore it again while this page
-   * has none of its own. `newest`: it is the newest of the copies (an alternative chosen instead may not be).
-   */
-  source: { id: string; values: Values; newest: boolean } | null;
-  /** A discard (a submission, "Discard instead", "Discard and reload anyway") that did not land: copies may come back. */
-  owed: boolean;
-}
-
-/** What a form carries across a remount in this page (`RecoverableFormRegistry.carry`). */
-interface CarriedState {
-  initial: Values | null;
-  clean: Values | null;
-  persisted: Persisted;
-}
+const NO_VIEW: SessionView = { restored: null, alternatives: [] };
 
 export function useRecoverableForm(
   options: UseRecoverableFormOptions,
 ): RecoverableForm {
   const { formContext, allow, formRef, port } = options;
-  // The allow-list is read through `latest`, so a caller that builds it afresh on every render does not restart anything.
+  // The allow-list is read through `fields`, so a caller that builds it afresh on every render does not restart anything.
   const registry = options.registry ?? pageFormRegistry;
   const tab = options.tab ?? getPageRecoveryTab();
-  const [restored, setRestored] = useState<RecoverySnapshot | null>(null);
-  const [alternatives, setAlternatives] = useState<readonly RecoverySnapshot[]>(
-    [],
-  );
+  const [view, setViewState] = useState<SessionView>(NO_VIEW);
   const [ready, setReady] = useState(false);
-  // What the form showed at mount (before any restore).
-  const initial = useRef<Values | null>(null);
-  // The values for which no copy is needed when nothing is durable: the mount values, or what the form showed when it was submitted or
-  // discarded.
-  const clean = useRef<Values | null>(null);
-  const persisted = useRef<Persisted>({
-    own: null,
-    ownAsked: false,
-    source: null,
-    owed: false,
-  });
-  // The hook's order of flushes and discards (R4): taken synchronously when each is asked for.
-  const order = useRef({ next: 0, lastTerminal: 0 });
-  const looked = useRef(false);
-  // The account the form was mounted for, and its database as it was then (the first port's `pin`): nothing is ever written for another.
-  const mountedAccount = useRef<string | null>(null);
-  const mountedScope = useRef<string | null>(null);
-  const latest = useRef({ formContext, allow, port });
-  latest.current = { formContext, allow, port };
-
-  // The restore: ONCE per mount, the first time the form and the port are both there. A look that finished is never made again (the
-  // account's store may be bound again later, which gives a new port), and a copy is never restored over input the person has typed since
-  // the form mounted: then every copy is offered as an alternative instead.
-  useEffect(() => {
-    const form = formRef.current;
-    if (!form) return;
-    const fields = latest.current.allow;
-    if (initial.current === null) {
-      initial.current = read(form, fields);
-      clean.current = initial.current;
-    }
-    if (port && mountedAccount.current === null) {
-      const pinned = port.pin?.() ?? null;
-      mountedAccount.current = pinned?.account ?? null;
-      mountedScope.current = pinned?.scope ?? null;
-    }
-    if (!port || looked.current) return;
-    looked.current = true;
-    // The same form mounted again in its place in this page (a remount, F-1): its previous mount's input and state are put back as they
-    // were, unless the person has typed into this one meanwhile, and nothing is looked for (the copies it knew of are in that state).
-    const carried =
-      mountedScope.current === null
-        ? null
-        : registry.take(formContext, mountedScope.current);
-    if (carried && sameValues(read(form, fields), initial.current ?? {})) {
-      const state = carried.state as CarriedState;
-      restoreSnapshot(
-        form,
-        { formContext, tabInstanceId: "", values: carried.values, savedAt: "" },
-        fields,
-      );
-      initial.current = state.initial ?? initial.current;
-      clean.current = state.clean ?? clean.current;
-      persisted.current = state.persisted;
-      setReady(true);
-      return;
-    }
-    let cancelled = false;
-    let finished = false;
-    void (async () => {
-      const listed = await port.list(formContext);
-      // What may be restored: THIS page's own copy first (the form was mounted again in the same page: another page's boot makes every
-      // tab check its session, which remounts the protected tree, and the copy saved before is this tab's own latest input), then the
-      // copies of tabs that have gone, newest first. Another OPEN tab's copy is never taken over.
-      const own = tab.current();
-      const gone: RecoverySnapshot[] = listed.filter(
-        (copy) => copy.tabInstanceId === own,
-      );
-      for (const copy of listed)
-        if (
-          copy.tabInstanceId !== own &&
-          !(await tab.ownerOpen(copy.tabInstanceId))
-        )
-          gone.push(copy);
-      if (cancelled) return;
-      finished = true;
-      const current = formRef.current;
-      const typed =
-        current !== null &&
-        !sameValues(read(current, fields), initial.current ?? {});
-      const newest = gone[0];
-      if (newest && current && !typed) {
-        restoreSnapshot(current, newest, fields);
-        const values = read(current, fields);
-        if (newest.tabInstanceId === own)
-          persisted.current = {
-            ...persisted.current,
-            own: { values, op: 0 },
-            ownAsked: true,
-          };
-        else
-          persisted.current = {
-            ...persisted.current,
-            source: { id: newest.tabInstanceId, values, newest: true },
-          };
-        setRestored(newest);
-        setAlternatives(gone.slice(1));
-      } else if (gone.length > 0) setAlternatives(gone);
-      setReady(true);
-    })().catch(() => {
-      if (cancelled) return;
-      finished = true;
-      setReady(true);
-    });
-    return () => {
-      cancelled = true;
-      // Only a look that did not finish is made again (React replays effects in development).
-      if (!finished) looked.current = false;
-    };
-  }, [port, formContext, formRef, tab, registry]);
-
-  /** The port for a write asked for NOW, pinned to the account it reaches now; null when that is not the form's account (or none). */
-  const targetOf = useCallback(
-    (current: FormRecoveryPort): FormRecoveryPort | null => {
-      if (!current.pin) return current;
-      const pinned = current.pin();
-      if (pinned === null) return null;
-      if (
-        mountedAccount.current !== null &&
-        pinned.account !== mountedAccount.current
-      )
-        return null;
-      return pinned.port;
-    },
-    [],
+  const locked = useSyncExternalStore(
+    registry.subscribe,
+    registry.frozen,
+    registry.frozen,
   );
+  const fields = useRef<readonly RecoverableFieldSpec[]>(allow);
+  fields.current = allow;
+  // What this mount showed when it mounted (before any restore).
+  const mountValues = useRef<Values | null>(null);
+  const session = useRef<FormSession | null>(null);
+  const attachment = useRef<Attachment | null>(null);
+  // The registration of this mount while it has no session yet (no port): what it shows is dirty if it differs from `unboundClean` (the
+  // mount values, or what it showed at a submission or discard), and it cannot be saved.
+  const provisional = useRef<(() => void) | null>(null);
+  // A mount that resumed its session owes it the look for copies other tabs left since; it is ready when that look has settled.
+  const offerOwed = useRef(false);
+  const unboundClean = useRef<Values | null>(null);
 
-  /** What the next page would show for this form if the page went now (R2). */
-  const dirtyOf = useCallback((form: HTMLFormElement): boolean => {
-    const { own, source, owed } = persisted.current;
-    if (owed) return true;
-    const now = read(form, latest.current.allow);
-    if (own) return !sameValues(now, own.values);
-    // A chosen alternative that is not the newest copy is not what the next page would restore: only a copy of this page's own makes it so.
-    if (source) return !source.newest || !sameValues(now, source.values);
-    return !sameValues(now, clean.current ?? {});
+  // The session the mount was last bound to, kept after it unmounts: a submission sent from it still belongs to that session (R3, R4).
+  const owner = useRef<FormSession | null>(null);
+
+  const setView = useCallback((next: SessionView) => {
+    const current = session.current;
+    if (current) setSessionView(current, next);
+    else setViewState(next);
   }, []);
-  const isDirty = useCallback((): boolean => {
-    const form = formRef.current;
-    return form ? dirtyOf(form) : false;
-  }, [formRef, dirtyOf]);
 
-  /**
-   * Discards this form's copies (this page's own and the one it was restored from), in the hook's order at `op`: a flush asked for before
-   * it writes nothing any more (R4), and the port orders it after every capture already asked for.
-   */
-  const discardAt = useCallback(
-    async (op: number): Promise<DiscardResult> => {
-      const { port: unpinned, formContext: context } = latest.current;
-      const current = unpinned ? targetOf(unpinned) : null;
-      const state = persisted.current;
-      const ids = new Set<string>();
-      const own = tab.current();
-      if (own !== null && (state.ownAsked || state.own !== null)) ids.add(own);
-      if (state.source !== null) ids.add(state.source.id);
-      if (ids.size === 0) {
-        persisted.current = { ...state, owed: false };
-        return "discarded";
-      }
-      if (!current) {
-        persisted.current = { ...persisted.current, owed: true };
-        return "failed";
-      }
-      const results = await Promise.all(
-        [...ids].map((id) =>
-          current
-            .discard(context, id)
-            .catch((): DiscardResult => "failed")
-            .then((result) => ({ id, result })),
-        ),
-      );
-      const next = { ...persisted.current };
-      let outcome: DiscardResult = "discarded";
-      for (const { id, result } of results) {
-        if (result === "discarded") {
-          if (id === own && next.own !== null && next.own.op < op)
-            next.own = null;
-          if (next.source?.id === id) next.source = null;
-        } else outcome = outcome === "refused" ? outcome : result;
-      }
-      next.owed = outcome !== "discarded";
-      persisted.current = next;
-      return outcome;
-    },
-    [tab, targetOf],
-  );
-
-  const flushOf = useCallback(
-    async (form: HTMLFormElement | null): Promise<SaveResult> => {
-      const {
-        port: unpinned,
-        formContext: context,
-        allow: fields,
-      } = latest.current;
-      // Pinned NOW (before anything is awaited): the write reaches this account's store, or nothing.
-      const current = unpinned ? targetOf(unpinned) : null;
-      if (!form || !current) return "failed";
-      // The capture and its place in the hook's order are fixed NOW, before anything is awaited (R4).
-      order.current.next += 1;
-      const op = order.current.next;
-      const now = read(form, fields);
-      // Back to the clean state: the copies are discarded instead, so the next page shows that state (R2).
-      if (sameValues(now, clean.current ?? {})) {
-        order.current.lastTerminal = op;
-        const result = await discardAt(op);
-        return result === "discarded" ? "saved" : result;
-      }
-      let captured: RecoverySnapshot;
-      try {
-        captured = buildSnapshot({
-          form,
-          formContext: context,
-          tabInstanceId: "",
-          allow: fields,
-        });
-      } catch {
-        return "failed";
-      }
-      persisted.current = { ...persisted.current, ownAsked: true };
-      let id: string;
-      try {
-        id = await tab.id();
-      } catch {
-        return "failed";
-      }
-      // A submission or discard asked for after this capture has overtaken it: it is obsolete and is never written (R4).
-      if (order.current.lastTerminal > op) return "failed";
-      const snapshot = { ...captured, tabInstanceId: id };
-      const result = await current
-        .save(snapshot)
-        .catch((): SaveResult => "failed");
-      if (result !== "saved") return result;
-      const state = persisted.current;
-      if (order.current.lastTerminal < op && (state.own?.op ?? -1) < op)
-        persisted.current = {
-          ...state,
-          own: { values: captured.values, op },
-          // This page's own copy is newer than every discard that did not land: nothing unwanted can be restored in its place.
-          owed: state.source === null ? false : state.owed,
-        };
-      const source = persisted.current.source;
-      if (source !== null && source.id !== id) {
-        const dropped = await current
-          .discard(context, source.id)
-          .catch((): DiscardResult => "failed");
-        if (
-          dropped === "discarded" &&
-          persisted.current.source?.id === source.id
-        )
-          persisted.current = {
-            ...persisted.current,
-            source: null,
-            owed: false,
-          };
-      }
-      return result;
-    },
-    [tab, discardAt, targetOf],
-  );
-  const flush = useCallback(
-    (): Promise<SaveResult> => flushOf(formRef.current),
-    [flushOf, formRef],
-  );
-
-  /** A terminal act, in the hook's order NOW (R4): the form's clean state becomes `cleanValues`, then the copies are discarded. */
-  const terminal = useCallback(
-    (cleanValues: () => Values | null): Promise<DiscardResult> => {
-      order.current.next += 1;
-      const op = order.current.next;
-      order.current.lastTerminal = op;
-      const values = cleanValues();
-      if (values !== null) clean.current = values;
-      persisted.current = { ...persisted.current, owed: true };
-      return discardAt(op);
-    },
-    [discardAt],
-  );
-
-  // Registered while mounted. A form that unmounts dirty saves a copy from the element it leaves behind (F-1, above).
+  // The mount: registered at once (unbound until the port binds it to a session); at unmount the session keeps what it shows.
   useEffect(() => {
     const element = formRef.current;
-    const unregister = registry.register({
+    if (!element) return;
+    mountValues.current = readValues(element, fields.current);
+    unboundClean.current = mountValues.current;
+    const handle: RecoverableFormHandle = {
       formContext,
-      isDirty,
-      flush,
-      // "Discard and reload anyway": the input on screen is the person's to drop; what counts as clean is what it shows now.
-      discard: () =>
-        terminal(() => {
-          const form = formRef.current;
-          return form ? read(form, latest.current.allow) : null;
-        }),
-      freeze: () => {
-        const form = formRef.current;
-        if (!form) return () => undefined;
-        // `inert`: no focus, no click, no typing anywhere in the form (the attribute, which every supported engine reflects).
-        const before = form.hasAttribute("inert");
-        form.setAttribute("inert", "");
-        form.setAttribute("aria-busy", "true");
-        return () => {
-          if (!before) form.removeAttribute("inert");
-          form.removeAttribute("aria-busy");
-        };
-      },
-    });
-    return () => {
-      unregister();
-      // Memory only, and only for this account's database: a remount in this page takes it back (F-1).
-      const scope = mountedScope.current;
-      if (element && scope !== null && dirtyOf(element)) {
-        const state: CarriedState = {
-          initial: initial.current,
-          clean: clean.current,
-          persisted: persisted.current,
-        };
-        registry.carry(formContext, {
-          scope,
-          values: read(element, latest.current.allow),
-          state,
-        });
-      }
+      isDirty: () =>
+        !sameValues(
+          readValues(element, fields.current),
+          unboundClean.current ?? {},
+        ),
+      // No database yet: nothing can be saved, and nothing of this mount's was ever saved.
+      flush: async (): Promise<SaveResult> => "failed",
+      discard: async (): Promise<DiscardResult> => "discarded",
+      freeze: () => holdElement(element),
     };
-  }, [registry, formContext, formRef, isDirty, flush, dirtyOf, terminal]);
+    const unregister = registry.register(handle);
+    let registered = true;
+    provisional.current = () => {
+      if (!registered) return;
+      registered = false;
+      unregister();
+    };
+    return () => {
+      provisional.current?.();
+      provisional.current = null;
+      const current = session.current;
+      const shown = attachment.current;
+      session.current = null;
+      attachment.current = null;
+      if (current && shown) detach(current, shown);
+      mountValues.current = null;
+    };
+  }, [registry, formContext, formRef]);
 
-  const onSubmitted = useCallback(async (): Promise<DiscardResult> => {
-    const result = terminal(() => {
-      const form = formRef.current;
-      return form ? read(form, latest.current.allow) : null;
+  /**
+   * The look, made by `shown` through `through`. Its answer is applied only to this mount, only if nothing of the session has happened since
+   * it began (a save, a discard, a submission: DA-1), only if the person has not typed meanwhile, and not while an update reload is
+   * prepared (R3): otherwise every copy is offered instead, and the form is not touched. `offer` (a mount resuming its session, which
+   * already shows its input): the copies other tabs left since are offered, nothing is restored. Returns the cancellation.
+   */
+  const look = useCallback(
+    (
+      current: FormSession,
+      shown: Attachment,
+      through: FormRecoveryPort,
+      mode: "restore" | "offer" = "restore",
+    ): (() => void) => {
+      if (mode === "restore") current.look = "running";
+      const began = current.order.next;
+      let cancelled = false;
+      let finished = false;
+      void (async () => {
+        const listed = await through.list(current.formContext);
+        // What may be restored: THIS page's own copy first (the form was mounted again in the same page after its session ended), then the
+        // copies of tabs that have gone, newest first. Another OPEN tab's copy is never taken over.
+        const own = current.tab.current();
+        const gone: RecoverySnapshot[] = listed.filter(
+          (copy) => copy.tabInstanceId === own,
+        );
+        for (const copy of listed)
+          if (
+            copy.tabInstanceId !== own &&
+            !(await current.tab.ownerOpen(copy.tabInstanceId))
+          )
+            gone.push(copy);
+        if (cancelled) return;
+        finished = true;
+        if (current.attached?.token !== shown.token) return;
+        if (mode === "offer") {
+          offerOwed.current = false;
+          const showing = current.view.restored?.tabInstanceId;
+          setView({
+            restored: current.view.restored,
+            alternatives: gone.filter(
+              (copy) =>
+                copy.tabInstanceId !== own && copy.tabInstanceId !== showing,
+            ),
+          });
+          setReady(true);
+          return;
+        }
+        current.look = "done";
+        const form = elementOf(current);
+        const untouched =
+          form !== null &&
+          sameValues(readValues(form, fields.current), current.initial) &&
+          current.order.next === began &&
+          !current.registry.frozen();
+        const newest = gone[0];
+        if (newest && form && untouched) {
+          restoreSnapshot(form, newest, fields.current);
+          const values = readValues(form, fields.current);
+          if (newest.tabInstanceId === own)
+            current.persisted = {
+              ...current.persisted,
+              own: { values, op: 0 },
+              ownAsked: true,
+            };
+          else
+            current.persisted = {
+              ...current.persisted,
+              source: { id: newest.tabInstanceId, values, newest: true },
+            };
+          setView({ restored: newest, alternatives: gone.slice(1) });
+        } else if (gone.length > 0)
+          setView({ restored: current.view.restored, alternatives: gone });
+        setReady(true);
+      })().catch(() => {
+        if (cancelled) return;
+        finished = true;
+        if (mode === "offer") offerOwed.current = false;
+        else if (current.attached?.token === shown.token) current.look = "done";
+        setReady(true);
+      });
+      return () => {
+        cancelled = true;
+        // Only a look that did not finish is made again (React replays effects in development; a new port asks again).
+        if (!finished && mode === "restore" && current.look === "running")
+          current.look = "none";
+      };
+    },
+    [setView],
+  );
+
+  // The binding: the first time the form and the port are both there, the mount shows its session (the one this page already has for
+  // this form and database, or a new one), and a session that has not looked for copies to restore looks once.
+  useEffect(() => {
+    const element = formRef.current;
+    const initial = mountValues.current;
+    if (!element || !port || initial === null) return;
+    const pinned = port.pin?.() ?? null;
+    const bound = session.current;
+    const shownBefore = attachment.current;
+    if (bound && shownBefore) {
+      // Never bound again to another scope (DA-2); a new port for the same database is used from now on.
+      if (port.pin && pinned?.scope !== bound.scope) return;
+      bound.port = port;
+      // A resumed mount whose look for new copies was cancelled (a new port) makes it again: it is not ready until it has.
+      if (offerOwed.current && bound.look === "done")
+        return look(bound, shownBefore, port, "offer");
+      return bound.look === "none" ? look(bound, shownBefore, port) : undefined;
+    }
+    if (port.pin && pinned === null) return;
+    const scope = pinned?.scope ?? UNSCOPED;
+    retireOtherScopes(registry, scope);
+    const existing = registry.session(formContext) as FormSession | undefined;
+    const resumed =
+      existing !== undefined &&
+      existing.scope === scope &&
+      existing.attached === null
+        ? existing
+        : null;
+    const current =
+      resumed ??
+      openSession({
+        formContext,
+        scope,
+        account: pinned?.account ?? UNSCOPED,
+        registry,
+        tab,
+        allow: fields,
+        port,
+        initial,
+        // Another mount of the same form is showing the context's session: this one has a session of its own.
+        keep: existing === undefined || existing.attached === null,
+      });
+    current.port = port;
+    const shown = attach(current, element, formRef, initial, setViewState);
+    session.current = current;
+    owner.current = current;
+    attachment.current = shown;
+    provisional.current?.();
+    provisional.current = null;
+    if (current.look === "done") {
+      // Resumed: the session's input and view are shown at once; the mount is ready once the copies other tabs left since are known.
+      setView(current.view);
+      offerOwed.current = true;
+      return look(current, shown, port, "offer");
+    }
+    return look(current, shown, port);
+  }, [port, formContext, formRef, tab, registry, setView, look]);
+
+  /**
+   * The terminal act of the session (R4: in the session's order NOW), with its clean state becoming `clean(form)`, where `form` is what
+   * shows the session now (this mount, a later mount of the same form, or none: what the last mount left counts).
+   */
+  const terminal = useCallback(
+    (
+      clean: (
+        form: HTMLFormElement | null,
+        current: FormSession | null,
+      ) => Values | null,
+    ) => {
+      const current = owner.current;
+      if (!current) {
+        // No session (no database yet): nothing was ever saved, so nothing can come back.
+        unboundClean.current =
+          clean(formRef.current, null) ?? unboundClean.current;
+        return Promise.resolve<DiscardResult>("discarded");
+      }
+      const result = terminalAct(current, clean(elementOf(current), current));
+      setSessionView(current, { ...current.view, restored: null });
+      return result;
+    },
+    [formRef],
+  );
+
+  const onSubmitted = useCallback(
+    async (): Promise<DiscardResult> =>
+      terminal((form, current) =>
+        form
+          ? readValues(form, fields.current)
+          : current
+            ? valuesOf(current)
+            : null,
+      ),
+    [terminal],
+  );
+
+  const submitting = useCallback((): SubmissionTicket | null => {
+    if (registry.frozen()) return null;
+    let settle: () => void = () => undefined;
+    const outstanding = new Promise<void>((resolve) => {
+      settle = resolve;
     });
-    setRestored(null);
-    return result;
-  }, [terminal, formRef]);
+    const current = owner.current;
+    if (current) track(current, outstanding);
+    let done = false;
+    return {
+      succeeded() {
+        if (done) return Promise.resolve<DiscardResult>("discarded");
+        done = true;
+        // The submission's terminal act is outstanding before the ticket is released, so nothing is ever waiting for neither.
+        const result = onSubmitted();
+        settle();
+        return result;
+      },
+      failed() {
+        done = true;
+        settle();
+      },
+    };
+  }, [registry, onSubmitted]);
 
   const discard = useCallback(async (): Promise<DiscardResult> => {
-    const result = terminal(() => {
-      const form = formRef.current;
-      const before = initial.current;
+    // Refused while an update reload is prepared (R3): the form keeps what its last save captured.
+    if (registry.frozen()) return "failed";
+    return terminal((form, current) => {
+      const before = current?.initial ?? mountValues.current;
       if (form && before)
         restoreSnapshot(
           form,
           {
-            formContext: latest.current.formContext,
+            formContext,
             tabInstanceId: "",
             values: before,
             savedAt: "",
           },
-          latest.current.allow,
+          fields.current,
         );
       return before;
     });
-    setRestored(null);
-    return result;
-  }, [terminal, formRef]);
+  }, [registry, terminal, formContext]);
 
   const restoreAlternative = useCallback(
     (tabInstanceId: string) => {
-      const form = formRef.current;
-      const chosen = alternatives.find(
+      // Refused while an update reload is prepared (R3): it would change the form after its last save.
+      if (registry.frozen()) return;
+      const current = session.current;
+      const form = current ? elementOf(current) : null;
+      const chosen = view.alternatives.find(
         (copy) => copy.tabInstanceId === tabInstanceId,
       );
-      if (!form || !chosen) return;
-      restoreSnapshot(form, chosen, latest.current.allow);
-      const values = read(form, latest.current.allow);
-      setAlternatives((others) => [
-        ...(restored ? [restored] : []),
-        ...others.filter((copy) => copy.tabInstanceId !== tabInstanceId),
-      ]);
+      if (!current || !form || !chosen) return;
+      restoreSnapshot(form, chosen, fields.current);
+      const values = readValues(form, fields.current);
       // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
-      persisted.current = {
-        ...persisted.current,
+      current.persisted = {
+        ...current.persisted,
         source: { id: chosen.tabInstanceId, values, newest: false },
       };
-      setRestored(chosen);
+      setView({
+        restored: chosen,
+        alternatives: [
+          ...(view.restored ? [view.restored] : []),
+          ...view.alternatives.filter(
+            (copy) => copy.tabInstanceId !== tabInstanceId,
+          ),
+        ],
+      });
     },
-    [alternatives, restored, formRef],
+    [registry, view, setView],
   );
 
   return {
-    restored,
-    alternatives,
+    restored: view.restored,
+    alternatives: view.alternatives,
     restoreAlternative,
     ready,
+    locked,
+    submitting,
     onSubmitted,
     discard,
   };

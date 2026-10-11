@@ -61,6 +61,15 @@ takes focus, is announced once, and NEVER reloads on its own:
   every form of the acting tab is frozen (`inert`, `aria-busy`; the registry freezes a form that mounts meanwhile too): the waits above can
   last seconds, and input typed after the save would be lost. A failed save or discard releases them (the person keeps working). Other tabs
   are never frozen: they save a copy and keep working.
+- **The freeze is a lock, and a reload needs a checkpoint (revision 2, R3).** While the acting tab is frozen, `registry.frozen()` is true:
+  the recovery actions that would change a form are refused at the API (`restoreAlternative`, "Discard instead", a new submission
+  ticket) and their controls outside the form are disabled with a reason (PROPOSED copy: "Unavailable while Atlas saves your form and
+  reloads."). Work already outstanding when the person accepts (a save, a discard, a submission sent before, `submitting()`) is waited
+  for first. EVERY way to the reload (the activation, the controller change, the 10 s fallback, no waiting worker, a refused skip-waiting
+  message) passes one check made in the same step as the reload: nothing is outstanding, every form is held still, none is dirty. Work that
+  arrived during the waits (a form mounted again, a submission's success) is settled first (up to three rounds); what cannot be settled
+  stops this tab's reload ("Couldn't save your unfinished form…", the forms released, "Retry save" available), even if the worker has
+  activated for the other tabs. A form that cannot be held still is never taken for safe.
 - **"Discard and reload anyway" discards (revision 1, R6).** It discards the copies of every dirty form (this page's own earlier copy and the
   one the form was restored from), so none comes back after the reload. A discard that cannot be written says so (`discard_failed`,
   PROPOSED copy: "Couldn't clear the saved copy of your unfinished form. If you reload now, that copy may be restored afterwards. Your form
@@ -120,9 +129,11 @@ cases 2-3 against a backend whose version really varies stays with BE-B2 and WEB
 ```ts
 const port = useFormRecoveryPort(); // src/data: the displayed account's store, or null while it has no open database
 const recovery = useRecoverableForm({ formContext: `task-edit:${path}`, allow, formRef, port });
-// render <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard }} firstFieldRef={...} /> when recovery.restored
-// offer recovery.alternatives (other copies, newest first) with recovery.restoreAlternative(tabInstanceId)
-// after a successful submission: await recovery.onSubmitted()
+// render <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard, disabled: recovery.locked }} firstFieldRef={...} />
+// offer recovery.alternatives (other copies, newest first) with recovery.restoreAlternative(tabInstanceId), disabled while recovery.locked
+// submitting (revision 2): take a ticket BEFORE sending; none while an update reload is prepared (send nothing then)
+const ticket = recovery.submitting();
+if (ticket) send(...).then(() => ticket.succeeded(), () => ticket.failed()); // succeeded() is onSubmitted(): the copies are discarded
 ```
 
 - Only allow-listed fields are captured, never a sensitive one (`guard.ts`: development builds throw, production drops it).
@@ -139,14 +150,28 @@ const recovery = useRecoverableForm({ formContext: `task-edit:${path}`, allow, f
   the Web Lock `atlas-recovery-tab-<id>` for its life. A form restores, once per mount and never over input typed meanwhile, this page's own
   copy first (the tree may be mounted again), then the newest copy of a tab that has GONE; another open tab's copy is never taken over.
   After this page's own copy is saved, the copy it was restored from is discarded; a submission or "Discard instead" discards both.
-- **A remount keeps the input (finding F-1, reassessed in revision 1):** another page booting makes every open tab check its session, which
-  tears down and remounts the protected tree (the session behaviour stays WEB-08c's). A form that unmounts dirty leaves its input and its
-  recovery state in the page's registry, in memory only (nothing is written while the tree is torn down), and the same form mounted again in
-  this page, for the same account's database and incarnation (`FormRecoveryPort.pin().scope`), takes them back before it looks for copies; it
-  is still dirty, so an update saves it. Never to another account or to a database deleted and created again since. Playwright's WebKit shows
-  no remount on a peer's boot, so the browser case does not exercise the carry there (it is annotated).
-- **Pinned writes (revision 1):** every flush and discard pins the port when it is asked for (`pin()`), so a write that waits for the page's
-  identifier can never land in another account's store, and none is made for an account other than the form's.
+- **One session per form, whatever mounts it (revision 2; R2, R4, DA-1, DA-2; `src/lib/form-recovery/session.ts`).** The form's state
+  belongs to a SESSION in the page's registry, bound to the account's database (account and incarnation, `FormRecoveryPort.pin().scope`)
+  when the form first has a port; a mount of the hook is only a view of it. One order numbers every save and discard of the session when it
+  is asked for, so a submission or discard in any mount overtakes every earlier save, whichever mount asked for it (R4), and the durable
+  baseline only moves to a newer save's values when that save lands (R2: a late save never makes an older copy look current). A form that
+  unmounts (another page's boot remounts the protected tree, F-1) leaves its input to the session, in memory only (nothing is written while
+  the tree is torn down), and the same form mounted again in this page for the same scope shows it again with its restored copy and
+  alternatives, offering copies other tabs left since. The session stays in the registry's list while it is dirty, owes a discard or has
+  an operation outstanding, so a remount never takes unfinished work out of the update coordinator's sight; a clean idle one is kept, not
+  listed, for the next mount. A look for copies answered after any save, discard or submission of the session, or while an update reload
+  is prepared, restores nothing (it offers the copies; DA-1). When a form binds to another scope (another account, or the database deleted
+  and created again), the sessions of the old scope that no mount shows are retired: their memory-only input is dropped, never shown or
+  written there. A session stays bound to its scope: a form that stays mounted while its database is re-created writes nothing into the new
+  one (DA-2). Two mounts of the same form at once are not supported (the second has a session of its own; they share one durable row).
+  Playwright's WebKit shows no remount on a peer's boot; the browser cases force the remount (`__atlasRemountForm`, fixture only).
+- **Pinned writes (revision 1; revision 2: the whole scope):** every flush and discard pins the port when it is asked for (`pin()`), so a
+  write that waits for the page's identifier can never land in another account's store or another incarnation, and none is made for a
+  scope other than the session's.
+- **What this does not cover.** Only the app-update reload is guarded. The sync-recovery "Reload" action (`SyncBlocked`, through the session's
+  own reload) and browser reload/close are outside the update coordinator; they are not claimed protected (design assessment, 10 October
+  2026; the owning slice decides). The newest eligible copy stays the default after a reload (WEB-04 8): another tab can save a newer copy
+  after this tab's last save, so "this tab's input" is preserved as an available copy, not guaranteed to be the one selected.
 
 ## Test builds and constants
 
