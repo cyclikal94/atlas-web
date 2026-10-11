@@ -41,7 +41,7 @@ const only = value("--only", "").split(",").filter(Boolean);
 const jobs = Number(value("--jobs", "3"));
 const check = flag("--check");
 
-const EXPECTED_UNIT = 1115;
+const EXPECTED_UNIT = 1120;
 const EXPECTED_ENGINE = 170;
 
 const selected = UNIT.filter((m) => only.length === 0 || only.includes(m.id));

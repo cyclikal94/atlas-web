@@ -149,6 +149,16 @@ describe("the capability read: once per visit (D-13a-10; DA-1, Q3)", () => {
     expect(c.caps).toHaveLength(2);
   });
 
+  test("Q3: a read the session refused before its send boundary (`closed`, unsent) leaves it unread: the next mount reads it", async () => {
+    const c = client();
+    const visit = enterVisit(identityMemory("acct", 1), c.api);
+    visit.capability.read(always);
+    c.caps[0]?.answer({ ok: false, kind: "closed", unsent: true });
+    await flush();
+    visit.capability.read(always);
+    expect(c.caps).toHaveLength(2);
+  });
+
   test("a read out across a remount is admitted for the screen mounted NOW (the newest caller's liveness is asked)", async () => {
     const c = client();
     const visit = enterVisit(identityMemory("acct", 1), c.api);

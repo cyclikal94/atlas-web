@@ -7,6 +7,8 @@
  *  - `not_sent`: the session did not put it on the wire (a hold that lasted the bounded wait): nothing to recover.
  *  - `offline`: not attempted (no connection).
  *  - `closed`: the session closed or moved to another identity while it ran (`auth_state`, `closed`, `stale`): show nothing new.
+ *    `unsent` (revision 5) when the session refused it before its send boundary (its cover was closed), so nothing reached the
+ *    server; a caller that declined its own admission knows that by itself.
  */
 export type CalendarFailure =
   | {
@@ -19,7 +21,7 @@ export type CalendarFailure =
   | { kind: "uncertain"; status?: number; requestId?: string }
   | { kind: "not_sent" }
   | { kind: "offline" }
-  | { kind: "closed" };
+  | { kind: "closed"; unsent?: true };
 
 export type CalendarResult<T> =
   | { ok: true; value: T }

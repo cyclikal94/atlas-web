@@ -196,6 +196,15 @@ describe("classification", () => {
       ok: false,
       kind: "closed",
     });
+    // Revision 5: the session refused it at its cover, before the send boundary: closed, and nothing reached the server.
+    for (const kind of ["closed", "closed_unresolved"] as const) {
+      const covered = world([{ throws: new StampedRequestError(kind) }]);
+      expect(await covered.api.liveSources()).toEqual({
+        ok: false,
+        kind: "closed",
+        unsent: true,
+      });
+    }
   });
 
   test("the caller's live is asked before EVERY admission (revision 1, R4): once it says no, nothing more is sent and the answer is closed", async () => {

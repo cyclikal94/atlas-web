@@ -80,12 +80,14 @@ function createCapabilityRead(api: Pick<CalendarApi, "capabilities">): {
         void api.capabilities(admitted).then(
           (result) => {
             if (result.ok) settle(true, result.value.calendarLinks);
-            // `not_sent`, or `closed` because the caller declined before a request was made: nothing reached the server.
+            // `not_sent`, or `closed` before the send boundary (the caller declined, or the session's cover was closed): nothing
+            // reached the server.
             else
               settle(
                 !(
                   result.kind === "not_sent" ||
-                  (result.kind === "closed" && declined)
+                  (result.kind === "closed" &&
+                    (declined || result.unsent === true))
                 ),
                 null,
               );

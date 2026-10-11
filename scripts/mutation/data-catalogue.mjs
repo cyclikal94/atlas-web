@@ -16338,8 +16338,9 @@ export const UNIT = [
           "        if (false)\n",
         ),
         // Re-anchored in revision 5 (page admission also asks that the source is listed); the same mutation.
-        "          entry.listed &&\n          now() < (entry.deadline ?? 0),\n",
-        "          entry.listed,\n",
+        // Revision 5 re-anchor (the admission records a decline): the same mutation.
+        "            entry.listed &&\n            now() < (entry.deadline ?? 0),\n",
+        "            entry.listed,\n",
       ),
   },
   {
@@ -16469,8 +16470,8 @@ export const UNIT = [
           "    if (stopped || !compatible || walking || attached === null) return;\n",
           "    if (stopped || walking || attached === null) return;\n",
         ),
-        "      compatible &&\n      cohort.some(",
-        "      cohort.some(",
+        "        compatible &&\n        cohort.some(",
+        "        cohort.some(",
       ),
   },
   {
@@ -16542,8 +16543,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "          entry.listed &&\n          now() < (entry.deadline ?? 0),\n",
-        "          now() < (entry.deadline ?? 0),\n",
+        // Re-anchored when the admission began recording a decline: the same mutation.
+        "            entry.listed &&\n            now() < (entry.deadline ?? 0),\n",
+        "            now() < (entry.deadline ?? 0),\n",
       ),
   },
   {
@@ -16617,7 +16619,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '                  result.kind === "not_sent" ||\n                  (result.kind === "closed" && declined)\n',
+        // Re-anchored when the session's unsent closure was added: the same mutation (nothing counts as never sent).
+        '                  result.kind === "not_sent" ||\n                  (result.kind === "closed" &&\n                    (declined || result.unsent === true))\n',
         "                  false\n",
       ),
   },
@@ -16700,6 +16703,77 @@ export const UNIT = [
     tests: ["tests/features/calendars/visit-screen.test.tsx"],
     expect: /shows the press's outcome/,
     patch: (t) => sub(t, "    memory.lateRuns.add(adopt);\n", ""),
+  },
+  {
+    id: "MU-1433",
+    title:
+      "WEB-13a R11: a request the session refused at its cover (before the send boundary) is not marked unsent (its read counts as made)",
+    file: "src/features/calendars/api.ts",
+    tests: [
+      "tests/features/calendars/api.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /caller's live is asked|refused at the session's cover/,
+    patch: (t) =>
+      sub(
+        t,
+        '        return { kind: "closed", unsent: true };\n',
+        '        return { kind: "closed" };\n',
+      ),
+  },
+  {
+    id: "MU-1434",
+    title:
+      "WEB-13a R11: a walk that sent nothing ends its sources' observation for the visit (the next screen never reads them)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /SENT nothing|stays unread|refused at the session's cover/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (unsent) {\n          entry.waitsFor = attached ?? 0;\n          continue;\n        }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1435",
+    title:
+      "WEB-13a R11: a walk that sent nothing is read again by the same screen at once (a loop while the session keeps refusing it)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /SAME screen does not read it again/,
+    patch: (t) =>
+      sub(
+        t,
+        "          entry.waitsFor = attached ?? 0;\n",
+        "          entry.waitsFor = null;\n",
+      ),
+  },
+  {
+    id: "MU-1436",
+    title:
+      "WEB-13a R11: a walk whose own admission was declined (no screen attached) is taken as sent",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /SENT nothing, so the next screen reads it once/,
+    patch: (t) => sub(t, "      if (!admitted) declined = true;\n", ""),
+  },
+  {
+    id: "MU-1437",
+    title:
+      "WEB-13a R11 (DA-1): a capability read the session refused before its send boundary counts as made",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /refused before its send boundary/,
+    patch: (t) =>
+      sub(
+        t,
+        "                    (declined || result.unsent === true))\n",
+        "                    declined)\n",
+      ),
   },
 ];
 

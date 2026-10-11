@@ -78,6 +78,11 @@ interface Watched {
   leftBy: number | null;
   /** Listed again by the attachment that left it while still observed: read with the next walk, at once. */
   due: boolean;
+  /**
+   * A walk that included it was never SENT (its admission declined, or the session refused it before its send boundary): it stays
+   * unread, and is read by the NEXT attachment, never again by this one (0: no attachment at the time), so nothing loops.
+   */
+  waitsFor: number | null;
 }
 
 export function createSourceObserver(deps: {
@@ -148,6 +153,7 @@ export function createSourceObserver(deps: {
       .filter(
         ([, entry]) =>
           entry.listed &&
+          entry.waitsFor !== attached &&
           observing(entry.observation) &&
           (entry.deadline === null || started < entry.deadline),
       )
@@ -155,6 +161,7 @@ export function createSourceObserver(deps: {
     if (cohort.length === 0) return false;
     for (const { id, entry } of cohort) {
       entry.due = false;
+      entry.waitsFor = null;
       if (entry.deadline === null) {
         entry.deadline = started + OBSERVE_LIMIT_MS;
         entry.deadlineTimer = timers.setTimeout(() => {
@@ -166,25 +173,39 @@ export function createSourceObserver(deps: {
     }
     walking = true;
     // Every page (and every wait for one to be sent) is admitted only while some source of the walk is still listed (so a screen is
-    // attached: a detachment unlists everything) and observed in time. A walk refused a page this way ends as `closed`: its sources
-    // end, they are not read afresh.
-    const live = (): boolean =>
-      compatible &&
-      cohort.some(
-        ({ id, entry, generation }) =>
-          current(id, generation) !== null &&
-          entry.listed &&
-          now() < (entry.deadline ?? 0),
-      );
+    // attached: a detachment unlists everything) and observed in time. A walk refused a page this way ends as `closed` having sent
+    // nothing more: no page of it was refused by the server (that answer would be `refused`), so its sources stay unread for the next
+    // attachment, like a walk the session refused before its send boundary (`unsent`).
+    let declined = false;
+    const live = (): boolean => {
+      const admitted =
+        compatible &&
+        cohort.some(
+          ({ id, entry, generation }) =>
+            current(id, generation) !== null &&
+            entry.listed &&
+            now() < (entry.deadline ?? 0),
+        );
+      if (!admitted) declined = true;
+      return admitted;
+    };
     // The answer is the visit's: it is taken whichever screen is attached by then (or none), so a remount never reads it again.
     const answer = (result: CalendarResult<LiveSources>): void => {
       walking = false;
       if (disposed) return;
+      const unsent =
+        !result.ok &&
+        result.kind === "closed" &&
+        (declined || result.unsent === true);
       let changed = false;
       for (const { id, generation } of cohort) {
         const entry = current(id, generation);
         if (entry === null) continue;
         entry.due = false;
+        if (unsent) {
+          entry.waitsFor = attached ?? 0;
+          continue;
+        }
         if (entry.deadline !== null && now() >= entry.deadline)
           set(entry, expire(entry.observation));
         else set(entry, observe(entry.observation, id, result));
@@ -209,8 +230,9 @@ export function createSourceObserver(deps: {
     if (
       entries.some(
         (entry) =>
-          entry.observation.kind === "checking" ||
-          (entry.due && observing(entry.observation)),
+          entry.waitsFor !== attached &&
+          (entry.observation.kind === "checking" ||
+            (entry.due && observing(entry.observation))),
       )
     ) {
       const waiting = pollTimer;
@@ -274,6 +296,7 @@ export function createSourceObserver(deps: {
           listed: true,
           leftBy: null,
           due: false,
+          waitsFor: null,
         });
         changed = true;
       }

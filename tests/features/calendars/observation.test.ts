@@ -688,21 +688,50 @@ describe("a visit outlives its screen (revision 5, R11)", () => {
     expect(h.reads).toHaveLength(2);
   });
 
-  test("Q12: nothing is admitted while no screen is attached: a page (or a wait for one) asked then ends the observation, which a later screen does not restart", async () => {
+  test("Q12: nothing is admitted while no screen is attached; a walk refused that way SENT nothing, so the next screen reads it once", async () => {
     const h = harness();
     h.observer.compatible(true);
     h.attachment.watch(["S"]);
     const out = h.reads.at(-1);
     expect(out?.live()).toBe(true);
     h.attachment.detach();
+    // Its next admission (a page, or a wait after `not_sent`) is declined: the client answers `closed`.
     expect(out?.live()).toBe(false);
-    // The walk's next page is not admitted: the read ends `closed`.
     await h.answer({ ok: false, kind: "closed" });
-    h.observer.attach().watch(["S"]);
+    const screen = h.observer.attach();
+    screen.watch(["S"]);
+    expect(h.reads).toHaveLength(2);
+    await h.answer(list({ S: source(true) }));
+    expect(h.state("S")).toBe("busy");
+  });
+
+  test("a walk the session refused before its send boundary (`closed`, unsent) stays unread: the SAME screen does not read it again (no loop), the next screen does", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    await h.answer({ ok: false, kind: "closed", unsent: true });
+    expect(h.state("S")).toBe("checking");
+    await h.advance(2 * OBSERVE_POLL_MS);
+    h.attachment.watch(["S"]);
+    expect(h.reads).toHaveLength(1);
+    h.attachment.detach();
+    const screen = h.observer.attach();
+    screen.watch(["S"]);
+    expect(h.reads).toHaveLength(2);
+    await h.answer(list({ S: source(false) }));
+    expect(h.state("S")).toBe("idle");
+  });
+
+  test("control: `closed` after the request was sent (the identity moved on) ends it; no later screen of the visit reads it", async () => {
+    const h = harness();
+    h.observer.compatible(true);
+    h.attachment.watch(["S"]);
+    await h.answer({ ok: false, kind: "closed" });
     expect(h.state("S")).toBe("ended");
+    h.attachment.detach();
+    h.observer.attach().watch(["S"]);
     await h.advance(OBSERVE_LIMIT_MS);
     expect(h.reads).toHaveLength(1);
-    expect(h.observer.observation("S")).toEqual({ kind: "ended" });
   });
 
   test("Q6 (Strict Mode): attach, detach and attach again in one go, before the read is answered: one read, and its answer is shown", async () => {

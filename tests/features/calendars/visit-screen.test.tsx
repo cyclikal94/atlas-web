@@ -12,6 +12,7 @@ import {
   OBSERVE_LIMIT_MS,
   OBSERVE_POLL_MS,
 } from "../../../src/features/calendars/model/observation";
+import { StampedRequestError } from "../../../src/session";
 import { installMatchMedia } from "../../helpers/match-media";
 import {
   atlasBody,
@@ -240,6 +241,43 @@ describe("a refused automatic read is not made again by the remount it causes (R
     await elapse(w, 2 * OBSERVE_LIMIT_MS);
     expect(reads(w)).toHaveLength(count);
     expect(sends(w)).toEqual([]);
+  });
+});
+
+describe("a read the session never sent is not consumed (revision 5; native E-CAL4 two-tab failure, campaign 3)", () => {
+  test("the first read refused at the session's cover (closed before its send boundary): nothing more on this screen; the screen mounted next reads it once and shows Refreshing…", async () => {
+    fake();
+    const w = await calendarWorld({
+      cache: [sourceRow()],
+      replies: [
+        [
+          "/calendar-sources",
+          [{ throws: new StampedRequestError("closed") }, live(true)],
+        ],
+      ],
+    });
+    await elapse(w, OBSERVE_POLL_MS);
+    expect(reads(w)).toHaveLength(1);
+    expect(row().dataset.observation).toBe("checking");
+    await remount(w);
+    await waitFor(() => expect(row().dataset.observation).toBe("busy"));
+    expect(row().querySelector("[data-observed]")).toHaveTextContent(
+      copy.REFRESHING,
+    );
+    expect(reads(w)).toHaveLength(2);
+    expect(sends(w)).toEqual([]);
+  });
+
+  test("control: the first read refused 403 (sent and answered): the next screen reads nothing", async () => {
+    fake();
+    const w = await calendarWorld({
+      cache: [sourceRow()],
+      replies: [["/calendar-sources", [forbidden, live(true)]]],
+    });
+    await waitFor(() => expect(row().dataset.observation).toBe("unknown"));
+    await remount(w);
+    await elapse(w, OBSERVE_POLL_MS);
+    expect(reads(w)).toHaveLength(1);
   });
 });
 

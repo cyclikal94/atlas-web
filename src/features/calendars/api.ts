@@ -162,8 +162,12 @@ export function classifyThrown(error: unknown): CalendarFailure {
       case "not_sent":
       case "not_covered":
         return { kind: "not_sent" };
+      case "closed":
+      case "closed_unresolved":
+        // The session closed the display at the request's cover, BEFORE its send boundary: nothing reached the server (revision 5).
+        return { kind: "closed", unsent: true };
       default:
-        // `stale` (the identity changed while it ran), `closed`, `closed_unresolved`, `auth_state`: this answer is not the screen's.
+        // `stale` (the identity changed while it ran), `auth_state` (an invalidating answer): this answer is not the screen's.
         return { kind: "closed" };
     }
   }
