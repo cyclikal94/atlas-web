@@ -38,6 +38,19 @@ import type { RecoveryTab } from "./tab-identity";
  *    out of the coordinator's sight. A clean, idle session no mount shows is not listed, but it is KEPT for the next mount of the form in
  *    this page (its input, its baseline, its restored copy and alternatives), until a form binds to another scope.
  *
+ *  - WHAT WAS SENT IS NOT WHAT THE FORM HOLDS (revision 3, R3 and R10). Every change of the input (the person's, through the attached
+ *    mount's `input`/`change`/`reset` events, or the hook's own restores) moves `input` (the input REVISION). A submission records, when it
+ *    is sent, the session it belongs to, that revision, the field schema and the values (`Submission`). Its success is reconciled against
+ *    that record only: the submitted input becomes the clean state and its copies are discarded when the form still holds exactly it;
+ *    input changed after it was sent stays the form's, dirty until saved (its copy replaces an obsolete one), and is never declared clean
+ *    by an older response (`acknowledge`).
+ *  - THE ATTACHED MOUNT'S SCHEMA ADMITS (revision 3, R11). The session's allow-list (`allow`, normalised) is the attached mount's; a mount
+ *    with another list makes a TRANSITION (`changeSchema`): carried values of the fields both admit are restored, newly admitted fields start
+ *    from the mount's values, and the content of a field no longer admitted is never captured: it is held, in memory only, as an
+ *    unresolved obligation (`stranded`): the form counts as dirty and cannot be saved until that field is admitted again or the input is
+ *    discarded (design assessment D1: whether such content may be dropped is the form owner's decision, not this module's). An operation
+ *    already captured keeps the schema it was captured with; comparisons are made in the current schema (`sameIn`).
+ *
  * Memory only: nothing here is written anywhere except through the port.
  */
 export type Values = Record<string, string>;
@@ -60,6 +73,29 @@ export const sameValues = (a: Values, b: Values): boolean => {
   for (const key of keys) if (a[key] !== b[key]) return false;
   return true;
 };
+
+/**
+ * Whether `now` (values read in the session's current schema) is what `base` would show (revision 3, R11): a field `base` has no value for
+ * (it was captured under a schema without it) would show its initial value; a field `now` lacks (no longer admitted, or not rendered) is
+ * not compared.
+ */
+export const sameIn = (now: Values, base: Values, initial: Values): boolean => {
+  for (const [key, value] of Object.entries(now))
+    if ((base[key] ?? initial[key]) !== value) return false;
+  return true;
+};
+
+/** An allow-list in its normal form (each name once, in name order): reordering the same fields is not a change. */
+export const normaliseAllow = (
+  allow: readonly RecoverableFieldSpec[],
+): readonly RecoverableFieldSpec[] =>
+  [...new Set(allow.map((spec) => spec.name))].sort().map((name) => ({ name }));
+
+/** The identity of an allow-list's schema (equal for the same fields in any order). */
+export const schemaKey = (allow: readonly RecoverableFieldSpec[]): string =>
+  normaliseAllow(allow)
+    .map((spec) => spec.name)
+    .join("\n");
 
 /** What this page believes is durable for the form, and what it owes. */
 export interface Persisted {
@@ -92,6 +128,8 @@ export interface Attachment {
   readonly ref: RefObject<HTMLFormElement | null>;
   /** Shows the session's view in the mount (its restored copy and alternatives). */
   readonly show: (view: SessionView) => void;
+  /** Stops counting the mount's input events (revision 3, R3). */
+  readonly stop: () => void;
 }
 
 export interface FormSession extends PageFormSession {
@@ -100,15 +138,34 @@ export interface FormSession extends PageFormSession {
   readonly account: string;
   readonly registry: RecoverableFormRegistry;
   readonly tab: RecoveryTab;
-  readonly allow: { current: readonly RecoverableFieldSpec[] };
+  /**
+   * The attached mount's allow-list, normalised (revision 3, R11): what every read, capture, carry and restore of the session admits NOW.
+   * Replaced (never mutated) by a schema transition, so an operation that captured it keeps its own.
+   */
+  allow: readonly RecoverableFieldSpec[];
+  /** `schemaKey(allow)`. */
+  schema: string;
   /** The port the session was last bound through (a remount in the same scope brings a new one). */
   port: FormRecoveryPort;
-  /** What the form showed when the session began, before any restore ("Discard instead" puts it back). */
-  readonly initial: Values;
+  /**
+   * What the form showed when the session began, before any restore ("Discard instead" puts it back); a field admitted later starts from
+   * what the form showed for it then (revision 3, R11).
+   */
+  initial: Values;
   /** The values for which no copy is needed when nothing is durable: the initial values, or what the form showed at a terminal act. */
   clean: Values;
   persisted: Persisted;
   readonly order: { next: number; lastTerminal: number };
+  /** The input revision (revision 3, R3): moved by every change of what the form holds, never by carrying it to another mount. */
+  input: number;
+  /** The newest submission acknowledged (its input revision) and what its acknowledgement answered (revision 3, R3: no older one regresses it). */
+  acknowledged: { input: number; result: Promise<SubmissionResult> } | null;
+  /**
+   * Content of fields the attached schema no longer admits (revision 3, R11; design assessment D1), in memory only: never captured, never
+   * dropped silently. While it holds anything the form is dirty and cannot be saved; admitting the field again restores it, and a discard
+   * drops it.
+   */
+  stranded: Values;
   view: SessionView;
   /** The look for copies to restore: not made yet, being made (by the attachment named), or made. */
   look: "none" | "running" | "done";
@@ -135,19 +192,31 @@ export const elementOf = (session: FormSession): HTMLFormElement | null =>
 /** What the form holds now: the attached mount's allow-listed values, or what its last mount left. */
 export const valuesOf = (session: FormSession): Values => {
   const form = elementOf(session);
-  if (form) return readValues(form, session.allow.current);
+  if (form) return readValues(form, session.allow);
   return session.left?.values ?? session.clean;
 };
 
-/** What the next page would show for this form if the page went now (R2): dirty when that is not what the form holds. */
+const hasStranded = (session: FormSession): boolean =>
+  Object.keys(session.stranded).length > 0;
+
+/**
+ * What the next page would show for this form if the page went now (R2): dirty when that is not what the form holds, compared in the
+ * current schema (revision 3, R11); content of a field no longer admitted is an obligation of its own (`stranded`).
+ */
 export const isDirty = (session: FormSession): boolean => {
   const { own, source, owed } = session.persisted;
-  if (owed > 0) return true;
+  if (owed > 0 || hasStranded(session)) return true;
   const now = valuesOf(session);
-  if (own) return !sameValues(now, own.values);
+  if (own) return !sameIn(now, own.values, session.initial);
   // A chosen alternative that is not the newest copy is not what the next page would restore: only a copy of this page's own makes it so.
-  if (source) return !source.newest || !sameValues(now, source.values);
-  return !sameValues(now, session.clean);
+  if (source)
+    return !source.newest || !sameIn(now, source.values, session.initial);
+  return !sameIn(now, session.clean, session.initial);
+};
+
+/** The form's input changed (revision 3, R3): the person's edit, or a restore or discard the hook made. */
+export const noteInput = (session: FormSession): void => {
+  session.input += 1;
 };
 
 /** The port for a write asked for NOW, pinned to the database it reaches now; null when that is not the session's scope (or none). */
@@ -231,15 +300,19 @@ export async function discardAt(
 
 /** Saves a copy of what the form holds now (or discards its copies when it is back to its clean values). Never throws. */
 export async function flushSession(session: FormSession): Promise<SaveResult> {
+  // Content of a field the form no longer admits cannot be captured, and a capture without it would replace a copy that may hold it
+  // (revision 3, R11; D1): nothing is written, and the form stays dirty.
+  if (hasStranded(session)) return "failed";
   // Pinned NOW (before anything is awaited): the write reaches this session's database, or nothing.
   const target = targetOf(session);
   if (!target) return "failed";
-  // The capture and its place in the order are fixed NOW, before anything is awaited (R4).
+  // The capture, its schema and its place in the order are fixed NOW, before anything is awaited (R4; revision 3, R11).
   session.order.next += 1;
   const op = session.order.next;
+  const allow = session.allow;
   const now = valuesOf(session);
   // Back to the clean state: the copies are discarded instead, so the next page shows that state (R2).
-  if (sameValues(now, session.clean)) {
+  if (sameIn(now, session.clean, session.initial)) {
     session.order.lastTerminal = op;
     const result = await discardAt(session, target, op);
     return result === "discarded" ? "saved" : result;
@@ -252,7 +325,7 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
         form,
         formContext: session.formContext,
         tabInstanceId: "",
-        allow: session.allow.current,
+        allow,
       });
     } catch {
       return "failed";
@@ -312,16 +385,86 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
 export function terminalAct(
   session: FormSession,
   clean: Values | null,
+  kind: "discard" | "submission" = "discard",
 ): Promise<DiscardResult> {
   session.order.next += 1;
   const op = session.order.next;
   session.order.lastTerminal = op;
   if (clean !== null) session.clean = clean;
+  // A discard drops what the form held, including content of fields no longer admitted (revision 3, R11: the person's explicit act); a
+  // submission sent only what it sent.
+  if (kind === "discard") session.stranded = {};
   session.persisted = {
     ...session.persisted,
     owed: Math.max(session.persisted.owed, op),
   };
   return track(session, discardAt(session, targetOf(session), op));
+}
+
+// ---- submissions (revision 3, R3 and R10) --------------------------------------------------------------------------------------------
+
+/**
+ * What a submission's success did: `discarded` (the form still held exactly what was sent; no copy of it can come back), `kept` (input changed
+ * after the send stays the form's: dirty until saved, and a copy of it may come back after a reload, by design), or, as a discard,
+ * `failed`/`refused` (a copy of the sent input may still come back).
+ */
+export type SubmissionResult = DiscardResult | "kept";
+
+/**
+ * A submission as it was SENT (revision 3, R3, R10), fixed when it is sent and never changed: the session it belongs to (whatever the hook
+ * that sent it shows later), the input revision, the schema and the values it sent (allow-listed, never a sensitive field). `input` is null
+ * when the revision is unknown (sent before the form had a session, and the input changed before it had one).
+ */
+export interface Submission {
+  readonly session: FormSession;
+  readonly input: number | null;
+  readonly schema: string;
+  readonly values: Values;
+}
+
+/** What the session's form holds NOW, as a submission sent now. */
+export const submissionOf = (session: FormSession): Submission => ({
+  session,
+  input: session.input,
+  schema: session.schema,
+  values: { ...valuesOf(session) },
+});
+
+/**
+ * A submission succeeded: reconciled in ITS session against what IT sent (revision 3, R3, R10), never against the form's current owner or
+ * values.
+ *  - A newer submission of the session was acknowledged already: its answer (an older response never regresses it).
+ *  - The form still holds exactly what was sent (the same revision, schema and values): a terminal act in the session's order NOW; what was
+ *    sent becomes the clean state, and its copies are discarded.
+ *  - Otherwise the input changed after the send: it stays the form's (dirty until saved). When the form has a copy in the store (or owes a
+ *    discard), it is saved again now, so an obsolete copy never stands in for the later input; nothing is discarded. `kept`.
+ * Whatever it starts is outstanding before this returns.
+ */
+export function acknowledge(sent: Submission): Promise<SubmissionResult> {
+  const session = sent.session;
+  const known = session.acknowledged;
+  if (known && sent.input !== null && sent.input <= known.input)
+    return known.result;
+  const unchanged =
+    sent.input !== null &&
+    sent.input === session.input &&
+    sent.schema === session.schema &&
+    sameIn(valuesOf(session), sent.values, session.initial);
+  let result: Promise<SubmissionResult>;
+  if (unchanged)
+    result = terminalAct(session, { ...sent.values }, "submission");
+  else {
+    const { own, source, ownAsked, owed } = session.persisted;
+    result =
+      own !== null || source !== null || ownAsked || owed > 0
+        ? track(session, flushSession(session)).then(
+            (): SubmissionResult => "kept",
+          )
+        : Promise.resolve<SubmissionResult>("kept");
+  }
+  if (sent.input !== null && (known === null || sent.input > known.input))
+    session.acknowledged = { input: sent.input, result };
+  return result;
 }
 
 /** The session's view changes; the mount showing it (if any) shows it. */
@@ -396,7 +539,8 @@ export interface OpenSession {
   account: string;
   registry: RecoverableFormRegistry;
   tab: RecoveryTab;
-  allow: { current: readonly RecoverableFieldSpec[] };
+  /** The first mount's allow-list (the session keeps its normal form). */
+  allow: readonly RecoverableFieldSpec[];
   port: FormRecoveryPort;
   initial: Values;
   /** Whether the registry keeps it as the context's session (false: another mount of the same context is attached to that one). */
@@ -428,12 +572,16 @@ export function openSession(options: OpenSession): FormSession {
     account: options.account,
     registry: options.registry,
     tab: options.tab,
-    allow: options.allow,
+    allow: normaliseAllow(options.allow),
+    schema: schemaKey(options.allow),
     port: options.port,
     initial: options.initial,
     clean: options.initial,
     persisted: { own: null, ownAsked: false, source: null, owed: 0 },
     order: { next: 0, lastTerminal: 0 },
+    input: 0,
+    acknowledged: null,
+    stranded: {},
     view: { restored: null, alternatives: [] },
     look: "none",
     attached: null,
@@ -498,9 +646,123 @@ export function retireOtherScopes(
   }
 }
 
+/** The value each field starts from in the form as written (its default): what a field admitted while mounted counted as initially. */
+function defaultsOf(
+  form: HTMLFormElement,
+  allow: readonly RecoverableFieldSpec[],
+): Values {
+  const values: Values = {};
+  for (const { name } of allow) {
+    const element = form.elements.namedItem(name);
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement
+    )
+      values[name] = element.defaultValue;
+    else if (element instanceof HTMLSelectElement) {
+      const options = [...element.options];
+      values[name] =
+        (options.find((option) => option.defaultSelected) ?? options[0])
+          ?.value ?? "";
+    }
+  }
+  return values;
+}
+
 /**
- * A mount shows the session. Unless the person has typed into this mount already (`mountValues` differ from what it shows), the input the
- * last mount left is put back. A freeze in force holds the new element too.
+ * The attached schema becomes `allow` (revision 3, R11). `removedFrom`: what the form held for fields no longer admitted (the last mount's
+ * carry, or the mounted form); content that differs from the field's initial value is held (`stranded`), never captured or dropped.
+ * `addedFrom`: what a newly admitted field starts from. Answers the held content of fields admitted again, to be shown where the person has
+ * not typed. Reordering the same fields is no transition.
+ */
+function transition(
+  session: FormSession,
+  allow: readonly RecoverableFieldSpec[],
+  removedFrom: Values,
+  addedFrom: Values,
+): Values {
+  const next = normaliseAllow(allow);
+  const key = schemaKey(next);
+  if (key === session.schema) return {};
+  const before = new Set(session.allow.map((spec) => spec.name));
+  const after = new Set(next.map((spec) => spec.name));
+  const stranded = { ...session.stranded };
+  const readmitted: Values = {};
+  for (const name of before) {
+    if (after.has(name)) continue;
+    const value = removedFrom[name];
+    if (value !== undefined && value !== (session.initial[name] ?? ""))
+      stranded[name] = value;
+  }
+  for (const name of after) {
+    if (before.has(name)) continue;
+    const held = stranded[name];
+    if (held !== undefined) {
+      readmitted[name] = held;
+      delete stranded[name];
+    }
+    const start = addedFrom[name];
+    if (session.initial[name] === undefined && start !== undefined)
+      session.initial = { ...session.initial, [name]: start };
+  }
+  session.allow = next;
+  session.schema = key;
+  session.stranded = stranded;
+  noteInput(session);
+  return readmitted;
+}
+
+/** Puts `values` into the fields of `form` that still show `untouched` (the person has not typed into them). */
+function restoreUntouched(
+  session: FormSession,
+  form: HTMLFormElement,
+  values: Values,
+  untouched: Values,
+): void {
+  const shown = readValues(form, session.allow);
+  const restore: Values = {};
+  for (const [name, value] of Object.entries(values))
+    if (shown[name] !== undefined && shown[name] === untouched[name])
+      restore[name] = value;
+  if (Object.keys(restore).length === 0) return;
+  restoreSnapshot(
+    form,
+    {
+      formContext: session.formContext,
+      tabInstanceId: "",
+      values: restore,
+      savedAt: "",
+    },
+    session.allow,
+  );
+}
+
+/**
+ * The mounted form's allow-list changed while it stays mounted (revision 3, R11): the same transition as a mount with that list.
+ * A session no mount shows makes it when one attaches.
+ */
+export function changeSchema(
+  session: FormSession,
+  allow: readonly RecoverableFieldSpec[],
+): void {
+  const form = elementOf(session);
+  if (!form || schemaKey(allow) === session.schema) return;
+  const readmitted = transition(
+    session,
+    allow,
+    readValues(form, session.allow),
+    defaultsOf(form, allow),
+  );
+  restoreUntouched(session, form, readmitted, session.initial);
+}
+
+const INPUT_EVENTS = ["input", "change", "reset"] as const;
+
+/**
+ * A mount shows the session, with its allow-list (revision 3, R11: a schema transition when it differs). The input the last mount left is
+ * put back into every field the person has not typed into in this mount (each still shows `mountValues`); a field the person has typed
+ * into keeps what they typed. A freeze in force holds the new element too. From now on the mount's input events move the session's input
+ * revision.
  */
 export function attach(
   session: FormSession,
@@ -508,23 +770,34 @@ export function attach(
   ref: RefObject<HTMLFormElement | null>,
   mountValues: Values,
   show: (view: SessionView) => void,
+  allow: readonly RecoverableFieldSpec[],
 ): Attachment {
-  const attachment: Attachment = { token: ++tokens, element, ref, show };
   const left = session.left;
-  if (
-    left &&
-    sameValues(readValues(element, session.allow.current), mountValues)
-  )
-    restoreSnapshot(
-      element,
-      {
-        formContext: session.formContext,
-        tabInstanceId: "",
-        values: left.values,
-        savedAt: "",
-      },
-      session.allow.current,
-    );
+  const readmitted = transition(
+    session,
+    allow,
+    left?.values ?? {},
+    mountValues,
+  );
+  restoreUntouched(
+    session,
+    element,
+    { ...readmitted, ...(left?.values ?? {}) },
+    mountValues,
+  );
+  const onInput = (): void => noteInput(session);
+  for (const type of INPUT_EVENTS)
+    element.addEventListener(type, onInput, true);
+  const attachment: Attachment = {
+    token: ++tokens,
+    element,
+    ref,
+    show,
+    stop: () => {
+      for (const type of INPUT_EVENTS)
+        element.removeEventListener(type, onInput, true);
+    },
+  };
   session.left = null;
   session.attached = attachment;
   list(session);
@@ -535,15 +808,16 @@ export function attach(
 /** The mount goes: what it shows is kept (memory only), and the session stays registered while it is still needed. */
 export function detach(session: FormSession, attachment: Attachment): void {
   if (session.attached?.token !== attachment.token) return;
+  attachment.stop();
   const form = attachment.element;
-  const values = readValues(form, session.allow.current);
+  const values = readValues(form, session.allow);
   let sensitive = false;
   try {
     buildSnapshot({
       form,
       formContext: session.formContext,
       tabInstanceId: "",
-      allow: session.allow.current,
+      allow: session.allow,
     });
   } catch {
     sensitive = true;

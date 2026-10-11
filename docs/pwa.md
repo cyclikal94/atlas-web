@@ -132,8 +132,8 @@ const recovery = useRecoverableForm({ formContext: `task-edit:${path}`, allow, f
 // render <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard, disabled: recovery.locked }} firstFieldRef={...} />
 // offer recovery.alternatives (other copies, newest first) with recovery.restoreAlternative(tabInstanceId), disabled while recovery.locked
 // submitting (revision 2): take a ticket BEFORE sending; none while an update reload is prepared (send nothing then)
-const ticket = recovery.submitting();
-if (ticket) send(...).then(() => ticket.succeeded(), () => ticket.failed()); // succeeded() is onSubmitted(): the copies are discarded
+const ticket = recovery.submitting(); // in the same task as reading the values you send (revision 3)
+if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); // "discarded" | "kept" | "failed" | "refused"
 ```
 
 - Only allow-listed fields are captured, never a sensitive one (`guard.ts`: development builds throw, production drops it).
@@ -168,6 +168,31 @@ if (ticket) send(...).then(() => ticket.succeeded(), () => ticket.failed()); // 
 - **Pinned writes (revision 1; revision 2: the whole scope):** every flush and discard pins the port when it is asked for (`pin()`), so a
   write that waits for the page's identifier can never land in another account's store or another incarnation, and none is made for a
   scope other than the session's.
+- **A submission acknowledges what it SENT (revision 3; R3, R10).** `submitting()` records, when it is called, the form's session (account
+  and incarnation included), its input revision (moved by the person's `input`/`change`/`reset` events in the form and by the hook's own
+  restores and discards), its allow-list and its values. `succeeded()` reconciles in THAT session only, never in whatever the hook shows by
+  then (another form context, a remount, another account): if the form still holds exactly what was sent, what was sent becomes its clean
+  state and its copies are discarded (`discarded`); if the person changed the form after sending (even back to the same text), the change
+  stays theirs and stays dirty (`kept`): a copy of it replaces any obsolete one, and an update reload saves it first and restores it. An older
+  response never undoes a newer acknowledgement. A ticket completes once: a later `succeeded()`/`failed()` answers the first outcome and does
+  nothing. A ticket taken before the form had a database is still waited for by the update coordinator, and joins only the session the same
+  mount binds for the same form context. `onSubmitted()` acknowledges what the form holds when it is called: only in the same task as the
+  send's success. A change made by the caller's code without an `input` event, that returns the form to exactly the sent values, cannot be
+  told apart from no change: dispatch an `input` event (or take a new ticket) when code changes the form during a send.
+- **The mounted allow-list is the schema (revision 3; R11).** Every read, capture, carry and restore of the form's session admits the fields
+  of the allow-list of the mount that shows it; a mount with another list, or a list changed while mounted (the same fields in another order
+  are the same list), makes a transition. Carried input of fields both lists admit is put back (into every field the person has not typed
+  into since this mount appeared); a newly admitted field starts from what the form shows for it; a capture already made keeps its own list;
+  comparisons with durable copies are made in the current list (a field the copy lacks would show its initial value). Input in a field the
+  list NO LONGER admits is never captured and never silently dropped: the form stays dirty and its saves fail, so an update stops with
+  "Couldn't save your unfinished form…" and offers "Discard and reload anyway" (explicit), until the field is admitted again (its input comes
+  back) or the form is discarded. Do not narrow an allow-list while a removed field may hold unfinished input; whether such input may be
+  dropped, and how a person would be asked, is the form owner's decision (design assessment D1, not decided here).
+- **Ownership precedes exposure (revision 3; R12).** A page's recovery identifier is its own only once its Web Lock is GRANTED: a candidate
+  being acquired is not reported (`current()` is null), and a lock request that rejects or throws fails every waiter with
+  `RecoveryIdentityError`, so the save fails honestly (`failed`, input kept, nothing written) and the next save makes a new acquisition. A page
+  without `navigator.locks` has no recovery identity: it saves no copy, and every copy it finds belongs to another tab. (`locks: null` in
+  `createRecoveryTab` is a test double only.)
 - **What this does not cover.** Only the app-update reload is guarded. The sync-recovery "Reload" action (`SyncBlocked`, through the session's
   own reload) and browser reload/close are outside the update coordinator; they are not claimed protected (design assessment, 10 October
   2026; the owning slice decides). The newest eligible copy stays the default after a reload (WEB-04 8): another tab can save a newer copy

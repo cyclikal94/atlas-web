@@ -51,6 +51,7 @@ async function recoveryRows(
 ): Promise<
   Array<{
     tab_instance_id: string;
+    form_context: string;
     terminal: boolean;
     fields: Record<string, string>;
   }>
@@ -751,6 +752,10 @@ test.describe("revision 1, F-1 (reassessed): a page that boots does not cost ano
 
 type FixtureWindow = {
   __atlasRemountForm?: () => void;
+  __atlasFormProps?: (props: {
+    formContext?: string;
+    allow?: string[];
+  }) => void;
   __atlasFormMounts?: number;
   __atlasSubmitGate?: Promise<unknown>;
   __releaseSubmit?: (ok: boolean) => void;
@@ -762,16 +767,22 @@ const fixtureForm = (page: Page) =>
  * TEST INJECTION: the form mounted again in its place (`__atlasRemountForm`, the remount another page's boot causes, F-1), forced so the
  * schedule happens in every engine. The check that it happened: the mount counter moved on and the old form element is gone.
  */
-async function remountForm(page: Page): Promise<void> {
+async function remountForm(
+  page: Page,
+  /** Revision 3 (R11): the new mount's allow-list, given in the same render as the remount (no transition in the old mount). */
+  allow?: string[],
+): Promise<void> {
   const before = await page.evaluate(
     () => (window as unknown as FixtureWindow).__atlasFormMounts ?? 0,
   );
   await fixtureForm(page).evaluate((form) => {
     (form as unknown as { __old?: boolean }).__old = true;
   });
-  await page.evaluate(() =>
-    (window as unknown as FixtureWindow).__atlasRemountForm?.(),
-  );
+  await page.evaluate((next) => {
+    const scope = window as unknown as FixtureWindow;
+    if (next) scope.__atlasFormProps?.({ allow: next });
+    scope.__atlasRemountForm?.();
+  }, allow);
   await expect
     .poll(() =>
       page.evaluate(
@@ -1086,4 +1097,282 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
         await expect(restoredBanner(page)).toBeVisible();
       }
     });
+});
+
+// ---- revision 3 -------------------------------------------------------------------------------------------------------------------------
+
+/** TEST INJECTION (revision 3, R10/R11): the same mount renders with another form context or allow-list (`__atlasFormProps`, fixture only). */
+const formProps = async (
+  page: Page,
+  props: { formContext?: string; allow?: string[] },
+): Promise<void> => {
+  await page.evaluate(
+    (next) =>
+      (
+        window as unknown as {
+          __atlasFormProps?: (props: {
+            formContext?: string;
+            allow?: string[];
+          }) => void;
+        }
+      ).__atlasFormProps?.(next),
+    props,
+  );
+  if (props.formContext)
+    await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+      "data-form-context",
+      props.formContext,
+    );
+  await formReady(page);
+};
+
+/** The live (restorable) rows of the account's store: their form context and fields. */
+const liveRows = async (context: BrowserContext, world: Generations) =>
+  (await recoveryRows(context, world))
+    .filter((row) => !row.terminal)
+    .map((row) => ({ context: row.form_context, fields: row.fields }));
+
+/** TEST INJECTION: the fixture form's "send" waits for the test (`__atlasSubmitGate`); `release(ok)` answers it. */
+const holdSubmission = (page: Page) =>
+  page.evaluate(() => {
+    const scope = window as unknown as FixtureWindow;
+    scope.__atlasSubmitGate = new Promise((resolve, reject) => {
+      scope.__releaseSubmit = (ok) =>
+        ok ? resolve(undefined) : reject(new Error("not sent"));
+    });
+  });
+const releaseSubmission = (page: Page, ok: boolean) =>
+  page.evaluate(
+    (answer) => (window as unknown as FixtureWindow).__releaseSubmit?.(answer),
+    ok,
+  );
+const pendingCount = (page: Page) =>
+  page.evaluate(() =>
+    (
+      window as unknown as { __atlasForms: { pending(): number } }
+    ).__atlasForms.pending(),
+  );
+
+test.describe("revision 3, R3: a submission's success acknowledges what it SENT; input changed after the send survives the update reload", () => {
+  test("sent, then changed, then 'Save and reload': the coordinator waits for the send, its success keeps the change, and B restores it", async ({
+    context,
+    generations,
+  }) => {
+    const page = await oneTabWithUpdate(context, generations);
+    await title(page).fill("submitted text");
+    expect(await flushNow(page)).toBe("saved");
+    await holdSubmission(page);
+    await page.getByRole("button", { name: "Save note", exact: true }).click();
+    expect(await pendingCount(page)).toBe(1);
+    await title(page).fill("LATER UNSENT EDIT");
+    await mark(page);
+    await quiet(page);
+    await updateRegion(page)
+      .getByRole("button", { name: "Save and reload" })
+      .click();
+    await expect(
+      updateRegion(page).getByText(
+        "Saving your unfinished form before reloading…",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await expect(fixtureForm(page)).toHaveAttribute("inert", "");
+    expect(await title(page).inputValue()).toBe("LATER UNSENT EDIT");
+    expect(await marked(page)).toBe(true);
+    await releaseSubmission(page, true);
+    await reloadedOntoB(page);
+    await expect(title(page)).toHaveValue("LATER UNSENT EDIT");
+    await expect(restoredBanner(page)).toBeVisible();
+    expect(await liveTitles(context, generations)).toEqual([
+      "LATER UNSENT EDIT",
+    ]);
+  });
+});
+
+test.describe("revision 3, R10: a ticket completes in the form context it was sent from", () => {
+  for (const late of [true, false])
+    test(`${late ? "context A's success arrives after the form shows context B" : "control: no late answer from A"}: B's unsent copy and input stay${late ? ", A's sent copy is discarded" : ""}`, async ({
+      context,
+      generations,
+    }) => {
+      await seedAccount(context, generations);
+      const page = await openApp(context, generations);
+      await formReady(page);
+      await title(page).fill("A submitted");
+      expect(await flushNow(page)).toBe("saved");
+      if (late) {
+        await holdSubmission(page);
+        await page
+          .getByRole("button", { name: "Save note", exact: true })
+          .click();
+        expect(await pendingCount(page)).toBe(1);
+      }
+      await formProps(page, { formContext: "fixture-note:/other" });
+      await title(page).fill("B unsent");
+      expect(await flushNow(page)).toBe("saved");
+      if (late) {
+        await releaseSubmission(page, true);
+        await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+          "data-submitted",
+          "1",
+        );
+        await expect.poll(() => pendingCount(page)).toBe(0);
+      }
+      await expect(title(page)).toHaveValue("B unsent");
+      expect(await dirtyCount(page)).toBe(0);
+      const rows = await liveRows(context, generations);
+      expect(
+        rows
+          .filter((row) => row.context === "fixture-note:/other")
+          .map((row) => row.fields.title),
+      ).toEqual(["B unsent"]);
+      expect(
+        rows
+          .filter((row) => row.context === "fixture-note:/today")
+          .map((row) => row.fields.title),
+      ).toEqual(late ? [] : ["A submitted"]);
+    });
+});
+
+test.describe("revision 3, R11: the mounted allow-list is what the form's session admits", () => {
+  test("expanded on a remount: the carried title is restored and the newly admitted notes are captured with it", async ({
+    context,
+    generations,
+  }) => {
+    await seedAccount(context, generations);
+    const page = await openApp(context, generations);
+    await formReady(page);
+    // A form context whose session is opened by a title-only mount (the default context's session admits both fields from the start).
+    await formProps(page, {
+      formContext: "fixture-note:/expand",
+      allow: ["title"],
+    });
+    await title(page).fill("saved title");
+    expect(await flushNow(page)).toBe("saved");
+    await remountForm(page, ["title", "notes"]);
+    await expect(title(page)).toHaveValue("saved title");
+    expect(await dirtyCount(page)).toBe(0);
+    await notes(page).fill("new notes");
+    expect(await flushNow(page)).toBe("saved");
+    expect(await liveRows(context, generations)).toEqual([
+      {
+        context: "fixture-note:/expand",
+        fields: { notes: "new notes", title: "saved title" },
+      },
+    ]);
+  });
+
+  test("reduced on a remount: input in the removed field is never captured", async ({
+    context,
+    generations,
+  }) => {
+    await seedAccount(context, generations);
+    const page = await openApp(context, generations);
+    await formReady(page);
+    await title(page).fill("old title");
+    expect(await flushNow(page)).toBe("saved");
+    await remountForm(page, ["title"]);
+    await expect(title(page)).toHaveValue("old title");
+    await title(page).fill("new title");
+    await notes(page).fill("NOW EXCLUDED INPUT");
+    expect(await flushNow(page)).toBe("saved");
+    expect(await liveRows(context, generations)).toEqual([
+      { context: "fixture-note:/today", fields: { title: "new title" } },
+    ]);
+  });
+
+  test("reduced on a remount while the removed field holds input: the update cannot save it, says so, and nothing reloads", async ({
+    context,
+    generations,
+  }) => {
+    const page = await oneTabWithUpdate(context, generations);
+    await title(page).fill("title");
+    await notes(page).fill("unfinished notes");
+    expect(await flushNow(page)).toBe("saved");
+    await remountForm(page, ["title"]);
+    expect(await dirtyCount(page)).toBe(1);
+    expect(await flushNow(page)).toBe("failed");
+    await mark(page);
+    await quiet(page);
+    await updateRegion(page)
+      .getByRole("button", { name: "Save and reload" })
+      .click();
+    await expect(
+      updateRegion(page).getByText(SAVE_FAILED, { exact: true }),
+    ).toBeVisible();
+    expect(await marked(page)).toBe(true);
+    expect(await liveRows(context, generations)).toEqual([
+      {
+        context: "fixture-note:/today",
+        fields: { notes: "unfinished notes", title: "title" },
+      },
+    ]);
+  });
+});
+
+test.describe("revision 3, R12: a page saves a copy only under an identifier whose lock it holds", () => {
+  test("the owning lock is refused once: the save fails and writes nothing, another page takes nothing over; the retry holds a lock, and the copy is restorable only after the page goes", async ({
+    context,
+    generations,
+  }) => {
+    await seedAccount(context, generations);
+    const first = await openApp(context, generations);
+    await formReady(first);
+    // TEST INJECTION: only this page's FIRST owning request for its recovery-identifier lock (`atlas-recovery-tab-<id>`) is rejected, as a
+    // failing lock manager would; the store, the probes and every other page's locks are untouched.
+    await first.evaluate(() => {
+      const scope = window as unknown as { __refused?: number };
+      const request = navigator.locks.request.bind(navigator.locks);
+      (navigator.locks as unknown as { request: typeof request }).request = ((
+        name: string,
+        options: LockOptions,
+        callback: LockGrantedCallback<unknown>,
+      ) => {
+        if (
+          name.startsWith("atlas-recovery-tab-") &&
+          !options.ifAvailable &&
+          (scope.__refused ?? 0) === 0
+        ) {
+          scope.__refused = 1;
+          return Promise.reject(
+            new DOMException("injected lock failure", "UnknownError"),
+          );
+        }
+        return request(name, options, callback);
+      }) as typeof request;
+    });
+    await title(first).fill("still editing in the first tab");
+    expect(await flushNow(first)).toBe("failed");
+    expect(
+      await first.evaluate(
+        () => (window as unknown as { __refused?: number }).__refused,
+      ),
+    ).toBe(1);
+    expect(await liveTitles(context, generations)).toEqual([]);
+    expect(await dirtyCount(first)).toBe(1);
+    await expect(title(first)).toHaveValue("still editing in the first tab");
+
+    const second = await openApp(context, generations);
+    await formReady(second);
+    await expect(title(second)).toHaveValue("");
+    await expect(restoredBanner(second)).toHaveCount(0);
+
+    // The retry is a new acquisition: it holds its lock, so the copy stays the open first tab's.
+    expect(await flushNow(first)).toBe("saved");
+    expect(await liveTitles(context, generations)).toEqual([
+      "still editing in the first tab",
+    ]);
+    await second.reload();
+    await displayed(second);
+    await formReady(second);
+    await expect(title(second)).toHaveValue("");
+    await expect(restoredBanner(second)).toHaveCount(0);
+
+    await first.close();
+    await second.reload();
+    await displayed(second);
+    await formReady(second);
+    await expect(title(second)).toHaveValue("still editing in the first tab");
+    await expect(restoredBanner(second)).toBeVisible();
+  });
 });

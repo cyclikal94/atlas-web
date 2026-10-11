@@ -21,37 +21,48 @@ import { useRecoverableForm } from "../lib/form-recovery/use-recoverable-form";
  * the form is locked. No product form exists yet (WEB-10a onwards).
  *
  * TEST INJECTION: `__atlasRemountForm()` mounts the form again in its place (a new key), as another page's boot does to the protected tree,
- * so a spec can force the remount schedule the peer boot only sometimes produces (revision 2, R2/R4).
+ * so a spec can force the remount schedule the peer boot only sometimes produces (revision 2, R2/R4). `__atlasFormProps({ formContext,
+ * allow })` (revision 3, R10/R11) renders the SAME mount with another form context or allow-list (field names; never the password), as a
+ * feature form whose route or fields change would; followed by `__atlasRemountForm()` it is a remount with them.
  */
 export const FIXTURE_FORM_CONTEXT = "fixture-note:/today";
-const ALLOW = [{ name: "title" }, { name: "notes" }];
+const ALLOW = ["title", "notes"];
 
+type FixtureProps = { formContext: string; allow: readonly string[] };
 type FixtureScope = {
   __atlasRemountForm?: () => void;
+  __atlasFormProps?: (props: Partial<FixtureProps>) => void;
   __atlasSubmitGate?: Promise<unknown>;
   __atlasFormMounts?: number;
 };
 
 export function FixtureRecoveryForm() {
   const [key, setKey] = useState(0);
+  const [props, setProps] = useState<FixtureProps>({
+    formContext: FIXTURE_FORM_CONTEXT,
+    allow: ALLOW,
+  });
   useEffect(() => {
     const scope = window as unknown as FixtureScope;
     scope.__atlasRemountForm = () => setKey((n) => n + 1);
+    scope.__atlasFormProps = (next) =>
+      setProps((current) => ({ ...current, ...next }));
     return () => {
       scope.__atlasRemountForm = undefined;
+      scope.__atlasFormProps = undefined;
     };
   }, []);
-  return <FixtureRecoveryFormMount key={key} />;
+  return <FixtureRecoveryFormMount key={key} {...props} />;
 }
 
-function FixtureRecoveryFormMount() {
+function FixtureRecoveryFormMount({ formContext, allow }: FixtureProps) {
   const port = useFormRecoveryPort();
   const form = useRef<HTMLFormElement>(null);
   const first = useRef<HTMLInputElement>(null);
   const [submitted, setSubmitted] = useState(0);
   const recovery = useRecoverableForm({
-    formContext: FIXTURE_FORM_CONTEXT,
-    allow: ALLOW,
+    formContext,
+    allow: allow.map((name) => ({ name })),
     formRef: form,
     port,
   });
@@ -68,6 +79,7 @@ function FixtureRecoveryFormMount() {
       data-port={port ? "open" : "none"}
       data-submitted={submitted}
       data-locked={recovery.locked ? "true" : "false"}
+      data-form-context={formContext}
       className="m-4 flex flex-col gap-3"
     >
       {recovery.restored ? (

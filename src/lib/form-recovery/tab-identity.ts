@@ -8,11 +8,16 @@
  *    identifier's lock is still held belongs to a tab that is OPEN (it may still be editing that form), so a restoring page never takes it
  *    over or discards it; only copies of tabs that have gone are offered for restore. Ownership is probed with `ifAvailable` (never
  *    `locks.query`, which some engines answer inconsistently).
+ *  - OWNERSHIP PRECEDES EXPOSURE (revision 3, R12). An identifier is the page's only once its lock is GRANTED: a candidate being acquired
+ *    is not advertised, and a request that fails (the lock manager rejects or throws) rejects every waiter with a
+ *    `RecoveryIdentityError`, so no copy is written under an identifier nobody holds (a live page's copy would look like a gone tab's to
+ *    every other page). The next `id()` makes a new acquisition. A page without a lock manager has no recovery identity at all
+ *    (`getPageRecoveryTab`); `locks: null` is a test double only.
  */
 export interface RecoveryTab {
-  /** The page's identifier, minted on first use (the lock is held before it is returned). */
+  /** The page's identifier: its lock is held before it is returned; rejects (`RecoveryIdentityError`) when the lock cannot be had. */
   id(): Promise<string>;
-  /** The identifier, if this page has minted one. */
+  /** The identifier, once this page holds its lock. */
   current(): string | null;
   /** Whether the tab that owns `id` is still open (this page's own identifier is always open). */
   ownerOpen(id: string): Promise<boolean>;
@@ -20,38 +25,70 @@ export interface RecoveryTab {
 
 export interface RecoveryTabDeps {
   uuid(): string;
-  /** `navigator.locks`; null where the page has none (a unit test), when every other owner counts as gone. */
+  /**
+   * `navigator.locks`. TESTS ONLY: null for a double with no lock manager, whose identifier is its own at once and every other owner
+   * counts as gone (no cross-tab safety: never the page's).
+   */
   locks: Pick<LockManager, "request"> | null;
+}
+
+/** The page's recovery identity cannot be had (its lock was refused, or the page has no lock manager): nothing may be saved under it. */
+export class RecoveryIdentityError extends Error {
+  constructor(readonly reason: unknown) {
+    super("The page's recovery identity could not be acquired");
+    this.name = "RecoveryIdentityError";
+  }
 }
 
 export const recoveryLockName = (id: string): string =>
   `atlas-recovery-tab-${id}`;
 
 export function createRecoveryTab(deps: RecoveryTabDeps): RecoveryTab {
-  let minted: string | null = null;
-  let held: Promise<string> | null = null;
+  /** The identifier whose lock this page holds, once granted. */
+  let owned: string | null = null;
+  /** The acquisition in flight (its candidate is not the page's yet), shared by every caller. */
+  let acquiring: { candidate: string; held: Promise<string> } | null = null;
   return {
     id() {
-      if (held) return held;
-      const id = deps.uuid();
-      minted = id;
+      if (owned !== null) return Promise.resolve(owned);
+      if (acquiring) return acquiring.held;
+      const candidate = deps.uuid();
       const locks = deps.locks;
-      held = locks
-        ? new Promise<string>((resolve) => {
-            // Held for the page's life: the callback's promise never settles, so the lock is released only when the page goes.
-            void locks
-              .request(recoveryLockName(id), { mode: "exclusive" }, () => {
-                resolve(id);
-                return new Promise<never>(() => undefined);
-              })
-              .catch(() => resolve(id));
-          })
-        : Promise.resolve(id);
-      return held;
+      if (!locks) {
+        owned = candidate;
+        return Promise.resolve(candidate);
+      }
+      // Made before the request (a lock manager may call back at once); only this attempt is ever forgotten by its own outcome.
+      const attempt = { candidate, held: Promise.resolve(candidate) };
+      const end = (): void => {
+        if (acquiring === attempt) acquiring = null;
+      };
+      acquiring = attempt;
+      attempt.held = new Promise<string>((resolve, reject) => {
+        const refused = (reason: unknown): void => {
+          end();
+          reject(new RecoveryIdentityError(reason));
+        };
+        try {
+          // Held for the page's life: the callback's promise never settles, so the lock is released only when the page goes.
+          locks
+            .request(recoveryLockName(candidate), { mode: "exclusive" }, () => {
+              end();
+              owned = candidate;
+              resolve(candidate);
+              return new Promise<never>(() => undefined);
+            })
+            // Not granted (rejected or thrown): no identity, and the next `id()` makes a new acquisition.
+            .catch(refused);
+        } catch (reason) {
+          refused(reason);
+        }
+      });
+      return attempt.held;
     },
-    current: () => minted,
+    current: () => owned,
     async ownerOpen(id) {
-      if (id === minted) return true;
+      if (id === owned || id === acquiring?.candidate) return true;
       const locks = deps.locks;
       if (!locks) return false;
       try {
@@ -70,11 +107,20 @@ export function createRecoveryTab(deps: RecoveryTabDeps): RecoveryTab {
 }
 
 let page: RecoveryTab | null = null;
+/** A page with no lock manager: it cannot own an identifier, so it saves no copy (revision 3, R12); every copy it finds is another tab's. */
+const unavailable: RecoveryTab = {
+  id: () =>
+    Promise.reject(new RecoveryIdentityError("no Web Locks in this page")),
+  current: () => null,
+  ownerOpen: async () => true,
+};
+
 /** The page's recovery identity (memoised). */
 export function getPageRecoveryTab(): RecoveryTab {
-  page ??= createRecoveryTab({
-    uuid: () => crypto.randomUUID(),
-    locks: typeof navigator !== "undefined" ? (navigator.locks ?? null) : null,
-  });
+  const locks =
+    typeof navigator !== "undefined" ? (navigator.locks ?? null) : null;
+  page ??= locks
+    ? createRecoveryTab({ uuid: () => crypto.randomUUID(), locks })
+    : unavailable;
   return page;
 }

@@ -21,22 +21,29 @@ import {
 } from "./registry";
 import {
   type Attachment,
+  acknowledge,
   attach,
+  changeSchema,
   detach,
   elementOf,
   type FormSession,
   holdElement,
+  noteInput,
   openSession,
   readValues,
   retireOtherScopes,
   type SessionView,
+  type Submission,
+  type SubmissionResult,
+  sameIn,
   sameValues,
+  schemaKey,
   setSessionView,
+  submissionOf,
   terminalAct,
   track,
   UNSCOPED,
   type Values,
-  valuesOf,
 } from "./session";
 import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
 
@@ -48,7 +55,7 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  *   ... {recovery.restored && <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard, disabled: recovery.locked }} .../>}
  *   ... alternatives: <Button disabled={recovery.locked} ...> (revision 2: unavailable while this tab prepares an update reload)
  *   ... submitting:  const ticket = recovery.submitting(); if (!ticket) return;   // null: an update reload is being prepared; send nothing
- *                    send(...).then(() => ticket.succeeded(), () => ticket.failed());   // "discarded", or "failed"/"refused": a copy may come back
+ *                    send(values).then(() => ticket.succeeded(), () => ticket.failed());   // take the ticket in the same task as reading `values`
  *
  * While mounted the form is in the page's registry, so an accepted update saves its copy first (and another tab's accepted update asks
  * it to). On mount it restores the newest copy of the same form left by a tab that has GONE (one reload ago, or a closed tab), never
@@ -78,6 +85,22 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  * A DISCARD SAYS WHAT IT DID (revision 1, R6). `onSubmitted`, `discard` and the registry's `discard` answer `discarded` only when no copy of
  * the form can come back; otherwise the copies are still owed a discard, the form counts as dirty, and the next flush (an update's save) tries
  * again before anything reloads.
+ *
+ * A SUBMISSION ACKNOWLEDGES WHAT IT SENT (revision 3, R3, R10). `submitting()` records, when it is called, the form's session, input
+ * revision, schema and values: take the ticket in the same task as reading the values you send. Its success acts on THAT session only (the
+ * hook may show another form context by then, or none) and only for what was sent: if the person has changed the form since (even back to
+ * the same text), the change stays theirs, dirty until saved (`kept`), and an update reload saves it first. Completion is idempotent: a
+ * second `succeeded()` or `failed()` answers the first outcome and does nothing more. A ticket taken before the form has a session (no
+ * database yet) is held by this mount and joins the session the mount binds to for the same form context, never another; until then the
+ * update coordinator still waits for it. `onSubmitted()` acknowledges what the form holds at the moment it is called: use it only in the
+ * same task as the send's success, with nothing typed in between (prefer `submitting`).
+ *
+ * THE MOUNTED ALLOW-LIST IS THE SCHEMA (revision 3, R11). Captures, carries and restores admit the fields of the allow-list this mount was
+ * given (a mount with another list, or a changed list while mounted, makes a transition; `session.ts`). Content of a field the list no
+ * longer admits is never captured and never silently dropped: the form stays dirty and its saves fail (an update reload stops with "could
+ * not save" and offers "Discard and reload anyway") until the field is admitted again, the form is discarded, or the person submits and
+ * then discards. Do not narrow an allow-list while a removed field may hold unfinished input; whether such content may be dropped is the
+ * form owner's decision (design assessment D1).
  */
 export interface UseRecoverableFormOptions {
   formContext: string;
@@ -92,9 +115,13 @@ export interface UseRecoverableFormOptions {
 
 /** A submission sent while the form is mounted (revision 2, R3): the update coordinator waits for it before a reload. */
 export interface SubmissionTicket {
-  /** The submission succeeded: as `onSubmitted()`. */
-  succeeded(): Promise<DiscardResult>;
-  /** It did not (or was not sent): the form keeps its input and its copies. */
+  /**
+   * The submission succeeded (revision 3, R3): what it SENT is acknowledged in the session it was sent from. `discarded`: the form still
+   * held exactly that, and no copy of it can come back; `kept`: the form was changed after the send, and the change stays (dirty until
+   * saved); `failed`/`refused`: a copy of what was sent may still come back. A ticket already completed answers its first outcome again.
+   */
+  succeeded(): Promise<SubmissionResult>;
+  /** It did not (or was not sent): the form keeps its input and its copies. Nothing more happens after the first completion. */
   failed(): void;
 }
 
@@ -111,13 +138,28 @@ export interface RecoverableForm {
   locked: boolean;
   /** Before sending a submission (revision 2, R3); null while `locked`: send nothing then. */
   submitting(): SubmissionTicket | null;
-  /** The form was submitted: its copies are discarded. `failed`/`refused`: a copy may still come back after a reload. */
-  onSubmitted(): Promise<DiscardResult>;
+  /**
+   * The form was submitted with what it holds NOW: its copies are discarded. `failed`/`refused`: a copy may still come back after a reload.
+   * Only in the same task as the send's success (revision 3): `submitting` is the contract for a send that takes time.
+   */
+  onSubmitted(): Promise<SubmissionResult>;
   /** "Discard instead": the copies are discarded and the form shows what it showed before the restore. `failed` (nothing done) while `locked`. */
   discard(): Promise<DiscardResult>;
 }
 
 const NO_VIEW: SessionView = { restored: null, alternatives: [] };
+
+/** A ticket taken while the mount had no session (revision 3, R10): held by the mount until the mount binds a session of its context. */
+interface Provisional {
+  readonly formContext: string;
+  /** The mount's input count when it was sent. */
+  readonly input: number;
+  readonly schema: string;
+  readonly values: Values;
+  readonly outstanding: Promise<void>;
+  /** The submission in the session it joined, once it joined one. */
+  sent: Submission | null;
+}
 
 export function useRecoverableForm(
   options: UseRecoverableFormOptions,
@@ -145,9 +187,21 @@ export function useRecoverableForm(
   // A mount that resumed its session owes it the look for copies other tabs left since; it is ready when that look has settled.
   const offerOwed = useRef(false);
   const unboundClean = useRef<Values | null>(null);
+  // Revision 3 (R3, R10): how many times the person changed this mount's input before it had a session, and the tickets taken meanwhile.
+  const unboundInput = useRef(0);
+  const provisionalTickets = useRef(new Set<Provisional>());
+  // The form context this hook was last rendered with (revision 3, R10): a ticket never joins a session of another context.
+  const contextNow = useRef(formContext);
+  contextNow.current = formContext;
 
   // The session the mount was last bound to, kept after it unmounts: a submission sent from it still belongs to that session (R3, R4).
   const owner = useRef<FormSession | null>(null);
+  /** The session the form shows now (revision 3, R10): the bound one, else the one it was last bound to if that is still this form context's. */
+  const origin = useCallback((): FormSession | null => {
+    if (session.current) return session.current;
+    const last = owner.current;
+    return last && last.formContext === contextNow.current ? last : null;
+  }, []);
 
   const setView = useCallback((next: SessionView) => {
     const current = session.current;
@@ -161,6 +215,12 @@ export function useRecoverableForm(
     if (!element) return;
     mountValues.current = readValues(element, fields.current);
     unboundClean.current = mountValues.current;
+    const tickets = provisionalTickets.current;
+    const counted = (): void => {
+      unboundInput.current += 1;
+    };
+    for (const type of ["input", "change", "reset"])
+      element.addEventListener(type, counted, true);
     const handle: RecoverableFormHandle = {
       formContext,
       isDirty: () =>
@@ -172,6 +232,15 @@ export function useRecoverableForm(
       flush: async (): Promise<SaveResult> => "failed",
       discard: async (): Promise<DiscardResult> => "discarded",
       freeze: () => holdElement(element),
+      // A submission sent before the form had a session is waited for too (revision 3, R10).
+      settled: () => {
+        const waiting = [...tickets].filter((ticket) => ticket.sent === null);
+        return waiting.length === 0
+          ? null
+          : Promise.allSettled(
+              waiting.map((ticket) => ticket.outstanding),
+            ).then(() => undefined);
+      },
     };
     const unregister = registry.register(handle);
     let registered = true;
@@ -181,6 +250,8 @@ export function useRecoverableForm(
       unregister();
     };
     return () => {
+      for (const type of ["input", "change", "reset"])
+        element.removeEventListener(type, counted, true);
       provisional.current?.();
       provisional.current = null;
       const current = session.current;
@@ -243,13 +314,18 @@ export function useRecoverableForm(
         const form = elementOf(current);
         const untouched =
           form !== null &&
-          sameValues(readValues(form, fields.current), current.initial) &&
+          sameIn(
+            readValues(form, current.allow),
+            current.initial,
+            current.initial,
+          ) &&
           current.order.next === began &&
           !current.registry.frozen();
         const newest = gone[0];
         if (newest && form && untouched) {
-          restoreSnapshot(form, newest, fields.current);
-          const values = readValues(form, fields.current);
+          restoreSnapshot(form, newest, current.allow);
+          noteInput(current);
+          const values = readValues(form, current.allow);
           if (newest.tabInstanceId === own)
             current.persisted = {
               ...current.persisted,
@@ -318,17 +394,36 @@ export function useRecoverableForm(
         account: pinned?.account ?? UNSCOPED,
         registry,
         tab,
-        allow: fields,
+        allow: fields.current,
         port,
         initial,
         // Another mount of the same form is showing the context's session: this one has a session of its own.
         keep: existing === undefined || existing.attached === null,
       });
     current.port = port;
-    const shown = attach(current, element, formRef, initial, setViewState);
+    const shown = attach(
+      current,
+      element,
+      formRef,
+      initial,
+      setViewState,
+      fields.current,
+    );
     session.current = current;
     owner.current = current;
     attachment.current = shown;
+    // Tickets this mount took before it had a session join it, for this form context only (revision 3, R10), before the mount's own
+    // registration goes, so the coordinator never stops waiting for them. Input changed since the send makes their revision unknown.
+    for (const ticket of provisionalTickets.current) {
+      if (ticket.sent !== null || ticket.formContext !== formContext) continue;
+      ticket.sent = {
+        session: current,
+        input: ticket.input === unboundInput.current ? current.input : null,
+        schema: ticket.schema === current.schema ? current.schema : "",
+        values: ticket.values,
+      };
+      track(current, ticket.outstanding);
+    }
     provisional.current?.();
     provisional.current = null;
     if (current.look === "done") {
@@ -339,6 +434,13 @@ export function useRecoverableForm(
     }
     return look(current, shown, port);
   }, [port, formContext, formRef, tab, registry, setView, look]);
+
+  // The allow-list changed while the form stays mounted (revision 3, R11): the session makes the same transition as a mount with it.
+  const schema = schemaKey(allow);
+  useEffect(() => {
+    const current = session.current;
+    if (current && schema) changeSchema(current, fields.current);
+  }, [schema]);
 
   /**
    * The terminal act of the session (R4: in the session's order NOW), with its clean state becoming `clean(form)`, where `form` is what
@@ -351,7 +453,7 @@ export function useRecoverableForm(
         current: FormSession | null,
       ) => Values | null,
     ) => {
-      const current = owner.current;
+      const current = origin();
       if (!current) {
         // No session (no database yet): nothing was ever saved, so nothing can come back.
         unboundClean.current =
@@ -362,20 +464,30 @@ export function useRecoverableForm(
       setSessionView(current, { ...current.view, restored: null });
       return result;
     },
-    [formRef],
+    [formRef, origin],
   );
 
-  const onSubmitted = useCallback(
-    async (): Promise<DiscardResult> =>
-      terminal((form, current) =>
-        form
-          ? readValues(form, fields.current)
-          : current
-            ? valuesOf(current)
-            : null,
-      ),
-    [terminal],
+  /** Acknowledges a submission in the session it was sent from (revision 3, R3, R10); its restored banner goes when nothing changed since. */
+  const acknowledged = useCallback(
+    (sent: Submission): Promise<SubmissionResult> => {
+      const current = sent.session;
+      const before = current.order.lastTerminal;
+      const result = acknowledge(sent);
+      if (current.order.lastTerminal !== before)
+        setSessionView(current, { ...current.view, restored: null });
+      return result;
+    },
+    [],
   );
+
+  const onSubmitted = useCallback(async (): Promise<SubmissionResult> => {
+    const current = origin();
+    if (current) return acknowledged(submissionOf(current));
+    // No session (no database yet): nothing was ever saved, so nothing can come back; what the form shows is its clean state.
+    const form = formRef.current;
+    if (form) unboundClean.current = readValues(form, fields.current);
+    return "discarded";
+  }, [origin, acknowledged, formRef]);
 
   const submitting = useCallback((): SubmissionTicket | null => {
     if (registry.frozen()) return null;
@@ -383,31 +495,67 @@ export function useRecoverableForm(
     const outstanding = new Promise<void>((resolve) => {
       settle = resolve;
     });
-    const current = owner.current;
-    if (current) track(current, outstanding);
-    let done = false;
+    // What is sent, fixed NOW (revision 3, R3, R10): the session the form shows, its revision, schema and values.
+    const current = origin();
+    let provisional: Provisional | null = null;
+    let sent: Submission | null = null;
+    if (current) {
+      sent = submissionOf(current);
+      track(current, outstanding);
+    } else {
+      const form = formRef.current;
+      provisional = {
+        formContext: contextNow.current,
+        input: unboundInput.current,
+        schema: schemaKey(fields.current),
+        values: form ? readValues(form, fields.current) : {},
+        outstanding,
+        sent: null,
+      };
+      provisionalTickets.current.add(provisional);
+    }
+    let outcome: Promise<SubmissionResult> | null = null;
+    const done = (): void => {
+      if (provisional) provisionalTickets.current.delete(provisional);
+      settle();
+    };
     return {
       succeeded() {
-        if (done) return Promise.resolve<DiscardResult>("discarded");
-        done = true;
-        // The submission's terminal act is outstanding before the ticket is released, so nothing is ever waiting for neither.
-        const result = onSubmitted();
-        settle();
-        return result;
+        if (outcome) return outcome;
+        const joined = sent ?? provisional?.sent ?? null;
+        if (joined) outcome = acknowledged(joined);
+        else {
+          // Still no session: nothing was saved; what was sent is the clean state when the form still holds it.
+          const form = formRef.current;
+          const unchanged =
+            provisional !== null &&
+            provisional.input === unboundInput.current &&
+            form !== null &&
+            sameValues(readValues(form, fields.current), provisional.values);
+          if (unchanged && provisional)
+            unboundClean.current = provisional.values;
+          outcome = Promise.resolve<SubmissionResult>(
+            unchanged ? "discarded" : "kept",
+          );
+        }
+        // The acknowledgement is outstanding before the ticket is released, so nothing is ever waiting for neither.
+        done();
+        return outcome;
       },
       failed() {
-        done = true;
-        settle();
+        if (outcome) return;
+        outcome = Promise.resolve<SubmissionResult>("failed");
+        done();
       },
     };
-  }, [registry, onSubmitted]);
+  }, [registry, origin, acknowledged, formRef]);
 
   const discard = useCallback(async (): Promise<DiscardResult> => {
     // Refused while an update reload is prepared (R3): the form keeps what its last save captured.
     if (registry.frozen()) return "failed";
     return terminal((form, current) => {
       const before = current?.initial ?? mountValues.current;
-      if (form && before)
+      if (form && before) {
         restoreSnapshot(
           form,
           {
@@ -416,8 +564,10 @@ export function useRecoverableForm(
             values: before,
             savedAt: "",
           },
-          fields.current,
+          current?.allow ?? fields.current,
         );
+        if (current) noteInput(current);
+      }
       return before;
     });
   }, [registry, terminal, formContext]);
@@ -432,8 +582,9 @@ export function useRecoverableForm(
         (copy) => copy.tabInstanceId === tabInstanceId,
       );
       if (!current || !form || !chosen) return;
-      restoreSnapshot(form, chosen, fields.current);
-      const values = readValues(form, fields.current);
+      restoreSnapshot(form, chosen, current.allow);
+      noteInput(current);
+      const values = readValues(form, current.allow);
       // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
       current.persisted = {
         ...current.persisted,
