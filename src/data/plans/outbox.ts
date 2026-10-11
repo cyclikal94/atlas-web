@@ -334,7 +334,13 @@ export type EditResult =
   | { kind: "edited"; localId: LocalId }
   | {
       kind: "refused";
-      reason: "fenced" | "closing" | "not_found" | "not_queued" | "retargeted";
+      reason:
+        | "fenced"
+        | "closing"
+        | "not_found"
+        | "not_queued"
+        | "retargeted"
+        | "draft_changed";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -531,6 +537,8 @@ export type SupersedeResult =
         | "not_supersedable"
         | "key_in_use"
         | "no_base"
+        /** The request's `expectDraft` refused the old draft as it is stored now; nothing was written. */
+        | "draft_changed"
         /** No order of the queue lets the replacement and the drafts around it all be sent (R45, revision 25); nothing was written. */
         | "order_conflict"
         /** The request stated what its caller saw (`observed`), and this transaction read something else; nothing was written. */

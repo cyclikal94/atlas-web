@@ -14,11 +14,13 @@ import {
   useSyncStatusModel,
 } from "../../data";
 import { describeSyncChip } from "../../lib/sync-chip";
+import { DefaultsReview } from "../sharing";
 import {
   ACTION_DISCARD,
   ACTION_DISMISS,
   ACTION_RETRY,
   ACTION_RETRY_BLOCKED,
+  ACTION_REVIEW,
   CANNOT_DISCARD,
   DETAIL_ACTION,
   DISCARD_CONFIRM,
@@ -295,6 +297,7 @@ function QueueRow({
   const [detail, setDetail] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   if (view === null) return null;
 
   const discard = async () => {
@@ -317,9 +320,11 @@ function QueueRow({
   // Retry is immediate. Discarding or dismissing deletes what the person wrote, so it asks first.
   const run = (action: RowAction) => {
     if (action === "retry") return actions.retryChanges(draft.local_id);
+    if (action === "review") return setReviewing(true);
     setConfirming(true);
   };
   const label: Record<RowAction, string> = {
+    review: ACTION_REVIEW,
     discard: ACTION_DISCARD,
     dismiss: ACTION_DISMISS,
     retry: draft.status === "blocked" ? ACTION_RETRY_BLOCKED : ACTION_RETRY,
@@ -399,7 +404,11 @@ function QueueRow({
             {view.actions.map((action) => (
               <Button
                 key={action}
-                variant={action === "retry" ? "primary" : "secondary"}
+                variant={
+                  action === "retry" || action === "review"
+                    ? "primary"
+                    : "secondary"
+                }
                 aria-label={`${label[action]}: ${title}`}
                 onClick={() => run(action)}
               >
@@ -409,6 +418,9 @@ function QueueRow({
           </div>
         ) : null}
       </div>
+      {reviewing ? (
+        <DefaultsReview draft={draft} onClose={() => setReviewing(false)} />
+      ) : null}
       {variant !== null && detail ? (
         <ItemDetailDialog
           draft={draft}

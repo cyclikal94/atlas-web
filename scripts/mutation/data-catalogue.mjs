@@ -16775,6 +16775,1306 @@ export const UNIT = [
         "                    declined)\n",
       ),
   },
+  // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
+  {
+    id: "MU-1118",
+    title:
+      "WEB-12a W14: writeDefaults applies no EPO guard (an answer of an earlier epoch overwrites the record)",
+    file: "src/data/plans/defaults.ts",
+    tests: [
+      "tests/data/defaults-plan.test.ts",
+      "tests/data/plan-inventory.test.ts",
+    ],
+    expect: /MU-D1 EPO/,
+    patch: (t) =>
+      sub(
+        t,
+        'guards: ["INC", "CLS", "EPO"], quota: "cache"',
+        'guards: ["INC", "CLS"], quota: "cache"',
+      ),
+  },
+  {
+    id: "MU-1119",
+    title:
+      "WEB-12a W14: an answer asked for EARLIER replaces a stored record asked for later (two pages' reads out of order)",
+    file: "src/data/plans/defaults.ts",
+    tests: [
+      "tests/data/defaults-plan.test.ts",
+      "tests/data/defaults-source.test.ts",
+    ],
+    expect: /MU-D2/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (stored !== null && stored.issued_at > input.issuedAt)",
+        "if (false)",
+      ),
+  },
+  {
+    id: "MU-1120",
+    title:
+      "WEB-12a: the snapshot parser accepts a revision that is not 64 lower-case hex",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /not 64 lower-case hex/,
+    patch: (t) =>
+      sub(
+        t,
+        "const REVISION = /^[0-9a-f]{64}$/;",
+        "const REVISION = /^[0-9a-zA-Z]{64}$/;",
+      ),
+  },
+  {
+    id: "MU-1121",
+    title: "WEB-12a: the snapshot parser accepts more than 32 households",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /more than 32 households/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (!Array.isArray(households) || households.length > MAX_HOUSEHOLDS)",
+        "if (!Array.isArray(households))",
+      ),
+  },
+  {
+    id: "MU-1122",
+    title:
+      "WEB-12a: the snapshot parser accepts a member whose username is not text",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /a member whose username is not text/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (!isUuid(value.account_id) || typeof value.username !== "string")',
+        "if (!isUuid(value.account_id))",
+      ),
+  },
+  {
+    id: "MU-1123",
+    title:
+      "WEB-12a: a capture names no household of an explicit template (a membership-only change would be invisible, F7a)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: ["tests/data/defaults-capture.test.ts"],
+    expect: /explicit template captures EVERY household/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (grant.kind === "household" && !ids.includes(grant.id))',
+        "if (false)",
+      ),
+  },
+  {
+    id: "MU-1124",
+    title:
+      "WEB-12a: with no record ever fetched the capture asks for no review (the create would be sent with an omitted guard)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: [
+      "tests/data/defaults-capture.test.ts",
+      "tests/data/outbox-defaults-review.test.ts",
+    ],
+    expect: /with no record ever fetched/,
+    patch: (t) =>
+      sub(t, "      defaultsReview: wanted,", "      defaultsReview: [],"),
+  },
+  {
+    id: "MU-1125",
+    title:
+      "WEB-12a D-12a-5: composeDraft ignores defaultsReview (a draft that needs a review is stored unblocked and sent)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-D7/,
+    patch: (t) =>
+      sub(
+        t,
+        "    review_block: reviewBlockOf(built.defaultsReview),",
+        "    review_block: null,",
+      ),
+  },
+  {
+    id: "MU-1126",
+    title:
+      "WEB-12a: an edit that confirms ([]) keeps the review block (a confirmed draft is never released)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-D8/,
+    patch: (t) =>
+      sub(
+        t,
+        "built.defaultsReview === undefined\n          ? draft.review_block\n          : reviewBlockOf(built.defaultsReview),",
+        "draft.review_block,",
+      ),
+  },
+  {
+    id: "MU-1127",
+    title:
+      "WEB-12a D-12a-6: the review's Now accepts a record asked for before the review opened (a persisted one)",
+    file: "src/features/sharing/model/review.ts",
+    tests: [
+      "tests/features/sharing/model.test.ts",
+      "tests/features/sharing/defaults-review.test.tsx",
+    ],
+    expect: /MU-S9/,
+    patch: (t) =>
+      sub(
+        t,
+        "record !== null && record.issued_at >= openedAt",
+        "record !== null",
+      ),
+  },
+  {
+    id: "MU-1128",
+    title:
+      "WEB-12a D-12a-6: the confirmation's rebuild skips the bases check (a body sent on versions it was not built on)",
+    file: "src/data/model/review-confirmation.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-D10/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!sameBases(bases, stored)) throw new BasesMoved();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1129",
+    title:
+      "WEB-12a D-12a-2: Try again mints a new key (a committed command could be made twice)",
+    file: "src/features/sharing/model/submission.ts",
+    tests: [
+      "tests/features/sharing/model.test.ts",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S11/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (uncertain !== null && uncertain.body === body) return uncertain;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1130",
+    title: "WEB-12a D-12a-2: a changed body reuses the uncertain attempt's key",
+    file: "src/features/sharing/model/submission.ts",
+    tests: ["tests/features/sharing/model.test.ts"],
+    expect: /MU-S12/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (uncertain !== null && uncertain.body === body)",
+        "if (uncertain !== null)",
+      ),
+  },
+  {
+    id: "MU-1131",
+    title:
+      "WEB-12a: the effective audience lets a grant reach an excluded account",
+    file: "src/features/sharing/model/audience.ts",
+    tests: ["tests/features/sharing/model.test.ts"],
+    expect: /MU-S13/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (id === input.ownerId || excluded.has(id)) return;",
+        "if (id === input.ownerId) return;",
+      ),
+  },
+  {
+    id: "MU-1132",
+    title: "WEB-12a: the policy reducer grants the owner's own account",
+    file: "src/features/sharing/model/policy-draft.ts",
+    tests: ["tests/features/sharing/model.test.ts"],
+    expect: /MU-S14/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (kind === "account" && action.id === ownerId)\n        return { policy, refused: "owner" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1133",
+    title:
+      "WEB-12a: a personal set_defaults is guarded by another layer's template version",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S15/,
+    patch: (t) =>
+      sub(
+        t,
+        "                      record={personal}",
+        "                      record={household ?? personal}",
+      ),
+  },
+  {
+    id: "MU-1134",
+    title: "WEB-12a: the policy editor's Save stays enabled offline",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S16/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const reason = !env.online\n      ? copy.SAVE_OFFLINE_REASON\n      : !env.writable",
+        "    const reason = !env.writable",
+      ),
+  },
+  {
+    id: "MU-1135",
+    title:
+      "WEB-12a: a policy conflict is resolved by an automatic resend with the server's new version (a silent overwrite)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S17/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (failure.kind === "conflict")\n      setOutcome({ kind: "conflict", requestId: failure.requestId });',
+        '    if (failure.kind === "conflict")\n      void env.api.readPolicy(resourceId).then((read) => read.ok && env.api.management([{ kind: "replace_policy", id: resourceId, expected_version: read.value.version, policy: read.value.policy }], env.newId()));',
+      ),
+  },
+  {
+    id: "MU-1136",
+    title:
+      "WEB-12a: the defaults source keeps a body that is not the contract's snapshot",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D18/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const snapshot = parseSharingSnapshot(result.value);",
+        "    const snapshot = (parseSharingSnapshot(result.value) ?? result.value) as ReturnType<typeof parseSharingSnapshot>;",
+      ),
+  },
+  {
+    id: "MU-1137",
+    title:
+      "WEB-12a D-12a-3: replace_policy is guarded by the cache's (lagging) policy_version instead of GET /policies'",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S19/,
+    // ADAPTED in WEB-12a review cycle 1 (R1/R5): Save now sends the draft's own `base` (the version it was composed against, so a draft
+    // kept through the sync control stays guarded by it). A fresh draft takes its base from the read, so the same defect (the cache's
+    // lagging policy_version guarding the save instead of GET /policies') is now made where the base is set.
+    patch: (t) =>
+      sub(
+        t,
+        "      base: policyLoad.value.version,\n",
+        "      base: merged?.policy_version ?? policyLoad.value.version,\n",
+      ),
+  },
+  {
+    id: "MU-1138",
+    title:
+      "WEB-12a G5: W14 is committed outside the account service (no persistence hold: a stale session record is not refused)",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D20/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const out = await service.commit(writeDefaults, {",
+        "      const out = await service.store.run(writeDefaults, {",
+      ),
+  },
+  {
+    id: "MU-1139",
+    title:
+      "WEB-12a: a policy read refused with 403 is asked again (the 403 remounts the protected tree: a non-owner's editor loops)",
+    file: "src/features/sharing/api.ts",
+    tests: ["tests/features/sharing/api.test.ts"],
+    expect: /MU-S20/,
+    // Both protections go: the memory of the refusal and the sharing of a read still on its way (either alone can hide the loop).
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      if (refusedPolicies.has(key)) return { ok: false, kind: "forbidden" };\n',
+          "",
+        ),
+        "      if (shared !== undefined) return shared;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1142",
+    title:
+      "WEB-12a R2: an edit of a queued draft ignores the request's expectDraft (the confirmation overwrites an edit committed after its read)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-S23/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (request.expectDraft !== undefined && !request.expectDraft(draft))\n    return { kind: "refused", reason: "draft_changed" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1143",
+    title:
+      "WEB-12a R2: any stored draft counts as the one the person reviewed (the confirmation is no longer conditional on it)",
+    file: "src/data/model/review-confirmation.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /MU-S2[34]/,
+    patch: (t) =>
+      sub(
+        t,
+        "    canonicalJson(reviewedOf(stored)) === canonicalJson(reviewedOf(reviewed))\n",
+        "    canonicalJson(reviewedOf(stored)) !== null\n",
+      ),
+  },
+  {
+    id: "MU-1144",
+    title: "WEB-12a R2: the review confirms without naming the draft it showed",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S28/,
+    patch: (t) => sub(t, "        reviewed: reviewedOf(draft),\n", ""),
+  },
+  {
+    id: "MU-1145",
+    title:
+      "WEB-12a R3: a non-empty review block replaces the captured kinds (a consumed kind whose audience was known is never reviewed)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: [
+      "tests/data/defaults-capture.test.ts",
+      "tests/features/sharing/defaults-review.test.tsx",
+    ],
+    expect: /MU-S2[56]/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ...(context === null ? [] : Object.keys(context.kinds)),\n",
+        "    ...((draft.review_block?.kinds ?? []).length > 0 || context === null\n      ? []\n      : Object.keys(context.kinds)),\n",
+      ),
+  },
+  {
+    id: "MU-1146",
+    title:
+      "WEB-12a R4: the review shows a direct grant only as a count (who, and with what access, is hidden)",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S27/,
+    patch: (t) =>
+      sub(
+        t,
+        "              {copy.REVIEW_ACCOUNT_ACCESS(label(account.id), account.edit)}\n",
+        '              {"1 account granted directly"}\n',
+      ),
+  },
+  {
+    id: "MU-1147",
+    title: "WEB-12a R4: the review does not show the audience's exclusions",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S27/,
+    patch: (t) =>
+      sub(
+        t,
+        "              {copy.REVIEW_EXCLUDED(label(id))}\n",
+        "              {null}\n",
+      ),
+  },
+  {
+    id: "MU-1148",
+    title:
+      "WEB-12a R4: a household grant's access is not shown (Read and Edit look the same in the review)",
+    file: "src/features/sharing/model/templates.ts",
+    tests: [
+      "tests/features/sharing/defaults-review.test.tsx",
+      "tests/features/sharing/model.test.ts",
+    ],
+    expect: /MU-S35/,
+    patch: (t) =>
+      sub(
+        t,
+        '            grant.kind === "household" && grant.id === id && grant.edit,\n',
+        '            grant.kind === "household" && grant.id === id && false,\n',
+      ),
+  },
+  {
+    id: "MU-1149",
+    title:
+      "WEB-12a R4: the capture records no names for the accounts a template names directly (the review's Was shows only ids)",
+    file: "src/data/model/sharing-snapshot.ts",
+    tests: [
+      "tests/data/defaults-capture.test.ts",
+      "tests/features/sharing/defaults-review.test.tsx",
+    ],
+    expect: /MU-S2[79]/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (member !== undefined)\n        accounts.push({ account_id: id, username: member.username });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1150",
+    title:
+      "WEB-12a R1: a sharing read is not bound to its target (the previous primary household's template and version are kept for the next)",
+    file: "src/features/sharing/parts.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S32/,
+    patch: (t) =>
+      sub(
+        t,
+        "  a.length === b.length && a.every((value, at) => Object.is(value, b[at]));\n",
+        "  a.length === b.length;\n",
+      ),
+  },
+  {
+    id: "MU-1151",
+    title:
+      "WEB-12a R1: the policy editor is neither renewed for another resource nor reads it (A's draft and version are saved to B)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S30/,
+    // Both protections go: the editor keyed by its resource and the policy read bound to it (either alone keeps the target).
+    patch: (t) =>
+      sub(
+        sub(t, "      key={`${env.identity}\\u0000${props.resourceId}`}\n", ""),
+        "    { enabled: reading, now: env.now, target: [env.api, resourceId] },\n",
+        "    { enabled: reading, now: env.now, target: [env.api] },\n",
+      ),
+  },
+  {
+    id: "MU-1152",
+    title:
+      "WEB-12a R5: the policy editor's sync control does not keep the unsaved draft",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S31/,
+    patch: (t) => sub(t, "      onRetainDraft={keep}\n", ""),
+  },
+  {
+    id: "MU-1153",
+    title:
+      "WEB-12a R5: going offline replaces the defaults editor's forms with the read-only snapshot (unsaved choices are lost on return)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S33/,
+    patch: (t) =>
+      sub(
+        t,
+        "          {!env.online && !formsRead ? (\n",
+        "          {!env.online ? (\n",
+      ),
+  },
+  {
+    id: "MU-1154",
+    title:
+      "WEB-12a R5: the defaults editor's sync control does not keep the forms' unsaved choices",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S34/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onRetainDraft={() => {\n        for (const keeper of forms.current.values()) keeper.keep();\n      }}\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1155",
+    title:
+      "WEB-12a R5: a kept policy draft is saved at the version just read, not the one it was composed against (a newer policy is overwritten)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S36/,
+    patch: (t) =>
+      sub(
+        t,
+        "            onClick={() => void send(draft.policy, draft.base)}\n",
+        "            onClick={() => void send(draft.policy, read.version)}\n",
+      ),
+  },
+  {
+    id: "MU-1157",
+    title:
+      "WEB-12a R5: Cancel in the policy editor does not discard a draft the sync control kept (it comes back on reopening)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S37/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const cancel = () => {\n    discard();\n    close();\n  };\n",
+        "  const cancel = () => {\n    close();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1158",
+    title:
+      "WEB-12a R5: Escape and the close icon do not discard a draft the sync control kept in the policy editor",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S38/,
+    patch: (t) => sub(t, "      onDiscard={discard}\n", ""),
+  },
+  {
+    id: "MU-1159",
+    title:
+      "WEB-12a R5: Done in the defaults editor does not discard choices the sync control kept",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S39/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const done = () => {\n    discardForms();\n    onClose();\n  };\n",
+        "  const done = () => {\n    onClose();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1160",
+    title:
+      "WEB-12a review 2 R5: the policy editor discards a kept draft only once its read has landed (Escape while reading leaves it to come back)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S40/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const discard = () => {\n    restore.current = undefined;\n    session.discard();\n  };\n",
+        "  const discard = () => {\n    if (draft !== null) session.discard();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1161",
+    title:
+      "WEB-12a review 2 R5: the policy editor's Close on its offline/unavailable/failed states closes without discarding the kept draft",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S41/,
+    patch: (t) =>
+      sub(
+        t,
+        '  let footer: React.ReactNode = (\n    <Button variant="secondary" onClick={cancel}>\n',
+        '  let footer: React.ReactNode = (\n    <Button variant="secondary" onClick={close}>\n',
+      ),
+  },
+  {
+    id: "MU-1162",
+    title:
+      "WEB-12a review 2 R5: Reload after a conflict does not abandon the kept draft (a failed reload leaves it to be kept and restored again)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S42/,
+    patch: (t) =>
+      sub(
+        t,
+        "          onReload={reload}\n",
+        "          onReload={() => {\n            setOutcome(null);\n            reloadPolicy();\n          }}\n",
+      ),
+  },
+  {
+    id: "MU-1163",
+    title:
+      "WEB-12a review 2 R5: a session's discard forgets every owner's kept input (another resource's or editor's unsaved draft is lost)",
+    file: "src/features/sharing/retained.ts",
+    tests: [
+      "tests/features/sharing/retained.test.ts",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S43/,
+    patch: (t) =>
+      sub(
+        t,
+        "      for (const [key, entry] of entries)\n        if (entry.owner === self) entries.delete(key);\n",
+        "      entries.clear();\n",
+      ),
+  },
+  {
+    id: "MU-1164",
+    title:
+      "WEB-12a review 2 R5: an ended (dismissed) session's late keep is given back to the next opening (two sites: the keep is not refused, and what is given back is not checked to be the session's own)",
+    file: "src/features/sharing/retained.ts",
+    tests: ["tests/features/sharing/retained.test.ts"],
+    expect: /MU-S44/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    retain(target, value) {\n      if (self.ended) return;\n",
+          "    retain(target, value) {\n",
+        ),
+        "      return entry?.owner === self ? (entry.value as T) : undefined;\n",
+        "      return entry?.value as T | undefined;\n",
+      ),
+  },
+  {
+    id: "MU-1165",
+    title:
+      "WEB-12a review 2 R5: an ended session's late forget (a save completing after a dismissal) removes the next session's kept input",
+    file: "src/features/sharing/retained.ts",
+    tests: ["tests/features/sharing/retained.test.ts"],
+    expect: /MU-S44/,
+    patch: (t) =>
+      sub(
+        t,
+        "    forget(target) {\n      if (self.ended) return;\n      const key = keyOf(identity, target);\n      if (entries.get(key)?.owner === self) entries.delete(key);\n    },\n",
+        "    forget(target) {\n      entries.delete(keyOf(identity, target));\n    },\n",
+      ),
+  },
+  {
+    id: "MU-1166",
+    title:
+      "WEB-12a review 2 R5: the defaults editor's dismissal forgets only the forms on screen (offline, still reading, or another kind or household: the kept choices come back)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S4[56]/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const discardForms = () => session.discard();\n",
+        "  const discardForms = () => {\n    for (const id of forms.current.keys()) session.forget(id);\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1167",
+    title:
+      "WEB-12a review 2 R5: saving one defaults layer discards every kept choice of the session (the other layer's unsaved input is lost)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S47/,
+    patch: (t) =>
+      sub(
+        t,
+        "      uncertain.current = null;\n      session.forget(target);\n      announcer.announce(copy.SAVED_DEFAULTS);\n",
+        "      uncertain.current = null;\n      session.discard();\n      announcer.announce(copy.SAVED_DEFAULTS);\n",
+      ),
+  },
+  {
+    id: "MU-1168",
+    title:
+      "WEB-12a review 2 R5: a template conflict's Reload keeps the abandoned choice (a failed reload leaves it to be restored)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S48/,
+    patch: (t) =>
+      sub(
+        t,
+        "              onClick={() => {\n                session.forget(target);\n                onSaved();\n              }}\n",
+        "              onClick={() => {\n                onSaved();\n              }}\n",
+      ),
+  },
+  {
+    id: "MU-1169",
+    title:
+      "WEB-12a review 2 R7: an acquisition shares a defaults read issued BEFORE its boundary (unconditional coalescing: a review can wait on an answer that is never 'Now')",
+    file: "src/data/engine/defaults-source.ts",
+    tests: [
+      "tests/data/defaults-source.test.ts",
+      "tests/features/sharing/defaults-review.test.tsx",
+    ],
+    expect: /MU-D21|MU-S49/,
+    patch: (t) =>
+      sub(t, "        (after === null || entry.issued > after) &&\n", ""),
+  },
+  {
+    id: "MU-1170",
+    title:
+      "WEB-12a review 2 R7: an acquisition ignores the (account, epoch) its boundary was taken for (an earlier identity's caller is answered with the next identity's snapshot)",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D22/,
+    patch: (t) => sub(t, "      keyOf(identity) !== after.identity ||\n", ""),
+  },
+  {
+    id: "MU-1171",
+    title:
+      "WEB-12a review 2 R7: the review takes its read's record as 'Now' without checking it was issued after the review opened",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S50/,
+    patch: (t) =>
+      sub(
+        t,
+        '          got.outcome === "fetched" ? freshForReview(got.record, at) : null;\n',
+        '          got.outcome === "fetched" ? got.record : null;\n',
+      ),
+  },
+  {
+    id: "MU-1172",
+    title:
+      "WEB-12a review 2 R7: a superseded review read still sets the review's state (an answer landing after the page went offline shows 'Now')",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S51/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (mounted.current && current === loads.current) setStatus(next);\n",
+        "      if (mounted.current) setStatus(next);\n",
+      ),
+  },
+  {
+    id: "MU-1173",
+    title:
+      "WEB-12a review 2 R7: after a defaults save the snapshot is refreshed by a read that may predate the save",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S52/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 7 (R12): the post-save read is now one of the editor's own tracked snapshot reads; same defect.
+        "      async () => (await defaults.acquire(defaults.boundary())).outcome,\n",
+        "      () => defaults.refresh(),\n",
+      ),
+  },
+  {
+    id: "MU-1174",
+    title:
+      "WEB-12a review 2 R7: after a household change the snapshot is refreshed by a read that may predate the change",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S53/,
+    patch: (t) =>
+      sub(
+        t,
+        "      void defaults.acquire(defaults.boundary());\n",
+        "      void defaults.refresh();\n",
+      ),
+  },
+  {
+    id: "MU-1175",
+    title:
+      "WEB-12a review 2 C3: the review's Confirm stays offered after the page goes offline (two sites: the review keeps its ready state offline, and Confirm ignores the connection)",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S54/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '    if (!env.online) {\n      setStatus({ kind: "offline" });\n      return;\n    }\n    setStatus({ kind: "loading" });\n',
+          '    if (!env.online) return;\n    setStatus({ kind: "loading" });\n',
+        ),
+        "    now === null || !env.online\n",
+        "    now === null\n",
+      ),
+  },
+  {
+    id: "MU-1178",
+    title:
+      "WEB-12a review 3 R8: a household Try again that is not sent (offline, closed) forgets the earlier uncertain attempt (a new create is admitted under a new id and key)",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S55/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (earlier !== null) {\n          setProblem({\n            message: earlier.sent ? copy.UNCERTAIN : copy.NOT_SENT,\n          });\n          return false;\n        }\n        break;\n",
+        "        hold(null);\n        break;\n",
+      ),
+  },
+  {
+    id: "MU-1179",
+    title:
+      "WEB-12a review 3 R8: the household Try again is admitted offline (two sites: the button is offered, and the action does not check the connection)",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S56/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const retryBlocked = !env.online\n    ? copy.SAVE_OFFLINE_REASON\n    : !env.writable\n",
+          "  const retryBlocked = !env.writable\n",
+        ),
+        "    if (!now.online) return copy.SAVE_OFFLINE_REASON;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1180",
+    title:
+      "WEB-12a review 3 R8: Reload ends the unresolved household attempt before anything shows what happened to it",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S57/,
+    patch: (t) =>
+      sub(
+        t,
+        "                    // Shows the households and invitations again; the unconfirmed change stays to be tried again (R8).\n                    reloadHouseholds();\n",
+        "                    hold(null);\n                    reloadHouseholds();\n",
+      ),
+  },
+  {
+    id: "MU-1181",
+    title:
+      "WEB-12a review 3 DA-H1: an invitation's directory lookup is not part of the operation (the page is admitted only once it answers, so another command can be sent meanwhile)",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S58/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const token = admit(false);\n    if (token === null) return false;\n    const api = live.current.api;\n    const found = await untilSent(() => api.lookup(username), {\n      isCurrent: () => owns(token),\n    });\n",
+        "    const api = live.current.api;\n    const found = await untilSent(() => api.lookup(username));\n    const token = admit(false);\n    if (token === null) return false;\n",
+      ),
+  },
+  {
+    id: "MU-1182",
+    title:
+      "WEB-12a review 3 DA-H1: a lookup's continuation sends the invite without checking the connection and the server's compatibility as they are now",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S59/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const reason = !live.current.online\n      ? copy.SAVE_OFFLINE_REASON\n      : !live.current.writable\n        ? copy.SAVE_COMPAT_REASON\n        : null;\n",
+        "    const reason: string | null = null;\n",
+      ),
+  },
+  {
+    id: "MU-1183",
+    title:
+      "WEB-12a review 3 DA-H1: household admission ignores the operation already owning the page (two submissions in one turn send two commands)",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S60/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (operation.current !== null) return copy.SAVE_BUSY_REASON;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1184",
+    title:
+      "WEB-12a review 3 DA-C1: the review's loads after the opening reuse the opening's boundary (a read under way before the disconnection, or before Try again, becomes 'Now')",
+    file: "src/features/sharing/DefaultsReview.tsx",
+    tests: ["tests/features/sharing/defaults-review.test.tsx"],
+    expect: /MU-S64|MU-S65/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (loaded.current)\n      since.current = { after: defaults.boundary(), at: env.now() };\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1185",
+    title:
+      "WEB-12a review 3 R8: the policy editor's Try again is admitted offline (two sites: the button is offered, and the action does not check the connection)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S61/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const retry =\n    retryReason === null ? (\n",
+          "  const retry =\n    true ? (\n",
+        ),
+        "    if (sending.current || !env.online || !env.writable) return;\n",
+        "    if (sending.current) return;\n",
+      ),
+  },
+  {
+    id: "MU-1186",
+    title:
+      "WEB-12a review 3 R8: the defaults editor's Try again is admitted offline (two sites: the button is offered, and the action does not check the connection)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S62/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const retry =\n    retryReason === null ? (\n",
+          "  const retry =\n    true ? (\n",
+        ),
+        // Re-anchored in revision 7 (R12 added `unresolved`, a separate guard it keeps); the connection and compatibility checks go.
+        "    if (sending.current || !env.online || !env.writable || unresolved) return;\n",
+        "    if (sending.current || unresolved) return;\n",
+      ),
+  },
+  {
+    id: "MU-1187",
+    title:
+      "WEB-12a review 3 R8: a defaults Try again that is not sent clears the 'unconfirmed' outcome (no Try again is left on screen)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S63/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (shown?.kind === "uncertain" || shown?.kind === "not_sent")\n          setOutcome(shown);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1189",
+    title:
+      "WEB-12a review 4 R10: the reviewed defect restored: the defaults answer is judged by account and epoch only, and persisted through the service bound AFTER it, stamped then (four sites)",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D23/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            sub(
+              t,
+              '    if (!stands(context)) return { outcome: obsolete(context), fetched: null };\n    if (result.kind !== "ok")\n',
+              '    if (current()?.account_id !== context.account || current()?.epoch !== context.epoch) return { outcome: "wait", fetched: null };\n    if (result.kind !== "ok")\n',
+            ),
+            "    await persist(context, fetched);\n    // Its binding may have gone while it was admitted or committed: what memory holds of it is out of view, and it answers no one.\n    if (!stands(context)) return { outcome: obsolete(context), fetched: null };\n",
+            "    await persist(context, fetched);\n",
+          ),
+          "    const { service, captured } = context;\n    if (service === null || captured === null || !stands(context)) return;\n",
+          "    const service = deps.service(context.account);\n    if (!service?.live) return;\n",
+        ),
+        "      if (!stands(context)) return;\n      const lease = reservation;\n      const out = await service.commit(writeDefaults, {\n        captured,\n",
+        "      const lease = reservation;\n      const out = await service.commit(writeDefaults, {\n        captured: service.capture(context.epoch),\n",
+      ),
+  },
+  {
+    id: "MU-1190",
+    title:
+      "WEB-12a review 4 R10 (Q3): after the quota admission the defaults are committed through the binding that stands THEN, stamped then",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D25/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!stands(context)) return;\n      const lease = reservation;\n      const out = await service.commit(writeDefaults, {\n        captured,\n",
+        "      const later = deps.service(context.account);\n      if (later === null) return;\n      const lease = reservation;\n      const out = await later.commit(writeDefaults, {\n        captured: later.capture(context.epoch),\n",
+      ),
+  },
+  {
+    id: "MU-1191",
+    title:
+      "WEB-12a review 4 R10 (Q3/Q6): what memory holds is shown for the identity alone, whatever binding it was asked under",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D25|MU-D26/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return value !== null && stands(value.context) ? value.record : null;\n",
+        "      const identity = current();\n      return value !== null && identity !== null && value.context.key === keyOf(identity) ? value.record : null;\n",
+      ),
+  },
+  {
+    id: "MU-1192",
+    title:
+      "WEB-12a review 4 R10 (Q6): the follower's completed read is not asked again when its binding goes (the replacement shows nothing until a person acts)",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D26/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (\n        completed !== null &&\n        completed.key === keyOf(identity) &&\n        !stands(completed)\n      ) {\n        completed = null;\n        task.stop();\n        task = begin();\n      }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1193",
+    title:
+      "WEB-12a review 4 R10 (Q7): a defaults read of an earlier lifetime of the controller (stopped and started again) still stands",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D27/,
+    patch: (t) =>
+      sub(
+        t,
+        "      keyOf(identity) !== context.key ||\n      context.lifetime !== lifetime\n",
+        "      keyOf(identity) !== context.key\n",
+      ),
+  },
+  {
+    id: "MU-1194",
+    title:
+      "WEB-12a review 4 R10 (Q7): an explicit defaults read under way is shared although its binding or lifetime has gone",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D27/,
+    patch: (t) => sub(t, "        stands(entry.context) &&\n", ""),
+  },
+  {
+    id: "MU-1195",
+    title:
+      "WEB-12a review 4 R10 (Q5): a defaults read asked with no database stands although a database opened (and ended) before its answer",
+    file: "src/data/engine/defaults-source.ts",
+    tests: ["tests/data/defaults-source.test.ts"],
+    expect: /MU-D28/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? service === null && at === context.binding\n",
+        "      ? service === null\n",
+      ),
+  },
+  {
+    id: "MU-1196",
+    title:
+      "WEB-12a design assessment DA-P1: the reviewed defect restored: a policy Try again the session closes forgets the uncertain attempt (and its Try again)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S66/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (shown?.kind === "uncertain" || shown?.kind === "not_sent")\n          setOutcome(shown);\n        return;\n',
+        "        uncertain.current = null;\n        return;\n",
+      ),
+  },
+  {
+    id: "MU-1198",
+    title:
+      "WEB-12a review 5 R11: the reviewed defect restored: the defaults editor offers and names only the households B5 lists (its resolved-relevant subset)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S68|MU-S69|MU-S70/,
+    patch: (t) =>
+      sub(
+        t,
+        "    read: () => env.api.readHouseholds(),\n",
+        "    read: async () => ({ ok: true, value: snapshot?.households ?? [] }),\n",
+      ),
+  },
+  {
+    id: "MU-1199",
+    title:
+      "WEB-12a review 5 R11 (Q3): a loading or failed membership list is taken as complete (offers households, says 'not in')",
+    file: "src/features/sharing/PolicyGrantsEditor.tsx",
+    tests: [
+      "tests/features/sharing/defaults-editor.test.tsx",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S71|MU-S74/,
+    patch: (t) =>
+      sub(
+        t,
+        '    membership.status === "ready" ? membership.current.households : null;\n',
+        "    knownMembership(membership)?.households ?? [];\n",
+      ),
+  },
+  {
+    id: "MU-1200",
+    title:
+      "WEB-12a review 5 R11 (Q2/Q3): without a complete list, a granted household is labelled one you are not in",
+    file: "src/features/sharing/PolicyGrantsEditor.tsx",
+    tests: [
+      "tests/features/sharing/defaults-editor.test.tsx",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S71|MU-S74/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (complete !== null\n          ? copy.HOUSEHOLD_UNKNOWN\n          : copy.HOUSEHOLD_UNCHECKED));\n",
+        "        copy.HOUSEHOLD_UNKNOWN);\n",
+      ),
+  },
+  {
+    id: "MU-1281",
+    title:
+      "WEB-12a design assessment DA-M1: the effective audience counts a household no complete list names as one you are not in",
+    file: "src/features/sharing/model/audience.ts",
+    tests: [
+      "tests/features/sharing/model.test.ts",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S67|MU-S74/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (input.complete ? unknownHouseholds : uncheckedHouseholds).push({\n",
+        "      unknownHouseholds.push({\n",
+      ),
+  },
+  {
+    id: "MU-1282",
+    title:
+      "WEB-12a review 5 R11 (Q4): an earlier membership read's answer replaces a later one's",
+    file: "src/features/sharing/membership.ts",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S72/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (mine !== generation.current) return;\n      setState((prior) => ({\n",
+        "      setState((prior) => ({\n",
+      ),
+  },
+  {
+    id: "MU-1283",
+    title:
+      "WEB-12a review 5 R11 (Q5): coming back online does not read the membership list again",
+    file: "src/features/sharing/membership.ts",
+    tests: [
+      "tests/features/sharing/defaults-editor.test.tsx",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S73|MU-S75/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [options.enabled, run, ...options.target]);\n",
+        "  }, [run, ...options.target]);\n",
+      ),
+  },
+  {
+    id: "MU-1284",
+    title:
+      "WEB-12a design assessment DA-M1: the policy editor's membership Try again is dropped (it reads nothing)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/sharing/policy-editor.test.tsx"],
+    expect: /MU-S74/,
+    patch: (t) =>
+      sub(
+        t,
+        "          onRetryMembership={retryMembership}\n",
+        "          onRetryMembership={() => undefined}\n",
+      ),
+  },
+  {
+    id: "MU-1285",
+    title:
+      "WEB-12a review 5 R11 (Q5): a membership re-read forgets the last list's names while it is under way",
+    file: "src/features/sharing/membership.ts",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S73/,
+    patch: (t) =>
+      sub(
+        t,
+        '      membership: { status: "loading", last: lastOf(prior) },\n',
+        '      membership: { status: "loading", last: null },\n',
+      ),
+  },
+  {
+    id: "MU-1286",
+    title:
+      "WEB-12a review 5 R11 (Q3): a failed membership read is taken as a complete EMPTY list",
+    file: "src/features/sharing/membership.ts",
+    tests: [
+      "tests/features/sharing/defaults-editor.test.tsx",
+      "tests/features/sharing/policy-editor.test.tsx",
+    ],
+    expect: /MU-S71|MU-S74/,
+    patch: (t) =>
+      sub(
+        t,
+        '          : { status: "failed", failure: result, last: lastOf(prior) },\n',
+        '          : { status: "ready", current: { households: [], at: now.current() } },\n',
+      ),
+  },
+  {
+    id: "MU-1288",
+    title:
+      "WEB-12a review 6 R12: the resolver treats an UNREAD household template as read absent (the application default resolves)",
+    file: "src/features/sharing/model/templates.ts",
+    tests: [
+      "tests/features/sharing/model.test.ts",
+      "tests/features/sharing/defaults-editor.test.tsx",
+    ],
+    expect: /MU-S76|MU-S77|MU-S78/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!input.household.known) return { known: false, missing: "household" };\n',
+        // Not a deletion (the next line would then read an unknown's value and crash): the unread template resolves as read absent.
+        '    if (!input.household.known)\n      return { known: true, layer: "application", template: APPLICATION_DEFAULTS[input.kind] };\n',
+      ),
+  },
+  {
+    id: "MU-1289",
+    title:
+      "WEB-12a review 6 R12: the reviewed defect restored: the defaults editor passes a household read that is loading or failed as a template read absent",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S77|MU-S78/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : UNKNOWN;\n  const personal = personalEvidence.known",
+        "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
+      ),
+  },
+  {
+    id: "MU-1290",
+    title:
+      "WEB-12a review 6 R12: no snapshot on the device is taken as a snapshot naming NO primary household",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S79/,
+    patch: (t) =>
+      sub(
+        t,
+        "    snapshot === null\n      ? UNKNOWN\n",
+        "    snapshot === null\n      ? { known: true, value: null }\n",
+      ),
+  },
+  {
+    id: "MU-1291",
+    title:
+      "WEB-12a review 6 R12: a NEW save is admitted while what it would make new records start as is unknown (button and action)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S78|MU-S79/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const unresolved = missing !== null && !retrying;\n",
+        "  const unresolved = false;\n",
+      ),
+  },
+  {
+    id: "MU-1292",
+    title:
+      "WEB-12a review 6 R12 (assessment invariant 8): an uncertain attempt's Try again is held back once its inheritance becomes unknown",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    tests: ["tests/features/sharing/defaults-editor.test.tsx"],
+    expect: /MU-S80/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const unresolved = missing !== null && !retrying;\n",
+        "  const unresolved = missing !== null;\n",
+      ),
+  },
+  {
+    id: "MU-1293",
+    title:
+      "WEB-12a design assessment DA-M2: offline, an empty B5 household subset says you are in no household",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S82/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ) : shown.from === "snapshot" && shown.list.length === 0 ? (\n',
+        "      ) : false ? (\n",
+      ),
+  },
+  {
+    id: "MU-1294",
+    title:
+      "WEB-12a design assessment DA-M2: offline, a complete list read on the page is labelled with the B5 snapshot's time",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    tests: ["tests/features/sharing/sharing-page.test.tsx"],
+    expect: /MU-S83/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ? { from: "complete", list: households.value, at: households.at }\n',
+        '      ? { from: "complete", list: households.value, at: defaults.record?.fetched_at ?? households.at }\n',
+      ),
+  },
 ];
 
 /**
@@ -19514,6 +20814,162 @@ export const ENGINE = [
         t,
         "      if (router.history.location.pathname !== opened) visit.dispose();\n",
         "",
+      ),
+  },
+  // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
+  {
+    id: "MU-1140",
+    title:
+      "WEB-12a: (REAL ENGINE) a queued draft's captured defaults context is not stored (the review's Was cannot show the captured audience)",
+    file: "src/data/model/outbox.ts",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH5:",
+    expect: /E-SH5:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    defaults_context: built.defaultsContext ?? null,",
+        "    defaults_context: null,",
+      ),
+  },
+  {
+    id: "MU-1141",
+    title:
+      "WEB-12a: (REAL ENGINE) a policy read refused with 403 is asked again: the 403 remounts the protected tree and a non-owner's editor loops",
+    file: "src/features/sharing/api.ts",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH9:",
+    expect: /E-SH9:/,
+    // Both protections go: the memory of the refusal and the sharing of a read still on its way (either alone can hide the loop).
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      if (refusedPolicies.has(key)) return { ok: false, kind: "forbidden" };\n',
+          "",
+        ),
+        "      if (shared !== undefined) return shared;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1156",
+    title:
+      "WEB-12a R6: (REAL ENGINE) the policy editor is the generic 768 px dialog, not the full-bleed sheet the tablet frames draw",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH8:",
+    expect: /E-SH8:/,
+    patch: (t) => sub(t, '      sheetBelow="desktop"\n', ""),
+  },
+  {
+    id: "MU-1176",
+    title:
+      "WEB-12a review 2 R5: (REAL ENGINE) the policy editor discards a kept draft only once its read has landed (Escape while reading leaves it to come back)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH12:",
+    expect: /E-SH12:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const discard = () => {\n    restore.current = undefined;\n    session.discard();\n  };\n",
+        "  const discard = () => {\n    if (draft !== null) session.discard();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1177",
+    title:
+      "WEB-12a review 2 R5: (REAL ENGINE) the defaults editor's dismissal forgets only the forms on screen (offline or another kind: the kept choice comes back)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH13:",
+    expect: /E-SH13:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const discardForms = () => session.discard();\n",
+        "  const discardForms = () => {\n    for (const id of forms.current.keys()) session.forget(id);\n  };\n",
+      ),
+  },
+  {
+    id: "MU-1188",
+    title:
+      "WEB-12a review 3 R8: (REAL ENGINE) the reviewed defect restored: the household Try again is admitted offline and a Try again not sent forgets the uncertain create (three sites)",
+    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH14:",
+    expect: /E-SH14:/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  const retryBlocked = !env.online\n    ? copy.SAVE_OFFLINE_REASON\n    : !env.writable\n",
+            "  const retryBlocked = !env.writable\n",
+          ),
+          "    if (!now.online) return copy.SAVE_OFFLINE_REASON;\n",
+          "",
+        ),
+        "        if (earlier !== null) {\n          setProblem({\n            message: earlier.sent ? copy.UNCERTAIN : copy.NOT_SENT,\n          });\n          return false;\n        }\n        break;\n",
+        "        hold(null);\n        break;\n",
+      ),
+  },
+  {
+    id: "MU-1197",
+    title:
+      "WEB-12a review 4 R10: (REAL ENGINE) the reviewed defect restored: a defaults answer asked before the database was deleted and created again is persisted into the replacement (four sites)",
+    file: "src/data/engine/defaults-source.ts",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH15:",
+    expect: /E-SH15:/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            sub(
+              t,
+              '    if (!stands(context)) return { outcome: obsolete(context), fetched: null };\n    if (result.kind !== "ok")\n',
+              '    if (current()?.account_id !== context.account || current()?.epoch !== context.epoch) return { outcome: "wait", fetched: null };\n    if (result.kind !== "ok")\n',
+            ),
+            "    await persist(context, fetched);\n    // Its binding may have gone while it was admitted or committed: what memory holds of it is out of view, and it answers no one.\n    if (!stands(context)) return { outcome: obsolete(context), fetched: null };\n",
+            "    await persist(context, fetched);\n",
+          ),
+          "    const { service, captured } = context;\n    if (service === null || captured === null || !stands(context)) return;\n",
+          "    const service = deps.service(context.account);\n    if (!service?.live) return;\n",
+        ),
+        "      if (!stands(context)) return;\n      const lease = reservation;\n      const out = await service.commit(writeDefaults, {\n        captured,\n",
+        "      const lease = reservation;\n      const out = await service.commit(writeDefaults, {\n        captured: service.capture(context.epoch),\n",
+      ),
+  },
+  {
+    id: "MU-1287",
+    title:
+      "WEB-12a review 5 R11: (REAL ENGINE) the reviewed defect restored: the defaults editor offers and names only the households B5 lists",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH16:",
+    expect: /E-SH16:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    read: () => env.api.readHouseholds(),\n",
+        "    read: async () => ({ ok: true, value: snapshot?.households ?? [] }),\n",
+      ),
+  },
+  {
+    id: "MU-1295",
+    title:
+      "WEB-12a review 6 R12: (REAL ENGINE) the reviewed defect restored: a household template read that failed is taken as read absent (Private inherited)",
+    file: "src/features/sharing/DefaultsEditor.tsx",
+    spec: "tests/e2e/fixture.sharing.spec.ts",
+    grep: "E-SH17:",
+    expect: /E-SH17:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : UNKNOWN;\n  const personal = personalEvidence.known",
+        "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
       ),
   },
 ];

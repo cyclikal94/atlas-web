@@ -6,6 +6,7 @@ import { listPlans, listReadPlans } from "../../src/data/plans/registry";
 import "../../src/data/plans/epoch";
 import "../../src/data/plans/fence";
 import "../../src/data/plans/commit-page";
+import "../../src/data/plans/defaults";
 import "../../src/data/plans/form-recovery";
 import "../../src/data/plans/outbox";
 import "../../src/data/plans/pending-reads";
@@ -128,8 +129,8 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
 };
 
 /**
- * The writers whose plans exist in this slice: every row of the table but W14 (`writeDefaults`, WEB-12a's) and W17 (the versionchange
- * transaction of the Dexie adapter, not a plan).
+ * The writers whose plans exist: every row of the table but W17 (the versionchange transaction of the Dexie adapter, not a plan). W14
+ * (`writeDefaults`) was reserved by WEB-09a and is WEB-12a's.
  */
 const PRESENT_WRITERS: readonly string[] = [
   "W1",
@@ -145,6 +146,7 @@ const PRESENT_WRITERS: readonly string[] = [
   "W11",
   "W12",
   "W13",
+  "W14",
   "W15",
   "W16",
   "W18",
@@ -283,6 +285,8 @@ describe("F-S7: the writer inventory", () => {
       "data.editQueuedDraft",
       "data.supersedeDraft",
       "data.saveFormRecovery",
+      // WEB-12a: the B5 sharing snapshot is server-sized (up to 32 households of 100 members), admitted as a cache write by the defaults source.
+      "data.writeDefaults",
     ];
     // A fixed few hundred bytes, once per page context and form (the writer claim) or in place in the singleton `sync_state` row (the
     // verified name and the device id): no caller-sized growth, covered by the reserve's slack and the allowance each save carries.

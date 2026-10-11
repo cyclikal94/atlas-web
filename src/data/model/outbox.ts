@@ -42,6 +42,29 @@ export interface BuildResult {
   displayPatch?: Record<ResourceId, ProjectionPatch>;
   defaultsRevision?: string | null;
   defaultsContext?: unknown;
+  /**
+   * The template kinds that need the person's review before this draft may be sent (WEB-12a, WEB-04 §5.7): a queued create that
+   * relies on implicit defaults the device never fetched, or whose captured template names a household nobody here has seen.
+   * Non-empty: the draft is stored with `review_block { kind: "defaults", kinds }`, which the dispatcher never sends and which holds
+   * the queue from it (D-19). On an EDIT of a queued draft the field decides the block: absent keeps the block the draft has (an edit
+   * of the content is not a review of its audience), `[]` clears it (the defaults review's confirmation), a list replaces it.
+   */
+  defaultsReview?: readonly string[];
+}
+
+/** A build's `defaultsReview`, which must be a list of texts: anything else is not what the contract allows (`not_json`). */
+function reviewKindsOf(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.some((kind) => typeof kind !== "string"))
+    throw new TypeError("defaultsReview must be a list of template kinds");
+  return value as string[];
+}
+
+/** The review block a build asks for, or null for none. Kinds are kept once each, in order. */
+function reviewBlockOf(
+  kinds: readonly string[] | undefined,
+): DraftRow["review_block"] {
+  if (kinds === undefined || kinds.length === 0) return null;
+  return { kind: "defaults", kinds: [...new Set(kinds)] };
 }
 
 export interface EnqueueRequest {
@@ -63,6 +86,13 @@ export interface EnqueueRequest {
    * the answer is `refused / changed` (WEB-13a revision 2). A retry of a save that was already made is recognised first.
    */
   observed?: Observation;
+  /**
+   * PURE. For an edit of a queued draft or a supersession only: called inside the writing transaction with the draft as it is stored
+   * NOW (the one being edited, or the one being replaced). `false` refuses the request (`draft_changed`) and nothing is written. A
+   * caller that decided on a draft it read earlier (the defaults review's confirmation, WEB-12a R2) states here what it decided on, so a
+   * change committed in between (another page's edit of the same draft) is never overwritten by a body built from the older read.
+   */
+  expectDraft?(draft: DraftRow): boolean;
 }
 
 /**
@@ -405,6 +435,12 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
             token: request.observed.token,
           },
         }),
+    ...(request.expectDraft === undefined
+      ? {}
+      : {
+          expectDraft: (draft: DraftRow) =>
+            request.expectDraft?.call(request, draft) === true,
+        }),
   };
 }
 
@@ -570,8 +606,9 @@ function dependencies(
  * among them, R40) is a `TypeError`, which the callers report as `not_json`.
  */
 function buildSnapshot(request: EnqueueRequest, bases: Bases): BuildResult {
-  const { command, displayPatch, defaultsRevision, defaultsContext } =
+  const { command, displayPatch, defaultsRevision, ...defaults } =
     request.build({ ...bases });
+  const { defaultsContext, defaultsReview } = defaults;
   return {
     command: snapshotPlain(command) as JsonObject,
     ...(displayPatch === undefined
@@ -588,6 +625,9 @@ function buildSnapshot(request: EnqueueRequest, bases: Bases): BuildResult {
     ...(defaultsContext === undefined
       ? {}
       : { defaultsContext: snapshotPlain(defaultsContext) }),
+    ...(defaultsReview === undefined
+      ? {}
+      : { defaultsReview: reviewKindsOf(snapshotPlain(defaultsReview)) }),
   };
 }
 
@@ -637,7 +677,7 @@ function composeDraft(
       ? {}
       : { expected_version: resolved.expectedVersion }),
     defaults_context: built.defaultsContext ?? null,
-    review_block: null,
+    review_block: reviewBlockOf(built.defaultsReview),
     depends_on: dependsOn,
     status: "queued",
     held_pending_cache: false,
@@ -703,7 +743,13 @@ export function planEnqueue(
 export type PlannedEdit =
   | {
       kind: "refused";
-      reason: "fenced" | "closing" | "not_found" | "not_queued" | "retargeted";
+      reason:
+        | "fenced"
+        | "closing"
+        | "not_found"
+        | "not_queued"
+        | "retargeted"
+        | "draft_changed";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | { kind: "edited"; draft: DraftRow; command: JsonObject };
@@ -744,6 +790,8 @@ export function planEdit(
     return { kind: "refused", reason: "not_queued" };
   if (!sameTargets(request, draft))
     return { kind: "refused", reason: "retargeted" };
+  if (request.expectDraft !== undefined && !request.expectDraft(draft))
+    return { kind: "refused", reason: "draft_changed" };
   let built: BuildResult;
   let digest: string;
   try {
@@ -763,6 +811,10 @@ export function planEdit(
       command_digest: digest,
       defaults_revision: built.defaultsRevision ?? draft.defaults_revision,
       defaults_context: built.defaultsContext ?? draft.defaults_context,
+      review_block:
+        built.defaultsReview === undefined
+          ? draft.review_block
+          : reviewBlockOf(built.defaultsReview),
       display_patch: built.displayPatch ?? null,
     },
     command: built.command,
@@ -1048,6 +1100,8 @@ export type SupersedeDecision =
         | "not_supersedable"
         | "key_in_use"
         | "no_base"
+        /** The request's `expectDraft` refused the old draft as it is stored now: nothing is written. */
+        | "draft_changed"
         /**
          * The replacement could not be put in an order that every draft involved can follow (R45, revision 25): it would have to wait
          * for a newer draft (or for one of its own dependants) while drafts older than that one wait for it, or it would stand on
@@ -1122,6 +1176,8 @@ export function decideSupersede(
     old.status === "operation_conflict" ||
     (old.status === "in_flight" && old.review_block !== null);
   if (!supersedable) return { kind: "refused", reason: "not_supersedable" };
+  if (request.expectDraft !== undefined && !request.expectDraft(old))
+    return { kind: "refused", reason: "draft_changed" };
   // The replacement is written under its key and `old` is deleted, so a key that is already a draft's (the old one's included) would
   // lose or overwrite that draft, a frozen in-flight body among them. Refused before anything is changed: neither command, nor their
   // effects, dependencies or versions move.
