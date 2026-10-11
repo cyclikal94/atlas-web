@@ -2,20 +2,26 @@ import { describe, expect, it } from "vitest";
 import type { ProfileRun } from "../../src/fixture/data-harness/profile-page";
 import {
   admission,
+  type Collections,
+  captureDecision,
   compareAndSet,
   complete,
   decide,
   type Envelope,
+  exportDiagnostic,
   exportResults,
   type KeyValue,
   MANUAL_KEY,
   mayClear,
   newEnvelope,
+  nextUnusedRun,
   type Permit,
   PROTOCOL_KEY,
   permitProblem,
   readEnvelope,
+  recoverAbandoned,
   recoverInterrupted,
+  recoveryTarget,
   reserve,
   tabToken,
   takeOver,
@@ -472,5 +478,255 @@ describe("the device page's protocol state", () => {
     expect(tabToken(tabA, make)).toBe("token-1");
     expect(tabToken(tabA, make)).toBe("token-1");
     expect(tabToken(tabB, make)).toBe("token-2");
+  });
+
+  // ---- Revision 4 (review 4 R5, design assessment B1-B6; Q-M1-Q-M5, Q-F1) ------------------------------------------------------------
+  const manualEnvelope = (owner: string, w2: string | null = null) =>
+    newEnvelope({
+      kind: "manual",
+      protocolId: "manual-1",
+      owner,
+      workloadVersion: 1,
+      w2sha256: w2,
+      plan: [],
+      machine: {},
+      now: "t0",
+    });
+  const startManual = (s: KeyValue, owner: string, w2: string | null = null) =>
+    compareAndSet(s, MANUAL_KEY, null, manualEnvelope(owner, w2));
+  const both = (s: KeyValue): Collections => ({
+    protocol: readEnvelope(s, PROTOCOL_KEY),
+    manual: readEnvelope(s, MANUAL_KEY),
+  });
+  const kill = (r: { name: string; run: number }) => killed(r.name, r.run);
+  /** A decision's reason, or what it did instead (always a string, so a wrong action fails the assertion, never a TypeError). */
+  const whyOf = (d: ReturnType<typeof captureDecision>) =>
+    d.action === "refuse" ? d.why : `(${d.action})`;
+  const presentAt = (s: KeyValue, key: string) => {
+    const r = readEnvelope(s, key);
+    expect(r.state, JSON.stringify(r).slice(0, 200)).toBe("present");
+    return r as Extract<ReturnType<typeof read>, { state: "present" }>;
+  };
+
+  it("case (B3): a write of an inconsistent envelope - a duplicate result, a result beside its reservation - is refused and nothing is written", () => {
+    const s = store();
+    expect(startManual(s, "tab-a").ok).toBe(true);
+    const r0 = presentAt(s, MANUAL_KEY);
+    const one = complete(
+      reserve(r0.envelope, 0, { name: "W3", run: 1 }, "page", "t1"),
+      result("W3", 1),
+      "t2",
+    );
+    expect(compareAndSet(s, MANUAL_KEY, r0.raw, one).ok).toBe(true);
+    const r1 = presentAt(s, MANUAL_KEY);
+    // The R5a schedule: the same identity reserved and stored again after its interrupted attempt was recorded.
+    const again = complete(
+      reserve(r1.envelope, 1, { name: "W3", run: 1 }, "page", "t3"),
+      result("W3", 1),
+      "t4",
+    );
+    const refused = compareAndSet(s, MANUAL_KEY, r1.raw, again);
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? "" : refused.error).toMatch(
+      /inconsistent \(the result W3#1 is stored twice\): nothing was written/,
+    );
+    expect(s.map.get(MANUAL_KEY)).toBe(r1.raw);
+  });
+
+  it("case (B3): the next unused manual run skips every recorded and reserved run of that workload, gaps included", () => {
+    expect(nextUnusedRun(null, "W3")).toBe(1);
+    const e = {
+      ...manualEnvelope("tab-a"),
+      runs: [result("W3", 1), result("W3", 3), result("W4", 2)],
+      next: 3,
+      reserved: { name: "W3", run: 2, index: 3, at: "t", page: "p" },
+    } as Envelope;
+    expect(nextUnusedRun(e, "W3")).toBe(4);
+    expect(nextUnusedRun(e, "W4")).toBe(1);
+  });
+
+  it("case (B2): recovering a gone tab's manual collection moves it once, records its reserved attempt as ONE killed result in the same write, and keeps its id, results and pin", () => {
+    const s = store();
+    expect(startManual(s, "tab-a", "b".repeat(64)).ok).toBe(true);
+    const r0 = presentAt(s, MANUAL_KEY);
+    const ran = complete(
+      reserve(r0.envelope, 0, { name: "W3", run: 1 }, "page-a", "t1"),
+      result("W3", 1),
+      "t2",
+    );
+    expect(compareAndSet(s, MANUAL_KEY, r0.raw, ran).ok).toBe(true);
+    const r1 = presentAt(s, MANUAL_KEY);
+    const held = reserve(
+      r1.envelope,
+      1,
+      { name: "W2", run: 1 },
+      "page-a",
+      "t3",
+    );
+    expect(compareAndSet(s, MANUAL_KEY, r1.raw, held).ok).toBe(true);
+    const before = presentAt(s, MANUAL_KEY);
+    // Tab B: the target is the manual collection (the only one that needs it), never "nothing is active".
+    const t = recoveryTarget(both(s), "tab-b", "auto");
+    expect(t.ok && t.kind).toBe("manual");
+    const writes: string[] = [];
+    const counting = {
+      ...s,
+      setItem: (k: string, v: string) => {
+        writes.push(k);
+        s.setItem(k, v);
+      },
+    };
+    const moved = compareAndSet(
+      counting,
+      MANUAL_KEY,
+      before.raw,
+      recoverAbandoned(before.envelope, "tab-b", "t4", kill),
+    );
+    expect(moved.ok).toBe(true);
+    expect(writes).toEqual([MANUAL_KEY]);
+    const after = presentAt(s, MANUAL_KEY).envelope;
+    expect(after.protocol_id).toBe("manual-1");
+    expect(after.w2sha256).toBe("b".repeat(64));
+    expect(after.owner).toBe("tab-b");
+    expect(after.reserved).toBeNull();
+    expect(after.runs.map((r) => [r.workload, r.run, r.outcome])).toEqual([
+      ["W3", 1, "admitted"],
+      ["W2", 1, "killed"],
+    ]);
+    expect(after.takeovers).toEqual([{ at: "t4", from: "tab-a", to: "tab-b" }]);
+    // Nothing left to recover: a second recovery cannot add a second killed result.
+    const t2 = recoveryTarget(both(s), "tab-b", "auto");
+    expect(t2.ok).toBe(false);
+    expect(t2.ok ? "" : t2.why).toMatch(/nothing to take over or recover/);
+    expect(recoverAbandoned(after, "tab-b", "t5", kill).runs.length).toBe(2);
+  });
+
+  it("case (B2): the owner's own interrupted attempt is recorded as killed without a take-over; an idle gone tab's collection only moves", () => {
+    const s = store();
+    expect(startManual(s, "tab-a").ok).toBe(true);
+    const r0 = presentAt(s, MANUAL_KEY);
+    const held = reserve(r0.envelope, 0, { name: "W3", run: 1 }, "p", "t1");
+    const own = recoverAbandoned(held, "tab-a", "t2", kill);
+    expect(own.takeovers).toEqual([]);
+    expect(own.runs.map((r) => r.outcome)).toEqual(["killed"]);
+    const idle = recoverAbandoned(r0.envelope, "tab-b", "t3", kill);
+    expect(idle.runs).toEqual([]);
+    expect(idle.takeovers).toEqual([{ at: "t3", from: "tab-a", to: "tab-b" }]);
+  });
+
+  it("case (B1): the recovery target is the named collection, or the ONLY one that needs it; two need a choice, an unreadable one is never guessed past", () => {
+    const s = store();
+    expect(start(s, "tab-a").ok).toBe(true);
+    expect(startManual(s, "tab-a").ok).toBe(true);
+    const two = recoveryTarget(both(s), "tab-b", "auto");
+    expect(two.ok).toBe(false);
+    expect(two.ok ? "" : two.why).toMatch(
+      /two collections can be taken over \(protocol p-1, manual manual-1\): choose one/,
+    );
+    const named = recoveryTarget(both(s), "tab-b", "manual");
+    expect(named.ok && named.key).toBe(MANUAL_KEY);
+    const mine = recoveryTarget(both(s), "tab-a", "protocol");
+    expect(mine.ok ? "" : mine.why).toMatch(
+      /already owns protocol collection p-1/,
+    );
+    expect(recoveryTarget(both(s), "tab-a", "auto").ok).toBe(false);
+    s.map.set(MANUAL_KEY, "{torn");
+    const torn = recoveryTarget(both(s), "tab-b", "auto");
+    expect(torn.ok ? "" : torn.why).toMatch(/manual collection is unreadable/);
+    s.map.delete(MANUAL_KEY);
+    const finished = presentAt(s, PROTOCOL_KEY);
+    s.map.set(
+      PROTOCOL_KEY,
+      JSON.stringify({ ...finished.envelope, terminal: "error", error: "x" }),
+    );
+    const done = recoveryTarget(both(s), "tab-b", "protocol");
+    expect(done.ok ? "" : done.why).toMatch(
+      /is error: there is nothing to take over/,
+    );
+  });
+
+  it("case (B5): a picked capture never replaces a pin silently: another tab's pinned collection, a protocol without W2, another file and two different pins of this tab are refused unless the target is chosen", () => {
+    const H1 = "1".repeat(64);
+    const H2 = "2".repeat(64);
+    const s = store();
+    // No collection: the capture is kept.
+    expect(captureDecision(both(s), "tab-a", H1, "auto").action).toBe("keep");
+    // An idle manual collection that pins nothing does not hold the pick.
+    expect(startManual(s, "tab-b").ok).toBe(true);
+    expect(captureDecision(both(s), "tab-a", H1, "auto").action).toBe("keep");
+    s.map.clear();
+    // Another tab's manual collection pins H1: refused for this tab until a take-over.
+    expect(startManual(s, "tab-b", H1).ok).toBe(true);
+    const foreign = captureDecision(both(s), "tab-a", H1, "auto");
+    expect(whyOf(foreign)).toMatch(
+      /another tab owns manual collection manual-1, which pins a W2 capture/,
+    );
+    // This tab's manual collection pins H1: the same file restores it, another is refused.
+    const restored = captureDecision(both(s), "tab-b", H1, "auto");
+    expect(
+      restored.action === "restore" && restored.restored.map((r) => r.kind),
+    ).toEqual(["manual"]);
+    const other = captureDecision(both(s), "tab-b", H2, "auto");
+    expect(whyOf(other)).toMatch(/pins W2 capture 1{64}/);
+    // And a protocol of this tab pinning H2 beside it: two different pins need a target; the target restores its own and names the other.
+    const p = newEnvelope({
+      kind: "protocol",
+      protocolId: "p-2",
+      owner: "tab-b",
+      workloadVersion: 1,
+      w2sha256: H2,
+      plan: PLAN,
+      machine: {},
+      now: "t0",
+    });
+    expect(compareAndSet(s, PROTOCOL_KEY, null, p).ok).toBe(true);
+    const ambiguous = captureDecision(both(s), "tab-b", H2, "auto");
+    expect(whyOf(ambiguous)).toMatch(/pin different W2 captures/);
+    const chosen = captureDecision(both(s), "tab-b", H2, "protocol");
+    expect(chosen.action).toBe("restore");
+    if (chosen.action === "restore") {
+      expect(chosen.restored.map((r) => r.kind)).toEqual(["protocol"]);
+      expect(chosen.displaced.map((r) => r.kind)).toEqual(["manual"]);
+    }
+    expect(captureDecision(both(s), "tab-b", H1, "protocol").action).toBe(
+      "refuse",
+    );
+    // A protocol without W2 never takes a capture.
+    s.map.clear();
+    const plain = newEnvelope({
+      kind: "protocol",
+      protocolId: "p-3",
+      owner: "tab-b",
+      workloadVersion: 1,
+      w2sha256: null,
+      plan: PLAN,
+      machine: {},
+      now: "t0",
+    });
+    expect(compareAndSet(s, PROTOCOL_KEY, null, plain).ok).toBe(true);
+    const none = captureDecision(both(s), "tab-b", H1, "auto");
+    expect(whyOf(none)).toMatch(/has no W2, and its plan never changes/);
+    s.map.set(MANUAL_KEY, "{torn");
+    expect(captureDecision(both(s), "tab-b", H1, "auto").action).toBe("refuse");
+  });
+
+  it("case (B5): a collection's diagnostic export carries its owner, next attempt and reservation, and an unreadable one its raw text", () => {
+    const s = store();
+    expect(startManual(s, "tab-a").ok).toBe(true);
+    const r0 = presentAt(s, MANUAL_KEY);
+    const held = reserve(r0.envelope, 0, { name: "W3", run: 1 }, "p", "t1");
+    expect(compareAndSet(s, MANUAL_KEY, r0.raw, held).ok).toBe(true);
+    expect(exportDiagnostic(readEnvelope(s, MANUAL_KEY))).toMatchObject({
+      kind: "manual",
+      protocol_id: "manual-1",
+      owner: "tab-a",
+      next: 0,
+      reserved: { name: "W3", run: 1, index: 0 },
+    });
+    s.map.set(MANUAL_KEY, "{torn");
+    expect(exportDiagnostic(readEnvelope(s, MANUAL_KEY))).toMatchObject({
+      raw: "{torn",
+    });
+    expect(exportDiagnostic(readEnvelope(s, PROTOCOL_KEY))).toBeNull();
   });
 });

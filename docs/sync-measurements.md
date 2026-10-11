@@ -27,6 +27,15 @@ is a pass mark, none stands for a device class, and BE-B1 and BE-Q23 remain bloc
 > field of `results.json` and `report.md` by one **projection** of the carried evidence that the validator repeats field for field, and gives the device page **one
 > collector per origin** with owner-only restoration of the pinned capture. Version-1 evidence (every attempt so far) resolves incomplete under version 2: it lacks
 > the support the contract now recomputes from, and stays history, unchanged.
+>
+> **Status after review 4 (revision 4, 10 October 2026).** Review 4 found that a correctly hashed capture that was not a sync page (`null`), or whose 199
+> checklist fields were empty, still made the hand-over complete (R2), and that a manual collection whose tab was lost could not be taken over, cleared or
+> recovered (R5). Revision 4 reads every W2 capture's **contents** with one observer (`scripts/lib/profile-w2-capture.mjs`, used by the writer, the contract
+> and the device validator): a valid sync page whose one batch holding the seeded person is that person and its 199 distinct checklist fields of 100 items and 40
+> checked ids each; the device validator accepts a capture's hash only after certifying it from its hand-over. The device page gives the protocol **and** a
+> manual collection one recorded recovery (take-over or the owner's own), records a reserved attempt once as `killed` and never runs it again, resolves every
+> action against a chosen collection, and stops a run's engine whatever its observation throws. Nothing in the contract's evidence format changed; every
+> historical measurement stays history.
 
 ## Read this first
 
@@ -88,7 +97,57 @@ programme that is merely incomplete or not isolated is a partial hand-over (2 wh
 | C8 | R1: `quotaReserveBytes` (8 MiB) protecting `atlas-auth` | Three pages' stamped requests did not all go out together: 20 of 60 were in flight at once, because another page's requests wait. The `atlas-auth` burst was below what the engines' storage figures resolve. The estimate moves in steps of 4 KiB (Chromium), about 16 KiB (Firefox) and about 1 KiB (WebKit). The derived desktop figure, `max(burst x 4, step x 2)` (an engineering margin, not a measurement), is at most about 150 KB, far below 8 MiB. **The constant is not changed** | Real Safari/iOS estimate behaviour and genuine exhaustion (the roster) |
 | C9 | Matrix §3.6.2/§3.6.3: unresolved leases, waits, give-ups, retirements, yield | Desktop figures with a FIXTURE leader, synthetic delays and a synthetic freeze (P-6 to P-9 in the hand-over). The production 20 s give-up was observed at the bound and never earlier | The production leader (WEB-09b), a real freeze or bfcache (WEB-08c), devices |
 | C10 | R60 follow-up: the healthy-follower reads that `atlas-sync` hints cause | **Every committed sync page posts `data_changed [cache, sync_state]`, and `sync_state` is also the stop-record store**, so a healthy follower re-reads on every leader page: about 11 IndexedDB transactions per page hint (9 of them on `sync_state`), about 12 to 20 ms per hint (p50). A stop-record hint costs one transaction, and a draft or receipt hint 5. The leader's catch-up throughput was unchanged by followers in Chromium; in WebKit it fell from 70 to 52 and 40 pages/s with one and two followers (series marked `(m)`/`(X)`: a signal to re-take, not a finding) | Devices; the production leader (WEB-09b) |
-| C11 | Bundle budgets (OD-2) | One shared ceiling per figure, the signed-in shell's measurement plus 10 %: 241,540 / 7,560 / 92,110 bytes (initial JS gzip / CSS gzip / fonts) from the current candidate's fixture build, 219,582 / 6,873 / 83,736 (revision 1: the device page's lazy W2 route changed the chunk names the fixture entry references; attempt 4 measured 219,586 and the ceiling was 241,545). The production build (107,948 / 6,873 / 83,736) passes it and its own baseline + 10 %. Throttled boot figures are reported below, not judged | Device boot timing (WEB-09d) |
+| C11 | Bundle budgets (OD-2) | One shared ceiling per figure, the signed-in shell's measurement plus 10 %: 241,540 / 7,560 / 92,110 bytes (initial JS gzip / CSS gzip / fonts) from the current candidate's fixture build, 219,582 / 6,873 / 83,736 (revision 1: the device page's lazy W2 route changed the chunk names the fixture entry references; attempt 4 measured 219,586 and the ceiling was 241,545). The production build (107,948 / 6,873 / 83,736) passes it and its own baseline + 10 %. Throttled boot figures are reported below, not judged. **Revision 4: the successor ceiling is owed under FB-20261010 (see "Bundle budgets after FB-20261010" below); 241,540 stays in force here, explicitly provisional** | Device boot timing (WEB-09d); the reasoned successor ceiling (the Air programme's P-1/P-1S); the combined-build remeasurement |
+
+## Bundle budgets after FB-20261010 (revision 4: obligations recorded, ceiling not yet replaced)
+
+Kieran approved **FB-20261010** on 10 October 2026 (`atlas-orchestrator/approval/fixture-budget-20261010.json`, SHA-256
+`7414b09a5fa9dcb094a5e5cbaf4645f24fee413f49999c13a975ac888aa584bc`; hand-off `delivery/handoffs/fixture-budget-20261010.md`, SHA-256
+`d2852ad606f8759f2f41f24043a38df02e6fcb2a77b67ecc859fe769682ec430`) and applied it to WEB-12a as **FB-20261010-WEB12A**
+(`delivery/handoffs/web12a-fixture-budget-20261010.md`, SHA-256 `73cac22e13e30743c6a4b899161d1ffccadae8e12b29ff25b79ed4243619b52f`), then to WEB-08c and
+WEB-14a as **FB-20261010-08C-14A** (`approval/web08c-web14a-fixture-budgets-20261010.json`, SHA-256
+`777f7db96d3c30abd00f6bc9706c2630b3a5d2e4d867d6ad93d04d69914e1223`; hand-off `delivery/handoffs/web08c-web14a-fixture-budgets-20261010.md`, SHA-256
+`8507fa8cee064014c42f39a13c972b2e3aaaec7e32ac93c3b2a33431a110e963`). These later inputs reach this task through the operator addenda of its `.agtx/plan.md`
+(`docs/budget-handoff-dispatch-repair-20261010.md`, SHA-256 `7e337a4f74fb93a2213ab2967ce1c1cadcd4028ea852ee6b8ca5db8f511f88db`), and on 11 October 2026 to
+WEB-08d as **FB-20261011-08D** (`approval/web08d-fixture-budget-20261011.json`, SHA-256 `2006d78812da545b5161a5e74a4f50b88337b5462d505cbc76a38e3fd1bcc2b0`;
+hand-off `delivery/handoffs/web08d-fixture-budget-20261011.md`, SHA-256 `41c1451937d28ffb5d39ca87fcc2ee0a7df447268e2d85158f172cd2ce038173`). Five feature cards
+get one-off, temporary `dist-fixture` re-records, and **WEB-09c owns replacing that temporary policy with a reasoned size budget**. There is no universal correct
+byte count and no demonstrated performance cliff at the old ceiling; the fixture is a proxy for the signed-in shell.
+
+| Build (fixture initial JS gzip) | Measured | Ceiling it is held to | Status |
+| --- | --- | --- | --- |
+| WEB-09a accepted base / OD-2 measurement (revision 1) | 219,582 | 241,540 (= 219,582 x 1.1, OD-2) | the current `perf-budget.json` budget and fixture baseline of THIS branch |
+| Accepted main as merged into this branch (`5528137`), and this branch's revision-4 candidate | 240,479 (CSS 7,183, fonts 83,736; `node scripts/check-budgets.mjs dist-fixture`, 10 October 2026) | 241,540 | passes with 1,061 bytes of headroom; the growth since 219,582 is merged main's (the device page's modules are lazy and not in the initial chunk) |
+| WEB-13a candidate (FB-20261010) | 243,097 (CSS 7,240, fonts 83,736) | 267,406 temporary (floor of 243,097 x 1.10) | **not in this branch**: not measured or profiled here |
+| WEB-12a candidate (FB-20261010-WEB12A) | 241,870 (CSS 7,059, fonts 83,736) | 266,057 temporary (floor of 241,870 x 1.10) | **not in this branch**: not measured or profiled here |
+| WEB-08c candidate (FB-20261010-08C-14A) | 241,970 (CSS 7,227, fonts 83,736; its production entry 108,620) | 266,167 temporary (floor of 241,970 x 1.10) | **not in this branch**: not measured or profiled here |
+| WEB-14a candidate (FB-20261010-08C-14A) | 243,565 (CSS 7,193, fonts 83,736; its production entry 109,128) | 267,921 temporary (floor of 243,565 x 1.10) | **not in this branch**: not measured or profiled here |
+| WEB-08d candidate (FB-20261011-08D) | 244,712 (CSS 7,191, fonts 83,736; its production entry 108,567, production policy unchanged) | 269,183 temporary (floor of 244,712 x 1.10) | **not in this branch**: not measured or profiled here; its author attributes 4,234 B gzip to the device-naming/label feature (`NameDeviceDialog.tsx`, `labels.ts`, `label-copy.ts`) |
+
+The branch figures are **not additive**: each is a whole bundle of a different branch, so neither their sum nor either one is a measurement of the combined
+application. This branch contains accepted main as merged at `5528137` and WEB-09c's own (lazy, fixture-only) device-page modules, not the feature code of WEB-08c, WEB-08d, WEB-12a, WEB-13a or WEB-14a. The figures of those five cards are their authors' records (WEB-08d's also measured by the operator), cited from the decisions above, not re-measured here.
+
+What WEB-09c owes, and where it is done:
+
+1. **The reasoned successor ceiling** comes from the finite Air programme (P-1 bundle attribution of both builds; P-1S: 24 cold Chromium shell runs over two builds,
+   two viewports, two networks, three runs each), on the frozen candidate. It must report size beside the observed loading and rendering, with the candidate,
+   build, engine, network and CPU conditions, the run-to-run variability and the fixture-only overhead (the fixture entry minus the production entry), all labelled
+   desktop/emulated. OD-2's measured size plus 10 % stays a permitted starting rule, but the hand-over must say why the proposed absolute ceiling and its headroom
+   are reasonable against those measurements, the approved functionality and expected growth (and why 10 % is kept, if it is); a renamed current-size-plus-10 %
+   field is not an answer, no universal performance target is claimed and no unmeasured responsiveness is asserted. Where the evidence cannot support more, the
+   ceiling stays explicitly provisional with a named follow-up. Supported-device boot acceptance remains WEB-09d's.
+2. **Coverage gap, stated:** the feature code of WEB-08c, WEB-08d, WEB-12a, WEB-13a and WEB-14a is not in the measured branch. The combined build is NOT measured here. **Obligation for the
+   integration of these branches:** after they are combined, rebuild `dist-fixture` and `dist`, run `node scripts/check-budgets.mjs dist-fixture` and
+   `node scripts/check-budgets.mjs dist` and the P-1 attribution (`node scripts/profile-sync.mjs --evidence <fresh dir> --only bundle`) on that combined
+   candidate, and decide the shared ceiling from that measurement (an explicit decision for any further increase, with the growth attributed). This creates
+   no dependency between the active cards and authorises no merge.
+3. **Budget metadata at integration:** WEB-08c, WEB-08d, WEB-12a, WEB-13a and WEB-14a record their temporary ceilings in main's budget file (WEB-08d's,
+   WEB-12a's and WEB-13a's decisions name `provisional_by_build["dist-fixture"]`; WEB-08c and WEB-14a use the same re-record mechanism); this
+   branch's checker (`scripts/check-budgets.mjs`, OD-2) REFUSES a file that still holds `provisional` or `provisional_by_build`, and replaces both with one
+   shared `budget` and `budget_basis`. When the branches meet, that conflict must be reconciled deliberately into the shared budget: neither branch's file may
+   silently restore an older, smaller ceiling or carry a temporary one forward unexamined.
+4. **Preserved:** the production baseline (`baseline.dist`) and its regression guard (the build's own baseline + 10 %), the shared CSS and font ceilings, the
+   tolerance and the checker's assertions. Future increases need attributed growth and an explicit decision, never an automatic reset per card.
 
 ## Measured on desktop
 
@@ -297,6 +356,9 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
 * memory: every sample is kept, the peak is the largest of them, the processes at the peak add up to it, the top-level copies and the P-11/P-W2 series are the
   per-run figures in run order, and the heap peak is the largest heap sample;
 * W2: the captured bytes are parsed and their phase, batches, changes and shapes recomputed against the seeded person, so metadata cannot make a small batch dense;
+  revision 4: the bytes must also BE the seed (a valid sync page whose one batch holding the seeded person is that person and its 199 distinct checklist fields of
+  100 items labelled "x" and 40 checked ids each, 200 changes; the seeding's field count and value size are the observed ones; both limits show the same seeded
+  batch), and an engine's device cells depend on its limit-1 capture being valid;
   the bound and the limits ladder have their recorded forms; the live application and the cold outcomes agree with their copies;
 * P-4: each sync-page total is the sum of its segments (a draft total at least theirs); the shell's medians and every derived figure follow from its runs;
 * the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures;
@@ -371,3 +433,6 @@ linkage, so the evidence contract resolves none of its cells, and its memory is 
 Review 3 found that observation contents and published figures were still not part of completeness (R2) and that the device page's ownership did not cover manual
 runs or a lost tab's capture (R5). Revision 3 corrected both (`.agtx/execute.md`); the complete desktop programme then runs on the MacBook Air under the
 operator's hand-over of 10 October 2026, after an independent source assessment. Nothing measured so far is evidence under contract version 2.
+
+Review 4 found that a capture's contents (a non-object page, empty checklists) were still not part of completeness (R2) and that a manual collection had no
+recovery once its tab was lost (R5). Revision 4 corrected both (`.agtx/execute.md`); the Air programme still runs only after an independent source assessment.

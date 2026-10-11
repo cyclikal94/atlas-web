@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agtx": {
+      "args": [
+        "mcp-serve",
+        "/Users/kieran/atlas/atlas-web"
+      ],
+      "command": "/Users/kieran/.local/bin/agtx"
+    }
+  }
+}

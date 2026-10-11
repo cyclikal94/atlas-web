@@ -79,45 +79,89 @@ function plan() {
   );
 }
 
-/** A real-shaped `/sync` delta page holding the server-maximal dense batch: the person and 199 dense checklist fields. */
-export function captureBody(engine, limit, person = PERSON) {
-  const field = (i) => ({
-    kind: "upsert",
-    resource: {
-      id: `f-${engine}-${limit}-${String(i).padStart(3, "0")}`,
-      kind: "field",
-      parent_id: person,
-      value: {
-        kind: "checklist",
-        items: [{ id: `i-${i}`, text: `item ${i}`, checked: i % 2 === 0 }],
-      },
-    },
-  });
-  const dense = {
-    revision: 40 + limit,
-    changes: [
-      { kind: "upsert", resource: { id: person, kind: "person" } },
-      ...Array.from({ length: 199 }, (_, i) => field(i)),
-    ],
+/** A UUID of its own for every tag (version-4 layout, lower-case hex), reproducible. */
+const uuidOf = (tag) => {
+  const h = sha(tag);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+};
+/** A projection as the released backend renders one in `/sync` (every field the contract requires, and the policy version). */
+const projection = (id, kind, parentId, label, value, policyVersion) => ({
+  id,
+  kind,
+  parent_id: parentId,
+  label,
+  value,
+  version: 1,
+  policy_version: policyVersion,
+  can_edit: false,
+  archived: false,
+});
+/**
+ * The writer's dense checklist (tests/integration/integration.profile-sync.spec.ts `denseChecklist`), written out again: 100 items of a
+ * fresh UUID and the label "x", the first 40 of them checked; keys in the order the released backend sends them.
+ */
+function denseChecklist(tag) {
+  const items = Array.from({ length: 100 }, (_, j) => ({
+    id: uuidOf(`${tag}|item|${j}`),
+    label: "x",
+  }));
+  return {
+    checked: items.slice(0, 40).map((item) => item.id),
+    items,
+    kind: "checklist",
   };
-  // At limit 80 the page also carries an earlier, ordinary batch (a removal), so the two captures differ in shape as real ones can.
-  const batches =
-    limit === 80
-      ? [
-          {
-            revision: 39,
-            changes: [
-              { kind: "remove", id: `old-${engine}`, resource_kind: "field" },
-            ],
-          },
-          dense,
-        ]
-      : [dense];
+}
+const denseBatches = new Map();
+/**
+ * The server-maximal dense batch of one engine (revision 4, review 4 R2 and design assessment A3: the writer's real shape, not a tag):
+ * one revision publishing the seeded person and its 199 checklist fields shared with the reader, 200 changes. The same batch at both
+ * limits; every engine's has ids and a revision of its own.
+ */
+function denseBatch(engine, person) {
+  const key = `${engine}|${person}`;
+  if (!denseBatches.has(key))
+    denseBatches.set(key, {
+      revision: 203 + ENGINES.indexOf(engine),
+      changes: [
+        {
+          kind: "upsert",
+          resource: projection(person, "person", null, "W2 person", null, 4),
+        },
+        ...Array.from({ length: 199 }, (_, i) => ({
+          kind: "upsert",
+          resource: projection(
+            uuidOf(`${engine}|${person}|field|${i}`),
+            "field",
+            person,
+            "Checklist",
+            denseChecklist(`${engine}|${person}|field|${i}`),
+            1,
+          ),
+        })),
+      ],
+    });
+  return denseBatches.get(key);
+}
+/** The byte size of one dense checklist value, as the writer measures its own (`Buffer.byteLength(JSON.stringify(value))`). */
+export const DENSE_VALUE_BYTES = Buffer.byteLength(
+  JSON.stringify(denseChecklist("size")),
+);
+/**
+ * A real-shaped `/sync` delta page read from the cursor before the grant: at limit 1 the dense batch alone (more to come), at limit 80 the
+ * dense batch and a later ordinary batch (a removal), so the two captures differ in pagination as real ones can while the seeded batch
+ * is the same.
+ */
+export function captureBody(engine, limit, person = PERSON) {
+  const dense = denseBatch(engine, person);
+  const later = {
+    revision: dense.revision + 1,
+    changes: [{ kind: "remove", id: uuidOf(`${engine}|later-removal`) }],
+  };
   return JSON.stringify({
     phase: "delta",
-    batches,
-    next_cursor: `cursor-${engine}-${limit}`,
-    has_more: false,
+    batches: limit === 80 ? [dense, later] : [dense],
+    next_cursor: `d1.${engine}.limit-${limit}.0000000000cb`,
+    has_more: limit !== 80,
   });
 }
 /** The integration writer's batch shape (tests/integration/integration.profile-sync.spec.ts `shapeOf`), written out again. */
@@ -1185,7 +1229,7 @@ export function writeProgramme(
         reader: "carol (this page)",
         person: PERSON,
         dense_fields: 199,
-        value_bytes: 7_400,
+        value_bytes: DENSE_VALUE_BYTES,
         seeding_ms: 12_345,
         grant_policy_version: 3,
         revoke_status: 200,

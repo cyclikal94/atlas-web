@@ -38,20 +38,33 @@ under the same lock. So:
 
 * while a protocol is active (not yet complete), **every manual run is refused**, in another tab and in the owning tab alike, and nothing is run or written;
 * while a manual run is in progress, or a manual attempt was left reserved by a closed tab, a protocol does not start (open the manual run's link again in its tab,
-  or clear, first);
+  or, if that tab is gone, **Take over or recover** the manual collection, which records the attempt as `killed`; then the protocol starts);
 * of two tabs started at the same moment, exactly one collects; the other says "another live page is collecting on this origin" and writes nothing;
 * a duplicate of a collecting tab (browsers copy `sessionStorage` when a tab is duplicated) only reads;
 * a browser without Web Locks collects and changes nothing (the page cannot establish that it is the only collector, so it never assumes it);
-* an unknown workload, a run number that is not one, or a run already recorded is refused before anything is reserved;
+* an unknown workload, a run number that is not one, or a run already recorded is refused before anything is reserved; a manual link reloaded after its
+  attempt was reserved records that attempt once as `killed` and runs nothing (revision 4): the menu's links always name an unused run number;
 * a result is stored only into the reservation its page made: if the collection was cleared, re-created or taken over while the run was going on, the result is
   shown on that page and **not** stored.
 
-**A lost owning tab.** If the owning tab is lost for good (closed, crashed, the device restarted), open `/profile-harness` in a new tab and tap **Take over the
-active collection**. A take-over is refused while the collection's own page is still alive. The take-over is recorded in the results, and every earlier attempt
-stays as it was (an attempt the lost tab had reserved is recorded once as `killed` by the next protocol load). The W2 capture was kept only in the lost tab: the
-page then asks you to **choose the same capture file again**. Only the new owner can restore it, and only the very file whose SHA-256 the collection pins is
-accepted ("W2 capture restored for collection …"); any other file, or another tab, changes nothing. Then open the protocol link (with the same `w2sha256`) to go on.
-If the page says a capture was written but did not read back, what the tab keeps is uncertain: choose the file again before a W2 run.
+**A lost owning tab** (revision 4: the protocol **and** a manual collection). If the owning tab is lost for good (closed, crashed, the device restarted), open
+`/profile-harness` in a new tab and tap **Take over or recover the selected collection**. **Collection** chooses which stored collection an action is for; its
+default takes the only one that needs it, and when a protocol and a manual collection both belong to a lost tab the page asks you to choose one and take them over
+one at a time. A take-over is refused while the collection's own page is still alive (a page that collected keeps the lock until it is navigated away or closed).
+It is one recorded write: the collection moves to this tab with its id, every earlier result and its W2 pin unchanged, and an attempt the lost tab had reserved is
+recorded, in the same write, once as `killed` (it is never run again under that identity; a further manual run takes an unused run number). Nothing runs during a
+take-over. The same button records an interrupted attempt of this tab's own collection (its page ended) without a take-over. The W2 capture was kept only in the
+lost tab: the page then asks you to **choose the same capture file again**. Only the owner can restore it, and only the very file whose SHA-256 the collection pins
+is accepted ("W2 capture restored for collection …"); any other file, or another tab, changes nothing. If this tab owns two collections that pin different
+captures, choose the one you are restoring with **Collection** (the page says which other collection's capture this tab no longer keeps). Then open the
+collection's link (with the same `w2sha256`) to go on. If the page says a capture was written but did not read back, what the tab keeps is uncertain: choose the
+file again before a W2 run.
+
+**Copying and clearing** (revision 4). **Copy results JSON** copies the chosen collection: a protocol's results file, or a manual collection's diagnostic export
+(its runs with its owner, next attempt and reservation: never a results file). **Copy diagnostic snapshot** copies both collections' raw records and this page's
+state. What is copied is also shown in the box under the buttons, so a refused clipboard loses nothing. **Clear results** clears the chosen collection (both by
+default), refuses one that another tab owns or that holds an attempt in progress, shows what it removed in the box first, and says exactly which collection it
+could not remove if the storage refuses. Copy before you clear.
 
 What it does **not** do, and the figures must not be read as if it did:
 
@@ -86,8 +99,11 @@ WEB-09c measured on has **no** `mkcert` and **no** Caddy (the operator installs 
 ## W2: the captured batch
 
 W2 is BE-B1 3(b) and BE-Q23 M3's server-reachable dense batch (one batch of 200 changes, about 1.5 MB). The hand-over carries it:
-`handoff/fixtures/W2-captured.<engine>.limit-1.json`, with their SHA-256 in `handoff/fixtures/W2-hashes.json`. Any one of the limit-1 captures will do; the
-validator accepts any hash listed in `W2-hashes.json`.
+`handoff/fixtures/W2-captured.<engine>.limit-1.json`, with their SHA-256 in `handoff/fixtures/W2-hashes.json`. Any one of the limit-1 captures will do. The
+validator accepts a hash listed in `W2-hashes.json` only after it has **certified** that capture from the hand-over that lists it (revision 4): the bytes are in
+the hand-over's `fixtures/` and `evidence/w2/`, its `P-W2 capture` row records that hash with the seeded person, and the bytes are the seeded dense batch (a sync
+page whose one batch holding that person is the person and its 199 distinct checklist fields of 100 items labelled "x" with 40 checked ids each:
+`scripts/lib/profile-w2-capture.mjs`). So give `--w2-hashes` the hand-over's own `fixtures/W2-hashes.json`; a copy of that file anywhere else certifies nothing.
 
 1. Copy the chosen capture onto the device (AirDrop, a USB transfer or `adb push` into Downloads).
 2. Open `/profile-harness` in the tab (or installed app) that will run the protocol. Under **W2 capture**, choose the file. The page shows
@@ -131,7 +147,8 @@ only from the pinned file, clear and delete serialised, illegal identities refus
    and written count; W5 makes no request and commits nothing; a killed attempt measured nothing). A missing figure is an explicit `null`. A W7 control
    fulfils its control only when it was **refused**: an admitted, timed-out, failed or killed control stays in the file and is reported as `FAILED CONTROL`.
    What a run is expected to do comes from the workload, never from the file. A W2 run is checked against `W2-hashes.json` and cannot be validated without it;
-   a W2 capture whose bytes are not the ones the protocol names is an `error` run and is not processed.
+   a W2 capture whose bytes are not the ones the protocol names is an `error` run and is not processed. Revision 4: a listed hash counts only for a capture the
+   hand-over certifies (see "W2: the captured batch"); a limit-80 capture is never the device page's W2.
 6. Tap **Delete profiling databases** to remove the throw-away databases from the device.
 
 ## Multi-tab runs (H5) and the contention items P-6 to P-9

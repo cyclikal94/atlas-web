@@ -22,6 +22,14 @@
  * results, terminal and take-overs agree).
  *
  * A results file is the envelope's runs with its identity (schema 2): one `protocol_id` on every run, every (workload, run) once.
+ *
+ * Revision 4 (review 4 R5, design assessment B1-B6): BOTH collections have a recovery lifecycle. `recoveryTarget` resolves which stored
+ * collection an operator's action is for (an explicit target, or the only one that needs it; never a fixed protocol-first choice);
+ * `recoverAbandoned` is the one recovery transition for either kind: the attempt a lost or reloaded page left reserved becomes ONE
+ * `killed` result, and a collection owned by a gone tab moves to this tab with a recorded take-over, in the same write; the attempt is
+ * never run again under its identity. `captureDecision` resolves a picked capture against every collection that pins one, so neither
+ * pin is ever replaced silently. `compareAndSet` refuses to store an envelope that breaks the structural invariants, so no transition
+ * (a duplicate result included) can write an inconsistent record. `nextUnusedRun` picks a manual run number nobody holds.
  */
 import type { ProfileRun } from "./profile-page";
 
@@ -215,6 +223,14 @@ export function compareAndSet(
       ok: false,
       error:
         "the stored protocol changed since this page read it (another tab, a clear or a take-over): nothing was written",
+    };
+  // What is written must be a consistent envelope itself (revision 4, B3): a transition that would store a duplicate result, a result
+  // outside its reservation or any other inconsistency is refused before the write, never stored and found corrupt afterwards.
+  const problem = structuralProblem(next);
+  if (problem)
+    return {
+      ok: false,
+      error: `the collection this page would store is inconsistent (${problem}): nothing was written`,
     };
   try {
     store.setItem(key, JSON.stringify(next));
@@ -450,7 +466,7 @@ export function admission(
   )
     return {
       ok: false,
-      why: `a manual attempt (${manual.envelope.reserved.name} run ${manual.envelope.reserved.run}) is reserved: let its page record it (or reopen its link in its tab), or clear, before a protocol starts`,
+      why: `a manual attempt (${manual.envelope.reserved.name} run ${manual.envelope.reserved.run}) is reserved: let its page record it (or reopen its link in its tab); if its tab is gone, "Take over or recover" records it as killed. Then a protocol can start`,
     };
   return { ok: true };
 }
@@ -474,4 +490,209 @@ export function mayClear(
       why: "an attempt is in progress: wait for it to be recorded",
     };
   return { ok: true, why: "" };
+}
+
+/** The smallest run number of `name` that no stored result and no reservation of this collection holds (manual URLs allow gaps). */
+export function nextUnusedRun(e: Envelope | null, name: string): number {
+  const held = new Set(
+    (e?.runs ?? []).filter((r) => r.workload === name).map((r) => r.run),
+  );
+  if (e?.reserved && e.reserved.name === name) held.add(e.reserved.run);
+  let run = 1;
+  while (held.has(run)) run += 1;
+  return run;
+}
+
+/**
+ * The one recovery transition, for either kind of collection (revision 4, review 4 R5, B2): the attempt left reserved (its page was lost,
+ * reloaded or could not store a result) becomes exactly one `killed` result with its reservation's identity, and a collection owned by
+ * another (gone) tab moves to `owner` with a recorded take-over, both in the SAME write. The owner's own interrupted attempt is recorded
+ * without a take-over. Nothing else changes: the collection id, its results, its plan and its capture pin stay, and no workload runs.
+ */
+export function recoverAbandoned(
+  e: Envelope,
+  owner: string,
+  now: string,
+  killed: (reserved: Reservation) => ProfileRun,
+): Envelope {
+  const recovered = e.reserved
+    ? recoverInterrupted(e, killed(e.reserved), now)
+    : e;
+  return e.owner === owner ? recovered : takeOver(recovered, owner, now);
+}
+
+/** Which collection an operator's action is for: one of them by name, or `auto` (the only one the action can apply to). */
+export type Target = "auto" | "protocol" | "manual";
+export interface Collections {
+  protocol: Read;
+  manual: Read;
+}
+export const KEY_OF = { protocol: PROTOCOL_KEY, manual: MANUAL_KEY } as const;
+type Present = Extract<Read, { state: "present" }>;
+export type Resolved =
+  | {
+      ok: true;
+      kind: "protocol" | "manual";
+      key: string;
+      read: Present;
+    }
+  | { ok: false; why: string };
+
+/** Whether a stored collection needs recovery by `owner`: it is unfinished, and either another tab owns it or it holds a reservation. */
+const needsRecovery = (read: Read, owner: string): boolean =>
+  read.state === "present" &&
+  !read.envelope.terminal &&
+  (read.envelope.owner !== owner || read.envelope.reserved !== null);
+
+/**
+ * The collection a take-over or recovery is for (revision 4, B1): the named one, or with `auto` the ONLY stored collection that needs it;
+ * two candidates need an explicit choice (one transfer at a time), and an unreadable one is never guessed past.
+ */
+export function recoveryTarget(
+  c: Collections,
+  owner: string,
+  target: Target,
+): Resolved {
+  const kinds =
+    target === "auto" ? (["protocol", "manual"] as const) : [target];
+  for (const kind of kinds) {
+    const read = c[kind];
+    if (read.state === "corrupt")
+      return {
+        ok: false,
+        why: `the stored ${kind} collection is unreadable (${read.error}); copy it (diagnostic snapshot), then clear it explicitly`,
+      };
+  }
+  if (target !== "auto") {
+    const read = c[target];
+    if (read.state !== "present")
+      return { ok: false, why: `no ${target} collection is stored` };
+    if (read.envelope.terminal)
+      return {
+        ok: false,
+        why: `${target} collection ${read.envelope.protocol_id} is ${read.envelope.terminal}: there is nothing to take over`,
+      };
+    if (!needsRecovery(read, owner))
+      return {
+        ok: false,
+        why: `this tab already owns ${target} collection ${read.envelope.protocol_id}, and it holds no interrupted attempt`,
+      };
+    return { ok: true, kind: target, key: KEY_OF[target], read };
+  }
+  const candidates = (["protocol", "manual"] as const).filter((kind) =>
+    needsRecovery(c[kind], owner),
+  );
+  if (candidates.length === 0)
+    return {
+      ok: false,
+      why: "nothing to take over or recover: no stored collection is owned by another tab or holds an interrupted attempt",
+    };
+  if (candidates.length > 1)
+    return {
+      ok: false,
+      why: `two collections can be taken over (${candidates
+        .map((k) => `${k} ${(c[k] as Present).envelope.protocol_id}`)
+        .join(
+          ", ",
+        )}): choose one with "Collection", and take them over one at a time`,
+    };
+  const kind = candidates[0] as "protocol" | "manual";
+  return { ok: true, kind, key: KEY_OF[kind], read: c[kind] as Present };
+}
+
+/** What picking a capture file with SHA-256 `sha256` may do, given every stored collection that pins a capture. */
+export type CaptureDecision =
+  | { action: "keep" }
+  | {
+      action: "restore";
+      restored: Array<{ kind: "protocol" | "manual"; envelope: Envelope }>;
+      displaced: Array<{ kind: "protocol" | "manual"; envelope: Envelope }>;
+    }
+  | { action: "refuse"; why: string };
+
+/**
+ * A picked capture against every unfinished collection whose capture matters (revision 4, R5b/B5): the active protocol (it pins one, or
+ * none: its plan never changes) and a manual collection that pins one. Another tab's pinned collection is restored only by its owner (take
+ * it over first); a file that is not a collection's pin never replaces it. When two collections of this tab pin DIFFERENT captures, only
+ * an explicit target restores one of them, and the other is reported as no longer kept in this tab: no pin is ever replaced silently.
+ */
+export function captureDecision(
+  c: Collections,
+  owner: string,
+  sha256: string,
+  target: Target,
+): CaptureDecision {
+  for (const kind of ["protocol", "manual"] as const) {
+    const read = c[kind];
+    if (read.state === "corrupt")
+      return {
+        action: "refuse",
+        why: `the stored ${kind} collection is unreadable (${read.error}); copy it, then clear it explicitly`,
+      };
+  }
+  const pinned = (["protocol", "manual"] as const).flatMap((kind) => {
+    const read = c[kind];
+    if (read.state !== "present" || read.envelope.terminal) return [];
+    if (kind === "manual" && read.envelope.w2sha256 === null) return [];
+    return [{ kind, envelope: read.envelope }];
+  });
+  const restored: Array<{ kind: "protocol" | "manual"; envelope: Envelope }> =
+    [];
+  const displaced: typeof restored = [];
+  for (const p of pinned) {
+    const name = `${p.kind} collection ${p.envelope.protocol_id}`;
+    const chosen = target === "auto" || target === p.kind;
+    if (p.envelope.owner !== owner) {
+      if (chosen)
+        return {
+          action: "refuse",
+          why: `another tab owns ${name}, which pins a W2 capture: only its owner (or this tab after a recorded take-over) restores it`,
+        };
+      continue;
+    }
+    if (p.envelope.w2sha256 === null) {
+      if (chosen)
+        return {
+          action: "refuse",
+          why: `${name} has no W2, and its plan never changes after it starts`,
+        };
+      continue;
+    }
+    if (p.envelope.w2sha256 === sha256) restored.push(p);
+    else if (chosen)
+      return {
+        action: "refuse",
+        why:
+          target === "auto" && pinned.length > 1
+            ? `this tab's collections pin different W2 captures (${pinned.map((x) => `${x.kind} ${x.envelope.w2sha256 ?? "none"}`).join(", ")}): choose the collection whose capture this is with "Collection"; no pin is replaced silently`
+            : `${name} pins W2 capture ${p.envelope.w2sha256}, and its capture never changes after it starts (this file's SHA-256 is ${sha256})`,
+      };
+    else displaced.push(p);
+  }
+  if (target !== "auto" && !restored.some((r) => r.kind === target))
+    return {
+      action: "refuse",
+      why: `no unfinished ${target} collection of this tab pins a W2 capture to restore`,
+    };
+  return restored.length === 0 && displaced.length === 0
+    ? { action: "keep" }
+    : { action: "restore", restored, displaced };
+}
+
+/** A stored collection as a diagnostic (revision 4, B5): its results with its owner, next attempt and reservation; never a results file. */
+export function exportDiagnostic(read: Read) {
+  if (read.state === "absent") return null;
+  if (read.state === "corrupt")
+    return { unreadable: read.error, raw: read.raw };
+  const e = read.envelope;
+  return {
+    ...exportResults(e),
+    owner: e.owner,
+    next: e.next,
+    reserved: e.reserved,
+    note:
+      e.kind === "manual"
+        ? "a manual collection: diagnostic runs, not a protocol's results file"
+        : "a protocol's state; its results file is the protocol export",
+  };
 }

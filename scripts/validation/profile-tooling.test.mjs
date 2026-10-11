@@ -2399,6 +2399,29 @@ test("case (E7): a run's memory figures are one observation: the peak is its lar
   ]);
 });
 
+/** A package laid out as a hand-over (fixtures/ beside the carried evidence) that certifies `engine`'s limit-1 capture; returns its W2-hashes.json. */
+const certifyingPackage = (t, dir, engine) => {
+  const name = `W2-captured.${engine}.limit-1.json`;
+  const at = scratch(t);
+  mkdirSync(join(at, "fixtures"), { recursive: true });
+  mkdirSync(join(at, "evidence/w2"), { recursive: true });
+  cpSync(join(dir, "w2", name), join(at, "fixtures", name));
+  cpSync(join(dir, "w2", name), join(at, "evidence/w2", name));
+  cpSync(join(dir, "values.jsonl"), join(at, "evidence/values.jsonl"));
+  const list = join(at, "fixtures/W2-hashes.json");
+  writeFileSync(
+    list,
+    JSON.stringify({ [name]: sha(readFileSync(join(dir, "w2", name))) }),
+  );
+  return list;
+};
+/** Every cell of one engine's device stage (its results file and its 39 runs), as the contract lists them. */
+const deviceIds = (engine) =>
+  contract
+    .requiredCells([engine])
+    .filter((c) => c.kind === "device-file" || c.kind === "device-run")
+    .map((c) => c.id);
+
 test("case (E8): a W2 capture is checked from its bytes: small or other-person bytes under dense metadata, a wrong phase, a missing person, a malformed bound or limits ladder are refused", (t) => {
   const capture = (engine, limit) =>
     `w2/W2-captured.${engine}.limit-${limit}.json`;
@@ -2438,8 +2461,9 @@ test("case (E8): a W2 capture is checked from its bytes: small or other-person b
       "a small batch under metadata claiming 200 changes (rehashed)",
       (dir) => replaceBytes(dir, "chromium", 80, small),
       {
+        // Revision 4 (labelled adaptation of the revision-3 pattern; same intent, the reader's new wording): the seeded batch is not the seed.
         "P-W2 capture limit 80[chromium]":
-          /does not follow from the captured bytes.*no batch of 199|no batch of 199/,
+          /lacks projection fields.*holds 1 changes, not the seed's 200.*holds 0 distinct fields of the seeded person.*does not follow from the captured bytes/,
       },
     ],
     [
@@ -2453,7 +2477,7 @@ test("case (E8): a W2 capture is checked from its bytes: small or other-person b
         ),
       {
         "P-W2 capture limit 80[firefox]":
-          /no batch of 199 dense checklists with the seeded person/,
+          /no batch holds the seeded person: the capture is not the seeded dense batch/,
       },
     ],
     [
@@ -2467,7 +2491,9 @@ test("case (E8): a W2 capture is checked from its bytes: small or other-person b
             .captureBody("webkit", 80)
             .replace('"phase":"delta"', '"phase":"snapshot"'),
         ),
-      { "P-W2 capture limit 80[webkit]": /phase snapshot, not a delta page/ },
+      {
+        "P-W2 capture limit 80[webkit]": /phase "snapshot", not a delta page/,
+      },
     ],
     [
       "the recorded shape altered while the bytes are the dense batch (metadata only)",
@@ -2489,9 +2515,18 @@ test("case (E8): a W2 capture is checked from its bytes: small or other-person b
         }),
       {
         "P-W2 capture limit 1[chromium]":
-          /seeded person's identity is not recorded/,
+          /seeded person's identity is not a recorded UUID/,
         "P-W2 capture limit 80[chromium]":
-          /seeded person's identity is not recorded/,
+          /seeded person's identity is not a recorded UUID/,
+        // Revision 4 (A4): without its seeded person the limit-1 capture is not certified, so neither are the protocol's W2 runs of it.
+        ...Object.fromEntries(
+          deviceIds("chromium").map((id) => [
+            id,
+            id.startsWith("device page results")
+              ? /limit-1 W2 capture is not a valid W2 capture/
+              : /results file is refused/,
+          ]),
+        ),
       },
     ],
     [
@@ -2516,6 +2551,768 @@ test("case (E8): a W2 capture is checked from its bytes: small or other-person b
     ],
   ]);
   void device;
+});
+
+// ---- Revision 4 (review 4 R2; design assessment A1-A6, Q-C1-Q-C6): a W2 capture is valid for its CONTENTS ---------------------------------
+const W2_ENGINES = ["chromium", "firefox", "webkit"];
+const W2_COMBOS = W2_ENGINES.flatMap((engine) =>
+  [1, 80].map((limit) => [engine, limit]),
+);
+const capturePath = (dir, engine, limit) =>
+  join(dir, `w2/W2-captured.${engine}.limit-${limit}.json`);
+/** The integration writer's generic batch statistics (`shapeOf`), written out again here. */
+const statsOf = (batch, person) => ({
+  changes: batch.changes.length,
+  checklist_upserts: batch.changes.filter(
+    (c) =>
+      c?.kind === "upsert" &&
+      c.resource?.kind === "field" &&
+      c.resource.value?.kind === "checklist",
+  ).length,
+  person_ancestor: batch.changes.some(
+    (c) => c?.kind === "upsert" && c.resource?.id === person,
+  ),
+});
+/** The device page's file and binder of `engine` re-pointed at capture `hash`, so a stale hash can never be what rejects a variant. */
+const rebind = (dir, engine, hash) => {
+  const file = join(dir, `device-page/results.${engine}.json`);
+  const v = JSON.parse(readFileSync(file, "utf8"));
+  v.w2sha256 = hash;
+  for (const run of v.runs) if (run.workload === "W2") run.sha256 = hash;
+  const text = `${JSON.stringify(v, null, 2)}\n`;
+  writeFileSync(file, text);
+  editValue(dir, "P-11 device page", engine, (r) => {
+    r.results_sha256 = sha(text);
+    r.w2_capture.sha256 = hash;
+  });
+};
+/**
+ * Writes `bytes` as the capture and regenerates EVERY recorded figure that can follow from them (hash, size and MiB; for a page: phase,
+ * batch and change counts, has_more and the batch statistics) and, at limit 1, the device file and binder that name it: only the
+ * contents can then fail.
+ */
+const recapture = (dir, engine, limit, bytes) => {
+  const buffer = Buffer.from(bytes);
+  writeFileSync(capturePath(dir, engine, limit), buffer);
+  let body = null;
+  try {
+    body = JSON.parse(buffer.toString("utf8"));
+  } catch {}
+  editValue(dir, "P-W2 capture", engine, (r) => {
+    const c = r.captures[`limit_${limit}`];
+    Object.assign(c, {
+      sha256: sha(buffer),
+      bytes: buffer.length,
+      mib: +(buffer.length / 1_048_576).toFixed(3),
+    });
+    if (
+      body &&
+      typeof body === "object" &&
+      Array.isArray(body.batches) &&
+      body.batches.every((b) => Array.isArray(b?.changes))
+    )
+      Object.assign(c, {
+        phase: body.phase,
+        batches: body.batches.length,
+        changes: body.batches.reduce((n, b) => n + b.changes.length, 0),
+        has_more: body.has_more,
+        batch_shapes: body.batches.map((b) => statsOf(b, r.seeding.person)),
+      });
+  });
+  if (limit === 1) rebind(dir, engine, sha(buffer));
+};
+/** Edits the parsed capture and recaptures it (every derivable figure regenerated). */
+const reshape = (dir, engine, limit, change) => {
+  const body = JSON.parse(
+    readFileSync(capturePath(dir, engine, limit), "utf8"),
+  );
+  change(body);
+  recapture(dir, engine, limit, JSON.stringify(body));
+};
+/** The seeded batch of a parsed capture, and its fields (the person is its first change). */
+const seeded = (body) =>
+  body.batches.find((b) =>
+    b.changes.some((c) => c.resource?.id === programme.PERSON),
+  );
+const fieldsOf = (body) => seeded(body).changes.slice(1);
+/** The cells a capture variant must make invalid: the capture's own, and at limit 1 its engine's device cells (A4). */
+const captureCells = (engine, limit, pattern) => ({
+  [`P-W2 capture limit ${limit}[${engine}]`]: pattern,
+  ...(limit === 1
+    ? Object.fromEntries(
+        deviceIds(engine).map((id) => [
+          id,
+          id.startsWith("device page results")
+            ? /limit-1 W2 capture is not a valid W2 capture/
+            : /results file is refused/,
+        ]),
+      )
+    : {}),
+});
+/** A complete programme written once; every variant edits a copy of it (so a variant can never leak into the next). */
+let programmeOnce = null;
+const programmeCopy = (t) => {
+  if (!programmeOnce) {
+    programmeOnce = join(
+      mkdtempSync(join(tmpdir(), "atlas-profile-w2-template-")),
+      "p",
+    );
+    writeComplete(programmeOnce);
+  }
+  const copy = join(scratch(t), "p");
+  cpSync(programmeOnce, copy, { recursive: true });
+  return copy;
+};
+const expectCaptureVariants = (t, variants) => {
+  for (const [what, change, expected] of variants) {
+    const dir = programmeCopy(t);
+    change(dir);
+    const r = resolveDir(dir);
+    const bad = r.cells.filter(
+      (c) => !["ok", "unavailable"].includes(c.status),
+    );
+    assert.deepEqual(
+      bad.map((c) => c.id).sort(),
+      Object.keys(expected).sort(),
+      `${what}: ${JSON.stringify(bad.map((c) => [c.id, c.reasons]).slice(0, 6))}`,
+    );
+    for (const [id, pattern] of Object.entries(expected)) {
+      assert.equal(statusOf(r, id), "invalid", `${what}: ${id}`);
+      assert.match(reasonsOf(r, id), pattern, `${what}: ${id}`);
+    }
+    assert.equal(r.complete, false, what);
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+test("control (Q-C1): the synthetic programme's W2 captures are the writer's real seed, counted here without the contract's reader, and the contract accepts them", (t) => {
+  const dir = programmeCopy(t);
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  for (const engine of W2_ENGINES) {
+    const pages = {};
+    for (const limit of [1, 80]) {
+      const body = JSON.parse(
+        readFileSync(capturePath(dir, engine, limit), "utf8"),
+      );
+      pages[limit] = body;
+      assert.deepEqual(Object.keys(body).sort(), [
+        "batches",
+        "has_more",
+        "next_cursor",
+        "phase",
+      ]);
+      assert.equal(body.phase, "delta");
+      assert.equal(body.batches.length, limit === 1 ? 1 : 2);
+      const batch = seeded(body);
+      assert.equal(batch.changes.length, 200);
+      const [person, ...fields] = batch.changes;
+      assert.equal(person.resource.id, programme.PERSON);
+      assert.equal(person.resource.kind, "person");
+      assert.equal(person.resource.parent_id, null);
+      assert.equal(fields.length, 199);
+      assert.equal(new Set(fields.map((f) => f.resource.id)).size, 199);
+      for (const f of fields) {
+        assert.equal(f.kind, "upsert");
+        assert.equal(f.resource.kind, "field");
+        assert.equal(f.resource.parent_id, programme.PERSON);
+        assert.match(f.resource.id, UUID);
+        const v = f.resource.value;
+        assert.deepEqual(Object.keys(v).sort(), ["checked", "items", "kind"]);
+        assert.equal(v.kind, "checklist");
+        assert.equal(v.items.length, 100);
+        assert.equal(new Set(v.items.map((i) => i.id)).size, 100);
+        assert.ok(v.items.every((i) => i.label === "x" && UUID.test(i.id)));
+        assert.equal(v.checked.length, 40);
+        assert.equal(new Set(v.checked).size, 40);
+        const ids = new Set(v.items.map((i) => i.id));
+        assert.ok(v.checked.every((id) => ids.has(id)));
+        // The independent expected size of this exact seed shape (the writer's own assertion): 7,402 bytes.
+        assert.equal(Buffer.byteLength(JSON.stringify(v)), 7_402);
+      }
+    }
+    // The seeded batch is the same at both limits; their pagination differs (limit 80 also holds a later ordinary batch).
+    assert.deepEqual(seeded(pages[1]), seeded(pages[80]));
+    assert.equal(pages[1].has_more, true);
+    assert.equal(pages[80].has_more, false);
+  }
+  const r = resolveDir(dir);
+  for (const [engine, limit] of W2_COMBOS)
+    assert.equal(statusOf(r, `P-W2 capture limit ${limit}[${engine}]`), "ok");
+  assert.equal(r.complete, true);
+});
+
+test("case (Q-C2): a capture that is not a sync page - non-JSON, null, a boolean, a number, a string, an array, an empty object - is invalid at either limit in every engine, rehashed", (t) => {
+  const kinds = [
+    ["non-JSON", "invalid JSON", /the capture is not JSON/],
+    ["null", "null", /the capture is null, not a sync page/],
+    ["a boolean", "true", /the capture is a boolean, not a sync page/],
+    ["a number", "3", /the capture is a number, not a sync page/],
+    ["a string", '"a page"', /the capture is a string, not a sync page/],
+    ["an array", "[]", /the capture is an array, not a sync page/],
+    ["an empty object", "{}", /the page's fields are \[\], not exactly/],
+  ];
+  expectCaptureVariants(
+    t,
+    kinds.flatMap(([what, text, pattern]) =>
+      W2_COMBOS.map(([engine, limit]) => [
+        `${what} as the ${engine} limit-${limit} capture`,
+        (dir) => recapture(dir, engine, limit, text),
+        captureCells(engine, limit, pattern),
+      ]),
+    ),
+  );
+});
+
+test("case (Q-C2): a page whose structure is not the contract's - bytes that are not UTF-8, missing or extra page fields, a bad cursor, has_more or revision, out-of-order batches, an invalid change - is invalid, rehashed", (t) => {
+  const edit = (change) => (body) => change(body);
+  const variants = [
+    [
+      "bytes that are not UTF-8",
+      (dir, engine, limit) => {
+        const text = readFileSync(capturePath(dir, engine, limit));
+        const at = text.indexOf(Buffer.from('"label":"x"')) + 10;
+        recapture(
+          dir,
+          engine,
+          limit,
+          Buffer.concat([
+            text.subarray(0, at),
+            Buffer.from([0xff]),
+            text.subarray(at),
+          ]),
+        );
+      },
+      /the capture is not UTF-8/,
+    ],
+    [
+      "no batches",
+      edit((b) => delete b.batches),
+      /the page's fields are \[has_more, next_cursor, phase\]/,
+    ],
+    [
+      "an extra page field",
+      edit((b) => (b.extra = 1)),
+      /not exactly \[batches, has_more, next_cursor, phase\]/,
+    ],
+    [
+      "batches that are an object",
+      edit((b) => (b.batches = { 0: b.batches[0] })),
+      /batches is an object, not an array/,
+    ],
+    [
+      "has_more that is a string",
+      edit((b) => (b.has_more = "no")),
+      /has_more is not a boolean/,
+    ],
+    [
+      "an empty cursor",
+      edit((b) => (b.next_cursor = "")),
+      /next_cursor is not an opaque string/,
+    ],
+    [
+      "a cursor that is a number",
+      edit((b) => (b.next_cursor = 7)),
+      /next_cursor is not an opaque string/,
+    ],
+    [
+      "a batch without its revision",
+      edit((b) => delete b.batches[0].revision),
+      /batch 1 is not exactly a revision and its changes/,
+    ],
+    [
+      "a negative revision",
+      edit((b) => (b.batches[0].revision = -1)),
+      /batch 1's revision is not a non-negative integer/,
+    ],
+    [
+      "a fractional revision",
+      edit((b) => (b.batches[0].revision = 1.5)),
+      /batch 1's revision is not a non-negative integer/,
+    ],
+    [
+      "a change of an unknown kind",
+      edit((b) => (b.batches[0].changes[3].kind = "update")),
+      /batch 1 change 4 has kind "update"/,
+    ],
+    [
+      "an upsert without its version",
+      edit((b) => delete b.batches[0].changes[5].resource.version),
+      /batch 1 change 6 lacks projection fields \(version\)/,
+    ],
+    [
+      "an upsert with a field outside the contract",
+      edit((b) => (b.batches[0].changes[7].resource.colour = "red")),
+      /batch 1 change 8 has projection fields outside the contract \(colour\)/,
+    ],
+    [
+      "a resource id that is not a UUID",
+      edit((b) => (b.batches[0].changes[9].resource.id = "f-9")),
+      /batch 1 change 10 has an id that is not a UUID/,
+    ],
+    [
+      "an unknown resource kind",
+      edit((b) => (b.batches[0].changes[11].resource.kind = "widget")),
+      /batch 1 change 12 has resource kind "widget"/,
+    ],
+    [
+      "an empty label",
+      edit((b) => (b.batches[0].changes[13].resource.label = "")),
+      /batch 1 change 14 has a label that is not 1-300 code points/,
+    ],
+    [
+      "a snapshot phase",
+      edit((b) => (b.phase = "snapshot")),
+      /the page is phase "snapshot", not a delta page/,
+    ],
+  ];
+  const at80 = [
+    [
+      "batches out of revision order",
+      edit((b) => (b.batches[1].revision = b.batches[0].revision)),
+      /batch 2's revision does not follow the one before it/,
+    ],
+    [
+      "a removal carrying another key (the revision-3 fixture's)",
+      edit((b) => (b.batches[1].changes[0].resource_kind = "field")),
+      /batch 2 change 1 is not a removal of exactly a UUID id/,
+    ],
+  ];
+  const at1 = [
+    [
+      "two batches on a limit-1 page",
+      edit((b) =>
+        b.batches.push({ revision: b.batches[0].revision + 1, changes: [] }),
+      ),
+      /2 batches on a page read with limit 1/,
+    ],
+  ];
+  const list = [];
+  for (const [i, [what, change, pattern]] of variants.entries()) {
+    const [engine, limit] = W2_COMBOS[i % W2_COMBOS.length];
+    list.push([
+      `${what} (${engine} limit ${limit})`,
+      (dir) =>
+        change.length === 3
+          ? change(dir, engine, limit)
+          : reshape(dir, engine, limit, change),
+      captureCells(engine, limit, pattern),
+    ]);
+  }
+  for (const [i, [what, change, pattern]] of at80.entries()) {
+    const engine = W2_ENGINES[i % 3];
+    list.push([
+      `${what} (${engine} limit 80)`,
+      (dir) => reshape(dir, engine, 80, change),
+      captureCells(engine, 80, pattern),
+    ]);
+  }
+  for (const [what, change, pattern] of at1)
+    list.push([
+      `${what} (webkit)`,
+      (dir) => reshape(dir, "webkit", 1, change),
+      captureCells("webkit", 1, pattern),
+    ]);
+  expectCaptureVariants(t, list);
+});
+
+test("case (Q-C3): the seeded batch's DENSITY and relationships are checked: emptied, under-filled or mislabelled checklists, repeated or foreign ids, a wrong parent, an impostor person, unrelated fields and a split seed are each invalid, every derivable figure regenerated", (t) => {
+  const f = (i, change) => (body) => change(fieldsOf(body)[i].resource, body);
+  const other = "0ff0ff00-0000-4000-8000-0000000000aa";
+  const variants = [
+    [
+      "one checklist emptied",
+      f(0, (r) => Object.assign(r.value, { items: [], checked: [] })),
+      /holds 0 items, not 100/,
+    ],
+    ["99 items", f(1, (r) => r.value.items.pop()), /holds 99 items, not 100/],
+    [
+      "39 checked",
+      f(2, (r) => r.value.checked.pop()),
+      /checks 39 items, not 40/,
+    ],
+    [
+      'an item labelled "y"',
+      f(3, (r) => (r.value.items[50].label = "y")),
+      /an item is labelled "y", not "x"/,
+    ],
+    [
+      "an item id that is not a UUID",
+      f(4, (r) => (r.value.items[60].id = "item-60")),
+      /an item's id is not a UUID/,
+    ],
+    [
+      "two items with one id",
+      f(5, (r) => (r.value.items[70].id = r.value.items[71].id)),
+      /its item ids are not distinct/,
+    ],
+    [
+      "a checked id listed twice",
+      f(6, (r) => (r.value.checked[1] = r.value.checked[0])),
+      /its checked ids are not distinct/,
+    ],
+    [
+      "a checked id that is not an item",
+      f(7, (r) => (r.value.checked[0] = other)),
+      /a checked id is not one of its own items/,
+    ],
+    [
+      "a checklist with another key",
+      f(8, (r) => (r.value.note = "")),
+      /not exactly a checklist's kind, items and checked/,
+    ],
+    [
+      "a text field in place of a checklist",
+      f(9, (r) => (r.value = { kind: "text", text: "x".repeat(7_380) })),
+      /not exactly a checklist's kind, items and checked/,
+    ],
+    [
+      "a field of another parent",
+      f(10, (r) => (r.parent_id = other)),
+      /1 change\(s\) that are not checklist fields of the seeded person.*holds 198 distinct fields/,
+    ],
+    [
+      "a field id repeated",
+      f(11, (r, body) => (r.id = fieldsOf(body)[12].resource.id)),
+      /field ids are not distinct \(1 repeated\).*holds 198 distinct fields/,
+    ],
+    [
+      "the person replaced by an impostor field with its id",
+      (body) =>
+        Object.assign(seeded(body).changes[0].resource, {
+          kind: "field",
+          parent_id: other,
+        }),
+      /resource with the seeded id is not a person without a parent/,
+    ],
+    [
+      "an unrelated dense field added to the seeded batch",
+      (body) =>
+        seeded(body).changes.push({
+          kind: "upsert",
+          resource: {
+            ...fieldsOf(body)[0].resource,
+            id: other,
+            parent_id: other,
+          },
+        }),
+      /holds 201 changes, not the seed's 200.*1 change\(s\) that are not checklist fields/,
+    ],
+    [
+      "one field missing",
+      (body) => seeded(body).changes.pop(),
+      /holds 199 changes, not the seed's 200.*holds 198 distinct fields/,
+    ],
+  ];
+  const list = variants.map(([what, change, pattern], i) => {
+    const [engine, limit] = W2_COMBOS[i % W2_COMBOS.length];
+    return [
+      `${what} (${engine} limit ${limit})`,
+      (dir) => reshape(dir, engine, limit, change),
+      captureCells(engine, limit, pattern),
+    ];
+  });
+  list.push([
+    "the seed split across two batches (firefox limit 80)",
+    (dir) =>
+      reshape(dir, "firefox", 80, (body) => {
+        const [dense, later] = body.batches;
+        const moved = dense.changes.splice(101);
+        later.revision += 1;
+        body.batches = [
+          dense,
+          { revision: dense.revision + 1, changes: moved },
+          later,
+        ];
+      }),
+    captureCells(
+      "firefox",
+      80,
+      /holds 101 changes, not the seed's 200.*holds 100 distinct fields/,
+    ),
+  ]);
+  // Review 4's schedule: every checklist of the limit-80 capture emptied in all three engines (tags and counts kept).
+  list.push([
+    "review 4's schedule: every limit-80 checklist emptied in every engine",
+    (dir) => {
+      for (const engine of W2_ENGINES)
+        reshape(dir, engine, 80, (body) => {
+          for (const b of body.batches)
+            for (const c of b.changes)
+              if (c.resource?.value?.kind === "checklist")
+                Object.assign(c.resource.value, { items: [], checked: [] });
+        });
+    },
+    Object.assign(
+      {},
+      ...W2_ENGINES.map((e) => captureCells(e, 80, /holds 0 items, not 100/)),
+    ),
+  ]);
+  expectCaptureVariants(t, list);
+});
+
+test("case (Q-C4): the recorded metadata and the identity of the seeded batch must follow from the bytes: seeding counts, has_more, phase, file, swapped engines and a moved revision are refused; a limit-1 content defect with every downstream identity updated is still refused", (t) => {
+  const both = (engine, pattern) => ({
+    [`P-W2 capture limit 1[${engine}]`]: pattern,
+    [`P-W2 capture limit 80[${engine}]`]: pattern,
+  });
+  expectCaptureVariants(t, [
+    [
+      "198 dense fields recorded",
+      (dir) =>
+        editValue(dir, "P-W2 capture", "chromium", (r) => {
+          r.seeding.dense_fields = 198;
+        }),
+      both("chromium", /records 198 dense fields; the W2 seed is 199/),
+    ],
+    [
+      "a 7,400-byte value recorded",
+      (dir) =>
+        editValue(dir, "P-W2 capture", "firefox", (r) => {
+          r.seeding.value_bytes = 7_400;
+        }),
+      both(
+        "firefox",
+        /7400-byte checklist values; the captured ones are 7402 bytes/,
+      ),
+    ],
+    [
+      "has_more recorded the other way",
+      (dir) =>
+        editValue(dir, "P-W2 capture", "webkit", (r) => {
+          r.captures.limit_1.has_more = false;
+        }),
+      {
+        "P-W2 capture limit 1[webkit]": /the recorded has_more does not follow/,
+      },
+    ],
+    [
+      "a snapshot phase recorded over delta bytes",
+      (dir) =>
+        editValue(dir, "P-W2 capture", "chromium", (r) => {
+          r.captures.limit_80.phase = "snapshot";
+        }),
+      {
+        "P-W2 capture limit 80[chromium]": /the recorded phase does not follow/,
+      },
+    ],
+    [
+      "another file recorded",
+      (dir) =>
+        editValue(dir, "P-W2 capture", "firefox", (r) => {
+          r.captures.limit_80.file = "w2/elsewhere.json";
+        }),
+      {
+        "P-W2 capture limit 80[firefox]":
+          /the recorded file is w2\/elsewhere\.json/,
+      },
+    ],
+    [
+      "the limit-1 captures of two engines swapped (rehashed and rebound)",
+      (dir) => {
+        const a = readFileSync(capturePath(dir, "chromium", 1));
+        const b = readFileSync(capturePath(dir, "firefox", 1));
+        recapture(dir, "chromium", 1, b);
+        recapture(dir, "firefox", 1, a);
+      },
+      {
+        ...both(
+          "chromium",
+          /the seeded batch is revision \d+ at one limit and \d+ at the other/,
+        ),
+        ...both(
+          "firefox",
+          /the seeded batch is revision \d+ at one limit and \d+ at the other/,
+        ),
+      },
+    ],
+    [
+      "the seeded batch moved to another revision at limit 80 only",
+      (dir) =>
+        reshape(dir, "webkit", 80, (body) => {
+          seeded(body).revision -= 1;
+        }),
+      both(
+        "webkit",
+        /the seeded batch is revision \d+ at one limit and \d+ at the other/,
+      ),
+    ],
+    [
+      "the seeded batch's contents changed at limit 80 only (a valid label)",
+      (dir) =>
+        reshape(dir, "chromium", 80, (body) => {
+          fieldsOf(body)[0].resource.label = "Renamed";
+        }),
+      both(
+        "chromium",
+        /the seeded batch's contents differ between the two limits/,
+      ),
+    ],
+    [
+      "a limit-1 checklist emptied with the device file, binder and hashes all updated (A4: the stale hash is not what rejects it)",
+      (dir) =>
+        reshape(dir, "webkit", 1, (body) => {
+          Object.assign(fieldsOf(body)[100].resource.value, {
+            items: [],
+            checked: [],
+          });
+        }),
+      captureCells("webkit", 1, /holds 0 items, not 100/),
+    ],
+  ]);
+});
+
+test("case (Q-C5): a hand-over whose captures are invalid (review 4's null and emptied schedules) is refused with and without --allow-partial and publishes no desktop conclusion; a missing capture is a partial hand-over", (t) => {
+  const schedules = [
+    [
+      "null captures at limit 80 in every engine",
+      (dir) => {
+        for (const e of W2_ENGINES) recapture(dir, e, 80, "null");
+      },
+      "invalid",
+    ],
+    [
+      "every limit-80 checklist emptied in every engine",
+      (dir) => {
+        for (const e of W2_ENGINES)
+          reshape(dir, e, 80, (body) => {
+            for (const b of body.batches)
+              for (const c of b.changes)
+                if (c.resource?.value?.kind === "checklist")
+                  Object.assign(c.resource.value, { items: [], checked: [] });
+          });
+      },
+      "invalid",
+    ],
+    [
+      "the firefox limit-80 capture missing",
+      (dir) => rmSync(capturePath(dir, "firefox", 80)),
+      "missing",
+    ],
+  ];
+  for (const [what, change, kind] of schedules) {
+    const dir = programmeCopy(t);
+    change(dir);
+    const run = assemble(dir);
+    assert.equal(run.status, 0, `${what}: ${run.stdout}${run.stderr}`);
+    const results = resultsOf(dir);
+    assert.equal(results.desktop_programme.complete, false, what);
+    assert.equal(results.H8.desktop_valid_workload_failure, null, what);
+    assert.equal(results.H9.desktop_needs_finer_pagination, null, what);
+    const handoff = join(dir, "handoff");
+    const plain = validate(handoff);
+    const partial = validate(handoff, "--allow-partial");
+    assert.equal(plain.status, 1, `${what}: ${plain.stdout}${plain.stderr}`);
+    assert.equal(
+      partial.status,
+      kind === "invalid" ? 1 : 2,
+      `${what} (--allow-partial): ${partial.stdout}${partial.stderr}`,
+    );
+    const resolution = JSON.parse(
+      readFileSync(join(handoff, "resolution.json"), "utf8"),
+    );
+    const captures = resolution.cells.filter(
+      (c) => c.kind === "w2-capture" && c.status !== "ok",
+    );
+    assert.ok(
+      captures.length > 0 && captures.every((c) => c.status === kind),
+      `${what}: ${JSON.stringify(captures.map((c) => [c.id, c.status]))}`,
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("case (Q-C6): the operator's results file is accepted only with captures its hand-over certifies: a hashes file outside the hand-over, a package without its evidence, an invalid capture rehashed into every list, a limit-80 or unknown capture are refused", (t) => {
+  const dir = assembledCopy(t);
+  const handoff = join(dir, "handoff");
+  const results = join(handoff, "evidence/device-page/results.chromium.json");
+  const hashes = join(handoff, "fixtures/W2-hashes.json");
+  const fileMode = (file, list) =>
+    node([
+      join(root, "scripts/validate-profile-handoff.mjs"),
+      file,
+      "--w2-hashes",
+      list,
+    ]);
+  const control = fileMode(results, hashes);
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+  assert.match(control.stdout, /complete and consistent/);
+  // A copy of the hashes outside the hand-over certifies nothing.
+  const loose = join(scratch(t), "W2-hashes.json");
+  cpSync(hashes, loose);
+  const outside = fileMode(results, loose);
+  assert.equal(outside.status, 1);
+  assert.match(
+    outside.stderr,
+    /no capture is certified, so no W2 run can be accepted/,
+  );
+  assert.match(outside.stderr, /W2 run 1\): sha256 \w+ is listed, but/);
+  // A hand-over copy without its carried values certifies nothing.
+  const bare = join(scratch(t), "bare");
+  cpSync(handoff, bare, { recursive: true });
+  rmSync(join(bare, "evidence/values.jsonl"));
+  const noEvidence = fileMode(
+    join(bare, "evidence/device-page/results.chromium.json"),
+    join(bare, "fixtures/W2-hashes.json"),
+  );
+  assert.equal(noEvidence.status, 1);
+  assert.match(noEvidence.stderr, /no capture is certified/);
+  // An invalid capture (one checklist emptied) put into the fixtures, the carried evidence, W2-hashes.json, its value row and the results.
+  const name = "W2-captured.chromium.limit-1.json";
+  const body = JSON.parse(
+    readFileSync(join(handoff, "fixtures", name), "utf8"),
+  );
+  Object.assign(fieldsOf(body)[0].resource.value, { items: [], checked: [] });
+  const text = JSON.stringify(body);
+  const forged = join(scratch(t), "forged");
+  cpSync(handoff, forged, { recursive: true });
+  writeFileSync(join(forged, "fixtures", name), text);
+  writeFileSync(join(forged, "evidence/w2", name), text);
+  editJson(join(forged, "fixtures/W2-hashes.json"), (v) => {
+    v[name] = sha(text);
+  });
+  editValue(join(forged, "evidence"), "P-W2 capture", "chromium", (r) => {
+    r.captures.limit_1.sha256 = sha(text);
+  });
+  const forgedResults = join(
+    forged,
+    "evidence/device-page/results.chromium.json",
+  );
+  editJson(forgedResults, (v) => {
+    v.w2sha256 = sha(text);
+    for (const run of v.runs) if (run.workload === "W2") run.sha256 = sha(text);
+  });
+  const invalid = fileMode(
+    forgedResults,
+    join(forged, "fixtures/W2-hashes.json"),
+  );
+  assert.equal(invalid.status, 1);
+  assert.match(
+    invalid.stderr,
+    /is listed, but W2-captured\.chromium\.limit-1\.json is NOT a certified W2 capture: .*holds 0 items, not 100/,
+  );
+  // A run of the limit-80 capture (listed, never the device page's) and of an unknown capture.
+  const list = JSON.parse(readFileSync(hashes, "utf8"));
+  for (const [what, hash, pattern] of [
+    [
+      "a limit-80 capture",
+      list["W2-captured.chromium.limit-80.json"],
+      /a limit-80 capture: the device page runs limit-1 captures/,
+    ],
+    [
+      "an unknown capture",
+      "c".repeat(64),
+      /is not a captured W2 of the hand-over/,
+    ],
+  ]) {
+    const copy = join(scratch(t), "r.json");
+    const v = JSON.parse(readFileSync(results, "utf8"));
+    v.w2sha256 = hash;
+    for (const run of v.runs) if (run.workload === "W2") run.sha256 = hash;
+    writeFileSync(copy, JSON.stringify(v));
+    const refused = fileMode(copy, hashes);
+    assert.equal(refused.status, 1, what);
+    assert.match(refused.stderr, pattern, what);
+  }
 });
 
 test("case (E9): every published figure is projected from the carried evidence: a published shell figure, admission list, quota copy, consumer status, report line, candidate identity or constant altered alone is refused even with SHA256SUMS regenerated", (t) => {
@@ -2767,16 +3564,10 @@ test("case (E12): a device results file's lifecycle and every run's payload are 
     const r = resolveDir(dir);
     assert.equal(statusOf(r, "device page results[firefox]"), "invalid", what);
     assert.match(reasonsOf(r, "device page results[firefox]"), pattern, what);
-    // The operator's file mode says the same of the same file.
-    const hashes = join(dir, "W2-hashes.json");
-    writeFileSync(
-      hashes,
-      JSON.stringify({
-        "W2-captured.firefox.limit-1.json": sha(
-          readFileSync(join(dir, "w2/W2-captured.firefox.limit-1.json")),
-        ),
-      }),
-    );
+    // The operator's file mode says the same of the same file. Revision 4 (labelled adaptation, review 4 R2/A5): the hashes come from a
+    // package that certifies the capture (the hand-over layout: fixtures/ beside the carried evidence), so the variant, not an uncertified
+    // capture, is what file mode must find; its control is below.
+    const hashes = certifyingPackage(t, dir, "firefox");
     const fileMode = node([
       join(root, "scripts/validate-profile-handoff.mjs"),
       file,
@@ -2786,5 +3577,16 @@ test("case (E12): a device results file's lifecycle and every run's payload are 
     ]);
     assert.equal(fileMode.status, 1, `${what}: ${fileMode.stdout}`);
     assert.match(fileMode.stderr, pattern, `${what} (file mode)`);
+    assert.doesNotMatch(fileMode.stderr, /is listed, but/, what);
   }
+  // Control: the unchanged file with the same kind of package is complete and consistent in file mode.
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  const control = node([
+    join(root, "scripts/validate-profile-handoff.mjs"),
+    join(dir, "device-page/results.firefox.json"),
+    "--w2-hashes",
+    certifyingPackage(t, dir, "firefox"),
+  ]);
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
 });

@@ -42,6 +42,11 @@ import {
   SHARED_ROWS,
 } from "./profile-evidence.mjs";
 import { classifyWindow, SAMPLE_INTERVAL_MS } from "./profile-isolation.mjs";
+import {
+  observeW2Capture,
+  sameTargetProblems,
+  W2_SEED,
+} from "./profile-w2-capture.mjs";
 
 export { CONTRACT_VERSION };
 export const CELL_STATUSES = [
@@ -2186,27 +2191,35 @@ function batchShape(batch, person) {
   };
 }
 /**
- * A W2 capture: its bytes parsed, and phase, batch count, change count, batch shapes (dense checklists and THE seeded person), size and
- * hash recomputed from them and compared with what was recorded; a matching hash alone never makes a capture dense (assessment A5/E8).
+ * One engine's W2 capture at one limit, observed from its bytes (scripts/lib/profile-w2-capture.mjs; revision 4, review 4 R2, design
+ * assessment A1-A4) and reconciled with what the writer recorded: the page is a valid sync page and its seeded batch is the seed exactly
+ * (the person and 199 distinct dense checklists of 100 items and 40 checked ids each, in one batch of 200 changes); the recorded
+ * file, size, MiB, SHA-256, phase, batch and change counts, has_more and generic batch shapes follow from the bytes; the seeding's
+ * field count and value size are the observed ones; and the two limits show the same seeded batch. A matching hash or a parsed
+ * document is never enough on its own. Cached per (engine, limit): the capture cells and the device cells read the same observation.
  */
-function resolveCapture(ev, cell) {
-  const path = `w2/W2-captured.${cell.engine}.limit-${cell.limit}.json`;
-  if (!ev.exists(path)) return result(cell, "missing", [`${path} is missing`]);
-  const value = rowsNamed(ev.values, "P-W2 capture", cell.engine);
-  if (value.length !== 1)
-    return result(cell, "invalid", [`${value.length} "P-W2 capture" rows`]);
-  const recorded = value[0].captures?.[`limit_${cell.limit}`];
+function captureContent(ev, engine, limit) {
+  const key = `w2:${engine}:${limit}`;
+  if (ev[key]) return ev[key];
+  const kept = (value) => {
+    ev[key] = value;
+    return value;
+  };
+  const path = `w2/W2-captured.${engine}.limit-${limit}.json`;
+  if (!ev.exists(path)) return kept({ path, missing: true, problems: [] });
+  const rows = rowsNamed(ev.values, "P-W2 capture", engine);
+  if (rows.length !== 1)
+    return kept({
+      path,
+      rows,
+      problems: [`${rows.length} "P-W2 capture" rows`],
+    });
+  const row = rows[0];
   const bytes = ev.bytes(path);
-  const problems = windowProblems(ev, cell, value[0], value[0].collection);
-  const person = value[0].seeding?.person;
-  if (!isText(person))
-    problems.push("the seeded person's identity is not recorded");
-  let body = null;
-  try {
-    body = JSON.parse(bytes.toString("utf8"));
-  } catch (error) {
-    problems.push(`the capture is not JSON: ${error.message}`);
-  }
+  const person = row.seeding?.person;
+  const observed = observeW2Capture(bytes, { person, limit });
+  const problems = [...observed.problems];
+  const recorded = row.captures?.[`limit_${limit}`];
   if (!isObj(recorded))
     problems.push("the capture is not recorded in its value row");
   else {
@@ -2218,36 +2231,52 @@ function resolveCapture(ev, cell) {
       problems.push("the capture's MiB does not follow from its size");
     if (recorded.file !== path)
       problems.push(`the recorded file is ${recorded.file}, not ${path}`);
-  }
-  if (isObj(body) && isObj(recorded) && isText(person)) {
-    const batches = Array.isArray(body.batches) ? body.batches : null;
-    if (!batches) problems.push("the captured body has no batches");
-    else {
-      const shapes = batches.map((b) => batchShape(b, person));
+    if (observed.page) {
+      const batches = JSON.parse(bytes.toString("utf8")).batches;
       const derived = {
-        phase: body.phase,
-        batches: batches.length,
-        changes: shapes.reduce((n, s) => n + s.changes, 0),
-        has_more: body.has_more,
-        batch_shapes: shapes,
+        phase: observed.page.phase,
+        batches: observed.page.batches,
+        changes: observed.page.changes,
+        has_more: observed.page.has_more,
+        batch_shapes: batches.map((b) => batchShape(b, person)),
       };
-      for (const [key, want] of Object.entries(derived))
-        if (!same(recorded[key], want))
+      for (const [name, want] of Object.entries(derived))
+        if (!same(recorded[name], want))
           problems.push(
-            `the recorded ${key} does not follow from the captured bytes`,
+            `the recorded ${name} does not follow from the captured bytes`,
           );
-      if (body.phase !== "delta")
-        problems.push(
-          `the captured page is phase ${body.phase}, not a delta page`,
-        );
-      if (!shapes.some((s) => s.checklist_upserts >= 199 && s.person_ancestor))
-        problems.push(
-          "the captured bytes hold no batch of 199 dense checklists with the seeded person",
-        );
-      if (!(derived.changes >= 200))
-        problems.push(`${derived.changes} changes: not the dense batch`);
     }
   }
+  const seeding = row.seeding;
+  if (!isObj(seeding)) problems.push("the seeding is not recorded");
+  else {
+    if (seeding.dense_fields !== W2_SEED.fields)
+      problems.push(
+        `the seeding records ${seeding.dense_fields} dense fields; the W2 seed is ${W2_SEED.fields}`,
+      );
+    if (observed.target && seeding.value_bytes !== observed.target.value_bytes)
+      problems.push(
+        `the seeding records ${seeding.value_bytes}-byte checklist values; the captured ones are ${observed.target.value_bytes} bytes`,
+      );
+  }
+  const out = kept({ path, row, observed, problems });
+  // The other limit of the same engine must show the same seeded batch (revision and contents). It is compared only when its own bytes
+  // are a valid capture: a defect of the other limit stays that limit's finding, never this one's.
+  const other = captureContent(ev, engine, limit === 1 ? 80 : 1);
+  if (other.observed && other.observed.problems.length === 0)
+    problems.push(...sameTargetProblems(observed, other.observed));
+  return out;
+}
+
+function resolveCapture(ev, cell) {
+  const content = captureContent(ev, cell.engine, cell.limit);
+  if (content.missing)
+    return result(cell, "missing", [`${content.path} is missing`]);
+  if (!content.row) return result(cell, "invalid", content.problems);
+  const problems = [
+    ...windowProblems(ev, cell, content.row, content.row.collection),
+    ...content.problems,
+  ];
   return problems.length
     ? result(cell, "invalid", problems)
     : result(cell, "ok");
@@ -2274,6 +2303,11 @@ function deviceCheck(ev, engine) {
     const binder = rowsNamed(ev.values, "P-11 device page", engine);
     const invalid = [...checked.errors];
     if (!w2) invalid.push("this engine's W2 capture is missing");
+    // Its hash identifies bytes; only the observed contents make them the W2 the protocol had to run (revision 4, review 4 R2, A4).
+    else if (!(captureContent(ev, engine, 1).observed?.problems.length === 0))
+      invalid.push(
+        "this engine's limit-1 W2 capture is not a valid W2 capture (see its capture cell): the protocol's W2 runs are not of the dense batch",
+      );
     if (binder.length !== 1)
       invalid.push(
         `${binder.length} "P-11 device page" rows bind the file to its run`,

@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
+import {
+  observeW2Capture,
+  sameTargetProblems,
+  type W2Observation,
+} from "../../scripts/lib/profile-w2-capture.mjs";
 import { oneColdRun } from "../e2e/profile-cold-run";
 import {
   beginCollection,
@@ -337,7 +342,10 @@ interface SyncBody {
   next_cursor: string;
   has_more: boolean;
 }
-/** The shape of one batch: how many dense checklist field upserts, and whether `person` (their ancestor) is in it. */
+/**
+ * Generic statistics of one batch, recorded for every observation (the pre-grant drain, both captures, the bound): how many checklist field
+ * upserts, and whether `person` is in it. They describe a batch; they do NOT qualify a capture as W2 (that is `observeW2Capture`).
+ */
 const shapeOf = (batch: { changes: Change[] }, person: string) => ({
   changes: batch.changes.length,
   checklist_upserts: batch.changes.filter(
@@ -557,7 +565,12 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   const seedingMs = Date.now() - seededAt;
 
   // 4. Capture: the reader's delta from the live edge before the grant, at limit 1 and at limit 80.
+  // The seed's own value size, checked against the documented one (WEB-03's dense checklist with 36-character ids: 7,402 bytes).
+  expect(valueBytes, "the seeded dense checklist's serialised size").toBe(
+    7_402,
+  );
   const captures: Record<string, unknown> = {};
+  const observations: W2Observation[] = [];
   let w2Body = "";
   let afterW2 = "";
   mkdirSync(`${PROFILE_OUT}/w2`, { recursive: true });
@@ -572,13 +585,18 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     expect(captured.status, captured.error ?? captured.text.slice(0, 400)).toBe(
       200,
     );
+    // The measurement happened only if the bytes ARE the seeded dense batch (revision 4, review 4 R2): a valid sync page whose one batch
+    // holding this person is the person and its 199 distinct checklist fields of 100 items and 40 checked ids each, 200 changes and
+    // nothing else; the same reader the evidence contract applies to the file.
+    const observed = observeW2Capture(Buffer.from(captured.text), {
+      person,
+      limit,
+    });
+    expect(observed.problems, `limit ${limit}`).toEqual([]);
+    expect(observed.target?.value_bytes, `limit ${limit}`).toBe(valueBytes);
+    observations.push(observed);
     const body = JSON.parse(captured.text) as SyncBody;
     const shapes = body.batches.map((b) => shapeOf(b, person));
-    // The measurement happened only if the batch is really there: at least 199 dense checklist upserts with their person, in ONE batch.
-    expect(
-      shapes.some((b) => b.checklist_upserts >= 199 && b.person_ancestor),
-      `limit ${limit}: ${JSON.stringify({ shapes, has_more: body.has_more, phase: body.phase })}`,
-    ).toBe(true);
     const bytes = Buffer.byteLength(captured.text);
     writeFileSync(
       `${PROFILE_OUT}/w2/W2-captured.${engine}.limit-${limit}.json`,
@@ -598,6 +616,13 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     if (limit === 1) w2Body = captured.text;
     if (limit === 80) afterW2 = body.next_cursor;
   }
+  // Both limits show the same seeded batch (its revision and contents); their pagination may differ.
+  expect(
+    sameTargetProblems(
+      observations[0] as W2Observation,
+      observations[1] as W2Observation,
+    ),
+  ).toEqual([]);
 
   // 5. Process, live: the page's FIXTURE leader syncs from the seeded cursor against the real server (every batch of the seeding, then
   // the dense one) and commits through the production engine path; heap (Chromium) and the engine process tree's RSS are sampled while

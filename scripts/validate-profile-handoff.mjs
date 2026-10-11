@@ -24,9 +24,14 @@
 // pin is this candidate's, every stage ran on the candidate named at hand-over, the constants are the ones constants.md shows). In both
 // modes an INVALID cell or a failed control exits 1, `--allow-partial` or not: only a consistent programme that is merely incomplete or
 // not isolated is a partial hand-over (2 when allowed).
+//
+// Revision 4 (review 4 R2, design assessment A4/A5): a W2 capture is valid only for its CONTENTS (scripts/lib/profile-w2-capture.mjs:
+// a sync page whose seeded batch is the person and its 199 dense checklists), in both modes. In results-file mode a hash from
+// `--w2-hashes` is accepted only after the hand-over that lists it certifies that capture (its bytes in fixtures/ and evidence/w2/, its
+// P-W2 capture row and seeded person, and the observed contents); a hashes file outside such a hand-over certifies nothing.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONTRACT_VERSION,
@@ -47,6 +52,7 @@ import {
   projectResults,
   renderReport,
 } from "./lib/profile-projection.mjs";
+import { observeW2Capture } from "./lib/profile-w2-capture.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -65,13 +71,17 @@ if (!file) {
   );
   process.exit(1);
 }
-// W2 is not generated: its runs are of the bytes the released backend produced, which the hand-over carries with their hashes.
+// W2 is not generated: its runs are of the bytes the released backend produced, which the hand-over carries with their hashes. A listed
+// hash is accepted only for a capture the hand-over CERTIFIES (revision 4, review 4 R2, design assessment A5): see certifiedW2.
 let w2Hashes = null;
+let w2Uncertified = new Map();
 if (w2HashesFile)
   try {
-    w2Hashes = new Set(
-      Object.values(JSON.parse(readFileSync(resolve(w2HashesFile), "utf8"))),
-    );
+    const certification = certifiedW2(w2HashesFile);
+    w2Hashes = certification.certified;
+    w2Uncertified = certification.uncertified;
+    for (const message of certification.notes)
+      console.error(`WARNING ${message}`);
   } catch (error) {
     console.error(`cannot read ${w2HashesFile}: ${error.message}`);
     process.exit(1);
@@ -83,7 +93,11 @@ try {
   console.error(`cannot read ${file}: ${error.message}`);
   process.exit(1);
 }
-const checked = checkDeviceResults(data, { recorded: RECORDED, w2Hashes });
+const checked = checkDeviceResults(data, {
+  recorded: RECORDED,
+  w2Hashes,
+  w2Uncertified,
+});
 for (const message of checked.errors) console.error(`ERROR   ${message}`);
 for (const message of checked.failed_controls)
   console.error(`FAILED CONTROL ${message}`);
@@ -103,6 +117,83 @@ if (checked.incomplete) {
   process.exit(allowPartial ? 2 : 1);
 }
 console.log("complete and consistent");
+
+/**
+ * The W2 captures a results file may have run (revision 4, review 4 R2, design assessment A5). `--w2-hashes` names a hand-over's
+ * `fixtures/W2-hashes.json`; a hash there is certified only when that hand-over carries the capture's bytes (`fixtures/` and the same
+ * bytes in `evidence/w2/`), its `P-W2 capture` row records that hash for the engine with its seeded person, and the bytes are the
+ * seeded dense batch (scripts/lib/profile-w2-capture.mjs). Only limit-1 captures are the device page's W2 (docs/profiling-devices.md). A
+ * hashes file that is not inside such a hand-over certifies nothing, so no W2 run can be accepted with it: a hash identifies bytes, it
+ * does not show what they hold.
+ */
+function certifiedW2(file) {
+  const at = resolve(file);
+  const listed = JSON.parse(readFileSync(at, "utf8"));
+  const certified = new Set();
+  const uncertified = new Map();
+  const notes = [];
+  const handoff =
+    basename(dirname(at)) === "fixtures" ? dirname(dirname(at)) : null;
+  const valuesPath = handoff ? join(handoff, "evidence", "values.jsonl") : "";
+  if (!handoff || !existsSync(valuesPath)) {
+    const why = `${file} is not the fixtures/W2-hashes.json of a hand-over that carries its evidence: no capture is certified, so no W2 run can be accepted`;
+    notes.push(why);
+    for (const hash of Object.values(listed ?? {}))
+      if (typeof hash === "string") uncertified.set(hash, why);
+    return { certified, uncertified, notes };
+  }
+  const values = readFileSync(valuesPath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    });
+  const sha = (path) =>
+    createHash("sha256").update(readFileSync(path)).digest("hex");
+  for (const [name, hash] of Object.entries(listed ?? {})) {
+    const m = /^W2-captured\.([a-z]+)\.limit-(\d+)\.json$/.exec(name);
+    const problems = [];
+    if (!m) problems.push("not a capture's name");
+    else if (m[2] !== "1")
+      problems.push(
+        "a limit-80 capture: the device page runs limit-1 captures",
+      );
+    else {
+      const fixture = join(handoff, "fixtures", name);
+      const carried = join(handoff, "evidence", "w2", name);
+      if (!existsSync(fixture)) problems.push(`fixtures/${name} is missing`);
+      else if (sha(fixture) !== hash)
+        problems.push(`fixtures/${name} does not have the listed SHA-256`);
+      if (!existsSync(carried) || sha(carried) !== hash)
+        problems.push(`evidence/w2/${name} is not the listed bytes`);
+      const rows = values.filter(
+        (r) => r?.name === "P-W2 capture" && r.engine === m[1],
+      );
+      if (rows.length !== 1)
+        problems.push(`${rows.length} "P-W2 capture" rows for ${m[1]}`);
+      else if (rows[0].captures?.limit_1?.sha256 !== hash)
+        problems.push("its P-W2 capture row records another limit-1 capture");
+      if (problems.length === 0)
+        problems.push(
+          ...observeW2Capture(readFileSync(fixture), {
+            person: rows[0].seeding?.person,
+            limit: 1,
+          }).problems,
+        );
+    }
+    if (problems.length === 0) certified.add(hash);
+    else {
+      const why = `${name} is NOT a certified W2 capture: ${problems.join("; ")}`;
+      if (typeof hash === "string") uncertified.set(hash, why);
+      if (!m || m[2] === "1") notes.push(why);
+    }
+  }
+  return { certified, uncertified, notes };
+}
 
 /**
  * `--handoff <dir>`: the hand-over directory itself. Exit 0: complete and consistent; 1: a violation, or a consistent hand-over of an

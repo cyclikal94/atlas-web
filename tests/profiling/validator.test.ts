@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -14,12 +15,90 @@ const dir = mkdtempSync(join(tmpdir(), "atlas-validate-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // W2 is the released backend's captured batch: its hash comes from the hand-over's W2-hashes.json, given with --w2-hashes (review R3).
-const W2_SHA = "a".repeat(64);
-const w2Hashes = join(dir, "W2-hashes.json");
-writeFileSync(
-  w2Hashes,
-  JSON.stringify({ "W2-captured.chromium.limit-1.json": W2_SHA }),
-);
+// Revision 4 (review 4 R2, design assessment A5): a listed hash is accepted only for a capture the hand-over CERTIFIES, so the hashes
+// file is a hand-over's (fixtures/W2-hashes.json beside the carried evidence): the capture's bytes in fixtures/ and evidence/w2/, its
+// P-W2 capture row with the seeded person, and contents that are the seed (a person and 199 dense checklists, built here on their own).
+const PERSON = randomUUID();
+const projection = (
+  id: string,
+  kind: string,
+  parent: string | null,
+  label: string,
+  value: unknown,
+) => ({
+  id,
+  kind,
+  parent_id: parent,
+  label,
+  value,
+  version: 1,
+  policy_version: 1,
+  can_edit: false,
+  archived: false,
+});
+const checklist = () => {
+  const items = Array.from({ length: 100 }, () => ({
+    id: randomUUID(),
+    label: "x",
+  }));
+  return {
+    checked: items.slice(0, 40).map((i) => i.id),
+    items,
+    kind: "checklist",
+  };
+};
+const captureText = (fill: () => unknown = checklist) =>
+  JSON.stringify({
+    phase: "delta",
+    batches: [
+      {
+        revision: 7,
+        changes: [
+          {
+            kind: "upsert",
+            resource: projection(PERSON, "person", null, "W2 person", null),
+          },
+          ...Array.from({ length: 199 }, () => ({
+            kind: "upsert",
+            resource: projection(
+              randomUUID(),
+              "field",
+              PERSON,
+              "Checklist",
+              fill(),
+            ),
+          })),
+        ],
+      },
+    ],
+    next_cursor: "d1.after",
+    has_more: false,
+  });
+const shaOf = (text: string) => createHash("sha256").update(text).digest("hex");
+const CAPTURE = "W2-captured.chromium.limit-1.json";
+/** A hand-over's fixtures and carried evidence holding `text` as the chromium limit-1 capture; returns its W2-hashes.json. */
+function handover(name: string, text: string): string {
+  const at = join(dir, name);
+  mkdirSync(join(at, "fixtures"), { recursive: true });
+  mkdirSync(join(at, "evidence/w2"), { recursive: true });
+  writeFileSync(join(at, "fixtures", CAPTURE), text);
+  writeFileSync(join(at, "evidence/w2", CAPTURE), text);
+  writeFileSync(
+    join(at, "evidence/values.jsonl"),
+    `${JSON.stringify({
+      name: "P-W2 capture",
+      engine: "chromium",
+      seeding: { person: PERSON },
+      captures: { limit_1: { sha256: shaOf(text) } },
+    })}\n`,
+  );
+  const list = join(at, "fixtures/W2-hashes.json");
+  writeFileSync(list, JSON.stringify({ [CAPTURE]: shaOf(text) }));
+  return list;
+}
+const CAPTURED = captureText();
+const W2_SHA = shaOf(CAPTURED);
+const w2Hashes = handover("handoff", CAPTURED);
 const hash = (name: string) =>
   name === "W2"
     ? W2_SHA
@@ -128,6 +207,30 @@ describe("validate-profile-handoff", () => {
     const unchecked = validate(complete(), [], []);
     expect(unchecked.status).toBe(1);
     expect(unchecked.text).toContain("cannot be verified without --w2-hashes");
+  });
+  it("accepts a W2 hash only from a hand-over that certifies its capture: a copy of the list elsewhere, or an invalid capture rehashed into every list, is refused (revision 4)", () => {
+    const loose = join(dir, "W2-hashes.json");
+    writeFileSync(loose, JSON.stringify({ [CAPTURE]: W2_SHA }));
+    const outside = validate(complete(), [], ["--w2-hashes", loose]);
+    expect(outside.status).toBe(1);
+    expect(outside.text).toContain("no capture is certified");
+    expect(outside.text).toMatch(/W2 run 1\): sha256 \w+ is listed, but/);
+    // Empty checklists under the seed's tags and counts: a valid page, not the dense batch.
+    const empty = captureText(() => ({
+      checked: [],
+      items: [],
+      kind: "checklist",
+    }));
+    const forged = handover("forged", empty);
+    const data = complete();
+    data.w2sha256 = shaOf(empty);
+    for (const r of data.runs)
+      if (r.workload === "W2") (r as { sha256: string }).sha256 = shaOf(empty);
+    const invalid = validate(data, [], ["--w2-hashes", forged]);
+    expect(invalid.status).toBe(1);
+    expect(invalid.text).toMatch(
+      /is listed, but W2-captured\.chromium\.limit-1\.json is NOT a certified W2 capture: .*holds 0 items, not 100/,
+    );
   });
   it("refuses results without W2 as incomplete, and reports 2 when partial results are allowed", () => {
     // A protocol started without a named capture: no W2 in its plan, so its results are incomplete (revision 3: the realistic file).

@@ -1,0 +1,33 @@
+{
+  "agtx": {
+    "PostInvocation": [
+      {
+        "command": "/Users/kieran/.local/bin/agtx hook --env antigravity --event PostInvocation",
+        "type": "command"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/kieran/.local/bin/agtx hook --env antigravity --event PostToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreInvocation": [
+      {
+        "command": "/Users/kieran/.local/bin/agtx hook --env antigravity --event PreInvocation",
+        "type": "command"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "/Users/kieran/.local/bin/agtx hook --env antigravity --event Stop",
+        "type": "command"
+      }
+    ]
+  }
+}

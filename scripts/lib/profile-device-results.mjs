@@ -122,15 +122,16 @@ function payloadProblems(run, bytesOf) {
 }
 
 /**
- * Checks one results file. `recorded` is scripts/lib/profile-workload-hashes.json; `w2Hashes` the hand-over's captured W2 hashes (a Set) or
- * null; `w2Expected`, when given, is the one capture this protocol must have run (the desktop stage knows which engine's capture it picked).
+ * Checks one results file. `recorded` is scripts/lib/profile-workload-hashes.json; `w2Hashes` the hand-over's CERTIFIED W2 hashes (a Set)
+ * or null; `w2Uncertified` the listed hashes that were not certified, with why (revision 4); `w2Expected`, when given, is the one capture
+ * this protocol must have run (the desktop stage knows which engine's capture it picked).
  *
  * Returns `errors` (the file is malformed, inconsistent or names other bytes), `failed_controls` (a W7 control that was not refused),
  * `warnings`, `incomplete` (a required run is absent), the valid-workload `failures` (facts) and the distinct runs per workload.
  */
 export function checkDeviceResults(
   data,
-  { recorded, w2Hashes = null, w2Expected = null },
+  { recorded, w2Hashes = null, w2Expected = null, w2Uncertified = new Map() },
 ) {
   const errors = [];
   const warnings = [];
@@ -265,6 +266,10 @@ export function checkDeviceResults(
       if (!w2Hashes)
         errors.push(
           `${where}: a W2 run cannot be verified without --w2-hashes (the hand-over's fixtures/W2-hashes.json)`,
+        );
+      else if (w2Uncertified.has(run.sha256))
+        errors.push(
+          `${where}: sha256 ${String(run.sha256).slice(0, 12)} is listed, but ${w2Uncertified.get(run.sha256)}`,
         );
       else if (!w2Hashes.has(run.sha256))
         errors.push(
