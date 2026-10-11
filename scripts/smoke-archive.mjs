@@ -123,7 +123,7 @@ try {
   );
   const provenance = await (await get("/_web/provenance.json")).json();
   check(
-    provenance.atlas_backend_ref.tag === "v0.27.0-rc.1",
+    provenance.atlas_backend_ref.tag === "v0.28.0-rc.1",
     "provenance is not served",
   );
   const asset = /assets\/index-[^"]+\.js/.exec(html)?.[0];

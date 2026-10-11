@@ -36,7 +36,7 @@ import {
 } from "./web08b-support";
 
 /**
- * I-21, I-27 and I-28a (WEB-08b plan 9.3): browser OIDC against the RELEASED backend (v0.27.0-rc.1) and a STUB identity provider
+ * I-21, I-27 and I-28a (WEB-08b plan 9.3): browser OIDC against the RELEASED backend (the version in contract-pin.json) and a STUB identity provider
  * (`scripts/integration/oidc-provider.mjs`, loopback, S256 PKCE, RS256 ID token with a correct `at_hash`). The stub satisfies the
  * released backend's own `openidconnect` validation; a real provider's claims, key rotation, consent screens and failure redirects
  * are NOT exercised. The callback's redirect target is the preview origin's root, which the integration build serves with the
