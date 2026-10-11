@@ -15422,13 +15422,18 @@ export const UNIT = [
     title:
       "WEB-08d: a naming change does not read the sessions list again (its device_name goes stale)",
     file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
+    // Review R1 adaptation: naming now reports through the section's shared `changed` (both lists via the composed screen); the
+    // mutant keeps its intent by reloading only the devices list.
+    tests: [
+      "tests/features/settings/name-device.test.tsx",
+      "tests/features/settings/cross-list.test.tsx",
+    ],
     expect: /BOTH lists are read again/,
     patch: (t) =>
       sub(
         t,
-        "            onNamesChanged?.();",
-        "            void onNamesChanged;",
+        "          device={naming}\n          onChanged={changed}",
+        "          device={naming}\n          onChanged={reload}",
       ),
   },
   {
@@ -15465,6 +15470,113 @@ export const UNIT = [
         'typeof value === "number" && Number.isSafeInteger(value) && value >= 0;',
         'typeof value === "number" && value >= 0;',
       ),
+  },
+  {
+    id: "MU-1633",
+    title:
+      "WEB-08d R1: retiring another device reads only the devices list (its ended sessions and the sign-in capacity stay on screen)",
+    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /retiring another device ends its sessions/,
+    patch: (t) =>
+      sub(
+        t,
+        "          device={retiring}\n          onChanged={changed}",
+        "          device={retiring}\n          onChanged={reload}",
+      ),
+  },
+  {
+    id: "MU-1634",
+    title:
+      "WEB-08d R1: signing out another session reads only the sessions list (a removed device keeps its row and controls)",
+    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /last session removes the device and its controls/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const changed = () => (onChanged ? onChanged() : reload());",
+        "  const changed = () => reload();",
+      ),
+  },
+  {
+    id: "MU-1635",
+    title:
+      "WEB-08d R1: the composed screen does not pass the change signal to the devices list",
+    file: "src/features/settings/sessions-devices/SessionsDevices.tsx",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /last session removes the device and its controls/,
+    patch: (t) =>
+      sub(
+        t,
+        "<DevicesSection refresh={changes} onChanged={changed} />",
+        "<DevicesSection onChanged={changed} />",
+      ),
+  },
+  {
+    id: "MU-1636",
+    title:
+      "WEB-08d R1: the composed screen does not pass the change signal to the sessions list",
+    file: "src/features/settings/sessions-devices/SessionsDevices.tsx",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /retiring another device ends its sessions/,
+    patch: (t) =>
+      sub(
+        t,
+        "        refresh={changes}\n        onChanged={changed}",
+        "        onChanged={changed}",
+      ),
+  },
+  {
+    id: "MU-1637",
+    title:
+      "WEB-08d R1: a sign-out whose outcome is unknown (a lost answer, a 5xx) reads nothing again",
+    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /sign-out, a 503 for a session that is still there/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (outcomeUnknown(result)) changed();",
+        "    void outcomeUnknown;",
+      ),
+  },
+  {
+    id: "MU-1638",
+    title:
+      "WEB-08d R1: a retirement whose outcome is unknown (a lost answer, a 5xx) reads nothing again",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /retirement, a 503/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (outcomeUnknown(result)) onChanged();",
+        "    void outcomeUnknown;",
+      ),
+  },
+  {
+    id: "MU-1639",
+    title:
+      "WEB-08d R1: a definite 4xx refusal is treated as an unknown outcome (the lists are read again for nothing)",
+    file: "src/features/settings/sessions-devices/outcome.ts",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /sign-out, a 403 refusal/,
+    patch: (t) =>
+      sub(
+        t,
+        "          result.status < 400 ||",
+        "          result.status < 500 ||",
+      ),
+  },
+  {
+    id: "MU-1640",
+    title:
+      "WEB-08d R1: a connection lost after sending is treated as a definite answer (the lists are not read again)",
+    file: "src/features/settings/sessions-devices/outcome.ts",
+    tests: ["tests/features/settings/cross-list.test.tsx"],
+    expect: /offline after sending/,
+    patch: (t) => sub(t, '    (result.error === "offline" ||', "    (false ||"),
   },
 ];
 

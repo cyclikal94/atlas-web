@@ -41,7 +41,7 @@ const only = value("--only", "").split(",").filter(Boolean);
 const jobs = Number(value("--jobs", "3"));
 const check = flag("--check");
 
-const EXPECTED_UNIT = 1031; // WEB-08d adds MU-1600 to MU-1632
+const EXPECTED_UNIT = 1039; // WEB-08d adds MU-1600 to MU-1640 (MU-1633 to MU-1640: review R1)
 const EXPECTED_ENGINE = 154;
 
 const selected = UNIT.filter((m) => only.length === 0 || only.includes(m.id));

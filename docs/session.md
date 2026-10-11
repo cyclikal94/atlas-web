@@ -276,6 +276,10 @@ request's User-Agent: a recognition hint, never identity), `device_name` to sess
 - **Naming (D-8d-09/10):** offered only when the devices answer carries `sync_capacity`; disabled offline with its reason; validated before sending; an unconfirmed
   outcome (a lost answer, a `5xx`) says so and reads the list again; `closed`/`auth_state` and an answer after the dialog closed say nothing. A name is display metadata:
   it is not part of `state_token`, so a rename never stales a retirement (the confirmation still sends the token of the read that supplied the row).
+- **Both lists after a change (review R1):** one server change touches both lists (retiring a device ends its sessions; signing out a never-synced device's last
+  session removes the device and changes a synced device's session count; a name is shown on both). So a confirmed sign-out, retirement or naming change, or one
+  whose outcome is unknown (a lost answer, a `5xx`, the same rule as naming), reads BOTH lists again through the composed screen (`SessionsDevices`), each with its
+  own loading and error state. A definite refusal, `rejected_stale`, `not_sent`, `closed` and `auth_state` read nothing again.
 - **Confirmations name the item (D-8d-12):** "Retire {name}?" (the name isolated) for another device; one identifying line above the unchanged WEB-04 warning for this device and logout.
   Signing out another session keeps its direct action (WF-SETTINGS-02 draws no dialog); its accessible name and announcements name the row.
 - **Privacy (D-8d-14):** names and labels are never persisted by the client (not in `atlas-auth`, not in the retirement envelope, which keeps only `state_token` and

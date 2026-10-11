@@ -20,6 +20,7 @@ import {
   sessionPhrase,
   sessionTitle,
 } from "./labels";
+import { outcomeUnknown } from "./outcome";
 import { untilSent } from "./until-sent";
 import { useLoad } from "./useLoad";
 
@@ -45,11 +46,17 @@ export const sessionMeta = (row: SessionSummary, now: Date): string =>
 export function SessionsSection({
   onSignOutCurrent,
   refresh = 0,
+  onChanged,
 }: {
   /** Opens the logout warning for the current row (the row is passed so the warning can name it). */
   onSignOutCurrent(row: SessionSummary): void;
-  /** Changes when another section changed what this list shows (a device was named): the list is read again. */
+  /** Changes when the server may have changed what this list shows (in either section): the list is read again. */
   refresh?: number;
+  /**
+   * A sign-out here was confirmed, or its outcome is unknown: the devices list changes too (a never-synced device leaves with its
+   * last session; a synced one's session count drops). The owner reads both lists again; without one, this list reloads itself.
+   */
+  onChanged?(): void;
 }) {
   const session = useSession();
   const announcer = useAnnouncer();
@@ -66,6 +73,7 @@ export function SessionsSection({
     lastRefresh.current = refresh;
     reload();
   }, [refresh, reload]);
+  const changed = () => (onChanged ? onChanged() : reload());
 
   const revoke = async (row: SessionSummary) => {
     const id = row.id;
@@ -80,7 +88,7 @@ export function SessionsSection({
       announcer.announce(
         named ? signedOut(sessionInSentence(row)) : SIGN_IN_ENDED,
       );
-      reload();
+      changed();
       return;
     }
     setFailed({
@@ -92,6 +100,9 @@ export function SessionsSection({
       named ? signOutFailed(sessionInSentence(row)) : REVOKE_FAILED,
       "assertive",
     );
+    // The session may have ended anyway (an answer lost after sending, a server error): read again. The row's failure stays shown
+    // while it is still listed, and signing it out again is safe (an ended session answers `gone`).
+    if (outcomeUnknown(result)) changed();
   };
 
   return (

@@ -5,6 +5,7 @@ import { List } from "../../../components/ui/list";
 import { type DeviceRow, useSession } from "../../../session";
 import { retireOtherTitle } from "./label-copy";
 import { deviceInSentence } from "./labels";
+import { outcomeUnknown } from "./outcome";
 import { untilSent } from "./until-sent";
 import { summaryLines } from "./wipe-copy";
 
@@ -26,12 +27,15 @@ export const RETIRE_OTHER_FAILED =
 
 export function RetireOtherDialog({
   device,
-  onDone,
+  onChanged,
   onClose,
 }: {
   device: DeviceRow;
-  /** Called after a confirmed retirement, so the list can reload. */
-  onDone(): void;
+  /**
+   * Called after a confirmed retirement, or one whose outcome is unknown, so the lists are read again: retiring a device also ends
+   * its sessions.
+   */
+  onChanged(): void;
   onClose(): void;
 }) {
   const session = useSession();
@@ -50,7 +54,7 @@ export function RetireOtherDialog({
         setMessage(RETIRE_OTHER_STALE);
         return;
       }
-      onDone();
+      onChanged();
       onClose();
       return;
     }
@@ -61,6 +65,9 @@ export function RetireOtherDialog({
         ? `${RETIRE_OTHER_FAILED} Request ID: ${requestId}`
         : RETIRE_OTHER_FAILED,
     );
+    // The device may have been retired anyway (an answer lost after sending, a server error): the lists behind the dialog are read
+    // again, and the failure stays shown here.
+    if (outcomeUnknown(result)) onChanged();
   };
 
   return (

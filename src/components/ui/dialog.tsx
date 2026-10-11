@@ -122,8 +122,13 @@ export function Dialog({
           className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[440px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-dialog tablet:border tablet:border-hairline-strong tablet:shadow-modal"
         >
           <header className="flex items-center gap-3 border-b border-hairline px-[18px] py-4">
-            {/* min-w-min: the title never squeezes below its longest word; the sync control gives way instead. */}
-            <div className="min-w-min break-words">
+            {/*
+              The title never squeezes below its longest word, so the sync control gives way first (a flex item's automatic minimum is
+              its min-content width). That minimum is capped by the max-width, which keeps 160 px for the sync control and Close: a word
+              wider than the rest of the header (a valid 64-character device name with no spaces) breaks there instead of pushing the
+              controls out of the dialog.
+            */}
+            <div className="max-w-[calc(100%-160px)] break-words">
               <DialogPrimitive.Title className="text-[16px] font-medium tracking-[-0.01em] text-ink-1">
                 {title}
               </DialogPrimitive.Title>

@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import {
   DARK,
   evidencePath,
@@ -13,7 +13,8 @@ import {
  * WEB-08d L-1 to L-6: recognisable sessions and devices, both capacities, naming and the named confirmations, rendered in each engine at
  * 320, 390, 768 and 1280 px in dark and light (and Auto). FIXTURE evidence (the canned 0.28-shaped session double): it shows the screens
  * render, reflow and pass axe with real layout and contrast. It is not integration evidence (integration.web08d-labels.spec.ts), not
- * assistive-technology evidence and not Kieran's visual or copy sign-off.
+ * assistive-technology evidence and not Kieran's visual or copy sign-off. L-7 (review R2): a valid 64-character name with no spaces in
+ * the Rename and Retire dialog titles.
  */
 const WIDTHS: Array<[number, number]> = [
   [320, 640],
@@ -487,4 +488,230 @@ test.describe("L-6 Auto", () => {
     const violations = await runAxe(page);
     expect(violations.map((v) => v.id)).toEqual([]);
   });
+});
+
+/**
+ * The dialog header measured in the page: the title, the sync control, Close and the footer's buttons must lie inside the dialog and
+ * be the topmost element at their own centre (not clipped, not covered); `split` lists the title's words drawn on more than one line.
+ */
+async function measure(dialog: Locator) {
+  return dialog.evaluate((element) => {
+    const box = (node: Element) => {
+      const r = node.getBoundingClientRect();
+      return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+    };
+    const shown = (node: Element) => {
+      const r = node.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        (r.left + r.right) / 2,
+        (r.top + r.bottom) / 2,
+      );
+      return hit !== null && node.contains(hit);
+    };
+    const title = element.querySelector("h2") as HTMLElement;
+    const chip = element.querySelector(
+      'header button:not([aria-label="Close"])',
+    ) as HTMLElement;
+    const close = element.querySelector(
+      'button[aria-label="Close"]',
+    ) as HTMLElement;
+    const text = title.firstChild as Text;
+    const split: string[] = [];
+    let at = 0;
+    for (const word of (text.textContent ?? "").split(" ")) {
+      const range = document.createRange();
+      range.setStart(text, at);
+      range.setEnd(text, at + word.length);
+      // Lines the word's VISIBLE glyphs are drawn on: Firefox gives the zero-width U+2068 isolate its own empty box at the end of the
+      // previous line, which is not a break in the word.
+      const lines = new Set(
+        Array.from(range.getClientRects())
+          .filter((rect) => rect.width > 0)
+          .map((rect) => Math.round(rect.top)),
+      );
+      if (lines.size > 1) split.push(word);
+      at += word.length + 1;
+    }
+    return {
+      dialog: box(element),
+      viewport: { width: innerWidth, height: innerHeight },
+      title: box(title),
+      chip: box(chip),
+      close: box(close),
+      closeSize: [close.offsetWidth, close.offsetHeight],
+      chipSize: [chip.offsetWidth, chip.offsetHeight],
+      overflow: {
+        title: title.scrollWidth - title.clientWidth,
+        header:
+          (element.querySelector("header") as HTMLElement).scrollWidth -
+          (element.querySelector("header") as HTMLElement).clientWidth,
+        dialog: element.scrollWidth - element.clientWidth,
+      },
+      shown: {
+        title: shown(title),
+        chip: shown(chip),
+        close: shown(close),
+        footer: Array.from(element.querySelectorAll("footer button")).map(
+          (button) => [button.textContent ?? "", shown(button)] as const,
+        ),
+      },
+      split,
+    };
+  });
+}
+
+/** Containment of every header control, 44 px targets, nothing clipped; then Tab reaches each control, drawn and inside the dialog. */
+async function checkDialog(
+  page: Page,
+  dialog: Locator,
+  label: string,
+  long: boolean,
+) {
+  const m = await measure(dialog);
+  const inside = (b: { left: number; right: number }, what: string) => {
+    expect(b.left, `${label}: ${what} left edge`).toBeGreaterThanOrEqual(
+      m.dialog.left - 0.5,
+    );
+    expect(b.right, `${label}: ${what} right edge`).toBeLessThanOrEqual(
+      m.dialog.right + 0.5,
+    );
+  };
+  inside(m.title, "title");
+  inside(m.chip, "sync control");
+  inside(m.close, "Close");
+  expect(
+    m.dialog.right,
+    `${label}: dialog in the viewport`,
+  ).toBeLessThanOrEqual(m.viewport.width + 0.5);
+  expect(
+    m.title.right,
+    `${label}: title clear of the sync control`,
+  ).toBeLessThanOrEqual(m.chip.left + 0.5);
+  expect(
+    m.chip.right,
+    `${label}: sync control clear of Close`,
+  ).toBeLessThanOrEqual(m.close.left + 0.5);
+  expect(m.closeSize[0], `${label}: Close width`).toBeGreaterThanOrEqual(44);
+  expect(m.closeSize[1], `${label}: Close height`).toBeGreaterThanOrEqual(44);
+  expect(m.chipSize[0], `${label}: sync control width`).toBeGreaterThanOrEqual(
+    44,
+  );
+  expect(m.chipSize[1], `${label}: sync control height`).toBeGreaterThanOrEqual(
+    44,
+  );
+  expect(m.overflow, `${label}: nothing overflows sideways`).toEqual({
+    title: 0,
+    header: 0,
+    dialog: 0,
+  });
+  expect(m.shown.title, `${label}: title drawn`).toBe(true);
+  expect(m.shown.chip, `${label}: sync control drawn`).toBe(true);
+  expect(m.shown.close, `${label}: Close drawn`).toBe(true);
+  expect(
+    m.shown.footer.filter(([, shown]) => !shown).map(([text]) => text),
+    `${label}: footer buttons drawn`,
+  ).toEqual([]);
+  // An ordinary title keeps every word whole (the sync control gives way first); only the unbroken name may break.
+  expect(m.split, `${label}: words broken across lines`).toEqual(
+    long ? [m.split[0] ?? "(none)"] : [],
+  );
+  if (long)
+    expect(m.split[0], `${label}: the long name wraps`).toContain("WWWW");
+  const focusable = await dialog
+    .locator("button:not([disabled]), input")
+    .count();
+  for (let step = 0; step < focusable; step += 1) {
+    await pressTab(page);
+    const where = await page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      const dialogElement = document.querySelector("[role=dialog]");
+      if (!active || !dialogElement?.contains(active)) return "outside";
+      const r = active.getBoundingClientRect();
+      const d = dialogElement.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        (r.left + r.right) / 2,
+        (r.top + r.bottom) / 2,
+      );
+      if (r.left < d.left - 0.5 || r.right > d.right + 0.5) return "clipped";
+      return hit !== null && active.contains(hit) ? "shown" : "hidden";
+    });
+    expect(where, `${label}: focus after Tab ${step + 1}`).toBe("shown");
+  }
+}
+
+test.describe("L-7 a long unbroken name in the dialog titles (review R2)", () => {
+  const LONG = "W".repeat(64);
+  for (const scheme of ["dark", "light"] as const)
+    for (const [width, height] of [
+      [320, 568],
+      [320, 640],
+      [390, 844],
+      [768, 1024],
+      [1280, 800],
+    ] as const)
+      test(`Rename and Retire keep the title, sync control and Close inside the dialog at ${width}x${height}, ${scheme}`, async ({
+        page,
+      }, testInfo) => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.setViewportSize({ width, height });
+        // The largest sync control the header can hold beside the title.
+        await page.goto(
+          "/settings/sessions?phase=offline&pending=1000&conflicts=1000",
+        );
+        await ready(page);
+        const label = `L-7 ${width}x${height} ${scheme}`;
+        // Control: an ordinary name keeps every word of the title whole.
+        await page
+          .getByRole("button", {
+            name: `Retire ${isolate("Kieran's phone")}, last synced 3 hours ago`,
+          })
+          .click();
+        const ordinary = page.getByRole("dialog", {
+          name: `Retire ${isolate("Kieran's phone")}?`,
+        });
+        await ordinary.waitFor();
+        await checkDialog(page, ordinary, `${label} ordinary retire`, false);
+        await page.keyboard.press("Escape");
+        await expect(ordinary).toHaveCount(0);
+        // A valid 64-character name with no spaces, saved through the dialog.
+        await page
+          .getByRole("button", {
+            name: `Rename ${isolate("Kieran's phone")}, last synced 3 hours ago`,
+          })
+          .click();
+        const naming = page.getByRole("dialog");
+        await naming.getByLabel("Device name").fill(LONG);
+        await naming.getByRole("button", { name: "Save name" }).click();
+        await expect(naming).toHaveCount(0);
+        await expect(page.locator("bdi[data-device-name]")).toHaveText(LONG);
+        const steps: Array<[string, string, string]> = [
+          [
+            "rename",
+            `Rename ${isolate(LONG)}, last synced 3 hours ago`,
+            `Rename ${isolate(LONG)}`,
+          ],
+          [
+            "retire",
+            `Retire ${isolate(LONG)}, last synced 3 hours ago`,
+            `Retire ${isolate(LONG)}?`,
+          ],
+        ];
+        for (const [name, button, title] of steps) {
+          await page.getByRole("button", { name: button }).click();
+          const dialog = page.getByRole("dialog", { name: title });
+          await dialog.waitFor();
+          if (name === "rename")
+            await expect(dialog.getByLabel("Device name")).toHaveValue(LONG);
+          await checkDialog(page, dialog, `${label} ${name}`, true);
+          await checkSurface(page, `${label} ${name}`, "[role=dialog]");
+          if (testInfo.project.name === "fixture-chromium")
+            await page.screenshot({
+              path: evidencePath(
+                `session-labels/L7-${name}-${width}x${height}-${scheme}.png`,
+              ),
+            });
+          await page.keyboard.press("Escape");
+          await expect(dialog).toHaveCount(0);
+        }
+      });
 });

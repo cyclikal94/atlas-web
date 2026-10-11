@@ -13,8 +13,11 @@ import { WipeConfirmDialog } from "./WipeConfirmDialog";
  */
 export function SessionsDevices() {
   const [loggingOut, setLoggingOut] = useState<SessionSummary | null>(null);
-  // A device's name is shown on the sessions list too, so a naming change there reads the sessions again.
-  const [namesChanged, setNamesChanged] = useState(0);
+  // One server change touches both lists: retiring a device ends its sessions, signing out a never-synced device's last session
+  // removes that device (and changes a synced one's session count), and a device's name is shown on the sessions list. So a change
+  // made in either section, or one whose outcome is unknown, reads BOTH lists again (each keeps its own loading and error state).
+  const [changes, setChanges] = useState(0);
+  const changed = () => setChanges((n) => n + 1);
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
@@ -28,9 +31,10 @@ export function SessionsDevices() {
       </div>
       <SessionsSection
         onSignOutCurrent={(row) => setLoggingOut(row)}
-        refresh={namesChanged}
+        refresh={changes}
+        onChanged={changed}
       />
-      <DevicesSection onNamesChanged={() => setNamesChanged((n) => n + 1)} />
+      <DevicesSection refresh={changes} onChanged={changed} />
       {loggingOut ? (
         <WipeConfirmDialog
           kind="logout"

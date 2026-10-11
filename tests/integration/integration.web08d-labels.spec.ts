@@ -336,4 +336,174 @@ test.describe("I-8d: BE-Q25 labels, names and capacities against the released ba
     expect(API).toContain("/api/experimental/v1");
     expect(isolate("x")).toBe("\u2068x\u2069");
   });
+  test("I-8d-7 (review R1): a change made in one list is shown in the other, for never-synced and synced devices; naming is the control", async ({
+    context,
+  }) => {
+    await rawSignIn("ivan", "ivan-tablet", { userAgent: SAMSUNG_ANDROID });
+    await rawSignIn("ivan", "ivan-phone", { userAgent: SAFARI_IPHONE });
+    const laptop = await rawSignIn("ivan", "ivan-laptop", {
+      userAgent: FIREFOX_WINDOWS,
+    });
+    // The laptop syncs once (a cookie-authenticated read carries the CSRF token), so it holds a place for syncing and outlives its
+    // sessions.
+    const synced = await raw("GET", "/sync", {
+      cookie: laptop.cookie,
+      headers: { "x-csrf-token": laptop.csrf },
+    });
+    expect(synced.status, JSON.stringify(synced.json)).toBe(200);
+    const page = await settled(context, "ivan");
+    const main = page.locator("main");
+    const sessionRows = main.locator("[data-session-row]");
+    const deviceRows = main.locator("[data-device-row]");
+    const other = (kind: "session" | "device", text: string) =>
+      main.locator(`[data-${kind}-row=other]`, { hasText: text });
+    const lines = async () => {
+      const sessions = await sessionsOf(page);
+      const devices = await devicesOf(page);
+      return {
+        sessions: `${sessions.session_capacity.used} of ${sessions.session_capacity.limit} sign-ins in use.`,
+        devices: `${devices.sync_capacity.used} of ${devices.sync_capacity.limit} places for syncing in use.`,
+        counts: [sessions.sessions.length, devices.devices.length],
+        synced: devices.devices.find((d) => d.id === "ivan-laptop")?.summary,
+      };
+    };
+    const shows = async (expected: Awaited<ReturnType<typeof lines>>) => {
+      await expect(sessionRows).toHaveCount(expected.counts[0] ?? -1);
+      await expect(deviceRows).toHaveCount(expected.counts[1] ?? -1);
+      await expect(main.locator("[data-capacity=sessions]")).toHaveText(
+        expected.sessions,
+      );
+      await expect(main.locator("[data-capacity=devices]")).toHaveText(
+        expected.devices,
+      );
+    };
+    const start = await lines();
+    expect(start.counts).toEqual([4, 4]);
+    expect(start.synced).toMatchObject({ sync_registered: true });
+    await shows(start);
+
+    // Control: naming the tablet shows the name on its device row and its session row.
+    await other("device", "Samsung Internet on Android")
+      .getByRole("button", { name: /^Name / })
+      .click();
+    const naming = page.getByRole("dialog");
+    await naming.getByLabel("Device name").fill("Ivan's tablet");
+    await naming.getByRole("button", { name: "Save name" }).click();
+    await expect(naming).toHaveCount(0);
+    await expect(other("device", "Ivan's tablet")).toHaveCount(1);
+    await expect(other("session", "Ivan's tablet")).toHaveCount(1);
+
+    // Retiring the (never-synced) tablet ends its session: the sessions list and its capacity follow.
+    await other("device", "Ivan's tablet")
+      .getByRole("button", { name: /^Retire / })
+      .click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Retire device", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const retired = await lines();
+    expect(retired.counts).toEqual([3, 3]);
+    await shows(retired);
+    await expect(other("session", "Ivan's tablet")).toHaveCount(0);
+
+    // Signing out the phone's only session removes the never-synced phone, controls and all.
+    await other("session", "Safari on iOS")
+      .getByRole("button", { name: /^Sign out / })
+      .click();
+    // The row leaves only after the confirmed answer: read the server's state after that, not while the DELETE is in flight.
+    await expect(other("session", "Safari on iOS")).toHaveCount(0);
+    const phoneGone = await lines();
+    expect(phoneGone.counts).toEqual([2, 2]);
+    await shows(phoneGone);
+    await expect(other("device", "Safari on iOS")).toHaveCount(0);
+
+    // Signing out the synced laptop's session keeps the laptop, with its session count read again.
+    await other("session", "Firefox on Windows")
+      .getByRole("button", { name: /^Sign out / })
+      .click();
+    await expect(other("session", "Firefox on Windows")).toHaveCount(0);
+    const laptopIdle = await lines();
+    expect(laptopIdle.counts).toEqual([1, 2]);
+    await shows(laptopIdle);
+    await expect(other("device", "Firefox on Windows")).toContainText(
+      "0 active sessions",
+    );
+
+    // Retiring the synced laptop frees its place for syncing.
+    await other("device", "Firefox on Windows")
+      .getByRole("button", { name: /^Retire / })
+      .click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Retire device", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const laptopRetired = await lines();
+    expect(laptopRetired.counts).toEqual([1, 1]);
+    expect(laptopRetired.devices).not.toBe(laptopIdle.devices);
+    await shows(laptopRetired);
+  });
+
+  test("I-8d-8 (review R2): a valid 64-character name with no spaces keeps the Rename and Retire titles, the sync control and Close inside the dialog", async ({
+    context,
+  }) => {
+    await rawSignIn("judy", "judy-phone", { userAgent: SAFARI_IPHONE });
+    const page = await settled(context, "judy");
+    const LONG = "W".repeat(64);
+    const phone = page.locator("main [data-device-row=other]");
+    await phone.getByRole("button", { name: /^Name / }).click();
+    const naming = page.getByRole("dialog");
+    await naming.getByLabel("Device name").fill(LONG);
+    await naming.getByRole("button", { name: "Save name" }).click();
+    await expect(naming).toHaveCount(0);
+    await expect(phone.locator("bdi[data-device-name]")).toHaveText(LONG);
+    expect(
+      (await devicesOf(page)).devices.find((d) => d.id === "judy-phone")?.name,
+    ).toBe(LONG);
+    for (const [width, height] of [
+      [320, 640],
+      [1280, 800],
+    ] as const) {
+      await page.setViewportSize({ width, height });
+      for (const [action, title] of [
+        ["Rename", `Rename ${isolate(LONG)}`],
+        ["Retire", `Retire ${isolate(LONG)}?`],
+      ] as const) {
+        await phone
+          .getByRole("button", { name: new RegExp(`^${action} `) })
+          .click();
+        const dialog = page.getByRole("dialog", { name: title });
+        await dialog.waitFor();
+        const where = `${action} at ${width}x${height}`;
+        const geometry = await dialog.evaluate((element) => {
+          const d = element.getBoundingClientRect();
+          const parts = [
+            element.querySelector("h2"),
+            element.querySelector('header button:not([aria-label="Close"])'),
+            element.querySelector('button[aria-label="Close"]'),
+          ] as HTMLElement[];
+          return parts.map((part) => {
+            const r = part.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+              (r.left + r.right) / 2,
+              (r.top + r.bottom) / 2,
+            );
+            return {
+              inside: r.left >= d.left - 0.5 && r.right <= d.right + 0.5,
+              shown: hit !== null && part.contains(hit),
+              overflow: part.scrollWidth - part.clientWidth,
+            };
+          });
+        });
+        expect(geometry, where).toEqual([
+          { inside: true, shown: true, overflow: 0 },
+          { inside: true, shown: true, overflow: 0 },
+          { inside: true, shown: true, overflow: 0 },
+        ]);
+        await page.keyboard.press("Escape");
+        await expect(dialog).toHaveCount(0);
+      }
+    }
+  });
 });

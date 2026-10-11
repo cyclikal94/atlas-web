@@ -28,7 +28,7 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Dialogs:** title, description, the sync control **inside** the focus trap (the page behind is inert), a close control, Escape and the close icon discard, only the sync control retains the draft. Focus goes to the first field on open and returns to the opener on close. Tab and Shift+Tab, with or without Option or Alt, wrap inside the dialog (`src/components/ui/focus-loop.ts`), tested on every engine.
 - **The sync/offline chip** is a real `<button>` whose accessible name states status and action ("2 waiting to send, Receiving updates: up to date. Open sync queue."). It contains its visible text. A separate announcer reports changes: polite on a change of phase or count, assertive **only** when the conflict count increases, never on first render, coalesced to one per frame.
 - **Tone is never colour alone:** every state has words and a dot.
-- **44px targets** for touch controls, 48px for the mobile tabs. The dialog Close control and the in-dialog sync control keep 44px at 320px wide beside long labels and large counts: Close does not shrink (`shrink-0`), the title never squeezes below its longest word, and the sync label wraps (`tests/e2e/fixture.shell.spec.ts`, "dialog header keeps a 44 x 44 Close target").
+- **44px targets** for touch controls, 48px for the mobile tabs. The dialog Close control and the in-dialog sync control keep 44px at 320px wide beside long labels and large counts: Close does not shrink (`shrink-0`), the title never squeezes below its longest word, and the sync label wraps (`tests/e2e/fixture.shell.spec.ts`, "dialog header keeps a 44 x 44 Close target"). The title's width, and so that minimum, is capped at the header less 160 px: a word wider than that (a valid 64-character device name with no spaces) breaks inside the title instead of pushing the sync control and Close out of the dialog (`fixture.session-labels.spec.ts` L-7).
 - **Tooltips** on the icon rail show on hover **and** keyboard focus, are dismissible (Escape), hoverable and persistent (WCAG 1.4.13). Controls keep their own accessible names: labels do not depend on hover.
 - **Focus ring:** one style everywhere, 2px `action-ink`, 2px offset, and system colours in forced-colours mode.
 - **Forms:** every `Input` requires a label association. A disabled control states its reason beside it.
@@ -64,7 +64,8 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   are disabled with the visible reason "Naming a device needs a connection.", which is their accessible description. As everywhere, a disabled control is drawn in
   place of the enabled one, so focus on Save falls to the page when the connection drops (listed in the manual checks below).
 - **Confirmations name the item:** another device's retirement is titled with its name or label; this device's retirement and logout keep the WEB-04 words and add
-  one identifying line above them.
+  one identifying line above them. A long unbroken name wraps inside the dialog title; the sync control and Close stay inside the dialog with their 44 px targets
+  (L-7, 320 to 1280 px, dark and light, every engine).
 - Automated evidence: jest-axe on every new state (`tests/features/settings/name-device.test.tsx`) and real-engine axe including contrast at 320, 390, 768 and 1280 px
   in dark, light and Auto (`tests/e2e/fixture.session-labels.spec.ts`), plus the released-backend run (`integration.web08d-labels.spec.ts`). TalkBack, NVDA and
   VoiceOver passes remain Layer 3 (WEB-15).

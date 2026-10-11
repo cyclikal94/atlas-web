@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { type DeviceRow, useSession } from "../../../session";
@@ -37,14 +37,27 @@ export const deviceMeta = (row: DeviceRow, now: Date): string =>
   ].join(" · ");
 
 export function DevicesSection({
-  onNamesChanged,
+  refresh = 0,
+  onChanged,
 }: {
-  /** A name changed (or may have): the sessions list shows device names too. */
-  onNamesChanged?(): void;
+  /** Changes when the server may have changed what this list shows (in either section): the list is read again. */
+  refresh?: number;
+  /**
+   * A retirement or a naming change here was confirmed, or its outcome is unknown: the sessions list changes too (a retired device's
+   * sessions end; it shows device names). The owner reads both lists again; without one, this list reloads itself.
+   */
+  onChanged?(): void;
 } = {}) {
   const session = useSession();
   const online = useOnline();
   const [load, reload] = useLoad(() => session.operations.readDevices());
+  const lastRefresh = useRef(refresh);
+  useEffect(() => {
+    if (lastRefresh.current === refresh) return;
+    lastRefresh.current = refresh;
+    reload();
+  }, [refresh, reload]);
+  const changed = () => (onChanged ? onChanged() : reload());
   const [retiring, setRetiring] = useState<DeviceRow | null>(null);
   const [naming, setNaming] = useState<DeviceRow | null>(null);
   const now = new Date();
@@ -181,17 +194,14 @@ export function DevicesSection({
       ) : retiring ? (
         <RetireOtherDialog
           device={retiring}
-          onDone={reload}
+          onChanged={changed}
           onClose={() => setRetiring(null)}
         />
       ) : null}
       {naming ? (
         <NameDeviceDialog
           device={naming}
-          onChanged={() => {
-            reload();
-            onNamesChanged?.();
-          }}
+          onChanged={changed}
           onClose={() => setNaming(null)}
         />
       ) : null}
