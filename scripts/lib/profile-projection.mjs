@@ -533,7 +533,7 @@ export function projectResults({ evidenceDir, resolution, context }) {
       candidate_fingerprint: now?.source_fingerprint ?? null,
       node: machineRecord?.node ?? null,
       playwright: machineRecord?.playwright ?? null,
-      backend: `released ${pinned?.backend_tag} (${pinned?.backend_commit}), integration measurements only`,
+      backend: `configured target ${pinned?.backend_tag} (${pinned?.backend_commit}); use each measurement's recorded backend attribution (historical results may differ)`,
       api_pin: "contract-pin.json",
       date: machineRecord?.recorded_at ?? null,
       operator: "the Running-phase agent; no person has reviewed this record",

@@ -19,7 +19,7 @@ import {
 
 /**
  * I-01 to I-03 (plan 14.3). The session module and its production adapters in a real engine against the RELEASED backend
- * (v0.27.0-rc.1) on a disposable SQLite database. What each asserts on the wire, and what it does not prove, is stated per test.
+ * (the version in contract-pin.json) on a disposable SQLite database. What each asserts on the wire, and what it does not prove, is stated per test.
  * `Set-Cookie` presence is read from response headers, never from `document.cookie` (the cookie is HttpOnly).
  */
 const wire = (page: Page) => {

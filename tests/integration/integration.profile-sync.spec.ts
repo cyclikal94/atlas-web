@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
+import contractPin from "../../contract-pin.json" with { type: "json" };
 import {
   observeW2Capture,
   sameTargetProblems,
@@ -771,8 +772,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     });
   recordValue("P-W2 capture", engine, {
     status: "measured",
-    server:
-      "the released backend on SQLite behind the delaying proxy, loopback",
+    server: `the released ${contractPin.backend_tag} on SQLite behind the delaying proxy, loopback`,
     seeding: {
       writer: "dave (raw HTTP)",
       reader: "carol (this page)",
@@ -816,8 +816,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
       "one revocation of a person holding 200 dense checklist fields shared with the reader (201 changes for the reader in one revision)",
     revoke: { status: boundRevoke.status, body: boundRevoke.body },
     delivered: boundRead,
-    reading:
-      "what the released v0.27.0-rc.1 did; the publisher's bound (B-7) belongs to BE-B1 and is not a client requirement",
+    reading: `what the released ${contractPin.backend_tag} did; the publisher's bound (B-7) belongs to BE-B1 and is not a client requirement`,
   });
 });
 

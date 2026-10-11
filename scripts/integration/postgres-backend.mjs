@@ -5,10 +5,10 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
-// Pins: the backend's container image index digest (release asset container-image.txt, v0.27.0-rc.1) and the PostgreSQL index digest this repository
+// Pins: the backend's container image index digest (release asset container-image.txt, v0.28.0-rc.1) and the PostgreSQL index digest this repository
 // already pins for its Compose example (deploy/base-images.env).
 export const BACKEND_IMAGE =
-  "ghcr.io/cyclikal94/atlas@sha256:fb5d51fdff89795b2400885e18b53cb3a2e2a41f6c93b504c15ceef8eb262211";
+  "ghcr.io/cyclikal94/atlas@sha256:2b8101a8047f7e6cbc23742f3f0b4701b9e22deb38c2b88a932e09dd71ab4d20";
 export const POSTGRES_IMAGE =
   "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f";
 const env = { ...process.env, DOCKER_CONTEXT: "colima-atlas" };
