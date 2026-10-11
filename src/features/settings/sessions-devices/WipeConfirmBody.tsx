@@ -17,6 +17,7 @@ export function WipeConfirmBody({
   corrected,
   device,
   refusal,
+  identity,
 }: {
   kind: WipeKind;
   summary: LocalWorkSummary | null;
@@ -24,10 +25,18 @@ export function WipeConfirmBody({
   corrected: boolean;
   device?: DeviceRow;
   refusal: string | null;
+  /** WEB-08d (D-8d-12): one line naming what is being signed out or retired, above the WEB-04 words (which stay verbatim). */
+  identity?: { line: string; named?: string } | null;
 }) {
   const unsynced = summary !== null && summary.count > 0;
   return (
     <div className="flex flex-col gap-3 text-[14px] leading-[1.6] text-ink-1">
+      {identity ? (
+        <p data-identity="" className="text-ink-2 [overflow-wrap:anywhere]">
+          {identity.line}
+          {identity.named !== undefined ? <bdi>{identity.named}</bdi> : null}
+        </p>
+      ) : null}
       {corrected && summary ? (
         <p>{actuallyLine(summary.count, kind)}</p>
       ) : unsynced ? (

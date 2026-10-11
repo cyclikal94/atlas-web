@@ -77,7 +77,7 @@ const STACKS = NARROWED
         suffix: "",
         args: [
           "--grep-invert",
-          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W)[0-9]|I-2[0-9]|I-30",
+          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W)[0-9]|I-2[0-9]|I-30|I-8d",
         ],
         oidc: false,
       },
@@ -105,6 +105,8 @@ const STACKS = NARROWED
       },
       { suffix: "-oidc-off", args: ["--grep", "I-28b"], oidc: false },
       { suffix: "-settings", args: ["--grep", "I-29|I-30"], oidc: false },
+      // WEB-08d: the BE-Q25 labels, names and capacities against the released 0.28 backend, in a fresh stack of their own.
+      { suffix: "-labels", args: ["--grep", "I-8d"], oidc: false },
     ];
 
 const children = [];

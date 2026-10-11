@@ -80,6 +80,10 @@ export function sessionDouble(
       ok: true as const,
       value: { sessions: [] },
     })),
+    nameDevice: vi.fn(async (_id: string, name: string | null) => ({
+      ok: true as const,
+      value: name === null ? ("cleared" as const) : ("named" as const),
+    })),
     revokeOtherSession: vi.fn(async () => ({
       ok: true as const,
       value: "revoked" as const,

@@ -1,16 +1,32 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { type SessionSummary, useSession } from "../../../session";
 import { formatAgo, formatIn } from "../relative-time";
+import { CapacityLine } from "./CapacityLine";
 import { LoadFailed } from "./LoadFailed";
+import {
+  ON_DEVICE,
+  SIGN_IN_ENDED,
+  signedOut,
+  signOutFailed,
+  THIS_BROWSER_TAG,
+} from "./label-copy";
+import {
+  decodeClientLabel,
+  decodeDeviceName,
+  sessionInSentence,
+  sessionPhrase,
+  sessionTitle,
+} from "./labels";
 import { untilSent } from "./until-sent";
 import { useLoad } from "./useLoad";
 
 /**
- * "Where you're signed in" (WF-SETTINGS-02). Labels come from real fields only (design gap G-1): the contract carries no
- * user-agent or label, so a row says "This browser" or "Another sign-in", how it authenticates, and when it started and ends.
+ * "Where you're signed in" (WF-SETTINGS-02). WEB-08d: a row is titled by the BE-Q25 client label ("Chrome on macOS"), with WEB-08a's
+ * "This browser" / "Another sign-in" as the fallback for a legacy, absent or unusable label; its device's name, how it authenticates,
+ * and when it started and ends tell rows apart without an identifier. The live-session capacity is the answer's own.
  */
 export const SESSIONS_HEADING = "Where you're signed in";
 export const SESSIONS_CONSEQUENCE =
@@ -19,8 +35,6 @@ export const CURRENT_NOTE =
   "Signing out here ends your current session immediately — you'll need to log in again.";
 export const REVOKE_FAILED = "Couldn't revoke this session — please try again.";
 
-export const sessionTitle = (row: SessionSummary): string =>
-  row.current ? "This browser" : "Another sign-in";
 export const sessionMeta = (row: SessionSummary, now: Date): string =>
   [
     row.authentication === "oidc" ? "Single sign-on" : "Password",
@@ -30,8 +44,12 @@ export const sessionMeta = (row: SessionSummary, now: Date): string =>
 
 export function SessionsSection({
   onSignOutCurrent,
+  refresh = 0,
 }: {
-  onSignOutCurrent(): void;
+  /** Opens the logout warning for the current row (the row is passed so the warning can name it). */
+  onSignOutCurrent(row: SessionSummary): void;
+  /** Changes when another section changed what this list shows (a device was named): the list is read again. */
+  refresh?: number;
 }) {
   const session = useSession();
   const announcer = useAnnouncer();
@@ -42,16 +60,26 @@ export function SessionsSection({
   } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const now = new Date();
+  const lastRefresh = useRef(refresh);
+  useEffect(() => {
+    if (lastRefresh.current === refresh) return;
+    lastRefresh.current = refresh;
+    reload();
+  }, [refresh, reload]);
 
-  const revoke = async (id: string) => {
+  const revoke = async (row: SessionSummary) => {
+    const id = row.id;
     setBusy(id);
     setFailed(null);
     const result = await untilSent(() =>
       session.operations.revokeOtherSession(id),
     ).catch(() => null);
     setBusy(null);
+    const named = decodeClientLabel(row.client) !== null;
     if (result?.ok) {
-      announcer.announce("That sign-in was ended.");
+      announcer.announce(
+        named ? signedOut(sessionInSentence(row)) : SIGN_IN_ENDED,
+      );
       reload();
       return;
     }
@@ -60,7 +88,10 @@ export function SessionsSection({
       requestId:
         result && !result.ok ? result.atlasError?.request_id : undefined,
     });
-    announcer.announce(REVOKE_FAILED, "assertive");
+    announcer.announce(
+      named ? signOutFailed(sessionInSentence(row)) : REVOKE_FAILED,
+      "assertive",
+    );
   };
 
   return (
@@ -78,6 +109,9 @@ export function SessionsSection({
         <p className="text-[12.5px] leading-[1.6] text-ink-2">
           {SESSIONS_CONSEQUENCE}
         </p>
+        {load.status === "ready" ? (
+          <CapacityLine kind="sessions" raw={load.value.session_capacity} />
+        ) : null}
       </div>
       {load.status === "loading" ? (
         <p aria-busy="true" className="text-[13px] text-ink-2">
@@ -87,54 +121,71 @@ export function SessionsSection({
         <LoadFailed what="your sign-ins" error={load.error} onRetry={reload} />
       ) : (
         <List className="flex flex-col gap-2">
-          {load.value.sessions.map((row) => (
-            <li
-              key={row.id}
-              data-session-row={row.current ? "current" : "other"}
-              className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
-            >
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="text-[14px] text-ink-1">
-                    {sessionTitle(row)}
-                    {row.current ? (
-                      <span className="ml-2 text-[12px] text-ink-2">
-                        Current session
+          {load.value.sessions.map((row) => {
+            const device = decodeDeviceName(row.device_name);
+            const label = `Sign out ${sessionPhrase(row, now)}`;
+            return (
+              <li
+                key={row.id}
+                data-session-row={row.current ? "current" : "other"}
+                className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="text-[14px] text-ink-1 [overflow-wrap:anywhere]">
+                      {sessionTitle(row)}
+                      {row.current ? (
+                        <span
+                          data-current-tag=""
+                          className="ml-2 text-[12px] text-ink-2"
+                        >
+                          {THIS_BROWSER_TAG}
+                        </span>
+                      ) : null}
+                    </span>
+                    {device !== null ? (
+                      <span
+                        data-device-name=""
+                        className="text-[12.5px] text-ink-2 [overflow-wrap:anywhere]"
+                      >
+                        {ON_DEVICE} <bdi>{device}</bdi>
                       </span>
                     ) : null}
-                  </span>
-                  <span className="text-[12.5px] text-ink-2">
-                    {sessionMeta(row, now)}
-                  </span>
+                    <span className="text-[12.5px] text-ink-2">
+                      {sessionMeta(row, now)}
+                    </span>
+                  </div>
+                  {row.current ? (
+                    <Button
+                      aria-label={label}
+                      onClick={() => onSignOutCurrent(row)}
+                    >
+                      Sign out
+                    </Button>
+                  ) : busy === row.id ? (
+                    <Button disabled reason="Working…" aria-label={label}>
+                      Sign out
+                    </Button>
+                  ) : (
+                    <Button aria-label={label} onClick={() => void revoke(row)}>
+                      Sign out
+                    </Button>
+                  )}
                 </div>
                 {row.current ? (
-                  <Button onClick={onSignOutCurrent}>Sign out</Button>
-                ) : busy === row.id ? (
-                  <Button disabled reason="Working…">
-                    Sign out
-                  </Button>
-                ) : (
-                  <Button
-                    aria-label="Sign out this other sign-in"
-                    onClick={() => void revoke(row.id)}
-                  >
-                    Sign out
-                  </Button>
-                )}
-              </div>
-              {row.current ? (
-                <p className="mt-2 text-[12.5px] leading-[1.6] text-ink-2">
-                  {CURRENT_NOTE}
-                </p>
-              ) : null}
-              {failed?.id === row.id ? (
-                <p data-error="" className="mt-2 text-[12.5px] text-ink-1">
-                  {REVOKE_FAILED}
-                  {failed.requestId ? ` Request ID: ${failed.requestId}` : ""}
-                </p>
-              ) : null}
-            </li>
-          ))}
+                  <p className="mt-2 text-[12.5px] leading-[1.6] text-ink-2">
+                    {CURRENT_NOTE}
+                  </p>
+                ) : null}
+                {failed?.id === row.id ? (
+                  <p data-error="" className="mt-2 text-[12.5px] text-ink-1">
+                    {REVOKE_FAILED}
+                    {failed.requestId ? ` Request ID: ${failed.requestId}` : ""}
+                  </p>
+                ) : null}
+              </li>
+            );
+          })}
         </List>
       )}
     </section>

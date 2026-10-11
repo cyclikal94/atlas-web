@@ -1,0 +1,259 @@
+{
+  "source": {
+    "repository": "atlas (backend)",
+    "commit": "30fec6a3f31aaeea9c69d10216c78b8c02645661",
+    "api_version": "0.28.0",
+    "openapi_sha256": "087ced05e7a731d99b6374bbe0572e40746cec88dad0ce350c7bfe52fbf153fc",
+    "files": [
+      "api/openapi.json",
+      "api/compatibility.json",
+      "crates/core/src/devices.rs (valid_device_name tests)",
+      "crates/server/tests/cases/labels.rs (naming_is_validated_account_scoped_and_returned_verbatim)"
+    ],
+    "note": "Verbatim extract for WEB-08d Phase A (reference evidence, not a pin). The name vectors are transcribed from the Rust tests listed; escapes are JSON escapes of the same code points."
+  },
+  "schemas": {
+    "ClientLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "browser", "platform"],
+      "description": "Coarse description of the client that signed in, captured by the server when the session was issued (BE-Q25). channel comes from the route: browser for POST /browser-sessions/activate, native for POST /sessions, POST /registration and POST /oidc/native/exchange. browser and platform are derived only from that request's User-Agent header, which the client reports about itself and can change, so this is a hint for recognising a sign-in, never identity or proof of a device. Only these closed values are stored: no raw header, version, model, client hint or address. A header that is absent, repeated, over 512 bytes or not printable ASCII gives unknown and never blocks a sign-in. More values may be added in a MINOR version; treat an unrecognised value as unknown.",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": ["browser", "native"]
+        },
+        "browser": {
+          "type": ["string", "null"],
+          "enum": [
+            "chrome",
+            "edge",
+            "firefox",
+            "safari",
+            "opera",
+            "samsung_internet",
+            "unknown",
+            null
+          ],
+          "description": "null exactly when channel is native."
+        },
+        "platform": {
+          "type": "string",
+          "enum": [
+            "windows",
+            "macos",
+            "ios",
+            "android",
+            "linux",
+            "chromeos",
+            "unknown"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "channel": "browser",
+          "browser": "safari",
+          "platform": "ios"
+        },
+        {
+          "channel": "native",
+          "browser": null,
+          "platform": "android"
+        }
+      ]
+    },
+    "Capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit", "used", "remaining"],
+      "description": "Used and remaining slots under one limit the server enforces, read from the same rows the enforcement counts at the time of this response (BE-Q25). Advisory, not a reservation: a concurrent sign-in or registration can take the last slot, and a slot is freed only when the sign-out, retirement or expiry that frees it commits.",
+      "properties": {
+        "limit": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "The configured limit, or null when the server does not enforce one."
+        },
+        "used": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "max(limit - used, 0); null exactly when limit is null."
+        }
+      },
+      "examples": [
+        {
+          "limit": 32,
+          "used": 3,
+          "remaining": 29
+        }
+      ]
+    },
+    "DeviceName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "A name the account's owner chose for one of their devices (BE-Q25). 1 to 64 Unicode scalar values (at most 256 UTF-8 bytes), with no leading or trailing white space and no control, bidirectional-control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069), invisible (U+200B, U+2060-U+2064, U+FEFF, U+FFF9-U+FFFB), line/paragraph-separator (U+2028, U+2029) or noncharacter code point. ZWJ and ZWNJ are allowed. Stored and returned exactly as accepted, without normalisation or trimming. It is user-supplied text: render it as text, never as markup."
+    },
+    "DeviceNameUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "$ref": "#/components/schemas/DeviceName"
+        }
+      },
+      "examples": [
+        {
+          "name": "Kieran's phone"
+        }
+      ]
+    }
+  },
+  "labels_and_capacity": {
+    "bidi_name": {
+      "code": "invalid_value",
+      "set_cookie": false,
+      "status": 422
+    },
+    "bob_clears_alices_device": {
+      "code": "not_found",
+      "set_cookie": false,
+      "status": 404
+    },
+    "clear_name": {
+      "code": null,
+      "set_cookie": false,
+      "status": 204
+    },
+    "clear_name_again": {
+      "code": null,
+      "set_cookie": false,
+      "status": 204
+    },
+    "devices": {
+      "client": {
+        "browser": null,
+        "channel": "native",
+        "platform": "ios"
+      },
+      "item_members": [
+        "active_sessions",
+        "client",
+        "current",
+        "id",
+        "last_synced_at",
+        "name",
+        "state_token",
+        "summary"
+      ],
+      "name": "Phone",
+      "page_members": ["devices", "sync_capacity"],
+      "sync_capacity": {
+        "limit": 32,
+        "remaining": 32,
+        "used": 0
+      }
+    },
+    "invalid_name": {
+      "code": "invalid_value",
+      "set_cookie": false,
+      "status": 422
+    },
+    "null_name": {
+      "code": "malformed_request",
+      "set_cookie": false,
+      "status": 400
+    },
+    "other_accounts_device": {
+      "code": "not_found",
+      "set_cookie": false,
+      "status": 404
+    },
+    "sessions": {
+      "client": {
+        "browser": null,
+        "channel": "native",
+        "platform": "ios"
+      },
+      "device_name": "Phone",
+      "item_members": [
+        "authentication",
+        "client",
+        "created_at",
+        "current",
+        "device_id",
+        "device_name",
+        "expires_at",
+        "id"
+      ],
+      "page_members": ["session_capacity", "sessions"],
+      "session_capacity": {
+        "limit": 32,
+        "remaining": 31,
+        "used": 1
+      }
+    },
+    "set_name": {
+      "code": null,
+      "set_cookie": false,
+      "status": 204
+    },
+    "unauthenticated": {
+      "code": "unauthenticated",
+      "set_cookie": false,
+      "status": 401
+    },
+    "unknown_device": {
+      "code": "not_found",
+      "set_cookie": false,
+      "status": 404
+    },
+    "unknown_member": {
+      "code": "malformed_request",
+      "set_cookie": false,
+      "status": 400
+    }
+  },
+  "name_vectors": {
+    "accepted": [
+      "Kieran's phone",
+      "a",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+      "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 tablet",
+      "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+      "\u5bb6\u65cf\u306eiPad",
+      "<script>alert(1)</script>",
+      "tab\u3000inside ok"
+    ],
+    "refused": [
+      "",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+      " leading",
+      "trailing ",
+      "\u3000ideographic space",
+      "line\nbreak",
+      "nul\u0000",
+      "tab\tinside",
+      "c1\u0085",
+      "rtl \u202eoverride",
+      "isolate \u2066x\u2069",
+      "isolate \u2066x",
+      "zero\u200bwidth",
+      "bom\ufeff",
+      "line\u2028separator",
+      "arabic\u061cmark",
+      "word\u2060joiner",
+      "annotation\ufff9",
+      "non\uffffchar",
+      "non\ufdd0char",
+      "plane\ud83f\udffe"
+    ]
+  }
+}

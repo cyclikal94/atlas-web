@@ -1,6 +1,7 @@
 import { runAxe } from "../e2e/helpers";
 import {
   bootHarness,
+  engineLabel,
   expect,
   proxy,
   raw,
@@ -117,10 +118,12 @@ test.describe("I-11: api_version", () => {
 });
 
 test.describe("I-16: the Settings screens with real data", () => {
+  // WEB-08d (API 0.28): the rows are now labelled by the released backend (BE-Q25), so the neutral titles of gaps G-1 to G-3 are only
+  // the fallback for a label-less row. The test keeps every check; the label assertions replace "nothing is invented" (adapted, WEB-08d).
   test("two real sessions and the real device list render with neutral labels; axe is clean; the dialogs are inside the protected portal", async ({
     context,
     provokes,
-  }) => {
+  }, testInfo) => {
     provokes(401);
     const other = await rawSignIn("alice", "second-laptop");
     const page = await bootHarness(context, "/settings/sessions");
@@ -130,28 +133,43 @@ test.describe("I-16: the Settings screens with real data", () => {
     await expect(
       main.getByRole("heading", { level: 1, name: "Sessions & devices" }),
     ).toBeVisible();
+    await expect(
+      main.locator("[data-session-row=current] [data-current-tag]"),
+    ).toHaveText("This browser");
     await expect(main.locator("[data-session-row=current]")).toContainText(
-      "This browser",
+      engineLabel(
+        testInfo.project.name,
+        await page.evaluate(() => navigator.userAgent),
+      ),
     );
-    await expect(main.getByText("Another sign-in").first()).toBeVisible();
+    await expect(
+      main.locator("[data-session-row=other]").first(),
+    ).toBeVisible();
     await expect(
       main.getByText("Password · Signed in just now").first(),
     ).toBeVisible();
-    await expect(main.locator("[data-device-row=current]")).toContainText(
-      "This device",
+    await expect(
+      main.locator("[data-device-row=current] [data-current-tag]"),
+    ).toHaveText("This device");
+    await expect(main.locator("[data-device-row=other]").first()).toBeVisible();
+    // Nothing the contract does not supply is invented: the capacity is the answer's own, never the design's five.
+    const reported = await page.evaluate(async () => {
+      const read = await window.__retry(() =>
+        window.__s.operations.listSessions(),
+      );
+      return read.ok ? read.value.session_capacity : null;
+    });
+    expect(reported).toMatchObject({ used: expect.any(Number) });
+    const { used, limit } = reported as { used: number; limit: number };
+    await expect(main.locator("[data-capacity=sessions]")).toHaveText(
+      `${used} of ${limit} sign-ins in use.`,
     );
-    await expect(main.getByText("Another device").first()).toBeVisible();
-    // Nothing the contract cannot supply is invented (gaps G-1 to G-3).
-    expect(await main.innerText()).not.toMatch(
-      /room for|\bof 5\b|Chrome|macOS|iPhone/,
-    );
+    expect(await main.innerText()).not.toMatch(/room for|\bof 5\b|iPhone/);
     expect(await runAxe(page)).toEqual([]);
 
     // "Sign out" of ANOTHER session calls the ordinary operation and the row goes; the backend really removed it.
     const row = main.locator("[data-session-row=other]").first();
-    await row
-      .getByRole("button", { name: "Sign out this other sign-in" })
-      .click();
+    await row.getByRole("button", { name: /^Sign out / }).click();
     await expect
       .poll(
         async () =>
@@ -202,11 +220,9 @@ test.describe("I-16: the Settings screens with real data", () => {
     const before = await rows.count();
     await rows
       .nth(index)
-      .getByRole("button", { name: "Retire this other device" })
+      .getByRole("button", { name: /^Retire / })
       .click();
-    const dialog = page.getByRole("dialog", {
-      name: "Retire this other device?",
-    });
+    const dialog = page.getByRole("dialog", { name: /^Retire .+\?$/ });
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "Retire device" }).click();
     await expect(dialog).toHaveCount(0);

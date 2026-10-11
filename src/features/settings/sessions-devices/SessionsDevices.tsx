@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { PageHeading } from "../../../components/ui/page-heading";
+import type { SessionSummary } from "../../../session";
 import { DevicesSection } from "./DevicesSection";
 import { SessionsSection } from "./SessionsSection";
 import { WipeConfirmDialog } from "./WipeConfirmDialog";
@@ -11,7 +12,9 @@ import { WipeConfirmDialog } from "./WipeConfirmDialog";
  * precedes a wipe; on another row they call the ordinary operations directly.
  */
 export function SessionsDevices() {
-  const [loggingOut, setLoggingOut] = useState(false);
+  const [loggingOut, setLoggingOut] = useState<SessionSummary | null>(null);
+  // A device's name is shown on the sessions list too, so a naming change there reads the sessions again.
+  const [namesChanged, setNamesChanged] = useState(0);
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
@@ -23,10 +26,17 @@ export function SessionsDevices() {
         </Link>
         <PageHeading>Sessions &amp; devices</PageHeading>
       </div>
-      <SessionsSection onSignOutCurrent={() => setLoggingOut(true)} />
-      <DevicesSection />
+      <SessionsSection
+        onSignOutCurrent={(row) => setLoggingOut(row)}
+        refresh={namesChanged}
+      />
+      <DevicesSection onNamesChanged={() => setNamesChanged((n) => n + 1)} />
       {loggingOut ? (
-        <WipeConfirmDialog kind="logout" onClose={() => setLoggingOut(false)} />
+        <WipeConfirmDialog
+          kind="logout"
+          current={loggingOut}
+          onClose={() => setLoggingOut(null)}
+        />
       ) : null}
     </div>
   );

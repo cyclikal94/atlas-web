@@ -138,6 +138,61 @@ const operations: Call[] = [
         ),
       ),
   },
+  // WEB-08d (BE-Q25): the capacity members travel INSIDE the sealed result. A result carrying account A's capacity is never returned
+  // once B (or a new epoch) is settled: the same schedules as the lists, with the members present.
+  {
+    name: "BE-Q25 listSessions + session_capacity",
+    refusal: "closed",
+    match: hasKey("sessions"),
+    prepare: async (f) => {
+      f.server.beq25 = true;
+    },
+    start: (page) =>
+      page.session.operations.listSessions().then(
+        (result): Outcome =>
+          result.ok
+            ? Object.hasOwn(result.value, "session_capacity")
+              ? "returned"
+              : "other"
+            : result.error === "closed"
+              ? "closed"
+              : "other",
+        (): Outcome => "other",
+      ),
+  },
+  {
+    name: "BE-Q25 readDevices + sync_capacity",
+    refusal: "closed",
+    match: hasKey("devices"),
+    prepare: async (f) => {
+      f.server.beq25 = true;
+    },
+    start: (page) =>
+      page.session.operations.readDevices().then(
+        (result): Outcome =>
+          result.ok
+            ? Object.hasOwn(result.value, "sync_capacity")
+              ? "returned"
+              : "other"
+            : result.error === "closed"
+              ? "closed"
+              : "other",
+        (): Outcome => "other",
+      ),
+  },
+  {
+    // WEB-08d: a refused naming call decodes its Atlas error body (`not_found` is `gone`), so it is sealed after that decode too.
+    name: "BE-Q25 nameDevice, decoded 404 (gone)",
+    refusal: "closed",
+    match: hasField("code"),
+    prepare: async (f) => {
+      f.server.beq25 = true;
+    },
+    start: (page) =>
+      outcomeOfResult(
+        page.session.operations.nameDevice("not-listed-device", "Kitchen"),
+      ),
+  },
 ];
 const typed: Call[] = (["ordinary"] as const).flatMap((klass) => [
   {

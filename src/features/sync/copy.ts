@@ -127,8 +127,9 @@ export const STILL_TRYING_CHANGES_BODY =
 export const STILL_TRYING_ACTION = "Retry now";
 
 export const DEVICE_CAPACITY_TITLE = "This device can't sync right now";
+/** WEB-08d (D-8d-13), PROPOSED: BE-Q25 frees a place for syncing only by a retirement (or cleanup), never by a sign-out. */
 export const DEVICE_CAPACITY_BODY =
-  "This account has reached the number of devices that can sync at once. Sign out another device in Settings, then try again.";
+  "This account has no free place for syncing. Retire a device you no longer use in Settings → Sessions & devices, then try again.";
 
 export const UNRECOGNISED_TITLE = "Updates stopped";
 export const UNRECOGNISED_BODY =

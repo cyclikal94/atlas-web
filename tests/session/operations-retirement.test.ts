@@ -5,6 +5,7 @@ import type { FakePage, Fixture } from "../support/session/harness";
 import { checkProperties } from "../support/session/properties";
 import {
   fencesOf,
+  holdAnswers,
   newWorld,
   signedInPage,
   stateOf,
@@ -307,5 +308,52 @@ describe("other devices and sessions (SA-10)", () => {
     expect(
       sessions.ok && sessions.value.sessions.filter((s) => s.current),
     ).toHaveLength(1);
+  });
+});
+
+describe("WEB-08d (D-8d-14): a device's name and label are never persisted", () => {
+  test("retiring a NAMED, labelled device: the envelope keeps only the token and summary, and nothing in atlas-auth holds the name or label", async () => {
+    const f = await newWorld();
+    f.server.beq25 = true;
+    const l = await signedInPage(f);
+    f.data.databases.set(l.account, { incarnation: "inc-1" });
+    f.data.work.set(l.account, { count: 2, digest: "d2" });
+    const first = await confirmedRead(f, l.page);
+    const name = "Kieran's private laptop";
+    const renamed = await f.runWith(
+      l.page.session.operations.nameDevice(first.id, name),
+    );
+    expect(renamed).toEqual({ ok: true, value: "named" });
+    const row = await confirmedRead(f, l.page);
+    expect(row.name).toBe(name);
+    // Hold the retirement's answer so the fence and its envelope stand while they are inspected.
+    const hold = holdAnswers(
+      f,
+      (r) => r.method === "DELETE" && /\/devices\/[^/]+$/.test(r.path),
+    );
+    const result = await f.runWith(
+      l.page.session.operations.retireThisDevice({ read: row, unsynced }),
+    );
+    expect(result.kind).toBe("started");
+    await f.world.runUntilIdle();
+    expect(retirements(f)).toHaveLength(1);
+    const fence = (stateOf(f).fences[l.account] ?? []).find(
+      (entry) => entry.kind === "operation",
+    );
+    if (fence?.kind !== "operation") throw new Error("no fence");
+    expect(Object.keys(fence.envelope).sort()).toEqual(
+      Object.keys(fence.envelope)
+        .filter((key) => key !== "name" && key !== "client")
+        .sort(),
+    );
+    expect(fence.envelope).toMatchObject({
+      state_token: row.state_token,
+      summary: row.summary,
+    });
+    expect(JSON.stringify(f.store.records)).not.toContain(name);
+    expect(JSON.stringify(f.store.records)).not.toContain('"client"');
+    hold.release();
+    hold.stop();
+    await f.settle();
   });
 });

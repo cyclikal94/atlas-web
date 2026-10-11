@@ -14,7 +14,8 @@ import {
  * INCLUDING colour contrast in real layout, 44 px targets in the content, a visible focus ring, the right focus target.
  * Screenshots (Chromium) go to this invocation's evidence directory. FIXTURE evidence: it says the screens render as designed. It is
  * not Kieran's visual sign-off and not assistive-technology evidence (T22, WEB-08c). The light theme of the gap frames was
- * unverified in the design files (G-11); this is where it is measured.
+ * unverified in the design files (G-11); this is where it is measured. WEB-08d: the default fixture is 0.28-shaped (labelled rows), so the
+ * readiness waits find rows by their `data-*` role, not by WEB-08a's fallback titles; the assertions are unchanged.
  */
 const WIDTHS: Array<[number, number]> = [
   [320, 640],
@@ -87,8 +88,8 @@ const SURFACES: Surface[] = [
     path: "/settings/sessions",
     region: "main",
     prepare: async (page) => {
-      await page.getByText("Another device").first().waitFor();
-      await page.getByText("Another sign-in").waitFor();
+      await page.locator("[data-device-row=other]").first().waitFor();
+      await page.locator("[data-session-row=other]").first().waitFor();
     },
   },
   {
@@ -105,7 +106,7 @@ const SURFACES: Surface[] = [
     region: "main",
     prepare: async (page) => {
       await page.locator("[data-load-error]").waitFor();
-      await page.getByText("Another device").first().waitFor();
+      await page.locator("[data-device-row=other]").first().waitFor();
     },
   },
   {
@@ -121,7 +122,7 @@ const SURFACES: Surface[] = [
     path: "/settings/sessions",
     region: "[role=dialog]",
     prepare: async (page) => {
-      await page.getByText("Another device").first().waitFor();
+      await page.locator("[data-device-row=other]").first().waitFor();
       await openLogout(page);
     },
   },
@@ -130,7 +131,7 @@ const SURFACES: Surface[] = [
     path: "/settings/sessions?unsynced=3",
     region: "[role=dialog]",
     prepare: async (page) => {
-      await page.getByText("Another device").first().waitFor();
+      await page.locator("[data-device-row=other]").first().waitFor();
       await openLogout(page);
       await page.getByText("3 changes haven't finished syncing yet:").waitFor();
     },
@@ -140,7 +141,7 @@ const SURFACES: Surface[] = [
     path: "/settings/sessions?unsynced=3&reconfirm=4",
     region: "[role=dialog]",
     prepare: async (page) => {
-      await page.getByText("Another device").first().waitFor();
+      await page.locator("[data-device-row=other]").first().waitFor();
       await openLogout(page);
       await page.getByRole("button", { name: "Log out anyway →" }).click();
       await page.getByText("Actually 4 changes — still log out?").waitFor();
@@ -151,7 +152,7 @@ const SURFACES: Surface[] = [
     path: "/settings/sessions?unsynced=2",
     region: "[role=dialog]",
     prepare: async (page) => {
-      await page.getByText("Another device").first().waitFor();
+      await page.locator("[data-device-row=other]").first().waitFor();
       await page.getByRole("button", { name: "Retire this device" }).click();
       await page.getByRole("dialog", { name: "Retire this device?" }).waitFor();
       await page
@@ -164,14 +165,14 @@ const SURFACES: Surface[] = [
     path: "/settings/sessions",
     region: "[role=dialog]",
     prepare: async (page) => {
-      await page.getByText("Another device").first().waitFor();
+      await page.locator("[data-device-row=other]").first().waitFor();
+      // WEB-08d: the button and the dialog name the device (the first other row is the fixture's named phone).
       await page
-        .getByRole("button", { name: "Retire this other device" })
+        .locator("[data-device-row=other]")
         .first()
+        .getByRole("button", { name: /^Retire / })
         .click();
-      await page
-        .getByRole("dialog", { name: "Retire this other device?" })
-        .waitFor();
+      await page.getByRole("dialog", { name: /^Retire .+\?$/ }).waitFor();
     },
   },
   {
@@ -292,7 +293,7 @@ test.describe("the confirmation dialog is a keyboard loop with the safe default"
     page,
   }) => {
     await page.goto("/settings/sessions?unsynced=3");
-    await page.getByText("Another device").first().waitFor();
+    await page.locator("[data-device-row=other]").first().waitFor();
     await openLogout(page);
     const dialog = page.getByRole("dialog", { name: "Log out?" });
     await expect(
@@ -307,7 +308,7 @@ test.describe("the confirmation dialog is a keyboard loop with the safe default"
     page,
   }) => {
     await page.goto("/settings/sessions");
-    await page.getByText("Another device").first().waitFor();
+    await page.locator("[data-device-row=other]").first().waitFor();
     await openLogout(page);
     const outside = await page.evaluate(() => {
       const dialog = document.querySelector("[role=dialog]");

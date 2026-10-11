@@ -4,8 +4,9 @@ import type { World } from "./world";
 
 /**
  * A small stateful STAND-IN for the session-lifecycle projection of plan section 3, written from the OpenAPI facts.
- * /health follows the current pin. List responses intentionally retain the pre-BE-Q25 projection: this stub does not model
- * client labels, names, rename operations or capacity reporting. It is not validation of the full API 0.28 response schema. It is a stub of the contract, NOT a port of the backend, and a passing test against it is
+ * /health follows the current pin. By default list responses retain the pre-BE-Q25 projection; WEB-08d's opt-in `beq25` mode adds
+ * client labels, names, the rename operations and capacity REPORTING (not enforcement) for the Settings tests that need them. Neither
+ * mode is validation of the full API 0.28 response schema. It is a stub of the contract, NOT a port of the backend, and a passing test against it is
  * fixture evidence, never integration evidence. Every answer can be delayed, dropped, rewritten or held (`Rule`).
  */
 export const API = "/api/experimental/v1";
@@ -42,6 +43,8 @@ interface ServerSession {
   created: number;
   authentication: "local" | "oidc";
   token: string;
+  /** BE-Q25: the label recorded at issue (only answered in `beq25` mode). */
+  client?: unknown;
 }
 interface Grant {
   grant: string;
@@ -103,6 +106,22 @@ export interface RecordedRequest {
   hadSetCookie: boolean;
 }
 
+/**
+ * BE-Q25 `DeviceName`, written independently of the client's `checkDeviceName` (Unicode property escapes, not a code-point table), so
+ * a defect in the client's rules is not mirrored by the stand-in.
+ */
+const NAME_FORBIDDEN =
+  /[\p{Cc}\p{Cs}\p{Noncharacter_Code_Point}\u061C\u200B\u200E\u200F\u202A-\u202E\u2028\u2029\u2060-\u2064\u2066-\u2069\uFEFF\uFFF9-\uFFFB]/u;
+export const serverAcceptsName = (name: string): boolean => {
+  const scalars = [...name].length;
+  return (
+    scalars >= 1 &&
+    scalars <= 64 &&
+    !/^\p{White_Space}|\p{White_Space}$/u.test(name) &&
+    !NAME_FORBIDDEN.test(name)
+  );
+};
+
 const errorBody = (code: string, message = code) => ({
   code,
   message,
@@ -129,6 +148,15 @@ export class StubServer {
   readonly requests: RecordedRequest[] = [];
   /** Make the next activations answer `503 device_capacity`. */
   deviceCapacity = 0;
+  /**
+   * WEB-08d: answer the BE-Q25 (API 0.28.0) members too: session/device `client`, `device_name`/`name`, `session_capacity`,
+   * `sync_capacity`, and `PUT`/`DELETE /devices/{id}/name`. Off by default: the lifecycle suites keep the pre-BE-Q25 projection.
+   */
+  beq25 = false;
+  /** The limit both BE-Q25 capacities report (null: none enforced). Reporting only: the stand-in does not enforce it. */
+  capacityLimit: number | null = 4;
+  /** BE-Q25 device names, by `account/device`. */
+  readonly deviceNames = new Map<string, string>();
   private counter = 0;
   private ordinals = new Map<string, number>();
 
@@ -528,7 +556,24 @@ export class StubServer {
             ).toISOString(),
             authentication: s.authentication,
             current: s.id === session.id,
+            ...(this.beq25
+              ? {
+                  client: s.client ?? null,
+                  device_name:
+                    this.deviceNames.get(`${session.account}/${s.device}`) ??
+                    null,
+                }
+              : {}),
           })),
+        ...(this.beq25
+          ? {
+              session_capacity: this.capacity(
+                [...this.sessions.values()].filter(
+                  (s) => s.account === session.account,
+                ).length,
+              ),
+            }
+          : {}),
       });
     }
     const sessionMatch = /^\/sessions\/([^/]+)$/.exec(route);
@@ -569,7 +614,43 @@ export class StubServer {
         if (s.account === session.account) ids.add(s.device);
       return json(200, {
         devices: [...ids].map((id) => this.deviceView(id, session)),
+        ...(this.beq25
+          ? {
+              sync_capacity: this.capacity(
+                [...ids].filter((id) => this.device(id).sync_registered).length,
+              ),
+            }
+          : {}),
       });
+    }
+    const nameMatch = /^\/devices\/([^/]+)\/name$/.exec(route);
+    if (this.beq25 && nameMatch && (method === "PUT" || method === "DELETE")) {
+      const deviceId = decodeURIComponent(nameMatch[1] ?? "");
+      let name: string | null = null;
+      if (method === "PUT") {
+        if (
+          typeof body !== "object" ||
+          body === null ||
+          Array.isArray(body) ||
+          Object.keys(body).length !== 1 ||
+          typeof b.name !== "string"
+        )
+          return error(400, "malformed_request");
+        name = b.name;
+      }
+      // As the backend orders it: the ID's length and the name's rules (422) before whether the device is listed (404).
+      if (deviceId.length < 1 || deviceId.length > 100)
+        return error(422, "invalid_value");
+      if (name !== null && !serverAcceptsName(name))
+        return error(422, "invalid_value");
+      const listed = [...this.sessions.values()].some(
+        (s) => s.account === session.account && s.device === deviceId,
+      );
+      if (!listed) return error(404, "not_found");
+      const key = `${session.account}/${deviceId}`;
+      if (name === null) this.deviceNames.delete(key);
+      else this.deviceNames.set(key, name);
+      return { status: 204 };
     }
     const deviceMatch = /^\/devices\/([^/]+)$/.exec(route);
     if (deviceMatch && method === "DELETE") {
@@ -605,6 +686,8 @@ export class StubServer {
             this.sessions.delete(s.id);
         }
         this.devices.delete(deviceId);
+        // BE-Q25: a confirmed retirement forgets the name.
+        this.deviceNames.delete(`${session.account}/${deviceId}`);
       }
       this.ledger.set(ledgerKey, { outcome, kind: "retire" });
       if (outcome === "rejected_stale")
@@ -663,6 +746,15 @@ export class StubServer {
     return error(404, "not_found");
   }
 
+  private capacity(used: number) {
+    const limit = this.capacityLimit;
+    return {
+      limit,
+      used,
+      remaining: limit === null ? null : Math.max(limit - used, 0),
+    };
+  }
+
   private invitationOpen(invitation: Invitation): boolean {
     return invitation.state === "open" && invitation.expires > this.world.time;
   }
@@ -707,6 +799,18 @@ export class StubServer {
       active_sessions: sessionsHere.length,
       current: session.device === deviceId,
       state_token: this.deviceToken(deviceId, state),
+      ...(this.beq25
+        ? {
+            name:
+              this.deviceNames.get(`${session.account}/${deviceId}`) ?? null,
+            client:
+              sessionsHere.reduce<ServerSession | null>(
+                (latest, s) =>
+                  latest === null || s.created >= latest.created ? s : latest,
+                null,
+              )?.client ?? null,
+          }
+        : {}),
       summary: {
         sessions: sessionsHere.length,
         native_handoffs: data.handoffs.length,

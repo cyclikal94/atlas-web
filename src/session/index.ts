@@ -51,6 +51,7 @@ export type {
   Session,
   SessionNotice,
   SessionSummary,
+  SessionsRead,
   SessionView,
   StampedApi,
   StampedFailure,

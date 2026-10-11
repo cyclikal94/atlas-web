@@ -253,6 +253,13 @@ export interface SessionSummary {
   expires_at: IsoInstant;
   authentication: "local" | "oidc";
   current: boolean;
+  /**
+   * BE-Q25 (API 0.28.0): the coarse label captured when this session was issued; null for an older session. An UNTRUSTED wire value
+   * passed through as received: the Settings feature decodes it (`decodeClientLabel`). Absent on a server older than 0.28.0.
+   */
+  readonly client?: unknown;
+  /** BE-Q25: the current name of this session's device, untrusted user text (decoded by `decodeDeviceName`), or null. */
+  readonly device_name?: unknown;
 }
 export interface DeviceRow {
   id: DeviceId;
@@ -261,9 +268,23 @@ export interface DeviceRow {
   current: boolean;
   state_token: string;
   summary: DeviceSummary;
+  /** BE-Q25: the device's name, untrusted user text, or null. Display only: it is not part of `state_token`. */
+  readonly name?: unknown;
+  /** BE-Q25: the label of the device's most recently issued session, untrusted, or null. */
+  readonly client?: unknown;
 }
 export interface DevicesRead {
   devices: readonly DeviceRow[];
+  /**
+   * BE-Q25: sync registrations against their limit, as received (decoded by the Settings feature). The member is copied only when the
+   * answer carries it, so "absent" (an older server: unavailable) stays distinguishable from any value the server sent.
+   */
+  readonly sync_capacity?: unknown;
+}
+export interface SessionsRead {
+  sessions: readonly SessionSummary[];
+  /** BE-Q25: live sessions against their limit, as received; absent when the answer has no such member. */
+  readonly session_capacity?: unknown;
 }
 export type OperationStart =
   | { kind: "started"; operation_id: OperationId }
@@ -304,7 +325,17 @@ export interface Operations {
    */
   summariseLocalWork(): Promise<LocalWorkSummary | null>;
   readDevices(): Promise<Result<DevicesRead>>;
-  listSessions(): Promise<Result<{ sessions: readonly SessionSummary[] }>>;
+  listSessions(): Promise<Result<SessionsRead>>;
+  /**
+   * BE-Q25: `PUT /devices/{id}/name` with `{ name }` (the name exactly as given: never trimmed or normalised) or, for null, `DELETE`.
+   * An ordinary stamped call (CSRF, cover, lease, identity checks), released and sealed after its body is read. No Idempotency-Key:
+   * repeating it is harmless. `gone` is a `404 not_found` (the device is no longer listed for this account); any other refusal is
+   * `http` with the Atlas error.
+   */
+  nameDevice(
+    id: DeviceId,
+    name: string | null,
+  ): Promise<Result<"named" | "cleared" | "gone">>;
   /** An ordinary DELETE without a key; refuses `settled.session_id` (use `logout`). */
   revokeOtherSession(id: SessionId): Promise<Result<"revoked" | "gone">>;
   retireOtherDevice(

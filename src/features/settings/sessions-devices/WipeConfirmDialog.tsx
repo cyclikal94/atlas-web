@@ -5,8 +5,11 @@ import {
   type DeviceRow,
   type LocalWorkSummary,
   type OperationStart,
+  type SessionSummary,
   useSession,
 } from "../../../session";
+import { thisBrowserLine, thisDeviceLine } from "./label-copy";
+import { clientLabelText, decodeClientLabel, deviceDisplay } from "./labels";
 import { WipeConfirmBody } from "./WipeConfirmBody";
 import {
   confirmLabel,
@@ -23,14 +26,37 @@ import {
  * rechecked at confirmation: a changed recount shows the corrected re-confirmation instead of proceeding. The default focus
  * is "Stay logged in".
  */
+/** D-8d-12: the line that names this browser or device, or null when it has only WEB-08a's fallback title (it would say nothing). */
+export function identityLine(
+  kind: WipeKind,
+  device: DeviceRow | undefined,
+  current: SessionSummary | undefined,
+): { line: string; named?: string } | null {
+  if (kind === "retire" && device) {
+    const d = deviceDisplay(device);
+    if (d.fallback) return null;
+    return d.named
+      ? { line: thisDeviceLine(""), named: d.title }
+      : { line: thisDeviceLine(d.title) };
+  }
+  if (kind === "logout" && current) {
+    const label = decodeClientLabel(current.client);
+    return label ? { line: thisBrowserLine(clientLabelText(label)) } : null;
+  }
+  return null;
+}
+
 export function WipeConfirmDialog({
   kind,
   device,
+  current,
   onClose,
 }: {
   kind: WipeKind;
   /** Retirement: the current-device row from the read the approved token belongs to. */
   device?: DeviceRow;
+  /** Logout: the current session's row, so the warning can name this browser. */
+  current?: SessionSummary;
   onClose(): void;
 }) {
   const session = useSession();
@@ -125,6 +151,7 @@ export function WipeConfirmDialog({
         corrected={corrected}
         device={device}
         refusal={refusal}
+        identity={identityLine(kind, device, current)}
       />
     </Dialog>
   );

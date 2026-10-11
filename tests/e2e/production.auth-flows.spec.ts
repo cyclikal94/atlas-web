@@ -329,7 +329,7 @@ test.describe("an outcome that arrives after the neutral gate (review R1, R2)", 
     },
   };
   const CAPACITY_TEXT =
-    "This device has too many active sign-ins for this account. End one from Settings in another session, or try again later.";
+    "This account has reached its limit of active sign-ins. Sign out of one in Settings → Sessions & devices from another session, or try again later.";
   const LOST =
     "If you already submitted this and lost the confirmation, don't try again — sign in with the details you chose.";
   const gate = (page: Page) =>

@@ -3,15 +3,20 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { List } from "../../../components/ui/list";
 import { type DeviceRow, useSession } from "../../../session";
+import { retireOtherTitle } from "./label-copy";
+import { deviceInSentence } from "./labels";
 import { untilSent } from "./until-sent";
 import { summaryLines } from "./wipe-copy";
 
 /**
  * Retiring ANOTHER device (SA-10). It touches nothing on this browser, so there is no unsynced-work warning. The call
  * carries the approved-state token of the read that supplied this row; a device that changed since answers
- * `rejected_stale`, which is never retried against changed state. PROPOSED copy (gap G-5).
+ * `rejected_stale`, which is never retried against changed state. PROPOSED copy (gap G-5). WEB-08d (D-8d-12): the title names the
+ * device ("Retire Firefox on Windows?", a name isolated); the token sent is still the one from the read that supplied the row, and a
+ * name is not part of it, so a rename in between cannot stale the retirement.
  */
-export const RETIRE_OTHER_TITLE = "Retire this other device?";
+export const retireOtherDialogTitle = (device: DeviceRow): string =>
+  retireOtherTitle(deviceInSentence(device));
 export const RETIRE_OTHER_BODY =
   "Retiring a device signs it out and frees its place for syncing. It can sign in again later.";
 export const RETIRE_OTHER_STALE =
@@ -62,7 +67,7 @@ export function RetireOtherDialog({
     <Dialog
       open
       onClose={onClose}
-      title={RETIRE_OTHER_TITLE}
+      title={retireOtherDialogTitle(device)}
       initialFocusSelector="[data-keep]"
       footer={
         <>

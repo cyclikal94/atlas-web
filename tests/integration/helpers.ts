@@ -404,9 +404,15 @@ export interface RawSession {
 export async function rawSignIn(
   who: Who,
   deviceId = `raw-${freshVerifier().slice(0, 10)}`,
+  /** WEB-08d: the User-Agent the activation reports (BE-Q25 derives the session's label from it). */
+  options: { userAgent?: string } = {},
 ): Promise<RawSession> {
   const verifier = freshVerifier();
+  const agent: Record<string, string> = options.userAgent
+    ? { "user-agent": options.userAgent }
+    : {};
   const exchange = await raw("POST", "/browser-sessions", {
+    headers: agent,
     body: {
       username: ACCOUNTS[who].username,
       password: ACCOUNTS[who].password,
@@ -418,6 +424,7 @@ export async function rawSignIn(
     throw new Error(`raw exchange for ${who}: ${exchange.status}`);
   const grant = (exchange.json as { grant: string }).grant;
   const activated = await raw("POST", "/browser-sessions/activate", {
+    headers: agent,
     body: { grant, verifier },
   });
   if (activated.status !== 200)
@@ -592,3 +599,22 @@ export function recordMeasurement(
     `${JSON.stringify({ name, engine, at: new Date().toISOString(), ...value })}\n`,
   );
 }
+
+/**
+ * WEB-08d: the label BE-Q25 gives this engine's own activation: the engine's browser family, and the platform the User-Agent the
+ * browser actually sends claims (Playwright's desktop profiles present Chromium and Firefox as Windows). Mirrors the backend's
+ * token order for the platforms Playwright can claim.
+ */
+export const engineLabel = (project: string, userAgent: string): string => {
+  const browser = project.includes("firefox")
+    ? "Firefox"
+    : project.includes("webkit")
+      ? "Safari"
+      : "Chrome";
+  const platform = /Windows/.test(userAgent)
+    ? "Windows"
+    : /Macintosh|Mac OS X/.test(userAgent)
+      ? "macOS"
+      : "Linux";
+  return `${browser} on ${platform}`;
+};

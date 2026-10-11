@@ -47,6 +47,28 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Remove is described by its consequence.** The "signs you out everywhere" paragraph has an id and every Remove control (enabled, "Removing…", or disabled with its reason) lists it in `aria-describedby`, on the mobile sheet and the desktop dialog. A disabled control's own reason is read first. axe does not check this association, so `tests/e2e/fixture.auth-settings.spec.ts` asserts the accessible description at 320 and 1280 px.
 - **A refusal that arrives after "Finishing sign-in"** is shown by the sign-in form that mounts next (the heading is focused as for any new state, and the message is a `role="alert"` inserted after the form appears, so it is announced once).
 
+## What WEB-08d built in
+
+- **Every row action is named by its row.** The visible text stays short ("Sign out", "Retire…", "Name…", "Rename…") and the accessible name starts with it (label in
+  name), then carries what tells the row apart without an identifier: its title (label or name), any device name, and the row's own time ("Sign out Chrome on macOS,
+  signed in 3 days ago", "Retire Firefox on Windows, last synced 2 hours ago", "Name this device, Chrome on macOS"). Session and device IDs and state tokens are never
+  shown or announced.
+- **A person's name for a device is text, isolated.** It is rendered as a text node inside `<bdi>` (never markup or an attribute other than `aria-label`), and wrapped
+  in U+2068/U+2069 where it stands in a composed string (an accessible name, a dialog title, an announcement), so a right-to-left name cannot reorder the words around
+  it. A name the server's rules would refuse (bidirectional controls, invisible or control characters, over 64 scalars) is treated as absent and never shown.
+- **Exactly one indicator per current row** ("This browser", "This device"), as text, so it is read with the row.
+- **Reflow at 320 px:** long and hostile names wrap (`overflow-wrap: anywhere`); actions keep their 44 px targets and wrap under the text; the capacity lines sit under
+  each section's explanation, not in the heading.
+- **Naming dialog:** one labelled field with its rule as a description; a refusal is shown under the field, which becomes `aria-invalid`, is described by it and takes
+  focus, and the message is announced once (assertive). "Saved"/"removed" are announced politely after the dialog closes. Offline, "Name…"/"Rename…" and "Save name"
+  are disabled with the visible reason "Naming a device needs a connection.", which is their accessible description. As everywhere, a disabled control is drawn in
+  place of the enabled one, so focus on Save falls to the page when the connection drops (listed in the manual checks below).
+- **Confirmations name the item:** another device's retirement is titled with its name or label; this device's retirement and logout keep the WEB-04 words and add
+  one identifying line above them.
+- Automated evidence: jest-axe on every new state (`tests/features/settings/name-device.test.tsx`) and real-engine axe including contrast at 320, 390, 768 and 1280 px
+  in dark, light and Auto (`tests/e2e/fixture.session-labels.spec.ts`), plus the released-backend run (`integration.web08d-labels.spec.ts`). TalkBack, NVDA and
+  VoiceOver passes remain Layer 3 (WEB-15).
+
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
 For each core journey (open the app, move between destinations, open Appearance and change it, open the More sheet, read the sync status, reach a compatibility screen):

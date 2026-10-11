@@ -8,6 +8,7 @@ import type {
   Operations,
   Result,
   SessionSummary,
+  SessionsRead,
   Store,
 } from "../api";
 import { LOCKS } from "../constants";
@@ -15,6 +16,7 @@ import { raiseOperationFence } from "../model/reducers/operation";
 import type {
   AccountId,
   AuthRecords,
+  DeviceId,
   Envelope,
   Epoch,
   OperationId,
@@ -625,21 +627,60 @@ export class OperationService implements Operations {
     return this.ordinary("GET", "/devices", {}, (response) =>
       this.json(response, (value) => {
         const devices = (value as { devices?: unknown } | null)?.devices;
-        return Array.isArray(devices)
-          ? { devices: devices as DeviceRow[] }
-          : null;
+        if (!Array.isArray(devices)) return null;
+        // BE-Q25: the capacity travels inside this sealed result, untouched, and only when the answer carries it (absent is not null).
+        return Object.hasOwn(value as object, "sync_capacity")
+          ? {
+              devices: devices as DeviceRow[],
+              sync_capacity: (value as { sync_capacity: unknown })
+                .sync_capacity,
+            }
+          : { devices: devices as DeviceRow[] };
       }),
     );
   }
 
-  listSessions(): Promise<Result<{ sessions: readonly SessionSummary[] }>> {
+  listSessions(): Promise<Result<SessionsRead>> {
     return this.ordinary("GET", "/sessions", {}, (response) =>
       this.json(response, (value) => {
         const sessions = (value as { sessions?: unknown } | null)?.sessions;
-        return Array.isArray(sessions)
-          ? { sessions: sessions as SessionSummary[] }
-          : null;
+        if (!Array.isArray(sessions)) return null;
+        return Object.hasOwn(value as object, "session_capacity")
+          ? {
+              sessions: sessions as SessionSummary[],
+              session_capacity: (value as { session_capacity: unknown })
+                .session_capacity,
+            }
+          : { sessions: sessions as SessionSummary[] };
       }),
+    );
+  }
+
+  /**
+   * BE-Q25: name or un-name a listed device. The body carries the name exactly as given (never trimmed). The answer is read through
+   * `jsonResult`'s error path (the Atlas body carries the request ID), so the result is sealed after that decode like any other read.
+   */
+  nameDevice(
+    id: DeviceId,
+    name: string | null,
+  ): Promise<Result<"named" | "cleared" | "gone">> {
+    return this.ordinary(
+      name === null ? "DELETE" : "PUT",
+      `/devices/${encodeURIComponent(id)}/name`,
+      name === null ? {} : { body: { name } },
+      async (response): Promise<Result<"named" | "cleared" | "gone">> => {
+        if (response.status === 204)
+          return { ok: true, value: name === null ? "cleared" : "named" };
+        const refused = await jsonResult<never>(response, () => null);
+        if (
+          !refused.ok &&
+          response.status === 404 &&
+          refused.atlasError?.code === "not_found"
+        )
+          return { ok: true, value: "gone" };
+        // Any other answer, a 2xx other than 204 included, is `http` with the status and any Atlas error.
+        return refused;
+      },
     );
   }
 

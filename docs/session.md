@@ -22,7 +22,7 @@ Where this document says "the matrix" it means that file; its wording is not res
 - `session.persistence.hold(account, epoch)` (revisions 5 and 6, obligation 4 below), the types `Persistence` and `PersistenceHold`, and `unrevokedHold` (a hold that is never revoked, for a double of the session); `LockPort` gained `acquireShared`;
 - the production assembly: `openAuthStore`, `runAuthCanary`, `browserPorts`, `createProtectedSurface`;
 - the types of the public surface: `Session`, `SessionView`, `NeutralStateId`, `Attempts`, `Operations`, `Recovery`, `Wipe`, `StampedApi`, `StampedRequestError`, `ApiCompatibility`,
-  and (revision 5) `RegistrationInput`, `InvitationPreview`, `OidcStartOutcome` and `AccountSummary`.
+  and (revision 5) `RegistrationInput`, `InvitationPreview`, `OidcStartOutcome` and `AccountSummary`, and (WEB-08d) `SessionsRead`.
 
 A `Session` carries no account data. `session.view` says what to render; `session.identity` is a **fact** for consumers (the drafts store keys its database by it), **never a
 permission**: do not decide to send, render or write on it (matrix G3).
@@ -35,7 +35,7 @@ permission**: do not decide to send, render or write on it (matrix G3).
 | WEB-09b (recovery) | `session.api.client('recovery', …)`; `recovery.begin(account)` and `recovery.finish(handle)`; `recovery.report('catching_up' \| 'failed' \| null)` drives neutral states 2 and 3; `recovery.onRetry(listener)` (added by WEB-09b review cycle 1, R2) is told when the person presses the neutral state's "Try again" (`actions.retry`), so state 3 reaches the recovery job; it is a request, never a permission, and changes no protection; `api.admission(klass, account, epoch)` (review cycle 2, R3) is a READ of what admits a request now (an opaque digest of the settled stamp, a gating attempt, the account's fences and `fence_seq`, other pages' request leases, and this page's hold, closing write and CSRF token, plus `blocked`), for a caller that was refused before sending and waits for that to change: it writes nothing, takes no lease or lock, and is never a permission; `api.seal(account, epoch, pending)` (review cycle 2, R7) is the public form of `sealResult` for a caller that interprets `fetchFor` responses itself (the data layer's authorised current read): the record is read after the caller's whole result, in the step that decides, and it refuses (`stale`) once the session is disposed |
 | WEB-08b (registration, OIDC, sign-in, account and sign-in settings; **delivered, revision 5**) | `attempts.begin`, `signInWithPassword`, `previewInvitation(token)`, `registerWithInvitation(handle, input)`, `startOidc(handle)`, `landing(fragment)`, `cancel`; `AttemptOutcome` (`settled.method`, `refused.stage`) and `OidcStartOutcome`; `operations.readAccount()` and `unlinkOidc(issuer)`. The fragment is captured by `captureHandoff`, the **first statement of `boot()`** (not `start({ beforeStart })`); see "Authentication surfaces" below |
 | WEB-08c (lifecycle traces, account switching) | everything above, the fake platform (`tests/support/session/`), the integration harness and delaying proxy (`scripts/integration/`, `tests/integration/`); the seam `settings/account/slots.ts` (`accountActions`, empty: append "Switch account" there); no in-place same-account re-authentication exists yet (gap G-23); `1c.ended` is raised by nothing yet |
-| WEB-08d (labels and capacity, BE-Q25) | the seam `settings/signing-in/slots.ts` (`signingInExtras`, empty). The forms contain contract fields only: **no label, device-name or capacity field exists or is invented** (D-8b-13) |
+| WEB-08d (labels and capacity, BE-Q25; **delivered for review**) | `operations.listSessions()` and `readDevices()` return the BE-Q25 members as received (`client`, `device_name`, `name` and, only when the answer carries them, `session_capacity` and `sync_capacity`), all typed `unknown` and decoded by the Settings feature; `operations.nameDevice(id, name \| null)`. BE-Q25 derives a label from the activation request's own User-Agent and takes no name at sign-in or registration, so the WEB-08b forms are unchanged and D-8b-13 still holds **for the forms**; naming lives on the device row of WF-SETTINGS-02, and the seam `settings/signing-in/slots.ts` (`signingInExtras`) **stays empty** (D-8d-08) |
 | WEB-13a (calendar) | the Settings registry entry point and the named `calendarLine` slot (below) |
 
 ### Obligations this slice creates for WEB-09a
@@ -212,13 +212,14 @@ unresolved lease (1e) → waiting (1e) → read failure (1e). After a re-authent
 
 ## Gap report (design and contract)
 
-None blocks anything; G-1 to G-3 are material and need Kieran's acceptance.
+None blocks anything. G-1 to G-3 were material; WEB-08d replaced them with BE-Q25's labels, names and capacities (below). The neutral rows remain the fallback for a
+label-less row, and Kieran's visual and copy sign-off of the replacement is open.
 
 | ID | Gap | Treatment |
 | --- | --- | --- |
-| G-1 | Session rows: the design shows "Chrome on macOS"; `GET /sessions` has no label field | "This browser" / "Another sign-in"; "Password" / "Single sign-on"; signed-in and expiry times. **Material** |
-| G-2 | "You have room for 5": the API exposes no device capacity | Omitted; the count the API returns is shown. **Material** |
-| G-3 | Device names: `device_id` is opaque and client-chosen | "This device" / "Another device", session count, last sync. **Material** |
+| G-1 | Session rows: the design shows "Chrome on macOS"; `GET /sessions` has no label field | "This browser" / "Another sign-in"; "Password" / "Single sign-on"; signed-in and expiry times. **Replaced by WEB-08d** (BE-Q25 `client`); the neutral titles are the fallback |
+| G-2 | "You have room for 5": the API exposes no device capacity | Omitted; the count the API returns is shown. **Replaced by WEB-08d**: the two capacities BE-Q25 reports (`session_capacity`, `sync_capacity`), never a hard-coded figure, never a reservation |
+| G-3 | Device names: `device_id` is opaque and client-chosen | "This device" / "Another device", session count, last sync. **Replaced by WEB-08d** (BE-Q25 `name` and `client`, and naming); the neutral titles are the fallback |
 | G-4 | The logout/retirement warning and the consent prompt exist only as ASCII in WEB-04 | Implemented verbatim; a rendered wireframe is requested |
 | G-5 | Retirement dialog's `DeviceSummary` lines have no accepted copy | Proposed: one line per non-zero component. Not accepted |
 | G-6 | The API-version compatibility screen has no accepted copy | Proposed: "Atlas can't work with this server yet" with an unsupported and a missing wording. Not accepted |
@@ -251,7 +252,36 @@ in the application); `sectionPath` is the one place that says so. The "Your data
 
 WEB-08b added one registry entry, **Signing in** (`id: "signing-in"`, `owner: "WEB-08"`, order 20), a dialog route like Appearance, and the **account card** at the top of the home list
 (`settings/account/AccountCard.tsx`; it is the only part of the home that issues a request, under a skeleton, so the list still paints at once). Two empty, ordered seams are left for
-other slices: `settings/account/slots.ts` (`accountActions`: WEB-08c appends "Switch account") and `settings/signing-in/slots.ts` (`signingInExtras`: WEB-08d, if BE-Q25 needs a control).
+other slices: `settings/account/slots.ts` (`accountActions`: WEB-08c appends "Switch account") and `settings/signing-in/slots.ts` (`signingInExtras`: WEB-08d needed no control there, D-8d-08).
+
+## Recognisable sessions and devices (WEB-08d, BE-Q25, API 0.28.0)
+
+The released contract (`v0.28.0-rc.1`) adds a coarse `client` label to every session (`channel`, `browser`, `platform`, derived by the server from the activation
+request's User-Agent: a recognition hint, never identity), `device_name` to sessions and `name`/`client` to devices, `session_capacity` to `GET /sessions` and
+`sync_capacity` to `GET /devices` (`{limit, used, remaining}`; `limit: null` is unlimited; an absent member, on an older server, is unavailable), and
+`PUT`/`DELETE /devices/{id}/name`.
+
+- **The session kernel stays thin (D-8d-02).** The lists copy a capacity member only when the answer carries it, inside the same sealed result, so absent stays
+  distinguishable from `null` and a capacity of account A is never returned after a transition to B (`tests/session/public-decode.test.ts`). `nameDevice` is an ordinary
+  stamped call (CSRF, cover, lease, identity), released and sealed after its error body is decoded; the name is sent exactly as given; `204` is `named`/`cleared`, a
+  `404 not_found` is `gone`, any other answer `http`. No Idempotency-Key: a repeat is harmless.
+- **Decoding lives in the lazy Settings chunk** (`settings/sessions-devices/labels.ts`): unknown or future enum values read as `unknown`; a name is shown only if it
+  passes the server's own `DeviceName` rules (by code point, Rust `char::is_whitespace`), so a value a correct server never sends falls back; capacity readings that are
+  inconsistent are `unavailable`.
+- **Titles (D-8d-03/04):** a session by its label ("Chrome on macOS", "Atlas app on iOS"); a device by its name, then its label, then WEB-08a's fallback. The current
+  rows keep exactly one "This browser"/"This device" indicator (D-8d-05). Identifiers and tokens are never shown; every row action's accessible name carries the title,
+  any device name and the row's own time (D-8d-06). Names are text in `<bdi>`, and isolated (U+2068/U+2069) in composed strings (D-8d-07).
+- **Capacity (D-8d-11):** each line comes from its own list's READY answer only (none while loading or after an error), uses the server's figures (never 5 or 32, never
+  the number of listed devices) and never promises a place.
+- **Naming (D-8d-09/10):** offered only when the devices answer carries `sync_capacity`; disabled offline with its reason; validated before sending; an unconfirmed
+  outcome (a lost answer, a `5xx`) says so and reads the list again; `closed`/`auth_state` and an answer after the dialog closed say nothing. A name is display metadata:
+  it is not part of `state_token`, so a rename never stales a retirement (the confirmation still sends the token of the read that supplied the row).
+- **Confirmations name the item (D-8d-12):** "Retire {name}?" (the name isolated) for another device; one identifying line above the unchanged WEB-04 warning for this device and logout.
+  Signing out another session keeps its direct action (WF-SETTINGS-02 draws no dialog); its accessible name and announcements name the row.
+- **Privacy (D-8d-14):** names and labels are never persisted by the client (not in `atlas-auth`, not in the retirement envelope, which keeps only `state_token` and
+  `summary`), nor logged, nor sent anywhere but the `PUT` body.
+- All new copy is PROPOSED (`label-copy.ts`, provenance-marked) and awaits Kieran's sign-off. The two capacity strings of WEB-08b and WEB-09a were corrected to the
+  defined semantics (D-8d-13): the sign-in limit is per account, and only a retirement frees a place for syncing.
 
 ## Decisions taken beyond the matrix
 
@@ -374,6 +404,7 @@ syntactic checker**, `scripts/check-session-conventions.mjs`, run by `pnpm lint`
 | Fake platform | `tests/session/`, `tests/support/session/` | the protocol against a deterministic world: delays on every completion, both creation orders, crashes; properties V1 to V7, W1 to W3 and P-A to P-I checked on the logs; 16 mutations of the source are each caught | real IndexedDB, Web Locks or BroadcastChannel behaviour |
 | Full matrices | `pnpm test:session-matrix` | check 12 (52 488 scenarios), check 13 (4 752), check 14 (2 880) with no violation; the 16 mutations caught over the full products | as above |
 | Real-engine fixture | `tests/e2e/fixture.session-*.spec.ts`, `fixture.auth-settings.spec.ts`; `production.auth-public.spec.ts` and `production.auth-flows.spec.ts` (WEB-08b: the PRODUCTION build against a STUBBED network, `tests/e2e/auth-stub.ts`) | the production adapters, the level-0 gate with real `inert` and the real top layer, the rendered screens (including the sign-in, join, account-card and "Signing in" states) in both themes at four widths with axe including contrast, the fragment stripped before the first request, registration, the OIDC round trip with a stub provider, and the T1/T3/T15 orderings with two real pages and held answers, in Chromium, Firefox and WebKit | a backend; the real cookie; a real provider; real Safari; assistive technology; freeze and bfcache |
+| WEB-08d labels | `tests/features/settings/{session-labels,labels-contract,name-device}.test.*`, `tests/session/operations-device-name.test.ts`, `tests/e2e/fixture.session-labels.spec.ts`, `tests/integration/integration.web08d-labels.spec.ts` (I-8d, its own stack) | the decoders against the 30fec6a contract extract and the backend's own name vectors, and the released `openapi.json` byte for byte; the screens' every answer; naming over the stand-in's opt-in `beq25` mode with held answers across transitions; the rendered states in three engines; labels, names and capacities against the RELEASED `v0.28.0-rc.1` backend | a legacy (pre-0.28) row against a real backend (a fresh 0.28 database has none: fixture-only); real Safari or a device; assistive technology; Kieran's visual and copy sign-off |
 | Integration | `pnpm test:integration` | the session and its adapters in a real engine (Chromium, Firefox and WebKit: 46 specs from WEB-08a and 57 WEB-08b specs each, one of them (I-27k) opt-in and skipped unless asked for, run in seven fresh stacks per engine because the backend throttles password sign-ins per source and minute, consumes invitations and needs one stack with single sign-on configured and one without) against the **released** backend `v0.27.0-rc.1` (SHA-256 verified), on a disposable SQLite database, behind a delaying proxy (it can hold, delay, drop, rewrite and swap, and `buffer_request` accepts a request and forwards it after the client has timed out); the WEB-08b specs include T1, T2, T3, T15, T16 cell by cell, registration with the backend's own operator invitations, and the OIDC round trip against a **stub** provider (`scripts/integration/oidc-provider.mjs`) | the WEB-08c traces on a rendered cache; a real identity provider; a household invitation (the released binary gives no account a household); real Safari or a device; assistive technology; PostgreSQL (unless `--postgres` was run: see `.agtx/execute.md`); the unmodified Compose or Ingress arrangement |
 
 Visibility in the real-engine specs is driven by overriding `document.visibilityState` and dispatching `visibilitychange`: a limitation, stated wherever it applies.
