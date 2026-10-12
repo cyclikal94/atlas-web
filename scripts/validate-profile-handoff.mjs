@@ -29,6 +29,11 @@
 // a sync page whose seeded batch is the person and its 199 dense checklists), in both modes. In results-file mode a hash from
 // `--w2-hashes` is accepted only after the hand-over that lists it certifies that capture (its bytes in fixtures/ and evidence/w2/, its
 // P-W2 capture row and seeded person, and the observed contents); a hashes file outside such a hand-over certifies nothing.
+//
+// Revision 6 (review 6 R7): the hand-over's acceptance scope is checked against STAGED-ACCEPTANCE-20261011 as this validator pins it
+// (acceptanceScopeProblems): the physical-device rows are transferred to WEB-09d, not a prerequisite of BE-B1/BE-Q23; no published text
+// reinstates that prerequisite; a desktop-scoped decision is supported only by a complete programme with no failure; a generated package
+// claims no review and no acceptance.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -366,6 +371,164 @@ function idsOf(list) {
 }
 
 /**
+ * Revision 6 (review 6 R7): the acceptance scope, checked against the later human decision on device timing (STAGED-ACCEPTANCE-20261011)
+ * as THIS validator holds it, not as the projection does. Re-projection only shows that the assembler and the validator agree with each
+ * other; a projection that restored the superseded device gate, or let an incomplete package claim support, would agree with itself.
+ * Function declarations, not module constants: the hand-over mode runs while this module is still being evaluated.
+ */
+function stagedAcceptance() {
+  return {
+    id: "STAGED-ACCEPTANCE-20261011",
+    brief_sha256:
+      "ed8bc85b3474b4dfddff06e5cc7cfab595a4ae01ebc7ad83a7efd49158ac1ca3",
+    authority_sha256:
+      "812002ba25387c186e4d9e457d34a0304565dd173292f294336dcc098370ea63",
+    // The rows whose physical-device part moved to WEB-09d (its §4: BE-B1 items 2 to 7, BE-Q23 M1 to M9 but the source answers M3 and M6).
+    transferred: [
+      "BE-B1:2 real devices, named",
+      "BE-B1:3 workloads with bytes, nodes and changes",
+      "BE-B1:4 multi-tab on every class",
+      "BE-B1:5 metrics per run",
+      "BE-B1:6 derived values",
+      "BE-B1:7 format",
+      "BE-Q23:M1 roster",
+      "BE-Q23:M2 method",
+      "BE-Q23:M4 granularity sweep",
+      "BE-Q23:M5 multi-tab scenarios",
+      "BE-Q23:M7 cost of finer requests",
+      "BE-Q23:M8 smallest unprocessable response",
+      "BE-Q23:M9 derived values",
+    ],
+    // Statements that make physical-device results a prerequisite of BE-B1/BE-Q23 (OD-1's superseded timing), in any published text.
+    superseded: [
+      /\bBE-B1(?:\/| and )BE-Q23\b[^.;]*\b(?:remains?|stays?|are|is)\s+(?:blocked|held)\b/i,
+      /\b(?:gate|BE-B1|BE-Q23)\b[^.;]*\bheld\s+until\s+the\s+(?:device\s+)?roster\b/i,
+      /\buntil\s+the\s+(?:device\s+)?roster\s+(?:runs|has\s+run)\b/i,
+    ],
+    support:
+      "can, with each backend card's own required checks, support BE-B1/BE-Q23 scoped technical acceptance",
+  };
+}
+
+function acceptanceScopeProblems(results, recomputed, at) {
+  const policy = stagedAcceptance();
+  const problems = [];
+  const scope = results.acceptance_scope;
+  if (!scope || typeof scope !== "object")
+    return [
+      `acceptance_scope is missing: the hand-over does not state its scope under ${policy.id}`,
+    ];
+  const decision = scope.decision ?? {};
+  if (
+    decision.id !== policy.id ||
+    decision.brief_sha256 !== policy.brief_sha256 ||
+    decision.authority_sha256 !== policy.authority_sha256
+  )
+    problems.push(
+      `acceptance_scope.decision is not ${policy.id} as pinned (brief ${policy.brief_sha256}, authority ${policy.authority_sha256})`,
+    );
+  if (scope.physical_devices_block_backend !== false)
+    problems.push(
+      `acceptance_scope.physical_devices_block_backend is not false: under ${policy.id} missing physical-device results alone do not block BE-B1/BE-Q23 scoped technical completion`,
+    );
+  if (
+    scope.package?.independently_reviewed !== false ||
+    scope.package?.claims_acceptance !== false
+  )
+    problems.push(
+      "acceptance_scope.package claims a review or an acceptance: a generated hand-over records neither",
+    );
+  // What the hand-over may support follows from its OWN evidence: complete (every cell ok or a declared capability, isolated) and no
+  // valid-workload failure. Anything else supports no desktop-scoped decision and acquires no acceptance statement.
+  const supports =
+    recomputed.complete === true &&
+    recomputed.derived?.desktop_valid_workload_failure === false;
+  const stated = scope.desktop_decision ?? {};
+  if (stated.supports !== supports)
+    problems.push(
+      `acceptance_scope.desktop_decision.supports is ${JSON.stringify(stated.supports)}; this hand-over's evidence supports ${supports ? "a desktop-scoped development decision" : "none"}`,
+    );
+  if (
+    !Array.isArray(stated.needs) ||
+    (supports ? stated.needs.length === 0 : stated.needs.length > 0)
+  )
+    problems.push(
+      "acceptance_scope.desktop_decision.needs does not match what the evidence supports",
+    );
+  const first = String(results.first_paragraph ?? "");
+  if (first.includes(policy.support) !== supports)
+    problems.push(
+      supports
+        ? "first_paragraph does not state what this complete desktop hand-over can support"
+        : "first_paragraph claims support for BE-B1/BE-Q23 acceptance that this hand-over's evidence does not give",
+    );
+  if (!first.includes("transferred to WEB-09d") || !first.includes(policy.id))
+    problems.push(
+      `first_paragraph does not state that the physical-device measurements are transferred to WEB-09d (${policy.id})`,
+    );
+  const transfers = Array.isArray(scope.transferred_to_web09d)
+    ? scope.transferred_to_web09d
+    : [];
+  if (
+    JSON.stringify(transfers.map((t) => t?.item).sort()) !==
+      JSON.stringify([...policy.transferred].sort()) ||
+    transfers.some((t) => t?.owner !== "WEB-09d" || t?.status !== "not_run")
+  )
+    problems.push(
+      "acceptance_scope.transferred_to_web09d is not every BE-B1/BE-Q23 row with a physical-device part, owned by WEB-09d and not run",
+    );
+  for (const key of DEVICE_KEYS) {
+    const status = results.consumer_map?.[key]?.status;
+    if (status !== "transferred" && status !== "not_run")
+      problems.push(
+        `consumer_map: ${key} is ${status}; under ${policy.id} its physical-device measurement is transferred to WEB-09d`,
+      );
+  }
+  if (
+    !Array.isArray(scope.human_decisions) ||
+    scope.human_decisions.length === 0
+  )
+    problems.push(
+      "acceptance_scope.human_decisions is empty: the roster and any material contract choice stay with a person",
+    );
+  const held = recomputed.cells
+    .filter((c) => ["failed", "failed_control", "invalid"].includes(c.status))
+    .map((c) => c.id);
+  if (
+    idsOf(scope.held_failures?.cells) !== idsOf(held) ||
+    canonical(scope.held_failures?.workload_failures ?? null) !==
+      canonical(recomputed.failures)
+  )
+    problems.push(
+      "acceptance_scope.held_failures are not the failed, failed-control and invalid cells and the valid-workload failures the evidence resolves to",
+    );
+  const texts = [];
+  const walk = (value, path) => {
+    if (typeof value === "string") texts.push([path, value]);
+    else if (Array.isArray(value))
+      for (const [i, v] of value.entries()) walk(v, `${path}[${i}]`);
+    else if (value && typeof value === "object")
+      for (const [k, v] of Object.entries(value))
+        walk(v, path ? `${path}.${k}` : k);
+  };
+  walk(results, "");
+  try {
+    texts.push(["report.md", readFileSync(join(at, "report.md"), "utf8")]);
+  } catch {
+    // report.md's absence is the publication check's finding.
+  }
+  for (const [path, text] of texts)
+    for (const pattern of policy.superseded)
+      if (pattern.test(text)) {
+        problems.push(
+          `${path} makes physical-device results a prerequisite of BE-B1/BE-Q23 (superseded by ${policy.id}): "${pattern.exec(text)[0]}"`,
+        );
+        break;
+      }
+  return problems;
+}
+
+/**
  * What the hand-over says against what its own evidence resolves to (review R1, R2): the contract, every cell's status, the lists, the
  * item statuses and the desktop conclusions. A forged summary, a dropped raw file or a "complete" programme holding a not-run item is
  * refused here, whatever SHA256SUMS says.
@@ -472,6 +635,7 @@ function programmeProblems(results, recomputed, at) {
         `device_page_validation: results.${c.engine}.json is ${stated?.status}; the evidence resolves to ${c.status}`,
       );
   }
+  problems.push(...acceptanceScopeProblems(results, recomputed, at));
   problems.push(...publicationProblems(results, recomputed, at));
   return problems;
 }

@@ -1093,8 +1093,10 @@ test("case: a failed stage, and an empty programme, leave the programme incomple
     Object.keys(results.consumer_map).sort(),
     [...evidence.CONSUMER_KEYS].sort(),
   );
+  // Adapted in revision 6 (review 6 R7, STAGED-ACCEPTANCE-20261011): the original expectation was `escalated` (OD-1's timing). Its intent,
+  // that a device row is never answered from an empty desktop programme, is kept: the row is now `transferred` to WEB-09d, not measured.
   for (const key of evidence.DEVICE_KEYS)
-    assert.equal(results.consumer_map[key].status, "escalated");
+    assert.equal(results.consumer_map[key].status, "transferred");
   assert.equal(results.desktop_programme.missing.length, 796);
   assert.equal(results.H8.desktop_valid_workload_failure, null);
   assert.match(results.H8.desktop_answer, /UNDETERMINED/);
@@ -4065,4 +4067,476 @@ test("case (R6, Q7): on a candidate whose source no longer shows the path (the l
     here.stderr,
     /H9\.limit_in_use\.source_facts are not this candidate's snapshot source facts/,
   );
+});
+
+// ---- Revision 6 (review 6 R7): the hand-over's acceptance scope under STAGED-ACCEPTANCE-20261011 ----------------------------------------
+// The expectations below are written from the decision itself (delivery/handoffs/staged-acceptance-20261011.md §3 and §4), not read from
+// the projection: physical-device measurements are WEB-09d's and do not block BE-B1/BE-Q23 scoped technical completion; a hand-over states
+// what its desktop evidence can support only when that evidence is complete with no failure, and never records a review or an acceptance.
+const STAGED = {
+  id: "STAGED-ACCEPTANCE-20261011",
+  brief_sha256:
+    "ed8bc85b3474b4dfddff06e5cc7cfab595a4ae01ebc7ad83a7efd49158ac1ca3",
+  authority_sha256:
+    "812002ba25387c186e4d9e457d34a0304565dd173292f294336dcc098370ea63",
+};
+const TRANSFERRED_ROWS = [
+  "BE-B1:2 real devices, named",
+  "BE-B1:3 workloads with bytes, nodes and changes",
+  "BE-B1:4 multi-tab on every class",
+  "BE-B1:5 metrics per run",
+  "BE-B1:6 derived values",
+  "BE-B1:7 format",
+  "BE-Q23:M1 roster",
+  "BE-Q23:M2 method",
+  "BE-Q23:M4 granularity sweep",
+  "BE-Q23:M5 multi-tab scenarios",
+  "BE-Q23:M7 cost of finer requests",
+  "BE-Q23:M8 smallest unprocessable response",
+  "BE-Q23:M9 derived values",
+];
+// What review 6 found in the generated package (the superseded OD-1 timing), verbatim.
+const OLD_GATE_PARAGRAPH =
+  "This record was taken on one macOS developer machine with Playwright's desktop engines. It does not meet the roster in H1 (BE-B1 item 2, BE-Q23 M1): no real device, floor device, installed app or browser without a device-memory signal was profiled, because the operator escalated the roster (OD-1, 10 October 2026). Every desktop figure is labelled as such and none stands for a device class. The BE-B1/BE-Q23 measurement gate remains held until the roster runs.";
+const OLD_UNTIL_THEN =
+  "BE-B1 item 2 and BE-Q23 M1 are escalated; needs_finer_pagination is undetermined for supported devices; BE-B1/BE-Q23 remain blocked";
+const SUPERSEDED_STATEMENTS = [
+  "measurement gate remains held until the roster runs",
+  "BE-B1/BE-Q23 remain blocked",
+  "BE-B1 and BE-Q23 remain blocked",
+  "BE-B1 and BE-Q23 stay blocked",
+];
+const SUPPORT =
+  "can, with each backend card's own required checks, support BE-B1/BE-Q23 scoped technical acceptance";
+const NO_SUPPORT =
+  "supports no desktop-scoped development decision and no acceptance claim";
+/** Everything a backend author reads: every string of results.json and the whole report. */
+const publishedText = (handoff) =>
+  `${readFileSync(join(handoff, "results.json"), "utf8")}\n${readFileSync(join(handoff, "report.md"), "utf8")}`;
+const assertNoSupersededGate = (handoff, what) => {
+  const text = publishedText(handoff);
+  for (const statement of SUPERSEDED_STATEMENTS)
+    assert.ok(!text.includes(statement), `${what}: publishes "${statement}"`);
+  assert.doesNotMatch(text, /held until the (device )?roster/i, what);
+};
+/** The scope every hand-over states, whatever its evidence: the decision, the transfers, the people, no review and no acceptance. */
+const assertStagedScope = (results, what) => {
+  const scope = results.acceptance_scope;
+  assert.equal(scope.decision.id, STAGED.id, what);
+  assert.equal(scope.decision.brief_sha256, STAGED.brief_sha256, what);
+  assert.equal(scope.decision.authority_sha256, STAGED.authority_sha256, what);
+  assert.equal(scope.physical_devices_block_backend, false, what);
+  assert.equal(scope.package.independently_reviewed, false, what);
+  assert.equal(scope.package.claims_acceptance, false, what);
+  assert.deepEqual(
+    scope.transferred_to_web09d.map((t) => [t.item, t.owner, t.status]),
+    TRANSFERRED_ROWS.map((item) => [item, "WEB-09d", "not_run"]),
+    what,
+  );
+  assert.ok(scope.human_decisions.length >= 2, what);
+  assert.match(
+    scope.human_decisions.map((h) => h.decision).join(" | "),
+    /supported-device roster.*\|.*material contract or product choice/,
+    what,
+  );
+  for (const key of evidence.DEVICE_KEYS) {
+    assert.equal(results.consumer_map[key].status, "transferred", what);
+    assert.match(results.consumer_map[key].owner, /^WEB-09d /, what);
+  }
+  assert.equal(results.H1.status, "transferred", what);
+  assert.match(
+    results.first_paragraph,
+    /those measurements are transferred to WEB-09d and have not run \(STAGED-ACCEPTANCE-20261011/,
+    what,
+  );
+  assert.match(
+    results.first_paragraph,
+    /This record has not been independently reviewed and claims no acceptance\.$/,
+    what,
+  );
+  // OD-1 is kept as the decision of record, with its timing labelled superseded and its old "until then" gone.
+  const od1 = results.escalations.find((e) => e.id === "OD-1");
+  assert.equal(od1.status, "timing superseded", what);
+  assert.match(od1.superseded_by, /^STAGED-ACCEPTANCE-20261011 /, what);
+  assert.equal(od1.until_then, undefined, what);
+};
+/** Re-publishes a hand-over with ANOTHER candidate's projection (its assembler), so the re-projection of that candidate agrees with it. */
+const republish = async (handoff, base) => {
+  const projection = await import(
+    pathToFileURL(join(base, "scripts/lib/profile-projection.mjs")).href
+  );
+  const theirContract = await import(
+    pathToFileURL(join(base, "scripts/lib/profile-contract.mjs")).href
+  );
+  const evidenceDir = join(handoff, "evidence");
+  const resolution = theirContract.resolveEvidence(evidenceDir);
+  const before = JSON.parse(
+    readFileSync(join(handoff, "results.json"), "utf8"),
+  );
+  const results = projection.projectResults({
+    evidenceDir,
+    resolution,
+    context: projection.contextOf(before),
+  });
+  writeFileSync(
+    join(handoff, "results.json"),
+    `${JSON.stringify(results, null, 2)}\n`,
+  );
+  writeFileSync(
+    join(handoff, "report.md"),
+    projection.renderReport({ results, resolution, evidenceDir }),
+  );
+  resum(handoff);
+  return results;
+};
+const mutateCopy = (base, file, edits) => {
+  const path = join(base, file);
+  let text = readFileSync(path, "utf8");
+  for (const [anchor, replacement] of edits) {
+    assert.equal(text.split(anchor).length, 2, `${file}: ${anchor}`);
+    text = text.replace(anchor, replacement);
+  }
+  writeFileSync(path, text);
+};
+const validateWithCopy = (base, handoff, ...flags) =>
+  node(
+    [
+      join(base, "scripts/validate-profile-handoff.mjs"),
+      "--handoff",
+      handoff,
+      ...flags,
+    ],
+    { cwd: base },
+  );
+const AGREES =
+  /results\.json is not what its evidence projects to|report\.md is not the report/;
+/** A complete programme whose WebKit W2 live application timed out: complete, consistent, one valid-workload failure (H8). */
+const liveTimeout = (t) => {
+  const dir = join(scratch(t), "p");
+  writeComplete(dir);
+  editJson(join(dir, "w2/P-W2.webkit.json"), (v) => {
+    v.live.outcome = "timeout";
+  });
+  writeLines(
+    join(dir, "values.jsonl"),
+    readLines(join(dir, "values.jsonl")).map((r) =>
+      r.name === "P-W2 capture" && r.engine === "webkit"
+        ? { ...r, live: { ...r.live, outcome: "timeout" } }
+        : r,
+    ),
+  );
+  assert.equal(assemble(dir).status, 0);
+  return dir;
+};
+
+test("control (R7): a complete desktop-only hand-over is not held for absent mobile results: it states what it can support once reviewed, transfers the device rows to WEB-09d and validates (exit 0)", (t) => {
+  const dir = assembledCopy(t);
+  const handoff = join(dir, "handoff");
+  const results = resultsOf(dir);
+  assert.equal(results.desktop_programme.complete, true);
+  assertStagedScope(results, "complete");
+  const decision = results.acceptance_scope.desktop_decision;
+  assert.equal(decision.supports, true);
+  assert.deepEqual(decision.withheld_because, []);
+  assert.equal(decision.needs.length, 2);
+  assert.match(decision.needs[0], /independent review/);
+  assert.match(decision.needs[1], /backend card's own required checks/);
+  assert.match(
+    decision.scope,
+    /no mobile-safe limit, no supported-device floor/,
+  );
+  assert.ok(results.first_paragraph.includes(SUPPORT));
+  assert.ok(!results.first_paragraph.includes(NO_SUPPORT));
+  assert.match(
+    results.first_paragraph,
+    /missing phone and tablet results alone do not block that/,
+  );
+  assert.deepEqual(results.acceptance_scope.held_failures.cells, []);
+  assert.deepEqual(
+    results.acceptance_scope.held_failures.workload_failures,
+    [],
+  );
+  assertNoSupersededGate(handoff, "complete");
+  const report = readFileSync(join(handoff, "report.md"), "utf8");
+  assert.match(
+    report,
+    /## Acceptance scope \(what this hand-over can and cannot support\)/,
+  );
+  assert.match(
+    report,
+    /\* \*\*Desktop-scoped development decision:\*\* supported\./,
+  );
+  assert.match(
+    report,
+    /BE-Q23:M8 smallest unprocessable response \(desktop: partial\): .*; WEB-09d, not_run/,
+  );
+  assert.match(
+    report,
+    /Physical-device measurements are transferred to WEB-09d and not run \(H1\)/,
+  );
+  const checked = validate(handoff);
+  assert.equal(checked.status, 0, `${checked.stdout}${checked.stderr}`);
+});
+
+test("case (R7): an incomplete, failed-control or failing hand-over acquires no support or acceptance statement, still transfers the device rows and is not held for them", (t) => {
+  const empty = join(scratch(t), "p");
+  assert.equal(assemble(empty).status, 0);
+  const controls = join(scratch(t), "p");
+  writeComplete(controls, { controlOutcome: "timeout" });
+  assert.equal(assemble(controls).status, 0);
+  const failing = liveTimeout(t);
+  for (const [what, dir, expect] of [
+    [
+      "an empty programme",
+      empty,
+      { held: 0, failures: 0, exit: 1, partial: 2 },
+    ],
+    [
+      "every W7 control timed out",
+      controls,
+      { held: 36, failures: 0, exit: 1, partial: 1 },
+    ],
+    [
+      "a complete programme whose W2 live run timed out",
+      failing,
+      { held: 0, failures: 1, exit: 0, partial: 0 },
+    ],
+  ]) {
+    const handoff = join(dir, "handoff");
+    const results = resultsOf(dir);
+    assertStagedScope(results, what);
+    const decision = results.acceptance_scope.desktop_decision;
+    assert.equal(decision.supports, false, what);
+    assert.deepEqual(decision.needs, [], what);
+    assert.ok(decision.withheld_because.length > 0, what);
+    assert.ok(!results.first_paragraph.includes(SUPPORT), what);
+    assert.ok(results.first_paragraph.includes(NO_SUPPORT), what);
+    assert.equal(
+      results.acceptance_scope.held_failures.cells.length,
+      expect.held,
+      what,
+    );
+    assert.equal(
+      results.acceptance_scope.held_failures.workload_failures.length,
+      expect.failures,
+      what,
+    );
+    assertNoSupersededGate(handoff, what);
+    assert.match(
+      readFileSync(join(handoff, "report.md"), "utf8"),
+      /\* \*\*Desktop-scoped development decision:\*\* NOT supported\./,
+      what,
+    );
+    const plain = validate(handoff);
+    assert.equal(
+      plain.status,
+      expect.exit,
+      `${what}: ${plain.stdout}${plain.stderr}`,
+    );
+    assert.doesNotMatch(plain.stderr, /acceptance_scope|first_paragraph/, what);
+    assert.equal(
+      validate(handoff, "--allow-partial").status,
+      expect.partial,
+      what,
+    );
+  }
+  assert.match(
+    resultsOf(failing).acceptance_scope.desktop_decision.withheld_because.join(
+      " ",
+    ),
+    /a valid workload failed on a desktop engine \(H8\)/,
+  );
+});
+
+test("case (R7): forged acceptance-scope statements are refused even with SHA256SUMS regenerated (a claimed review or acceptance, devices blocking the backend, a dropped transfer, an escalated device row, another decision, support for an incomplete programme)", (t) => {
+  const forgeries = [
+    [
+      "a claimed acceptance",
+      (r) => {
+        r.acceptance_scope.package.claims_acceptance = true;
+      },
+      /acceptance_scope\.package claims a review or an acceptance/,
+    ],
+    [
+      "a claimed review",
+      (r) => {
+        r.acceptance_scope.package.independently_reviewed = true;
+      },
+      /acceptance_scope\.package claims a review or an acceptance/,
+    ],
+    [
+      "devices blocking the backend",
+      (r) => {
+        r.acceptance_scope.physical_devices_block_backend = true;
+      },
+      /physical_devices_block_backend is not false/,
+    ],
+    [
+      "a dropped transfer",
+      (r) => {
+        r.acceptance_scope.transferred_to_web09d.pop();
+      },
+      /transferred_to_web09d is not every BE-B1\/BE-Q23 row/,
+    ],
+    [
+      "an escalated device row",
+      (r) => {
+        r.consumer_map["BE-Q23:M1 roster"].status = "escalated";
+      },
+      /BE-Q23:M1 roster is escalated; under STAGED-ACCEPTANCE-20261011/,
+    ],
+    [
+      "another decision",
+      (r) => {
+        r.acceptance_scope.decision.brief_sha256 = "0".repeat(64);
+      },
+      /acceptance_scope\.decision is not STAGED-ACCEPTANCE-20261011 as pinned/,
+    ],
+    [
+      "the old gate restored in the first paragraph",
+      (r) => {
+        r.first_paragraph = OLD_GATE_PARAGRAPH;
+      },
+      /first_paragraph makes physical-device results a prerequisite of BE-B1\/BE-Q23/,
+    ],
+  ];
+  for (const [what, forge, message] of forgeries) {
+    const handoff = join(assembledCopy(t), "handoff");
+    editJson(join(handoff, "results.json"), forge);
+    resum(handoff);
+    const run = validate(handoff);
+    assert.equal(run.status, 1, `${what}: ${run.stdout}${run.stderr}`);
+    assert.match(run.stderr, message, what);
+  }
+  const empty = join(scratch(t), "p");
+  assert.equal(assemble(empty).status, 0);
+  const handoff = join(empty, "handoff");
+  editJson(join(handoff, "results.json"), (r) => {
+    r.acceptance_scope.desktop_decision.supports = true;
+    r.first_paragraph = r.first_paragraph.replace(NO_SUPPORT, SUPPORT);
+  });
+  resum(handoff);
+  const run = validate(handoff, "--allow-partial");
+  assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
+  assert.match(
+    run.stderr,
+    /desktop_decision\.supports is true; this hand-over's evidence supports none/,
+  );
+  assert.match(
+    run.stderr,
+    /first_paragraph claims support for BE-B1\/BE-Q23 acceptance that this hand-over's evidence does not give/,
+  );
+});
+
+test("case (R7): a projection that restores OD-1's device gate is refused although the assembler and the validator's re-projection agree on it", async (t) => {
+  const base = validatorCopy(t);
+  mutateCopy(base, "scripts/lib/profile-projection.mjs", [
+    [
+      "    first_paragraph: firstParagraph(scope),",
+      `    first_paragraph: ${JSON.stringify(OLD_GATE_PARAGRAPH)},`,
+    ],
+    [
+      '        current:\n          "BE-B1 item 2 and BE-Q23 M1 are transferred to WEB-09d and not run;',
+      `        until_then: ${JSON.stringify(OLD_UNTIL_THEN)},\n        current:\n          "BE-B1 item 2 and BE-Q23 M1 are transferred to WEB-09d and not run;`,
+    ],
+  ]);
+  const handoff = join(assembledCopy(t), "handoff");
+  const results = await republish(handoff, base);
+  assert.equal(results.first_paragraph, OLD_GATE_PARAGRAPH);
+  const run = validateWithCopy(base, handoff);
+  assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
+  assert.match(
+    run.stderr,
+    /first_paragraph makes physical-device results a prerequisite of BE-B1\/BE-Q23 \(superseded by STAGED-ACCEPTANCE-20261011\)/,
+  );
+  assert.match(
+    run.stderr,
+    /escalations\[0\]\.until_then makes physical-device results a prerequisite of BE-B1\/BE-Q23/,
+  );
+  assert.match(
+    run.stderr,
+    /report\.md makes physical-device results a prerequisite/,
+  );
+  assert.match(
+    run.stderr,
+    /first_paragraph does not state that the physical-device measurements are transferred to WEB-09d/,
+  );
+  assert.match(
+    run.stderr,
+    /first_paragraph does not state what this complete desktop hand-over can support/,
+  );
+  assert.doesNotMatch(run.stderr, AGREES);
+});
+
+test("case (R7): a projection that lets an incomplete programme claim support is refused although the assembler and the validator's re-projection agree on it", async (t) => {
+  const base = validatorCopy(t);
+  mutateCopy(base, "scripts/lib/profile-projection.mjs", [
+    [
+      "  const supports = resolution.complete === true && failure === false;",
+      "  const supports = true;",
+    ],
+  ]);
+  const empty = join(scratch(t), "p");
+  assert.equal(assemble(empty).status, 0);
+  const handoff = join(empty, "handoff");
+  const results = await republish(handoff, base);
+  assert.equal(results.acceptance_scope.desktop_decision.supports, true);
+  assert.ok(results.first_paragraph.includes(SUPPORT));
+  const run = validateWithCopy(base, handoff, "--allow-partial");
+  assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
+  assert.match(
+    run.stderr,
+    /desktop_decision\.supports is true; this hand-over's evidence supports none/,
+  );
+  assert.match(
+    run.stderr,
+    /desktop_decision\.needs does not match what the evidence supports/,
+  );
+  assert.match(
+    run.stderr,
+    /first_paragraph claims support for BE-B1\/BE-Q23 acceptance that this hand-over's evidence does not give/,
+  );
+  assert.doesNotMatch(run.stderr, AGREES);
+});
+
+test("case (R7): a projection that publishes the superseded scope structure - devices blocking the backend, a claimed acceptance, an escalated roster, a dropped transfer, another decision, no held workload failure - is refused although its re-projection agrees", async (t) => {
+  const base = validatorCopy(t);
+  mutateCopy(base, "scripts/lib/profile-projection.mjs", [
+    [
+      "    physical_devices_block_backend: false,",
+      "    physical_devices_block_backend: true,",
+    ],
+    ["      claims_acceptance: false,", "      claims_acceptance: true,"],
+    [
+      '    "BE-Q23:M1 roster": entry(\n      "transferred",',
+      '    "BE-Q23:M1 roster": entry(\n      "escalated",',
+    ],
+    [
+      "    transferred_to_web09d: DEVICE_TRANSFERS.map(",
+      "    transferred_to_web09d: DEVICE_TRANSFERS.slice(1).map(",
+    ],
+    [
+      '    "ed8bc85b3474b4dfddff06e5cc7cfab595a4ae01ebc7ad83a7efd49158ac1ca3",',
+      `    "${"0".repeat(64)}",`,
+    ],
+    [
+      "      workload_failures: resolution.failures ?? [],",
+      "      workload_failures: [],",
+    ],
+  ]);
+  const handoff = join(liveTimeout(t), "handoff");
+  const results = await republish(handoff, base);
+  assert.equal(results.acceptance_scope.physical_devices_block_backend, true);
+  const run = validateWithCopy(base, handoff);
+  assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
+  for (const message of [
+    /acceptance_scope\.physical_devices_block_backend is not false/,
+    /acceptance_scope\.package claims a review or an acceptance/,
+    /consumer_map: BE-Q23:M1 roster is escalated; under STAGED-ACCEPTANCE-20261011/,
+    /acceptance_scope\.transferred_to_web09d is not every BE-B1\/BE-Q23 row with a physical-device part/,
+    /acceptance_scope\.decision is not STAGED-ACCEPTANCE-20261011 as pinned/,
+    /acceptance_scope\.held_failures are not the failed, failed-control and invalid cells and the valid-workload failures/,
+  ])
+    assert.match(run.stderr, message);
+  assert.doesNotMatch(run.stderr, AGREES);
 });

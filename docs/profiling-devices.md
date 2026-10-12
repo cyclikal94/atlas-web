@@ -1,10 +1,12 @@
 # Profiling on a real device (evidence key `WEB-09a:sync-profiling`, handoff items H1 to H9)
 
-This is how a person with the devices runs the dense-workload measurements that the backend items BE-B1 and BE-Q23 are waiting for. The evidence key is unchanged;
-WEB-09c owns it since the WEB-09a closure (BC-20261009). It is **not** run by WEB-09c: that delivery measured on one macOS developer machine with Playwright engines,
-and says so in its hand-over (`docs/sync-measurements.md` names the run directory and its hashes). The operator escalated the device roster on 10 October 2026
-(OD-1, "Desktop now; escalate roster"; see "The roster" below). The measurement gate stays held until the roster below has run. Who runs it, and on which devices,
-is an operator decision.
+This is how a person with the devices runs the dense-workload measurements on physical devices for the backend items BE-B1 and BE-Q23. The evidence key is
+unchanged; WEB-09c owns it since the WEB-09a closure (BC-20261009). It is **not** run by WEB-09c: that delivery measured on one macOS developer machine with
+Playwright engines, and says so in its hand-over (`docs/sync-measurements.md` names the run directory and its hashes). The operator escalated the device roster on
+10 October 2026 (OD-1, "Desktop now; escalate roster"; see "The roster" below). On 11 October 2026 STAGED-ACCEPTANCE-20261011 transferred these physical-device
+measurements to **WEB-09d**, which prepares this package and runs it on a more complete integrated app before beta. They no longer gate BE-B1/BE-Q23 planning,
+implementation, independent technical review or scoped technical completion; WEB-09d's integrated pre-beta acceptance waits for them. Who runs it, and on which
+devices, is named before that pass.
 
 ## What the page does, and what it does not
 
@@ -170,22 +172,24 @@ written under `<dir>/contention/`; `--evidence` is required and a directory that
 | P-9 | the yield between pages (none, macrotask, `scheduler.yield`, idle) against other pages' waits and catch-up throughput | the same fixture leader, on a desktop |
 | P-13 | what a **healthy follower** reads because of `atlas-sync` hints (a leader's pages, drafts and receipts, stop-record hints, none), and the leader's catch-up with 0, 1 and 2 followers | the same fixture leader; the stop-record hints are **synthetic** (posted by a test-side channel, the record unchanged); counted by test-side instrumentation in the follower page |
 
-What it does **not** show, and what stays a gate: a **real** freeze or back/forward-cache restore, any **mobile** device (the roster above), a loaded or throttled CPU, and the **production leader** (WEB-09b). A device run of the contention spec
+What it does **not** show, and what stays open: a **real** freeze or back/forward-cache restore, any **mobile** device (the roster below; WEB-09d's), a loaded or throttled CPU, and the **production leader** (WEB-09b). A device run of the contention spec
 is possible by hosting `dist-fixture/` as above and running the spec against it, but is not packaged for a person without a checkout; that is also open.
 
-## The roster (H1): escalated (OD-1)
+## The roster (H1): transferred to WEB-09d (OD-1 escalated it)
 
 Fill one row per device and attach its results file. The roster that BE-B1 and BE-Q23 need is named by Kieran or product; the floor devices (the lowest-memory
 **supported** device per family) must be named by them too. **No roster or floor device is named in any approved input**, `docs/browser-support.md` leaves its
 tested-versions table unfilled by design, and no device is attached to the controller. On 10 October 2026 Kieran chose "Desktop now; escalate roster" (OD-1): WEB-09c
-delivered the desktop programme and this package, and the following are needed before a device run:
+delivered the desktop programme and this package. Since STAGED-ACCEPTANCE-20261011 the device run is WEB-09d's, and the following are needed before it:
 
 1. the named floor device for each family (model, RAM, OS);
 2. the mid-range mobile;
 3. who runs the protocol, and where;
 4. the HTTPS hosting choice (a local CA that the device trusts, or Android `adb reverse`; an external tunnel is the operator's call).
 
-Until then BE-B1 item 2 and BE-Q23 M1 are `escalated` in the hand-over, `needs_finer_pagination` is undetermined for supported devices, and BE-B1 and BE-Q23 stay blocked.
+Until then BE-B1 item 2 and BE-Q23 M1 are `transferred` in the hand-over (WEB-09d, not run; `escalated` before 11 October 2026), and `needs_finer_pagination` is
+undetermined for supported devices. BE-B1 and BE-Q23 are not held for these runs: they use the reviewed desktop hand-over and their own backend checks, mark
+device-sensitive choices provisional and take a material unresolved choice to Kieran. Nothing here is a mobile-safe limit or a supported-device floor.
 
 | Engine and version | OS and version | Hardware | RAM | `deviceMemory` (or "absent") | `hardwareConcurrency` | Installed app or tab | Class assigned | Run by | Date | Results file |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

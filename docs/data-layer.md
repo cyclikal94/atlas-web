@@ -398,7 +398,7 @@ results, not a heap or out-of-memory measurement and not a measurement of the co
 
 The approved dense batch (800 changes of 100-item checklists) reproduces the design's figures exactly: each value is 7,402 bytes and 547 nodes, and the page is 455,214 nodes and
 5.83 MiB (`tests/profiling/workloads.test.ts`). It is applied as **one** request at the lowest rung in all three engines (`tests/e2e/fixture.data-sync.spec.ts`, E-C3).
-Whether that suffices on a real constrained device is exactly what the measurement hand-over must show (evidence key `WEB-09a:sync-profiling`, owned by WEB-09c: `docs/sync-measurements.md`), and it has not been run on one: WEB-09c measured desktop engines only, and the device roster is escalated.
+Whether that suffices on a real constrained device is exactly what the measurement hand-over must show (evidence key `WEB-09a:sync-profiling`, owned by WEB-09c: `docs/sync-measurements.md`), and it has not been run on one: WEB-09c measured desktop engines only, and the physical-device runs are WEB-09d's before beta (STAGED-ACCEPTANCE-20261011; OD-1 had escalated the roster).
 
 ### Device class, step-down and the floor
 

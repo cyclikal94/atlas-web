@@ -1,8 +1,10 @@
 # Sync measurements: the `WEB-09a:sync-profiling` hand-over (WEB-09c)
 
-*WEB-09c, 10 October 2026. UK English. For the authors of BE-B1 and BE-Q23, and for WEB-09b and WEB-09d. The evidence key is unchanged; WEB-09c has owned it since
-the WEB-09a closure (BC-20261009). Every figure here was measured on ONE macOS developer machine with Playwright's desktop engines (Chromium, Firefox, WebKit). None
-is a pass mark, none stands for a device class, and BE-B1 and BE-Q23 remain blocked: the device roster was escalated (OD-1) and has not run.*
+*WEB-09c, 10 October 2026 (acceptance scope revised 12 October 2026). UK English. For the authors of BE-B1 and BE-Q23, and for WEB-09b and WEB-09d. The evidence
+key is unchanged; WEB-09c has owned it since the WEB-09a closure (BC-20261009). Every figure here was measured on ONE macOS developer machine with Playwright's
+desktop engines (Chromium, Firefox, WebKit): it is desktop-scoped evidence. None is a pass mark and none stands for a device class. The physical-device
+measurements are WEB-09d's and have not run (STAGED-ACCEPTANCE-20261011, which supersedes the timing of OD-1); missing phone and tablet results alone no longer
+block BE-B1/BE-Q23 scoped technical completion, but those cards still need the reviewed desktop hand-over of the final programme and their own backend checks.*
 
 > **Status after review 1 (revision 1, 10 October 2026).** The figures below come from attempt 4, and **none of them is an isolated measurement**. The isolation
 > labels first published with them judged each row by when it was written out, not by when its figures were collected, so they are withdrawn (review finding R1).
@@ -49,11 +51,38 @@ is a pass mark, none stands for a device class, and BE-B1 and BE-Q23 remain bloc
 > is read from the candidate's source (`scripts/lib/profile-source-facts.mjs`), checked again by the validator against its own candidate, and kept apart from what
 > the programme measured (no production snapshot). The final programme runs against the candidate's pinned backend, now **v0.28.0-rc.1** (main's API 0.28 merge);
 > every 0.27.0-rc.1 figure below is history.
+>
+> **Status after review 6 (revision 6, 12 October 2026).** Review 6 found that the generated hand-over still made physical-device results a prerequisite of
+> BE-B1/BE-Q23 technical completion ("the BE-B1/BE-Q23 measurement gate remains held until the roster runs"; OD-1's "BE-B1/BE-Q23 remain blocked"), which
+> STAGED-ACCEPTANCE-20261011 (Kieran, 11 October 2026; `delivery/handoffs/staged-acceptance-20261011.md`, SHA-256 `ed8bc85b…c1ca3`, authority
+> `approval/staged-acceptance-20261011.json`, `812002ba…a63`) superseded (R7). Revision 6 makes the hand-over state its **acceptance scope**
+> (`results.json` `acceptance_scope`, and a report section) in the decision's three parts: what its desktop evidence can support (only a complete, isolated
+> programme with no failure, and only once an independent review accepts the hand-over, together with each backend card's own checks; otherwise nothing), the
+> physical-device rows transferred to WEB-09d (BE-B1 items 2 to 7, BE-Q23 M1, M2, M4, M5, M7 to M9; not run), and the choices that need a person (the roster;
+> any material contract or product choice the desktop evidence cannot settle). Failures, failed controls and invalid evidence are listed as held. A generated
+> hand-over records no review and no acceptance. The validator checks this scope against the decision as it pins it, independently of the projection. OD-1 is
+> kept as the decision of record for the desktop scope and the roster's open items, its timing labelled superseded. The statements earlier in this document and
+> in the earlier reports are kept as they were written.
+>
+> **Status after review 7 (revision 7, 12 October 2026).** The first complete Air attempt after revision 6 (request `profile-20261012-195422-1b32a3d1`) failed
+> its P-1 bundle budgets: production 169,656 B and fixture 338,980 B initial JS gzip, both **development** builds (R8). Loading the production page reader
+> resolves a serve-mode Vite configuration, which sets an unset `NODE_ENV` to `development` on the process; the driver imports the reader before anything
+> else, so its `pnpm build` and `build:fixture` (and its browser stages and preview server) inherited it. Revision 7 restores the process environment after
+> the reader's loads, whether or not they succeed, and refuses to start if it cannot; a `NODE_ENV` the caller supplied is kept unchanged. Each build record
+> (`bundle/build-production.json`, `bundle/build-fixture.json`, `fixture-build.json`) now states the `NODE_ENV` the build was given (`null` when absent).
+> `scripts/validation/profile-build-environment.test.mjs` checks the public import chains and the driver's two build paths from an environment with and
+> without `NODE_ENV`, and the bundle stage's real builds and budgets without it. The failed attempt is kept as a failed attempt: it measured nothing, and
+> the budgets that caught it are unchanged.
 
 ## Read this first
 
 * **Desktop only.** No real device, floor device, installed web app or browser without a device-memory signal was profiled. BE-B1 item 2 and BE-Q23 M1 are
-  `escalated`, and `needs_finer_pagination` is **undetermined for supported devices**.
+  `transferred` to WEB-09d (not run; `escalated` under OD-1 until 11 October 2026), and `needs_finer_pagination` is **undetermined for supported devices**. No
+  mobile-safe limit, supported-device floor or all-platform conclusion is drawn from desktop figures.
+* **What this hand-over can support.** Under STAGED-ACCEPTANCE-20261011 the final programme's hand-over, once complete, isolated, free of failures and accepted
+  by an independent review, can support BE-B1/BE-Q23 scoped technical acceptance together with each card's own backend checks; device-sensitive choices stay
+  provisional and a material unresolved contract or product choice goes to Kieran. It does not record that acceptance. No such hand-over exists yet: the
+  figures below are attempt 4's history.
 * **Fixture and real backend are kept apart.** P-2, P-3, P-5, P-11, P-13, P-Q and P-Q2 use a stub network (the real stamped wrapper and the production engine). P-4,
   P-10 and P-W2 use the released backend (attempt 4: v0.27.0-rc.1; the final programme: the candidate's pin, v0.28.0-rc.1; disposable SQLite, loopback, behind the
   delaying proxy). The sync leader in every case is the FIXTURE test leader: production leadership, which the production build now starts (WEB-09b), is not what
@@ -103,12 +132,12 @@ programme that is merely incomplete or not isolated is a partial hand-over (2 wh
 | --- | --- | --- | --- |
 | C1 | BE-B1 M1: `N` in [the largest client `limit` in either phase and the default 50, 80] | This client sends `limit` 4 at the unconstrained initial rung and 1 for every other class, step-down only, never above 80 (`src/data/model/config.ts`). The engine asked for `limit=1` in every run here. **Current source (revision 5):** the production build also sends snapshot requests: boot starts the leader by default and its recovery job asks `/sync` for snapshot pages with the limit captured from the same persistent sizing ladder, so the same rungs apply in both phases (H9 `limit_in_use`, read from the candidate's code). *(Historical, attempt 4: "It sends no snapshot request: the first snapshot is WEB-09b's" was true of that candidate and is no longer current.)* Snapshot-shaped pages of 1 to 80 batches (W5) were processed on all three desktop engines; no production snapshot was measured | The rung of each device class; the limits production snapshots really use and their cost (not measured: WEB-09b, WEB-09d) |
 | C2 | BE-B1 D6 / BE-Q23 D1 (joint approver decision): is the 800-change W1 binding, or is the server-reachable W2 enough? | In attempt 4 both were admitted on every desktop engine, in every cold run (W2 also live). W1 is 6,108,903 bytes, 800 changes and 455,214 nodes. W2 from the released server is 1,520,162 bytes and 200 changes (199 dense checklists plus their person), about a quarter of W1 | The decision itself (Kieran); any device |
-| C3 | BE-Q23 §4.2: *D(c, b)*, `needs_finer_pagination`, the smallest failing unit | In attempt 4, desktop *D* = 800 dense changes on all three engines (the largest rung of the ladder) and no valid workload failed on a desktop engine. That run predates the completeness inventory, so the hand-over's desktop answer (H8, H9) is drawn only from the final run, and only if its programme is complete | **Every supported device class.** Without the roster, `needs_finer_pagination` stays undetermined |
+| C3 | BE-Q23 §4.2: *D(c, b)*, `needs_finer_pagination`, the smallest failing unit | In attempt 4, desktop *D* = 800 dense changes on all three engines (the largest rung of the ladder) and no valid workload failed on a desktop engine. That run predates the completeness inventory, so the hand-over's desktop answer (H8, H9) is drawn only from the final run, and only if its programme is complete | **Every supported device class.** Until WEB-09d's physical-device runs, `needs_finer_pagination` stays undetermined |
 | C4 | BE-Q23 M7: the cost of finer requests (per-request lease and lock) | Per sync page against the real backend on loopback: about 4 to 7 ms in total (p50), of which pre-issue (capture, lease cover, stamping) is 1.5 to 3 ms. A draft submission: 17 to 33 ms (p50). Behind a 250 ms proxy delay the request is 254 to 255 ms | A 10,000-resource snapshot (WEB-09b); device CPU |
 | C5 | BE-B1 item 6 / BE-Q23 M9 (V3): does the client's runtime validator use `SyncPage.batches.maxItems`? | **No.** The scanner enforces its own bounds (80 batches, 800 changes per batch; decision D-10). No file under `src/` reads `maxItems` | — |
 | C6 | Frontend: initial rungs 4/1, `floorAfter` 3, step-up disabled, `markerMinBytes`, `syncApplyWatchdogMs`, `maxResponseBytesFor` | W2 at `limit=1` (1.52 MB) is about 1/7 of `maxResponseBytesFor(1)` (11,124,736 bytes). It is above `markerMinBytes` (256 KiB), so the crash-loop marker is written for it. The slowest desktop commit of W1 is far below the 20 s apply watchdog. Nothing was refused, so the floor was never reached | The device classes: every constant stays provisional and unchanged |
 | C7 | Q9: `queueWarnAt` 200, `queueWorkingSet` 100, `listPage` 100 | A 200-draft queue drains in about 1.2 to 2.8 s (p50, maxInFlight 1, a stub). 200 dense drafts plus one 1 MiB import drain in about the same time | Devices; a real server's latency |
-| C8 | R1: `quotaReserveBytes` (8 MiB) protecting `atlas-auth` | Three pages' stamped requests did not all go out together: 20 of 60 were in flight at once, because another page's requests wait. The `atlas-auth` burst was below what the engines' storage figures resolve. The estimate moves in steps of 4 KiB (Chromium), about 16 KiB (Firefox) and about 1 KiB (WebKit). The derived desktop figure, `max(burst x 4, step x 2)` (an engineering margin, not a measurement), is at most about 150 KB, far below 8 MiB. **The constant is not changed** | Real Safari/iOS estimate behaviour and genuine exhaustion (the roster) |
+| C8 | R1: `quotaReserveBytes` (8 MiB) protecting `atlas-auth` | Three pages' stamped requests did not all go out together: 20 of 60 were in flight at once, because another page's requests wait. The `atlas-auth` burst was below what the engines' storage figures resolve. The estimate moves in steps of 4 KiB (Chromium), about 16 KiB (Firefox) and about 1 KiB (WebKit). The derived desktop figure, `max(burst x 4, step x 2)` (an engineering margin, not a measurement), is at most about 150 KB, far below 8 MiB. **The constant is not changed** | Real Safari/iOS estimate behaviour and genuine exhaustion (WEB-09d's physical-device runs) |
 | C9 | Matrix §3.6.2/§3.6.3: unresolved leases, waits, give-ups, retirements, yield | Desktop figures with a FIXTURE leader, synthetic delays and a synthetic freeze (P-6 to P-9 in the hand-over). The production 20 s give-up was observed at the bound and never earlier | The production leader (WEB-09b), a real freeze or bfcache (WEB-08c), devices |
 | C10 | R60 follow-up: the healthy-follower reads that `atlas-sync` hints cause | **Every committed sync page posts `data_changed [cache, sync_state]`, and `sync_state` is also the stop-record store**, so a healthy follower re-reads on every leader page: about 11 IndexedDB transactions per page hint (9 of them on `sync_state`), about 12 to 20 ms per hint (p50). A stop-record hint costs one transaction, and a draft or receipt hint 5. The leader's catch-up throughput was unchanged by followers in Chromium; in WebKit it fell from 70 to 52 and 40 pages/s with one and two followers (series marked `(m)`/`(X)`: a signal to re-take, not a finding) | Devices; the production leader (WEB-09b) |
 | C11 | Bundle budgets (OD-2) | One shared ceiling per figure, the signed-in shell's measurement plus 10 %: 241,540 / 7,560 / 92,110 bytes (initial JS gzip / CSS gzip / fonts) from the current candidate's fixture build, 219,582 / 6,873 / 83,736 (revision 1: the device page's lazy W2 route changed the chunk names the fixture entry references; attempt 4 measured 219,586 and the ceiling was 241,545). The production build (107,948 / 6,873 / 83,736) passes it and its own baseline + 10 %. Throttled boot figures are reported below, not judged. **Revision 4: the successor ceiling is owed under FB-20261010 (see "Bundle budgets after FB-20261010" below); 241,540 stays in force here, explicitly provisional** | Device boot timing (WEB-09d); the reasoned successor ceiling (the Air programme's P-1/P-1S); the combined-build remeasurement |
@@ -398,7 +427,8 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
 
 ## Not measured, and who owns it
 
-* The device roster and every device-class figure: escalated (OD-1); the package is `docs/profiling-devices.md`.
+* The physical-device measurements and every device-class figure: transferred to WEB-09d before beta (STAGED-ACCEPTANCE-20261011; OD-1 had escalated the
+  roster); the package is `docs/profiling-devices.md`.
 * The production leader, the first snapshot, a takeover mid-snapshot and a 10,000-resource snapshot: WEB-09b. The production build sends snapshot requests (H9's
   source answer); their measurement is not part of this programme.
 * A real freeze or back/forward-cache restore and the composed lifecycle: WEB-08c, with WEB-09d's final acceptance.
@@ -409,9 +439,11 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
 * **An isolated run of the whole programme.** No figure here is isolated (see above). The final validation runs the programme again on a controller protected from
   other heavy work (about two hours), and its hand-over replaces these figures as the record of reference.
 
-## The device roster (escalated, OD-1)
+## The device roster (OD-1; the device runs transferred to WEB-09d)
 
-On 10 October 2026 Kieran chose "Desktop now; escalate roster". Before a device run, these are needed: the named floor device for each family (model, RAM, OS); the
+On 10 October 2026 Kieran chose "Desktop now; escalate roster". On 11 October 2026 STAGED-ACCEPTANCE-20261011 moved the physical-device measurements to WEB-09d,
+which prepares and runs them on a more complete integrated app before beta; they no longer gate BE-B1/BE-Q23 scoped technical completion. Before a device run, these
+are needed: the named floor device for each family (model, RAM, OS); the
 mid-range mobile; who runs the protocol, and where; and the HTTPS hosting choice (a local CA the device trusts, or Android `adb reverse`; an external tunnel is the
 operator's call). The families are those of Q12: Chrome, Edge, Firefox and Safari on desktop (current and previous majors), Chrome on Android, and Safari on iOS and
 iPadOS including the installed web app. They must include the lowest-memory supported device of each family, a mid-range mobile, one desktop, and browsers without a

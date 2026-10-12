@@ -11,6 +11,13 @@
 // It fails closed: a module that cannot be loaded, or a production decode composition this reader does not reproduce, throws at import,
 // so every caller (the integration writer, the evidence contract, both validator modes, the tests) stops before it can certify anything.
 // There is no flag that turns it off and no fallback.
+//
+// Loading leaves the process environment exactly as it found it (revision 7; review 7 R8, family profiling-build-environment). The module
+// runner resolves a serve-mode Vite configuration, and Vite's `resolveConfig` sets an unset NODE_ENV to `development` (and may set DEBUG)
+// on the PROCESS. Every caller imports this file before it does anything else, so every later child inherited it: the profiling driver's
+// `pnpm build` and `build:fixture` produced development builds, and its browser stages and preview server ran under it too. The
+// environment is restored after the loads, whether or not they succeed, and the restoration is checked; a NODE_ENV the caller supplied
+// is kept as it was, never replaced. The production modules read no environment, so the verdict does not depend on it.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,11 +98,39 @@ function compositionProblem() {
   return null;
 }
 
-const [scanModule, validateModule, configModule] = await Promise.all([
-  load(PRODUCTION_MODULES.scan),
-  load(PRODUCTION_MODULES.validate),
-  load(PRODUCTION_MODULES.config),
-]);
+/** Puts every variable of `process.env` back to `before` (removing any added), then checks it; a difference that survives throws. */
+function restoreEnvironment(before) {
+  for (const key of Object.keys(process.env))
+    if (!Object.hasOwn(before, key)) delete process.env[key];
+  for (const [key, value] of Object.entries(before))
+    if (process.env[key] !== value) process.env[key] = value;
+  const changed = [
+    ...new Set([...Object.keys(before), ...Object.keys(process.env)]),
+  ].filter((key) => process.env[key] !== before[key]);
+  if (changed.length)
+    throw new Error(
+      `the production page reader cannot restore the process environment after loading the candidate's modules (${changed.join(", ")} changed)`,
+    );
+}
+
+/** Runs `loads` with the process environment restored afterwards, whatever they do (review 7 R8). */
+async function withEnvironmentContained(loads) {
+  const before = { ...process.env };
+  try {
+    return await loads();
+  } finally {
+    restoreEnvironment(before);
+  }
+}
+
+const [scanModule, validateModule, configModule] =
+  await withEnvironmentContained(() =>
+    Promise.all([
+      load(PRODUCTION_MODULES.scan),
+      load(PRODUCTION_MODULES.validate),
+      load(PRODUCTION_MODULES.config),
+    ]),
+  );
 const { scanSyncPage } = scanModule;
 const { decodeChange, createValueValidators, createKeyDerivers, PageInvalid } =
   validateModule;

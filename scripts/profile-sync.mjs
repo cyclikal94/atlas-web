@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // `pnpm profile:sync`: the sync-profiling programme (evidence key `WEB-09a:sync-profiling`, owned by WEB-09c since BC-20261009). It takes
 // MEASUREMENTS, not budgets, into the evidence directory the caller names, with the machine, the candidate and the load recorded first. It
-// never claims more than it measured: every figure is `measured`, `partial`, `not_run` or `escalated` with the reason, and the hand-over says
-// in its first paragraph that it is desktop-only and does not meet the device roster.
+// never claims more than it measured: every figure is `measured`, `partial`, `not_run`, `transferred` or `escalated` with the reason, and the
+// hand-over says in its first paragraph that it is desktop-scoped, that the physical-device measurements are WEB-09d's and have not run
+// (STAGED-ACCEPTANCE-20261011; revision 6, review 6 R7), and what its own evidence can support (acceptance_scope; never a review or an acceptance).
 //
 //   node scripts/profile-sync.mjs --evidence <dir> [--skip-build] [--preflight]
 //                                 [--only bundle,fixture,shell,contention,integration,device,handoff]
@@ -202,9 +203,10 @@ function bundle() {
         return 1;
       }
       mkdirSync(join(out, "bundle"), { recursive: true });
+      // The NODE_ENV the build was given (review 7 R8: absent unless the caller supplied it; never one left by an imported module).
       writeFileSync(
         join(out, "bundle", `build-${label}.json`),
-        `${JSON.stringify({ script, seconds: +((Date.now() - started) / 1000).toFixed(1) })}\n`,
+        `${JSON.stringify({ script, seconds: +((Date.now() - started) / 1000).toFixed(1), node_env: process.env.NODE_ENV ?? null })}\n`,
       );
     }
   mkdirSync(join(out, "bundle"), { recursive: true });
@@ -284,7 +286,7 @@ async function fixture() {
     }
     writeFileSync(
       join(out, "fixture-build.json"),
-      `${JSON.stringify({ seconds: +((Date.now() - started) / 1000).toFixed(1) })}\n`,
+      `${JSON.stringify({ seconds: +((Date.now() - started) / 1000).toFixed(1), node_env: process.env.NODE_ENV ?? null })}\n`,
     );
   }
   return withFixtureServer(async (url) => {
@@ -502,7 +504,7 @@ function constants() {
     `# Provisional constants (P-12): none of these is measured
 
 Generated from \`src/data/model/config.ts\` on this candidate (the values) and \`docs/data-layer.md\` (the source and what would settle each). A
-desktop figure of this programme is evidence beside a constant; it does not settle one that names the device roster.
+desktop figure of this programme is evidence beside a constant; it does not settle one that depends on a device class (WEB-09d's physical-device pass).
 
 ## Values (DATA_CONFIG)
 

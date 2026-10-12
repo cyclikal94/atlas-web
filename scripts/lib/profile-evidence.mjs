@@ -64,13 +64,18 @@ export const CONSUMER_KEYS = [
   "BE-Q23:M8 smallest unprocessable response",
   "BE-Q23:M9 derived values",
 ];
-/** The rows that ask for real devices: on a desktop record they can only be `escalated` or `not_run`. */
+/**
+ * The rows that ask for real devices: on a desktop record they are never `measured`. Revision 6 (review 6 R7, STAGED-ACCEPTANCE-20261011):
+ * a current hand-over marks them `transferred` (to WEB-09d, not run); `escalated` is OD-1's status of 10 October 2026, kept so that the
+ * vocabulary still reads the hand-overs written before it.
+ */
 export const DEVICE_KEYS = ["BE-B1:2 real devices, named", "BE-Q23:M1 roster"];
 export const CONSUMER_STATUSES = [
   "measured",
   "partial",
   "not_run",
   "escalated",
+  "transferred",
 ];
 
 /**

@@ -48,6 +48,144 @@ function snapshotAnswer(facts, config) {
   return `UNVERIFIED on this candidate: the source does not show ${failing.length ? failing.join(", ") : "the request path"}; no answer is given (neither sent nor not sent)`;
 }
 
+// ---- Revision 6 (review 6 R7): the acceptance scope of the hand-over, under the later human decision on device timing -------------------
+// STAGED-ACCEPTANCE-20261011 (Kieran, 11 October 2026) moved the physical-device measurements to WEB-09d (before beta) and removed them as a
+// prerequisite of BE-B1/BE-Q23 scoped technical completion. It is pinned by path and SHA-256 (the package does not read the orchestrator).
+// What the hand-over can support is derived from its own resolution only; a generated package never records a review or an acceptance.
+export const STAGED_ACCEPTANCE = {
+  id: "STAGED-ACCEPTANCE-20261011",
+  decided: "Kieran, 11 October 2026",
+  repository: "atlas-orchestrator",
+  brief: "delivery/handoffs/staged-acceptance-20261011.md",
+  brief_sha256:
+    "ed8bc85b3474b4dfddff06e5cc7cfab595a4ae01ebc7ad83a7efd49158ac1ca3",
+  authority: "approval/staged-acceptance-20261011.json",
+  authority_sha256:
+    "812002ba25387c186e4d9e457d34a0304565dd173292f294336dcc098370ea63",
+  supersedes:
+    "the timing of OD-1 (10 October 2026: BE-B1/BE-Q23 waited for the device roster) and WEB-09c plan acceptance item 7; the physical-device measurements stay required, by WEB-09d before beta",
+};
+/** The BE-B1/BE-Q23 rows with a physical-device part this desktop record cannot answer (STAGED-ACCEPTANCE-20261011 §4), and that part. */
+export const DEVICE_TRANSFERS = [
+  [
+    "BE-B1:2 real devices, named",
+    "actual device, browser and OS identity on the named roster: the lowest-memory supported device per family, a mid-range mobile, browsers without a device-memory signal, the installed app",
+  ],
+  [
+    "BE-B1:3 workloads with bytes, nodes and changes",
+    "dense valid workload success (W2 included) on supported devices",
+  ],
+  [
+    "BE-B1:4 multi-tab on every class",
+    "multi-tab and installed-app-plus-tab scenarios, lifecycle, backgrounding and offline behaviour on every device class",
+  ],
+  [
+    "BE-B1:5 metrics per run",
+    "device memory with each platform's tools (dumpsys, Instruments, about:memory) and bounded processing on devices",
+  ],
+  [
+    "BE-B1:6 derived values",
+    "the derived values per device class and tab count, needs_finer_pagination for supported devices included",
+  ],
+  ["BE-B1:7 format", "a record whose figures are measured on real hardware"],
+  ["BE-Q23:M1 roster", "the roster and its identities (as BE-B1:2)"],
+  ["BE-Q23:M2 method", "the per-platform device method and tools"],
+  ["BE-Q23:M4 granularity sweep", "the granularity sweep on each device class"],
+  ["BE-Q23:M5 multi-tab scenarios", "as BE-B1:4"],
+  [
+    "BE-Q23:M7 cost of finer requests",
+    "the device CPU cost of finer requests and affected performance",
+  ],
+  [
+    "BE-Q23:M8 smallest unprocessable response",
+    "the smallest response a supported device cannot process",
+  ],
+  ["BE-Q23:M9 derived values", "as BE-B1:6"],
+];
+const DEVICE_OWNER = `WEB-09d (physical devices before beta: transferred by ${STAGED_ACCEPTANCE.id}, not run)`;
+
+/** The three things the hand-over must keep apart (STAGED-ACCEPTANCE-20261011 §3), from its resolution and consumer map only. */
+function acceptanceScope(resolution, failure, consumerMap) {
+  const supports = resolution.complete === true && failure === false;
+  const ids = (status) =>
+    resolution.cells.filter((c) => c.status === status).map((c) => c.id);
+  const counts = resolution.counts ?? {};
+  const withheld = [];
+  if (resolution.complete !== true)
+    withheld.push(
+      `the desktop programme is not complete: ${counts.missing ?? 0} missing, ${counts.invalid ?? 0} invalid, ${counts.failed ?? 0} failed, ${counts.failed_control ?? 0} failed control(s), ${counts.not_isolated ?? 0} not isolated (desktop_programme)`,
+    );
+  if (failure === true)
+    withheld.push("a valid workload failed on a desktop engine (H8)");
+  else if (failure === null)
+    withheld.push("the desktop outcomes are incomplete, so H8 is undetermined");
+  return {
+    decision: STAGED_ACCEPTANCE,
+    physical_devices_block_backend: false,
+    physical_devices:
+      "Not run: transferred to WEB-09d, which names the roster, operator and HTTPS set-up and runs them before beta. Missing phone and tablet results alone do not block BE-B1/BE-Q23 planning, implementation, independent technical review or scoped technical completion; WEB-09d's integrated pre-beta acceptance waits for them",
+    desktop_decision: {
+      supports,
+      scope:
+        "desktop-scoped development decisions only: one macOS machine, Playwright's Chromium, Firefox and WebKit; no device class, no mobile-safe limit, no supported-device floor, no all-platform conclusion that finer pagination is unnecessary",
+      statement: supports
+        ? "A complete, isolated desktop programme with no failure: once an independent review accepts this hand-over, it can, with each backend card's own required checks, support BE-B1/BE-Q23 scoped technical acceptance, device-sensitive choices marked provisional"
+        : "This hand-over supports no desktop-scoped development decision and no acceptance claim",
+      needs: supports
+        ? [
+            "an independent review that accepts this hand-over",
+            "each backend card's own required checks (its SQLite/PostgreSQL, contract, release and published-types evidence)",
+          ]
+        : [],
+      withheld_because: withheld,
+    },
+    package: {
+      independently_reviewed: false,
+      claims_acceptance: false,
+      note: "Generated by scripts/profile-sync.mjs: this package records no review and no acceptance; a backend development completion record references the reviewed hand-over and states its desktop scope and the open WEB-09d obligations",
+    },
+    transferred_to_web09d: DEVICE_TRANSFERS.map(([item, part]) => ({
+      item,
+      physical_device: part,
+      status: "not_run",
+      owner: "WEB-09d",
+      desktop_status: consumerMap[item]?.status ?? null,
+    })),
+    human_decisions: [
+      {
+        decision:
+          "the supported-device roster: the floor device for each family (model, RAM, OS), the mid-range mobile, who runs the protocol and where, and the HTTPS hosting",
+        owner: "Kieran or product, before WEB-09d's physical-device pass",
+        basis:
+          "OD-1's open items (10 October 2026); this record neither invents nor reduces the roster",
+      },
+      {
+        decision:
+          "any material contract or product choice BE-B1/BE-Q23 cannot settle from desktop evidence (for example a finer-delivery parameter or a page-size change, whose need on supported devices is undetermined: H9)",
+        owner:
+          "BE-B1/BE-Q23 mark device-sensitive choices provisional and take a material unresolved choice to Kieran",
+        basis: `${STAGED_ACCEPTANCE.id} §3`,
+      },
+    ],
+    held_failures: {
+      cells: [...ids("failed"), ...ids("failed_control"), ...ids("invalid")],
+      workload_failures: resolution.failures ?? [],
+      rule: "A demonstrated functional, privacy, data-loss or valid-workload failure, a failed control or invalid evidence needs correction; missing mobile data is not permission to ignore it",
+    },
+  };
+}
+
+/** The first paragraph of the hand-over: its scope, what moved to WEB-09d, and what (if anything) it can support. */
+function firstParagraph(scope) {
+  return [
+    `This record was taken on one macOS developer machine with Playwright's desktop engines: it is desktop-scoped evidence. No physical device, floor device, installed app or browser without a device-memory signal was profiled; those measurements are transferred to WEB-09d and have not run (${STAGED_ACCEPTANCE.id}, which supersedes the timing of OD-1, 10 October 2026). Every desktop figure is labelled as such and none stands for a device class.`,
+    scope.desktop_decision.supports
+      ? "The desktop programme is complete and isolated with no failure: once an independent review accepts this hand-over, it can, with each backend card's own required checks, support BE-B1/BE-Q23 scoped technical acceptance; missing phone and tablet results alone do not block that."
+      : "The desktop programme is not complete or holds a failure (acceptance_scope.desktop_decision): this hand-over supports no desktop-scoped development decision and no acceptance claim.",
+    "This record has not been independently reviewed and claims no acceptance.",
+  ].join(" ");
+}
+
 /** A reader of the carried evidence that never throws: a malformed file is `null` (its cell in the resolution says why). */
 function reader(dir) {
   const json = (rel) => {
@@ -362,8 +500,8 @@ export function projectResults({ evidenceDir, resolution, context }) {
     claims_device_class: extra.claims_device_class ?? false,
     ...extra,
   });
-  const devicesOwner =
-    "Kieran names the roster (OD-1 escalation); WEB-09c's device package is run on it; WEB-09d owns supported-device acceptance";
+  // Revision 6 (review 6 R7): the physical-device part of a row is WEB-09d's (STAGED-ACCEPTANCE-20261011), not a prerequisite of BE-B1/BE-Q23.
+  const devicesOwner = `WEB-09c (desktop, this record); ${DEVICE_OWNER}`;
   const consumerMap = {
     "BE-B1:1 provenance": entry(
       provenanceStatus,
@@ -373,28 +511,28 @@ export function projectResults({ evidenceDir, resolution, context }) {
       { environment: "source" },
     ),
     "BE-B1:2 real devices, named": entry(
-      "escalated",
+      "transferred",
       ["H1"],
-      "no device was profiled: OD-1 (10 October 2026) escalated the roster; this record is one desktop machine",
-      devicesOwner,
+      "no physical device was profiled: this record is one desktop machine; the device measurements are WEB-09d's (STAGED-ACCEPTANCE-20261011; OD-1 had escalated the roster on 10 October 2026)",
+      DEVICE_OWNER,
       { claims_device_class: false },
     ),
     "BE-B1:3 workloads with bytes, nodes and changes": entry(
       "partial",
       ["H3", "P-2", "P-11", "P-W2"],
       `W1, W3 to W7 generated and hashed; W2 captured from the real /sync${capturesResolved ? "" : " (NOT complete: see P-W2)"}; delta pages at limit 50 and mixed ordinary/dense delta pages (3(d)) are not generated; the Q9 co-resident shapes (3(g)) only as P-5 and P-Q`,
-      "WEB-09c (desktop); the roster for device rows",
+      devicesOwner,
     ),
     "BE-B1:4 multi-tab on every class": entry(
       "partial",
       ["H5", "P-6", "P-7", "P-8", "P-9", "P-13"],
-      "desktop two- and three-page cases with a FIXTURE leader and synthetic delays only; takeover mid-snapshot is WEB-09b's, a real freeze WEB-08c's, the installed app plus a tab and every mobile class need the roster",
-      "WEB-09b (production leader), WEB-08c (real freeze), the roster",
+      "desktop two- and three-page cases with a FIXTURE leader and synthetic delays only; takeover mid-snapshot is WEB-09b's, a real freeze WEB-08c's, the installed app plus a tab and every mobile class WEB-09d's physical-device pass (not run)",
+      `WEB-09b (production leader), WEB-08c (real freeze), ${DEVICE_OWNER}`,
     ),
     "BE-B1:5 metrics per run": entry(
       "partial",
       ["H2", "P-11", "P-W2", "P-Q"],
-      "desktop: Chromium heap (CDP), the browser's RSS attributed per run (its own processes; on macOS WebKit with its WebContent, Networking and GPU services from the host's launchd domain; BROWSER-PROCESS RSS, not device memory and not server RSS), scan and commit times, outcomes, five cold runs; IndexedDB bytes only as Chromium's exact figure and the obfuscated estimate elsewhere; the device tools (dumpsys, Instruments, about:memory) need the roster",
+      "desktop: Chromium heap (CDP), the browser's RSS attributed per run (its own processes; on macOS WebKit with its WebContent, Networking and GPU services from the host's launchd domain; BROWSER-PROCESS RSS, not device memory and not server RSS), scan and commit times, outcomes, five cold runs; IndexedDB bytes only as Chromium's exact figure and the obfuscated estimate elsewhere; the device tools (dumpsys, Instruments, about:memory) are WEB-09d's (not run)",
       devicesOwner,
     ),
     "BE-B1:6 derived values": entry(
@@ -424,10 +562,10 @@ export function projectResults({ evidenceDir, resolution, context }) {
       { environment: "source" },
     ),
     "BE-Q23:M1 roster": entry(
-      "escalated",
+      "transferred",
       ["H1"],
-      "OD-1: no device, installed app or browser without a device-memory signal was profiled",
-      devicesOwner,
+      "no physical device, installed app or browser without a device-memory signal was profiled; the roster and its runs are WEB-09d's (STAGED-ACCEPTANCE-20261011)",
+      DEVICE_OWNER,
     ),
     "BE-Q23:M2 method": entry(
       "partial",
@@ -454,7 +592,7 @@ export function projectResults({ evidenceDir, resolution, context }) {
       "partial",
       ["H5", "P-6 to P-9", "P-13"],
       "as BE-B1:4",
-      "WEB-09b, WEB-08c, the roster",
+      `WEB-09b, WEB-08c, ${DEVICE_OWNER}`,
     ),
     "BE-Q23:M6 bounded processing as built": entry(
       "measured",
@@ -467,16 +605,16 @@ export function projectResults({ evidenceDir, resolution, context }) {
       statusOf("P-4") === "measured" ? "partial" : "not_run",
       ["P-4", "P-10", "P-3", "P-9"],
       "desktop per-request overhead (pre-issue, lease and lock, request, record) on loopback and behind a 250 ms proxy delay; a 10,000-resource snapshot is WEB-09b's and was not run",
-      "WEB-09b (snapshot), the roster (device CPU)",
+      `WEB-09b (snapshot); device CPU: ${DEVICE_OWNER}`,
     ),
     "BE-Q23:M8 smallest unprocessable response": entry(
       "partial",
       ["H8"],
       failure === null
-        ? "desktop: UNDETERMINED, the desktop programme's outcomes are incomplete (see desktop_programme); the answer for supported devices needs the roster"
+        ? "desktop: UNDETERMINED, the desktop programme's outcomes are incomplete (see desktop_programme); the answer for supported devices is WEB-09d's (not run)"
         : failure
-          ? "desktop: valid workloads failed (see H8.desktop_answer); the answer for supported devices needs the roster"
-          : "desktop: no valid workload failed on any desktop engine of this programme, whose outcomes are complete; the answer for supported devices needs the roster",
+          ? "desktop: valid workloads failed (see H8.desktop_answer); the answer for supported devices is WEB-09d's (not run)"
+          : "desktop: no valid workload failed on any desktop engine of this programme, whose outcomes are complete; the answer for supported devices is WEB-09d's (not run)",
       devicesOwner,
     ),
     "BE-Q23:M9 derived values": entry(
@@ -487,6 +625,7 @@ export function projectResults({ evidenceDir, resolution, context }) {
     ),
   };
 
+  const scope = acceptanceScope(resolution, failure, consumerMap);
   const desktopProgramme = {
     contract_version: CONTRACT_VERSION,
     complete: resolution.complete,
@@ -507,8 +646,8 @@ export function projectResults({ evidenceDir, resolution, context }) {
     title: `${EVIDENCE_KEY} — WEB-09c measurement hand-over`,
     evidence_key: EVIDENCE_KEY,
     owner: EVIDENCE_OWNER,
-    first_paragraph:
-      "This record was taken on one macOS developer machine with Playwright's desktop engines. It does not meet the roster in H1 (BE-B1 item 2, BE-Q23 M1): no real device, floor device, installed app or browser without a device-memory signal was profiled, because the operator escalated the roster (OD-1, 10 October 2026). Every desktop figure is labelled as such and none stands for a device class. The BE-B1/BE-Q23 measurement gate remains held until the roster runs.",
+    first_paragraph: firstParagraph(scope),
+    acceptance_scope: scope,
     projection:
       "every field below but the context (candidate.at_handoff, machine, backend.pin, programme.P-12.values) is projected from evidence/ and resolution.json by scripts/lib/profile-projection.mjs; the validator projects them again and refuses any difference",
     candidate: {
@@ -556,9 +695,9 @@ export function projectResults({ evidenceDir, resolution, context }) {
       operator: "the Running-phase agent; no person has reviewed this record",
     },
     H1: {
-      status: "escalated",
+      status: "transferred",
       reason:
-        "OD-1 (10 October 2026): desktop now, roster escalated. The roster (real devices, installed apps, the lowest-memory supported device per family, a mid-range mobile, browsers without deviceMemory) must be named by Kieran or product",
+        "no physical device was profiled. OD-1 (10 October 2026) escalated the roster; STAGED-ACCEPTANCE-20261011 (11 October 2026) transferred the physical-device measurements to WEB-09d, which runs them before beta once the roster (real devices, installed apps, the lowest-memory supported device per family, a mid-range mobile, browsers without deviceMemory), its operator and the HTTPS set-up are named; not run",
       roster: [
         {
           device: "developer machine",
@@ -568,7 +707,7 @@ export function projectResults({ evidenceDir, resolution, context }) {
           memory_gib: machineRecord?.memory_gib ?? null,
           engines: machineRecord?.engines ?? null,
           // What each desktop engine reported as navigator.deviceMemory on THIS machine. A null here is that engine's desktop behaviour,
-          // not evidence from a supported device without the signal: no such device was profiled (H1 escalated).
+          // not evidence from a supported device without the signal: no such device was profiled (H1 transferred to WEB-09d).
           device_memory_signal_by_engine: Object.fromEntries(
             ENGINES.map((engine) => [
               engine,
@@ -647,7 +786,8 @@ export function projectResults({ evidenceDir, resolution, context }) {
             ? { failures: resolution.failures }
             : "no valid workload (W1, W3, W4, W6 in five cold runs; W2 live and in five cold runs; the device page's runs) was refused or failed on any desktop engine of this programme",
       negative_controls_not_fulfilled: desktopProgramme.failed_controls,
-      reason: "the roster's answer is needed for any supported mobile device",
+      reason:
+        "for supported mobile devices the answer is WEB-09d's physical-device pass (transferred, not run)",
     },
     H9: {
       status: "partial",
@@ -723,7 +863,7 @@ export function projectResults({ evidenceDir, resolution, context }) {
       },
       "P-11": {
         status: statusOf("P-11"),
-        note: "desktop engines through the real wrapper; real devices not run (H1)",
+        note: "desktop engines through the real wrapper; physical devices not run (H1: WEB-09d's)",
       },
       "P-W2": {
         status: statusOf("P-W2"),
@@ -765,18 +905,22 @@ export function projectResults({ evidenceDir, resolution, context }) {
       applicability:
         "a timing, rate, memory or footprint figure is applicable as an isolated desktop measurement only when its cell is `ok` (its window `clean`); any other verdict qualifies it (it was, or may have been, taken beside other heavy work, or its coverage is unknown). Shapes, byte counts, hashes and admission outcomes do not depend on isolation. A 5 s poll cannot prove that no short foreign job ran between two samples: final timings need a protected controller",
     },
+    // OD-1 is kept as the decision of record for the desktop scope and the roster's open items; its timing is superseded (revision 6, R7).
     escalations: [
       {
         id: "OD-1",
         decided: "Desktop now; escalate roster (Kieran, 10 October 2026)",
+        status: "timing superseded",
+        superseded_by: `${STAGED_ACCEPTANCE.id} (${STAGED_ACCEPTANCE.decided}): ${STAGED_ACCEPTANCE.supersedes}`,
+        needed_before: "WEB-09d's physical-device pass",
         needed: [
           "the named floor device for each family (model, RAM, OS)",
           "the mid-range mobile",
           "who runs the protocol and where",
           "the HTTPS hosting choice (a local CA the device trusts, or Android `adb reverse`; an external tunnel is the operator's call)",
         ],
-        until_then:
-          "BE-B1 item 2 and BE-Q23 M1 are escalated; needs_finer_pagination is undetermined for supported devices; BE-B1/BE-Q23 remain blocked",
+        current:
+          "BE-B1 item 2 and BE-Q23 M1 are transferred to WEB-09d and not run; needs_finer_pagination is undetermined for supported devices; missing physical-device results alone do not block BE-B1/BE-Q23 scoped technical completion (acceptance_scope)",
       },
     ],
     retake_on_composed_client: [
@@ -808,7 +952,7 @@ export function renderReport({ results, resolution, evidenceDir }) {
     })
     .join("\n");
   const statusLine = resolution.complete
-    ? "**Desktop programme: COMPLETE and ISOLATED.** Every required cell of the evidence contract resolved, and every load-dependent cell was taken with no other heavy work on the controller. Device evidence is still escalated (H1)."
+    ? "**Desktop programme: COMPLETE and ISOLATED.** Every required cell of the evidence contract resolved, and Every load-dependent cell was taken with no other heavy work on the controller. Physical-device measurements are transferred to WEB-09d and not run (H1)."
     : `**Desktop programme: ${resolution.outcomes_complete ? "outcomes complete, NOT ISOLATED" : "INCOMPLETE"}.** This is a partial hand-over: of ${resolution.cells.length} required cells, ${resolution.counts.missing} missing, ${resolution.counts.invalid} invalid, ${resolution.counts.failed} failed, ${resolution.counts.failed_control} failed control(s), ${resolution.counts.not_isolated} not isolated. No desktop conclusion is drawn from what is absent.`;
   const head = (list) =>
     list.length
@@ -834,11 +978,29 @@ export function renderReport({ results, resolution, evidenceDir }) {
     `* Isolation of ${isolationSummary.judged_cells} judged cells: ${isolationSummary.clean} clean, ${isolationSummary.idle_foreign} idle_foreign, ${isolationSummary.contaminated} contaminated, ${isolationSummary.unknown} unknown (load samples every ${SAMPLE_INTERVAL_MS / 1000} s).`,
     `* H8 (a valid workload failed on a desktop engine): ${failure === null ? "undetermined" : failure}. H9 desktop needs finer pagination: ${derived.desktop_needs_finer_pagination === null ? "undetermined" : derived.desktop_needs_finer_pagination}. D(engine): ${JSON.stringify(derived.desktop_D_largest_dense_changes_committed)}.`,
   ].join("\n");
+  // Revision 6 (review 6 R7): the acceptance scope, rendered from results.acceptance_scope (STAGED-ACCEPTANCE-20261011 §3's three parts).
+  const scope = results.acceptance_scope;
+  const acceptanceSection = [
+    `Decision: ${scope.decision.id} (${scope.decision.decided}; ${scope.decision.repository} \`${scope.decision.brief}\`, SHA-256 \`${scope.decision.brief_sha256}\`; authority \`${scope.decision.authority}\`, SHA-256 \`${scope.decision.authority_sha256}\`). It supersedes ${scope.decision.supersedes}.`,
+    "",
+    `* **Desktop-scoped development decision:** ${scope.desktop_decision.supports ? "supported" : "NOT supported"}. ${scope.desktop_decision.statement}.${scope.desktop_decision.needs.length ? ` Needs: ${scope.desktop_decision.needs.join("; ")}.` : ""}${scope.desktop_decision.withheld_because.length ? ` Withheld because: ${scope.desktop_decision.withheld_because.join("; ")}.` : ""} Scope: ${scope.desktop_decision.scope}.`,
+    `* **Physical-device measurements:** ${scope.physical_devices}.`,
+    ...scope.transferred_to_web09d.map(
+      (t) =>
+        `  * ${t.item} (desktop: ${t.desktop_status}): ${t.physical_device}; ${t.owner}, ${t.status}`,
+    ),
+    "* **Material choices that need an informed human decision:**",
+    ...scope.human_decisions.map(
+      (h) => `  * ${h.decision}. Owner: ${h.owner} (${h.basis}).`,
+    ),
+    `* **Held failures:** ${scope.held_failures.cells.length ? `${scope.held_failures.cells.slice(0, 40).join("; ")}${scope.held_failures.cells.length > 40 ? `; and ${scope.held_failures.cells.length - 40} more (resolution.json)` : ""}` : "no failed, failed-control or invalid cell"}; ${scope.held_failures.workload_failures.length ? `${scope.held_failures.workload_failures.length} valid-workload failure(s) on a desktop engine (H8)` : "no valid-workload failure held"}. ${scope.held_failures.rule}.`,
+    `* **This package:** independently reviewed: ${scope.package.independently_reviewed}; claims acceptance: ${scope.package.claims_acceptance}. ${scope.package.note}.`,
+  ].join("\n");
   return `# ${results.title}
 
 ${results.first_paragraph}
 
-Every figure below is \`measured\` (taken by this programme in the stated environment), \`partial\`, \`not_run\` or \`escalated\` (with the reason), or \`modelled\` (WEB-03's arithmetic). Nothing here is a pass mark. Playwright contexts are ephemeral profiles: \`durability: "strict"\` is not measured against a real on-disk profile. Browser-process RSS is not device memory and not server RSS. Server RSS, Node-only runs, emulated devices, single-tab results presented as multi-tab, and \`limit\`-only step-down presented as proof that finer delivery is unnecessary are **not** claimed.
+Every figure below is \`measured\` (taken by this programme in the stated environment), \`partial\`, \`not_run\`, \`transferred\` (to its named owner, not run) or \`escalated\` (with the reason), or \`modelled\` (WEB-03's arithmetic). Nothing here is a pass mark. Playwright contexts are ephemeral profiles: \`durability: "strict"\` is not measured against a real on-disk profile. Browser-process RSS is not device memory and not server RSS. Server RSS, Node-only runs, emulated devices, single-tab results presented as multi-tab, and \`limit\`-only step-down presented as proof that finer delivery is unnecessary are **not** claimed.
 
 ${statusLine}
 
@@ -849,6 +1011,10 @@ Machine: ${machineRecord.os}, ${machineRecord.cpu}, ${machineRecord.cores} cores
 ## Completeness and isolation (read before any figure)
 
 ${completenessSection}
+
+## Acceptance scope (what this hand-over can and cannot support)
+
+${acceptanceSection}
 
 ## What the backend authors can use (consumer map)
 
