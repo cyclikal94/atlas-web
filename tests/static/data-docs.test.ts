@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DATA_CONFIG } from "../../src/data/model/config";
 import { DEXIE_SCHEMA, STORE_NAMES } from "../../src/data/model/schema";
 import "../../src/data/plans/commit-page";
+import "../../src/data/plans/defaults";
 import "../../src/data/plans/epoch";
 import "../../src/data/plans/fence";
 import "../../src/data/plans/form-recovery";

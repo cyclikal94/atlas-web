@@ -29,6 +29,13 @@ import type { QueueSummary } from "../../data/model/queue-summary";
 import type { StoreName } from "../../data/model/schema";
 import { accountDatabaseName, DEXIE_SCHEMA_V1 } from "../../data/model/schema";
 import {
+  captureDefaults,
+  type DefaultsCapture,
+  type DefaultsRecord,
+  parseSharingSnapshot,
+  type TemplateKind,
+} from "../../data/model/sharing-snapshot";
+import {
   type CacheState,
   deriveGate,
   deriveNotices,
@@ -45,6 +52,7 @@ import type {
 } from "../../data/model/types";
 import { createOutbox, type Outbox } from "../../data/outbox/outbox";
 import { createConflictHandlerRegistry } from "../../data/outbox/registries";
+import { readDefaults, writeDefaults } from "../../data/plans/defaults";
 import { readSyncFacts } from "../../data/plans/facts";
 import {
   releaseFence,
@@ -77,6 +85,7 @@ import type { AccountStore, Plan } from "../../data/store/port";
 import { StoreFailure, w } from "../../data/store/port";
 import { createRegistry, getPageRegistry } from "../../data/store/registry";
 import { createDataEnv, type DataEnv } from "../../data/ui/env";
+import { readDefaultsSnapshotThrough } from "../../data/ui/identity-reads";
 import { createProductionQuota } from "../../data/ui/production-quota";
 import { NOT_SENT_DELAYS_MS } from "../../features/settings/sessions-devices/until-sent";
 import { apiUrl } from "../../lib/api-client/wire";
@@ -304,8 +313,26 @@ export interface DataHarness {
    */
   startGate(
     account: AccountId,
-    options?: { established?: boolean; isolated?: boolean },
+    options?: {
+      established?: boolean;
+      isolated?: boolean;
+      /**
+       * WEB-12a review 4 (R10): the controller reads the sharing defaults through the production reader (`GET /defaults/snapshot` on the
+       * session's stamped client), so a spec can drive its PRODUCTION defaults source over real IndexedDB.
+       */
+      defaults?: boolean;
+    },
   ): Promise<void>;
+  /**
+   * WEB-12a review 4 (R10): the defaults source of the controller of `startGate({ defaults: true })` and the incarnation of the database
+   * it is bound to (null: none bound). FIXTURE.
+   */
+  gateDefaults(): {
+    boundary: DataEnv["defaults"]["boundary"];
+    acquire: DataEnv["defaults"]["acquire"];
+    revision: () => string | null;
+  } | null;
+  gateIncarnation(): string | null;
   /**
    * The reads of the sync facts that the controller of `startGate` has made itself, since it was started (R49, revision 30): `starts` is
    * the live queries it began (a bind, or a re-read after a marker or a failure), `emissions` the results they delivered, and `calls` EVERY
@@ -473,6 +500,21 @@ export interface DataHarness {
   outboxStorage(): { notResponding: boolean; memoryOnly: boolean } | null;
   /** Through the facade (quota, fence reconciliation, streaks). */
   enqueue(spec: HarnessEnqueue): Promise<HarnessOutcome>;
+  /** WEB-12a: the account's persisted sharing-defaults record (`sync_state.defaults`, read through W14's reader), or null. */
+  defaultsRecord(account: AccountId): Promise<DefaultsRecord | null>;
+  /**
+   * WEB-12a: W14 `writeDefaults` run DIRECTLY on the account's real store for a captured `(account, epoch)`, so its own guards (EPO,
+   * CLS, INC) and the later-issued rule are exercised in a real engine. FIXTURE: the product path goes through the account service's commit.
+   */
+  writeDefaultsProbe(
+    account: AccountId,
+    input: { epoch: number; issuedAt: number; snapshot: unknown },
+  ): Promise<string>;
+  /** WEB-12a: `captureDefaults` over the persisted record, as a queued create's builder would call it (FIXTURE: no product caller exists). */
+  captureDefaults(
+    account: AccountId,
+    kinds: TemplateKind[],
+  ): Promise<DefaultsCapture>;
   editQueued(localId: string, spec: HarnessEnqueue): Promise<HarnessOutcome>;
   /** A replacement with a fresh `localId` (`spec.localId`): through the facade, so the quota reserve and the key rule apply. */
   supersede(oldLocalId: string, spec: HarnessEnqueue): Promise<HarnessOutcome>;
@@ -590,6 +632,10 @@ export interface HarnessEnqueue {
    * the quota reserve for it like any other part of the write.
    */
   defaultsContext?: { [key: string]: unknown };
+  /** `BuildResult.defaultsRevision` (WEB-12a): what a capture gives a queued create. */
+  defaultsRevision?: string | null;
+  /** `BuildResult.defaultsReview` (WEB-12a): a non-empty list stores the draft blocked on a defaults review. */
+  defaultsReview?: string[];
 }
 
 export interface DatabaseDescription {
@@ -1065,6 +1111,12 @@ const requestOf = (spec: HarnessEnqueue): EnqueueRequest => ({
       ...(spec.defaultsContext === undefined
         ? {}
         : { defaultsContext: spec.defaultsContext }),
+      ...(spec.defaultsRevision === undefined
+        ? {}
+        : { defaultsRevision: spec.defaultsRevision }),
+      ...(spec.defaultsReview === undefined
+        ? {}
+        : { defaultsReview: spec.defaultsReview }),
     };
   },
 });
@@ -1637,6 +1689,39 @@ const harness: DataHarness = {
           notResponding: outbox.storageNotResponding.get(),
           memoryOnly: outbox.storageMemoryOnly.get(),
         },
+  async defaultsRecord(account) {
+    const store = runtime.serviceFor(account)?.store ?? storeFor(account);
+    if (!store) throw new Error(`no open store for ${account}`);
+    return store.run(readDefaults, { incarnationId: store.incarnationId });
+  },
+  async writeDefaultsProbe(account, input) {
+    const store = runtime.serviceFor(account)?.store ?? storeFor(account);
+    if (!store) throw new Error(`no open store for ${account}`);
+    const snapshot = parseSharingSnapshot(input.snapshot);
+    if (snapshot === null) throw new Error("not a sharing snapshot");
+    const out = await store.run(writeDefaults, {
+      captured: {
+        account,
+        epoch: input.epoch,
+        incarnationId: store.incarnationId,
+        requestSeq: null,
+        ownershipToken: null,
+        recoveryGeneration: 0,
+        expectedPosition: null,
+      },
+      snapshot,
+      issuedAt: input.issuedAt,
+      now: Date.now(),
+    });
+    return out.kind === "dropped"
+      ? `dropped:${out.reason}`
+      : out.value.written
+        ? "written"
+        : "kept";
+  },
+  async captureDefaults(account, kinds) {
+    return captureDefaults(await harness.defaultsRecord(account), kinds);
+  },
   async enqueue(spec) {
     if (!outbox) throw new Error("the outbox is not running on this page");
     // The facade and its binding are captured before anything is awaited: the record describes the action that was made (R57).
@@ -1997,6 +2082,9 @@ const harness: DataHarness = {
         return () => window.removeEventListener("online", listener);
       },
       markers,
+      ...(options.defaults === true
+        ? { readDefaultsSnapshot: readDefaultsSnapshotThrough(session) }
+        : {}),
     });
     gateEnv = env;
     gateSeen = [];
@@ -2030,6 +2118,18 @@ const harness: DataHarness = {
       throw new Error(`the controller never read the facts of ${account}`);
   },
   gate: () => (gateEnv === null ? null : deriveGate(gateEnv.inputs.get())),
+  gateDefaults: () => {
+    const defaults = gateEnv?.defaults;
+    return defaults === undefined
+      ? null
+      : {
+          boundary: () => defaults.boundary(),
+          acquire: (after) => defaults.acquire(after),
+          revision: () =>
+            defaults.record.get()?.snapshot.defaults.revision ?? null,
+        };
+  },
+  gateIncarnation: () => gateEnv?.service()?.incarnationId ?? null,
   gateCache: () => (gateEnv === null ? null : gateEnv.inputs.get().cache),
   gateHistory: () => [...gateSeen],
   resetGateHistory() {

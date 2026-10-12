@@ -1,12 +1,12 @@
 {
-  "_": "The measured budget (WEB-09c) and the recorded baselines. check-budgets.mjs fails above a `budget` figure, or more than `tolerance` above the build's own baseline; a file that still holds the retired `provisional` or `provisional_by_build` figures is refused.",
+  "_": "Size budgets and recorded baselines. check-budgets.mjs fails above a shared `budget` figure or more than `tolerance` above the build baseline, and refuses the retired `provisional`/`provisional_by_build` keys. The JavaScript ceiling carries the accepted WEB-12a temporary allowance; WEB-09c still owes the reasoned P-1/P-1S successor.",
   "budget": {
-    "initial_js_gzip": 241540,
+    "initial_js_gzip": 266057,
     "css_gzip": 7560,
     "fonts": 92110
   },
   "budget_basis": {
-    "rule": "one ceiling shared by both builds for each figure: round(the signed-in shell's measurement (dist-fixture) x (1 + tolerance)). No performance target is claimed: the throttled boot figures (P-1S) are reported beside the ceilings, not judged against them",
+    "rule": "One shared ceiling per figure, plus each build baseline and tolerance. Initial JavaScript carries the accepted WEB-12a temporary ceiling of 266,057 bytes into this checker format; CSS and fonts retain WEB-09c OD-2 ceilings. This merge makes no new baseline reset or performance claim. The reasoned successor, using current P-1/P-1S measurements, headroom and approved growth under FB-20261010, remains pending.",
     "authority": "OD-2, \"Signed-in size + 10% (Recommended)\", Kieran, 10 October 2026, WEB-09c Planning session 7ad2f6a0-8e07-47d7-8373-0c45e823ea68 (the agent question mechanism)",
     "measurement": {
       "build": "dist-fixture",
@@ -17,7 +17,20 @@
       "evidence": "validation run 2026-10-10T10-48-05.449Z-104ce4d2 (check-budgets-fixture.log) on this candidate; the final profiling run's bundle/bundle-profile-dist-fixture.json is the recorded measurement (its path and SHA-256 are in the hand-over's P-1)"
     },
     "replaces": "the WEB-07 provisional figures (204,800 / 30,720 / 256,000), the WEB-09a R61 dist-fixture-only ceiling (241,544) and the first WEB-09c candidate's ceiling (241,545 from 219,586); the CSS and font ceilings are TIGHTER than WEB-07's, which the rule selected",
-    "production": "the production build (dist) is held to the same budget and, as before, to its own baseline plus the tolerance; that baseline is unchanged and only Kieran can raise it"
+    "production": "the production build (dist) is held to the same budget and, as before, to its own baseline plus the tolerance; that baseline is unchanged and only Kieran can raise it",
+    "status": "Temporary accepted-base reconciliation at the WEB-09c merge of 38b7db9; the measurement below is historical revision-1 evidence, not a measurement of the merged candidate.",
+    "accepted_base": {
+      "commit": "38b7db9ee256fc2d1cd1c2614ede367893c3209d",
+      "fixture_baseline": {
+        "initial_js_gzip": 241870,
+        "css_gzip": 7059,
+        "fonts": 83736
+      },
+      "fixture_initial_js_ceiling": 266057,
+      "authority": "FB-20261010-WEB12A; atlas-orchestrator delivery/handoffs/web12a-fixture-budget-20261010.md, SHA-256 73cac22e13e30743c6a4b899161d1ffccadae8e12b29ff25b79ed4243619b52f; accepted exact-tree main integration delivery/integrations/web12a-20261011/acceptance.md",
+      "policy_history": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010-WEB12A (approved by Kieran on 10 October 2026; approval/fixture-budget-20261010.json and delivery/handoffs/web12a-fixture-budget-20261010.md in the orchestrator), WEB-12a revision 4 only: the measured candidate's fixture initial JavaScript was 241,870 bytes, 326 above the R61 ceiling 241,544 (the R10 defaults-source correction +310, the policy editor's DA-P1 fix +20, the fixture harness +10). The dist-fixture baseline was re-recorded on that candidate (initial JavaScript 241,870, CSS 7,059, fonts 83,736) and its initial JavaScript ceiling set to 266,057 (floor of 241,870 x 1.10). A one-off adjustment for this measured candidate, not authority for later resets; WEB-09c owns the reasoned successor ceiling (FB-20261010). Production baseline, shared provisional ceilings and tolerance are unchanged.",
+      "follow_up": "Remeasure the combined build without summing branch figures. WEB-09c must justify the successor with the finite P-1/P-1S programme; other unmerged feature ceilings remain named integration obligations."
+    }
   },
   "tolerance": 0.1,
   "baseline": {
@@ -27,8 +40,8 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 219582,
-      "css_gzip": 6873,
+      "initial_js_gzip": 241870,
+      "css_gzip": 7059,
       "fonts": 83736
     }
   }

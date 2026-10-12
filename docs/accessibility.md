@@ -33,6 +33,15 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Focus ring:** one style everywhere, 2px `action-ink`, 2px offset, and system colours in forced-colours mode.
 - **Forms:** every `Input` requires a label association. A disabled control states its reason beside it.
 
+### The sharing screens (WEB-12a)
+
+- The resource kinds of WF-SHARING-03 are a `role="tablist"` (arrows, Home and End move and select, roving `tabindex`, `aria-controls` to the panel); each template choice and each grant's Read/Edit is a labelled `role="radiogroup"`. The resolution chain marks the resolving layer with `aria-current` and the words "resolves here", not colour alone.
+- The directory lookup's two variants are separate labelled sections in one reading order (not tabs), and "No account found" is plain text, not an error banner.
+- Every disabled Save, Confirm or action states its reason beside it (offline, nothing changed, unsupported server, loading the current defaults). Errors carry a copyable request ID. Announcements (saved, confirmed, an error) go through the announcer only.
+- The policy and defaults editors are full-bleed sheets below the desktop breakpoint (1280 px: mobile and both tablet orientations, as the accepted tablet frames draw them) and centred dialogs from it (the shared `Dialog` with `sheetBelow="desktop"`; focus trap, in-dialog sync control and dismissal unchanged), with 44 px targets; the directory lookup is a view inside the open dialog with Back, never a second stacked dialog.
+- The in-dialog sync control keeps the editors' unsaved choices and says so when the editor reopens ("Your unsaved changes are shown again"); Cancel, Done, Escape and the close icon discard them (ia.md §1.3.3). The defaults review lists each principal of both audiences with its access and each exclusion, as text.
+- Automated: jest-axe on every sharing screen (`tests/features/sharing/*`) and keyboard, viewport and focus checks in the three engines (`tests/e2e/fixture.sharing.spec.ts`). The manual pass below and the real assistive technology passes of Layer 3 apply to these screens too and are not claimed.
+
 ## What WEB-08b built in
 
 - **The sign-in and join pages are real forms.** `<form>`, labels bound to inputs, `autocomplete` tokens (`username`, `current-password`, `new-password`), no `autofocus` on a field; Enter submits; a password manager can fill and save.
