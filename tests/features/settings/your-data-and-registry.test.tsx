@@ -98,7 +98,7 @@ describe("WF-SETTINGS-06 Your data (F-DATA)", () => {
 });
 
 describe("the Settings registry (F-REG)", () => {
-  test("Signing in, Sessions & devices and Your data are registered by WEB-08, Appearance by WEB-07, in order", () => {
+  test("Signing in, Sessions & devices and Your data are registered by WEB-08, Appearance by WEB-07, Archived items by WEB-11, in order", () => {
     expect(
       settingsSections().map((s) => [s.id, s.label, s.owner, s.route]),
     ).toEqual([
@@ -106,6 +106,7 @@ describe("the Settings registry (F-REG)", () => {
       ["sessions", "Sessions & devices", "WEB-08", "sessions"],
       ["appearance", "Appearance", "WEB-07", "appearance"],
       ["data", "Your data", "WEB-08", "data"],
+      ["archived", "Archived items", "WEB-11", "archived"],
     ]);
     const orders = settingsSections().map((s) => s.order);
     expect(orders).toEqual([...orders].sort((a, b) => a - b));

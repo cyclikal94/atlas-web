@@ -10,6 +10,7 @@ import {
 import { axe } from "jest-axe";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { DataEnvProvider, useConflictInbox } from "../../../src/data";
+import { registerPeopleCommands } from "../../../src/features/people/register";
 import { CacheGate } from "../../../src/features/sync/CacheGate";
 import * as copy from "../../../src/features/sync/copy";
 import { NoticeList } from "../../../src/features/sync/NoticeBanners";
@@ -697,6 +698,42 @@ describe("the queue panel (WF-QUEUE-01)", () => {
     expect(
       screen.getByText("1.0 L recorded on “Water plants”"),
     ).toBeInTheDocument();
+  });
+
+  test("WEB-11a: the people kinds are described by their registered kind (a wrapped put_field and archive included)", () => {
+    const env = stubEnv({
+      drafts: [
+        draftRow({
+          local_id: "a",
+          created_seq: 1,
+          command: { command: { kind: "put_field", id: "f", parent_id: "p" } },
+        }),
+        draftRow({
+          local_id: "b",
+          created_seq: 2,
+          command: { command: { kind: "archive", id: "p", archived: true } },
+        }),
+        draftRow({
+          local_id: "c",
+          created_seq: 3,
+          command: { commands: [{ kind: "create_person", id: "p" }] },
+        }),
+        draftRow({
+          local_id: "d",
+          created_seq: 4,
+          command: { commands: [{ kind: "edit", id: "p" }] },
+        }),
+      ],
+    });
+    registerPeopleCommands(env.commands);
+    mountPanel(env);
+    for (const label of [
+      "Field change",
+      "Archive or restore",
+      "New person",
+      "Name change",
+    ])
+      expect(screen.getByText(label)).toBeInTheDocument();
   });
 
   test("offline, a queued change says it will send when connected", () => {

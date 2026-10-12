@@ -1,8 +1,14 @@
 import { RouterProvider } from "@tanstack/react-router";
 import { type ReactNode, useMemo } from "react";
-import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
+import {
+  DataProvider,
+  getPageDataHost,
+  useAccountLabel,
+  useSyncStatusModel,
+} from "../data";
 import { invitationMemory } from "../features/authentication/handoff";
 import { isJoinPath } from "../features/authentication/public-route";
+import { registerPeopleCommands } from "../features/people/register";
 import { type Session, SessionProvider } from "../session";
 import { AccountSlot } from "./AccountSlot";
 import { ProtectedProviders } from "./providers";
@@ -63,6 +69,8 @@ function normalisePublicPath(): void {
 }
 
 export function createProtectedTree(session: Session) {
+  // The page's command registrations (the queue screens describe, read and rebuild these kinds), once, before any route renders.
+  registerPeopleCommands(getPageDataHost().commands);
   return (): ReactNode => {
     normalisePublicPath();
     // A new router per mount: an account change must not inherit the previous account's location or loaders.

@@ -224,7 +224,7 @@ describe("WF-SETTINGS-05 Appearance", () => {
       within(main)
         .getAllByRole("link")
         .map((link) => link.textContent?.split(/(?<=[a-z])(?=[A-Z])/)[0]),
-    ).toHaveLength(4); // Signing in (WEB-08b), Sessions & devices, Appearance, Your data
+    ).toHaveLength(5); // Signing in (WEB-08b), Sessions & devices, Appearance, Your data, Archived items (WEB-11a)
     expect(
       within(main).getByRole("link", { name: "Appearance" }),
     ).toBeInTheDocument();

@@ -230,8 +230,8 @@ export function foldRows(
   return [...rows.values()];
 }
 
-/** The display order of a list of people: by name (base sensitivity), then by id. */
+/** The display order of a list of people: by name (base sensitivity, surrounding spaces ignored), then by id. */
 const collator = new Intl.Collator(undefined, { sensitivity: "base" });
 export const byName = (a: ShownRow, b: ShownRow): number =>
-  collator.compare(a.row.label, b.row.label) ||
+  collator.compare(a.row.label.trim(), b.row.label.trim()) ||
   (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);

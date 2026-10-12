@@ -59,10 +59,20 @@ export class PeopleMemory {
   readonly linkage = new Map<string, LinkageEntry>();
   readonly linkageReads = new Map<string, Promise<unknown>>();
   readonly refused = new Map<string, "forbidden" | "not_found">();
+  /** People whose last linkage read failed for another reason (asked again on reconnect or "Try again"). */
+  readonly failed = new Set<string>();
   readonly prefetched = new Set<string>();
   readonly dismissed = new Map<string, Set<string>>();
   readonly held = new Map<string, HeldChange>();
   readonly drafts = new Map<string, unknown>();
+  /** Field policies this page read (owner-only `GET /policies/{id}`), with their versions: the only audiences the table names. */
+  readonly policies = new Map<string, { version: number; policy: Policy }>();
+  /** Policy reads on their way, shared by every editor that asks (never made twice). */
+  readonly policyReads = new Set<string>();
+  /** Policy reads that did not answer with a policy (`403`: remembered for the page; others until the next try). */
+  readonly policyRefusals = new Map<string, "forbidden" | "failed">();
+  /** The count "Possible duplicates" showed from its first page, per person ("2", "2+"; null: none claimed). */
+  readonly duplicateCounts = new Map<string, string | null>();
   readonly attempts = new Map<string, Attempt>();
   private listeners = new Set<Listener>();
   private revision = 0;
