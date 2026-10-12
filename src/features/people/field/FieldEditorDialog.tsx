@@ -1,3 +1,4 @@
+import { ChevronDown } from "lucide-react";
 import { useEffect, useId, useReducer, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
@@ -11,7 +12,11 @@ import {
   useDataActions,
   useSharingDefaults,
 } from "../../../data";
-import { applyPolicyChange, ResourcePolicyEditor } from "../../sharing";
+import {
+  applyPolicyChange,
+  ResourcePolicyEditor,
+  untilSent,
+} from "../../sharing";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
 import { isCurrentMemory, useMemoryRevision } from "../memory";
@@ -231,7 +236,7 @@ function Editor({
     memory.policyReads.add(existing.id);
     memory.policyRefusals.delete(existing.id);
     memory.touch();
-    void env.sharing.readPolicy(existing.id).then((result) => {
+    void untilSent(() => env.sharing.readPolicy(existing.id)).then((result) => {
       if (!isCurrentMemory(memory)) return;
       memory.policyReads.delete(existing.id);
       if (result.ok) memory.policies.set(existing.id, result.value);
@@ -666,24 +671,31 @@ function Editor({
             >
               {copy.FIELD_TYPE}
             </label>
-            <select
-              id={typeId}
-              value={state.kind}
-              disabled={readOnly}
-              onChange={(event) =>
-                dispatch({
-                  type: "kind",
-                  value: event.target.value as FieldKind,
-                })
-              }
-              className="min-h-11 rounded-control border border-field-edge bg-panel px-3 text-[14px] text-ink-1"
-            >
-              {FIELD_KINDS.map((kind) => (
-                <option key={kind} value={kind}>
-                  {copy.KIND_LABEL[kind]}
-                </option>
-              ))}
-            </select>
+            <span className="relative block">
+              <select
+                id={typeId}
+                value={state.kind}
+                disabled={readOnly}
+                onChange={(event) =>
+                  dispatch({
+                    type: "kind",
+                    value: event.target.value as FieldKind,
+                  })
+                }
+                className="atlas-transition min-h-11 w-full appearance-none rounded-control border border-field-edge bg-panel py-2.5 pl-3 pr-9 text-[14px] text-ink-1 disabled:opacity-60"
+              >
+                {FIELD_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {copy.KIND_LABEL[kind]}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown
+                aria-hidden="true"
+                size={16}
+                className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-2"
+              />
+            </span>
           </div>
           <ValueInput
             kind={state.kind}

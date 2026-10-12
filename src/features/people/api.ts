@@ -248,6 +248,27 @@ async function call<T>(
   }
 }
 
+const NOT_SENT_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800, 1_000];
+
+/**
+ * A READ the session held back (`not_sent`: nothing was sent, nothing counted; a stamped call made right as the tree is displayed is the
+ * usual case) is asked again quietly, a bounded number of times, as the stamped-call contract says; only then is `not_sent` reported.
+ * Commands are retried by their own attempt (`online.ts`), never here.
+ */
+export async function readUntilSent<T>(
+  read: () => Promise<PeopleResult<T>>,
+  sleep: (ms: number) => Promise<void> = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<PeopleResult<T>> {
+  for (let attempt = 0; ; attempt += 1) {
+    const result = await read();
+    if (result.ok || result.kind !== "not_sent") return result;
+    const delay = NOT_SENT_DELAYS_MS[attempt];
+    if (delay === undefined) return result;
+    await sleep(delay);
+  }
+}
+
 /** The production client over the session, for the displayed `(account, epoch)`. */
 export function createPeopleApi(
   session: Session,
@@ -262,24 +283,28 @@ export function createPeopleApi(
   return {
     readPerson: async (id) =>
       offline() ??
-      call(
-        () => client().GET("/people/{id}", { params: { path: { id } } }),
-        parsePersonDetail,
+      readUntilSent(() =>
+        call(
+          () => client().GET("/people/{id}", { params: { path: { id } } }),
+          parsePersonDetail,
+        ),
       ),
     readDuplicates: async (id, page) =>
       offline() ??
-      call(
-        () =>
-          client().GET("/people/{id}/duplicates", {
-            params: {
-              path: { id },
-              query: {
-                limit: page.limit,
-                ...(page.after ? { after: page.after } : {}),
+      readUntilSent(() =>
+        call(
+          () =>
+            client().GET("/people/{id}/duplicates", {
+              params: {
+                path: { id },
+                query: {
+                  limit: page.limit,
+                  ...(page.after ? { after: page.after } : {}),
+                },
               },
-            },
-          }),
-        (body) => parseProjectionPage(body, page.limit),
+            }),
+          (body) => parseProjectionPage(body, page.limit),
+        ),
       ),
     peopleCommand: async (attempt) =>
       offline() ??
