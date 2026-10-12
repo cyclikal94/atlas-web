@@ -21,7 +21,12 @@ import {
   sessionTitle,
 } from "./labels";
 import { mayHaveChanged } from "./outcome";
-import { reconcileLists, useInteractions, useListChanges } from "./ownership";
+import {
+  reconcileLists,
+  useInteractions,
+  useListChanges,
+  useReturnRefresh,
+} from "./ownership";
 import { untilSent } from "./until-sent";
 import { useLoad } from "./useLoad";
 
@@ -55,10 +60,14 @@ export function SessionsSection({
 }) {
   const session = useSession();
   const announcer = useAnnouncer();
-  const [load, reload] = useLoad(() => session.operations.listSessions());
+  const [load, reload, refresh] = useLoad(() =>
+    session.operations.listSessions(),
+  );
   // Review R1: a change made anywhere on this page for this identity (a sign-out here, a retirement or a name in the devices list,
   // even from a screen since left) may change this list, so it is read again when one is reported.
   useListChanges(reload);
+  // WEB08D-NAVIGATION-FRESHNESS-20261011: and quietly when the person comes back to this tab or window.
+  useReturnRefresh(refresh);
   const interactions = useInteractions();
   const [rows, setRows] = useState<ReadonlyMap<string, RowState>>(new Map());
   const pending = useRef(new Set<string>());

@@ -14,7 +14,12 @@ import {
 } from "./label-copy";
 import { deviceDisplay, devicePhrase, hasDuplicateTitles } from "./labels";
 import { NameDeviceDialog } from "./NameDeviceDialog";
-import { type Interaction, useInteractions, useListChanges } from "./ownership";
+import {
+  type Interaction,
+  useInteractions,
+  useListChanges,
+  useReturnRefresh,
+} from "./ownership";
 import { RetireOtherDialog } from "./RetireOtherDialog";
 import { useLoad, useOnline } from "./useLoad";
 import { WipeConfirmDialog } from "./WipeConfirmDialog";
@@ -45,10 +50,14 @@ interface Open {
 export function DevicesSection() {
   const session = useSession();
   const online = useOnline();
-  const [load, reload] = useLoad(() => session.operations.readDevices());
+  const [load, reload, refresh] = useLoad(() =>
+    session.operations.readDevices(),
+  );
   // Review R1: a change made anywhere on this page for this identity (a retirement or a name here, a sign-out in the sessions list,
   // even from a screen since left) may change this list, so it is read again when one is reported.
   useListChanges(reload);
+  // WEB08D-NAVIGATION-FRESHNESS-20261011: and quietly when the person comes back to this tab or window.
+  useReturnRefresh(refresh);
   const interactions = useInteractions();
   const [retiring, setRetiring] = useState<Open | null>(null);
   const [naming, setNaming] = useState<Open | null>(null);

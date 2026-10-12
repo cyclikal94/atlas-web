@@ -181,3 +181,43 @@ export function useListChanges(reload: () => void): void {
   const session = useSession();
   useEffect(() => subscribeLists(session, reload), [session, reload]);
 }
+
+/**
+ * WEB08D-NAVIGATION-FRESHNESS-20261011: a list on screen reads again, quietly, when the person comes back to this tab (it becomes
+ * visible) or to its window (it regains focus while visible). One return is one refresh: the page is "away" from `hidden` or the
+ * window's `blur` until the first of those notifications, and `refresh` itself never doubles a read in flight. Nothing is read
+ * while no identity is settled or the browser says it is offline (the screen's offline presentation stays), and the answer is
+ * shown only while the identity the return happened under is still the one settled. The listeners live as long as the list.
+ * There is no polling: a tab left visible, a suspended or offline browser, or a change committed after the read is not seen until
+ * the next return, entry, Retry or change made on this page.
+ */
+export function useReturnRefresh(
+  refresh: (isCurrent: () => boolean) => void,
+): void {
+  const session = useSession();
+  useEffect(() => {
+    let away = false;
+    const leave = () => {
+      away = true;
+    };
+    const back = () => {
+      if (!away || document.visibilityState !== "visible") return;
+      away = false;
+      const scope = scopeOf(session.identity.get());
+      if (scope === null || !navigator.onLine) return;
+      refresh(() => scopeOf(session.identity.get()) === scope);
+    };
+    const visibility = () => {
+      if (document.visibilityState === "visible") back();
+      else leave();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("blur", leave);
+    window.addEventListener("focus", back);
+    return () => {
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("blur", leave);
+      window.removeEventListener("focus", back);
+    };
+  }, [session, refresh]);
+}

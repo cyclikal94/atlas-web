@@ -302,9 +302,18 @@ request's User-Agent: a recognition hint, never identity), `device_name` to sess
     already issued is not aborted and its answer is handled as before (`tests/session/operations-withdraw.test.ts`).
   This supersedes the plan's D-8d-10 sentence "a result after the dialog has gone changes nothing": a dismissed interaction receives no local feedback; the lists
   for the same identity still reconcile a sent outcome. The current-device wipe warnings keep their durable protocol unchanged (a started operation is not
-  cancelled by closing the warning); only their closing is owned. **Not decided here:** freshness across independently open tabs or other devices. A list
-  reads on entry, on retry and after a change made on this page; it is not refreshed by a change made in another tab or on another device until one of those
-  happens (no polling, push or cross-tab hint was added). That is an open product decision (`.agtx/execute.md`, revision 2), not an accepted behaviour.
+  cancelled by closing the warning); only their closing is owned.
+- **Reading again on return (Q8, revision 4; Kieran's decision WEB08D-NAVIGATION-FRESHNESS-20261011).** Besides entry, Retry and a change made on this page, both
+  lists read again, quietly, when the person comes back to the tab (it becomes visible) or to its window (focus while visible) (`useReturnRefresh` in
+  `ownership.ts`, `useLoad`'s `refresh`). One return is one read per list: the page is away from `hidden` or the window's `blur` until the first return
+  notification, and a read in flight is never doubled. What is on screen stays while it is read (no loading state; rows keep their identity, so keyboard focus
+  stays; an open dialog and what is typed in it are untouched); the answer replaces the list as a load's would, through the same load generation and only while
+  the identity the return happened under is still settled, so an older or other-identity answer never replaces a newer one. A failed read shows the usual error and
+  its Retry; it is never presented as fresh data. Nothing is read while no identity is settled, while the browser says it is offline (the offline presentation
+  stays), from an error (it keeps its Retry), or after the screen is left (the listeners live as long as the list). **Limit, by decision:** there is no polling,
+  push or cross-tab notification and no backend change, so there is no maximum staleness: a tab left visible, a suspended or offline browser, or a change
+  committed after the return's read is not seen until the next return, entry, Retry or change made on this page (`tests/features/settings/return-refresh.test.tsx`,
+  I-8d-16).
 - **Confirmations name the item (D-8d-12):** "Retire {name}?" (the name isolated) for another device; one identifying line above the unchanged WEB-04 warning for this device and logout.
   Signing out another session keeps its direct action (WF-SETTINGS-02 draws no dialog); its accessible name and announcements name the row.
 - **Privacy (D-8d-14):** names and labels are never persisted by the client (not in `atlas-auth`, not in the retirement envelope, which keeps only `state_token` and

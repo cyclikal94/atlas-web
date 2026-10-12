@@ -26,12 +26,22 @@ export const toLoadError = (
  * One independent load. Sessions and devices are two requests with their own loading and error states (WF-SETTINGS-02, F5).
  * A `StampedRequestError('auth_state')` needs no screen: the session view has already switched to a neutral state and this
  * tree is being unmounted. A stale answer never overwrites a newer one.
+ *
+ * Returns the state, `reload` (shows the loading state, as on entry and Retry) and `refresh`, a QUIET read
+ * (WEB08D-NAVIGATION-FRESHNESS-20261011, the person came back to the tab or window): what is on screen stays while it is read, so
+ * rows keep their identity and focus; the answer replaces it as a load's would (a failure shows the usual error and its Retry, it is
+ * never presented as fresh data). Only a list on screen is refreshed: a load in flight answers anyway, an error keeps its Retry,
+ * and a refresh already in flight is not doubled. `isCurrent` (the identity the return happened under) is asked before every call
+ * and before the answer is shown; a newer load or refresh supersedes it.
  */
 export function useLoad<T>(
   load: () => Promise<Result<T>>,
-): [Load<T>, () => void] {
+): [Load<T>, () => void, (isCurrent?: () => boolean) => void] {
   const [state, setState] = useState<Load<T>>({ status: "loading" });
+  const shown = useRef(state);
+  shown.current = state;
   const generation = useRef(0);
+  const refreshing = useRef<number | null>(null);
   const loader = useRef(load);
   loader.current = load;
 
@@ -57,6 +67,30 @@ export function useLoad<T>(
     );
   }, []);
 
+  const refresh = useCallback((isCurrent: () => boolean = () => true) => {
+    if (
+      shown.current.status !== "ready" ||
+      refreshing.current === generation.current
+    )
+      return;
+    const mine = ++generation.current;
+    refreshing.current = mine;
+    const current = () => mine === generation.current && isCurrent();
+    const settle = (next: Load<T>) => {
+      if (refreshing.current === mine) refreshing.current = null;
+      if (current()) setState(next);
+    };
+    untilSent(() => loader.current(), { isCurrent: current }).then(
+      (result) =>
+        settle(
+          result.ok
+            ? { status: "ready", value: result.value }
+            : { status: "error", error: toLoadError(result) },
+        ),
+      () => settle({ status: "error", error: { reason: "failed" } }),
+    );
+  }, []);
+
   useEffect(() => {
     run();
     return () => {
@@ -64,7 +98,7 @@ export function useLoad<T>(
     };
   }, [run]);
 
-  return [state, run];
+  return [state, run, refresh];
 }
 
 /** Whether the browser believes it is online. A hint only: the requests themselves are the evidence. */

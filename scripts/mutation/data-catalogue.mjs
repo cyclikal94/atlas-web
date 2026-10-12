@@ -17288,6 +17288,152 @@ export const UNIT = [
         "    if (!online || !isOnlineNow()) return;",
       ),
   },
+  {
+    id: "MU-1672",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a quiet refresh is not refused while one is outstanding (one return reads twice)",
+    file: "src/features/settings/sessions-devices/useLoad.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect:
+      /overlapping notifications while the read is outstanding make no second read/,
+    patch: (t) =>
+      sub(
+        t,
+        '      shown.current.status !== "ready" ||\n      refreshing.current === generation.current\n',
+        '      shown.current.status !== "ready"\n',
+      ),
+  },
+  {
+    id: "MU-1673",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a quiet refresh runs from an error too (a return reads in place of the error's Retry)",
+    file: "src/features/settings/sessions-devices/useLoad.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /a failed refresh shows the usual error and its Retry/,
+    patch: (t) =>
+      sub(
+        t,
+        '      shown.current.status !== "ready" ||\n      refreshing.current === generation.current\n',
+        "      refreshing.current === generation.current\n",
+      ),
+  },
+  {
+    id: "MU-1674",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the return refresh shows the loading state (rows and the focused control are replaced)",
+    file: "src/features/settings/sessions-devices/useLoad.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect:
+      /nothing is replaced by a loading state|keyboard focus on a row's control stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "    refreshing.current = mine;\n",
+        '    refreshing.current = mine;\n    setState({ status: "loading" });\n',
+      ),
+  },
+  {
+    id: "MU-1675",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a return-triggered answer is shown after the identity moved on",
+    file: "src/features/settings/sessions-devices/useLoad.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /arrives after the identity moved on is dropped/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const current = () => mine === generation.current && isCurrent();\n",
+        "    const current = () => mine === generation.current;\n",
+      ),
+  },
+  {
+    id: "MU-1676",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): an older return-triggered answer replaces a newer read (no generation check)",
+    file: "src/features/settings/sessions-devices/useLoad.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /older return-triggered answer never replaces a newer read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const current = () => mine === generation.current && isCurrent();\n",
+        "    const current = () => isCurrent();\n",
+      ),
+  },
+  {
+    id: "MU-1677",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): every focus or visible notification reads (no departure is required: one return is several reads)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /a focus with no departure reads nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!away || document.visibilityState !== "visible") return;\n',
+        '      if (document.visibilityState !== "visible") return;\n',
+      ),
+  },
+  {
+    id: "MU-1678",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a focus while the tab is hidden reads",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /a focus while the tab is hidden reads nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!away || document.visibilityState !== "visible") return;\n',
+        "      if (!away) return;\n",
+      ),
+  },
+  {
+    id: "MU-1679",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a return reads while the browser says it is offline",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /while the browser says it is offline a return reads nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (scope === null || !navigator.onLine) return;\n",
+        "      if (scope === null) return;\n",
+      ),
+  },
+  {
+    id: "MU-1680",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the return listeners outlive the screen",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /after the screen is left a return reads nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '      document.removeEventListener("visibilitychange", visibility);\n      window.removeEventListener("blur", leave);\n      window.removeEventListener("focus", back);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1681",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the devices list does not refresh on return",
+    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /a change made elsewhere appears after the tab is visible again/,
+    patch: (t) => sub(t, "  useReturnRefresh(refresh);\n", ""),
+  },
+  {
+    id: "MU-1682",
+    title:
+      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the sessions list does not refresh on return",
+    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
+    tests: ["tests/features/settings/return-refresh.test.tsx"],
+    expect: /a change made elsewhere appears after the tab is visible again/,
+    patch: (t) => sub(t, "  useReturnRefresh(refresh);\n", ""),
+  },
 ];
 
 /**

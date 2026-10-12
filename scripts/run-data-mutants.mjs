@@ -41,7 +41,7 @@ const only = value("--only", "").split(",").filter(Boolean);
 const jobs = Number(value("--jobs", "3"));
 const check = flag("--check");
 
-const EXPECTED_UNIT = 1159; // Accepted WEB-12a baseline (1087) plus WEB-08d MU-1600 to MU-1671 (72).
+const EXPECTED_UNIT = 1170; // Accepted WEB-12a baseline (1087) plus WEB-08d MU-1600 to MU-1682 (83).
 const EXPECTED_ENGINE = 163;
 
 const selected = UNIT.filter((m) => only.length === 0 || only.includes(m.id));

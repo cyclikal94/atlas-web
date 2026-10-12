@@ -1054,4 +1054,52 @@ test.describe("I-8d: BE-Q25 labels, names and capacities against the released ba
     expect(await polite.textContent()).toBe(await still.textContent());
     await untilView(page, "displaying");
   });
+
+  test("I-8d-16 (WEB08D-NAVIGATION-FRESHNESS-20261011): another device's sign-in reaches an open Sessions & devices screen when the person comes back to the window, not before; a name being typed stays", async ({
+    context,
+  }) => {
+    const page = await settled(context, "nora");
+    const main = page.locator("main");
+    const listReads = async () =>
+      (await proxy.log()).filter(
+        (e) => e.method === "GET" && /\/v1\/(sessions|devices)$/.test(e.path),
+      ).length;
+    const sessionsLine = main.locator("[data-capacity=sessions]");
+    const firstLine = await sessionsLine.textContent();
+    const used = Number(/^(\d+) of/.exec(firstLine ?? "")?.[1]);
+    expect(used).toBeGreaterThan(0);
+    // A name being typed for this device, in an open dialog, with the keyboard in its field.
+    await main
+      .locator("[data-device-row=current]")
+      .getByRole("button", { name: /^(Name|Rename) / })
+      .click();
+    const dialog = page.getByRole("dialog");
+    const field = dialog.getByLabel("Device name");
+    await field.fill("Desk (draft)");
+    await field.focus();
+    const readsBefore = await listReads();
+    await rawSignIn("nora", "nora-phone", { userAgent: SAFARI_IPHONE });
+    // No polling: without a return the screen reads nothing and still shows what it read.
+    expect(await listReads()).toBe(readsBefore);
+    await expect(sessionsLine).toHaveText(firstLine ?? "");
+    // The person comes back to the window (the browser's own blur and focus notifications, here dispatched to the real page).
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("blur"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await expect(sessionsLine).toHaveText(
+      new RegExp(`^${used + 1} of \\d+ sign-ins in use\\.$`),
+    );
+    await expect(
+      main.locator("[data-session-row=other]", { hasText: "Safari on iOS" }),
+    ).toHaveCount(1);
+    await expect(
+      main.locator("[data-device-row=other]", { hasText: "Safari on iOS" }),
+    ).toHaveCount(1);
+    // One read of each list for the return, and the dialog, its typed value and the keyboard focus are untouched.
+    expect(await listReads()).toBe(readsBefore + 2);
+    await expect(field).toHaveValue("Desk (draft)");
+    await expect(field).toBeFocused();
+    await untilView(page, "displaying");
+  });
 });

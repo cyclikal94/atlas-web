@@ -61,16 +61,44 @@ const signInForm = (page: Page, username: string, password: string) =>
       await page.getByRole("button", { name: "Sign in" }).click();
     });
 
-/** Opens Settings from the shell's navigation (no reload) and returns the username the account card shows. */
+/** The original deadline for "the account card names this account" (unchanged by the adaptation below). */
+const SETTINGS_DEADLINE_MS = 20_000;
+/** At most this many Settings clicks are attempted, and only while no account card is drawn. */
+const SETTINGS_CLICKS = 3;
+
+/**
+ * Opens Settings from the shell's navigation (no reload) and returns once the account card names the account.
+ *
+ * LABELLED TEST-SETUP ADAPTATION (WEB-08d R5, WEB08D-NAVIGATION-FRESHNESS-20261011; the bounded retry WEB-08c uses for HF-1).
+ * The original helper clicked once and then waited 20 s for the card. In review r3 (Firefox, T3) that one click was reported
+ * complete while the tab stayed on Today; the trace's next snapshot shows the protected tree closed behind
+ * `1e.interrupted_online`. That one-click product regression is WEB-08c's to correct, WEB-09d verifies the correction before
+ * beta, and the "R5 / HF-1" cases at the end of this file keep it reproduced UNADAPTED. Here opening Settings is only the means
+ * to read the identity: a click is attempted only while no account card is drawn, at most `SETTINGS_CLICKS` times, and the
+ * account the card names is asserted within the ORIGINAL 20 s deadline (no longer timeout, no sleep, no whole-test retry). The
+ * attempts used are annotated as `settings-clicks`, so a run that needed more than one is visible in its report.
+ */
 async function shownAs(page: Page, username: string | RegExp) {
   const nav = page
     .getByRole("navigation")
     .getByRole("link", { name: "Settings" })
     .first();
-  await nav.click();
-  await expect(page.locator("[data-account-card]")).toContainText(username, {
-    timeout: 20_000,
-  });
+  const card = page.locator("[data-account-card]");
+  let clicks = 0;
+  try {
+    await expect(async () => {
+      if (clicks < SETTINGS_CLICKS && (await card.count()) === 0) {
+        clicks += 1;
+        await nav.click({ timeout: 2_000 });
+      }
+      await expect(card).toContainText(username, { timeout: 3_000 });
+    }).toPass({ timeout: SETTINGS_DEADLINE_MS });
+  } finally {
+    test
+      .info()
+      .annotations.push({ type: "settings-clicks", description: `${clicks}` });
+  }
+  return clicks;
 }
 
 test.describe("the fragment is stripped before the first request (matrix 3.4 step 2)", () => {
@@ -900,5 +928,167 @@ test.describe("ordering traces in a real engine (two pages, held answers)", () =
     await shownAs(b, "sam");
     await shownAs(a, "sam");
     expect(stub.cookieHistory.length).toBe(2);
+  });
+});
+
+test.describe("R5 / HF-1: a Settings click delivered while the protected tree is closed for a check (WEB-08c's open regression)", () => {
+  /**
+   * WEB08D-NAVIGATION-FRESHNESS-20261011. The forced order: tab A has a held device read (a REQUEST lease in the shared record)
+   * when it is closed, so tab B finds the lease orphaned, closes its protected tree (`1e.interrupted_online`) and verifies the
+   * session (`GET /browser-sessions/current`); that answer is held, so B stays closed for as long as the test holds it, well under
+   * the 5 s stall limits. A REAL pointer click on where B's Settings link was is delivered in that interval. These cases record the
+   * original one-click outcome separately from the adapted helper; they do not claim the precise cause of the r3 failure.
+   */
+  const settingsLink = (page: Page) =>
+    page
+      .getByRole("navigation")
+      .getByRole("link", { name: "Settings" })
+      .first();
+  const treeState = (page: Page) =>
+    page.evaluate(() => {
+      const root = document.getElementById("protected-root");
+      return {
+        neutral:
+          document
+            .querySelector("[data-neutral-state]")
+            ?.getAttribute("data-neutral-state") ?? null,
+        open:
+          root !== null &&
+          !root.hasAttribute("inert") &&
+          document.querySelector('nav a[href="/settings"]') !== null,
+      };
+    });
+  const isCheck = (r: { method: string; path: string }) =>
+    r.method === "GET" && r.path === "/browser-sessions/current";
+
+  /** Tab B displays "sam" (tab A signed in first), visibility pinned as in the ordering traces. */
+  async function displayedInTwoTabs(context: BrowserContext) {
+    const stub = await newStub(context);
+    await context.addInitScript(() => {
+      Object.defineProperty(document, "visibilityState", {
+        get: () => "visible",
+        configurable: true,
+      });
+      Object.defineProperty(document, "hidden", {
+        get: () => false,
+        configurable: true,
+      });
+      document.addEventListener(
+        "visibilitychange",
+        (event) => event.stopImmediatePropagation(),
+        true,
+      );
+    });
+    const a = await context.newPage();
+    await a.goto("/");
+    await signInForm(a, "sam", "pw2");
+    await expect(settingsLink(a)).toBeVisible({ timeout: 20_000 });
+    const b = await context.newPage();
+    await b.goto("/");
+    await expect
+      .poll(async () => (await treeState(b)).open, { timeout: 20_000 })
+      .toBe(true);
+    return { stub, a, b };
+  }
+
+  /** Closes tab A with its device read held; returns once tab B is closed for its held check. */
+  async function closeForHeldCheck(stub: AuthStub, a: Page, b: Page) {
+    const checksBefore = stub.count("GET", "/browser-sessions/current");
+    const readsBefore = stub.count("GET", "/sessions");
+    const holdRead = stub.hold(
+      (r) => r.method === "GET" && r.path === "/sessions",
+      1,
+    );
+    const holdCheck = stub.hold(isCheck, 1);
+    await settingsLink(a).click();
+    await expect
+      .poll(() => stub.count("GET", "/sessions"), { timeout: 10_000 })
+      .toBeGreaterThan(readsBefore);
+    await a.close();
+    holdRead.stop();
+    await expect
+      .poll(() => stub.count("GET", "/browser-sessions/current"), {
+        timeout: 10_000,
+      })
+      .toBeGreaterThan(checksBefore);
+    expect(await treeState(b)).toEqual({
+      neutral: "1e.interrupted_online",
+      open: false,
+    });
+    return holdCheck;
+  }
+
+  test("control: on a settled display, one click opens Settings and the adapted helper uses exactly one", async ({
+    context,
+  }) => {
+    const { b } = await displayedInTwoTabs(context);
+    expect(await shownAs(b, "sam")).toBe(1);
+    await expect(b).toHaveURL(/\/settings$/);
+  });
+
+  test("original (UNADAPTED, expected to change when WEB-08c corrects it): one real click inside the held check completes, nothing navigates and the tab stays on Today", async ({
+    context,
+  }) => {
+    const { stub, a, b } = await displayedInTwoTabs(context);
+    const box = await settingsLink(b).boundingBox();
+    expect(box).not.toBeNull();
+    const holdCheck = await closeForHeldCheck(stub, a, b);
+    if (box) await b.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    holdCheck.release();
+    await expect
+      .poll(async () => (await treeState(b)).open, { timeout: 20_000 })
+      .toBe(true);
+    // The observed one-click outcome (WEB-08c HF-1 / R5): the click was delivered and is gone; no Settings, no account card.
+    await expect(b).toHaveURL(/\/today$/);
+    await expect(b.locator("[data-account-card]")).toHaveCount(0);
+    test.info().annotations.push({
+      type: "hf1-original-one-click",
+      description: "not acted on (stayed on /today)",
+    });
+  });
+
+  test("adapted helper after the same lost click: no card is drawn, so it opens Settings and reads the identity within the original deadline", async ({
+    context,
+  }) => {
+    const { stub, a, b } = await displayedInTwoTabs(context);
+    const box = await settingsLink(b).boundingBox();
+    expect(box).not.toBeNull();
+    const holdCheck = await closeForHeldCheck(stub, a, b);
+    if (box) await b.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    holdCheck.release();
+    expect(await shownAs(b, "sam")).toBeLessThanOrEqual(SETTINGS_CLICKS);
+    await expect(b).toHaveURL(/\/settings$/);
+  });
+
+  test("adapted helper whose OWN first click is not acted on: it clicks once more only because no card is drawn (the original one-click helper fails here)", async ({
+    context,
+  }) => {
+    const { b } = await displayedInTwoTabs(context);
+    // HARNESS STAND-IN, not a product mechanism: Playwright's click cannot be timed into the few milliseconds of a real check from
+    // outside the page, so the first click on the Settings link is swallowed before the application sees it. The case above shows a
+    // real check losing a real click; this one shows what the adapted helper does with a click that had no effect.
+    await b.evaluate(() => {
+      const w = window as unknown as { __swallowed: number };
+      w.__swallowed = 0;
+      window.addEventListener(
+        "click",
+        (event) => {
+          const target = event.target as Element | null;
+          if (w.__swallowed > 0 || !target?.closest('nav a[href="/settings"]'))
+            return;
+          w.__swallowed += 1;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        },
+        true,
+      );
+    });
+    expect(await shownAs(b, "sam")).toBe(2);
+    expect(
+      await b.evaluate(
+        () => (window as unknown as { __swallowed: number }).__swallowed,
+      ),
+    ).toBe(1);
+    await expect(b).toHaveURL(/\/settings$/);
   });
 });
