@@ -124,6 +124,8 @@ export async function recoveryWorld(
     cacheStatus?: "valid" | "invalid" | "empty";
     displayed?: boolean;
     config?: RecoveryJobDeps["config"];
+    /** The device signals the job classifies (default: none, as in Firefox and WebKit). */
+    signals?: RecoveryJobDeps["signals"];
   } = {},
 ): Promise<RecoveryWorld> {
   const base = await pageWorld({
@@ -327,7 +329,7 @@ export async function recoveryWorld(
       derivers: createKeyDerivers(),
     },
     quota,
-    signals: { hasStorageEstimate: true },
+    signals: options.signals ?? { hasStorageEstimate: true },
     channel: {
       post: (message) => {
         out.posted.push(message);

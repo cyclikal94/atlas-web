@@ -2,8 +2,10 @@
 
 WEB-09a owns the per-account local database, the ordinary delta sync, the draft outbox, the status model that the sync chip and the sync screens read, and the real
 ports that the session's account wipe calls. It is the only slice that may touch IndexedDB for account data. WEB-09b supplies what this slice leaves open: leadership
-(which page runs the sync engine and the dispatcher), the first snapshot, and recovery. **In production nothing here starts an engine yet**, so the sync chip reads
-"Updates stopped", which is true.
+(which page runs the sync engine and the dispatcher), the first snapshot, and recovery. Since WEB-09b the production boot starts that leadership by default
+(`src/app/boot.tsx`, `src/data/leader/start.ts`; `tests/static/production-leader.test.ts`), so production does run the engine, the dispatcher and the recovery job
+(the first snapshot included) on the leading page. Statements below that production starts no engine were true when they were written, before WEB-09b, and are kept
+as the history of the slice; the fixture specs of WEB-09a still use a FIXTURE test leader (see "Testing, and what each layer does not prove").
 
 This document is written from the code and the tests. Where a statement rests on a test, the test file is named. Where the design or the plan was deliberately
 departed from, the departure is listed under "Departures from the plan".

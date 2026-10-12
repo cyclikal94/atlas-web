@@ -109,6 +109,27 @@ describe("profile capture (W2 on the device page)", () => {
     expect(await sessionStore().get()).toBeNull();
   });
 
+  it("case (revision 5, DA-E3): a capture that begins with a byte order mark is kept and read back as exactly its bytes, so its hash is the file's", async () => {
+    sessionStorage.clear();
+    const store = sessionStore();
+    const plain = new TextEncoder().encode('{"phase":"delta"}');
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...plain]);
+    // `.resolves`: a refused keep is this assertion's failure, not a thrown error of the code under test.
+    await expect(
+      storeCapture(new Blob([bom]), "bom.json", store),
+    ).resolves.toEqual({
+      name: "bom.json",
+      bytes: bom.length,
+      sha256: await sha256Bytes(bom),
+    });
+    const back = await store.get();
+    expect([...(back?.bytes ?? [])]).toEqual([...bom]);
+    const loaded = await loadCapture({ sha256: await sha256Bytes(bom) }, store);
+    expect(loaded).toMatchObject({ ok: true, verified: true });
+    expect([...loaded.bytes]).toEqual([...bom]);
+    sessionStorage.clear();
+  });
+
   it("case: a write the storage refuses leaves the previous capture exactly as it was (one record: name, bytes and hash together)", async () => {
     sessionStorage.clear();
     const kept = new TextEncoder().encode('{"kept":true}');

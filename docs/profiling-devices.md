@@ -103,7 +103,10 @@ W2 is BE-B1 3(b) and BE-Q23 M3's server-reachable dense batch (one batch of 200 
 validator accepts a hash listed in `W2-hashes.json` only after it has **certified** that capture from the hand-over that lists it (revision 4): the bytes are in
 the hand-over's `fixtures/` and `evidence/w2/`, its `P-W2 capture` row records that hash with the seeded person, and the bytes are the seeded dense batch (a sync
 page whose one batch holding that person is the person and its 199 distinct checklist fields of 100 items labelled "x" with 40 checked ids each:
-`scripts/lib/profile-w2-capture.mjs`). So give `--w2-hashes` the hand-over's own `fixtures/W2-hashes.json`; a copy of that file anywhere else certifies nothing.
+`scripts/lib/profile-w2-capture.mjs`). From revision 5 the bytes must also be admitted, as they are, by the candidate's production receive path (the byte scan, every
+element's decoder and gates: `scripts/lib/production-page-reader.mjs`), so a capture with a duplicated key, a revision such as `12e0` or a byte order mark is
+not certified even when its parsed form is the seed. So give `--w2-hashes` the hand-over's own `fixtures/W2-hashes.json`; a copy of that file anywhere else
+certifies nothing. The page keeps the file's exact bytes (a byte order mark included) and runs them as they are.
 
 1. Copy the chosen capture onto the device (AirDrop, a USB transfer or `adb push` into Downloads).
 2. Open `/profile-harness` in the tab (or installed app) that will run the protocol. Under **W2 capture**, choose the file. The page shows

@@ -21,6 +21,7 @@ import {
   sampler,
   writeEvidence,
 } from "../e2e/profile-helpers";
+import { readSyncBytes } from "../e2e/profile-sync-read";
 import {
   API as API_URL,
   BACKEND,
@@ -382,38 +383,12 @@ async function writer() {
   return { session, send, retried };
 }
 
-/** Reads `/sync` from `cursor` at `limit` through THIS page's stamped wrapper (the cursor belongs to the page's session), as the engine does. */
-const readSync = (
-  page: Page,
-  account: string,
-  epoch: number,
-  cursor: string,
-  limit: number,
-) =>
-  page.evaluate(
-    async ({ a, e, c, l }) => {
-      const fetchPage = window.__s.api.fetchFor("ordinary", a, e);
-      const url = new URL("/api/experimental/v1/sync", location.origin);
-      url.searchParams.set("cursor", c);
-      url.searchParams.set("limit", String(l));
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        try {
-          const response = await fetchPage(new Request(url, { method: "GET" }));
-          return {
-            status: response.status,
-            text: await response.text(),
-            error: null as string | null,
-          };
-        } catch (error) {
-          if (!String(error).includes("not_sent"))
-            return { status: 0, text: "", error: String(error).slice(0, 200) };
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-      }
-      return { status: 0, text: "", error: "not_sent for six seconds" };
-    },
-    { a: account, e: epoch, c: cursor, l: limit },
-  );
+/**
+ * Reads `/sync` from `cursor` at `limit` through THIS page's stamped wrapper (the cursor belongs to the page's session), as the engine does.
+ * Revision 5 (design assessment DA-E3, A2): the body's exact BYTES (`readSyncBytes`); `text` is a decoded view for messages and for the
+ * pages this spec only reads (the drain, the bound), never a capture.
+ */
+const readSync = readSyncBytes;
 
 /**
  * The released backend's sharing rules, read from its source at the pinned commit (crates/core/src/policy.rs `put_policy`,
@@ -572,7 +547,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   );
   const captures: Record<string, unknown> = {};
   const observations: W2Observation[] = [];
-  let w2Body = "";
+  let w2Body: Buffer = Buffer.alloc(0);
   let afterW2 = "";
   mkdirSync(`${PROFILE_OUT}/w2`, { recursive: true });
   for (const limit of [1, 80]) {
@@ -588,20 +563,20 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     );
     // The measurement happened only if the bytes ARE the seeded dense batch (revision 4, review 4 R2): a valid sync page whose one batch
     // holding this person is the person and its 199 distinct checklist fields of 100 items and 40 checked ids each, 200 changes and
-    // nothing else; the same reader the evidence contract applies to the file.
-    const observed = observeW2Capture(Buffer.from(captured.text), {
-      person,
-      limit,
-    });
+    // nothing else; the same reader the evidence contract applies to the file. Revision 5 (DA-E3): the reader sees, and the file, hash
+    // and cold replays get, the response body's exact bytes; they are decoded for the figures below only after the reader (which puts
+    // them through the production receive path) admitted them.
+    const raw = captured.bytes;
+    const observed = observeW2Capture(raw, { person, limit });
     expect(observed.problems, `limit ${limit}`).toEqual([]);
     expect(observed.target?.value_bytes, `limit ${limit}`).toBe(valueBytes);
     observations.push(observed);
-    const body = JSON.parse(captured.text) as SyncBody;
+    const body = JSON.parse(raw.toString("utf8")) as SyncBody;
     const shapes = body.batches.map((b) => shapeOf(b, person));
-    const bytes = Buffer.byteLength(captured.text);
+    const bytes = raw.length;
     writeFileSync(
       `${PROFILE_OUT}/w2/W2-captured.${engine}.limit-${limit}.json`,
-      captured.text,
+      raw,
     );
     captures[`limit_${limit}`] = {
       phase: body.phase,
@@ -611,10 +586,10 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
       batch_shapes: shapes,
       changes: body.batches.reduce((n, b) => n + b.changes.length, 0),
       has_more: body.has_more,
-      sha256: createHash("sha256").update(captured.text).digest("hex"),
+      sha256: createHash("sha256").update(raw).digest("hex"),
       file: `w2/W2-captured.${engine}.limit-${limit}.json`,
     };
-    if (limit === 1) w2Body = captured.text;
+    if (limit === 1) w2Body = raw;
     if (limit === 80) afterW2 = body.next_cursor;
   }
   // Both limits show the same seeded batch (its revision and contents); their pagination may differ.
@@ -665,7 +640,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
         // back-off is transient) until the time-out, which is recorded as such.
         return (dense && state?.kind === "idle") || state?.kind === "stopped";
       },
-      Buffer.byteLength(w2Body),
+      w2Body.length,
       { timeout: 240_000, polling: 25 },
     );
     const state = await page.evaluate(() => window.__atlasData?.engineState());
@@ -723,7 +698,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     coldRuns.push(
       await oneColdRun(browser, info.project.use.baseURL, engine, w2Body),
     );
-  const bytes = Buffer.byteLength(w2Body);
+  const bytes = w2Body.length;
   writeEvidence(`w2/P-W2.${engine}.json`, {
     engine,
     path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the CAPTURED bytes of the released backend's /sync (limit 1), served by a Playwright route stub in a new context per run",

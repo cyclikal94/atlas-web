@@ -14,6 +14,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2456,14 +2457,51 @@ test("case (E8): a W2 capture is checked from its bytes: small or other-person b
     next_cursor: "c",
     has_more: false,
   });
+  // Revision 5: the same small batch with a whole projection, so production admits it and only its CONTENTS and metadata can fail.
+  const admitted = JSON.stringify({
+    phase: "delta",
+    batches: [
+      {
+        revision: 1,
+        changes: [
+          {
+            kind: "upsert",
+            resource: {
+              id: programme.PERSON,
+              kind: "person",
+              parent_id: null,
+              label: "W2 person",
+              value: null,
+              version: 1,
+              can_edit: false,
+              archived: false,
+            },
+          },
+        ],
+      },
+    ],
+    next_cursor: "c",
+    has_more: false,
+  });
   expectInvalid(t, [
     [
       "a small batch under metadata claiming 200 changes (rehashed)",
       (dir) => replaceBytes(dir, "chromium", 80, small),
       {
         // Revision 4 (labelled adaptation of the revision-3 pattern; same intent, the reader's new wording): the seeded batch is not the seed.
+        // Revision 5 (labelled adaptation, review 5 R2 / design assessment A3): production refuses these bytes (the person lacks projection
+        // fields), so nothing is derived from them: the refusal is the reader's structural finding and production's, and the seed and
+        // metadata findings of the original pattern are kept by the production-admitted variant below.
         "P-W2 capture limit 80[chromium]":
-          /lacks projection fields.*holds 1 changes, not the seed's 200.*holds 0 distinct fields of the seeded person.*does not follow from the captured bytes/,
+          /lacks projection fields.*the production decoder refuses batch 1 change 1 \(projection: missing_field\)/,
+      },
+    ],
+    [
+      "a small batch production admits, under metadata claiming 200 changes (rehashed)",
+      (dir) => replaceBytes(dir, "chromium", 80, admitted),
+      {
+        "P-W2 capture limit 80[chromium]":
+          /holds 1 changes, not the seed's 200.*holds 0 distinct fields of the seeded person.*does not follow from the captured bytes/,
       },
     ],
     [
@@ -3589,4 +3627,442 @@ test("case (E12): a device results file's lifecycle and every run's payload are 
     certifyingPackage(t, dir, "firefox"),
   ]);
   assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+});
+
+// ---- Revision 5 (review 5 R2; design assessment DA-E1/DA-E2, Q1/Q4/Q6): a capture is certified for its BYTES ----------------------------
+// Each raw variant below leaves the PARSED capture exactly as it was (or changes only what production allows), so neither the seeded batch's
+// canonical digest nor the cross-limit comparison can see it: only the candidate's own receive path, which the observer now applies to the
+// bytes (scripts/lib/production-page-reader.mjs), refuses it. Every derivable figure is regenerated (`recapture`), so a stale hash, size or
+// binder can never be what refuses a variant.
+const pageMember = (body, key) =>
+  `${JSON.stringify(key)}:${JSON.stringify(body[key])}`;
+const RAW = {
+  "phase written twice (an escaped alias first)": (text) =>
+    `{"\\u0070hase":"delta",${text.slice(1)}`,
+  "next_cursor written twice (last)": (text) =>
+    `${text.slice(0, -1)},${pageMember(JSON.parse(text), "next_cursor")}}`,
+  "has_more written twice (first)": (text) =>
+    `{${pageMember(JSON.parse(text), "has_more")},${text.slice(1)}`,
+  "batches written twice (first)": (text) =>
+    `{${pageMember(JSON.parse(text), "batches")},${text.slice(1)}`,
+  "a batch's revision written twice": (text) =>
+    text.replace(/\{"revision":(\d+),/, '{"revision":$1,"revision":$1,'),
+  "a batch's changes written twice": (text) => {
+    const first = JSON.parse(text).batches[0];
+    return text.replace(
+      `{"revision":${first.revision},`,
+      `{"changes":${JSON.stringify(first.changes)},"revision":${first.revision},`,
+    );
+  },
+  "a revision written with an exponent": (text) =>
+    text.replace(/\{"revision":(\d+),/, '{"revision":$1e0,'),
+  "a revision written with a fraction": (text) =>
+    text.replace(/\{"revision":(\d+),/, '{"revision":$1.0,'),
+  "a byte order mark": (text) =>
+    Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text)]),
+};
+const RAW_REASON = {
+  "phase written twice (an escaped alias first)": /structure: duplicate phase/,
+  "next_cursor written twice (last)": /structure: duplicate next_cursor/,
+  "has_more written twice (first)": /structure: duplicate has_more/,
+  "batches written twice (first)": /structure: duplicate batches/,
+  "a batch's revision written twice": /structure: duplicate revision/,
+  "a batch's changes written twice": /structure: duplicate changes/,
+  "a revision written with an exponent": /structure: expected a plain integer/,
+  "a revision written with a fraction": /structure: expected a plain integer/,
+  "a byte order mark": /syntax: expected '\{', at byte 0/,
+};
+/** Rewrites a capture's bytes with `change(text)`, checking that what it parses to (where it parses) is unchanged. */
+const rawEdit = (dir, engine, limit, change) => {
+  const text = readFileSync(capturePath(dir, engine, limit), "utf8");
+  const bytes = Buffer.from(change(text));
+  const parsed = JSON.parse(
+    new TextDecoder("utf-8", { ignoreBOM: false }).decode(bytes),
+  );
+  assert.deepEqual(parsed, JSON.parse(text), "the parsed capture changed");
+  recapture(dir, engine, limit, bytes);
+};
+/** The limit-80 capture's ordinary companion batch replaced by one upsert holding `value` (production's element gates apply to it too). */
+const companion = (dir, engine, value) =>
+  reshape(dir, engine, 80, (body) => {
+    body.batches[1].changes = [
+      {
+        kind: "upsert",
+        resource: {
+          id: "c0c0c0c0-0000-4000-8000-00000000c0c0",
+          kind: "task",
+          parent_id: null,
+          label: "companion",
+          value,
+          version: 1,
+          can_edit: false,
+          archived: false,
+        },
+      },
+    ];
+  });
+const deepValue = (levels) => {
+  let value = { leaf: true };
+  for (let i = 0; i < levels; i += 1) value = { n: value };
+  return value;
+};
+
+test("case (R2, Q1): bytes production refuses but whose parsed page is unchanged - duplicated page or batch keys, a non-plain revision, a byte order mark - are invalid at either limit in every engine; so is a companion beyond production's element gates", (t) => {
+  const list = [];
+  const names = Object.keys(RAW);
+  for (const [i, what] of names.entries())
+    for (const [engine, limit] of [
+      W2_COMBOS[i % W2_COMBOS.length],
+      W2_COMBOS[(i + 3) % W2_COMBOS.length],
+    ])
+      list.push([
+        `${what} (${engine} limit ${limit})`,
+        (dir) => rawEdit(dir, engine, limit, RAW[what]),
+        captureCells(engine, limit, RAW_REASON[what]),
+      ]);
+  for (const [i, [what, value, pattern]] of [
+    ["nested beyond maxDepth", deepValue(18), /limit: nesting too deep/],
+    [
+      "an element above maxChangeBytes",
+      { t: "p".repeat(65_536) },
+      /gate: element_too_large/,
+    ],
+    [
+      "an element above maxValueNodes",
+      { a: Array(8_181).fill(0) },
+      /gate: too_many_nodes/,
+    ],
+  ].entries()) {
+    const engine = W2_ENGINES[i % 3];
+    list.push([
+      `a companion ${what} (${engine} limit 80)`,
+      (dir) => companion(dir, engine, value),
+      captureCells(engine, 80, pattern),
+    ]);
+  }
+  expectCaptureVariants(t, list);
+});
+
+test("control (R2, Q1): legal spellings production admits - reordered page and batch keys, whitespace, a single escaped key, an escaped cursor, a resource version written 1e0, a valid companion of another kind - keep every capture valid and the programme complete", (t) => {
+  const dir = programmeCopy(t);
+  const legal = (text) => {
+    const body = JSON.parse(text);
+    const batches = body.batches
+      .map(
+        (b) =>
+          `{"changes":${JSON.stringify(b.changes)},"revision":${b.revision}}`,
+      )
+      .join(" ,\n ");
+    return ` {\n "has_more" : ${body.has_more},\t"\\u0062atches" : [ ${batches} ] , "next_cursor" : "\\u${body.next_cursor.charCodeAt(0).toString(16).padStart(4, "0")}${body.next_cursor.slice(1)}" , "phase" : "delta" }\r\n`.replace(
+      '"version":1,',
+      '"version":1e0,',
+    );
+  };
+  for (const [engine, limit] of W2_COMBOS) rawEdit(dir, engine, limit, legal);
+  companion(dir, "webkit", { unknown: "allowed" });
+  const r = resolveDir(dir);
+  assert.deepEqual(
+    r.cells
+      .filter((c) => !["ok", "unavailable"].includes(c.status))
+      .map((c) => [c.id, c.reasons]),
+    [],
+  );
+  assert.equal(r.complete, true);
+  const run = assemble(dir);
+  assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+  const plain = validate(join(dir, "handoff"));
+  assert.equal(plain.status, 0, `${plain.stdout}${plain.stderr}`);
+});
+
+test("case (R2, Q4): a hand-over carrying such bytes - at limit 80 only, at limit 1 only, at both, or in one engine only - is refused with and without --allow-partial, publishes no desktop conclusion, and leaves the other engines' captures valid", (t) => {
+  const schedules = [
+    [
+      "phase written twice at limit 80 in every engine (review 5's schedule)",
+      (dir) => {
+        for (const e of W2_ENGINES)
+          rawEdit(
+            dir,
+            e,
+            80,
+            RAW["phase written twice (an escaped alias first)"],
+          );
+      },
+      W2_ENGINES.map((e) => [e, 80]),
+    ],
+    [
+      "a byte order mark at limit 1 in every engine",
+      (dir) => {
+        for (const e of W2_ENGINES)
+          rawEdit(dir, e, 1, RAW["a byte order mark"]);
+      },
+      W2_ENGINES.map((e) => [e, 1]),
+    ],
+    [
+      "a revision written with an exponent at both limits in every engine",
+      (dir) => {
+        for (const [e, l] of W2_COMBOS)
+          rawEdit(dir, e, l, RAW["a revision written with an exponent"]);
+      },
+      W2_COMBOS,
+    ],
+    [
+      "a companion above maxValueNodes in the firefox limit-80 capture alone",
+      (dir) => companion(dir, "firefox", { a: Array(8_181).fill(0) }),
+      [["firefox", 80]],
+    ],
+  ];
+  for (const [what, change, broken] of schedules) {
+    const dir = programmeCopy(t);
+    change(dir);
+    const run = assemble(dir);
+    assert.equal(run.status, 0, `${what}: ${run.stdout}${run.stderr}`);
+    const results = resultsOf(dir);
+    assert.equal(results.desktop_programme.complete, false, what);
+    assert.equal(results.H8.desktop_valid_workload_failure, null, what);
+    assert.equal(results.H9.desktop_needs_finer_pagination, null, what);
+    const handoff = join(dir, "handoff");
+    const plain = validate(handoff);
+    const partial = validate(handoff, "--allow-partial");
+    assert.equal(plain.status, 1, `${what}: ${plain.stdout}${plain.stderr}`);
+    assert.equal(
+      partial.status,
+      1,
+      `${what} (--allow-partial): ${partial.stdout}${partial.stderr}`,
+    );
+    const resolution = JSON.parse(
+      readFileSync(join(handoff, "resolution.json"), "utf8"),
+    );
+    const captures = resolution.cells.filter((c) => c.kind === "w2-capture");
+    const expected = new Set(
+      broken.map(([e, l]) => `P-W2 capture limit ${l}[${e}]`),
+    );
+    for (const c of captures)
+      assert.equal(
+        c.status,
+        expected.has(c.id) ? "invalid" : "ok",
+        `${what}: ${c.id} ${c.reasons.join(" | ")}`,
+      );
+    assert.ok(
+      captures
+        .filter((c) => expected.has(c.id))
+        .every((c) =>
+          /production (scanner|decoder) refuses/.test(c.reasons.join(" ")),
+        ),
+      `${what}: ${JSON.stringify(captures.map((c) => [c.id, c.reasons]))}`,
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("case (R2, Q4): the operator's results file is refused for a limit-1 capture production refuses, though it is rehashed into the hand-over's every list", (t) => {
+  const dir = programmeCopy(t);
+  rawEdit(dir, "chromium", 1, RAW["a batch's revision written twice"]);
+  const run = assemble(dir);
+  assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+  const handoff = join(dir, "handoff");
+  const name = "W2-captured.chromium.limit-1.json";
+  const listed = JSON.parse(
+    readFileSync(join(handoff, "fixtures/W2-hashes.json"), "utf8"),
+  )[name];
+  assert.equal(
+    listed,
+    sha(readFileSync(join(handoff, "fixtures", name))),
+    "the refused capture is listed with its own hash",
+  );
+  const refused = node([
+    join(root, "scripts/validate-profile-handoff.mjs"),
+    join(handoff, "evidence/device-page/results.chromium.json"),
+    "--w2-hashes",
+    join(handoff, "fixtures/W2-hashes.json"),
+  ]);
+  assert.equal(refused.status, 1, `${refused.stdout}${refused.stderr}`);
+  assert.match(
+    refused.stderr,
+    /W2-captured\.chromium\.limit-1\.json is NOT a certified W2 capture: .*production scanner refuses the capture \(structure: duplicate revision/,
+  );
+});
+
+/** A copy of the scripts and the sources a validator reads (its own candidate), node_modules linked: a validator of another candidate. */
+const validatorCopy = (t) => {
+  const base = scratch(t);
+  for (const dir of ["scripts", "src"])
+    cpSync(join(root, dir), join(base, dir), { recursive: true });
+  for (const file of ["contract-pin.json", "package.json"])
+    cpSync(join(root, file), join(base, file));
+  symlinkSync(join(root, "node_modules"), join(base, "node_modules"));
+  return base;
+};
+
+test("case (Q6): the production page reader fails closed - a production module that cannot be loaded, or a decode composition it does not reproduce, stops every certifying entry point before anything is read", (t) => {
+  const base = validatorCopy(t);
+  const handoff = join(assembledCopy(t), "handoff");
+  const certify = () =>
+    node(
+      [
+        join(base, "scripts/validate-profile-handoff.mjs"),
+        "--handoff",
+        handoff,
+      ],
+      {
+        cwd: base,
+      },
+    );
+  const control = certify();
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+  const composition = join(base, "src/data/ui/browser-leader.ts");
+  const original = readFileSync(composition, "utf8");
+  for (const [what, edit, pattern] of [
+    [
+      "the scanner missing",
+      () => rmSync(join(base, "src/data/scan/scan.ts")),
+      /the production page reader cannot load src\/data\/scan\/scan\.ts/,
+    ],
+    [
+      "a value validator registered by the composition",
+      () =>
+        writeFileSync(
+          composition,
+          original.replace(
+            "validators: createValueValidators(),",
+            'validators: (() => { const v = createValueValidators(); v.register("field", () => false); return v; })(),',
+          ),
+        ),
+      /the production page reader cannot start: .*browser-leader\.ts no longer composes/,
+    ],
+  ]) {
+    edit();
+    const run = certify();
+    assert.notEqual(run.status, 0, what);
+    assert.match(`${run.stdout}${run.stderr}`, pattern, what);
+    assert.doesNotMatch(run.stdout, /complete and consistent/, what);
+    cpSync(
+      join(root, "src/data/scan/scan.ts"),
+      join(base, "src/data/scan/scan.ts"),
+    );
+    writeFileSync(composition, original);
+  }
+  const restored = certify();
+  assert.equal(restored.status, 0, `${restored.stdout}${restored.stderr}`);
+});
+
+// ---- Revision 5 (review 5 R6; design assessment DA-S1, A4, Q7): H9's snapshot answer is the candidate's SOURCE, not a constant ------------
+const sourceFacts = await import(
+  pathToFileURL(join(root, "scripts/lib/profile-source-facts.mjs")).href
+);
+const OLD_SNAPSHOT_ANSWER =
+  "not sent by this client: the first snapshot is WEB-09b's (production starts no engine yet)";
+
+test("control (R6, Q7): H9 states this candidate's snapshot request path, read from its source, and that the programme did not measure it", (t) => {
+  const facts = sourceFacts.snapshotSourceFacts(root);
+  assert.equal(facts.snapshot_requests, true, JSON.stringify(facts.links));
+  const limits = resultsOf(assembledCopy(t)).H9.limit_in_use;
+  assert.deepEqual(limits.source_facts, facts);
+  assert.equal(limits.snapshot_requests, true);
+  assert.notEqual(limits.snapshot, OLD_SNAPSHOT_ANSWER);
+  assert.match(
+    limits.snapshot,
+    /^sent by the production composition \(src\/main\.tsx -> src\/app\/boot\.tsx -> /,
+  );
+  for (const link of facts.links)
+    assert.ok(limits.snapshot.includes(link.file), link.file);
+  assert.match(
+    limits.snapshot,
+    /same rungs as delta \(4 unconstrained, 1 otherwise, unknown memory included; step-down only; never above syncLimitMax 80\)/,
+  );
+  assert.equal(limits.snapshot_measured, false);
+  assert.match(
+    limits.snapshot_measurement,
+    /^NOT measured by this programme: .*WEB-09b .*WEB-09d/,
+  );
+});
+
+test("case (R6, Q7): a projection that restores the old constant answer is refused although the assembler and the validator's re-projection agree on it", (t) => {
+  const base = validatorCopy(t);
+  const projection = join(base, "scripts/lib/profile-projection.mjs");
+  const text = readFileSync(projection, "utf8");
+  const anchor = "snapshot: snapshotAnswer(sourceFacts, configValues),";
+  assert.equal(
+    text.split(anchor).length,
+    2,
+    "the projection's snapshot answer",
+  );
+  writeFileSync(
+    projection,
+    text.replace(anchor, `snapshot: ${JSON.stringify(OLD_SNAPSHOT_ANSWER)},`),
+  );
+  const handoff = join(assembledCopy(t), "handoff");
+  editJson(join(handoff, "results.json"), (r) => {
+    r.H9.limit_in_use.snapshot = OLD_SNAPSHOT_ANSWER;
+  });
+  resum(handoff);
+  const run = node(
+    [join(base, "scripts/validate-profile-handoff.mjs"), "--handoff", handoff],
+    { cwd: base },
+  );
+  assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
+  assert.match(
+    run.stderr,
+    /H9\.limit_in_use\.snapshot does not state this candidate's snapshot request path/,
+  );
+  // The re-projection agreed: the refusal is the source check's, not a disagreement of the published fields.
+  assert.doesNotMatch(
+    run.stderr,
+    /results\.json is not what its evidence projects to/,
+  );
+});
+
+test("case (R6, Q7): on a candidate whose source no longer shows the path (the leader off by default), the answer is UNVERIFIED, and a hand-over claiming either answer for another candidate is refused", async (t) => {
+  const base = validatorCopy(t);
+  const boot = join(base, "src/app/boot.tsx");
+  const text = readFileSync(boot, "utf8");
+  const anchor = "const leads = options.dataLeader !== false;";
+  assert.equal(text.split(anchor).length, 2, "boot's default");
+  writeFileSync(
+    boot,
+    text.replace(anchor, "const leads = options.dataLeader === true;"),
+  );
+  const theirs = (
+    await import(
+      pathToFileURL(join(base, "scripts/lib/profile-source-facts.mjs")).href
+    )
+  ).snapshotSourceFacts(base);
+  assert.equal(theirs.snapshot_requests, null);
+  assert.deepEqual(
+    theirs.links.filter((l) => !l.holds).map((l) => l.id),
+    ["boot_leads_by_default"],
+  );
+  const validateWith = (at, handoff) =>
+    node(
+      [join(at, "scripts/validate-profile-handoff.mjs"), "--handoff", handoff],
+      { cwd: at },
+    );
+  // This candidate's hand-over, validated by the other candidate: its facts are not that candidate's.
+  const ours = join(assembledCopy(t), "handoff");
+  const crossed = validateWith(base, ours);
+  assert.equal(crossed.status, 1, `${crossed.stdout}${crossed.stderr}`);
+  assert.match(
+    crossed.stderr,
+    /H9\.limit_in_use\.source_facts are not this candidate's snapshot source facts/,
+  );
+  assert.match(
+    crossed.stderr,
+    /snapshot_requests is true; this candidate's source says null/,
+  );
+  // The other candidate's own answer: its facts, projected by its projection, consistent there and refused here.
+  const other = join(assembledCopy(t), "handoff");
+  editJson(join(other, "results.json"), (r) => {
+    r.H9.limit_in_use.source_facts = theirs;
+    r.H9.limit_in_use.snapshot_requests = null;
+    r.H9.limit_in_use.snapshot =
+      "UNVERIFIED on this candidate: the source does not show boot_leads_by_default (src/app/boot.tsx); no answer is given (neither sent nor not sent)";
+  });
+  resum(other);
+  const there = validateWith(base, other);
+  assert.equal(there.status, 0, `${there.stdout}${there.stderr}`);
+  const here = validateWith(root, other);
+  assert.equal(here.status, 1, `${here.stdout}${here.stderr}`);
+  assert.match(
+    here.stderr,
+    /H9\.limit_in_use\.source_facts are not this candidate's snapshot source facts/,
+  );
 });

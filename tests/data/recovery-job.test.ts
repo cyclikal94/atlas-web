@@ -1305,3 +1305,63 @@ describe("review cycle 2: a request refused before it was sent is an explicit ad
     expect(w.sync().cursor).toBe("d2");
   });
 });
+
+describe("the snapshot request's limit is the captured sizing rung (WEB-09c revision 5, review 5 R6)", () => {
+  // The hand-over's H9 states the production SOURCE path of snapshot requests (scripts/lib/profile-source-facts.mjs); this is the behaviour
+  // that statement describes, on the wire: the job asks `/sync` cursor-less, then at each staged position, with the `limit` its capture
+  // took from the persistent sizing ladder, never above `syncLimitMax`.
+  const limits = (w: RecoveryWorld) =>
+    w.requests.map((r) => r.url.searchParams.get("limit"));
+
+  test("no device-memory signal: every snapshot page is asked for at the lowest rung (1)", async () => {
+    const w = await recoveryWorld();
+    w.script.push(w.page_(snap([1])), w.page_(finalSnap([2])));
+    await w.bindJob();
+    await w.settle();
+    expect(cursors(w)).toEqual([null, "snap-1"]);
+    expect(limits(w)).toEqual(["1", "1"]);
+    expect(w.sync().sizing).toMatchObject({ class: "unknown", limit: 1 });
+  });
+
+  test("an unconstrained device (8 GiB) starts at its rung (4); a constrained one (4 GiB) at 1", async () => {
+    const big = await recoveryWorld({
+      signals: { deviceMemoryGiB: 8, hasStorageEstimate: true },
+    });
+    big.script.push(big.page_(finalSnap([1])));
+    await big.bindJob();
+    await big.settle();
+    expect(limits(big)).toEqual([
+      String(DATA_CONFIG.initialLimitUnconstrained),
+    ]);
+    expect(DATA_CONFIG.initialLimitUnconstrained).toBe(4);
+    const small = await recoveryWorld({
+      signals: { deviceMemoryGiB: 4, hasStorageEstimate: true },
+    });
+    small.script.push(small.page_(finalSnap([1])));
+    await small.bindJob();
+    await small.settle();
+    expect(limits(small)).toEqual([String(DATA_CONFIG.initialLimitOther)]);
+    expect(DATA_CONFIG.initialLimitOther).toBe(1);
+  });
+
+  test("a persisted rung is what the snapshot asks for: a step-down survives a new job, whatever the device class says", async () => {
+    const stepped = await recoveryWorld({
+      signals: { deviceMemoryGiB: 8, hasStorageEstimate: true },
+    });
+    stepped.setSync({
+      sizing: {
+        limit: 2,
+        class: "unconstrained",
+        floor_hits: 0,
+        attempt: null,
+      },
+    });
+    stepped.script.push(
+      stepped.page_(snap([1])),
+      stepped.page_(finalSnap([2])),
+    );
+    await stepped.bindJob();
+    await stepped.settle();
+    expect(limits(stepped)).toEqual(["2", "2"]);
+  });
+});

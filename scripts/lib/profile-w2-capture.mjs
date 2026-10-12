@@ -18,7 +18,16 @@
 //    checked ids, each one of the field's own items.
 // The production scanner and decoder are the structural reference; they cannot establish the density (an unregistered value kind is
 // accepted by them), which is what this adds. Ordinary batches beside the target (a limit-80 page can carry them) stay legal when valid.
+//
+// Revision 5 (review 5 R2; design assessment DA-E1/DA-E2, A1/A3): the reference is no longer only restated. The checks above read a PARSED
+// page, after `JSON.parse` has collapsed a duplicated page or batch key, re-spelt a revision such as `12e0` and the decoder has dropped a
+// byte order mark, and none of them applied production's nesting, element-size or element-node gates. So every capture that reaches the
+// page body is also put, as the bytes it is, through the candidate's own receive path (scripts/lib/production-page-reader.mjs: the
+// response bound, the byte scan, every element's decoder and gates, companion batches included); its refusal is a problem of the capture,
+// and a refused capture yields no target, no digest and no derived figure (nothing is derived from bytes production would not admit). The
+// earlier refusals of bytes that are not UTF-8, not JSON or not a page object stay as they were (production refuses those too).
 import { createHash } from "node:crypto";
+import { productionRefusal } from "./production-page-reader.mjs";
 
 /** The seed the integration writer makes (tests/integration/integration.profile-sync.spec.ts `seedDensePerson`, `denseChecklist`). */
 export const W2_SEED = Object.freeze({
@@ -168,7 +177,8 @@ export function denseChecklistProblem(value) {
  * Observes one W2 capture. `bytes`: the file as captured (a Buffer or Uint8Array); `person`: the seeded person's id the writer recorded;
  * `limit`: the page limit it was read with (1 or 80). Returns every `problems` found (empty: a valid W2 target capture), the `page` as read
  * (null when there is no page) and the `target` batch (null when there is none): its index, revision, the person, its distinct field ids
- * in order, the value size of its checklists and a digest of its canonical contents, for the cross-limit comparison.
+ * in order, the value size of its checklists and a digest of its canonical contents, for the cross-limit comparison. Revision 5: when the
+ * production receive path refuses the bytes, `page` and `target` are both null and that refusal is one of the problems.
  */
 export function observeW2Capture(bytes, { person, limit }) {
   const problems = [];
@@ -254,6 +264,15 @@ export function observeW2Capture(bytes, { person, limit }) {
     changes,
     revisions: batches.map((b) => (isObj(b) ? b.revision : null)),
   };
+  // The bytes themselves through the production receive path (revision 5): a page production refuses is not a capture of what it would
+  // process, whatever its parsed form looks like, and nothing is derived from it: no page figures (a caller would read the bytes again to
+  // reconcile them; a byte order mark, for one, is dropped by this file's decoder but not by `Buffer#toString`) and no target.
+  const refusal = productionRefusal(bytes, { limit });
+  if (refusal) {
+    add(refusal);
+    out.page = null;
+    return out;
+  }
 
   // The target: the one batch that holds the seeded person, which must be the seed and nothing else.
   const holding = batches

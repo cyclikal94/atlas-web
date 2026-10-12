@@ -58,6 +58,7 @@ import {
 } from "./lib/profile-evidence.mjs";
 import { startLoadSampler } from "./lib/profile-isolation.mjs";
 import { projectResults, renderReport } from "./lib/profile-projection.mjs";
+import { snapshotSourceFacts } from "./lib/profile-source-facts.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const USAGE =
@@ -613,6 +614,8 @@ function assembleHandoff() {
       machine: machineRecord,
       pinned: JSON.parse(readFileSync(join(root, "contract-pin.json"), "utf8")),
       configValues: constants(),
+      // Revision 5 (review 5 R6): H9's snapshot answer, read from this candidate's code; the validator reads it again from its own.
+      sourceFacts: snapshotSourceFacts(root),
     },
   });
   writeFileSync(

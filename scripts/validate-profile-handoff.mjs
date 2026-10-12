@@ -52,6 +52,7 @@ import {
   projectResults,
   renderReport,
 } from "./lib/profile-projection.mjs";
+import { snapshotSourceFacts } from "./lib/profile-source-facts.mjs";
 import { observeW2Capture } from "./lib/profile-w2-capture.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -527,6 +528,37 @@ function publicationProblems(results, recomputed, at) {
   if (canonical(shown) !== canonical(context.configValues))
     problems.push(
       "programme.P-12.values are not the constants constants.md shows",
+    );
+  // Revision 5 (review 5 R6): H9's snapshot answer is a fact of the candidate's code, read here again from this candidate, and the published
+  // answer must state it in its own terms. A projection that restored a constant answer would publish the same text through the assembler
+  // and through this validator's re-projection; this check does not depend on that text agreeing with itself.
+  const facts = snapshotSourceFacts(root);
+  if (canonical(context.sourceFacts) !== canonical(facts))
+    problems.push(
+      "H9.limit_in_use.source_facts are not this candidate's snapshot source facts",
+    );
+  const limits = results?.H9?.limit_in_use;
+  if (limits?.snapshot_requests !== facts.snapshot_requests)
+    problems.push(
+      `H9.limit_in_use.snapshot_requests is ${JSON.stringify(limits?.snapshot_requests)}; this candidate's source says ${JSON.stringify(facts.snapshot_requests)}`,
+    );
+  const answer = String(limits?.snapshot ?? "");
+  if (facts.snapshot_requests === true) {
+    const unnamed = facts.links.filter((l) => !answer.includes(l.file));
+    if (
+      !answer.startsWith("sent by the production composition") ||
+      unnamed.length
+    )
+      problems.push(
+        `H9.limit_in_use.snapshot does not state this candidate's snapshot request path${unnamed.length ? ` (it names none of ${unnamed.map((l) => l.file).join(", ")})` : ""}`,
+      );
+  } else if (!answer.startsWith("UNVERIFIED"))
+    problems.push(
+      "H9.limit_in_use.snapshot gives an answer this candidate's source does not support",
+    );
+  if (limits?.snapshot_measured !== false)
+    problems.push(
+      "H9.limit_in_use.snapshot_measured is not false: this programme measures no production snapshot",
     );
   let projected = null;
   try {

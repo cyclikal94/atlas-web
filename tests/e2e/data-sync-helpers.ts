@@ -38,11 +38,11 @@ export interface SyncStub {
   /** Every command request, in order, and what answers them next (when empty: `200 {revision}` with a rising revision). */
   commands: CommandRequest[];
   commandScript: Array<(request: CommandRequest) => CommandAnswer>;
-  /** The pages (or errors) `/sync` answers next, in order; when empty, an empty page. */
+  /** The pages (or errors) `/sync` answers next, in order; when empty, an empty page. A `Buffer` body is served as exactly those bytes. */
   script: Array<
     (url: URL) => {
       status: number;
-      body: string;
+      body: string | Buffer;
       headers?: Record<string, string>;
     }
   >;

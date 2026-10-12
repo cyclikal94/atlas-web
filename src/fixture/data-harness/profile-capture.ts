@@ -84,13 +84,20 @@ export async function sha256Bytes(bytes: Uint8Array): Promise<string> {
  * is refused BEFORE anything is written), together with its name, in ONE record written by one `setItem`: a write the storage refuses
  * (quota, denied) leaves the previous capture exactly as it was, never a new name over old bytes or no capture at all. The run hashes what
  * it read, so any difference would show.
+ *
+ * Revision 5 (design assessment DA-E3, A2): the text must give back EXACTLY the picked bytes. Well-formed UTF-8 decodes and encodes back to
+ * itself, with one exception the decoder makes by default: it drops a leading byte order mark, so the kept capture would be other bytes than
+ * the file (and the read-back check would then fail AFTER the previous capture was replaced). The decoder keeps it (`ignoreBOM`).
  */
 export function sessionStore(
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> = sessionStorage,
 ): CaptureStore {
   return {
     async put(bytes, name) {
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const text = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(bytes);
       storage.setItem(CAPTURE_KEY, JSON.stringify({ name, text }));
     },
     async get() {

@@ -34,7 +34,18 @@ export function contextOf(results) {
     machine: results?.machine ?? null,
     pinned: results?.backend?.pin ?? null,
     configValues: results?.programme?.["P-12"]?.values ?? null,
+    sourceFacts: results?.H9?.limit_in_use?.source_facts ?? null,
   };
+}
+
+/** What the snapshot phase's request is, from the candidate's source facts (scripts/lib/profile-source-facts.mjs; revision 5, review 5 R6). */
+function snapshotAnswer(facts, config) {
+  if (facts?.snapshot_requests === true)
+    return `sent by the production composition (${facts.links.map((l) => l.file).join(" -> ")}): the recovery job asks /sync for snapshot pages, cursor-less and then at each staged position, with the limit its capture took from the persistent sizing ladder: the same rungs as delta (${config?.config?.initialLimitUnconstrained ?? "?"} unconstrained, ${config?.config?.initialLimitOther ?? "?"} otherwise, unknown memory included; step-down only; never above syncLimitMax ${config?.config?.syncLimitMax ?? "?"}). Only when the cache needs one (a first snapshot, a server-instructed restart, recovery); capability, identity, connectivity, admission and stops can withhold a request`;
+  const failing = (facts?.links ?? [])
+    .filter((l) => !l.holds)
+    .map((l) => `${l.id} (${l.file})`);
+  return `UNVERIFIED on this candidate: the source does not show ${failing.length ? failing.join(", ") : "the request path"}; no answer is given (neither sent nor not sent)`;
 }
 
 /** A reader of the carried evidence that never throws: a malformed file is `null` (its cell in the resolution says why). */
@@ -201,11 +212,17 @@ const listOf = (resolution, status) =>
 
 /**
  * `results.json` of a hand-over: every field from the carried evidence, its resolution, and `context` ({ now, machine, pinned,
- * configValues }). Deterministic: the same inputs give the same object, field for field.
+ * configValues, sourceFacts }). Deterministic: the same inputs give the same object, field for field.
  */
 export function projectResults({ evidenceDir, resolution, context }) {
   const r = reader(evidenceDir);
-  const { now, machine: machineRecord, pinned, configValues } = context;
+  const {
+    now,
+    machine: machineRecord,
+    pinned,
+    configValues,
+    sourceFacts,
+  } = context;
   const item = (name) =>
     resolution.items[name] ?? { status: "not_run", cells: 0, satisfied: 0 };
   const statusOf = (name) => item(name).status;
@@ -383,7 +400,7 @@ export function projectResults({ evidenceDir, resolution, context }) {
     "BE-B1:6 derived values": entry(
       "partial",
       ["H9", "C1", "C3", "C5"],
-      "desktop D(engine), W1/W2 admission at limit 1 on desktop, the limit in use per phase (source), per-request overhead (P-4), the validator's use of maxItems (source); needs_finer_pagination is UNDETERMINED for supported devices",
+      "desktop D(engine), W1/W2 admission at limit 1 on desktop, the limit in use per phase (source: delta from the sizing constants, snapshot from the production composition's source facts; production snapshot requests were not measured, WEB-09b/WEB-09d), per-request overhead (P-4), the validator's use of maxItems (source); needs_finer_pagination is UNDETERMINED for supported devices",
       devicesOwner,
     ),
     "BE-B1:7 format": entry(
@@ -636,9 +653,15 @@ export function projectResults({ evidenceDir, resolution, context }) {
       status: "partial",
       limit_in_use: {
         delta: `${configValues?.config?.initialLimitUnconstrained ?? "?"} at the unconstrained initial rung, ${configValues?.config?.initialLimitOther ?? "?"} for every other class; step-down only (step-up ${configValues?.config?.stepUpAfterSuccesses === null ? "disabled" : "enabled"}); never above syncLimitMax ${configValues?.config?.syncLimitMax ?? "?"}`,
-        snapshot:
-          "not sent by this client: the first snapshot is WEB-09b's (production starts no engine yet)",
+        // Revision 5 (review 5 R6): the snapshot phase's request is read from the candidate's source facts, never a constant; what the
+        // programme did NOT measure is said apart from it.
+        snapshot: snapshotAnswer(sourceFacts, configValues),
+        snapshot_requests: sourceFacts?.snapshot_requests ?? null,
+        snapshot_measured: false,
+        snapshot_measurement:
+          "NOT measured by this programme: its fixture leader seeds a delta cache and W5 exercises snapshot-shaped processing only, so production first-snapshot, adoption and recovery performance and the limits a production snapshot really used are not evidence here; WEB-09b owns production leadership, snapshot and recovery, WEB-09d integrated and supported-device acceptance",
         source: "src/data/model/config.ts (constants.md)",
+        source_facts: sourceFacts ?? null,
       },
       client_validator_consumes_SyncPage_batches_maxItems: false,
       reason_validator:

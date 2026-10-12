@@ -36,12 +36,14 @@ export const commitsOf = (trace: string[]): Commit[] =>
  *
  * Every attempt returns its record: a context that cannot be set up, a crash or a failed read after a time-out is an `error` run with its
  * detail and whatever was measured before it, never an attempt that vanishes. The context is closed on every path.
+ *
+ * A `Buffer` body (a captured W2 page, WEB-09c revision 5) is served as exactly those bytes, never re-encoded from text.
  */
 export async function oneColdRun(
   browser: Browser,
   baseURL: string | undefined,
   engine: string,
-  body: string,
+  body: string | Buffer,
 ) {
   let context: BrowserContext | null = null;
   const memory = browserMemory();

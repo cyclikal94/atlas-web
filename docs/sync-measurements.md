@@ -36,14 +36,28 @@ is a pass mark, none stands for a device class, and BE-B1 and BE-Q23 remain bloc
 > manual collection one recorded recovery (take-over or the owner's own), records a reserved attempt once as `killed` and never runs it again, resolves every
 > action against a chosen collection, and stops a run's engine whatever its observation throws. Nothing in the contract's evidence format changed; every
 > historical measurement stays history.
+>
+> **Status after review 5 (revision 5, 11 October 2026).** Review 5 found that the observer still certified a capture whose BYTES production refuses but whose
+> parsed form looked right (a duplicated page or batch key, a revision written `12e0`), so such a hand-over could still be complete (R2), and that H9 still said
+> this client sends no snapshot, which stopped being true when production leadership was merged (R6). The design assessment added that production's nesting,
+> element-size and element-node gates were never applied (a companion batch included) and that the writer read the capture with `Response.text()`, which drops a
+> byte order mark and replaces invalid UTF-8 before anything is hashed. Revision 5 puts every capture, as its bytes, through the **candidate's own receive path**
+> (`scripts/lib/production-page-reader.mjs` loads `scan.ts`, `validate.ts` and `config.ts` of the candidate: the response bound, the byte scan, every element's
+> decoder and gates) before any W2 check, in the writer, the contract and both validator modes alike; a refused capture yields no page figures and no target, and
+> the reader refuses to start (so nothing is certified) if it cannot load those modules or the production decode composition changes. The writer now keeps the
+> response body's exact bytes (`tests/e2e/profile-sync-read.ts`), and the cold replays and the device page's store give them back unchanged. H9's snapshot answer
+> is read from the candidate's source (`scripts/lib/profile-source-facts.mjs`), checked again by the validator against its own candidate, and kept apart from what
+> the programme measured (no production snapshot). The final programme runs against the candidate's pinned backend, now **v0.28.0-rc.1** (main's API 0.28 merge);
+> every 0.27.0-rc.1 figure below is history.
 
 ## Read this first
 
 * **Desktop only.** No real device, floor device, installed web app or browser without a device-memory signal was profiled. BE-B1 item 2 and BE-Q23 M1 are
   `escalated`, and `needs_finer_pagination` is **undetermined for supported devices**.
 * **Fixture and real backend are kept apart.** P-2, P-3, P-5, P-11, P-13, P-Q and P-Q2 use a stub network (the real stamped wrapper and the production engine). P-4,
-  P-10 and P-W2 use the released backend (v0.27.0-rc.1, disposable SQLite, loopback, behind the delaying proxy). The sync leader in every case is the FIXTURE test
-  leader: production leadership is WEB-09b's.
+  P-10 and P-W2 use the released backend (attempt 4: v0.27.0-rc.1; the final programme: the candidate's pin, v0.28.0-rc.1; disposable SQLite, loopback, behind the
+  delaying proxy). The sync leader in every case is the FIXTURE test leader: production leadership, which the production build now starts (WEB-09b), is not what
+  this programme measures.
 * **Memory labels.** "JS heap" is Chromium's own heap (CDP). "RSS" is the browser's own processes from `ps`. From revision 2 that is the test worker's descendants
   plus, for WebKit on macOS, every service in its host's launchd PID domain (`scripts/lib/browser-processes.mjs`); each run records its process set, sample count,
   failed samples and whether its attribution was complete, and a run without complete attribution is not memory evidence. Attempt 4's RSS (below) was
@@ -87,7 +101,7 @@ programme that is merely incomplete or not isolated is a partial hand-over (2 wh
 
 | # | Consumer and decision | What the desktop evidence shows | What it cannot settle |
 | --- | --- | --- | --- |
-| C1 | BE-B1 M1: `N` in [the largest client `limit` in either phase and the default 50, 80] | This client sends `limit` 4 at the unconstrained initial rung and 1 for every other class, step-down only, never above 80 (`src/data/model/config.ts`). The engine asked for `limit=1` in every run here. It sends no snapshot request: the first snapshot is WEB-09b's. Snapshot-shaped pages of 1 to 80 batches (W5) were processed on all three desktop engines | The rung of each device class; the snapshot-phase `limit` (WEB-09b) |
+| C1 | BE-B1 M1: `N` in [the largest client `limit` in either phase and the default 50, 80] | This client sends `limit` 4 at the unconstrained initial rung and 1 for every other class, step-down only, never above 80 (`src/data/model/config.ts`). The engine asked for `limit=1` in every run here. **Current source (revision 5):** the production build also sends snapshot requests: boot starts the leader by default and its recovery job asks `/sync` for snapshot pages with the limit captured from the same persistent sizing ladder, so the same rungs apply in both phases (H9 `limit_in_use`, read from the candidate's code). *(Historical, attempt 4: "It sends no snapshot request: the first snapshot is WEB-09b's" was true of that candidate and is no longer current.)* Snapshot-shaped pages of 1 to 80 batches (W5) were processed on all three desktop engines; no production snapshot was measured | The rung of each device class; the limits production snapshots really use and their cost (not measured: WEB-09b, WEB-09d) |
 | C2 | BE-B1 D6 / BE-Q23 D1 (joint approver decision): is the 800-change W1 binding, or is the server-reachable W2 enough? | In attempt 4 both were admitted on every desktop engine, in every cold run (W2 also live). W1 is 6,108,903 bytes, 800 changes and 455,214 nodes. W2 from the released server is 1,520,162 bytes and 200 changes (199 dense checklists plus their person), about a quarter of W1 | The decision itself (Kieran); any device |
 | C3 | BE-Q23 §4.2: *D(c, b)*, `needs_finer_pagination`, the smallest failing unit | In attempt 4, desktop *D* = 800 dense changes on all three engines (the largest rung of the ladder) and no valid workload failed on a desktop engine. That run predates the completeness inventory, so the hand-over's desktop answer (H8, H9) is drawn only from the final run, and only if its programme is complete | **Every supported device class.** Without the roster, `needs_finer_pagination` stays undetermined |
 | C4 | BE-Q23 M7: the cost of finer requests (per-request lease and lock) | Per sync page against the real backend on loopback: about 4 to 7 ms in total (p50), of which pre-issue (capture, lease cover, stamping) is 1.5 to 3 ms. A draft submission: 17 to 33 ms (p50). Behind a 250 ms proxy delay the request is 254 to 255 ms | A 10,000-resource snapshot (WEB-09b); device CPU |
@@ -385,7 +399,8 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
 ## Not measured, and who owns it
 
 * The device roster and every device-class figure: escalated (OD-1); the package is `docs/profiling-devices.md`.
-* The production leader, the first snapshot, a takeover mid-snapshot and a 10,000-resource snapshot: WEB-09b.
+* The production leader, the first snapshot, a takeover mid-snapshot and a 10,000-resource snapshot: WEB-09b. The production build sends snapshot requests (H9's
+  source answer); their measurement is not part of this programme.
 * A real freeze or back/forward-cache restore and the composed lifecycle: WEB-08c, with WEB-09d's final acceptance.
 * Integrated released-backend acceptance, PostgreSQL, HTTPS deployment, real Safari, installed apps and supported-device dense workloads: WEB-09d.
 * `maxInFlight` 2 and 3 (decision D-18 fixes 1).

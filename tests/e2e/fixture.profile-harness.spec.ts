@@ -59,20 +59,27 @@ async function pick(page: Page): Promise<void> {
 }
 
 type Collected = { protocol_id: string; runs: Run[] } | null;
+/** The page's own reading. A document whose lazily loaded page has not mounted yet says so by name (revision 5), never as "no results". */
+const NOT_MOUNTED = "the profile page has not mounted in this document";
 const collected = (page: Page, which: "results" | "manual") =>
   page.evaluate(
-    (w) =>
-      (
+    ({ w, notMounted }) => {
+      const profile = (
         window as unknown as {
-          __profile: Record<string, () => unknown>;
+          __profile?: Record<string, () => unknown>;
         }
-      ).__profile[w]?.() as Collected,
-    which,
+      ).__profile;
+      if (profile === undefined) throw new Error(notMounted);
+      return profile[w]?.() as Collected;
+    },
+    { w: which, notMounted: NOT_MOUNTED },
   );
 
 /**
  * The protocol reloads its own page between runs: a read waits for the lazily loaded page to have mounted, and one that lands on a
  * navigation is retried (only that error), never taken as "no results". Used by the cases that read a protocol while it runs.
+ * Revision 5 (harness, found by the pool's Chromium run of request-b4721ac119d44b39a381): the wait can see the OLD document mounted and
+ * the read then run in the new one before its page mounts; that read is retried too (`NOT_MOUNTED`), as a navigation is.
  */
 async function collectedWhileRunning(
   page: Page,
@@ -96,7 +103,10 @@ async function collectedWhileRunning(
         );
       return read;
     } catch (error) {
-      if (!/Execution context was destroyed|navigat/i.test(String(error)))
+      if (
+        !/Execution context was destroyed|navigat/i.test(String(error)) &&
+        !String(error).includes(NOT_MOUNTED)
+      )
         throw error;
       await page.waitForLoadState("domcontentloaded").catch(() => undefined);
     }
@@ -238,7 +248,8 @@ test("case: another tab, a plain menu page or the protocol URL, only reads the a
     await expect(other.locator("#profile-status")).toContainText("Refused:");
     expect(await writesOf(other)).toBe(0);
   }
-  const owned = await collected(page, "results");
+  // The owner's protocol is still running (it reloads its page between runs): read it as a running protocol is read (revision 5).
+  const owned = await collectedWhileRunning(page, "results");
   expect(owned?.protocol_id).toBeTruthy();
 });
 
