@@ -8,6 +8,7 @@ import { momentLabel } from "../format";
 import {
   forgetRefusal,
   type JointAnswer,
+  noteIfRefused,
   noteRefusal,
   refusalOf,
 } from "../memory";
@@ -292,12 +293,12 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       s === "saved" || s === "refused" || s === "failed" ? s : "loading",
     );
     void env.api.readEnrolment(taskId).then((result) => {
+      noteIfRefused(env.identity, readKey, result);
       if (!live) return;
       if (result.ok) {
         setEnrolment(result.value);
         setState((s) => (s === "loading" ? "idle" : s));
       } else if (result.kind === "forbidden" || result.kind === "not_found") {
-        noteRefusal(env.identity, readKey, result.kind);
         setState("unavailable");
       } else if (result.kind !== "closed") setState("unavailable");
     });

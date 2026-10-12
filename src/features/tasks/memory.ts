@@ -59,6 +59,23 @@ export function noteRefusal(
   bounded(memoryOf(identity).refused, read, kind);
 }
 
+/**
+ * Records a refusal of a mount-time read AS SOON AS THE ANSWER ARRIVES, whatever became of the screen that asked: the session closes and
+ * reopens the display on a `403` before the screen's own continuation runs, so a screen that remembered it only while mounted would be
+ * remounted, ask again and be refused again, for ever (measured natively: dozens of `/daily` reads a second).
+ */
+export function noteIfRefused(
+  identity: string,
+  read: string,
+  result: { ok: boolean; kind?: string },
+): void {
+  if (
+    !result.ok &&
+    (result.kind === "forbidden" || result.kind === "not_found")
+  )
+    noteRefusal(identity, read, result.kind);
+}
+
 /** "Try again": the person asks for the read again. */
 export function forgetRefusal(identity: string, read: string): void {
   memoryOf(identity).refused.delete(read);

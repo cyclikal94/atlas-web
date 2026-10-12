@@ -9,7 +9,7 @@ import {
 } from "../../../data";
 import type { TasksApi, TasksResult } from "../api";
 import { useTasksEnv } from "../env";
-import { forgetRefusal, noteJoint, noteRefusal, refusalOf } from "../memory";
+import { forgetRefusal, noteIfRefused, noteJoint, refusalOf } from "../memory";
 import { QUEUED_KINDS } from "../model/commands";
 import {
   type OccurrencePage,
@@ -68,6 +68,8 @@ export async function readWholeDay(
     limit: number;
   },
   isCurrent: () => boolean,
+  /** Called with every answer as it arrives, before anything else (the refusal memo, which must not depend on the screen). */
+  onAnswer: (result: TasksResult<OccurrencePage>) => void = () => undefined,
 ): Promise<
   | { ok: true; items: OccurrenceView[]; pendingTasks: string[] }
   | { ok: false; error: DailyError | "refused" | "closed" | "offline" }
@@ -85,6 +87,7 @@ export async function readWholeDay(
         ...(after === undefined ? {} : { after }),
         ...(revision === undefined ? {} : { revision }),
       });
+      onAnswer(page);
       if (!isCurrent()) return { ok: false, error: "closed" };
       if (!page.ok) {
         if (page.kind === "conflict" && revision !== undefined) {
@@ -157,6 +160,17 @@ export function useTodayView(day: string, zone: string): TodayView {
   const key = `${env.identity}\u0000${day}\u0000${zone}`;
   const pageSeq =
     position.status === "ready" ? (position.value?.pageSeq ?? -1) : -2;
+  // A committed sync page moves `pageSeq`; the position's own first load (loading → ready) is not a change of the cache, so the server
+  // read is not restarted (and its first answer discarded) by it.
+  const [syncTick, setSyncTick] = useState(0);
+  const lastSeq = useRef<number | null>(null);
+  useEffect(() => {
+    if (pageSeq < 0) return;
+    if (lastSeq.current !== null && lastSeq.current !== pageSeq)
+      setSyncTick((n) => n + 1);
+    lastSeq.current = pageSeq;
+  }, [pageSeq]);
+  const ready = position.status;
   const noDatabase = position.status === "unavailable";
 
   const outstanding: Outstanding = useMemo(
@@ -205,7 +219,7 @@ export function useTodayView(day: string, zone: string): TodayView {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [data, key, pageSeq, draftsKey]);
+  }, [data, key, ready, syncTick, draftsKey]);
 
   // ---- the two /daily reads: on mount, day/zone change, reconnect, a committed sync page, a retry, a window boundary --------------
   const read = useRef(0);
@@ -224,8 +238,12 @@ export function useTodayView(day: string, zone: string): TodayView {
     const timer = setTimeout(() => {
       const query = { day, zone, limit: env.dailyPageSize };
       void Promise.all([
-        readWholeDay(env.api, { ...query, scope: "joint" }, isCurrent),
-        readWholeDay(env.api, { ...query, scope: "personal" }, isCurrent),
+        readWholeDay(env.api, { ...query, scope: "joint" }, isCurrent, (r) =>
+          noteIfRefused(env.identity, DAILY, r),
+        ),
+        readWholeDay(env.api, { ...query, scope: "personal" }, isCurrent, (r) =>
+          noteIfRefused(env.identity, DAILY, r),
+        ),
       ]).then(([joint, personal]) => {
         if (!isCurrent()) return;
         if (!joint.ok || !personal.ok) {
@@ -235,8 +253,6 @@ export function useTodayView(day: string, zone: string): TodayView {
               ? personal.error
               : "closed";
           if (failed === "closed" || failed === "offline") return;
-          if (failed === "refused")
-            noteRefusal(env.identity, DAILY, "forbidden");
           setError(failed === "refused" ? { kind: "failed" } : failed);
           return;
         }
@@ -265,7 +281,7 @@ export function useTodayView(day: string, zone: string): TodayView {
       // A late answer for another identity, day or zone is dropped.
       if (read.current === mine) read.current += 1;
     };
-  }, [env.api, env.identity, env.online, key, pageSeq, attempt, now]);
+  }, [env.api, env.identity, env.online, key, syncTick, attempt, now]);
 
   const current = answer !== null && answer.key === key ? answer : null;
   const local = scan !== null && scan.key === key ? scan : null;
@@ -308,12 +324,16 @@ export function useTodayView(day: string, zone: string): TodayView {
         ...progressIds.values(),
         ...taskIds,
       ]);
-      if (live) setRelated({ progressIds, rows: rows ?? new Map() });
+      // The merged rows (cache with its admitted overlay), never the listing wrapper.
+      const merged = new Map<string, CacheRow>();
+      for (const [rowId, listed] of rows ?? [])
+        merged.set(rowId, listed.merged);
+      if (live) setRelated({ progressIds, rows: merged });
     })();
     return () => {
       live = false;
     };
-  }, [idsKey, pageSeq, draftsKey, env.accountId, data]);
+  }, [idsKey, ready, syncTick, draftsKey, env.accountId, data]);
 
   // ---- rows ----------------------------------------------------------------------------------------------------------------------------
   const composed = useMemo(() => {

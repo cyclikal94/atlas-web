@@ -3,8 +3,11 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
+import { noteIfRefused, refusalOf } from "../memory";
 import type { TaskDefinition, TaskPreset } from "../model/contract";
 import { todayIn } from "../model/time";
+
+const PRESETS = "presets";
 
 export const PRESET_COPY = {
   title: "New task",
@@ -73,11 +76,17 @@ export function PresetPicker({
       setState({ kind: "offline" });
       return;
     }
+    // A refused read is not asked again on a remount (a 403 remounts the tree), only when the picker is opened afresh by the person.
+    if (refusalOf(env.identity, PRESETS) !== null) {
+      setState({ kind: "failed" });
+      return;
+    }
     let live = true;
     setState({ kind: "loading" });
     void env.api
       .readPresets({ startDate: todayIn(zone, env.now()), zone })
       .then((result) => {
+        noteIfRefused(env.identity, PRESETS, result);
         if (!live) return;
         if (result.ok) {
           setState({ kind: "ready", presets: result.value });

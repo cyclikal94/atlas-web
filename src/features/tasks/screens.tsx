@@ -21,7 +21,15 @@ export const deviceZone = (): string => {
   return isKnownZone(zone) ? zone : "UTC";
 };
 
-export function TodayScreen({
+export function TodayScreen(props: { search: { day?: string; tz?: string } }) {
+  return (
+    <TasksBoundary>
+      <TodayWithDefaults {...props} />
+    </TasksBoundary>
+  );
+}
+
+function TodayWithDefaults({
   search,
 }: {
   search: { day?: string; tz?: string };

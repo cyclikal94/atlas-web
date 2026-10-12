@@ -78,7 +78,8 @@ export function countRows(rows: readonly RowInputs[]): Counts {
   for (const row of rows) {
     if (row.outcome === "complete") done += 1;
     else if (row.actionable) toDo += 1;
-    if (row.outcome === null || row.outcome === "unknown") notKnown += 1;
+    // Not known: a row that is neither done nor to do and whose state this device cannot tell (never counted as zero).
+    else if (row.outcome === null || row.outcome === "unknown") notKnown += 1;
   }
   return { total: rows.length, done, toDo, notKnown };
 }

@@ -688,7 +688,7 @@ function TaskForm({
                 className="mt-0.5 size-[15px]"
               />
               <span className="flex flex-col">
-                <span>{copy.CARRY[carry].label}</span>
+                <span>{copy.CARRY[carry].label}</span>{" "}
                 <span className="text-[12px] text-ink-2">
                   {copy.CARRY[carry].line}
                 </span>
@@ -720,7 +720,7 @@ function TaskForm({
                 className="mt-0.5 size-[15px]"
               />
               <span className="flex flex-col">
-                <span>{copy.PARTICIPATION[p]}</span>
+                <span>{copy.PARTICIPATION[p]}</span>{" "}
                 <span className="text-[12px] text-ink-2">
                   {copy.PARTICIPATION_LINE[p]}
                 </span>
