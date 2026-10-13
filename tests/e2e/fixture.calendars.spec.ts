@@ -2546,7 +2546,9 @@ test.describe("E-CAL14: automatic reads are once per visit (revision 5, R11)", (
  *
  *  - R12: who may record a refresh's outcome is decided by admission. Refresh A is held; the person goes to Settings and back (a new
  *    screen and controller); Refresh B (a new key) is pressed and, in one schedule, refused `422 invalid_ics`; then A's success arrives.
- *    A newer admission owns the source for good, so the row keeps B's state. With no newer press, A's late success is shown (the
+ *    A newer admission owns the source for good, so the row keeps B's state, and so does a screen built later from the identity's
+ *    memory (Settings and back once more: real-engine mutant MU-1448 corrupted only that memory, which the mounted row alone did not
+ *    show). With no newer press, A's late success is shown (the
  *    legitimate late outcome, and the positive control that the late answer is delivered within the bounded window the other two use;
  *    production timers are unchanged).
  *  - R13: a visit ends when the DOCUMENT leaves the screen, even while the protected tree is closed. A manual Refresh refused with an
@@ -2620,6 +2622,19 @@ test.describe("E-CAL15: refresh ownership by admission and departures while clos
         });
         await expect(state).toHaveAttribute("data-refresh", "failed");
       }
+      // A screen built later (Settings and back again) shows what the identity REMEMBERS: the owner's outcome, never the older answer
+      // (the mounted screen alone cannot tell: its own ticket check keeps its row right even if the shared memory took the older one).
+      await page
+        .locator("#main")
+        .getByRole("link", { name: "Settings", exact: true })
+        .click();
+      await expect(row).toHaveCount(0);
+      await page.getByRole("link", { name: "Calendars", exact: true }).click();
+      await expect(row).toHaveAttribute("data-observation", OBSERVED);
+      await expect(state).toHaveAttribute(
+        "data-refresh",
+        schedule === "no newer press" ? "succeeded" : "failed",
+      );
       expect(refreshes(cal)).toHaveLength(
         schedule === "no newer press" ? 1 : 2,
       );
