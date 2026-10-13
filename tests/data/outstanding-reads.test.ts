@@ -569,6 +569,46 @@ describe("R4: readOutstandingByKind continues through rows that do not match", (
     expect(all.pages).toBe(2);
   });
 
+  test("an entry of a status read further than another is answered once, on the page that reaches it", async () => {
+    const w = await pageWorld();
+    // The queued status is read only to 1,000 by the first page (other kinds); the rejected one, short, is read to its end.
+    w.put(
+      "drafts",
+      Array.from({ length: 1_200 }, (_, i) =>
+        draftRow({
+          local_id: uuid(10_000 + i),
+          created_seq: i + 1,
+          kind: "create_list",
+        }),
+      ),
+    );
+    w.put("drafts", [
+      draftRow({
+        local_id: uuid(30_001),
+        created_seq: 1_300,
+        kind: "record",
+        status: "rejected",
+        target_resource_ids: [A],
+        index_targets: [A],
+      }),
+      draftRow({
+        local_id: uuid(30_002),
+        created_seq: 1_301,
+        kind: "record",
+        target_resource_ids: [A],
+        index_targets: [A],
+      }),
+    ]);
+    const first = (await run(w, readOutstandingByKind as never, {
+      kinds: ["record"],
+    })) as Page;
+    expect(first.attention).toEqual([]);
+    expect(first.next).toBe(1_000);
+    const all = await follow(w, ["record"]);
+    expect(all.attention).toEqual([uuid(30_001)]);
+    expect(all.drafts).toEqual([uuid(30_002)]);
+  });
+
   test("statuses merge in queue order across pages; attention beyond a window is continued; every entry once", async () => {
     const w = await pageWorld();
     const statuses = ["queued", "in_flight", "blocked", "rejected"] as const;

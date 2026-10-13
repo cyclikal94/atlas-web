@@ -104,6 +104,7 @@ describe("R2: my result from /daily stops applying when it no longer describes t
       api.respond = () => pageOf([answer()]);
       const t = await mountTasks({ path: PATH, rows: task.rows, api });
       await t.until(() => row(task.occurrenceId)?.dataset.source === "server");
+      expect(row(task.occurrenceId)?.dataset.source).toBe("server");
       expect(row(task.occurrenceId)?.dataset.pill).toBe("on_track");
       t.rerender(tasksEnv(api, { online: false }));
       await t.settle();
@@ -123,37 +124,38 @@ describe("R2: my result from /daily stops applying when it no longer describes t
     async () => {
       const { task, closes, answer } = await provisionalTask(3);
       const api = fakeApi();
-      let reads = 0;
-      let release: ((r: TasksResult<OccurrencePage>) => void) | null = null;
-      api.readDaily = async () => {
-        reads += 1;
-        if (reads <= 2) return pageOf([answer()]);
-        // The re-read after the boundary is held until released.
-        if (release === null)
-          return new Promise((resolve) => {
-            release = resolve;
-          });
-        return never();
-      };
+      // Every read made before the boundary is answered at once (however many a remount makes); every read after it is HELD until
+      // released, so the row can be looked at between the boundary and the new answer.
+      const held: Array<(r: TasksResult<OccurrencePage>) => void> = [];
+      api.readDaily = async () =>
+        Date.now() < closes * 1000
+          ? pageOf([answer()])
+          : new Promise((resolve) => {
+              held.push(resolve);
+            });
       const t = await mountTasks({ path: PATH, rows: task.rows, api });
       await t.until(() => row(task.occurrenceId)?.dataset.source === "server");
+      // The precondition: before the boundary the row IS the server's answer (provisional, on track).
+      expect(row(task.occurrenceId)?.dataset.source).toBe("server");
+      expect(row(task.occurrenceId)?.dataset.pill).toBe("on_track");
       await waitReal(Math.max(0, closes * 1000 - Date.now()) + 300);
       await t.settle();
       expect(row(task.occurrenceId)?.dataset.pill).toBe("done");
       expect(row(task.occurrenceId)?.dataset.source).toBe("local");
       // The re-read the boundary asked for (two scopes) answers: the server's result shows again.
-      await t.until(() => release !== null);
-      const held = release as unknown as (
-        r: TasksResult<OccurrencePage>,
-      ) => void;
-      api.readDaily = async () =>
-        pageOf([answer({ outcome: "complete", period_outcome: "complete" })]);
-      await act(async () =>
-        held(
-          pageOf([answer({ outcome: "complete", period_outcome: "complete" })]),
-        ),
+      await untilLong(t, () => held.length >= 2);
+      expect(held.length).toBeGreaterThanOrEqual(2);
+      const complete = pageOf([
+        answer({ outcome: "complete", period_outcome: "complete" }),
+      ]);
+      await act(async () => {
+        for (const resolve of held.splice(0)) resolve(complete);
+      });
+      await untilLong(
+        t,
+        () => row(task.occurrenceId)?.dataset.source === "server",
       );
-      await t.until(() => row(task.occurrenceId)?.dataset.source === "server");
+      expect(row(task.occurrenceId)?.dataset.source).toBe("server");
       expect(row(task.occurrenceId)?.dataset.pill).toBe("done");
     },
   );
@@ -167,6 +169,7 @@ describe("R2: my result from /daily stops applying when it no longer describes t
       api.respond = () => pageOf([answer({ outcome: "complete" })]);
       const t = await mountTasks({ path: PATH, rows: task.rows, api });
       await t.until(() => row(task.occurrenceId)?.dataset.source === "server");
+      expect(row(task.occurrenceId)?.dataset.source).toBe("server");
       await waitReal(1_000);
       await t.settle();
       expect(row(task.occurrenceId)?.dataset.source).toBe("server");
@@ -189,14 +192,20 @@ describe("R2: my result from /daily stops applying when it no longer describes t
         actionable: true,
       };
       const api = fakeApi();
-      let reads = 0;
+      // Answered at once until the page is committed (however many reads a remount makes); held from then on.
+      let hold = false;
+      let held = 0;
       api.readDaily = async () => {
-        reads += 1;
-        return reads <= 2 ? pageOf([answer]) : never();
+        if (!hold) return pageOf([answer]);
+        held += 1;
+        return never();
       };
       const t = await mountTasks({ path: PATH, rows: task.rows, api });
       await t.until(() => row(task.occurrenceId)?.dataset.source === "server");
+      // The precondition: the row IS the server's answer (not yet done).
+      expect(row(task.occurrenceId)?.dataset.source).toBe("server");
       expect(row(task.occurrenceId)?.dataset.pill).toBe("to_do");
+      hold = true;
       // A sync page brings my stream at version 2, done (another device of mine recorded it). The earlier answer said not yet: it was read
       // before this page, so the device's newer progress shows at once, while the re-read (held here) has not answered.
       const done = { outcome: "complete" as const, amount: null, checked: [] };
@@ -219,7 +228,7 @@ describe("R2: my result from /daily stops applying when it no longer describes t
       // The commit asks for a re-read (after its 750 ms pause); while it is held the row stays the device's.
       await waitReal(1_200);
       await t.settle();
-      expect(reads).toBeGreaterThan(2);
+      expect(held).toBeGreaterThan(0);
       expect(row(task.occurrenceId)?.dataset.source).toBe("local");
       expect(row(task.occurrenceId)?.dataset.pill).toBe("done");
     },

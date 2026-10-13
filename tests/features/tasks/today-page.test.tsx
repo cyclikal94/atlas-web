@@ -279,7 +279,10 @@ describe("online: /daily", () => {
     t.rerender(tasksEnv(next, { identity: `${ME}:2` }));
     await t.settle();
     await act(async () => release(null));
-    await t.settle();
+    // Strengthened in revision 1 (the assertion is unchanged): a late answer that WERE applied needs several turns to be composed (the
+    // related rows are read after it), so the test waits, bounded, for the row to appear before asserting that it never does. A fixed
+    // number of turns let the three-layer mutant MU-2025 go unseen under load.
+    await t.until(() => row(a.occurrenceId) !== null);
     expect(row(a.occurrenceId)).toBeNull();
   });
 });

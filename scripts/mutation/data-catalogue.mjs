@@ -16687,8 +16687,9 @@ export const UNIT = [
           "const isCurrent = () => mine === read.current;",
           "const isCurrent = () => mine === mine;",
         ),
-        "  const current = answer !== null && answer.key === key ? answer : null;",
-        "  const current = answer;",
+        // Re-expressed in revision 1 (R2 moved the answer's key check into `listed`): the same three layers are defeated.
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    env.online && answer !== null ? answer : null;",
       ),
   },
   {
@@ -16735,8 +16736,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '        if (\n          (await reader.get("pending_effects", [id, draft.local_id])) !==\n          undefined\n        )\n          drafts.push(draft);',
-        "        drafts.push(draft);",
+        // Re-expressed in revision 1 (R4 moved the check into `oldestNaming`): an acknowledged draft is kept whatever its effect.
+        '        (draft.status === "acknowledged" &&\n          (await effectStands(reader, id, draft)))',
+        '        draft.status === "acknowledged"',
       ),
   },
   {
@@ -16766,6 +16768,393 @@ export const UNIT = [
         t,
         '  if (state.participation === "pooled" && goal.kind !== "numeric")',
         '  if (state.participation === "pooled" && goal.kind !== "numeric" && (false as boolean))',
+      ),
+  }, // ---- WEB-10a revision 1 (review of 13 October 2026, R1-R6): MU-2034..MU-2060 ------------------------------------------------------
+  {
+    id: "MU-2034",
+    title:
+      "WEB-10a R1: an occurrence in the address is accepted only when it is on the loaded page of saved days",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /BEYOND the first page/,
+    patch: (t) =>
+      sub(
+        t,
+        "    } else if (belongs(askedRow)) {",
+        "    } else if (\n      belongs(askedRow) &&\n      occurrences.some((o) => o.id === occurrenceParam)\n    ) {",
+      ),
+  },
+  {
+    id: "MU-2035",
+    title:
+      "WEB-10a R1: an occurrence in the address that is unavailable falls back to another day (today's or the page's last)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /not on this device|another task's day/,
+    patch: (t) =>
+      sub(
+        t,
+        '      selection = "unavailable";\n      chosen = null;',
+        '      selection = "default";\n      chosen = todaysId ?? occurrences[occurrences.length - 1]?.id ?? null;',
+      ),
+  },
+  {
+    id: "MU-2036",
+    title:
+      "WEB-10a R1: an occurrence in the address is not checked against the task (its parent and task id)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /another task's day/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (executionId === null || row.parent_id !== executionId) return false;\n",
+          "",
+        ),
+        "    return parsed === null || parsed.task_id === taskId;",
+        "    return parsed === parsed;",
+      ),
+  },
+  {
+    id: "MU-2037",
+    title:
+      "WEB-10a R1: without an occurrence in the address, the latest day of the FIRST page is shown (not of every saved day)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /latest day by date over EVERY saved day/,
+    patch: (t) =>
+      sub(
+        t,
+        "    chosen = latest.id ?? projectedFirst;",
+        "    chosen = occurrences[occurrences.length - 1]?.id ?? projectedFirst;",
+      ),
+  },
+  {
+    id: "MU-2038",
+    title:
+      "WEB-10a R1: the day picker never offers the next page of saved days",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /a page of 100 at a time/,
+    patch: (t) =>
+      sub(
+        t,
+        "      more: page?.next !== null && page?.next !== undefined,",
+        "      more: false,",
+      ),
+  },
+  {
+    id: "MU-2039",
+    title:
+      "WEB-10a R2: the last /daily answer still lists the day and gives my result once the device is offline",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /offline WITHOUT a remount/,
+    patch: (t) =>
+      sub(
+        t,
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    answer !== null && answer.key === key ? answer : null;",
+      ),
+  },
+  {
+    id: "MU-2040",
+    title:
+      "WEB-10a R2: my result from /daily still applies after a sync page committed since its read began",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /sync page committed after the read began/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const personalFresh = listed !== null && listed.tick === syncTick;",
+        "  const personalFresh = listed !== null;",
+      ),
+  },
+  {
+    id: "MU-2041",
+    title:
+      "WEB-10a R2: my result from /daily still applies after a window boundary passed since it was answered",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /window closes before the re-read answers/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (drafts.length === 0 && answerCovers(data, sources.answeredAt, nowMs)) {",
+        "  if (drafts.length === 0 && sources.answeredAt !== null) {",
+      ),
+  },
+  {
+    id: "MU-2042",
+    title:
+      "WEB-10a R2: an answer is taken as current at the instant of the boundary itself",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /answerCovers/,
+    patch: (t) =>
+      sub(t, "      boundary * 1000 <= nowMs", "      boundary * 1000 < nowMs"),
+  },
+  {
+    id: "MU-2043",
+    title:
+      "WEB-10a R3: a successful record clears an amount typed while it was pending",
+    file: "src/features/tasks/detail/RecordCard.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /typed while the save was pending stays after its success/,
+    patch: (t) =>
+      sub(
+        t,
+        "                      if (saved.ok && edits.current === submitted)",
+        "                      if (saved.ok)",
+      ),
+  },
+  {
+    id: "MU-2044",
+    title:
+      "WEB-10a R3: a successful correction closes the dialog and forgets the retained draft whatever was edited since",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect:
+      /edit made while the save was pending|newer edit kept while the person went to the queue/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (edits.current === submitted) {",
+        "        if (edits.current === edits.current) {",
+      ),
+  },
+  {
+    id: "MU-2045",
+    title:
+      "WEB-10a R3: a successful fix closes the form whatever was typed since it was submitted",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /value typed while the save was pending stays in the open fix/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if ((await onSave(evidence)) && edits.current === submitted) onSaved();",
+        "      if (await onSave(evidence)) onSaved();",
+      ),
+  },
+  {
+    id: "MU-2046",
+    title:
+      "WEB-10a R3: the fix can be saved again while its save is pending (two attempts)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /Save waits for the pending one/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {busy ? (\n        <Button disabled reason={copy.SAVING}>\n          {HISTORY_COPY.fixSave}",
+        "      {busy && (false as boolean) ? (\n        <Button disabled reason={copy.SAVING}>\n          {HISTORY_COPY.fixSave}",
+      ),
+  },
+  {
+    id: "MU-2047",
+    title:
+      "WEB-10a R4: a resource with more than a window of outstanding entries is cut to its oldest with no continuation",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect:
+      /101 outstanding drafts of one resource|attention headers beyond the window/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (entries.length > room)\n        next = {",
+        "      if (entries.length > room && (false as boolean))\n        next = {",
+      ),
+  },
+  {
+    id: "MU-2048",
+    title:
+      "WEB-10a R4: a page that looked at its bound of headers without a match says it is the last (no continuation)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect:
+      /one match after more headers of other kinds|read further than another/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : Number.isFinite(reach)\n          ? reach\n          : null;",
+        "        : null;",
+      ),
+  },
+  {
+    id: "MU-2049",
+    title:
+      "WEB-10a R4: an acknowledged draft whose effect is already in the cache is still listed as outstanding",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /whose effects are in the cache, is found|only the asked kinds/,
+    patch: (t) =>
+      sub(
+        t,
+        '        draft.status === "acknowledged" &&\n        !(await effectStands(reader, draft.target_resource_ids[0], draft))',
+        '        draft.status === "acknowledged" &&\n        (false as boolean)',
+      ),
+  },
+  {
+    id: "MU-2050",
+    title:
+      "WEB-10a R4: a page answers entries past what every status was read to (the next page answers them again)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /read further than another/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const candidates = found.filter((d) => d.created_seq <= reach).sort(bySeq);",
+        "    const candidates = found.sort(bySeq);",
+      ),
+  },
+  {
+    id: "MU-2051",
+    title:
+      "WEB-10a R4: a chained live read is ready with its first page (the continuation is not followed)",
+    file: "src/data/ui/outstanding.tsx",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/features/tasks/today-freshness.test.tsx",
+    ],
+    expect: /ready only when every page|after 120 others|105 amounts/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (next === null) {",
+        "      if (next === null || pages.length > 0) {",
+      ),
+  },
+  {
+    id: "MU-2052",
+    title:
+      "WEB-10a R5: a rebuilt task command is based on the local record, not the version the person reviewed",
+    file: "src/features/tasks/register.ts",
+    tests: [
+      "tests/features/tasks/rebuild.test.ts",
+      "tests/features/tasks/model.test.ts",
+    ],
+    expect:
+      /reviewed at 5|raised from the reviewed version|reviewed task version|reviewed version|takes the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ? { ...target, reviewedBase: reviewed.version }",
+        "        ? target",
+      ),
+  },
+  {
+    id: "MU-2053",
+    title:
+      "WEB-10a R5: a rebuilt first record of an Anyone task drops the defaults it captured",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /keeps the defaults it captured/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!captured) return built;",
+        "      if (captured || !captured) return built;",
+      ),
+  },
+  {
+    id: "MU-2054",
+    title:
+      "WEB-10a R5: a rebuild replaces the draft even when it changed after it was read",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /changed since it was read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    expectDraft: (stored) =>\n      stored.local_id === draft.local_id &&",
+        "    expectDraft: (stored) =>\n      stored.local_id === stored.local_id ||",
+      ),
+  },
+  {
+    id: "MU-2055",
+    title:
+      "WEB-10a R5: my stream is looked for among the primary targets only (an amount's stream is a side effect)",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /among its side effects|stream stays a side effect/,
+    patch: (t) =>
+      sub(t, "    ...Object.keys(draft.side_effect_bases ?? {}),\n", ""),
+  },
+  {
+    id: "MU-2056",
+    title:
+      "WEB-10a R5: the outbox ignores a target's reviewed base (the record or the cache is the base)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/reviewed-base.test.ts",
+      "tests/features/tasks/rebuild.test.ts",
+    ],
+    expect:
+      /ahead of the record and the cache|reviewed at 5|raised from the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      target.reviewedBase ??\n      tracked ??",
+        "      tracked ??",
+      ),
+  },
+  {
+    id: "MU-2057",
+    title: "WEB-10a R5: the request snapshot drops a target's reviewed base",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/reviewed-base.test.ts",
+      "tests/features/tasks/rebuild.test.ts",
+    ],
+    expect:
+      /ahead of the record and the cache|reviewed at 5|raised from the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ...(target.reviewedBase === undefined\n        ? {}\n        : { reviewedBase: target.reviewedBase }),",
+        "",
+      ),
+  },
+  {
+    id: "MU-2058",
+    title:
+      "WEB-10a R5: a reviewed base that is not a whole version of at least 1 is accepted",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/reviewed-base.test.ts"],
+    expect: /whole version of at least 1/,
+    patch: (t) =>
+      sub(
+        t,
+        '      throw new OutboxRequestError("reviewed_base");',
+        "      void 0;",
+      ),
+  },
+  {
+    id: "MU-2059",
+    title:
+      "WEB-10a R6: a wake on the same day does not arm the next wait (the day never rolls over more than six hours ahead)",
+    file: "src/features/tasks/screens.tsx",
+    tests: ["tests/features/tasks/today-day-timer.test.tsx"],
+    expect: /opened at 12:00|opened at 01:00/,
+    patch: (t) =>
+      sub(t, "          if (!check()) arm();", "          check();"),
+  },
+  {
+    id: "MU-2060",
+    title:
+      "WEB-10a R6: a page shown again after the device slept past midnight keeps yesterday",
+    file: "src/features/tasks/screens.tsx",
+    tests: ["tests/features/tasks/today-day-timer.test.tsx"],
+    expect: /slept past midnight/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (document.visibilityState === "visible") check();',
+        '      if (document.visibilityState === "visible") void 0;',
       ),
   },
 ];

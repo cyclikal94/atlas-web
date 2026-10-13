@@ -181,7 +181,9 @@ describe("the day picker reaches every saved day (Q9)", () => {
       [...daySelect().options].map((o) => o.value).filter((v) => v !== "");
     expect(options()).toHaveLength(100);
     expect(options()).not.toContain(occ(101));
-    fireEvent.click(screen.getByRole("button", { name: DETAIL_COPY.moreDays }));
+    const more = screen.queryByRole("button", { name: DETAIL_COPY.moreDays });
+    expect(more).not.toBeNull();
+    fireEvent.click(more as HTMLElement);
     await t.until(() => options().includes(occ(101)));
     expect(options()).toContain(occ(101));
     // The day shown stays the one in the address, listed while another page is open.
