@@ -1729,26 +1729,33 @@ test.describe("E-T9e: a committed correction defeats an older answer (A2, A14; R
     ).find((u) => u.resource.kind === "occurrence");
     if (occurrence === undefined)
       throw new Error("setup: no occurrence upsert");
+    // The correction arrives in a batch at revision 2, after the first page's revision 1, as a server's always-increasing sync clock sends
+    // it (`pageText` numbers the batches of each page from 1, which would repeat revision 1).
     net.script.push(() => ({
       status: 200,
-      body: pageText(
-        [
-          [
-            {
-              ...occurrence,
-              resource: {
-                ...occurrence.resource,
-                version: 2,
-                value: {
-                  ...occurrence.resource.value,
-                  closes_at: Math.floor(Date.now() / 1000) - 1,
+      body: JSON.stringify({
+        phase: "delta",
+        batches: [
+          {
+            revision: 2,
+            changes: [
+              {
+                ...occurrence,
+                resource: {
+                  ...occurrence.resource,
+                  version: 2,
+                  value: {
+                    ...occurrence.resource.value,
+                    closes_at: Math.floor(Date.now() / 1000) - 1,
+                  },
                 },
               },
-            },
-          ],
+            ],
+          },
         ],
-        "cursor-2",
-      ),
+        next_cursor: "cursor-2",
+        has_more: false,
+      }),
     }));
     await page.evaluate(() => window.__atlasData?.nudgeSync());
     await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
