@@ -659,12 +659,19 @@ the current epoch is shown with no request, one persisted for another epoch is n
 * **`plans/outstanding-reads.ts`** (read plans, not writers: the writer inventory is unchanged). `readOutstanding({ ids })` (at most 100 ids): per id,
   the drafts naming it (`index_targets`) whose effect the cache does not show yet, WITH their bodies, oldest first (`queued`, `in_flight`, `blocked`,
   and `acknowledged` while its `pending_effects` row for that id stands), and the headers of `version_conflict`/`operation_conflict`/`rejected` drafts;
-  at most one window (100) of bodies per call, `next` names the first id left for the next call. `readOutstandingByKind({ kinds, after? })`: the same
-  for the drafts of some kinds (a slice's commands, its creates included), oldest window first, with the attention headers. `readResourcesById({ ids })`:
+  at most one window (100) of entries per call (drafts and attention headers together), resumable: `next` is `{ id, after }` (the resource, in the
+  request's order, and the last `created_seq` already answered for it) or null, and a resource with more than a window of entries is answered from its
+  oldest and CONTINUED, never cut (revision 1, R4). `readOutstandingByKind({ kinds, after? })`: the same for the drafts of some kinds (a slice's
+  commands, its creates included), a page at a time in queue order: each status of `[status+created_seq]` is walked from `after`, at most ten windows
+  of headers per status per call, an acknowledged draft kept only while the effect on its first target stands; the page answers only up to the
+  `created_seq` every status was read to, and `next` continues from there (a page may be empty and still have a `next`, when what it looked at was
+  of other kinds or already in the cache). `readResourcesById({ ids })`:
   cached rows with their overlays (the fold of `readResourceList`), `null` where none is cached. `readCachePosition()`: `page_seq`, `applied_revision`,
   `last_synced_at`, a cheap signal that a sync page was committed.
-* **Hooks** (`ui/outstanding.tsx`, a module of its own so the plans stay out of every initial bundle): `useOutstanding(ids)`, `useOutstandingByKind(kinds)`,
-  `useCachedResources(ids)`, `useCachePosition()`. **Imperative** (`ui/scan.ts`): `scanResources(env, { kind, parentId?, window? }, visit, signal)` walks
+* **Hooks** (`ui/outstanding.tsx`, a module of its own so the plans stay out of every initial bundle): `useOutstanding(ids)`, `useOutstandingByKind(kinds)`
+  (one page each), `useAllOutstanding(ids)` and `useAllOutstandingByKind(kinds)` (EVERY page, merged: `chainWatch` watches page 0 and each next page
+  its predecessor names, is `loading` until the whole chain is ready, keeps the last complete value while a re-evaluated chain loads, and is
+  `unavailable`/`error` for a cursor that does not advance), `useCachedResources(ids)`, `useCachePosition()`. **Imperative** (`ui/scan.ts`): `scanResources(env, { kind, parentId?, window? }, visit, signal)` walks
   every cached resource of a kind a window at a time (one `readResourceList` transaction each, a macrotask between windows, at most one window held) and
   ends `complete`, `aborted` (signal or `visit` returned `"stop"`) or `closed` (no database, or the account's database changed under the walk);
   `readResourcesNow(env, ids)` reads by id now, 100 per transaction.
@@ -674,6 +681,10 @@ the current epoch is shown with no request, one persisted for another epoch is n
   (`window.id`, else the draft's only target) and `CommandRegistry.projectCreate` accept a projected row only when `row.id` is that id. A create that
   introduces several resources (a task, its details, its first occurrence and progress) can no longer project the task's row in its occurrence's place;
   a multi-target create with no named id projects nothing.
+* **`TargetSpec.reviewedBase` (revision 1, R5).** The version a person reviewed in WF-QUEUE-02's authorised current read: when present it is the
+  target's base ahead of the local record and the cache (`resolveTargets`), so a "save as new" is sent on that version and the record is raised from
+  it, and a later save of the same target is based on what the replacement leaves. A whole version of at least 1 (`OutboxRequestError("reviewed_base")`
+  otherwise). Only a supersession built on a reviewed read passes it.
 * **Departure (D-10a-2).** WEB-04 D's `by_kind_date` stays empty: no key deriver is registered for tasks (one registered now would leave existing caches
   inconsistent without a backfill). The offline day is the bounded walk above.
 

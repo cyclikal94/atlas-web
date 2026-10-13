@@ -44,6 +44,17 @@ Import only from the index.
   task kind (D-10a-3): one bad value would fail a whole sync page.
 - A screen that reads on mount records a `403`/`404` with `noteIfRefused` **when the answer arrives**, not after checking it is still
   mounted: a `403` remounts the protected tree before the screen's continuation runs (measured: dozens of `/daily` reads a second).
+- **Read every page of the outstanding work** (revision 1, R4): `useAllOutstandingByKind` / `useAllOutstanding` follow the reads' cursors and
+  are `loading` until the whole overlay is read; a view never composes my result from the first window alone. The single-page hooks remain
+  for a caller that pages explicitly (`next` is `{id, after}` for `readOutstanding`, a `created_seq` for `readOutstandingByKind`; a page may be
+  empty and still continue).
+- **A deep link names its write target** (revision 1, R1): an `occurrence` in the address is shown only if it is this task's; otherwise the
+  detail says it is unavailable and offers nothing to record. A consumer linking to a day passes the id it means; it is never replaced.
+- **A save acknowledges what it submitted** (revision 1, R3): an input editable while its save is pending is cleared, closed or forgotten
+  only if it was not edited after it was submitted (the task form, the record amount, the correction dialog and the entry fix all do this).
+- **"Save as new" of a task command** (revision 1, R5) rebuilds the request with its own builder on the REVIEWED version (`reviewedBase`), keeps
+  every target and the captured defaults, and is conditional on the draft not having changed. `resolve` offers no rebuild (no authorised
+  single-occurrence read exists for its draft).
 
 ## Decisions taken in this slice (D-10a-1 … D-10a-15)
 
@@ -71,8 +82,21 @@ Import only from the index.
 13. **Queued-edit coalescing.** Saving the form of a task whose `create_task` is still `queued` edits that draft in place; a second
     `revise_task` that is still queued and never sent is edited. The defaults review block is kept or widened, never cleared by an edit.
 14. **No `happened_at` editor.**
-15. **WF-QUEUE-02 current reads**: task-level kinds read `GET /tasks/{id}`; `record`/`exclude` read `GET /progress?parent_id=<occurrence>`.
-    `resolve` and `revise_occurrence` register none (no single-occurrence read in the contract).
+15. **WF-QUEUE-02 current reads**: task-level kinds read `GET /tasks/{id}`; `record`/`exclude` read `GET /progress?parent_id=<occurrence>`
+    (my stream is found among the primary targets AND the side effects: an amount names it as a side effect). `resolve` and
+    `revise_occurrence` register none (no single-occurrence read in the contract), so neither is rebuilt.
+
+Revision 1 (review of 13 October 2026) adds:
+
+16. **Freshness of my result from `/daily` (R2).** It applies only while the device is online, for the cache generation its read began under
+    (a committed sync page makes it stale until the re-read answers), and, row by row, until a window boundary of the row passes after it was
+    answered (`answerCovers`). Otherwise the row shows the personal reapplication with its finalisation. Offline, the day is the device's (the
+    last answer does not list it); the joint result stays the server's alone (Q8), shown with its time by the detail.
+17. **The displayed day of the detail (R1).** The address's occurrence by its own id (parent = the task's details, task id = the task);
+    unavailable otherwise. Without one: today's slot read by id, else the latest by date of every saved day (a bounded walk). The picker lists
+    a page of 100 saved days at a time ("More saved days" / "Previous saved days"), plus the selected day.
+18. **The default day's midnight timer (R6)** re-arms itself on every six-hourly wake and re-reads the day when the page is shown or focused; a
+    day in the address never moves.
 
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
@@ -109,6 +133,10 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Status colour only for Missed and Conflict (Done uses the neutral pill: the CSS budget); the words always say the state | `/today` |
 | Preset subtexts are built by the client from the definition | `/tasks/new` (E-T4) |
 | Tablet landscape at 1180×820 and 1112×834 both tested | E-T1 |
+| Revision 1: "This day isn't saved on this device, or isn't one of this task's days. Nothing can be recorded for it here." with "Show this task's days" | `/tasks/<id>?occurrence=<another id>` (jsdom `detail-selection.test.tsx`) |
+| Revision 1: "Loading this day"; the picker's "More saved days" / "Previous saved days" (saved days are listed by id a page at a time, each page shown by date) | `/tasks/<id>` with over 100 saved days (jsdom) |
+| Revision 1: a correction or fix saved while the person kept editing stays open with the newer value (the announcement says the earlier one was saved) | `/tasks/<id>` → Correct this day (jsdom `save-acknowledgement.test.tsx`) |
+| Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 
 ## Escalation E-1 (material, not blocking WEB-10a)
 
@@ -119,6 +147,14 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 
 ## Limits
 
+- **Paging the saved days by id.** No day index exists (D-10a-2), so the picker's pages are in id order, each shown by date; the latest day
+  is found by a walk of every saved day of the task (F-1's cost applies to it).
+- **The native E-T10 cannot see the hook's own layers.** On a real account switch the protected tree remounts, which discards the old view
+  before a late answer could be applied (an A/B with the three-layer mutant passed). The hook's layers are mutation-tested in jsdom (MU-2025),
+  where the identity changes without a remount.
+- **Shared files with WEB-11a.** `plans/outstanding-reads.ts` and `ui/outstanding.tsx` also carry WEB-11a's `readOutstandingCreates`; the
+  integration of the two branches is an add/add merge (recorded in WEB-11a's `docs/people.md`).
+
 - **Client "today" vs server "today".** A create's first occurrence is projected from the device's day in the task's zone; after a long offline
   period the server may make another slot. The next sync replaces the projection; a record queued against the projected id meets a real
   `404`/`409` and shows in the queue. It is never silently retargeted.
@@ -128,6 +164,7 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 
 ## Not claimed
 
-No PostgreSQL, HTTPS deployment, production-leader journey, physical device, installed PWA or manual screen-reader evidence (WEB-09d,
-collected by WEB-15). Browser viewport and colour-scheme emulation is not device evidence. Fixture evidence (stubbed `/daily`,
+No PostgreSQL, HTTPS deployment, physical device, installed PWA or manual screen-reader evidence (WEB-09d, collected by WEB-15). The
+production leader is exercised by one fixture case (E-T2b: a save in the tree is sent by the production dispatcher); the composed
+production-leader journey against a backend is WEB-09d's. Browser viewport and colour-scheme emulation is not device evidence. Fixture evidence (stubbed `/daily`,
 `/task-presets`, the fixture leader) is never integration evidence. Backend gates BE-Q1 and BE-CH1 have no completion record.

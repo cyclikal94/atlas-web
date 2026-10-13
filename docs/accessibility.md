@@ -70,6 +70,10 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - Automated: jest-axe in the component tests; axe with real layout and contrast in Chromium, Firefox and WebKit at 390×844, 834×1112, 1112×834,
   1180×820 and 1440×900 in light and dark (`fixture.tasks.spec.ts` E-T1; theme set before load), no horizontal overflow, and a keyboard-only journey
   (E-T8). This is browser emulation: physical devices and manual screen readers are WEB-09d's (collected by WEB-15).
+- Revision 1 (R7): axe with real layout in all three engines for the task detail, the correction dialog and the task form at 390×844 and 1440×900,
+  light and dark (E-T13), and a keyboard-only journey of the forms and dialogs (E-T8b): the correction dialog opens by Enter with focus inside,
+  closes by Escape and saves by Enter, focus returning to "Correct this day" each time; the task form is filled and saved by keyboard. A day named in
+  the address that is not available says so in text (no control is offered for it).
 
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
