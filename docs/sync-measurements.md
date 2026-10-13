@@ -104,6 +104,11 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > dense commit of zero or invented size, absent from the retained trace, did too, so each could derive desktop support (synthetic diagnostics; no Air
 > programme ran on revision 9). The design assessment added device results whose engine detail contradicted their outcome. Revision 10 makes the evidence
 > required (contract version 5, below); no measurement was taken under version 4, and no figure here changes.
+>
+> **Status after review 11 (revision 11, 13 October 2026).** Review 11 found the live W2 witness's terminal state never related to the step end of the same
+> observation: replacing only the idle step end in the retained trace by a stopped, failed or running end, every commit unchanged, still resolved as an
+> admission and supported the desktop decision (synthetic diagnostics; no Air programme ran on revision 10). Revision 11 corroborates the live terminal state
+> with the step end that completes the observation (contract version 6, below); no measurement was taken under version 5, and no figure here changes.
 
 ## Read this first
 
@@ -520,6 +525,15 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   may have no commit, and keeps the one it had after a `has_more` continuation.
 * **The live dense commit is the trace's.** It must be the retained trace's line at its recorded position, inside the epoch and before the observation, the
   first there of at least 90% of the captured limit-1 bytes, with the idle published after it; the recorded live commits are the trace's.
+* **The live end is corroborated (revision 11; contract version 6).** The live witness (`live-dense-commit/3`) keeps, from the one evaluation that found
+  its end, every state published since its mark and the raw line of every commit and step end of its engine start before its boundary. The step end that
+  completes it is derived from that slice: a normal end (`data.sync_next`) must record the state published last at its line, and a failed step
+  (`data.sync_step_failed`) must be followed by its `stopped/local_storage` stop with nothing between. Running after a `has_more` page, a back-off, a pause, a
+  wait, or idle before the dense page continue the observation; idle with the dense commit traced before it admits, any stop refuses, and a contradictory
+  end is an `error`. The claims (dense commit, step end, the publication it rests on) must equal what is derived. The retained lines must be the trace
+  file's at their positions, no step event inside the boundary may be missing, and the trace must have been read from the observation's page instance
+  (`trace_page`). Lines after the boundary (a later poll, a failure, another start) neither change nor repair the verdict. An applied dense commit must
+  have written its page (`value: "committed"`).
 * **Device results are schema 3.** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
   admitted run's figures must equal; W5 and killed attempts carry none. Schema-2 files and stored envelopes are history: read as unusable, never upgraded.

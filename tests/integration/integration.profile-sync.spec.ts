@@ -633,6 +633,8 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   // commit and the state at that same moment), never from a second read, which could already see the next live-edge poll running.
   // Revision 10: classified (below, after the trace is read) against the verified capture's size and the retained trace, by the shared
   // rules: the dense commit must be the trace's first of at least 90% of the captured bytes inside the epoch, the idle published after it.
+  // Revision 11 (review 11's R2 follow-up): the observation retains its publications and step-end lines, and its idle or stop must be
+  // the state the completing step end rests on (a normal end records it; a failed step is followed by its local_storage stop).
   let liveOutcome = "timeout";
   let liveObservation: LiveObservation | null = null;
   let liveProblems: string[] = [];
@@ -658,9 +660,14 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   await memory.stop();
   await memory.after();
   const liveMemory = memory.record();
-  const trace = await page.evaluate(
-    () => window.__atlasData?.engineTrace ?? [],
-  );
+  // Revision 11 (review 11's R2 follow-up, DA-L1): the trace is read with the page instance it belongs to, so a reload between the
+  // observation and this read is named (the rules also require the observation's retained lines to be this trace's at their positions).
+  const read = await page.evaluate(() => ({
+    page: window.__atlasData?.page ?? null,
+    trace: window.__atlasData?.engineTrace ?? [],
+  }));
+  const trace = read.trace;
+  const tracePage = read.page;
   // The engine's own trace of the live run is kept whatever its outcome: a refusal or a time-out is read from it, never guessed at.
   writeFileSync(
     `${PROFILE_OUT}/w2/P-W2.${engine}.live-engine-trace.txt`,
@@ -670,6 +677,7 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     const classified = classifyLiveOutcome(liveObservation, {
       capturedBytes: w2Body.length,
       traceLines: trace,
+      tracePage,
     });
     liveOutcome = classified.outcome;
     liveProblems = classified.problems;
@@ -694,6 +702,8 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     outcome: liveOutcome,
     // The one observation the outcome was classified from (null: the time-out; the trace file says what happened).
     observation: liveObservation,
+    // The page instance the retained trace file was read from (revision 11).
+    trace_page: tracePage,
     ...(liveProblems.length ? { problems: liveProblems } : {}),
     ...(liveError ? { error: liveError } : {}),
     elapsed_ms: liveElapsed,

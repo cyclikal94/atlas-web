@@ -15,6 +15,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * deterministic schedule of what the engine publishes between polls). Positive idle, genuine refusal and `has_more` controls sit beside
  * every contradiction; each expected outcome and reason is written here, not taken from the rules. Not a browser test or a measurement:
  * the native counterparts are the P-11 and W2 spec controls.
+ *
+ * Revision 11 (review 11's R2 follow-up; design assessment DA-L1/DA-H1): the live schedules now trace the step ends the production engine
+ * traces (revision 10's published idle or stop WITHOUT its `data.sync_next` is kept as an incomplete control), and the cases M1-M9 of
+ * the design assessment relate the live witness's terminal state to the step end that completes it.
  */
 
 type State = { kind: string; [key: string]: unknown };
@@ -442,65 +446,445 @@ describe("observeColdOutcome (the page function) and classifyColdOutcome", () =>
 });
 
 describe("observeLiveOutcome and classifyLiveOutcome", () => {
+  // Revision 11 (review 11's R2 follow-up; design assessment DA-L1, DA-H1, M1-M9): the live schedules are written from the production
+  // engine (src/data/engine/sync-engine.ts), WITH its step ends. A step publishes running (an identical state is not published again),
+  // traces its commits, publishes the state it ends in and returns; the loop then traces `data.sync_next` recording the state published
+  // last. `has_more` ends with running and the engine ticks again at once; a step that throws traces `data.sync_step_failed` and then
+  // publishes stopped/local_storage. An applied commit carries the plan's result (`value: "committed"`). Revision 10's live schedules
+  // published idle or stopped WITHOUT the end (DA-H1); they are kept below as incomplete controls.
   const BIG = 1_000_000;
-  const live = (least: number, m: ReturnType<typeof mark>) =>
-    defined(observeLiveOutcome({ least, mark: m }));
+  /** The witness the schedule guarantees (asserted, so a missing one is an assertion failure). */
+  const live = (least: number, m: ReturnType<typeof mark>) => {
+    const o = observeLiveOutcome({ least, mark: m });
+    expect(o).not.toBeNull();
+    return defined(o);
+  };
   const lines = () => [...harness.engineTrace];
-  const classify = (o: LiveObservation, captured = BIG) =>
-    classifyLiveOutcome(o, {
-      capturedBytes: captured,
-      traceLines: lines(),
+  const classify = (
+    o: LiveObservation,
+    captured = BIG,
+    traceLines = lines(),
+    tracePage: string | null = harness.page,
+  ) =>
+    classifyLiveOutcome(o, { capturedBytes: captured, traceLines, tracePage });
+  /** Publishes `state` unless it is the current one (the engine's `sameStop`). */
+  const show = (state: State) => {
+    if (JSON.stringify(current) !== JSON.stringify(state)) publish(state);
+  };
+  const tick = (why = "now") =>
+    trace("data.sync_tick", { why, coalesced: false });
+  const running = { kind: "running", catchingUp: true };
+  const pageCommit = (bytes: number, kind = "applied", value = "committed") =>
+    trace("data.sync_commit", {
+      bytes,
+      scan_ms: bytes === BIG ? 20 : 1,
+      commit_ms: bytes === BIG ? 300 : 2,
+      kind,
+      ...(kind === "applied" ? { value } : { reason: "unverified" }),
     });
-  const dense = (bytes = BIG, kind = "applied") =>
-    trace("data.sync_commit", { bytes, scan_ms: 20, commit_ms: 300, kind });
+  /** A step's normal end: the state it ended in (if any), then the line recording the state published last. */
+  const stepEnd = (state: State | null, when: string) => {
+    if (state) show(state);
+    trace("data.sync_next", { when, state: current?.kind });
+  };
+  const failedEnd = () => trace("data.sync_step_failed");
+  const localStop = { kind: "stopped", cause: "local_storage" };
+  /** A whole has_more page then the dense page, ending idle: the healthy live schedule (M1). */
+  const healthy = () => {
+    start();
+    tick("start");
+    show(running);
+    pageCommit(8_035);
+    stepEnd(null, "now");
+    tick();
+    show(running);
+    pageCommit(BIG);
+    stepEnd(idle, "after");
+  };
+  /** Replaces the retained line at `at` in the witness and in `lines` alike (both representations of one raw trace). */
+  const rewrite = (
+    o: LiveObservation,
+    all: string[],
+    at: number,
+    line: string,
+  ) => {
+    all[at] = line;
+    for (const e of o.events) if (e.trace === at) e.line = line;
+  };
 
-  it("case: the dense commit and idle at the same moment are admitted; a later running poll does not change the observation", () => {
+  it("control (M1): a dense commit, the idle it leads to and the idle end are admitted; the witness retains them and a later running poll changes nothing", () => {
     const m = mark();
     start();
-    trace("data.sync_commit", {
-      bytes: 8_035,
-      scan_ms: 1,
-      commit_ms: 2,
-      kind: "applied",
-    });
-    publish({ kind: "running", catchingUp: true });
+    tick("start");
+    show(running);
+    pageCommit(8_035);
+    stepEnd(null, "now");
     expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
-    dense();
-    publish(idle);
+    tick();
+    show(running);
+    pageCommit(BIG);
+    show(idle);
+    // The idle is published, but its step end is not traced yet: not complete.
+    expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
+    trace("data.sync_next", { when: "after", state: "idle" });
     const o = live(BIG, m);
-    publish({ kind: "running", catchingUp: false });
+    tick("timer");
+    show(running);
     expect(classify(o)).toEqual({ outcome: "admitted", problems: [] });
-    expect(o.state_entry.state.kind).toBe("idle");
+    expect(o.method).toBe("live-dense-commit/3");
+    expect(o.published.map((e) => e.state.kind)).toEqual([
+      "waiting",
+      "running",
+      "idle",
+    ]);
+    expect(o.events.map((e) => e.trace)).toEqual([1, 2, 4, 5]);
+    expect(o.dense?.trace).toBe(4);
+    expect(o.step_end).toEqual({
+      trace: 5,
+      event: "data.sync_next",
+      recorded: "idle",
+    });
+    expect(o.state_entry).toEqual(o.published[2]);
+    expect(o.boundary).toBe(6);
   });
 
-  it("control: a stop is refused; a back-off is waited out; an idle without the dense page is not an end", () => {
+  it("case (review 11, M2): replacing only the idle end by a stopped, failed-step or running end, its commits unchanged, is an error naming the step end", () => {
+    const m = mark();
+    healthy();
+    const o = live(BIG, m);
+    const end = o.step_end.trace;
+    const prefix = (o.events.find((e) => e.trace === end)?.line ?? "").split(
+      " ",
+    )[0];
+    // Each replacement edits every representation of that one trace line (the trace, the retained line and the step-end claim), so
+    // only the terminal relation can refuse it.
+    const cases: Array<[string, LiveObservation["step_end"], string[]]> = [
+      [
+        `${prefix} data.sync_next ${JSON.stringify({ when: "event", state: "stopped" })}`,
+        { trace: end, event: "data.sync_next", recorded: "stopped" },
+        [
+          `the step end at trace ${end} records stopped, but idle was published`,
+        ],
+      ],
+      [
+        `${prefix} data.sync_step_failed `,
+        { trace: end, event: "data.sync_step_failed", recorded: null },
+        [
+          "the failed step's stop is not retained inside the observation",
+          "the observed state is not the publication its step end rests on",
+        ],
+      ],
+      [
+        `${prefix} data.sync_next ${JSON.stringify({ when: "now", state: "running" })}`,
+        { trace: end, event: "data.sync_next", recorded: "running" },
+        [
+          `the step end at trace ${end} records running, but idle was published`,
+        ],
+      ],
+    ];
+    for (const [line, claim, problems] of cases) {
+      const edited = clone(o);
+      const all = lines();
+      rewrite(edited, all, end, line);
+      edited.step_end = claim;
+      expect(classify(edited, BIG, all)).toEqual({
+        outcome: "error",
+        problems,
+      });
+    }
+    // The review's original form (the trace file edited, the witness not) is refused by the binding.
+    const all = lines();
+    all[end] = cases[0]?.[0] ?? "";
+    expect(classify(o, BIG, all)).toEqual({
+      outcome: "error",
+      problems: [
+        "the retained step events are not the page's trace lines at their positions",
+      ],
+    });
+  });
+
+  it("case (review 11, M2): in the page, a completed contradictory end (stopped or running recorded over the published idle) is returned for the rules to refuse, not waited past", () => {
+    for (const recorded of ["stopped", "running"]) {
+      const m = mark();
+      start();
+      tick("start");
+      show(running);
+      pageCommit(BIG);
+      show(idle);
+      trace("data.sync_next", { when: "after", state: recorded });
+      const o = live(BIG, m);
+      expect(o.step_end.recorded).toBe(recorded);
+      expect(o.state_entry.state.kind).toBe("idle");
+      expect(classify(o)).toEqual({
+        outcome: "error",
+        problems: [
+          `the step end at trace ${o.step_end.trace} records ${recorded}, but idle was published`,
+        ],
+      });
+      begin();
+    }
+  });
+
+  it("case (M3): a missing, malformed, pre-epoch or outside-boundary end is an error, and a convenient idle end after the boundary does not repair it", () => {
+    const m = mark();
+    healthy();
+    const o = live(BIG, m);
+    // The end removed from the witness, the trace keeping it.
+    const removed = clone(o);
+    removed.events = removed.events.filter((e) => e.trace !== 5);
+    expect(classify(removed).problems).toEqual([
+      "the trace's step event at 5, inside the observation, was not retained",
+      "no step end inside the observation ends it (idle after the dense commit, or a stop)",
+    ]);
+    // Removed from both, the boundary drawn before it; a matching idle end is then appended after the boundary.
+    const cut = clone(o);
+    cut.events = cut.events.filter((e) => e.trace !== 5);
+    cut.boundary = 5;
+    const suffixed = [...lines()];
+    expect(classify(cut, BIG, suffixed).problems).toEqual([
+      "no step end inside the observation ends it (idle after the dense commit, or a stop)",
+    ]);
+    // The end malformed (no payload).
+    const malformed = clone(o);
+    const all = lines();
+    rewrite(malformed, all, 5, "6ms data.sync_next not-json");
+    expect(classify(malformed, BIG, all).problems).toEqual([
+      "step event 3 is malformed or unknown",
+    ]);
+    // The end placed at the boundary (outside the observation), the trace extended to hold it there.
+    const outside = clone(o);
+    const longer = [...lines(), lines()[5] ?? ""];
+    const last = outside.events[3];
+    if (last) last.trace = 6;
+    longer[5] = `6ms data.sync_tick ${JSON.stringify({ why: "timer", coalesced: false })}`;
+    expect(classify(outside, BIG, longer).problems).toEqual([
+      "step event 3 lies outside the observation's epoch and boundary",
+      "no step end inside the observation ends it (idle after the dense commit, or a stop)",
+    ]);
+    // An end that follows no publication (every publication moved after it, in order).
+    const orphan = clone(o);
+    for (const p of orphan.published) p.trace = Math.max(p.trace, 3);
+    orphan.state_entry = clone(orphan.published[2] ?? orphan.state_entry);
+    expect(classify(orphan).problems).toEqual([
+      "the step end at trace 2 follows no published state",
+      "the recorded step end is not the one that ends the observation",
+      "the observed state is not the publication its step end rests on",
+    ]);
+    // An end before the epoch (the witness's epoch moved after the dense page's step).
+    const early = clone(o);
+    const epoch = early.epochs[0];
+    if (epoch) epoch.trace = 6;
+    expect(classify(early).problems).toContain(
+      "step event 0 lies outside the observation's epoch and boundary",
+    );
+  });
+
+  it("control (M4): pages with has_more end in running and are followed; the first dense commit is the one retained, through several continuations", () => {
     const m = mark();
     start();
-    publish({ kind: "backing_off", since: 1 });
-    expect(observeLiveOutcome({ least: 1_000, mark: m })).toBeNull();
-    publish(idle);
-    expect(observeLiveOutcome({ least: 1_000, mark: m })).toBeNull();
-    publish({ kind: "stopped", cause: "floor" });
-    expect(classify(live(1_000, m), 1_000).outcome).toBe("refused");
-    // A failed dense commit at idle is no admission.
+    tick("start");
+    show(running);
+    pageCommit(8_035);
+    stepEnd(null, "now");
+    tick();
+    pageCommit(BIG);
+    stepEnd(null, "now");
+    expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
+    tick();
+    pageCommit(BIG);
+    stepEnd(null, "now");
+    tick();
+    pageCommit(500);
+    stepEnd(idle, "after");
+    const o = live(BIG, m);
+    expect(o.dense?.trace).toBe(4);
+    expect(classify(o)).toEqual({ outcome: "admitted", problems: [] });
+    // Citing the second dense commit instead is refused: the first is the measured one.
+    const second = clone(o);
+    second.dense = {
+      trace: 7,
+      commit: JSON.parse(
+        (lines()[7] ?? "").slice((lines()[7] ?? "").indexOf("{")),
+      ),
+    };
+    expect(classify(second).problems).toEqual([
+      "an earlier commit of the epoch already met the density: the observed commit is not the first dense one",
+    ]);
+  });
+
+  it("control (M5): a back-off end is waited out; the retry's dense commit and idle end are admitted (no premature live refusal)", () => {
+    const m = mark();
+    start();
+    tick("start");
+    show(running);
+    stepEnd({ kind: "backing_off", since: 1 }, "after");
+    expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
+    tick("timer");
+    show(running);
+    pageCommit(BIG);
+    stepEnd(idle, "after");
+    const o = live(BIG, m);
+    expect(classify(o)).toEqual({ outcome: "admitted", problems: [] });
+    expect(o.published.map((e) => e.state.kind)).toEqual([
+      "waiting",
+      "running",
+      "backing_off",
+      "running",
+      "idle",
+    ]);
+  });
+
+  it("control (M6): a normal stopped end without a dense commit, a failed step's local_storage stop, and a stop after a dense has_more continuation are refusals", () => {
+    const m = mark();
+    start();
+    tick("start");
+    show(running);
+    stepEnd({ kind: "stopped", cause: "storage_full" }, "event");
+    const plain = live(BIG, m);
+    expect(plain.dense).toBeNull();
+    expect(classify(plain)).toEqual({ outcome: "refused", problems: [] });
     const m2 = mark();
     begin();
-    publish({ kind: "running", catchingUp: true });
-    dense(1_000, "failed");
-    publish(idle);
-    const failed = live(1_000, m2);
-    expect(classify(failed, 1_000)).toEqual({
-      outcome: "error",
-      problems: ["the dense commit was not applied"],
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    tick("start");
+    show(running);
+    failedEnd();
+    publish(localStop);
+    const failed = live(BIG, m2);
+    expect(failed.step_end).toEqual({
+      trace: failed.events.at(-1)?.trace,
+      event: "data.sync_step_failed",
+      recorded: null,
     });
+    expect(classify(failed)).toEqual({ outcome: "refused", problems: [] });
+    const m3 = mark();
+    begin();
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    tick("start");
+    show(running);
+    pageCommit(BIG);
+    stepEnd(null, "now");
+    tick();
+    stepEnd({ kind: "stopped", cause: "floor" }, "event");
+    const later = live(BIG, m3);
+    expect(later.dense).not.toBeNull();
+    expect(classify(later)).toEqual({ outcome: "refused", problems: [] });
+  });
+
+  it("case (M7): between a failed step's line and its stop the observation waits; a stop of another cause, or one published before the line, is an error", () => {
+    const m = mark();
+    start();
+    tick("start");
+    show(running);
+    failedEnd();
+    expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
+    publish(localStop);
+    const o = live(BIG, m);
+    expect(classify(o).outcome).toBe("refused");
+    const cause = clone(o);
+    const stop = cause.published.at(-1);
+    if (stop) stop.state = { kind: "stopped", cause: "floor" };
+    cause.state_entry = clone(stop ?? cause.state_entry);
+    expect(classify(cause).problems).toEqual([
+      "a failed step ends in stopped/local_storage, not stopped",
+    ]);
+    const idleAfter = clone(o);
+    const after = idleAfter.published.at(-1);
+    if (after) after.state = idle;
+    idleAfter.state_entry = clone(after ?? idleAfter.state_entry);
+    expect(classify(idleAfter).problems).toEqual([
+      "a failed step ends in stopped/local_storage, not idle",
+    ]);
+    // Reversed: the stop published before the failure line (its trace position not after it).
+    const reversed = clone(o);
+    const moved = reversed.published.at(-1);
+    if (moved) moved.trace = reversed.step_end.trace;
+    expect(classify(reversed).problems).toEqual([
+      "the failed step's stop is not retained inside the observation",
+      "the observed state is not the publication its step end rests on",
+    ]);
+    // Another step event traced between the failure and its stop.
+    const m2 = mark();
+    begin();
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    tick("start");
+    show(running);
+    failedEnd();
+    trace("data.sync_next", { when: "now", state: "running" });
+    publish(localStop);
+    expect(classify(live(BIG, m2)).problems).toEqual([
+      "another step event lies between the failed step and its stop",
+    ]);
+  });
+
+  it("case (M8): what follows the boundary (a later running poll, a failure, a restart) neither changes nor repairs a frozen witness", () => {
+    const m = mark();
+    healthy();
+    const o = live(BIG, m);
+    tick("timer");
+    show(running);
+    stepEnd(null, "after");
+    failedEnd();
+    publish(localStop);
+    begin();
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    expect(lines().length).toBeGreaterThan(o.boundary);
+    expect(classify(o)).toEqual({ outcome: "admitted", problems: [] });
+  });
+
+  it("case (M9): a reload or second start while observing throws; a trace read from another page instance, or a replaced trace, is an error", () => {
+    const m = mark();
+    healthy();
+    const o = live(BIG, m);
+    expect(classify(o, BIG, lines(), "page-2").problems).toEqual([
+      "the retained live trace was not read from the observation's page instance",
+    ]);
+    // The page reloaded after the witness: a fresh trace, its own timings.
+    const fresh = lines().map((l) =>
+      l.replace(/^\d+ms/, (t) => `${Number.parseInt(t, 10) + 1000}ms`),
+    );
+    expect(classify(o, BIG, fresh, harness.page).problems).toEqual([
+      "the retained step events are not the page's trace lines at their positions",
+    ]);
+    const m2 = mark();
+    begin();
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    tick("start");
+    show(running);
+    begin();
+    expect(() => observeLiveOutcome({ least: BIG, mark: m2 })).toThrow(
+      "observation identity: the engine was started again while observing",
+    );
+    const m3 = mark();
+    begin();
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    publish({ kind: "running", catchingUp: true }, generation + 7);
+    expect(() => observeLiveOutcome({ least: BIG, mark: m3 })).toThrow(
+      "observation identity: another engine published while observing",
+    );
+    // A step end traced in the epoch before its engine published anything is not this engine's.
+    const m5 = mark();
+    begin();
+    trace("data.sync_next", { when: "now", state: "running" });
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    expect(() => observeLiveOutcome({ least: BIG, mark: m5 })).toThrow(
+      "observation identity: a step end of the epoch follows no state its engine published",
+    );
+    const m4 = mark();
+    begin();
+    harness.page = "page-2";
+    expect(() => observeLiveOutcome({ least: BIG, mark: m4 })).toThrow(
+      "observation identity: the page was replaced (a reload) while observing",
+    );
   });
 
   it("case (revision 10, DA-2): the density is judged against the verified capture: below 90% is an error, exactly 90% and above are admitted", () => {
     const m = mark();
     start();
-    publish({ kind: "running", catchingUp: true });
-    dense(900_000);
-    publish(idle);
+    tick("start");
+    show(running);
+    pageCommit(900_000);
+    stepEnd(idle, "after");
     const o = live(BIG, m);
     expect(classify(o, BIG).outcome).toBe("admitted");
     expect(classify(o, 900_000).outcome).toBe("admitted");
@@ -508,16 +892,14 @@ describe("observeLiveOutcome and classifyLiveOutcome", () => {
       outcome: "error",
       problems: [
         "the dense commit is 900000 bytes, below 90% of the captured 1000002",
+        "no step end inside the observation ends it (idle after the dense commit, or a stop)",
       ],
     });
   });
 
   it("case (revision 10, DA-2): review 10's invented dense commits (zero bytes; 999,999,999 bytes absent from the trace) are errors", () => {
     const m = mark();
-    start();
-    publish({ kind: "running", catchingUp: true });
-    dense();
-    publish(idle);
+    healthy();
     const o = live(BIG, m);
     const zero = clone(o);
     if (zero.dense) zero.dense.commit = { kind: "applied", bytes: 0 };
@@ -534,6 +916,7 @@ describe("observeLiveOutcome and classifyLiveOutcome", () => {
         scan_ms: 999,
         commit_ms: 999,
         kind: "applied",
+        value: "committed",
       };
     expect(classify(invented).problems).toEqual([
       "the dense commit is not the retained trace's commit at its position",
@@ -543,15 +926,18 @@ describe("observeLiveOutcome and classifyLiveOutcome", () => {
   it("case (revision 10, DA-2): a dense commit before the epoch does not qualify; one after it inside the epoch does", () => {
     // A large commit by an earlier engine, before the mark.
     begin();
-    dense();
+    pageCommit(BIG);
     const m = mark();
     start();
-    publish({ kind: "running", catchingUp: true });
-    publish(idle);
+    tick("start");
+    show(running);
+    stepEnd(idle, "after");
+    // Idle without the dense page is a continuation, not an end.
     expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
-    publish({ kind: "running", catchingUp: true });
-    dense();
-    publish(idle);
+    tick("timer");
+    show(running);
+    pageCommit(BIG);
+    stepEnd(idle, "after");
     const o = live(BIG, m);
     expect(classify(o).outcome).toBe("admitted");
     // The same witness pointing at the earlier engine's commit is refused.
@@ -559,71 +945,81 @@ describe("observeLiveOutcome and classifyLiveOutcome", () => {
     if (early.dense) early.dense.trace = 0;
     expect(classify(early).problems).toEqual([
       "the dense commit lies outside the observation's epoch and boundary",
+      "the dense commit is not the retained trace's commit at its position",
     ]);
   });
 
-  it("case (revision 10, DA-2): a dense commit after the observation's boundary, or an idle published before it, is not corroboration", () => {
+  it("case (revision 10, DA-2): a dense commit claimed at the boundary, or an idle published before the dense commit, is not corroboration", () => {
     const m = mark();
-    start();
-    publish({ kind: "running", catchingUp: true });
-    dense();
-    publish(idle);
+    healthy();
     const o = live(BIG, m);
     const after = clone(o);
     if (after.dense) after.dense.trace = after.boundary;
     expect(classify(after).problems).toContain(
       "the dense commit lies outside the observation's epoch and boundary",
     );
+    // The idle publication moved to the dense commit's own position (consistently in the slice and the claim).
     const before = clone(o);
-    before.state_entry.trace = before.dense?.trace ?? 0;
+    const entry = before.published[2];
+    if (entry) entry.trace = before.dense?.trace ?? 0;
+    before.state_entry = clone(entry ?? before.state_entry);
     expect(classify(before).problems).toEqual([
       "the idle state was not published after the dense commit",
     ]);
   });
 
-  it("case (revision 10): an idle published before the dense commit, with nothing published after it, is not an end", () => {
+  it("case (revision 11): a dense commit that was not applied, or applied no page (a lapsed lease), is no admission", () => {
     const m = mark();
     start();
-    publish({ kind: "running", catchingUp: true });
-    publish(idle);
-    dense();
-    expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
+    tick("start");
+    show(running);
+    pageCommit(BIG, "dropped");
+    stepEnd(null, "after");
+    tick("timer");
+    show(running);
+    pageCommit(BIG);
+    stepEnd(idle, "after");
+    expect(classify(live(BIG, m))).toEqual({
+      outcome: "error",
+      problems: ["the dense commit was not applied"],
+    });
+    const m2 = mark();
+    begin();
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    tick("start");
+    show(running);
+    pageCommit(BIG, "applied", "lease_lapsed");
+    stepEnd(null, "after");
+    tick("timer");
+    pageCommit(BIG);
+    stepEnd(idle, "after");
+    expect(classify(live(BIG, m2))).toEqual({
+      outcome: "error",
+      problems: ["the dense commit wrote no page (lease_lapsed)"],
+    });
   });
 
-  it("control (revision 10): a live back-off, retry and dense idle is admitted; a genuine stop without a dense commit is refused", () => {
+  it("control (review 11, DA-H1): revision 10's end-less schedules (idle or a stop published, no step end traced) are not complete: the observer waits", () => {
+    // Revision 10's admission control: a small commit, running, the dense commit, idle published; no `data.sync_next`.
     const m = mark();
     start();
+    trace("data.sync_commit", {
+      bytes: 8_035,
+      scan_ms: 1,
+      commit_ms: 2,
+      kind: "applied",
+      value: "committed",
+    });
     publish({ kind: "running", catchingUp: true });
-    publish({ kind: "backing_off", since: 1 });
-    expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
-    publish({ kind: "running", catchingUp: true });
-    dense();
+    pageCommit(BIG);
     publish(idle);
-    expect(classify(live(BIG, m)).outcome).toBe("admitted");
+    expect(observeLiveOutcome({ least: BIG, mark: m })).toBeNull();
+    // Revision 10's refusal control: a stop published without its end.
     const m2 = mark();
     begin();
     publish({ kind: "running", catchingUp: true });
     publish({ kind: "stopped", cause: "storage_full" });
-    const stopped = live(BIG, m2);
-    expect(stopped.dense).toBeNull();
-    expect(classify(stopped)).toEqual({ outcome: "refused", problems: [] });
-  });
-
-  it("case (revision 10, invariant 1): a restart or a reload while observing the live application is no verdict", () => {
-    const m = mark();
-    start();
-    publish({ kind: "running", catchingUp: true });
-    begin();
-    publish({ kind: "waiting", reason: "cache_not_valid" });
-    expect(() => observeLiveOutcome({ least: BIG, mark: m })).toThrow(
-      "observation identity: the engine was started again while observing",
-    );
-    const m2 = mark();
-    begin();
-    harness.page = "page-2";
-    expect(() => observeLiveOutcome({ least: BIG, mark: m2 })).toThrow(
-      "observation identity: the page was replaced (a reload) while observing",
-    );
+    expect(observeLiveOutcome({ least: BIG, mark: m2 })).toBeNull();
   });
 });
 

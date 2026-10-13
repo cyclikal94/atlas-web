@@ -2136,7 +2136,10 @@ function coldObservationProblems(run, servedBytes) {
  * limit-1 capture's recorded size (`capturedBytes`, the density basis, never the asserted commit; see `capturedLimit1`) and the page's
  * retained engine trace (the dense commit must be that trace's line at its recorded position, inside the epoch, before the
  * observation's boundary, the first there that met the density, and the idle published after it). The recorded commits are the
- * retained trace's.
+ * retained trace's. Revision 11 (review 11's R2 follow-up, DA-L1; contract version 6): the observation (`live-dense-commit/3`) retains
+ * its publications and step-event lines; the rules derive the step end that completes it and the publication that end rests on (a normal
+ * end records the state published last; a failed step is followed by its local_storage stop), require the claims to equal them, and bind
+ * the retained lines to this trace file and the page instance the writer read it from (`trace_page`).
  */
 function liveObservationProblems(ev, cell, run) {
   if (!["admitted", "refused"].includes(run.outcome)) return [];
@@ -2153,6 +2156,7 @@ function liveObservationProblems(ev, cell, run) {
   const { shows, problems } = liveObservationRules(o, {
     capturedBytes: captured.bytes ?? null,
     traceLines,
+    tracePage: run.trace_page ?? null,
   });
   if (captured.problem) problems.unshift(captured.problem);
   if (shows !== run.outcome)

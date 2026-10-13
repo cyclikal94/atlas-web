@@ -15,6 +15,12 @@
 // validator with and without --allow-partial, and the validator's standalone device-results mode. Positive controls: the complete
 // programme, genuine refusals (back-off, waiting for a valid cache, a failed step's stop, after a has_more continuation), a long has_more
 // schedule, the density threshold and a genuine live stop.
+//
+// Revision 11 (review 11's R2 follow-up; design assessment DA-L1/DA-H1, Q3; contract version 6): the live witness
+// (`live-dense-commit/3`) retains its publications and step-event lines, and its terminal state must be the one the completing step end
+// rests on. The live cases below carry review 11's three contradictions, absent/outside-boundary ends, failed-stop ordering, has_more and
+// back-off success, genuine refusals, an intact historical prefix and the trace's page binding through the contract, the assembler and
+// both validator modes.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -117,6 +123,104 @@ const editTrace = (dir, engine, change) => {
 };
 const captureBytes = (dir, engine) =>
   readFileSync(join(dir, `w2/W2-captured.${engine}.limit-1.json`)).length;
+const payloadOf = (line) => JSON.parse(line.slice(line.indexOf("{")));
+/**
+ * Replaces the live trace's line `at` in every representation of that one raw line: the trace file, the witness's retained line and
+ * (when it is the completing end) the step-end claim; `claim` is written by the case. Both live copies are kept equal.
+ */
+const editLiveLine = (dir, engine, at, line, claim) => {
+  editTrace(dir, engine, (lines) => {
+    lines[at] = line;
+    return lines;
+  });
+  editLive(dir, engine, (live) => {
+    for (const e of live.observation.events) if (e.trace === at) e.line = line;
+    if (claim) live.observation.step_end = claim;
+    live.commits = readFileSync(tracePath(dir, engine), "utf8")
+      .split("\n")
+      .filter((l) => l.includes("data.sync_commit"))
+      .map(payloadOf);
+  });
+};
+/**
+ * Revision 11 (DA-H1): writes engine `engine`'s live application as the fixture harness records the schedule `ops`, written by the case
+ * from the production engine's order: `["publish", state]` (an identical state is not published again, as `setState` does), `[event,
+ * payload]` a trace line, `["failed"]` a failed step's line. Every publication carries the trace length at its time; the witness retains
+ * them all and every commit/step-end line. The claims (`dense`, the completing `end` line, the publication `entry` it rests on) and the
+ * outcome are given by the case, never derived here.
+ */
+const writeLive = (dir, engine, ops, { outcome, dense, end, entry }) => {
+  const lines = [];
+  const published = [];
+  let current = null;
+  for (const [op, value] of ops) {
+    if (op === "publish") {
+      if (JSON.stringify(current) === JSON.stringify(value)) continue;
+      current = value;
+      published.push({
+        index: published.length,
+        generation: 1,
+        at: 700 + 10 * published.length,
+        trace: lines.length,
+        state: value,
+      });
+    } else if (op === "failed")
+      lines.push(`${lines.length + 1}ms data.sync_step_failed `);
+    else lines.push(`${lines.length + 1}ms ${op} ${JSON.stringify(value)}`);
+  }
+  writeFileSync(tracePath(dir, engine), lines.join("\n"));
+  const events = lines
+    .map((line, trace) => ({ trace, line }))
+    .filter((e) => /^\d+ms data\.sync_(commit|next|step_failed) /.test(e.line));
+  const endEvent = lines[end].split(" ")[1];
+  editLive(dir, engine, (live) => {
+    const page = live.observation.page;
+    live.outcome = outcome;
+    live.commits = lines
+      .filter((l) => l.includes("data.sync_commit"))
+      .map(payloadOf);
+    live.trace_page = page;
+    live.observation = {
+      ...live.observation,
+      boundary: lines.length,
+      published,
+      events,
+      dense:
+        dense === null
+          ? null
+          : { trace: dense, commit: payloadOf(lines[dense]) },
+      step_end: {
+        trace: end,
+        event: endEvent,
+        recorded:
+          endEvent === "data.sync_next" ? payloadOf(lines[end]).state : null,
+      },
+      state_entry: published[entry],
+    };
+  });
+};
+const TICK = (why) => ["data.sync_tick", { why, coalesced: false }];
+const NEXT = (when, state) => ["data.sync_next", { when, state }];
+const COMMIT = (bytes, extra = {}) => [
+  "data.sync_commit",
+  {
+    bytes,
+    scan_ms: 3,
+    commit_ms: 9,
+    kind: "applied",
+    value: "committed",
+    ...extra,
+  },
+];
+const RUNNING = ["publish", { kind: "running", catchingUp: true }];
+const START = ["publish", { kind: "waiting", reason: "cache_not_valid" }];
+const IDLE = [
+  "publish",
+  { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" },
+];
+/** No problem of the trace binding or the page instance fired (an isolating case's failure is the semantic rule's). */
+const BINDING =
+  /not the page's trace lines at their positions|was not retained|not read from the observation's page instance/;
 
 /** Applies `change` to the first commit after the request in BOTH of the witness's representations (its events and its commits). */
 const editFirstCommit = (change) => (run) => {
@@ -206,10 +310,10 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 5; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 6; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 5);
+  assert.equal(evidence.CONTRACT_VERSION, 6);
   assert.equal(device.DEVICE_SCHEMA, 3);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
@@ -783,8 +887,18 @@ test("case (DA-1, invariant 4): served bytes are bound to the recorded workload 
 test("case (review 10): review 9's live records (no observation, or a running state) are invalid with both copies kept equal", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
+  // Revision 11: the running state written consistently (the step's end records it, the witness rests on it).
+  const running = { kind: "running", catchingUp: false };
+  editLiveLine(
+    dir,
+    "chromium",
+    5,
+    `6ms data.sync_next ${JSON.stringify({ when: "now", state: "running" })}`,
+    { trace: 5, event: "data.sync_next", recorded: "running" },
+  );
   editLive(dir, "chromium", (live) => {
-    live.observation.state_entry.state = { kind: "running", catchingUp: false };
+    live.observation.published[2].state = running;
+    live.observation.state_entry.state = running;
   });
   editLive(dir, "webkit", (live) => {
     delete live.observation;
@@ -792,7 +906,7 @@ test("case (review 10): review 9's live records (no observation, or a running st
   const r = contract.resolveEvidence(dir);
   const c = cell(r, LIVE("chromium"));
   assert.equal(c.status, "invalid", reasons(c));
-  assert.match(reasons(c), /no verdict \(running\)/);
+  assert.match(reasons(c), /no step end inside the observation ends it/);
   assert.match(
     reasons(c),
     /recorded admitted, but the observation shows no verdict \(running\)/,
@@ -846,16 +960,16 @@ test("case and control (DA-2): density is judged against the verified capture: o
     ["firefox", 0],
   ]) {
     const bytes = Math.ceil(0.9 * captureBytes(dir, engine)) + delta;
-    editTrace(dir, engine, (lines) => {
-      const at = lines[3].indexOf("{");
-      const commit = JSON.parse(lines[3].slice(at));
-      commit.bytes = bytes;
-      lines[3] = `${lines[3].slice(0, at)}${JSON.stringify(commit)}`;
-      return lines;
-    });
+    const line = readFileSync(tracePath(dir, engine), "utf8").split("\n")[4];
+    const commit = { ...payloadOf(line), bytes };
+    editLiveLine(
+      dir,
+      engine,
+      4,
+      `${line.slice(0, line.indexOf("{"))}${JSON.stringify(commit)}`,
+    );
     editLive(dir, engine, (live) => {
       live.observation.dense.commit.bytes = bytes;
-      live.commits[1].bytes = bytes;
     });
   }
   const r = contract.resolveEvidence(dir);
@@ -870,11 +984,14 @@ test("case and control (DA-2): density is judged against the verified capture: o
 test("case (DA-2): a dense commit outside the epoch, an idle published before it, a missing live trace, or commits that are not the trace's are invalid", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
+  // Revision 11: the epoch moved after the dense commit's line (4), so the cited commit precedes it.
   editLive(dir, "chromium", (live) => {
-    live.observation.epochs[0].trace = 4;
+    live.observation.epochs[0].trace = 5;
   });
+  // Revision 11: the idle publication moved to the dense commit's position, in the slice and the claim alike.
   editLive(dir, "firefox", (live) => {
-    live.observation.state_entry.trace = 3;
+    live.observation.published[2].trace = 4;
+    live.observation.state_entry.trace = 4;
   });
   rmSync(tracePath(dir, "webkit"));
   const r = contract.resolveEvidence(dir);
@@ -906,7 +1023,7 @@ test("case (DA-2): a dense commit outside the epoch, an idle published before it
   );
   assert.match(
     reasons(cell(r2, LIVE("webkit"))),
-    /observation method live-dense-commit\/1 is not live-dense-commit\/2/,
+    /observation method live-dense-commit\/1 is not live-dense-commit\/3/,
   );
 });
 
@@ -914,16 +1031,13 @@ test("case (DA-2): the cited dense commit must be the epoch's FIRST of at least 
   const dir = scratch(t);
   writeComplete(dir);
   const bytes = Math.ceil(0.9 * captureBytes(dir, "chromium"));
-  editTrace(dir, "chromium", (lines) => {
-    const at = lines[1].indexOf("{");
-    const commit = JSON.parse(lines[1].slice(at));
-    commit.bytes = bytes;
-    lines[1] = `${lines[1].slice(0, at)}${JSON.stringify(commit)}`;
-    return lines;
-  });
-  editLive(dir, "chromium", (live) => {
-    live.commits[0].bytes = bytes;
-  });
+  const line = readFileSync(tracePath(dir, "chromium"), "utf8").split("\n")[1];
+  editLiveLine(
+    dir,
+    "chromium",
+    1,
+    `${line.slice(0, line.indexOf("{"))}${JSON.stringify({ ...payloadOf(line), bytes })}`,
+  );
   const c = cell(contract.resolveEvidence(dir), LIVE("chromium"));
   assert.equal(c.status, "invalid");
   assert.match(
@@ -950,25 +1064,344 @@ test("case (DA-4): the W2 capture row's live copy must equal the file's (an addi
 test("control (DA-2): a genuine live stop without a dense commit is a refused application (a finding), not an invalid record", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  editTrace(dir, "webkit", (lines) => [
-    lines[0],
-    lines[1],
-    `4ms data.sync_next ${JSON.stringify({ when: "event", state: "stopped" })}`,
-  ]);
-  editLive(dir, "webkit", (live) => {
-    live.outcome = "refused";
-    live.commits = [live.commits[0]];
-    live.observation.boundary = 3;
-    live.observation.dense = null;
-    live.observation.state_entry = {
-      ...live.observation.state_entry,
-      trace: 2,
-      state: { kind: "stopped", cause: "storage_full" },
-    };
-  });
+  // Revision 11: written with its step end (a small page with has_more, then a step that stopped).
+  writeLive(
+    dir,
+    "webkit",
+    [
+      START,
+      TICK("start"),
+      RUNNING,
+      COMMIT(8_035),
+      NEXT("now", "running"),
+      TICK("now"),
+      ["publish", { kind: "stopped", cause: "storage_full" }],
+      NEXT("event", "stopped"),
+    ],
+    { outcome: "refused", dense: null, end: 4, entry: 2 },
+  );
   const c = cell(contract.resolveEvidence(dir), LIVE("webkit"));
   assert.equal(c.status, "ok", reasons(c));
   assert.equal(c.outcome, "refused");
+});
+
+// ---- review 11: the live terminal state and its step end (revision 11, DA-L1, M1-M9) ---------------------------------------------------
+
+/** The healthy synthetic live trace's completing end (line 5: `data.sync_next` idle, resting on the idle published at trace 5). */
+const END = 5;
+const endLine = (dir, engine) =>
+  readFileSync(tracePath(dir, engine), "utf8").split("\n")[END];
+const stamp = (dir, engine) => endLine(dir, engine).split(" ")[0];
+
+test("case (review 11, M2): a stopped, failed-step or running end beside the idle witness, its commits unchanged and every representation of that trace line edited alike, is invalid by the terminal relation; the hand-over withholds support and both validator modes exit 1", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  editLiveLine(
+    dir,
+    "chromium",
+    END,
+    `${stamp(dir, "chromium")} data.sync_next ${JSON.stringify({ when: "event", state: "stopped" })}`,
+    { trace: END, event: "data.sync_next", recorded: "stopped" },
+  );
+  editLiveLine(
+    dir,
+    "firefox",
+    END,
+    `${stamp(dir, "firefox")} data.sync_step_failed `,
+    { trace: END, event: "data.sync_step_failed", recorded: null },
+  );
+  editLiveLine(
+    dir,
+    "webkit",
+    END,
+    `${stamp(dir, "webkit")} data.sync_next ${JSON.stringify({ when: "now", state: "running" })}`,
+    { trace: END, event: "data.sync_next", recorded: "running" },
+  );
+  const r = contract.resolveEvidence(dir);
+  assert.equal(r.complete, false);
+  const expected = {
+    chromium: /the step end at trace 5 records stopped, but idle was published/,
+    firefox: /the failed step's stop is not retained inside the observation/,
+    webkit: /the step end at trace 5 records running, but idle was published/,
+  };
+  for (const [engine, reason] of Object.entries(expected)) {
+    const c = cell(r, LIVE(engine));
+    assert.equal(c.status, "invalid", `${engine}: ${reasons(c)}`);
+    assert.match(reasons(c), reason);
+    assert.match(
+      reasons(c),
+      /recorded admitted, but the observation shows no verdict \(idle\)/,
+    );
+    assert.doesNotMatch(reasons(c), DUPLICATE);
+    assert.doesNotMatch(reasons(c), BINDING);
+  }
+  refusedEndToEnd(dir);
+});
+
+test("case (review 11, original form): only the trace file's end line replaced (stopped, failed-step, running), the witness unchanged, is invalid by the trace binding and refused end to end", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const lines = {
+    chromium: (s) =>
+      `${s} data.sync_next ${JSON.stringify({ when: "event", state: "stopped" })}`,
+    firefox: (s) => `${s} data.sync_step_failed `,
+    webkit: (s) =>
+      `${s} data.sync_next ${JSON.stringify({ when: "now", state: "running" })}`,
+  };
+  for (const [engine, line] of Object.entries(lines)) {
+    const s = stamp(dir, engine);
+    editTrace(dir, engine, (all) => {
+      all[END] = line(s);
+      return all;
+    });
+  }
+  const r = contract.resolveEvidence(dir);
+  for (const engine of Object.keys(lines)) {
+    const c = cell(r, LIVE(engine));
+    assert.equal(c.status, "invalid", `${engine}: ${reasons(c)}`);
+    assert.match(
+      reasons(c),
+      /the retained step events are not the page's trace lines at their positions/,
+    );
+    assert.doesNotMatch(reasons(c), DUPLICATE);
+  }
+  refusedEndToEnd(dir);
+});
+
+test("case (M3): an end absent from the witness, a malformed end, or one outside the boundary is invalid, and a matching idle end after the boundary does not repair it", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  // Absent from the witness (the trace keeps it).
+  editLive(dir, "chromium", (live) => {
+    live.observation.events = live.observation.events.filter(
+      (e) => e.trace !== END,
+    );
+  });
+  // Malformed (no payload) in every representation.
+  editLiveLine(dir, "firefox", END, `${stamp(dir, "firefox")} data.sync_next `);
+  // The witness's boundary drawn before its end; the idle end then lies only in the suffix of the trace.
+  editLive(dir, "webkit", (live) => {
+    live.observation.boundary = END;
+    live.observation.events = live.observation.events.filter(
+      (e) => e.trace !== END,
+    );
+  });
+  const r = contract.resolveEvidence(dir);
+  const absent = reasons(cell(r, LIVE("chromium")));
+  assert.match(
+    absent,
+    /the trace's step event at 5, inside the observation, was not retained/,
+  );
+  assert.match(absent, /no step end inside the observation ends it/);
+  assert.match(
+    reasons(cell(r, LIVE("firefox"))),
+    /step event 3 is malformed or unknown/,
+  );
+  const suffix = cell(r, LIVE("webkit"));
+  assert.equal(suffix.status, "invalid");
+  assert.match(reasons(suffix), /no step end inside the observation ends it/);
+  assert.doesNotMatch(reasons(suffix), BINDING);
+  for (const e of ["chromium", "firefox", "webkit"])
+    assert.doesNotMatch(reasons(cell(r, LIVE(e))), DUPLICATE);
+  refusedEndToEnd(dir);
+});
+
+test("control (M4, M5): several has_more continuations, and a back-off retried to the dense page, are admitted with the first dense commit; the programme stays complete, supports the desktop decision and passes both validator modes", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const dense = captureBytes(dir, "chromium");
+  writeLive(
+    dir,
+    "chromium",
+    [
+      START,
+      TICK("start"),
+      RUNNING,
+      COMMIT(8_035),
+      NEXT("now", "running"),
+      TICK("now"),
+      COMMIT(dense),
+      NEXT("now", "running"),
+      TICK("now"),
+      COMMIT(dense),
+      NEXT("now", "running"),
+      TICK("now"),
+      COMMIT(512),
+      IDLE,
+      NEXT("after", "idle"),
+    ],
+    { outcome: "admitted", dense: 4, end: 11, entry: 2 },
+  );
+  writeLive(
+    dir,
+    "firefox",
+    [
+      START,
+      TICK("start"),
+      RUNNING,
+      ["publish", { kind: "backing_off", since: 5 }],
+      NEXT("after", "backing_off"),
+      TICK("timer"),
+      RUNNING,
+      COMMIT(captureBytes(dir, "firefox")),
+      IDLE,
+      NEXT("after", "idle"),
+    ],
+    { outcome: "admitted", dense: 3, end: 4, entry: 4 },
+  );
+  const r = contract.resolveEvidence(dir);
+  for (const engine of ["chromium", "firefox"]) {
+    const c = cell(r, LIVE(engine));
+    assert.equal(c.status, "ok", `${engine}: ${reasons(c)}`);
+    assert.equal(c.outcome, "admitted");
+  }
+  assert.equal(r.complete, true);
+  const results = assemble(dir);
+  assert.equal(results.acceptance_scope.desktop_decision.supports, true);
+  for (const extra of [[], ["--allow-partial"]]) {
+    const v = validate(dir, ...extra);
+    assert.equal(v.status, 0, `${v.stdout}${v.stderr}`);
+  }
+});
+
+test("control (M6): genuine live refusals (a normal stopped end without a dense commit, a failed step's local_storage stop, a stop after a dense has_more continuation) resolve ok refused: a valid record of a failure that withholds desktop support, not invalid evidence", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  writeLive(
+    dir,
+    "chromium",
+    [
+      START,
+      TICK("start"),
+      RUNNING,
+      ["publish", { kind: "stopped", cause: "device_capacity" }],
+      NEXT("event", "stopped"),
+    ],
+    { outcome: "refused", dense: null, end: 1, entry: 2 },
+  );
+  writeLive(
+    dir,
+    "firefox",
+    [
+      START,
+      TICK("start"),
+      RUNNING,
+      ["failed"],
+      ["publish", { kind: "stopped", cause: "local_storage" }],
+    ],
+    { outcome: "refused", dense: null, end: 1, entry: 2 },
+  );
+  writeLive(
+    dir,
+    "webkit",
+    [
+      START,
+      TICK("start"),
+      RUNNING,
+      COMMIT(captureBytes(dir, "webkit")),
+      NEXT("now", "running"),
+      TICK("now"),
+      ["publish", { kind: "stopped", cause: "floor" }],
+      NEXT("event", "stopped"),
+    ],
+    { outcome: "refused", dense: 1, end: 4, entry: 2 },
+  );
+  const r = contract.resolveEvidence(dir);
+  for (const engine of ["chromium", "firefox", "webkit"]) {
+    const c = cell(r, LIVE(engine));
+    assert.equal(c.status, "ok", `${engine}: ${reasons(c)}`);
+    assert.equal(c.outcome, "refused");
+  }
+  assert.equal(r.complete, true);
+  const results = assemble(dir);
+  assert.equal(results.acceptance_scope.desktop_decision.supports, false);
+  assert.match(
+    results.acceptance_scope.desktop_decision.withheld_because.join(" "),
+    /a valid workload failed on a desktop engine/,
+  );
+  const strict = validate(dir);
+  assert.equal(strict.status, 0, `${strict.stdout}${strict.stderr}`);
+});
+
+test("case (M7): a failed step followed by a stop of another cause, or by an idle, or whose stop was published before its line, is invalid", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const failedThen = (engine, state) =>
+    writeLive(
+      dir,
+      engine,
+      [START, TICK("start"), RUNNING, ["failed"], ["publish", state]],
+      { outcome: "refused", dense: null, end: 1, entry: 2 },
+    );
+  failedThen("chromium", { kind: "stopped", cause: "floor" });
+  failedThen("firefox", {
+    kind: "idle",
+    lastSyncedAt: "2026-10-13T01:00:00.000Z",
+  });
+  // Reversed: the local_storage stop published before the failure line.
+  writeLive(
+    dir,
+    "webkit",
+    [
+      START,
+      TICK("start"),
+      RUNNING,
+      ["publish", { kind: "stopped", cause: "local_storage" }],
+      ["failed"],
+    ],
+    { outcome: "refused", dense: null, end: 1, entry: 2 },
+  );
+  const r = contract.resolveEvidence(dir);
+  assert.match(
+    reasons(cell(r, LIVE("chromium"))),
+    /a failed step ends in stopped\/local_storage, not stopped/,
+  );
+  assert.match(
+    reasons(cell(r, LIVE("firefox"))),
+    /a failed step ends in stopped\/local_storage, not idle/,
+  );
+  assert.match(
+    reasons(cell(r, LIVE("webkit"))),
+    /the failed step's stop is not retained inside the observation/,
+  );
+  for (const e of ["chromium", "firefox", "webkit"]) {
+    assert.equal(cell(r, LIVE(e)).status, "invalid");
+    assert.doesNotMatch(reasons(cell(r, LIVE(e))), BINDING);
+  }
+});
+
+test("case (M8, M9): a trace that continues after the boundary (a later poll, a failure, a restart) leaves the frozen witness admitted; a trace read from another page instance, or not named, is invalid", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const suffix = [
+    `7ms data.sync_tick ${JSON.stringify({ why: "timer", coalesced: false })}`,
+    `8ms data.sync_commit ${JSON.stringify({ bytes: 64, scan_ms: 1, commit_ms: 1, kind: "applied", value: "committed" })}`,
+    `9ms data.sync_next ${JSON.stringify({ when: "now", state: "running" })}`,
+    "10ms data.sync_step_failed ",
+  ];
+  editTrace(dir, "chromium", (all) => [...all, ...suffix]);
+  editLive(dir, "chromium", (live) => {
+    live.commits = [...live.commits, payloadOf(suffix[1])];
+  });
+  editLive(dir, "firefox", (live) => {
+    live.trace_page = "another-page";
+  });
+  editLive(dir, "webkit", (live) => {
+    delete live.trace_page;
+  });
+  const r = contract.resolveEvidence(dir);
+  const kept = cell(r, LIVE("chromium"));
+  assert.equal(kept.status, "ok", reasons(kept));
+  assert.equal(kept.outcome, "admitted");
+  for (const e of ["firefox", "webkit"]) {
+    const c = cell(r, LIVE(e));
+    assert.equal(c.status, "invalid");
+    assert.match(
+      reasons(c),
+      /the retained live trace was not read from the observation's page instance/,
+    );
+    assert.doesNotMatch(reasons(c), DUPLICATE);
+  }
 });
 
 // ---- DA-3: device engine outcomes -----------------------------------------------------------------------------------------------------
@@ -1126,8 +1559,8 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 
 // ---- versions -----------------------------------------------------------------------------------------------------------------------
 
-test("case: stages recorded under contract versions 3 (review 9's Air request) and 4 (revision 9) are not evidence of version 5", (t) => {
-  for (const version of [3, 4]) {
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9) and 5 (revision 10) are not evidence of version 6", (t) => {
+  for (const version of [3, 4, 5]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1140,7 +1573,7 @@ test("case: stages recorded under contract versions 3 (review 9's Air request) a
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 5`),
+          .includes(`recorded under contract ${version}, not 6`),
       ),
     );
   }

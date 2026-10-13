@@ -20,6 +20,10 @@
  * body). Its end is the first `data.sync_next` after it that does not record `running` (a `has_more` page is followed), or a
  * `data.sync_step_failed`; the terminal state is the one published before that `data.sync_next`, or the stop published after the failure.
  *
+ * Revision 11 (review 11's R2 follow-up; design assessment DA-L1): the live witness's terminal state is corroborated by the step end that
+ * completes it. `live-dense-commit/3` retains every publication since the mark and every step event of the epoch before its boundary (raw
+ * lines), and the rules derive the end, its publication and the dense commit from that slice and bind it to the trace file of the page.
+ *
  * `observeColdOutcome` and `observeLiveOutcome` run IN THE PAGE (Playwright serialises them): they must not refer to anything outside
  * their own bodies.
  */
@@ -305,25 +309,46 @@ export function classifyColdOutcome(
   return { outcome: shows, detail: shown, problems };
 }
 
-/** The live W2 witness (one evaluation): the epoch, the first dense commit at its trace position, and the state published last. */
+/** One retained live step event: its trace position and the raw trace line (the rules parse the event and payload from it). */
+export interface LiveStepLine {
+  trace: number;
+  line: string;
+}
+
+/**
+ * The live W2 witness (`live-dense-commit/3`, one evaluation). Revision 11 (review 11's R2 follow-up; design assessment DA-L1): the
+ * terminal state is corroborated by the step end that completes the observation, so the witness retains that support itself: every state
+ * published since the mark and every step event of the epoch before the boundary, as raw lines. `dense`, `step_end` and `state_entry` are
+ * claims the shared rules derive again from that slice.
+ */
 export interface LiveObservation {
   method: typeof LIVE_METHOD;
   page: string;
   mark: ObservationMark;
   generation: number;
   epochs: EngineEpochEntry[];
-  /** The trace length when the observation was made: the dense commit lies before it. */
+  /** The trace length when the observation was made: the exclusive end of everything it retains. */
   boundary: number;
-  /** The last state the observed engine published (its position after the mark, generation, time and trace position). */
-  state_entry: PublishedState;
-  /** The first commit of the epoch of at least 90% of the captured limit-1 bytes, and its trace position; null if none yet. */
+  /** Every state published since the mark, up to the observation. */
+  published: PublishedState[];
+  /** Every commit and step end of the epoch before the boundary, each its raw trace line. */
+  events: LiveStepLine[];
+  /** The first commit of the epoch of at least 90% of the captured limit-1 bytes, and its trace position; null if none. */
   dense: { trace: number; commit: ObservedCommit } | null;
+  /** The step end that completes the observation; `recorded` is the state kind a normal end carries, null after a failed step. */
+  step_end: { trace: number; event: string; recorded: string | null };
+  /** The publication that step end rests on (a normal end: the last published at or before it; a failed step: the stop after it). */
+  state_entry: PublishedState;
 }
 
 /**
- * In the page: the live application's end, or null. Admitted: the dense page (the first commit of the epoch of at least 90% of the
- * captured limit-1 bytes) has committed and the engine published idle after it. Refused: the engine stopped. Anything else (a back-off is
- * transient) is waited out. A reload or another start while observing throws (no verdict).
+ * In the page: the live application's end, or null (polled again). The epoch's step ends are walked in order; a normal end rests on the
+ * last state published at or before its trace line, a failed step on the first published after it (its stop; until that is published
+ * the observation waits). A continuation (running after a `has_more` page, a back-off, a pause, a wait, an idle before the dense page)
+ * is waited out. The observation is complete at the first end that is idle with the dense page (the first commit of the epoch of at
+ * least 90% of the captured limit-1 bytes) traced before the idle, any stop, or a contradiction (an end recording another state than the
+ * one published, a failed step not followed by its stop, an end with no verdict): a completed contradiction is returned, so the rules
+ * name it, rather than waited past to a convenient later state. A reload or another start while observing throws (no verdict).
  */
 export function observeLiveOutcome(arg: {
   least: number;
@@ -349,7 +374,14 @@ export function observeLiveOutcome(arg: {
   const states = data.engineStates;
   const last = states.at(-1);
   if (!last || states.length <= mark.states) return null;
-  if (last.generation !== epoch.generation)
+  const published = states.slice(mark.states).map((e, index) => ({
+    index,
+    generation: e.generation,
+    at: e.at,
+    trace: e.trace,
+    state: e.state,
+  }));
+  if (published.some((e) => e.generation !== epoch.generation))
     throw new Error(
       "observation identity: another engine published while observing",
     );
@@ -358,52 +390,111 @@ export function observeLiveOutcome(arg: {
     return null;
   const trace = data.engineTrace;
   const boundary = trace.length;
-  let dense: { trace: number; commit: ObservedCommit } | null = null;
+  const payload = (line: string): Record<string, unknown> | null => {
+    const at = line.indexOf("{");
+    if (at < 0) return null;
+    try {
+      const value = JSON.parse(line.slice(at)) as unknown;
+      return typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const events: Array<{ trace: number; line: string }> = [];
   for (let t = epoch.trace; t < boundary; t += 1) {
     const line = trace[t] ?? "";
-    if (line.split(" ")[1] !== "data.sync_commit") continue;
-    const at = line.indexOf("{");
-    if (at < 0) continue;
-    try {
-      const commit = JSON.parse(line.slice(at)) as ObservedCommit;
-      if ((commit.bytes ?? 0) >= least * 0.9) {
-        dense = { trace: t, commit };
-        break;
-      }
-    } catch {
-      // not a commit record
+    const name = line.split(" ")[1];
+    if (
+      name === "data.sync_commit" ||
+      name === "data.sync_next" ||
+      name === "data.sync_step_failed"
+    )
+      events.push({ trace: t, line });
+  }
+  let dense: { trace: number; commit: ObservedCommit } | null = null;
+  for (const e of events) {
+    if (e.line.split(" ")[1] !== "data.sync_commit") continue;
+    const commit = payload(e.line) as ObservedCommit | null;
+    if (commit && (commit.bytes ?? 0) >= least * 0.9) {
+      dense = { trace: e.trace, commit };
+      break;
     }
   }
-  const kind = last.state.kind;
-  if (
-    !(
-      (dense && kind === "idle" && last.trace > dense.trace) ||
-      kind === "stopped"
-    )
-  )
-    return null;
-  return {
-    method: "live-dense-commit/2",
-    page: data.page,
-    mark,
-    generation: epoch.generation,
-    epochs,
-    boundary,
-    state_entry: {
-      index: states.length - 1 - mark.states,
-      generation: last.generation,
-      at: last.at,
-      trace: last.trace,
-      state: last.state,
-    },
-    dense,
+  const witness = (
+    end: { trace: number; line: string },
+    entry: (typeof published)[number],
+  ): LiveObservation => {
+    const failed = end.line.split(" ")[1] === "data.sync_step_failed";
+    const recorded = failed ? null : payload(end.line)?.state;
+    return {
+      method: "live-dense-commit/3",
+      page: data.page,
+      mark,
+      generation: epoch.generation,
+      epochs,
+      boundary,
+      published,
+      events,
+      dense,
+      step_end: {
+        trace: end.trace,
+        event: failed ? "data.sync_step_failed" : "data.sync_next",
+        recorded: typeof recorded === "string" ? recorded : null,
+      },
+      state_entry: entry,
+    };
   };
+  for (const e of events) {
+    const name = e.line.split(" ")[1];
+    if (name === "data.sync_commit") continue;
+    if (name === "data.sync_step_failed") {
+      const stop = published.find((p) => p.trace > e.trace);
+      // The stop the engine publishes after a failed step's line: not published yet, polled again.
+      if (!stop) return null;
+      // Complete: the rules judge it (a stop of another cause, or another event before it, is a contradiction).
+      return witness(e, stop);
+    }
+    let entry: (typeof published)[number] | undefined;
+    for (const p of published) if (p.trace <= e.trace) entry = p;
+    const recorded = payload(e.line)?.state;
+    // The start publishes its waiting state before the epoch's first trace line: an end before any publication is not this engine's.
+    if (!entry)
+      throw new Error(
+        "observation identity: a step end of the epoch follows no state its engine published",
+      );
+    if (entry.state.kind !== recorded) return witness(e, entry);
+    if (recorded === "stopped") return witness(e, entry);
+    if (recorded === "idle") {
+      if (!dense || dense.trace > e.trace) continue;
+      return witness(e, entry);
+    }
+    if (
+      recorded === "running" ||
+      recorded === "backing_off" ||
+      recorded === "paused" ||
+      recorded === "waiting"
+    )
+      continue;
+    return witness(e, entry);
+  }
+  return null;
 }
 
-/** The live outcome its one observation shows, corroborated against the verified capture's size and the page's retained trace. */
+/**
+ * The live outcome its one observation shows, corroborated by the shared rules against the verified capture's size and the page's
+ * retained trace (and the page instance that trace was read from).
+ */
 export function classifyLiveOutcome(
   observation: LiveObservation,
-  context: { capturedBytes: number; traceLines: string[] | null },
+  context: {
+    capturedBytes: number;
+    traceLines: string[] | null;
+    tracePage: string | null;
+  },
 ): { outcome: "admitted" | "refused" | "error"; problems: string[] } {
   const { shows, problems } = liveObservationRules(observation, context);
   if (problems.length || shows === null)

@@ -22,6 +22,10 @@
 // recorded workload sizes, and the device results are schema 3 (JSON end states and each engine run's first commit). Written out here,
 // never computed by scripts/lib/profile-outcome-rules.mjs.
 //
+// Revision 11 (review 11's R2 follow-up, design assessment DA-H1; contract version 6): the live schedule includes the step ends the
+// production engine traces (and the tick between pages), applied commits carry the plan's result kind, and the live witness retains its
+// publications and step-event lines (`live-dense-commit/3`) with the page its trace was read from.
+//
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
 // thing and expect the exact cell the contract must name.
@@ -383,7 +387,7 @@ export function writeProgramme(
           scan_ms: 30 + (s % 40),
           commit_ms: 200 + (s % 300),
           kind: "applied",
-          value: "applied",
+          value: "committed",
         }
       : null;
     // The trace: 0 the start's tick (not a step event); [1 the commit;] then the step end. `running` is published after the tick (trace
@@ -1261,47 +1265,78 @@ export function writeProgramme(
       Buffer.byteLength(w2Body),
     );
     // Revision 10 (DA-2, DA-4): the live page's engine trace as the harness writes it, and the witness of its first dense commit (an
-    // earlier small page, then the dense one, the idle published after it), every commit kind recorded.
+    // earlier small page, then the dense one, the idle published after it), every commit kind recorded. Revision 11 (review 11's R2
+    // follow-up, DA-H1; contract version 6): the schedule the production engine runs (src/data/engine/sync-engine.ts), written out here:
+    // the start publishes waiting/cache_not_valid before its first tick; the step publishes running, commits the small page (has_more), and
+    // its end records running (the state it left; an identical running is not published again); the engine ticks at once, commits the
+    // dense page, publishes idle and its end records idle. An applied commit carries the plan's result kind (`value: "committed"`). The
+    // witness (`live-dense-commit/3`) retains every publication and every step-event line before its boundary; the end it names is the
+    // idle one, resting on the idle publication.
     const smallCommit = {
       bytes: 8_035,
       scan_ms: 1,
       commit_ms: 4,
       kind: "applied",
-      value: "applied",
+      value: "committed",
     };
     const denseCommit = {
       bytes: Buffer.byteLength(w2Body),
       scan_ms: 20,
       commit_ms: 300,
       kind: "applied",
-      value: "applied",
+      value: "committed",
     };
     const liveLines = [
       `1ms data.sync_tick ${JSON.stringify({ why: "start", coalesced: false })}`,
       `2ms data.sync_commit ${JSON.stringify(smallCommit)}`,
       `3ms data.sync_next ${JSON.stringify({ when: "now", state: "running" })}`,
-      `4ms data.sync_commit ${JSON.stringify(denseCommit)}`,
-      `5ms data.sync_next ${JSON.stringify({ when: "after", state: "idle" })}`,
+      `4ms data.sync_tick ${JSON.stringify({ why: "now", coalesced: false })}`,
+      `5ms data.sync_commit ${JSON.stringify(denseCommit)}`,
+      `6ms data.sync_next ${JSON.stringify({ when: "after", state: "idle" })}`,
     ];
     const livePage = `synthetic-live-${engine}`;
+    const livePublished = [
+      {
+        index: 0,
+        generation: 1,
+        at: 700,
+        trace: 0,
+        state: { kind: "waiting", reason: "cache_not_valid" },
+      },
+      {
+        index: 1,
+        generation: 1,
+        at: 720,
+        trace: 1,
+        state: { kind: "running", catchingUp: true },
+      },
+      {
+        index: 2,
+        generation: 1,
+        at: 900,
+        trace: 5,
+        state: { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" },
+      },
+    ];
     const live = {
       outcome: "admitted",
       observation: {
-        method: "live-dense-commit/2",
+        method: "live-dense-commit/3",
         page: livePage,
         mark: { page: livePage, states: 0, trace: 0, generation: 0 },
         generation: 1,
         epochs: [{ generation: 1, run: 1, trace: 0 }],
         boundary: liveLines.length,
-        state_entry: {
-          index: 2,
-          generation: 1,
-          at: 900,
-          trace: 4,
-          state: { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" },
-        },
-        dense: { trace: 3, commit: denseCommit },
+        published: livePublished,
+        events: [1, 2, 4, 5].map((trace) => ({
+          trace,
+          line: liveLines[trace],
+        })),
+        dense: { trace: 4, commit: denseCommit },
+        step_end: { trace: 5, event: "data.sync_next", recorded: "idle" },
+        state_entry: livePublished[2],
       },
+      trace_page: livePage,
       elapsed_ms: liveRun.elapsed_ms + 500,
       commits: [smallCommit, denseCommit],
       limits_the_engine_asked_for: ["1", "1"],
@@ -1507,7 +1542,7 @@ export function writeProgramme(
                 scan_ms: scanMs,
                 commit_ms: commitMs,
                 kind: "applied",
-                value: "applied",
+                value: "committed",
               }
             : null,
         user_agent: `synthetic ${engine}`,
@@ -1574,7 +1609,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 5,
+      contract_version: 6,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

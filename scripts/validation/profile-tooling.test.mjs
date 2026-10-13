@@ -2642,6 +2642,7 @@ const rebind = (dir, engine, hash) => {
  * capture's exact bytes and the live application's dense commit is judged against its size, so both now follow from the capture too.
  * Rebinds them as the integration writer would have recorded them: each run's served bytes and first commit (both of its witness's
  * representations), and the live witness's first commit of at least 90% of the capture in the retained trace (both live copies).
+ * Revision 11 (contract version 6, the same labelled adaptation): a rewritten dense trace line is also the witness's retained raw line.
  */
 const rebindW2Runs = (dir, engine, size) => {
   const file = join(dir, `w2/P-W2.${engine}.json`);
@@ -2682,6 +2683,8 @@ const rebindW2Runs = (dir, engine, size) => {
       lines.join("\n"),
     );
     o.dense.commit = commit;
+    // Revision 11 (contract version 6): the witness retains that raw line too.
+    for (const e of o.events) if (e.trace === at) e.line = lines[at];
     v.live.commits = lines
       .filter((l) => l.includes("data.sync_commit"))
       .map((l) => JSON.parse(l.slice(l.indexOf("{"))));

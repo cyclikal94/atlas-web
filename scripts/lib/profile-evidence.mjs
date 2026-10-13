@@ -59,9 +59,12 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * required (`engine-state-log/2`, `live-dense-commit/2`: page instance and engine start, every published state and step event retained
  * and recomputed, served-byte identity, the live dense commit's position in the retained trace and its density against the capture) and
  * device-page results are schema 3 (each engine run's first commit); version 4 evidence (no Air request was recorded under it) resolves
- * incomplete and stays history, unchanged.
+ * incomplete and stays history, unchanged. Version 6 (WEB-09c revision 11, review 11's R2 follow-up): the live witness is
+ * `live-dense-commit/3`, retaining every publication and step-event line inside its boundary so that its terminal state is corroborated
+ * by the step end that completes it, bound to the trace file and the page it was read from (`trace_page`); version 5 evidence (no Air
+ * request was recorded under it) resolves incomplete and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 5;
+export const CONTRACT_VERSION = 6;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [
