@@ -9,6 +9,7 @@ import {
   type ColdObservation,
   classifyColdOutcome,
   type ObservationMark,
+  observationMark,
   observeColdOutcome,
 } from "./profile-cold-outcome";
 import { browserMemory, cdpHeap, sampler, sleep } from "./profile-helpers";
@@ -50,6 +51,10 @@ export const commitsOf = (trace: string[]): Commit[] =>
  * and idle, `refused` only for the engine's own refusal states, and `error` for anything contradictory or not a verdict on the page (a
  * start's `waiting`, a `running` read, a step that never asked). The run keeps the observation; a time-out keeps the states published so far
  * (diagnostic, not an outcome). The scan and commit figures are the measured page's (the first commit after the request), not the last.
+ *
+ * Revision 10 (review 10 R2 follow-up): the observation is a witness bound to this page instance and the one engine start after the mark
+ * (a reload or a second start while observing is an `error` run, never a verdict), classified by the shared rules against the bytes this
+ * function served and the stub's count.
  */
 export async function oneColdRun(
   browser: Browser,
@@ -83,10 +88,9 @@ export async function oneColdRun(
     heapBaseline = await heap.used();
     await memory.baseline();
     // Where this run's states and trace begin (taken before the sampling window opens, so the window is as it was).
-    const mark: ObservationMark = await page.evaluate(() => ({
-      states: window.__atlasData?.engineStates.length ?? 0,
-      trace: window.__atlasData?.engineTrace.length ?? 0,
-    }));
+    const marked = await page.evaluate(observationMark);
+    if (!marked) throw new Error("no data harness on the measured page");
+    const mark: ObservationMark = marked;
     net.script.push(() => ({ status: 200, body }));
     const heapSampler = sampler(() => heap.used(), 25);
     memory.start(100);
@@ -101,7 +105,10 @@ export async function oneColdRun(
       observation = (await found.jsonValue()) as ColdObservation;
     } catch (error) {
       elapsed ??= Date.now() - started;
-      outcome = "timeout";
+      // A reload or another engine start while observing ends the attempt without a verdict (an error); no end in time is a time-out.
+      outcome = String(error).includes("observation identity")
+        ? "error"
+        : "timeout";
       detail = String(error).slice(0, 200);
     }
     heapSamples = await heapSampler.stop();
@@ -117,7 +124,8 @@ export async function oneColdRun(
       outcome = classified.outcome;
       detail = classified.detail;
       commit = observation.commits[0];
-    } else
+    } else if (outcome === "timeout")
+      // (Not after an identity error: the page or engine read now is no longer the observed one.)
       published = await page.evaluate(
         (from) =>
           (window.__atlasData?.engineStates ?? [])

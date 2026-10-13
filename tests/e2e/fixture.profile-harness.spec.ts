@@ -277,7 +277,7 @@ test("case: an attempt left reserved by a killed page is recorded once, as kille
       localStorage.setItem(
         "atlas-profile-protocol",
         JSON.stringify({
-          schema: 2,
+          schema: 3,
           kind: "protocol",
           protocol_id: "seeded",
           owner,
@@ -639,7 +639,8 @@ const storedRun = (workload: string, run: number, protocolId: string) => ({
   cold: true,
   expected: "admitted",
   outcome: "admitted",
-  detail: "seeded earlier attempt",
+  // Schema 3 (revision 10): an admitted engine run's detail is its end state, and it carries its first commit.
+  detail: JSON.stringify({ kind: "idle", lastSyncedAt: "t0" }),
   sha256: "1".repeat(64),
   sha256_verified: true,
   bytes: 1,
@@ -653,6 +654,7 @@ const storedRun = (workload: string, run: number, protocolId: string) => ({
   heap_baseline_bytes: null,
   heap_peak_bytes: null,
   heap_after_bytes: null,
+  first_commit: { kind: "applied", bytes: 1, scan_ms: 1, commit_ms: 1 },
   user_agent: "seeded",
   at: "t0",
 });
@@ -665,7 +667,7 @@ const seedProtocol = (
     localStorage.setItem(
       "atlas-profile-protocol",
       JSON.stringify({
-        schema: 2,
+        schema: 3,
         kind: "protocol",
         workload_version: 1,
         created_at: "t0",
@@ -1225,7 +1227,7 @@ const seedManual = (page: Page, envelope: Record<string, unknown>) =>
     localStorage.setItem(
       "atlas-profile-manual",
       JSON.stringify({
-        schema: 2,
+        schema: 3,
         kind: "manual",
         workload_version: 1,
         plan: [],
@@ -1730,6 +1732,7 @@ test("case (Q-F2): a held attempt whose collection moved A to B and back to A be
         heap_baseline_bytes: null,
         heap_peak_bytes: null,
         heap_after_bytes: null,
+        first_commit: null,
         user_agent: "test",
         at: "t8",
         protocol_id: e.protocol_id,

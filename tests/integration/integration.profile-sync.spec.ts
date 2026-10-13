@@ -10,6 +10,7 @@ import {
 import {
   classifyLiveOutcome,
   type LiveObservation,
+  observationMark,
   observeLiveOutcome,
 } from "../e2e/profile-cold-outcome";
 import { oneColdRun, unusableRuns } from "../e2e/profile-cold-run";
@@ -616,6 +617,10 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   const heapSampler = sampler(() => heap.used(), 25);
   memory.start(100);
   await page.evaluate(() => performance.clearResourceTimings());
+  // Revision 10 (review 10 R2 follow-up): the live epoch begins here, before the engine starts; the observation names this page and the
+  // one start after it, and its dense commit must lie in the retained trace inside it.
+  const liveMark = await page.evaluate(observationMark);
+  if (!liveMark) throw new Error("no data harness on the W2 page");
   const liveStarted = Date.now();
   // Only the engine: `leader` would run `prepareAccount` again, which seeds a NEW snapshot (holding the dense fields as snapshot rows)
   // and moves the cursor past the very delta this step measures.
@@ -626,20 +631,27 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   }, id.account_id);
   // Revision 9 (review 9 R2): the outcome is classified from the one evaluation that found the end (`observeLiveOutcome`: the dense
   // commit and the state at that same moment), never from a second read, which could already see the next live-edge poll running.
+  // Revision 10: classified (below, after the trace is read) against the verified capture's size and the retained trace, by the shared
+  // rules: the dense commit must be the trace's first of at least 90% of the captured bytes inside the epoch, the idle published after it.
   let liveOutcome = "timeout";
   let liveObservation: LiveObservation | null = null;
+  let liveProblems: string[] = [];
+  let liveError = "";
   let liveElapsed: number | null = null;
   try {
     const found = await page.waitForFunction(
       observeLiveOutcome,
-      w2Body.length,
+      { least: w2Body.length, mark: liveMark },
       { timeout: 240_000, polling: 25 },
     );
     liveElapsed = Date.now() - liveStarted;
     liveObservation = (await found.jsonValue()) as LiveObservation;
-    liveOutcome = classifyLiveOutcome(liveObservation);
-  } catch {
-    liveOutcome = "timeout";
+  } catch (error) {
+    // A reload or another start while observing is no verdict (an error); no end in time is a time-out.
+    liveOutcome = String(error).includes("observation identity")
+      ? "error"
+      : "timeout";
+    liveError = String(error).slice(0, 200);
   }
   liveElapsed ??= Date.now() - liveStarted;
   const heapSamples = await heapSampler.stop();
@@ -654,6 +666,14 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     `${PROFILE_OUT}/w2/P-W2.${engine}.live-engine-trace.txt`,
     trace.join("\n"),
   );
+  if (liveObservation) {
+    const classified = classifyLiveOutcome(liveObservation, {
+      capturedBytes: w2Body.length,
+      traceLines: trace,
+    });
+    liveOutcome = classified.outcome;
+    liveProblems = classified.problems;
+  }
   const commits = trace
     .filter((l) => l.includes("data.sync_commit"))
     .map((l) => {
@@ -674,6 +694,8 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     outcome: liveOutcome,
     // The one observation the outcome was classified from (null: the time-out; the trace file says what happened).
     observation: liveObservation,
+    ...(liveProblems.length ? { problems: liveProblems } : {}),
+    ...(liveError ? { error: liveError } : {}),
     elapsed_ms: liveElapsed,
     commits,
     limits_the_engine_asked_for: limitsAsked,

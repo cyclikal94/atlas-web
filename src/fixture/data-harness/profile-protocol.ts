@@ -22,6 +22,9 @@
  * results, terminal and take-overs agree).
  *
  * A results file is the envelope's runs with its identity (schema 2): one `protocol_id` on every run, every (workload, run) once.
+ * Schema 3 (WEB-09c revision 10, design assessment DA-3): every run also carries its first commit (`ProfileRun.first_commit`), so the
+ * validator can corroborate an engine run's outcome. A stored schema-2 envelope is left as it is (read as unusable, its raw text kept for
+ * the operator to copy or clear), never upgraded or relabelled.
  *
  * Revision 4 (review 4 R5, design assessment B1-B6): BOTH collections have a recovery lifecycle. `recoveryTarget` resolves which stored
  * collection an operator's action is for (an explicit target, or the only one that needs it; never a fixed protocol-first choice);
@@ -36,7 +39,7 @@ import type { ProfileRun } from "./profile-page";
 export const PROTOCOL_KEY = "atlas-profile-protocol";
 export const MANUAL_KEY = "atlas-profile-manual";
 export const OWNER_KEY = "atlas-profile-owner";
-export const SCHEMA = 2;
+export const SCHEMA = 3;
 
 /** The parts of `Storage` the protocol uses (localStorage, sessionStorage, or a test's own). */
 export interface KeyValue {
@@ -80,7 +83,7 @@ export type Read =
   | { state: "corrupt"; raw: string; error: string }
   | { state: "present"; envelope: Envelope; raw: string };
 
-/** Reads an envelope. Anything that is not a whole schema-2 envelope is `corrupt`, with its raw text kept for the operator. */
+/** Reads an envelope. Anything that is not a whole current-schema envelope is `corrupt`, with its raw text kept for the operator. */
 export function readEnvelope(store: KeyValue, key: string): Read {
   let raw: string | null;
   try {
@@ -102,14 +105,14 @@ export function readEnvelope(store: KeyValue, key: string): Read {
       return {
         state: "corrupt",
         raw,
-        error: "not a schema-2 protocol envelope",
+        error: `not a schema-${SCHEMA} protocol envelope`,
       };
     const problem = structuralProblem(envelope);
     if (problem)
       return {
         state: "corrupt",
         raw,
-        error: `an inconsistent schema-2 envelope: ${problem}`,
+        error: `an inconsistent schema-${SCHEMA} envelope: ${problem}`,
       };
     return { state: "present", envelope, raw };
   } catch (error) {
@@ -123,7 +126,7 @@ const isRun = (x: unknown): x is number =>
   typeof x === "number" && Number.isInteger(x) && x >= 1;
 
 /**
- * What makes a schema-2 envelope inconsistent (design assessment D9): its kind, plan, next, reservation, results, terminal state and
+ * What makes an envelope inconsistent (design assessment D9; schema 2 onwards): its kind, plan, next, reservation, results, terminal state and
  * take-overs must agree, so a hand-edited, truncated or mixed record is never driven as if it were a collection.
  */
 export function structuralProblem(e: Envelope): string | null {

@@ -98,6 +98,12 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > application keeps the one evaluation that found its end. The contract (version 4) checks every recorded outcome against its observation, and P-11 and W2
 > fail their stage on an error or time-out after writing every run, so a programme stops there. The two runs stay failed in that package; nothing in it is
 > reclassified, and it supports no desktop decision.
+>
+> **Status after review 10 (revision 10, 13 October 2026).** Review 10 found revision 9's corroboration optional: a cold record whose first commit had no
+> bytes, whose terminal state was the request's own entry or preceded it, or whose step failed but ended idle still resolved as an admission, and a live
+> dense commit of zero or invented size, absent from the retained trace, did too, so each could derive desktop support (synthetic diagnostics; no Air
+> programme ran on revision 9). The design assessment added device results whose engine detail contradicted their outcome. Revision 10 makes the evidence
+> required (contract version 5, below); no measurement was taken under version 4, and no figure here changes.
 
 ## Read this first
 
@@ -491,13 +497,32 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
   batch), and an engine's device cells depend on its limit-1 capture being valid;
   the bound and the limits ladder have their recorded forms; the live application and the cold outcomes agree with their copies;
 * P-4: each sync-page total is the sum of its segments (a draft total at least theirs); the shell's medians and every derived figure follow from its runs;
-* the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures;
+* the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures
+  (schema 3: and an engine run's end state and first commit corroborate its outcome);
 * every row lies in the lines its stage sealed; malformed nested evidence is a named finding of its cell, never a crash or an empty success.
 
 From revision 9 (review 9 R2; contract version 4) every admitted or refused P-11 and P-W2 cold run carries the one observation it was classified from
 (`tests/e2e/profile-cold-outcome.ts`): the request's step, the state published when that step ended and the trace line that ended it, and the commits since
 the request. The contract refuses a record whose observation does not show its outcome, whose detail is not the observed state, whose first commit is not
 the served page or whose figures are not that commit's; the live W2 application is checked against its own observation the same way.
+
+From revision 10 (review 10's R2 follow-up; contract version 5) that observation is a witness, judged by one rule set shared by the classifiers, the contract
+and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts the test knows independently of it:
+
+* **One page, one engine start.** The fixture harness names its page instance and logs every engine start (`restartSync` included) and each published
+  state's start. An observation names both; a reload or a second start while observing ends the run as an `error`, never a verdict.
+* **Everything it rests on is kept and recomputed.** A cold run keeps every state published since its mark (none truncated, however long a `has_more`
+  schedule) and every commit and step-end trace event up to the step's end. The request, its end, the terminal state and the commits are recomputed from
+  them and must equal what the record claims, in the engine's order: a normal end publishes its state and then traces it; a failed step traces its failure
+  and then publishes `stopped/local_storage`; a commit precedes the state it leads to.
+* **The served bytes are bound.** The first commit after the request must record the bytes served: a P-11 workload's recorded size, or W2's limit-1 capture
+  as its capture row records it (which the capture cell certifies against the file). Idle needs that commit applied and traced before the idle. A refusal
+  may have no commit, and keeps the one it had after a `has_more` continuation.
+* **The live dense commit is the trace's.** It must be the retained trace's line at its recorded position, inside the epoch and before the observation, the
+  first there of at least 90% of the captured limit-1 bytes, with the idle published after it; the recorded live commits are the trace's.
+* **Device results are schema 3.** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
+  backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
+  admitted run's figures must equal; W5 and killed attempts carry none. Schema-2 files and stored envelopes are history: read as unusable, never upgraded.
 
 ## What the released backend does (read from its source at the pinned commit, then measured)
 

@@ -47,6 +47,11 @@ import {
   sampleIdentityProblem,
 } from "./profile-isolation.mjs";
 import {
+  coldObservationRules,
+  commitsOfTrace,
+  liveObservationRules,
+} from "./profile-outcome-rules.mjs";
+import {
   observeW2Capture,
   sameTargetProblems,
   W2_SEED,
@@ -2043,23 +2048,61 @@ function runsSource(ev, cell) {
       identity,
     };
   const run = runs[cell.run - 1];
-  return isObj(run)
-    ? { run, identity, servedBytes: rows[0].bytes }
-    : { missing: `cold run ${cell.run} is missing` };
+  if (!isObj(run)) return { missing: `cold run ${cell.run} is missing` };
+  const served = servedBytesOf(ev, cell);
+  if (served.problem) identity.push(served.problem);
+  else if (rows[0].bytes !== served.bytes)
+    identity.push(
+      `the row records ${rows[0].bytes} served bytes; ${served.what} is ${served.bytes}`,
+    );
+  return { run, identity, servedBytes: served.bytes ?? null };
 }
 
-/** The engine's refusal states (tests/e2e/profile-cold-outcome.ts: REFUSED_STATES; a `waiting` after the request is refused too). */
-const REFUSED_STATES = ["stopped", "backing_off", "paused"];
-const COLD_METHOD = "engine-state-log/1";
-const LIVE_METHOD = "live-dense-commit/1";
+/**
+ * The byte length of what a cold run was served, from a source independent of the run's own record (revision 10, review 10 R2 follow-up,
+ * design assessment DA-1 and invariant 4): a P-11 workload's recorded size (scripts/lib/profile-workload-hashes.json, the bytes the
+ * generator's hash pins), and W2's limit-1 capture, the exact bytes every W2 cold run replays.
+ */
+function servedBytesOf(ev, cell) {
+  if (cell.source === "p11") {
+    const workload = RECORDED.workloads.find((w) => w.name === cell.workload);
+    return workload
+      ? { bytes: workload.bytes, what: `the recorded ${cell.workload}` }
+      : { problem: `${cell.workload} is not a recorded workload` };
+  }
+  return capturedLimit1(ev, cell.engine);
+}
 
 /**
- * Revision 9 (review 9 R2): a cold run's outcome is a verdict only when the ONE observation it was classified from shows it. The rules
- * are those of `observationProblems` and `classifyColdOutcome` (tests/e2e/profile-cold-outcome.ts), applied again to the record: the
- * observation is the measured request's step and its end; the published state is the one the step's end records; the first commit after
- * the request is the served page (its bytes); admitted is idle with that page applied; refused is a refusal state (or waiting for a valid
- * cache); the recorded detail is that terminal state and the scan/commit figures are the first commit's. A `refused` whose state is
- * `running` (the two WebKit runs of profile-20261013-013915-cf05e051) is contradictory, not a refusal.
+ * The limit-1 W2 capture's byte length as the capture value row records it (revision 10, DA-1/DA-2): the W2 cold runs' served bytes and
+ * the live density basis. The capture cell certifies that record against the file's own bytes (size, MiB and SHA-256, and its content
+ * as the seeded dense batch), so a run is bound to the verified capture through it, and a defect of the capture file stays that cell's
+ * finding (and its device dependants') rather than reappearing in every W2 cell; the programme is incomplete either way.
+ */
+function capturedLimit1(ev, engine) {
+  const rows = rowsNamed(ev.values, "P-W2 capture", engine);
+  const bytes =
+    rows.length === 1 ? rows[0].captures?.limit_1?.bytes : undefined;
+  return isCount(bytes) && bytes > 0
+    ? {
+        bytes,
+        what: "the recorded limit-1 capture (certified against its file by the capture cell)",
+      }
+    : {
+        problem:
+          "no recorded limit-1 W2 capture size: the served and captured bytes cannot be bound to it",
+      };
+}
+
+/**
+ * Revision 9 (review 9 R2): a cold run's outcome is a verdict only when the ONE observation it was classified from shows it. Revision 10
+ * (review 10's R2 follow-up, design assessment DA-1): the observation is a witness whose relations are REQUIRED, judged by the shared rules
+ * (scripts/lib/profile-outcome-rules.mjs, the classifier's own): one page instance and one engine start since the mark; every state
+ * published since the mark and every commit/step-end event to the step's end retained; the request, its end, the terminal state and the
+ * commits recomputed from them and equal to the claims, in the engine's order (a normal end records the published state; a failed step
+ * ends in the stop published after it); the first commit after the request of the SERVED bytes (`servedBytes`: the recorded workload or
+ * the captured W2 file, never the row's own figure), with its timings; idle only with that commit applied and traced before it. Then the
+ * record: its outcome is the one shown, its detail the observed terminal state and an admitted run's figures the first commit's.
  */
 function coldObservationProblems(run, servedBytes) {
   if (!["admitted", "refused"].includes(run.outcome)) return [];
@@ -2068,51 +2111,16 @@ function coldObservationProblems(run, servedBytes) {
     return [
       `a ${run.outcome} run without the observation it was classified from`,
     ];
-  const problems = [];
-  if (o.method !== COLD_METHOD) problems.push(`observation method ${o.method}`);
+  const { shows, problems, first } = coldObservationRules(o, {
+    servedBytes,
+    requests: run.requests,
+  });
   const state = o.terminal?.state;
-  if (!isObj(state) || typeof state.kind !== "string")
-    return [...problems, "the observation has no terminal state"];
-  if (!isCount(o.request?.index) || !isCount(o.terminal?.index))
-    problems.push("the observation does not place the request and its end");
-  else if (o.terminal.index < o.request.index)
-    problems.push("the terminal state precedes the request");
-  if (state.kind === "running" || state.kind === "not_started")
-    problems.push(`the step ended in ${state.kind}`);
-  if (
-    o.step_end?.event === "data.sync_next"
-      ? o.step_end.recorded !== state.kind
-      : o.step_end?.event !== "data.sync_step_failed"
-  )
-    problems.push(
-      `the step's end (${o.step_end?.event} ${o.step_end?.recorded}) does not record the published ${state.kind}`,
-    );
-  if (!(isCount(run.requests) && run.requests >= 1))
-    problems.push("no /sync request reached the stub");
-  const commits = Array.isArray(o.commits) ? o.commits : null;
-  if (!commits) problems.push("the observation's commits are not retained");
-  const first = commits?.[0];
-  if (first?.bytes !== undefined && first.bytes !== servedBytes)
-    problems.push(
-      `the first commit after the request is ${first.bytes} bytes, not the served ${servedBytes}`,
-    );
-  if (state.kind === "idle" && first?.kind !== "applied")
-    problems.push("idle without the served page's applied commit");
-  if (state.kind === "waiting" && state.reason !== "cache_not_valid")
-    problems.push(
-      `the step ended waiting (${state.reason}): not a verdict on the page`,
-    );
-  const shows =
-    state.kind === "idle"
-      ? "admitted"
-      : REFUSED_STATES.includes(state.kind) || state.kind === "waiting"
-        ? "refused"
-        : null;
   if (shows !== run.outcome)
     problems.push(
-      `recorded ${run.outcome}, but the observation shows ${shows ?? `no verdict (${state.kind})`}`,
+      `recorded ${run.outcome}, but the observation shows ${shows ?? `no verdict (${isObj(state) ? state.kind : "no terminal state"})`}`,
     );
-  if (run.detail !== JSON.stringify(state).slice(0, 200))
+  if (run.detail !== JSON.stringify(state ?? null).slice(0, 200))
     problems.push("the detail is not the observed terminal state");
   if (run.outcome === "admitted")
     for (const key of ["scan_ms", "commit_ms"])
@@ -2123,26 +2131,37 @@ function coldObservationProblems(run, servedBytes) {
   return problems;
 }
 
-/** The live application's outcome against its one observation (tests/e2e/profile-cold-outcome.ts: `classifyLiveOutcome`). */
-function liveObservationProblems(run) {
+/**
+ * The live application's outcome against its one observation (revision 10, DA-2): judged by the shared rules against the verified
+ * limit-1 capture's recorded size (`capturedBytes`, the density basis, never the asserted commit; see `capturedLimit1`) and the page's
+ * retained engine trace (the dense commit must be that trace's line at its recorded position, inside the epoch, before the
+ * observation's boundary, the first there that met the density, and the idle published after it). The recorded commits are the
+ * retained trace's.
+ */
+function liveObservationProblems(ev, cell, run) {
   if (!["admitted", "refused"].includes(run.outcome)) return [];
   const o = run.observation;
   if (!isObj(o))
     return [
       `a ${run.outcome} live application without the observation it was classified from`,
     ];
-  if (o.method !== LIVE_METHOD) return [`observation method ${o.method}`];
-  const shows =
-    o.state?.kind === "idle" && o.dense?.kind === "applied"
-      ? "admitted"
-      : o.state?.kind === "stopped"
-        ? "refused"
-        : null;
-  return shows === run.outcome
-    ? []
-    : [
-        `recorded ${run.outcome}, but the observation shows ${shows ?? `no verdict (${o.state?.kind})`}`,
-      ];
+  const tracePath = `w2/P-W2.${cell.engine}.live-engine-trace.txt`;
+  const traceLines = ev.exists(tracePath)
+    ? ev.bytes(tracePath).toString("utf8").split("\n")
+    : null;
+  const captured = capturedLimit1(ev, cell.engine);
+  const { shows, problems } = liveObservationRules(o, {
+    capturedBytes: captured.bytes ?? null,
+    traceLines,
+  });
+  if (captured.problem) problems.unshift(captured.problem);
+  if (shows !== run.outcome)
+    problems.push(
+      `recorded ${run.outcome}, but the observation shows ${shows ?? `no verdict (${o.state_entry?.state?.kind})`}`,
+    );
+  if (traceLines && !same(run.commits, commitsOfTrace(traceLines)))
+    problems.push("the recorded commits are not the retained live trace's");
+  return problems;
 }
 
 /** W2's capture value row repeats the live application and the cold outcomes: the same, or the representations disagree. */
@@ -2184,7 +2203,7 @@ function resolveOutcome(ev, cell) {
       (!Array.isArray(run.commits) || run.commits.length === 0)
     )
       problems.push("an admitted live application without its commits");
-    problems.push(...liveObservationProblems(run));
+    problems.push(...liveObservationProblems(ev, cell, run));
   }
   if (problems.length) return result(cell, "invalid", problems);
   if (cell.control && run.outcome !== "refused")

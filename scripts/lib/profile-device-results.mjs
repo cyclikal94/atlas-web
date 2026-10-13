@@ -15,8 +15,17 @@
 // holds, and each run carries the figures its path and outcome produce: an engine run that was admitted or refused made its request and
 // has its timings, W5 (processing only) made none and committed nothing, a killed attempt measured nothing, an error may lack figures but
 // says so. Absence is explicit (null), never a missing field, and never successful processing evidence.
+//
+// Schema 3 (WEB-09c revision 10, design assessment DA-3): an engine run's outcome is corroborated, not trusted. Its detail is the JSON
+// state the engine ended in and must show the recorded outcome (an admitted run idle; a refused one stopped, backing off, paused or
+// waiting for a valid cache); and every run carries `first_commit`, the first commit after its request (the served body's: its bytes, kind
+// and timings) or an explicit null, which an admitted run's figures must equal. W5 and killed attempts have none. Schema-2 files (before
+// revision 10) are historical: refused here, never rewritten. The rules are shared with the cold-run classifier and the contract
+// (scripts/lib/profile-outcome-rules.mjs).
 
-export const DEVICE_SCHEMA = 2;
+import { deviceRunOutcomeProblems } from "./profile-outcome-rules.mjs";
+
+export const DEVICE_SCHEMA = 3;
 export const MUST_HAVE_RUNS = ["W1", "W2", "W3", "W4", "W6"];
 export const REQUIRED_COLD_RUNS = 5;
 export const OUTCOMES = ["admitted", "refused", "error", "timeout", "killed"];
@@ -149,7 +158,7 @@ export function checkDeviceResults(
     };
   if (data.schema !== DEVICE_SCHEMA)
     errors.push(
-      `schema must be ${DEVICE_SCHEMA} (schema ${data.schema} is a historical record: one protocol identity and distinct runs are required)`,
+      `schema must be ${DEVICE_SCHEMA} (schema ${data.schema} is a historical record: one protocol identity, distinct runs and corroborated engine outcomes are required)`,
     );
   if (typeof data.protocol_id !== "string" || !data.protocol_id.trim())
     errors.push(
@@ -311,10 +320,10 @@ export function checkDeviceResults(
     }
     if (typeof run.user_agent !== "string")
       errors.push(`${where}: user_agent is missing`);
-    for (const problem of payloadProblems(
-      run,
-      bytesOf.get(run.workload) ?? null,
-    ))
+    for (const problem of [
+      ...payloadProblems(run, bytesOf.get(run.workload) ?? null),
+      ...deviceRunOutcomeProblems(run),
+    ])
       errors.push(`${where}: ${problem}`);
     const planned = plan[i];
     if (planned && (planned.name !== run.workload || planned.run !== run.run))

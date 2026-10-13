@@ -381,6 +381,14 @@ export interface DataHarness {
    * trace line takes). A profiling observation reads the whole sequence in one evaluation instead of polling for a state it might miss.
    */
   engineStates: EngineStateEntry[];
+  /**
+   * FIXTURE (WEB-09c revision 10, review 10 R2): this page instance's identity (a reload makes a new one and new, empty logs) and every
+   * engine start on it, `startSync`/`startSyncLocal` and `restartSync` alike (`generation` counts them; `trace` is the trace position at
+   * that start). `run` alone is no generation: `restartSync` restarts the same engine. A profiling observation names the page and the one
+   * start it observed, and is refused if another start or a reload came between.
+   */
+  page: string;
+  engineEpochs: EngineEpoch[];
   /** Listen on `atlas-sync` in this page (a follower). */
   follow(): void;
   /**
@@ -814,12 +822,38 @@ const engineTrace: string[] = [];
 /** One published engine state (see `DataHarness.engineStates`). */
 export interface EngineStateEntry {
   run: number;
+  /** The engine start (`DataHarness.engineEpochs`) whose engine published it. */
+  generation: number;
   at: number;
   trace: number;
   state: EngineState;
 }
 const engineStates: EngineStateEntry[] = [];
 let engineRuns = 0;
+/** One engine start on this page (see `DataHarness.engineEpochs`). */
+export interface EngineEpoch {
+  generation: number;
+  run: number;
+  trace: number;
+}
+const engineEpochs: EngineEpoch[] = [];
+let engineGenerations = 0;
+/** The started engine's current generation (`restartSync` moves it on); its state subscription reads it at each publication. */
+let engineEpoch: { run: number; generation: number } | null = null;
+// Not a secret, only distinct per page load (an insecure context has no randomUUID; the harness must still load there).
+const harnessPage =
+  typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+/** Records a start of the current engine as a new generation, before the engine publishes anything under it. */
+const beginEpoch = (epoch: { run: number; generation: number }): void => {
+  epoch.generation = ++engineGenerations;
+  engineEpochs.push({
+    generation: epoch.generation,
+    run: epoch.run,
+    trace: engineTrace.length,
+  });
+};
 
 let gateEnv: DataEnv | null = null;
 let gateSeen: CacheState[] = [];
@@ -1220,10 +1254,14 @@ function startEngine(wiring: EngineWiring): void {
   });
   // Recorded before the start, so the start's own state is the first entry of this engine.
   const run = ++engineRuns;
+  const epoch = { run, generation: 0 };
+  beginEpoch(epoch);
+  engineEpoch = epoch;
   const published = engine.state;
   published.subscribe(() => {
     engineStates.push({
       run,
+      generation: epoch.generation,
       at: performance.now(),
       trace: engineTrace.length,
       state: published.get(),
@@ -1936,6 +1974,8 @@ const harness: DataHarness = {
   syncReceived,
   engineTrace,
   engineStates,
+  page: harnessPage,
+  engineEpochs,
   follow() {
     createBroadcastSyncChannel().subscribe((message) => {
       syncReceived.push(message);
@@ -2034,6 +2074,7 @@ const harness: DataHarness = {
     if (!engine) throw new Error("no engine is running on this page");
     replacedAbort = engineAbort;
     engineAbort = new AbortController();
+    if (engineEpoch) beginEpoch(engineEpoch);
     engine.start({ token: null, signal: engineAbort.signal });
   },
   abortReplacedOwnership() {

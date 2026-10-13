@@ -123,7 +123,12 @@ const run = (
     cold: true,
     expected: control ? "refused" : "admitted",
     outcome: control ? "refused" : "admitted",
-    detail: "",
+    // Schema 3 (revision 10, DA-3): an engine run's detail is the state it ended in; W5's is its own description.
+    detail: processing
+      ? "phase snapshot"
+      : JSON.stringify(
+          control ? { kind: "backing_off", since: 1 } : { kind: "idle" },
+        ),
     sha256: hash(workload),
     sha256_verified: true,
     ...(workload === "W2"
@@ -140,6 +145,16 @@ const run = (
     heap_baseline_bytes: null,
     heap_peak_bytes: null,
     heap_after_bytes: null,
+    // The first commit after the request: the served body's, with the run's own figures (null for W5 and a refused control here).
+    first_commit:
+      control || processing
+        ? null
+        : {
+            kind: "applied",
+            bytes: bytesOf(workload),
+            scan_ms: 3,
+            commit_ms: 20,
+          },
     user_agent: "test",
     at: "2026-10-10T00:00:00.000Z",
     ...extra,
@@ -157,7 +172,7 @@ const planOf = (withW2: boolean) =>
 const complete = () => {
   const runs = planOf(true);
   return {
-    schema: 2,
+    schema: 3,
     kind: "protocol",
     protocol_id: "protocol-1",
     w2sha256: W2_SHA as string | null,
@@ -288,7 +303,7 @@ describe("validate-profile-handoff", () => {
     expect(out.status).toBe(1);
     expect(out.text).toContain("a duplicate of runs[");
   });
-  it("runs of another protocol, a missing protocol identity and a historical schema-1 file are refused", () => {
+  it("runs of another protocol, a missing protocol identity and historical schema-1 and schema-2 files are refused", () => {
     const mixed = complete();
     (mixed.runs[3] as { protocol_id: string }).protocol_id = "protocol-2";
     expect(validate(mixed).text).toContain(
@@ -300,7 +315,13 @@ describe("validate-profile-handoff", () => {
     const historical = { ...complete(), schema: 1 };
     const out = validate(historical);
     expect(out.status).toBe(1);
-    expect(out.text).toContain("schema must be 2");
+    expect(out.text).toContain("schema must be 3");
+    // Revision 10: schema 2 (before corroborated engine outcomes) is history too.
+    const schema2 = validate({ ...complete(), schema: 2 });
+    expect(schema2.status).toBe(1);
+    expect(schema2.text).toContain(
+      "schema must be 3 (schema 2 is a historical record",
+    );
   });
   it("a W2 run, killed ones included, is of the protocol's capture", () => {
     const data = complete();

@@ -16,6 +16,12 @@
 // (the own tree with the root in it, foreign processes as records agreeing with the display strings, support processes). The literals
 // are written out here, not imported, for the same reason.
 //
+// Revision 10 (review 10's R2 follow-up, design assessment DA-4; contract version 5): every cold run's and the live application's
+// observation is a coherent witness of a possible engine schedule (page instance, one engine start, every published state and step event
+// with its trace position), the live engine trace is a real trace holding the dense commit at the witnessed position, P-11 runs serve the
+// recorded workload sizes, and the device results are schema 3 (JSON end states and each engine run's first commit). Written out here,
+// never computed by scripts/lib/profile-outcome-rules.mjs.
+//
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
 // thing and expect the exact cell the contract must name.
@@ -352,8 +358,10 @@ export function writeProgramme(
   };
   /**
    * One cold run as `oneColdRun` returns it, every figure its own; heap samples where the engine has them. Revision 9 (review 9 R2): with
-   * the one observation its outcome is classified from (tests/e2e/profile-cold-outcome.ts, written out here): the request's `running`,
-   * the step's end and the state it recorded, and the served page's commit (`bytes`) when it was admitted.
+   * the one observation its outcome is classified from. Revision 10 (review 10's R2 follow-up, design assessment DA-4): that observation is
+   * the witness tests/e2e/profile-cold-outcome.ts returns, of a physically possible engine schedule written out here (not computed by the
+   * shared rules): the page instance and its one engine start since the mark; the start's own waiting, the request's running and the end
+   * state, each with its trace position; the commit traced before the idle it leads to; the step end recording the published state.
    */
   const coldRun = (engine, key, bytes, outcome = "admitted") => {
     const s = seeded(key);
@@ -365,42 +373,71 @@ export function writeProgramme(
             (_, i) => 1e7 + (s % 1e6) + i * 3_333,
           )
         : [];
-    const state =
-      outcome === "admitted"
-        ? { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" }
-        : { kind: "stopped", cause: "floor" };
-    const commits =
-      outcome === "admitted"
-        ? [
-            {
-              bytes,
-              scan_ms: 30 + (s % 40),
-              commit_ms: 200 + (s % 300),
-              kind: "applied",
-              value: "applied",
-            },
-          ]
-        : [];
+    const admitted = outcome === "admitted";
+    const state = admitted
+      ? { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" }
+      : { kind: "stopped", cause: "floor" };
+    const commit = admitted
+      ? {
+          bytes,
+          scan_ms: 30 + (s % 40),
+          commit_ms: 200 + (s % 300),
+          kind: "applied",
+          value: "applied",
+        }
+      : null;
+    // The trace: 0 the start's tick (not a step event); [1 the commit;] then the step end. `running` is published after the tick (trace
+    // position 1), the end state after the commit, just before the step end's line.
+    const end = admitted ? 2 : 1;
+    const page = `synthetic-page-${key}`;
+    const mark = { page, states: 0, trace: 0, generation: 0 };
+    const at = (n) => 400 + (s % 50) + n * 60;
+    const published = [
+      {
+        index: 0,
+        generation: 1,
+        at: at(0),
+        trace: 0,
+        state: { kind: "waiting", reason: "cache_not_valid" },
+      },
+      {
+        index: 1,
+        generation: 1,
+        at: at(1),
+        trace: 1,
+        state: { kind: "running", catchingUp: true },
+      },
+      { index: 2, generation: 1, at: at(2), trace: end, state },
+    ];
+    const events = [
+      ...(commit
+        ? [{ trace: 1, event: "data.sync_commit", payload: commit }]
+        : []),
+      {
+        trace: end,
+        event: "data.sync_next",
+        payload: { when: admitted ? "after" : "event", state: state.kind },
+      },
+    ];
     return {
       outcome,
       detail: JSON.stringify(state),
       observation: {
-        method: "engine-state-log/1",
-        run: 1,
-        request: { index: 2, at: 400 + (s % 50), trace: 6 },
-        terminal: { index: 3, at: 600 + (s % 90), trace: 9, state },
-        step_end: { trace: 9, event: "data.sync_next", recorded: state.kind },
-        states: [
-          "waiting/cache_not_valid",
-          "waiting/cache_not_valid",
-          "running",
-          outcome === "admitted" ? "idle" : "stopped/floor",
-        ],
-        commits,
+        method: "engine-state-log/2",
+        page,
+        mark,
+        generation: 1,
+        epochs: [{ generation: 1, run: 1, trace: 0 }],
+        published,
+        events,
+        request: { index: 1, at: at(1), trace: 1 },
+        terminal: { index: 2, at: at(2), trace: end, state },
+        step_end: { trace: end, event: "data.sync_next", recorded: state.kind },
+        commits: commit ? [commit] : [],
       },
       elapsed_ms: 1_000 + (s % 900),
-      scan_ms: commits[0]?.scan_ms ?? null,
-      commit_ms: commits[0]?.commit_ms ?? null,
+      scan_ms: commit?.scan_ms ?? null,
+      commit_ms: commit?.commit_ms ?? null,
       requests: 2,
       heap_baseline_bytes: engine === "chromium" ? 9e6 : null,
       heap_samples_bytes: heap,
@@ -568,8 +605,9 @@ export function writeProgramme(
       dense.map((x) => x / 201),
     );
     const rows = [];
+    // The bytes a P-11 run serves are the generated workload's (revision 10: the contract binds them to its recorded size).
     const servedBytes = (workload) =>
-      100_000 + (seeded(`bytes|${workload}`) % 900_000);
+      recorded.workloads.find((w) => w.name === workload).bytes;
     for (const workload of ["W1", "W3", "W4", "W6"])
       rows.push({
         workload,
@@ -1222,23 +1260,50 @@ export function writeProgramme(
       `P-W2|${engine}|live`,
       Buffer.byteLength(w2Body),
     );
+    // Revision 10 (DA-2, DA-4): the live page's engine trace as the harness writes it, and the witness of its first dense commit (an
+    // earlier small page, then the dense one, the idle published after it), every commit kind recorded.
+    const smallCommit = {
+      bytes: 8_035,
+      scan_ms: 1,
+      commit_ms: 4,
+      kind: "applied",
+      value: "applied",
+    };
+    const denseCommit = {
+      bytes: Buffer.byteLength(w2Body),
+      scan_ms: 20,
+      commit_ms: 300,
+      kind: "applied",
+      value: "applied",
+    };
+    const liveLines = [
+      `1ms data.sync_tick ${JSON.stringify({ why: "start", coalesced: false })}`,
+      `2ms data.sync_commit ${JSON.stringify(smallCommit)}`,
+      `3ms data.sync_next ${JSON.stringify({ when: "now", state: "running" })}`,
+      `4ms data.sync_commit ${JSON.stringify(denseCommit)}`,
+      `5ms data.sync_next ${JSON.stringify({ when: "after", state: "idle" })}`,
+    ];
+    const livePage = `synthetic-live-${engine}`;
     const live = {
       outcome: "admitted",
       observation: {
-        method: "live-dense-commit/1",
-        state: { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" },
-        dense: {
-          bytes: Buffer.byteLength(w2Body),
-          scan_ms: 20,
-          commit_ms: 300,
-          kind: "applied",
+        method: "live-dense-commit/2",
+        page: livePage,
+        mark: { page: livePage, states: 0, trace: 0, generation: 0 },
+        generation: 1,
+        epochs: [{ generation: 1, run: 1, trace: 0 }],
+        boundary: liveLines.length,
+        state_entry: {
+          index: 2,
+          generation: 1,
+          at: 900,
+          trace: 4,
+          state: { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" },
         },
-        trace: 40,
+        dense: { trace: 3, commit: denseCommit },
       },
       elapsed_ms: liveRun.elapsed_ms + 500,
-      commits: [
-        { bytes: Buffer.byteLength(w2Body), scan_ms: 20, commit_ms: 300 },
-      ],
+      commits: [smallCommit, denseCommit],
       limits_the_engine_asked_for: ["1", "1"],
       heap_baseline_bytes: liveRun.heap_baseline_bytes,
       heap_samples_bytes: liveRun.heap_samples_bytes,
@@ -1264,7 +1329,7 @@ export function writeProgramme(
       ],
       evidence: stamp("integration", engine, "W2:"),
     });
-    put(`w2/P-W2.${engine}.live-engine-trace.txt`, "trace\n");
+    put(`w2/P-W2.${engine}.live-engine-trace.txt`, liveLines.join("\n"));
     series(
       "integration",
       engine,
@@ -1381,7 +1446,8 @@ export function writeProgramme(
       reading: "synthetic",
     });
 
-    // ---- device: the page's whole protocol, schema 2, one protocol, in plan order, every payload its path's ----
+    // ---- device: the page's whole protocol, schema 3, one protocol, in plan order, every payload its path's (revision 10: an engine
+    // run's detail is the state it ended in, and its first commit the served body's) ----
     const w2sha = captures.limit_1.sha256;
     const protocolId = `protocol-${engine}`;
     const runs = plan().map(({ name, run }, i) => {
@@ -1389,6 +1455,24 @@ export function writeProgramme(
       const processing = name.startsWith("W5-");
       const outcome = control ? controlOutcome : "admitted";
       const engineRun = outcome === "admitted" || outcome === "refused";
+      const bytes =
+        name === "W2"
+          ? Buffer.byteLength(w2Body)
+          : recorded.workloads.find((w) => w.name === name).bytes;
+      const scanMs = engineRun && outcome === "admitted" ? 3 + (i % 5) : null;
+      const commitMs =
+        engineRun && outcome === "admitted" && !processing ? 20 + i : null;
+      const detail =
+        processing && outcome === "admitted"
+          ? `phase snapshot, synthetic attempt ${i + 1}`
+          : outcome === "admitted"
+            ? JSON.stringify({
+                kind: "idle",
+                lastSyncedAt: t("device", 20 + i),
+              })
+            : outcome === "refused"
+              ? JSON.stringify({ kind: "backing_off", since: 1_000 + i })
+              : `synthetic attempt ${i + 1}`;
       return {
         protocol_id: protocolId,
         workload: name,
@@ -1396,7 +1480,7 @@ export function writeProgramme(
         cold: true,
         expected: control ? "refused" : "admitted",
         outcome,
-        detail: `synthetic attempt ${i + 1}`,
+        detail,
         sha256:
           name === "W2"
             ? w2sha
@@ -1405,14 +1489,10 @@ export function writeProgramme(
         ...(name === "W2"
           ? { source: `W2-captured.${engine}.limit-1.json` }
           : {}),
-        bytes:
-          name === "W2"
-            ? Buffer.byteLength(w2Body)
-            : recorded.workloads.find((w) => w.name === name).bytes,
+        bytes,
         elapsed_ms: outcome === "killed" ? 0 : 10 + i,
-        scan_ms: engineRun && outcome === "admitted" ? 3 + (i % 5) : null,
-        commit_ms:
-          engineRun && outcome === "admitted" && !processing ? 20 + i : null,
+        scan_ms: scanMs,
+        commit_ms: commitMs,
         request_count: processing || !engineRun ? 0 : 1,
         limit: processing || !engineRun ? null : 1,
         changes_written: outcome === "admitted" ? 100 + i : null,
@@ -1420,13 +1500,23 @@ export function writeProgramme(
         heap_baseline_bytes: engine === "chromium" ? 9e6 + i : null,
         heap_peak_bytes: engine === "chromium" ? 2e7 + i : null,
         heap_after_bytes: engine === "chromium" ? 1e7 + i : null,
+        first_commit:
+          !processing && outcome === "admitted"
+            ? {
+                bytes,
+                scan_ms: scanMs,
+                commit_ms: commitMs,
+                kind: "applied",
+                value: "applied",
+              }
+            : null,
         user_agent: `synthetic ${engine}`,
         at: t("device", 20 + i),
       };
     });
     const results = `${JSON.stringify(
       {
-        schema: 2,
+        schema: 3,
         kind: "protocol",
         protocol_id: protocolId,
         workload_version: recorded.version,
@@ -1484,7 +1574,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 4,
+      contract_version: 5,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

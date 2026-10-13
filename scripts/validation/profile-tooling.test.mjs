@@ -2638,9 +2638,63 @@ const rebind = (dir, engine, hash) => {
   });
 };
 /**
+ * Revision 10 (contract version 5; a labelled adaptation of this helper, its intent unchanged): the W2 cold runs replay the limit-1
+ * capture's exact bytes and the live application's dense commit is judged against its size, so both now follow from the capture too.
+ * Rebinds them as the integration writer would have recorded them: each run's served bytes and first commit (both of its witness's
+ * representations), and the live witness's first commit of at least 90% of the capture in the retained trace (both live copies).
+ */
+const rebindW2Runs = (dir, engine, size) => {
+  const file = join(dir, `w2/P-W2.${engine}.json`);
+  const v = JSON.parse(readFileSync(file, "utf8"));
+  for (const row of v.rows) {
+    row.bytes = size;
+    for (const run of row.runs) {
+      const o = run.observation;
+      for (const e of o?.events ?? [])
+        if (e.event === "data.sync_commit") e.payload.bytes = size;
+      if (o?.commits?.[0]) o.commits[0].bytes = size;
+    }
+  }
+  const lines = readFileSync(
+    join(dir, `w2/P-W2.${engine}.live-engine-trace.txt`),
+    "utf8",
+  ).split("\n");
+  const o = v.live.observation;
+  const start = o.epochs[0].trace;
+  let found = false;
+  for (let t = start; t < o.boundary && !found; t += 1) {
+    if (!lines[t].includes("data.sync_commit")) continue;
+    const commit = JSON.parse(lines[t].slice(lines[t].indexOf("{")));
+    if (commit.bytes >= 0.9 * size) {
+      o.dense = { trace: t, commit };
+      found = true;
+    }
+  }
+  if (!found) {
+    // A capture larger than every live commit: the live engine's dense page would have been this size (its trace line, the witness
+    // and the recorded commits together).
+    const at = o.dense.trace;
+    const commit = { ...o.dense.commit, bytes: size };
+    lines[at] =
+      `${lines[at].slice(0, lines[at].indexOf("{"))}${JSON.stringify(commit)}`;
+    writeFileSync(
+      join(dir, `w2/P-W2.${engine}.live-engine-trace.txt`),
+      lines.join("\n"),
+    );
+    o.dense.commit = commit;
+    v.live.commits = lines
+      .filter((l) => l.includes("data.sync_commit"))
+      .map((l) => JSON.parse(l.slice(l.indexOf("{"))));
+  }
+  writeFileSync(file, `${JSON.stringify(v, null, 2)}\n`);
+  editValue(dir, "P-W2 capture", engine, (r) => {
+    r.live = v.live;
+  });
+};
+/**
  * Writes `bytes` as the capture and regenerates EVERY recorded figure that can follow from them (hash, size and MiB; for a page: phase,
- * batch and change counts, has_more and the batch statistics) and, at limit 1, the device file and binder that name it: only the
- * contents can then fail.
+ * batch and change counts, has_more and the batch statistics) and, at limit 1, the device file and binder that name it and (revision 10)
+ * the W2 runs bound to it: only the contents can then fail.
  */
 const recapture = (dir, engine, limit, bytes) => {
   const buffer = Buffer.from(bytes);
@@ -2670,7 +2724,10 @@ const recapture = (dir, engine, limit, bytes) => {
         batch_shapes: body.batches.map((b) => statsOf(b, r.seeding.person)),
       });
   });
-  if (limit === 1) rebind(dir, engine, sha(buffer));
+  if (limit === 1) {
+    rebind(dir, engine, sha(buffer));
+    rebindW2Runs(dir, engine, buffer.length);
+  }
 };
 /** Edits the parsed capture and recaptures it (every derivable figure regenerated). */
 const reshape = (dir, engine, limit, change) => {

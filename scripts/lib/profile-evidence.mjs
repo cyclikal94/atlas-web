@@ -55,9 +55,13 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * review 9 R2): every admitted or refused cold run and live W2 application carries the ONE observation its outcome was classified from,
  * and the contract checks that the observation shows that outcome; version 3 evidence (up to and including the Air request
  * profile-20261013-013915-cf05e051, whose two WebKit cold runs recorded `refused` over a `running` state) resolves incomplete and stays
- * history, unchanged.
+ * history, unchanged. Version 5 (WEB-09c revision 10, review 10's R2 follow-up): that observation is a witness whose corroboration is
+ * required (`engine-state-log/2`, `live-dense-commit/2`: page instance and engine start, every published state and step event retained
+ * and recomputed, served-byte identity, the live dense commit's position in the retained trace and its density against the capture) and
+ * device-page results are schema 3 (each engine run's first commit); version 4 evidence (no Air request was recorded under it) resolves
+ * incomplete and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 4;
+export const CONTRACT_VERSION = 5;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [

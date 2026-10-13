@@ -116,8 +116,21 @@ export interface ProfileRun {
   heap_baseline_bytes: number | null;
   heap_peak_bytes: number | null;
   heap_after_bytes: number | null;
+  /**
+   * Schema 3 (WEB-09c revision 10, design assessment DA-3): the engine's first `data.sync_commit` after this run's request, as traced
+   * (the served body's: its bytes, kind and timings), or null (no commit; W5, which commits nothing; a killed or unread attempt). The
+   * validator requires an admitted run's to be the served bytes, applied, with the run's own scan and commit figures.
+   */
+  first_commit: FirstCommit | null;
   user_agent: string;
   at: string;
+}
+export interface FirstCommit {
+  kind?: string;
+  bytes?: number;
+  scan_ms?: number;
+  commit_ms?: number;
+  [key: string]: unknown;
 }
 
 const recordedHash = new Map(
@@ -189,6 +202,7 @@ type RunBase = Omit<
   | "cursor_after"
   | "heap_after_bytes"
   | "heap_peak_bytes"
+  | "first_commit"
 >;
 
 async function runEngine(
@@ -246,8 +260,11 @@ async function runEngine(
             state.kind === "idle"
               ? "admitted"
               : // The page was not applied: refused outright (stopped, waiting for a valid cache) or counted as a failed read and backed off.
+                // Waiting for the session or the network is no verdict on the page (revision 10: the rule the validator applies).
                 state.kind === "stopped" ||
-                  state.kind === "waiting" ||
+                  (state.kind === "waiting" &&
+                    (state as { reason?: unknown }).reason ===
+                      "cache_not_valid") ||
                   state.kind === "backing_off" ||
                   state.kind === "paused"
                 ? "refused"
@@ -319,7 +336,7 @@ async function observeRun(
       } catch {
         return {};
       }
-    }) as Array<{ scan_ms?: number; commit_ms?: number }>;
+    }) as FirstCommit[];
   const first = commits[0];
   data.stopSync();
   const after = heap();
@@ -337,6 +354,7 @@ async function observeRun(
     cursor_after: sync?.cursor ?? null,
     heap_peak_bytes: run.peak,
     heap_after_bytes: after,
+    first_commit: first ?? null,
   };
 }
 
@@ -388,6 +406,7 @@ function runProcessing(bytes: Uint8Array, base: RunBase): ProfileRun {
     cursor_after: null,
     heap_peak_bytes: peak,
     heap_after_bytes: heap(),
+    first_commit: null,
   };
 }
 
@@ -435,6 +454,7 @@ async function runCapture(
       cursor_after: null,
       heap_peak_bytes: null,
       heap_after_bytes: null,
+      first_commit: null,
     };
   return runEngine(data, loaded.bytes, "admitted", {
     ...base,
@@ -536,6 +556,7 @@ function killedRun(
     heap_baseline_bytes: null,
     heap_peak_bytes: null,
     heap_after_bytes: null,
+    first_commit: null,
     user_agent: navigator.userAgent,
     at: new Date().toISOString(),
   };
