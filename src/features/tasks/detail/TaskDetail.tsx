@@ -101,6 +101,12 @@ export function TaskDetail({
     stored === null || row === null
       ? null
       : submittedCorrection(commandOf(stored), row.id);
+  // "Save mine on the current version" needs the version that defeated it on this device: until a version newer than the one the
+  // operation was built on is shown, resending would only meet the same conflict again.
+  const builtOn =
+    stored === null || row === null ? undefined : stored.bases[row.id];
+  const newerShown =
+    row !== null && (builtOn === undefined || row.version > builtOn);
   const progressIds = [
     ...view.progressRows.map((p) => p.id),
     ...(row && (row.streamPresent || row.streamPending)
@@ -285,9 +291,13 @@ export function TaskDetail({
                 <p className="text-[12.5px] text-ink-2">
                   {CORRECTION_COPY.mineUnavailable}
                 </p>
+              ) : mine !== null && !newerShown ? (
+                <p className="text-[12.5px] text-ink-2">
+                  {CORRECTION_COPY.waitingNewer}
+                </p>
               ) : null}
               <div className="flex flex-wrap gap-2">
-                {mine && stored && env.writable ? (
+                {mine && stored && newerShown && env.writable ? (
                   <Button
                     variant="primary"
                     onClick={() => {

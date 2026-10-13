@@ -298,9 +298,7 @@ export function composeRow(
   });
   let source: RowModel["source"] = "local";
   const answerCurrent =
-    basis !== null &&
-    basis.current &&
-    answerCovers(data, basis.requestedAt, nowMs);
+    basis?.current === true && answerCovers(data, basis.requestedAt, nowMs);
   if (drafts.length === 0 && answerCurrent) {
     if (sources.personal !== null && sources.personal.version === version) {
       outcome = sources.personal.outcome;

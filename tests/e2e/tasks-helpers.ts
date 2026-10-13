@@ -214,6 +214,13 @@ export interface TaskReads {
   presets: number;
   presetsAnswer: { status: number; body: unknown };
   other: string[];
+  /**
+   * While set, a `/daily` read is DELIVERED only when this settles (revision 2): its answer is the one `respond` gave when the read arrived
+   * (as of dispatch), and `dispatched` records when each read arrived. A read delivered after a boundary was still evaluated before it.
+   * A read waits for the gate that was set when it arrived.
+   */
+  gate: Promise<void> | null;
+  dispatched: number[];
 }
 
 export const view = (task: BuiltTask, over: Record<string, unknown> = {}) => ({
@@ -258,6 +265,8 @@ export async function serveTaskReads(
     daily: [],
     respond: () => dailyPage([]),
     presets: 0,
+    gate: null,
+    dispatched: [],
     presetsAnswer: {
       status: 503,
       body: {
@@ -279,7 +288,11 @@ export async function serveTaskReads(
         revision: url.searchParams.get("revision"),
       };
       reads.daily.push(q);
+      reads.dispatched.push(Date.now());
+      // The answer is what the server would say when the read is DISPATCHED; a gate delays only its delivery.
       const answer = reads.respond(q);
+      const gate = reads.gate;
+      if (gate !== null) await gate;
       return route.fulfill({
         status: answer.status,
         contentType: "application/json",

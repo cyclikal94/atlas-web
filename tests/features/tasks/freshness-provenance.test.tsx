@@ -490,6 +490,34 @@ describe("Today: an answer dispatched before the close and delivered after it (F
       expect(row(task.occurrenceId)?.dataset.pill).toBe("done");
     },
   );
+
+  test(
+    "an answer already stale when it arrives (the clock was read after the close first) is asked for again, after the boundary",
+    SLOW,
+    async () => {
+      const { task, closes, answer } = await provisionalTask(3);
+      const daily = holdingApi();
+      const t = await mountTasks({
+        path: PATH,
+        rows: task.rows.filter((r) => r.kind !== "occurrence"),
+        api: daily.api,
+      });
+      expect(daily.held.length).toBeGreaterThanOrEqual(2);
+      await waitReal(closes * 1000 - Date.now() + 300);
+      // The page is focused after the close: its clock is read again with nothing listed yet, so no later reading crosses the boundary.
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      for (const h of daily.held.splice(0)) h.resolve(pageOf([answer()]));
+      await t.settle();
+      await untilLong(t, () => daily.held.some((h) => h.at >= closes * 1000));
+      expect(
+        daily.held.filter((h) => h.at >= closes * 1000).length,
+      ).toBeGreaterThanOrEqual(2);
+      expect(row(task.occurrenceId)?.dataset.source).toBe("local");
+      expect(row(task.occurrenceId)?.dataset.pill).toBe("done");
+    },
+  );
 });
 
 describe("Today: a committed occurrence defeats an older daily answer (F2)", () => {

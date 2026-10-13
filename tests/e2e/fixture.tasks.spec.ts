@@ -47,7 +47,10 @@ import {
  * window boundary; E-T11 a 403 read once across remounts; E-T12 display-zone change and the gap explainer. Revision 1 adds E-T9b (online,
  * then offline in place), E-T7b/E-T7c (the correction conflict choices; the edit kept across the queue), E-T8b (forms and dialogs by
  * keyboard, focus return), E-T13 (axe of the forms and dialogs), E-T2b (the PRODUCTION leader sends a save made in the tree) and E-T10 (a
- * held `/daily` answer across a real account switch).
+ * held `/daily` answer across a real account switch). Revision 2 adds E-T8d (the form and the correction dialog by real Tab traversal from
+ * the page's start; E-T8b's programmatic-focus cases remain as activation controls), E-T8e (keys + a held local save + the queue visit: the
+ * newer edit survives), E-T9c (the detail follows its window's close), E-T9d (an answer dispatched before the close and delivered after it),
+ * E-T9e (a committed correction defeats the older answer) and E-T7e (the conflict choices after a reload, from the durable operation).
  */
 const TODAY = todayUtc();
 const todayRoute = (zone = "UTC", day = TODAY) =>
@@ -646,7 +649,20 @@ test.describe("E-T11: a refused read is asked once across remounts (A2)", () => 
     await expect(page.locator("[data-today-error]")).toBeVisible({
       timeout: 20_000,
     });
-    const asked = reads.daily.length;
+    // Harness correction (revision 2, labelled): the two scopes of ONE read can reach the stub tens of milliseconds apart (WebKit, measured
+    // 3 of 10 runs, about 70 ms), so the error can show before the second has arrived. Count once this first read is quiet; the assertion
+    // that navigating away and back asks nothing more is unchanged.
+    let settled = -1;
+    await expect
+      .poll(async () => {
+        const before = reads.daily.length;
+        await page.waitForTimeout(300);
+        const quiet = reads.daily.length === before;
+        if (quiet) settled = before;
+        return quiet;
+      })
+      .toBe(true);
+    const asked = settled;
     expect(asked).toBeGreaterThanOrEqual(1);
     await navigateInApp(page, "/tasks");
     await navigateInApp(page, todayRoute());
@@ -927,7 +943,7 @@ test.describe("E-T7c: a correction kept while the person visits the queue (A14; 
 });
 
 test.describe("E-T8b: keyboard only, forms and dialogs (A10, A14, A19; R7 of revision 1)", () => {
-  test("the correction dialog opens, closes by Escape and saves by Enter, focus returning to its control each time", async ({
+  test("the correction dialog opens, closes by Escape and saves by Enter, focus returning to its control each time (activation control: programmatic focus, revision 2)", async ({
     context,
   }) => {
     const a = buildTask({
@@ -973,7 +989,7 @@ test.describe("E-T8b: keyboard only, forms and dialogs (A10, A14, A19; R7 of rev
     ]);
   });
 
-  test("the task form is filled and saved by keyboard; the new task's detail follows", async ({
+  test("the task form is filled and saved by keyboard; the new task's detail follows (activation control: programmatic focus, revision 2)", async ({
     context,
   }) => {
     const { page } = await setup(context, "/tasks/new", []);
@@ -1143,5 +1159,715 @@ test.describe("E-T10: a /daily answer held across an account switch (A20; R7 of 
     // The next account's own day was asked for and answered (so the screen is live, not stuck), and the held answers were delivered.
     expect(daily.asked.some((q) => q.account === VIEWED)).toBe(true);
     expect(daily.held).toHaveLength(0);
+  });
+});
+
+// ---- revision 2 --------------------------------------------------------------------------------------------------------------------------
+
+/** What has keyboard focus, as a person sees it (K1): its name, whether it is in a dialog, on screen, not covered and visibly focused. */
+interface Focus {
+  tag: string;
+  type: string | null;
+  name: string;
+  chip: boolean;
+  inDialog: boolean;
+  inView: boolean;
+  unobscured: boolean;
+  /** What is at the control's centre when something else is (for the failure message). */
+  coveredBy: string;
+  /** The control's box and the viewport, for the failure message. */
+  box: string;
+  focusVisible: boolean;
+}
+const focusOf = (page: Page): Promise<Focus> =>
+  page.evaluate(() => {
+    const el = document.activeElement as HTMLElement | null;
+    if (el === null || el === document.body)
+      return {
+        tag: "body",
+        type: null,
+        name: "",
+        chip: false,
+        inDialog: false,
+        inView: false,
+        unobscured: false,
+        coveredBy: "",
+        box: "",
+        focusVisible: false,
+      };
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const inView =
+      r.width > 0 &&
+      r.height > 0 &&
+      cx >= 0 &&
+      cy >= 0 &&
+      cx <= innerWidth &&
+      cy <= innerHeight;
+    const top = inView ? document.elementFromPoint(cx, cy) : null;
+    const labelled = (el as HTMLInputElement).labels?.[0]?.textContent;
+    const name = (
+      el.getAttribute("aria-label") ??
+      labelled ??
+      el.textContent ??
+      ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return {
+      tag: el.tagName.toLowerCase(),
+      type: el.getAttribute("type"),
+      name,
+      chip: el.hasAttribute("data-sync-tone"),
+      inDialog: el.closest('[role="dialog"]') !== null,
+      inView,
+      unobscured:
+        top !== null && (top === el || el.contains(top) || top.contains(el)),
+      coveredBy:
+        top === null
+          ? "nothing"
+          : `${top.tagName.toLowerCase()}${top.id ? `#${top.id}` : ""}.${String(top.className).slice(0, 60)}`,
+      box: `${Math.round(r.top)}..${Math.round(r.bottom)} of ${innerHeight}`,
+      // A date or time field has several stops of its own (each part of the value, and Chromium's picker button), whose focus the
+      // BROWSER draws (the focused part is highlighted): WebKit never matches `:focus-visible` on these fields and Chromium's picker stop
+      // is inside the field, so the app's ring rule does not apply there. Measured per engine in revision 2; recorded as the browser's own
+      // indicator, not the app's ring.
+      focusVisible:
+        el.matches(":focus-visible") ||
+        (["date", "time"].includes(el.getAttribute("type") ?? "") &&
+          el.matches(":focus-within")),
+    };
+  });
+/**
+ * The key that moves to the next control. Safari (WebKit) with its default settings moves by Tab between text fields only and by
+ * Option+Tab (Alt+Tab) through every control: that is the keyboard path of a person using Safari, so the WebKit project uses it (the dialog's
+ * focus loop honours either: `focus-loop.ts`). Chromium and Firefox use Tab.
+ */
+const nextKey = (shift = false): string =>
+  `${test.info().project.name === "fixture-webkit" ? "Alt+" : ""}${shift ? "Shift+" : ""}Tab`;
+/** Presses Tab (or Shift+Tab) until `want` holds, at most `max` times; throws with the path taken otherwise. */
+async function tabTo(
+  page: Page,
+  want: (f: Focus) => boolean,
+  label: string,
+  options: { shift?: boolean; max?: number } = {},
+): Promise<Focus> {
+  const trail: string[] = [];
+  for (let i = 0; i < (options.max ?? 60); i += 1) {
+    await page.keyboard.press(nextKey(options.shift));
+    const f = await focusOf(page);
+    trail.push(f.name || f.tag);
+    if (want(f)) return f;
+  }
+  throw new Error(
+    `${label} was not reached by ${options.shift ? "Shift+Tab" : "Tab"}: ${trail.join(" → ")}`,
+  );
+}
+/** A meaningful stop: visibly focused, on screen and not covered by anything. */
+function seen(f: Focus, what: string): void {
+  expect(f.focusVisible, `${what}: visible focus`).toBe(true);
+  expect(f.inView, `${what}: on screen`).toBe(true);
+  expect(
+    f.unobscured,
+    `${what}: not covered (at its centre: ${f.coveredBy}; box ${f.box})`,
+  ).toBe(true);
+}
+/** The person starts at the top of the page: nothing has focus (as after the page loaded). */
+const fromPageStart = (page: Page) =>
+  page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+const DIALOG_CONTROLS = [
+  "Close",
+  "At least",
+  "At most",
+  "Unit",
+  "The date it counts for",
+  "Time of day",
+  "You can start it (days before)",
+  "How long it stays open (days)",
+  "Cancel",
+  "Save correction",
+];
+
+test.describe("E-T8d: keyboard traversal, forms and dialogs (A10, A14, A19; R7 of revision 2)", () => {
+  test("the correction dialog by Tab from the page's start: reached, contained both ways, edited and saved by keys, focus returned", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 22,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const { page } = await setup(
+      context,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+      [a],
+    );
+    await goOfflineAtBoundary(page);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    seen(
+      await tabTo(page, (f) => f.name === "Correct this day", "the opener"),
+      "the opener",
+    );
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect.poll(async () => (await focusOf(page)).inDialog).toBe(true);
+    // Forward: every stop is in the dialog, visible and uncovered, until Tab comes back round to the first.
+    const first = await focusOf(page);
+    const forward: Focus[] = [first];
+    for (let i = 0; i < 40; i += 1) {
+      await page.keyboard.press(nextKey());
+      const f = await focusOf(page);
+      if (f.name === first.name && f.tag === first.tag && i > 0) break;
+      forward.push(f);
+    }
+    for (const f of forward) {
+      expect(f.inDialog, `${f.name}: inside the dialog`).toBe(true);
+      seen(f, `dialog stop '${f.name}'`);
+    }
+    const names = forward.map((f) => f.name);
+    for (const control of DIALOG_CONTROLS)
+      expect(
+        names.some((n) => n === control || n.startsWith(control)),
+        `'${control}' is reached by Tab (${names.join(" → ")})`,
+      ).toBe(true);
+    expect(forward.some((f) => f.chip)).toBe(true);
+    // Backward: the same stops, in the dialog, back to where it began.
+    let back = 0;
+    for (; back < 40; back += 1) {
+      await page.keyboard.press(nextKey(true));
+      const f = await focusOf(page);
+      expect(f.inDialog, `${f.name}: inside the dialog (Shift+Tab)`).toBe(true);
+      if (f.name === first.name && f.tag === first.tag) break;
+    }
+    expect(back + 1).toBe(forward.length);
+    // Edit by keys and save with Enter on the Save button.
+    seen(
+      await tabTo(
+        page,
+        (f) => f.inDialog && f.name.startsWith("At most"),
+        "At most",
+      ),
+      "At most",
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("3");
+    seen(
+      await tabTo(page, (f) => f.name === "Save correction", "Save correction"),
+      "Save correction",
+    );
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeFocused();
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.kind))
+      .toEqual(["revise_occurrence"]);
+    const body = (await bodiesOf(page))[0]?.command.command as {
+      definition: { goal: { maximum: string } };
+    };
+    expect(body.definition.goal.maximum).toBe("3");
+    // Escape discards and returns focus to the opener too.
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeFocused();
+    expect(await draftsOf(page)).toHaveLength(1);
+  });
+
+  test("the task form by Tab from the page's start: preset choice, name, sharing by arrow keys, saved by Enter", async ({
+    context,
+  }) => {
+    const { page } = await setup(context, "/tasks/new", []);
+    await goOfflineAtBoundary(page);
+    await expect(
+      page.getByRole("button", { name: "Start from scratch instead" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    seen(
+      await tabTo(
+        page,
+        (f) => f.name === "Start from scratch instead",
+        "Start from scratch instead",
+      ),
+      "Start from scratch instead",
+    );
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-task-form]")).toBeVisible();
+    seen(
+      await tabTo(
+        page,
+        (f) => f.tag === "input" && f.name.startsWith("Name"),
+        "Name",
+      ),
+      "Name",
+    );
+    await page.keyboard.type("Water the plants");
+    const sharing = await tabTo(
+      page,
+      (f) =>
+        f.type === "radio" &&
+        (f.name === "Only me" || f.name.startsWith("Use my defaults")),
+      "the sharing choice",
+    );
+    seen(sharing, "the sharing choice");
+    const onlyMe = page.getByRole("radio", { name: "Only me" });
+    for (let i = 0; i < 6 && !(await onlyMe.isChecked()); i += 1)
+      await page.keyboard.press("ArrowDown");
+    await expect(onlyMe).toBeChecked();
+    await expect(onlyMe).toBeFocused();
+    seen(await tabTo(page, (f) => f.name === "Save", "Save"), "Save");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    expect((await draftsOf(page)).map((d) => d.kind)).toEqual(["create_task"]);
+  });
+});
+
+/** Holds the COMPLETION of local writes of drafts (`draft_commands`, read-write) while `__holdDraftWrites` is set: the write is durable, the save's
+ * acknowledgement waits. Installed before the page loads (Dexie assigns `oncomplete` per transaction). */
+const holdDraftWritesInit = (): void => {
+  const desc = Object.getOwnPropertyDescriptor(
+    IDBTransaction.prototype,
+    "oncomplete",
+  );
+  const get = desc?.get;
+  const set = desc?.set;
+  if (get === undefined || set === undefined) return;
+  const w = window as unknown as {
+    __holdDraftWrites?: boolean;
+    __heldDraftWrites?: Array<() => void>;
+  };
+  w.__heldDraftWrites = [];
+  Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
+    configurable: true,
+    enumerable: desc?.enumerable ?? true,
+    get() {
+      return get.call(this);
+    },
+    set(fn: unknown) {
+      const tx = this as IDBTransaction;
+      if (
+        typeof fn !== "function" ||
+        tx.mode !== "readwrite" ||
+        !Array.from(tx.objectStoreNames).includes("draft_commands")
+      ) {
+        set.call(this, fn);
+        return;
+      }
+      set.call(this, function (this: IDBTransaction, event: Event) {
+        if (w.__holdDraftWrites === true) {
+          w.__heldDraftWrites?.push(() => fn.call(tx, event));
+          return;
+        }
+        return fn.call(tx, event);
+      });
+    },
+  });
+};
+
+test.describe("E-T8e: keys, a held local save and the queue visit (A14, A19; R3/R7 of revision 2)", () => {
+  test("a correction saved by keys while its acknowledgement is held, kept through the in-dialog sync control, edited again: the older save keeps the newer edit", async ({
+    context,
+  }) => {
+    await context.addInitScript(holdDraftWritesInit);
+    const a = buildTask({
+      n: 23,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const detail = `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`;
+    const { page } = await setup(context, detail, [a]);
+    await goOfflineAtBoundary(page);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    await tabTo(page, (f) => f.name === "Correct this day", "the opener");
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await tabTo(
+      page,
+      (f) => f.inDialog && f.name.startsWith("At most"),
+      "At most",
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("12");
+    await tabTo(page, (f) => f.name === "Save correction", "Save correction");
+    await page.evaluate(() => {
+      (window as unknown as { __holdDraftWrites?: boolean }).__holdDraftWrites =
+        true;
+    });
+    await page.keyboard.press("Enter");
+    // The save is written but not acknowledged: the dialog waits.
+    await expect(
+      dialog.getByRole("button", { name: "Save correction" }),
+    ).toBeDisabled();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __heldDraftWrites?: unknown[] })
+              .__heldDraftWrites?.length ?? 0,
+        ),
+      )
+      .toBeGreaterThanOrEqual(1);
+    // To the queue by the in-dialog sync control, by keys.
+    await tabTo(
+      page,
+      (f) => f.inDialog && f.chip,
+      "the in-dialog sync control",
+    );
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/sync/);
+    await expect(dialog).toHaveCount(0);
+    // Back on the day: the dialog opens on the kept edit; the person changes it.
+    await navigateInApp(page, detail);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    await tabTo(page, (f) => f.name === "Correct this day", "the opener");
+    await page.keyboard.press("Enter");
+    await expect(dialog.getByLabel("At most")).toHaveValue("12");
+    await tabTo(
+      page,
+      (f) => f.inDialog && f.name.startsWith("At most"),
+      "At most",
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("15");
+    // The older save is acknowledged now.
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __holdDraftWrites?: boolean;
+        __heldDraftWrites?: Array<() => void>;
+      };
+      w.__holdDraftWrites = false;
+      for (const release of w.__heldDraftWrites?.splice(0) ?? []) release();
+    });
+    await expect(
+      dialog.getByRole("button", { name: "Save correction" }),
+    ).toBeEnabled();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("At most")).toHaveValue("15");
+    const saved = (await bodiesOf(page)).map(
+      (b) =>
+        (b.command.command as { definition: { goal: { maximum: string } } })
+          .definition.goal.maximum,
+    );
+    expect(saved).toEqual(["12"]);
+    // The newer edit is saved by its own act, and only then does the dialog close.
+    await tabTo(page, (f) => f.name === "Save correction", "Save correction");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect
+      .poll(async () =>
+        (await bodiesOf(page))
+          .map(
+            (b) =>
+              (
+                b.command.command as {
+                  definition: { goal: { maximum: string } };
+                }
+              ).definition.goal.maximum,
+          )
+          .sort(),
+      )
+      .toEqual(["12", "15"]);
+  });
+});
+
+test.describe("E-T9c: the task detail follows its day's window (A4, A15; R8 of revision 2)", () => {
+  test("left open offline across the real close, the detail becomes Done with no data change or user action (no timer shortened)", async ({
+    context,
+  }) => {
+    const closesAt = Math.floor(Date.now() / 1000) + 8;
+    const a = buildTask({
+      n: 24,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt,
+    });
+    const { page } = await setup(
+      context,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+      [a],
+    );
+    await goOfflineAtBoundary(page);
+    const pill = page.locator("[data-detail-pill]");
+    await expect(pill).toHaveAttribute("data-detail-pill", "on_track");
+    await expect(pill).toHaveAttribute("data-detail-pill", "done", {
+      timeout: 20_000,
+    });
+    expect(Math.floor(Date.now() / 1000)).toBeGreaterThanOrEqual(closesAt);
+  });
+});
+
+test.describe("E-T9d: an answer dispatched before the close and delivered after it (A2, A4; R2 of revision 2)", () => {
+  test("the day read ahead of the occurrence's delta, both scopes delivered after the real close: finalised from my saved summary, not the provisional answer", async ({
+    context,
+  }) => {
+    const closesAt = Math.floor(Date.now() / 1000) + 8;
+    const a = buildTask({
+      n: 25,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt,
+    });
+    // The cache holds the task and my progress; the occurrence's delta has not arrived (the daily read is ahead of it).
+    const withoutOccurrence: BuiltTask = {
+      ...a,
+      upserts: (a.upserts as Array<{ resource: { kind: string } }>).filter(
+        (u) => u.resource.kind !== "occurrence",
+      ),
+    };
+    let release: () => void = () => undefined;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { page, reads } = await setup(
+      context,
+      todayRoute(),
+      [withoutOccurrence],
+      (r) => {
+        r.respond = () =>
+          Date.now() < closesAt * 1000
+            ? dailyPage([
+                view(a, {
+                  outcome: "provisional",
+                  period_outcome: "provisional",
+                }),
+              ])
+            : dailyPage([
+                view(a, {
+                  outcome: "complete",
+                  period_outcome: "complete",
+                  actionable: false,
+                }),
+              ]);
+        r.gate = first;
+      },
+    );
+    await expect.poll(() => reads.daily.length).toBeGreaterThanOrEqual(2);
+    expect(reads.dispatched.every((t) => t < closesAt * 1000)).toBe(true);
+    await expect
+      .poll(() => Date.now(), { timeout: 20_000 })
+      .toBeGreaterThan(closesAt * 1000 + 500);
+    // Every later read is held (never delivered): what shows is decided by the late answer alone.
+    reads.gate = new Promise<void>(() => undefined);
+    release();
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+      { timeout: 10_000 },
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-structure",
+      "daily",
+    );
+  });
+});
+
+test.describe("E-T9e: a committed correction defeats an older answer (A2, A14; R2 of revision 2)", () => {
+  test("a sync page commits version 2 with a closed window while the re-read is held: the committed day is shown and finalised", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 26,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const { page, net, reads } = await setup(
+      context,
+      todayRoute(),
+      [a],
+      (r) => {
+        r.respond = () =>
+          dailyPage([
+            view(a, { outcome: "provisional", period_outcome: "provisional" }),
+          ]);
+      },
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "server",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "on_track",
+    );
+    reads.gate = new Promise<void>(() => undefined);
+    const occurrence = (
+      a.upserts as Array<{
+        kind: string;
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "occurrence");
+    if (occurrence === undefined)
+      throw new Error("setup: no occurrence upsert");
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              ...occurrence,
+              resource: {
+                ...occurrence.resource,
+                version: 2,
+                value: {
+                  ...occurrence.resource.value,
+                  closes_at: Math.floor(Date.now() / 1000) - 1,
+                },
+              },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-version",
+      "2",
+      { timeout: 10_000 },
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-structure",
+      "cache",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+    );
+  });
+});
+
+test.describe("E-T7e: the conflict choices after a reload (A14; DA-N1 of revision 2)", () => {
+  test("a correction refused on a version conflict, the page reloaded: 'Save mine' resends what was SUBMITTED, read from the queued operation", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 27,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const detail = `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`;
+    const { page, net } = await setup(context, detail, [a]);
+    await goOfflineAtBoundary(page);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("At most").fill("2");
+    await dialog.getByRole("button", { name: "Save correction" }).click();
+    await expect(dialog).toHaveCount(0);
+    net.commandScript.push(() => conflict("conflict"));
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.status))
+      .toEqual(["version_conflict"]);
+    const theirs = (
+      a.upserts as Array<{
+        kind: string;
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "occurrence");
+    if (theirs === undefined) throw new Error("setup: no occurrence upsert");
+    const definition = (theirs.resource.value as { definition: object })
+      .definition as Record<string, unknown>;
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              ...theirs,
+              resource: {
+                ...theirs.resource,
+                version: 2,
+                value: {
+                  ...theirs.resource.value,
+                  definition: {
+                    ...definition,
+                    goal: {
+                      kind: "numeric",
+                      minimum: null,
+                      maximum: "6",
+                      unit: "cups",
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect(page.locator("[data-correction-conflict]")).toBeVisible();
+    // Their correction is committed (version 2) before the reload: the version the person is then shown.
+    await expect
+      .poll(async () => {
+        const rows = (await page.evaluate(
+          (acct) => window.__atlasData?.rows(acct, "cache"),
+          ACCOUNT,
+        )) as Array<{ id: string; version: number }>;
+        return rows.find((r) => r.id === a.occurrenceId)?.version;
+      })
+      .toBe(2);
+    // A reload: nothing of this page's memory survives; the queued operation does.
+    await page.goto(`/__session?route=${encodeURIComponent(detail)}`);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await page.waitForFunction(() => window.__atlasData !== undefined);
+    const block = page.locator("[data-correction-conflict]");
+    await expect(block).toContainText("Someone else corrected this day first");
+    await block
+      .getByRole("button", { name: "Save mine on the current version" })
+      .click();
+    await expect(block).toHaveCount(0);
+    await send(page);
+    await expect.poll(() => net.commands.length).toBe(2);
+    const resent = JSON.parse(net.commands[1]?.body ?? "{}") as {
+      command: Record<string, unknown>;
+    };
+    expect(resent.command).toMatchObject({
+      kind: "revise_occurrence",
+      id: a.occurrenceId,
+      expected_version: 2,
+      definition: { goal: { maximum: "2" } },
+    });
+    expect(net.commands[1]?.key).not.toBe(net.commands[0]?.key);
   });
 });

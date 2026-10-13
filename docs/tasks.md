@@ -98,6 +98,42 @@ Revision 1 (review of 13 October 2026) adds:
 18. **The default day's midnight timer (R6)** re-arms itself on every six-hourly wake and re-reads the day when the page is shown or focused; a
     day in the address never moves.
 
+Revision 2 (review of 13 October 2026 and its design assessment) adds:
+
+19. **Whole-input freshness (R2; supersedes the time and generation rules of 16).** A `/daily` answer carries its provenance: when each scope's
+    accepted page chain was DISPATCHED (a `409` restart counts from the restart), each scope's `revision`, and the durable cache position read
+    when the read was dispatched (`readCacheSeqNow`). A row's STRUCTURE (definition, window, participants, `can_edit`, version) and its DERIVED
+    fields are chosen separately (`structureOf`, `composeRow`): the committed cache row wins unless the daily item is ahead of it (a newer
+    version; the same version read after the cache's last commit; or a row the cache does not hold that this view never held, so an old answer
+    cannot bring back a removed one). My result is the server's only when no cache page was committed since dispatch, no window boundary of the
+    row passed since dispatch (delivery never renews an answer), and the server's item is of the structure's version; otherwise it is the
+    personal reapplication with its finalisation. The server's membership of the day applies only while its answer for the row is current. An
+    answer already stale when it arrives is asked for again once (its re-read is dispatched after the boundary). Joint results stay the server's.
+20. **Coherent composition (C2).** Today composes from the occurrence, task and progress rows of ONE related read (the durable position is read
+    before and after; a read that spans a commit is read again, at most three times), for the current candidate ids; otherwise it keeps the last
+    coherent composition and marks the list `data-today-refreshing`. The walk only discovers candidates. The queue key includes each draft's
+    `command_digest`, so a queued edit under the same id and status re-walks. A pending entry the synced stream already lists is not counted
+    again.
+21. **One boundary clock for Today and the detail (R8).** `useBoundaryClock` holds the time a screen evaluates against and wakes at the next
+    opening or closing of the windows shown (Today: every candidate row; the detail: the displayed day, its queued correction applied), capped
+    at six hours with waits that arm themselves, re-reads the clock on `visibilitychange`, `focus` and `pageshow`, evaluates at once when new
+    data brings a boundary that has already passed, and moves its epoch (Today asks `/daily` again) when a boundary is crossed or the clock went
+    back. The detail's `now` feeds its result, pill and record card. The detail's default day is chosen once per visit: moving it at midnight
+    would retarget an open record card or correction; the record card, entry history and correction dialog are keyed by the day shown.
+22. **Correction editing has an owner that outlives the dialog (R3).** `detail/correction-owner.ts`: per identity and day, a session (numbers
+    never reused) with a revision every edit advances, wherever it is made. A save captures `{session, revision}`; its completion consumes the
+    entry only if it is still that session at that revision, and the session's CURRENT editor (if one is mounted) closes itself on that
+    notification: no mount ever closes through an earlier mount's callback. Cancel, Escape and the close icon end the session (a save already
+    made stays queued); the in-dialog sync control retains it; another identity's sessions are dropped. The entry fix carries a session number
+    from its parent (a reopened fix of the same entry is never closed by an earlier one's save), and the task form navigates only while it is
+    still mounted.
+23. **The conflict choices read the queued operation (DA-N1).** "Someone else corrected this day first" reads the conflicted draft WITH its
+    command (`useDraftWithCommand`, the existing `readDraftWithCommand` plan) and shows and resends what was SUBMITTED (`submittedCorrection`):
+    the full definition, date and time, rebuilt in full on the version shown (`reviewedBase`) and only if the stored operation is still the one
+    read (`expectDraft`: id, status, digest). A reload, another tab, or a second conflict of the replacement all work from the durable
+    operation; page memory is not used. "Save mine" is offered only once a version newer than the one the operation was built on is on the
+    device; an unreadable command says so. "Discard mine" is always offered.
+
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -136,6 +172,8 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 1: "This day isn't saved on this device, or isn't one of this task's days. Nothing can be recorded for it here." with "Show this task's days" | `/tasks/<id>?occurrence=<another id>` (jsdom `detail-selection.test.tsx`) |
 | Revision 1: "Loading this day"; the picker's "More saved days" / "Previous saved days" (saved days are listed by id a page at a time, each page shown by date) | `/tasks/<id>` with over 100 saved days (jsdom) |
 | Revision 1: a correction or fix saved while the person kept editing stays open with the newer value (the announcement says the earlier one was saved) | `/tasks/<id>` → Correct this day (jsdom `save-acknowledgement.test.tsx`) |
+| Revision 2: "The other correction hasn't reached this device yet." (no "Save mine" until the newer version is synced) and "Your saved correction can't be read on this device." | `/tasks/<id>` with a correction in conflict (jsdom `conflict-context.test.tsx`) |
+| Revision 2: while a newer composition is read, Today keeps the last one on screen (marked `data-today-refreshing`, no visible text) | `/today` after a sync page (jsdom `freshness-provenance.test.tsx`) |
 | Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 
 ## Escalation E-1 (material, not blocking WEB-10a)
@@ -152,6 +190,11 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 - **The native E-T10 cannot see the hook's own layers.** On a real account switch the protected tree remounts, which discards the old view
   before a late answer could be applied (an A/B with the three-layer mutant passed). The hook's layers are mutation-tested in jsdom (MU-2025),
   where the identity changes without a remount.
+- **The first answer on a device without a database.** An answer dispatched before the database existed is not current for my result; Today
+  asks again once its rows are read at a cache position (the `behind` re-read). That path has no separate test (the jsdom world cannot create
+  the database after mount); its effect is limited to one extra `/daily` read.
+- **The dialog reveals a focused control whole** (`src/components/ui/dialog.tsx`, revision 2): a shared component changed for R7's keyboard
+  evidence; every dialog benefits. Covered by `tests/components/dialog-reveal.test.tsx` (MU-2090) and E-T8d in WebKit.
 - **Shared files with WEB-11a.** `plans/outstanding-reads.ts` and `ui/outstanding.tsx` also carry WEB-11a's `readOutstandingCreates`; the
   integration of the two branches is an add/add merge (recorded in WEB-11a's `docs/people.md`).
 

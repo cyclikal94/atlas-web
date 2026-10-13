@@ -40,6 +40,8 @@ async function conflicted(
     /** The version now saved (someone else's correction committed first). */
     cached?: number;
     localId?: string;
+    /** The version the operation was built on (default: the one before `cached`). */
+    builtOn?: number;
   } = {},
 ) {
   const task = await seededTask({
@@ -81,7 +83,7 @@ async function conflicted(
         command_digest: options.digest ?? "digest-1",
         target_resource_ids: [task.occurrenceId],
         index_targets: [task.occurrenceId],
-        bases: { [task.occurrenceId]: cached - 1 },
+        bases: { [task.occurrenceId]: options.builtOn ?? cached - 1 },
         command: { command: submitted } as never,
       }),
     ],
@@ -192,6 +194,18 @@ describe("the conflict choices after a reload or in another tab (S4)", () => {
     expect(t.drafts().map((d) => [d.local_id, d.command_digest])).toEqual([
       [LOCAL, "digest-2"],
     ]);
+  });
+
+  test("until a newer version than the one the operation was built on is on the device, 'Save mine' is not offered (it would only conflict again)", async () => {
+    await conflicted({ cached: 2, builtOn: 2 });
+    const s = section() as HTMLElement;
+    expect(s.textContent).toContain(CORRECTION_COPY.waitingNewer);
+    expect(
+      within(s).queryByRole("button", { name: CORRECTION_COPY.saveMine }),
+    ).toBeNull();
+    expect(
+      within(s).queryByRole("button", { name: CORRECTION_COPY.discardMine }),
+    ).not.toBeNull();
   });
 
   test("an unreadable submitted correction offers no 'Save mine' and says so; 'Discard mine' stays", async () => {

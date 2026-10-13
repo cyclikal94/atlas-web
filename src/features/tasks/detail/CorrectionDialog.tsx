@@ -55,6 +55,7 @@ export const CORRECTION_COPY = {
   saveMine: "Save mine on the current version",
   discardMine: "Discard mine",
   mineUnavailable: "Your saved correction can't be read on this device.",
+  waitingNewer: "The other correction hasn't reached this device yet.",
   undated: "No date",
 } as const;
 

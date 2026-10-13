@@ -71,9 +71,23 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   1180×820 and 1440×900 in light and dark (`fixture.tasks.spec.ts` E-T1; theme set before load), no horizontal overflow, and a keyboard-only journey
   (E-T8). This is browser emulation: physical devices and manual screen readers are WEB-09d's (collected by WEB-15).
 - Revision 1 (R7): axe with real layout in all three engines for the task detail, the correction dialog and the task form at 390×844 and 1440×900,
-  light and dark (E-T13), and a keyboard-only journey of the forms and dialogs (E-T8b): the correction dialog opens by Enter with focus inside,
-  closes by Escape and saves by Enter, focus returning to "Correct this day" each time; the task form is filled and saved by keyboard. A day named in
-  the address that is not available says so in text (no control is offered for it).
+  light and dark (E-T13). E-T8b is **keyboard activation and focus return only**: each control is focused by the test itself and then operated
+  by keys (the correction dialog opens by Enter with focus inside, closes by Escape and saves by Enter, focus returning to "Correct this day"; the
+  task form is filled and saved by keys). It does not show reachability or tab order and is kept as an activation control. A day named in the
+  address that is not available says so in text (no control is offered for it).
+- Revision 2 (R7): **keyboard traversal** (E-T8d), Chromium, Firefox and WebKit at 1280×720. From the start of the page (nothing focused) the
+  person moves by Tab, in WebKit by Option+Tab (Safari's default settings move by Tab between text fields only; the dialog's focus loop honours
+  either). The correction dialog: "Correct this day" is reached and opened by Enter; Tab then visits every control of the dialog (the in-dialog
+  sync control, Close, each field, Cancel, Save correction) and comes back round without leaving it, and Shift+Tab visits the same stops back to
+  the first; at each stop the control is visibly focused, on screen and not covered; a field is edited by keys and Enter on "Save correction"
+  saves and returns focus to "Correct this day"; Escape discards and returns focus there too. The task form: "Start from scratch instead", the
+  name, the sharing choice (arrow keys to "Only me") and Save are reached by Tab, each visibly focused and uncovered, and Enter saves. E-T8e adds
+  the queue visit by keys while a save's acknowledgement is held (the newer edit survives the older save). Date and time fields have several
+  stops of their own whose focus the BROWSER draws (the focused part of the value is highlighted): WebKit never applies `:focus-visible` to these
+  fields and Chromium's picker stop is inside the field, so the app's ring is not what shows there; this is recorded, not claimed as the ring.
+  **Found and fixed:** WebKit revealed a text field's caret rather than the field, so the dialog's lower fields stayed half under its footer
+  (9 of 10 runs); the dialog now reveals a focused control whole (`dialog.tsx`, block "nearest"; 10 of 10 clear afterwards). Browser emulation,
+  not physical devices or a screen reader (WEB-09d, collected by WEB-15).
 
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 

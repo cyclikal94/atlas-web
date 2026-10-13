@@ -16862,28 +16862,34 @@ export const UNIT = [
     id: "MU-2040",
     title:
       "WEB-10a R2: my result from /daily still applies after a sync page committed since its read began",
-    file: "src/features/tasks/today/useTodayView.ts",
-    tests: ["tests/features/tasks/today-freshness.test.tsx"],
-    expect: /sync page committed after the read began/,
+    // Re-expressed in revision 2 (same intent): the cache generation is now the answer's `current` basis, checked in `composeRow`.
+    file: "src/features/tasks/view.ts",
+    tests: [
+      "tests/features/tasks/today-freshness.test.tsx",
+      "tests/features/tasks/freshness-provenance.test.tsx",
+    ],
+    expect:
+      /sync page committed after the read began|cache first|permission the cache committed/,
     patch: (t) =>
       sub(
         t,
-        "  const personalFresh = listed !== null && listed.tick === syncTick;",
-        "  const personalFresh = listed !== null;",
+        "    basis?.current === true && answerCovers(data, basis.requestedAt, nowMs);",
+        "    basis !== null && answerCovers(data, basis.requestedAt, nowMs);",
       ),
   },
   {
     id: "MU-2041",
     title:
       "WEB-10a R2: my result from /daily still applies after a window boundary passed since it was answered",
+    // Re-expressed in revision 2 (same intent): the boundary is now measured from the read's dispatch (`requestedAt`).
     file: "src/features/tasks/view.ts",
     tests: ["tests/features/tasks/today-freshness.test.tsx"],
     expect: /window closes before the re-read answers/,
     patch: (t) =>
       sub(
         t,
-        "  if (drafts.length === 0 && answerCovers(data, sources.answeredAt, nowMs)) {",
-        "  if (drafts.length === 0 && sources.answeredAt !== null) {",
+        "    basis?.current === true && answerCovers(data, basis.requestedAt, nowMs);",
+        "    basis?.current === true && basis.requestedAt !== null;",
       ),
   },
   {
@@ -16914,15 +16920,19 @@ export const UNIT = [
     id: "MU-2044",
     title:
       "WEB-10a R3: a successful correction closes the dialog and forgets the retained draft whatever was edited since",
-    file: "src/features/tasks/detail/CorrectionDialog.tsx",
-    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    // Re-expressed in revision 2 (same intent): the edit revision now lives in the correction owner, which outlives the dialog's mounts.
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: [
+      "tests/features/tasks/save-acknowledgement.test.tsx",
+      "tests/features/tasks/correction-ownership.test.tsx",
+    ],
     expect:
-      /edit made while the save was pending|newer edit kept while the person went to the queue/,
+      /edit made while the save was pending|newer edit kept while the person went to the queue|keeps 15|B's own save|edit after the submission/,
     patch: (t) =>
       sub(
         t,
-        "        if (edits.current === submitted) {",
-        "        if (edits.current === edits.current) {",
+        "  if (saved && held.revision === ticket.revision) {",
+        "  if (saved) {",
       ),
   },
   {
@@ -16932,11 +16942,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
     expect: /value typed while the save was pending stays in the open fix/,
+    // Re-expressed in revision 2 (same intent): the completion now names its fix session.
     patch: (t) =>
       sub(
         t,
-        "      if ((await onSave(evidence)) && edits.current === submitted) onSaved();",
-        "      if (await onSave(evidence)) onSaved();",
+        "      if ((await onSave(evidence)) && edits.current === submitted)\n        onSaved(session);",
+        "      if (await onSave(evidence)) onSaved(session);",
       ),
   },
   {
@@ -17156,6 +17167,368 @@ export const UNIT = [
         '      if (document.visibilityState === "visible") check();',
         '      if (document.visibilityState === "visible") void 0;',
       ),
+  },
+  // ---- WEB-10a revision 2 (R2, R3, R7, R8, DA-N1): unit mutants of the corrections ---------------------------------------------------
+  {
+    id: "MU-2064",
+    title:
+      "WEB-10a R2 (rev 2): the daily item is the structure whatever version the committed cache holds",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /older one never is|cache first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : item.version > cached.version ||\n        (item.version === cached.version && basis.current);",
+        "      : true;",
+      ),
+  },
+  {
+    id: "MU-2065",
+    title:
+      "WEB-10a R2 (rev 2): at the same version the daily item's permission wins even after a later cache commit",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /same version|permission the cache committed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (item.version === cached.version && basis.current);",
+        "        item.version === cached.version;",
+      ),
+  },
+  {
+    id: "MU-2066",
+    title:
+      "WEB-10a R2 (rev 2): an old answer brings back an occurrence the cache once held and removed",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /never brought back|removed by a committed page/,
+    patch: (t) =>
+      sub(t, "      ? basis.current || basis.neverCached", "      ? true"),
+  },
+  {
+    id: "MU-2067",
+    title:
+      "WEB-10a R2 (rev 2): my result from /daily is used although its item is of another version than the row",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /another version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sources.personal !== null && sources.personal.version === version) {",
+        "    if (sources.personal !== null) {",
+      ),
+  },
+  {
+    id: "MU-2068",
+    title:
+      "WEB-10a R2 (rev 2): a /daily answer is dated by its delivery (receipt time as evaluation time)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /delivered (joint|personal) first/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const requestedAt = Math.min(joint.startedAt, personal.startedAt);",
+        "        const requestedAt = env.now();",
+      ),
+  },
+  {
+    id: "MU-2069",
+    title:
+      "WEB-10a R2 (rev 2): a scope restarted on 409 keeps the dispatch time of the discarded pages",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /409 restart/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (let restart = 0; restart < RESTARTS; restart += 1) {\n    const startedAt = clock();",
+        "  const startedAt = clock();\n  for (let restart = 0; restart < RESTARTS; restart += 1) {",
+      ),
+  },
+  {
+    id: "MU-2070",
+    title:
+      "WEB-10a R2 (rev 2): an answer already stale when it arrives is not asked for again",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /stale when it arrives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (staleOnArrival) setRestale((n) => n + 1);",
+        "        if (staleOnArrival) void 0;",
+      ),
+  },
+  {
+    id: "MU-2071",
+    title:
+      "WEB-10a F4 (rev 2): a pending entry the synced stream already lists is counted again",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /not counted again/,
+    patch: (t) => sub(t, " && !landed.has(p.entryId),", ","),
+  },
+  {
+    id: "MU-2072",
+    title:
+      "WEB-10a R8 (rev 2): the clock does not arm the next wait after a wake (only the first boundary is followed)",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /opening, then at the closing|thirteen hours/,
+    patch: (t) =>
+      sub(
+        t,
+        "          revalidate();\n          arm();",
+        "          revalidate();",
+      ),
+  },
+  {
+    id: "MU-2073",
+    title:
+      "WEB-10a R8 (rev 2): the clock is not read again when the page is shown, focused or restored",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /slept past the close/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (document.visibilityState !== "visible") return;\n      revalidate();',
+        '      if (document.visibilityState !== "visible") return;\n      void 0;',
+      ),
+  },
+  {
+    id: "MU-2074",
+    title:
+      "WEB-10a R8 (rev 2): a clock moved backwards is not a reason to ask again",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /BACKWARDS/,
+    patch: (t) =>
+      sub(
+        t,
+        "        t < prev.now || crossedBetween(latest.current.boundaries, prev.now, t);",
+        "        crossedBetween(latest.current.boundaries, prev.now, t);",
+      ),
+  },
+  {
+    id: "MU-2075",
+    title:
+      "WEB-10a R8 (rev 2): new data whose boundary already passed waits for the next wake",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /late answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "    // New data may carry a boundary that has already passed: evaluate at once.\n    revalidate();",
+        "    // New data may carry a boundary that has already passed: evaluate at once.",
+      ),
+  },
+  {
+    id: "MU-2076",
+    title:
+      "WEB-10a R8 (rev 2): the task detail's clock is not told its day's window",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect:
+      /left open offline across the close|opens while the detail|queued correction gives/,
+    patch: (t) =>
+      sub(t, "    shownWindow === null ? [] : [shownWindow],", "    [],"),
+  },
+  {
+    id: "MU-2077",
+    title:
+      "WEB-10a R8 (rev 2): the detail follows the cached window, not the one its queued correction gives",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /queued correction gives/,
+    patch: (t) =>
+      sub(
+        t,
+        "          patched(occurrenceRow, chosen, draftsNaming(detail, [chosen]))",
+        "          patched(occurrenceRow, chosen, [])",
+      ),
+  },
+  {
+    id: "MU-2078",
+    title:
+      "WEB-10a R3 (rev 2): a completion consumes a session other than the one it submitted",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /never reused|NOTHING edited/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (held === undefined || held.session !== ticket.session) return "gone";',
+        '  if (held === undefined) return "gone";',
+      ),
+  },
+  {
+    id: "MU-2079",
+    title:
+      "WEB-10a R3 (rev 2): an editing session let go of ends at once (a development remount loses its input)",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /development remount/,
+    patch: (t) =>
+      sub(
+        t,
+        "  held.releasing = true;",
+        "  entries.delete(key);\n  held.releasing = true;",
+      ),
+  },
+  {
+    id: "MU-2080",
+    title: "WEB-10a R3 (rev 2): Cancel does not end the editing session",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /NOTHING edited|opened again and edited|never reused/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (held !== undefined && held.session === session) entries.delete(key);",
+        "  if (held !== undefined && held.session === session) void 0;",
+      ),
+  },
+  {
+    id: "MU-2081",
+    title:
+      "WEB-10a R3 (rev 2): another identity's editing sessions are kept when the displayed identity opens one",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /another identity/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const other of [...entries.keys()])",
+        "  for (const other of [] as string[])",
+      ),
+  },
+  {
+    id: "MU-2082",
+    title:
+      "WEB-10a R3 (rev 2): the dialog that saved closes itself through its own (possibly obsolete) callback",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /never through the old mount/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeCorrection(ticket, ok);",
+        "      completeCorrection(ticket, ok);\n      if (ok) onClose();",
+      ),
+  },
+  {
+    id: "MU-2083",
+    title:
+      "WEB-10a R3 (rev 2): the parent closes any open fix of the entry when an earlier fix's save succeeds",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /SAME entry|reopened with nothing typed/,
+    patch: (t) =>
+      sub(
+        t,
+        "                      open !== null && open.session === session ? null : open,",
+        "                      null,",
+      ),
+  },
+  {
+    id: "MU-2084",
+    title:
+      "WEB-10a R3 (rev 2): a late task-form success navigates although the person has left the form",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /went to the task list/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!ok || !mounted.current) return;",
+        "      if (!ok) return;",
+      ),
+  },
+  {
+    id: "MU-2085",
+    title:
+      "WEB-10a S5 (rev 2): a correction save that throws leaves the dialog waiting",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /save that throws/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeCorrection(ticket, ok);",
+        "      if (ok) completeCorrection(ticket, ok);",
+      ),
+  },
+  {
+    id: "MU-2086",
+    title:
+      "WEB-10a DA-N1 (rev 2): the conflict choices do not read the submitted correction from the queued operation",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /submitted day is shown|replacement made by/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : submittedCorrection(commandOf(stored), row.id);",
+        "      : null;",
+      ),
+  },
+  {
+    id: "MU-2087",
+    title:
+      "WEB-10a DA-N1 (rev 2): 'Save mine' supersedes whatever the queued operation has become since it was read",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /operation changed/,
+    patch: (t) =>
+      sub(
+        t,
+        "                        expectDraft: (now) =>",
+        "                        _expectDraft: (now) =>",
+      ),
+  },
+  {
+    id: "MU-2088",
+    title:
+      "WEB-10a DA-N1 (rev 2): 'Save mine' is offered before the version that defeated it is on the device",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /until a newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row !== null && (builtOn === undefined || row.version > builtOn);",
+        "    row !== null;",
+      ),
+  },
+  {
+    id: "MU-2089",
+    title:
+      "WEB-10a DA-N1 (rev 2): an unreadable submitted correction is not said to be unreadable",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /unreadable submitted correction/,
+    patch: (t) =>
+      sub(
+        t,
+        '              {mine === null && conflictDraft.status === "ready" ? (',
+        "              {false ? (",
+      ),
+  },
+  {
+    id: "MU-2090",
+    title:
+      "WEB-10a R7 (rev 2): the dialog does not reveal a focused control that is partly out of its scrolling body (WebKit)",
+    file: "src/components/ui/dialog.tsx",
+    tests: ["tests/components/dialog-reveal.test.tsx"],
+    expect: /scrolled into view|revealed too/,
+    patch: (t) =>
+      sub(t, "    return revealInBody(body);", "    return undefined;"),
   },
 ];
 
@@ -19889,11 +20262,114 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.tasks.spec.ts",
     grep: "E-T7c:",
     expect: /E-T7c:/,
+    // Re-expressed in revision 2 (same intent): retention is now the correction owner's `retainCorrection`.
     patch: (t) =>
       sub(
         t,
-        "      onRetainDraft={() => retained.set(key, state)}",
-        "      onRetainDraft={() => undefined}",
+        "        if (session.current !== null) retainCorrection(key, session.current);",
+        "        if (session.current !== null) void 0;",
+      ),
+  },
+  // ---- WEB-10a revision 2 (R2, R3, R7, R8, DA-N1): N-T7..N-T13 ------------------------------------------------------------------------
+  {
+    id: "MU-2095",
+    title:
+      "WEB-10a N-T7: (REAL ENGINE) the correction dialog's Save is taken out of the keyboard's tab order",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8d: .*correction dialog",
+    expect: /E-T8d:/,
+    patch: (t) =>
+      sub(
+        t,
+        '              <Button variant="primary" onClick={() => void save()}>',
+        '              <Button\n                variant="primary"\n                tabIndex={-1}\n                onClick={() => void save()}\n              >',
+      ),
+  },
+  {
+    id: "MU-2096",
+    title:
+      "WEB-10a N-T8: (REAL ENGINE) the task form's Save is taken out of the keyboard's tab order",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8d: .*task form",
+    expect: /E-T8d:/,
+    patch: (t) =>
+      sub(
+        t,
+        '          <Button variant="primary" type="submit">',
+        '          <Button variant="primary" type="submit" tabIndex={-1}>',
+      ),
+  },
+  {
+    id: "MU-2097",
+    title:
+      "WEB-10a N-T9: (REAL ENGINE) an older correction save consumes the session whatever was edited since (keys, held save, queue visit)",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8e:",
+    expect: /E-T8e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (saved && held.revision === ticket.revision) {",
+        "  if (saved) {",
+      ),
+  },
+  {
+    id: "MU-2098",
+    title:
+      "WEB-10a N-T10: (REAL ENGINE) the task detail's clock is not told its day's window (no wake at the close)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9c:",
+    expect: /E-T9c:/,
+    patch: (t) =>
+      sub(t, "    shownWindow === null ? [] : [shownWindow],", "    [],"),
+  },
+  {
+    id: "MU-2099",
+    title:
+      "WEB-10a N-T11: (REAL ENGINE) a /daily answer is dated by its delivery instead of its dispatch",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9d:",
+    expect: /E-T9d:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const requestedAt = Math.min(joint.startedAt, personal.startedAt);",
+        "        const requestedAt = env.now();",
+      ),
+  },
+  {
+    id: "MU-2100",
+    title:
+      "WEB-10a N-T12: (REAL ENGINE) the daily item is taken as the structure even when the committed cache holds a newer version",
+    file: "src/features/tasks/view.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9e:",
+    expect: /E-T9e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : item.version > cached.version ||\n        (item.version === cached.version && basis.current);",
+        "      : true;",
+      ),
+  },
+  {
+    id: "MU-2101",
+    title:
+      "WEB-10a N-T13: (REAL ENGINE) the conflict choices do not read what was submitted from the queued operation (after a reload)",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7e:",
+    expect: /E-T7e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : submittedCorrection(commandOf(stored), row.id);",
+        "      : null;",
       ),
   },
 ];

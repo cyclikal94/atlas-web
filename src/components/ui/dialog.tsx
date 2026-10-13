@@ -50,6 +50,26 @@ const PANEL: Readonly<Record<"tablet" | "desktop", string>> = {
 };
 
 /**
+ * A control that takes focus inside the dialog's scrolling body is revealed WHOLE (WCAG 2.4.11, as `chrome-insets.ts` does for the
+ * shell's bars). WebKit reveals a text field's caret rather than the field, so a field can stay half under the footer: measured in
+ * WEB-10a revision 2 (the correction dialog's lower fields, WebKit, keyboard traversal). Block "nearest": nothing moves when the control
+ * is already wholly in view, so engines that reveal it themselves are unchanged.
+ */
+function revealInBody(body: HTMLElement): () => void {
+  const reveal = (event: FocusEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const box = target.getBoundingClientRect();
+    const port = body.getBoundingClientRect();
+    if (box.height > port.height) return;
+    if (box.top >= port.top && box.bottom <= port.bottom) return;
+    target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
+  body.addEventListener("focusin", reveal);
+  return () => body.removeEventListener("focusin", reveal);
+}
+
+/**
  * The dialog pattern (ia.md 3). Header: title, the in-dialog sync control (inside the focus trap, because the
  * page behind is inert), then the close icon. Escape, the overlay and the close icon discard; only the
  * sync control retains. Renders in the registered portal container, so it stays inside #protected-root.
@@ -89,6 +109,11 @@ export function Dialog({
     if (!content) return;
     return enterFocusLoop(content);
   }, [content]);
+  const [body, setBody] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!body) return;
+    return revealInBody(body);
+  }, [body]);
   if (!container) return null;
 
   const discard = () => {
@@ -169,7 +194,9 @@ export function Dialog({
               </DialogPrimitive.Close>
             </div>
           </header>
-          <div className="flex-1 overflow-y-auto p-[18px]">{children}</div>
+          <div ref={setBody} className="flex-1 overflow-y-auto p-[18px]">
+            {children}
+          </div>
           {footer ? (
             <footer className="flex items-center gap-2 border-t border-hairline bg-inset px-[18px] py-3.5">
               {footer}
