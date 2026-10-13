@@ -197,9 +197,12 @@ describe("the people list", () => {
         document.querySelector(`[data-person-row="${a}"]`),
       ).toHaveAttribute("aria-current", "page"),
     );
-    expect(
-      document.querySelector(`[data-person-detail="${a}"]`),
-    ).not.toBeNull();
+    // The detail is its own lazy route component: it can appear after the list's row.
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-person-detail="${a}"]`),
+      ).not.toBeNull(),
+    );
     cleanup();
     media.set({ width: 834 });
     await w.mount(`/people/${a}`);

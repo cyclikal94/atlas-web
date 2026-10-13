@@ -75,7 +75,7 @@ function Known({ value }: { value: FieldValue }) {
             aria-expanded={open}
             aria-controls={id}
             onClick={() => setOpen(!open)}
-            className="min-h-11 text-left text-[13.5px] text-ink-1 underline decoration-hairline-strong"
+            className="min-h-11 text-left text-[13.5px] text-ink-1 underline"
           >
             {formatValue(value)}
           </button>

@@ -459,11 +459,33 @@ export function peopleWorld(
       const view = render(tree());
       rerender = (ui) => view.rerender(ui);
       await screen.findByRole("main", { hidden: true });
+      await untilLazyScreensShown();
       return { router };
     },
   } as PeopleWorld;
   env.set({ cache: "valid", online });
   return world;
+}
+
+/**
+ * The People screens are a lazy chunk (`src/features/people/screens.tsx`): each lazy route component suspends once on its first render,
+ * even with its module loaded, and the nested ones (the layout, then the detail or the editor) resolve one after another. The module is
+ * loaded first, then React is flushed until the document stops changing (two quiet flushes in a row), so a test's first query sees the
+ * rendered screen. Bounded: a document that never settles is an error, not a pass.
+ */
+async function untilLazyScreensShown(): Promise<void> {
+  await import("../../../src/features/people/screens");
+  let last = document.body.innerHTML;
+  let quiet = 0;
+  for (let round = 0; round < 50 && quiet < 2; round += 1) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const now = document.body.innerHTML;
+    quiet = now === last ? quiet + 1 : 0;
+    last = now;
+  }
+  if (quiet < 2) throw new Error("the people screens did not settle");
 }
 
 export const person = (over: Partial<CacheRow> = {}): CacheRow =>

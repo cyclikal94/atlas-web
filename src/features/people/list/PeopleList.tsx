@@ -47,7 +47,7 @@ const normalise = (text: string) =>
 export function PeopleList({ selectedId }: { selectedId: string | null }) {
   const env = usePeopleEnv();
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "archived">("all");
+  const [view, setView] = useState<"all" | "archived">("all");
   const [creating, setCreating] = useState(false);
   const searchId = useId();
   return (
@@ -76,10 +76,11 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
             <button
               key={value}
               type="button"
-              aria-pressed={filter === value}
+              aria-pressed={view === value}
               data-people-filter={value}
-              onClick={() => setFilter(value)}
-              className="atlas-transition min-h-11 rounded-control border border-hairline-strong px-3 text-[13px] text-ink-1 hover:bg-row-hover aria-pressed:border-action-fill aria-pressed:bg-select-tint"
+              data-status={view === value ? "active" : undefined}
+              onClick={() => setView(value)}
+              className={`atlas-transition min-h-11 rounded-control border px-3 text-[13px] text-ink-1 hover:bg-row-hover data-[status=active]:bg-select-tint ${view === value ? "border-action-fill" : "border-hairline-strong"}`}
             >
               {value === "all" ? copy.FILTER_ALL : copy.FILTER_ARCHIVED}
             </button>
@@ -101,7 +102,7 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
                     "person",
                   )}
                   query={query}
-                  filter={filter}
+                  view={view}
                   selectedId={selectedId}
                   onNew={() => setCreating(true)}
                 />
@@ -121,7 +122,7 @@ function Rows({
   capped,
   shown,
   query,
-  filter,
+  view,
   selectedId,
   onNew,
 }: {
@@ -130,7 +131,7 @@ function Rows({
   capped: boolean;
   shown: ShownRow[];
   query: string;
-  filter: "all" | "archived";
+  view: "all" | "archived";
   selectedId: string | null;
   onNew(): void;
 }) {
@@ -143,13 +144,13 @@ function Rows({
     () =>
       shown
         .filter((row) =>
-          filter === "archived" ? row.row.archived : !row.row.archived,
+          view === "archived" ? row.row.archived : !row.row.archived,
         )
         .filter(
           (row) => wanted === "" || normalise(row.row.label).includes(wanted),
         )
         .sort(byName),
-    [shown, filter, wanted],
+    [shown, view, wanted],
   );
   const displayed = rows.slice(0, limit);
   usePrefetchLinkage(
@@ -176,7 +177,7 @@ function Rows({
         {[0, 1, 2, 3, 4].map((n) => (
           <div
             key={n}
-            className="h-14 rounded-row border border-hairline bg-panel"
+            className="min-h-12 rounded-row border border-hairline bg-panel"
           />
         ))}
       </div>
@@ -212,7 +213,7 @@ function Rows({
         <p data-people-state="no-match" className="text-[13px] text-ink-2">
           {wanted !== ""
             ? copy.NO_MATCH(query.trim())
-            : filter === "archived"
+            : view === "archived"
               ? copy.EMPTY_ARCHIVED
               : copy.EMPTY}
         </p>
@@ -269,7 +270,8 @@ function PersonRow({
         params={{ personId: person.id }}
         aria-current={selected ? "page" : undefined}
         data-person-row={person.id}
-        className="atlas-transition flex min-h-14 items-center gap-3 rounded-row border border-hairline px-3 py-2 hover:bg-row-hover aria-[current=page]:border-action-fill aria-[current=page]:bg-select-tint"
+        data-status={selected ? "active" : undefined}
+        className={`atlas-transition flex min-h-12 items-center gap-3 rounded-row border px-3 py-2 hover:bg-row-hover data-[status=active]:bg-select-tint ${selected ? "border-action-fill" : "border-hairline"}`}
       >
         <Avatar name={person.label} />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">

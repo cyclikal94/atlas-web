@@ -39,10 +39,6 @@ import {
   readMerged,
   readResourceList,
 } from "../plans/outbox";
-import {
-  type OutstandingCreatesPage,
-  readOutstandingCreates,
-} from "../plans/outstanding-reads";
 import type { Loadable, Watchable } from "../store/port";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
 import {
@@ -431,7 +427,7 @@ export function useSharingDefaults(): {
 // ---- cache reads (never create a database) ------------------------------------------------------------------------------------
 const ABSENT: Loadable<never> = { status: "unavailable", reason: "absent" };
 
-function useWatch<T>(
+export function useWatch<T>(
   make: (env: DataEnv) => Watchable<T> | null,
   deps: readonly unknown[],
 ): Loadable<T> {
@@ -507,31 +503,5 @@ export function useResourceList(options: {
         : null;
     },
     [options.kind, options.parentId, options.after, options.limit],
-  );
-}
-
-/**
- * One window of this device's OUTSTANDING saves of the command kinds asked for, with their bodies (`readOutstandingCreates`): the
- * queued, in-flight and capacity-blocked drafts, and the acknowledged ones whose change the cache has not published yet, oldest first,
- * at most 100. Pass the page's `next` back as `after` to read the following window. A screen uses it to show what the cache cannot yet
- * (a resource created on this device, a change not yet sent); it never creates a database.
- */
-export function useOutstandingCreates(
-  kinds: readonly string[],
-  after?: number | null,
-): Loadable<OutstandingCreatesPage> {
-  const key = kinds.join("\u0000");
-  return useWatch(
-    (env) => {
-      const service = env.service();
-      return service
-        ? service.store.watch(readOutstandingCreates, {
-            incarnationId: service.incarnationId,
-            kinds: key === "" ? [] : key.split("\u0000"),
-            ...(typeof after === "number" ? { after } : {}),
-          })
-        : null;
-    },
-    [key, after],
   );
 }

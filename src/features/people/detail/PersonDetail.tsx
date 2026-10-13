@@ -108,11 +108,11 @@ function DetailSkeleton() {
       data-people-state="loading"
       className="flex flex-col gap-3"
     >
-      <div className="h-14 w-64 rounded-row bg-panel" />
+      <div className="min-h-12 w-48 rounded-row bg-panel" />
       {[0, 1, 2].map((n) => (
         <div
           key={n}
-          className="h-12 rounded-row border border-hairline bg-panel"
+          className="min-h-12 rounded-row border border-hairline bg-panel"
         />
       ))}
     </div>
@@ -243,7 +243,7 @@ function FieldRows({ rows, person }: { rows: ShownRow[]; person: ShownRow }) {
     <div className="flex flex-col gap-1">
       <div
         aria-hidden="true"
-        className="hidden grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)_auto] gap-3 px-3 text-[12px] text-ink-2 tablet:grid"
+        className="hidden gap-3 px-3 text-[12px] text-ink-2 tablet:grid tablet:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)_auto]"
       >
         <span>{copy.COLUMN_FIELD}</span>
         <span>{copy.COLUMN_VALUE}</span>
@@ -401,7 +401,7 @@ function ArchivedFields({ rows }: { rows: ShownRow[] }) {
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen(!open)}
-        className="min-h-11 self-start text-[13px] text-ink-1 underline decoration-hairline-strong"
+        className="min-h-11 self-start text-[13px] text-ink-1 underline"
       >
         {copy.ARCHIVED_FIELDS(rows.length)}
       </button>

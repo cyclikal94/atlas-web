@@ -31,6 +31,10 @@ registerPeopleCommands(registry)                       // the queue registration
 type LinkageState, type PersonDetailSlots, type ArchivedLedgerKind
 ```
 
+The screens are one lazy chunk (`screens.tsx`, Settings → "Archived items" included): `route.tsx` and `archived/section.tsx` import only
+the router, `titles.ts` and `slots.ts`, so no people screen is in an initial bundle. The queue registrations stay static (a dynamic import of
+`register.ts`, like a lazy chunk of the ledger's own, made the bundler split shared modules out of the fixture entry, measured).
+
 Routes: `/people`, `/people/$personId` (beside the list from 1280 px, alone below it), `/people/$personId/duplicates`,
 `/people/$personId/fields/new` and `/people/$personId/fields/$fieldId` (the field editor, route-addressed so a remount of the protected tree
 reopens it with its draft), and `/settings/archived`.
@@ -44,8 +48,12 @@ reopens it with its draft), and `/settings/archived`.
    calls `registerArchiveKind(registry)`, which does nothing the second time. A second `registry.register("archive", …)` throws. If WEB-10a lands
    with its own `archive` spec first, the integration moves its task reader into `registerArchiveReader` and removes the duplicate; a test
    asserts exactly one registration (`tests/features/people/register.test.ts`).
-3. **`readOutstandingCreates`/`useOutstandingCreates`** (src/data) have the same name, signature and semantics in WEB-10a's plan: whichever
-   card integrates second keeps the first's implementation and both cards' tests must pass against it.
+3. **`readOutstandingCreates`/`useOutstandingCreates`** (src/data). WEB-10a's branch (as of `d4f54e8`, 13 October 2026) ships the same read
+   under other names, `readOutstandingByKind`/`useOutstandingByKind`, in the same files (`plans/outstanding-reads.ts`, `ui/outstanding.tsx`):
+   the same input (`incarnationId`, `kinds`, `after`), the same statuses (queued, in flight, blocked; acknowledged while its own
+   `pending_effects` row on the first target stands), windows of 100 by `created_seq`, plus the drafts needing a decision as headers. Whichever
+   card integrates second keeps the first's plan and hook, moves its callers to it (here: `reads.tsx` `OutstandingChain`), and both cards'
+   tests must pass against it.
 4. **Q4 recovery contexts** (`model/recovery.ts`): `people-field:<personId>:<fieldId|new:<formId>>`, `people-rename:<personId>`,
    `people-new:<formId>`. WEB-14a captures them; WEB-11a does not touch `src/lib/form-recovery`. A restore fills a form and never submits.
 
@@ -126,6 +134,7 @@ the fixture spec named.
 | Settings "Archived items" placement, empty state, archived-person banner copy | `/settings/archived` | E-P8 |
 | New person dialog (not drawn): name, "Who can see this person", "Add a first note" / "Don't add a note" | `/people` | E-P10 |
 | People on tablet use one column (no tablet frames exist for people); the editor is a sheet below 768 px | `/people/$id` | E-P12 |
+| Bundle-budget adjustments (production CSS within 4 bytes of its limit): list rows and skeletons 48 px high (drawn 56 px), Amount and Unit side by side at equal widths (drawn 2:1), Day/Month/Year as an equal flex row, "Show more" and link-style buttons underlined in the text colour (drawn hairline), the selected row and chip marked with the existing `data-[status=active]` tint | `/people`, `/people/$id/fields/$fid` | E-P1, E-P3, E-P12 |
 
 Escalations (material, to the operator; none blocks WEB-11a on the approved scope): **E-1** the held audience change cannot be durable with
 the current foundation; **E-2** the contract cannot support the drawn list/table columns without unsafe owner-only reads; **E-3** the list's

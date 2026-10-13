@@ -88,38 +88,42 @@ export function ValueInput({
     case "quantity":
       return (
         <div className="flex flex-col gap-1.5">
-          <div className="grid grid-cols-[2fr_1fr] gap-2">
-            <Input
-              label={copy.AMOUNT}
-              inputMode="decimal"
-              surface="panel"
-              readOnly={readOnly}
-              value={slots.quantity.amount}
-              aria-invalid={problems.amount ? true : undefined}
-              aria-describedby={described("amount")}
-              onChange={(event) =>
-                dispatch({
-                  type: "slot",
-                  kind: "quantity",
-                  value: { ...slots.quantity, amount: event.target.value },
-                })
-              }
-            />
-            <Input
-              label={copy.UNIT}
-              surface="panel"
-              readOnly={readOnly}
-              value={slots.quantity.unit}
-              aria-invalid={problems.unit ? true : undefined}
-              aria-describedby={described("unit")}
-              onChange={(event) =>
-                dispatch({
-                  type: "slot",
-                  kind: "quantity",
-                  value: { ...slots.quantity, unit: event.target.value },
-                })
-              }
-            />
+          <div className="flex gap-2">
+            <div className="min-w-0 flex-1">
+              <Input
+                label={copy.AMOUNT}
+                inputMode="decimal"
+                surface="panel"
+                readOnly={readOnly}
+                value={slots.quantity.amount}
+                aria-invalid={problems.amount ? true : undefined}
+                aria-describedby={described("amount")}
+                onChange={(event) =>
+                  dispatch({
+                    type: "slot",
+                    kind: "quantity",
+                    value: { ...slots.quantity, amount: event.target.value },
+                  })
+                }
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <Input
+                label={copy.UNIT}
+                surface="panel"
+                readOnly={readOnly}
+                value={slots.quantity.unit}
+                aria-invalid={problems.unit ? true : undefined}
+                aria-describedby={described("unit")}
+                onChange={(event) =>
+                  dispatch({
+                    type: "slot",
+                    kind: "quantity",
+                    value: { ...slots.quantity, unit: event.target.value },
+                  })
+                }
+              />
+            </div>
           </div>
           <FieldError id={ids.amount} message={message("amount")} />
           <FieldError id={ids.unit} message={message("unit")} />
@@ -134,7 +138,7 @@ export function ValueInput({
           <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
             {copy.FIELD_VALUE}
           </legend>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="flex gap-2">
             {(
               [
                 ["day", copy.DAY],
@@ -142,22 +146,23 @@ export function ValueInput({
                 ["year", copy.YEAR],
               ] as const
             ).map(([part, label]) => (
-              <Input
-                key={part}
-                label={label}
-                inputMode="numeric"
-                surface="panel"
-                readOnly={readOnly}
-                value={slots.date[part]}
-                aria-invalid={problems.date ? true : undefined}
-                onChange={(event) =>
-                  dispatch({
-                    type: "slot",
-                    kind: "date",
-                    value: { ...slots.date, [part]: event.target.value },
-                  })
-                }
-              />
+              <div key={part} className="min-w-0 flex-1">
+                <Input
+                  label={label}
+                  inputMode="numeric"
+                  surface="panel"
+                  readOnly={readOnly}
+                  value={slots.date[part]}
+                  aria-invalid={problems.date ? true : undefined}
+                  onChange={(event) =>
+                    dispatch({
+                      type: "slot",
+                      kind: "date",
+                      value: { ...slots.date, [part]: event.target.value },
+                    })
+                  }
+                />
+              </div>
             ))}
           </div>
           <span id={ids.hint} className="text-[12px] text-ink-2">

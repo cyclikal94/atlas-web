@@ -140,7 +140,7 @@ export function IdentityHeader({
 
 function SubHeading({ children }: { children: ReactNode }) {
   return (
-    <h2 className="text-[22px] font-semibold tracking-[-0.02em] text-ink-1">
+    <h2 className="text-[22px] font-semibold tracking-[-0.025em] text-ink-1">
       {children}
     </h2>
   );
@@ -429,7 +429,7 @@ function RenameForm({
   return (
     <form
       data-rename-form=""
-      className="flex max-w-[480px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="flex max-w-[440px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
       onSubmit={(event) => {
         event.preventDefault();
         if (reason === null) void submit();

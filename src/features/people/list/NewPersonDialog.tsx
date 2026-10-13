@@ -192,7 +192,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
             <FieldError id={nameError} message={problems.name} />
           </div>
           <fieldset className="flex flex-col gap-2">
-            <legend className="mb-2 text-[13px] font-medium text-ink-1">
+            <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
               {copy.PERSON_SHARING}
             </legend>
             <Choices<PersonSharing>

@@ -6,7 +6,7 @@
  */
 
 // ---- list (WF-PEOPLE-01) --------------------------------------------------------------------------------------------------------------
-export const PAGE_TITLE = "People";
+export { PAGE_TITLE } from "./titles";
 export const PAGE_SUBHEAD =
   "Everyone you've added, plus anyone shared with you";
 export const NEW_PERSON = "New person";

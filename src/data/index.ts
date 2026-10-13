@@ -128,6 +128,7 @@ export {
   type DataEnv,
   type DataEnvDeps,
 } from "./ui/env";
+export { useOutstandingCreates } from "./ui/outstanding";
 export {
   type ConflictRow,
   DataEnvProvider,
@@ -142,7 +143,6 @@ export {
   useDraftQueue,
   useNotices,
   useOptionalDataEnv,
-  useOutstandingCreates,
   useQueueSummary,
   useResourceList,
   useSharingDefaults,

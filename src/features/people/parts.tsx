@@ -104,7 +104,7 @@ export function Choices<Value extends string>({
             <span className="flex min-w-0 flex-col gap-0.5">
               <span className="font-medium">{choice.label}</span>
               {choice.description ? (
-                <span className="text-[12.5px] leading-[1.5] text-ink-2">
+                <span className="text-[12.5px] leading-[1.55] text-ink-2">
                   {choice.description}
                 </span>
               ) : null}
