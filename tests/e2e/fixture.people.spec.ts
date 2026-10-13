@@ -751,18 +751,42 @@ test.describe("E-P11: a 403 on the field's policy (A20)", () => {
   test("the dialog survives the remount with its draft; the policy is asked ONCE; the owner-only copy is shown", async ({
     context,
   }, info) => {
-    const { page, served } = await setup(context, `/people/${P}`, [
-      personP(P, "Ada"),
-      fieldP(F, P, "Phone", { kind: "text", text: "0770" }),
-    ]);
+    // The 403 is held until the value is typed: the remount it causes must come AFTER the draft exists, or there is nothing to lose.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { page, served } = await setup(
+      context,
+      `/people/${P}`,
+      [
+        personP(P, "Ada"),
+        fieldP(F, P, "Phone", { kind: "text", text: "0770" }),
+      ],
+      {
+        arrange: (s) =>
+          s.policyScript.push(() => ({
+            status: 403,
+            body: atlas("forbidden"),
+            after: held,
+          })),
+      },
+    );
     await navigateInApp(page, `/people/${P}/fields/${F}`);
     const dialog = page.getByRole("dialog", { name: "Edit Phone" });
     await dialog
       .getByRole("textbox", { name: "Value" })
       .fill("typed before the remount");
+    await expect
+      .poll(() => served.log.includes(`GET /policies/${F}`))
+      .toBe(true);
+    await dialog.evaluate((el) => el.setAttribute("data-e-p11-before", ""));
+    release();
     await expect(dialog).toContainText(
       "Only the owner can change who can see this field",
     );
+    // The remount replaced the dialog element (the marked one is gone) and the new one reopened with the draft.
+    await expect(page.locator("[data-e-p11-before]")).toHaveCount(0);
     await page.waitForTimeout(3_000);
     await expect(
       page

@@ -87,7 +87,8 @@ export const fieldP = (
 });
 
 export type Answer =
-  | { status: number; body: unknown }
+  /** `after`: the answer is held until this settles (the request is already logged). */
+  | { status: number; body: unknown; after?: Promise<void> }
   | "abort"
   | (() => Promise<void>);
 
@@ -148,7 +149,10 @@ const answer = async (
     await next();
     return route.fulfill(json(200, fallback()));
   }
-  if (next !== undefined) return route.fulfill(json(next.status, next.body));
+  if (next !== undefined) {
+    await next.after;
+    return route.fulfill(json(next.status, next.body));
+  }
   return route.fulfill(json(200, fallback()));
 };
 
