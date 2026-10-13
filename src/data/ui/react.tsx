@@ -528,7 +528,7 @@ export function useOutstandingCreates(
         ? service.store.watch(readOutstandingCreates, {
             incarnationId: service.incarnationId,
             kinds: key === "" ? [] : key.split("\u0000"),
-            ...(after === undefined || after === null ? {} : { after }),
+            ...(typeof after === "number" ? { after } : {}),
           })
         : null;
     },

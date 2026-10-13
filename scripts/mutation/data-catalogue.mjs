@@ -16343,6 +16343,440 @@ export const UNIT = [
         "void k.disposed;",
       ),
   },
+  // WEB-11a (plan §7.4): unit mutants MU-2101..MU-2132, each caught by the named assertion of its own test.
+  {
+    id: "MU-2101",
+    title: "WEB-11a Q1: a put_field update omits expected_policy_version",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /carries the base as expected_version AND the policy version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          expected_version: bases[input.fieldId] as number,\n          expected_policy_version: input.policyVersion,\n",
+        "          expected_version: bases[input.fieldId] as number,\n",
+      ),
+  },
+  {
+    id: "MU-2102",
+    title: "WEB-11a TASK-10a: a put_field create sends expected_policy_version",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /no expected_version, no expected_policy_version/,
+    patch: (t) =>
+      sub(
+        t,
+        '    value: input.value as unknown as JsonObject,\n    ...(input.audience === "only_you"',
+        '    value: input.value as unknown as JsonObject,\n    expected_policy_version: 1,\n    ...(input.audience === "only_you"',
+      ),
+  },
+  {
+    id: "MU-2103",
+    title: "WEB-11a TASK-10a: a put_field update sends initial_policy",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /carries the base as expected_version AND the policy version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          expected_policy_version: input.policyVersion,\n          label: input.label,\n          value: input.value as unknown as JsonObject,\n        },\n      },\n      displayPatch: {\n        [input.fieldId]",
+        "          expected_policy_version: input.policyVersion,\n          label: input.label,\n          value: input.value as unknown as JsonObject,\n          initial_policy: ONLY_YOU_POLICY() as unknown as JsonObject,\n        },\n      },\n      displayPatch: {\n        [input.fieldId]",
+      ),
+  },
+  {
+    id: "MU-2104",
+    title:
+      "WEB-11a WEB-12a capture: a 'Use my defaults' field create does not capture the field template",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect:
+      /the field template captured|blocked for review, no defaults_revision/,
+    patch: (t) =>
+      sub(
+        t,
+        'const capture = captured(input.record, ["field"]);',
+        "const capture = captured(input.record, []);",
+      ),
+  },
+  {
+    id: "MU-2105",
+    title:
+      "WEB-11a: a private ('Only you') field create still captures the field template (and could be held for review)",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /and NO defaults capture/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (input.audience === "only_you") return { command: { command } };',
+        'if (input.audience === "only_you") return { command: { command }, ...captured(input.record, ["field"]).result };',
+      ),
+  },
+  {
+    id: "MU-2106",
+    title:
+      "WEB-11a D-11a-7: a shared ('Home · can view') field create is queued instead of being sent online",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /Home · can view is sent online/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (choiceNew === "home") {',
+        'if ((choiceNew as string) === "never") {',
+      ),
+  },
+  {
+    id: "MU-2107",
+    title:
+      "WEB-11a: the explicit private policy excludes an account (it is not exactly {grants: [], exclude_accounts: []})",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/commands.test.ts",
+      "tests/features/people/audience.test.ts",
+    ],
+    expect: /explicit empty policy|Only you grants nobody/,
+    patch: (t) =>
+      sub(
+        t,
+        "export const ONLY_YOU_POLICY = (): Policy => ({\n  grants: [],\n  exclude_accounts: [],\n});",
+        'export const ONLY_YOU_POLICY = (): Policy => ({\n  grants: [],\n  exclude_accounts: ["00000000-0000-4000-8000-000000000000"],\n});',
+      ),
+  },
+  {
+    id: "MU-2108",
+    title:
+      "WEB-11a SHARE-10: the new-person batch puts create_field before create_person",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /person FIRST/,
+    patch: (t) =>
+      sub(
+        t,
+        '    commands.push({\n      kind: "create_field",',
+        '    commands.unshift({\n      kind: "create_field",',
+      ),
+  },
+  {
+    id: "MU-2109",
+    title:
+      "WEB-11a PRODUCT-DECISIONS item 2: the new person's note is sent while hidden",
+    file: "src/features/people/model/person-form.ts",
+    tests: ["tests/features/people/person-form.test.ts"],
+    expect: /a hidden note keeps its text and is not sent/,
+    patch: (t) =>
+      sub(
+        t,
+        'const sendNote = state.noteOpen && state.note.trim() !== "";',
+        'const sendNote = state.note.trim() !== "";',
+      ),
+  },
+  {
+    id: "MU-2110",
+    title:
+      "WEB-11a PRODUCT-DECISIONS item 2: a type switch discards the other slots",
+    file: "src/features/people/model/field-form.ts",
+    tests: ["tests/features/people/field-form.test.ts"],
+    expect: /switching the type away and back restores/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { ...state, kind: action.value, revision };",
+        "      return {\n        ...state,\n        kind: action.value,\n        slots: { ...emptySlots(), [action.value]: state.slots[action.value] },\n        revision,\n      };",
+      ),
+  },
+  {
+    id: "MU-2111",
+    title:
+      "WEB-11a PRODUCT-DECISIONS item 2: a save sends a hidden type's value (always the text slot)",
+    file: "src/features/people/model/field-form.ts",
+    tests: ["tests/features/people/field-form.test.ts"],
+    expect: /only the ACTIVE type's value/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const value = activeValue(state.kind, state.slots);",
+        '  const value = activeValue("text", state.slots);',
+      ),
+  },
+  {
+    id: "MU-2112",
+    title: "WEB-11a §4.8: a refused save of a new field clears the form",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /a refused save keeps everything typed/,
+    patch: (t) =>
+      sub(
+        t,
+        "      setSaving(false);\n      if (!outcome.ok) return fail(outcome.message);\n      return succeeded(\n        reviewing",
+        '      setSaving(false);\n      if (!outcome.ok) {\n        dispatch({ type: "replace", state: newFieldForm() });\n        return fail(outcome.message);\n      }\n      return succeeded(\n        reviewing',
+      ),
+  },
+  {
+    id: "MU-2113",
+    title: "WEB-11a TASK-10: TaskDecimal accepts a negative amount",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /TaskDecimal/,
+    patch: (t) => sub(t, "  /^(?:(?:0|[1-9]", "  /^-?(?:(?:0|[1-9]"),
+  },
+  {
+    id: "MU-2114",
+    title: "WEB-11a TASK-10: the date check rejects 29 February without a year",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /null-2-29 → true/,
+    patch: (t) =>
+      sub(t, "  const y = year ?? 2000;", "  const y = year ?? 2001;"),
+  },
+  {
+    id: "MU-2115",
+    title: "WEB-11a TASK-10: the link check accepts credentials",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /user(:secret)?@example\.org → false/,
+    patch: (t) =>
+      sub(
+        t,
+        '    url.username === "" &&\n    url.password === ""\n',
+        "    true\n",
+      ),
+  },
+  {
+    id: "MU-2116",
+    title:
+      "WEB-11a TASK-10: choices accept a selected value outside the options",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /choices: 1 to 100 unique options/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (value.selected.some((s) => !value.options.includes(s)))\n        return "selected_unknown";\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2117",
+    title:
+      "WEB-11a: checklist item ids are regenerated when an existing field is edited",
+    file: "src/features/people/model/field-form.ts",
+    tests: ["tests/features/people/field-form.test.ts"],
+    expect: /keeps checklist ids/,
+    patch: (t) =>
+      sub(
+        t,
+        "        items: value.items.map((item) => ({\n          id: item.id,",
+        "        items: value.items.map((item) => ({\n          id: keyOf(),",
+      ),
+  },
+  {
+    id: "MU-2118",
+    title: "WEB-11a D-11a-5: an unlinked person is renamed with rename_profile",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /known unlinked: the content edit/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return canEdit\n        ? { kind: "edit", maxLength: 300 }',
+        '      return canEdit\n        ? { kind: "rename_profile", maxLength: 200 }',
+      ),
+  },
+  {
+    id: "MU-2119",
+    title: "WEB-11a D-11a-5: the linked self is renamed with the content edit",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /known self: rename_profile/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "self":\n      return { kind: "rename_profile", maxLength: 200 };',
+        '    case "self":\n      return { kind: "edit", maxLength: 300 };',
+      ),
+  },
+  {
+    id: "MU-2120",
+    title: "WEB-11a D-11a-2: an unknown linkage is treated as unlinked",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /UNKNOWN is never treated as unlinked/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (!linkage.known) return { kind: "disabled", reason: "unknown" };',
+        '  if (!linkage.known)\n    return canEdit ? { kind: "edit", maxLength: 300 } : { kind: "disabled", reason: "cannot_edit" };',
+      ),
+  },
+  {
+    id: "MU-2121",
+    title:
+      "WEB-11a D-11a-2: the rename of another account's profile follows can_edit (linkage inferred from it)",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /known other: disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "other":\n      return { kind: "disabled", reason: "other_owns" };\n  }\n}\n\n/** How "Unlink account"',
+        '    case "other":\n      return canEdit ? { kind: "edit", maxLength: 300 } : { kind: "disabled", reason: "other_owns" };\n  }\n}\n\n/** How "Unlink account"',
+      ),
+  },
+  {
+    id: "MU-2122",
+    title: "WEB-11a D-11a-6: Unlink is enabled for another account's profile",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /enabled for the linked self; disabled for another account/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "other":\n      return { kind: "disabled", reason: "other_owns" };\n    case "unlinked":\n      return { kind: "absent" };',
+        '    case "other":\n      return { kind: "enabled" };\n    case "unlinked":\n      return { kind: "absent" };',
+      ),
+  },
+  {
+    id: "MU-2123",
+    title:
+      "WEB-11a PPL-3: the duplicates reducer declares completion on an empty page that has a next_after",
+    file: "src/features/people/model/duplicates.ts",
+    tests: ["tests/features/people/duplicates.test.ts"],
+    expect: /an empty page with next_after is 'none so far'/,
+    patch: (t) =>
+      sub(
+        t,
+        "    exhausted: page.next_after === null,",
+        "    exhausted: page.next_after === null || page.items.length === 0,",
+      ),
+  },
+  {
+    id: "MU-2124",
+    title:
+      "WEB-11a A20: the page memory (dismissed pairs, attempts, held changes) is kept across identities",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/memory.test.ts"],
+    expect: /another identity .* starts empty/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (current === null || current.identity !== identity) {",
+        "  if (current === null) {",
+      ),
+  },
+  {
+    id: "MU-2125",
+    title:
+      "WEB-11a D-11a-12: a held change sends its content before the policy change is confirmed",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /the policy goes first, then the content/,
+    patch: (t) =>
+      sub(
+        t,
+        "  // Already confirmed by an earlier run",
+        "  return enqueueContent(held, held.from.version, enqueue);\n  // Already confirmed by an earlier run",
+      ),
+  },
+  {
+    id: "MU-2126",
+    title:
+      "WEB-11a D-11a-12: a held change's content carries the pre-change policy version",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /the policy goes first, then the content/,
+    patch: (t) =>
+      sub(
+        t,
+        "  held.from = { version: result.policyVersion, policy: held.to };\n  return enqueueContent(held, result.policyVersion, enqueue);",
+        "  const before = held.from.version;\n  held.from = { version: result.policyVersion, policy: held.to };\n  return enqueueContent(held, before, enqueue);",
+      ),
+  },
+  {
+    id: "MU-2127",
+    title: "WEB-11a D-11a-8: applyPolicyChange skips the version guard",
+    file: "src/features/sharing/apply-policy-change.ts",
+    tests: ["tests/features/sharing/apply-policy-change.test.ts"],
+    expect: /the version guard/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (read.value.version !== input.from.version) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2128",
+    title:
+      "WEB-11a D-11a-8: applyPolicyChange reports ok without the confirming read",
+    file: "src/features/sharing/apply-policy-change.ts",
+    tests: ["tests/features/sharing/apply-policy-change.test.ts"],
+    expect: /never 'ok' without the confirming read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const confirm = await untilSent(",
+        "  if (sent.ok) return { result: { ok: true, policyVersion: read.value.version + 1 }, attempt: null };\n  const confirm = await untilSent(",
+      ),
+  },
+  {
+    id: "MU-2129",
+    title:
+      "WEB-11a §4.7: an uncertain online attempt is resent under a new key",
+    file: "src/features/people/model/attempt.ts",
+    tests: [
+      "tests/features/people/attempt.test.ts",
+      "tests/features/people/person-detail.test.tsx",
+    ],
+    expect: /SAME key/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "uncertain":\n      return sent;',
+        '    case "uncertain":\n      return null;',
+      ),
+  },
+  {
+    id: "MU-2130",
+    title:
+      "WEB-11a PPL-5: the archived-items ledger lists a field whose person this device does not hold",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
+    expect: /a field is listed only under a person this device holds/,
+    patch: (t) =>
+      sub(
+        sub(t, "  if (person === null) return null;\n", ""),
+        "name={copy.FIELD_OF(shown.row.label, person.label)}",
+        'name={copy.FIELD_OF(shown.row.label, person?.label ?? "")}',
+      ),
+  },
+  {
+    id: "MU-2131",
+    title:
+      "WEB-11a §3.1 item 1: commandKindOf ignores a wrapped command's kind",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/command-kind.test.ts",
+      "tests/features/people/commands.test.ts",
+    ],
+    expect: /a wrapped command's kind is the kind|header kind is put_field/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const kind = (wrapped as Record<string, unknown>).kind;\n    if (typeof kind === "string") return kind;\n',
+        "    void wrapped;\n",
+      ),
+  },
+  {
+    id: "MU-2132",
+    title:
+      "WEB-11a §3.1 item 2: readOutstandingCreates lists an acknowledged draft whose effect is gone",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /an acknowledged draft is listed only while its own effect/,
+    patch: (t) =>
+      sub(t, "            if (effect === undefined) continue;\n", ""),
+  },
 ];
 
 /**
@@ -18994,6 +19428,52 @@ export const ENGINE = [
         t,
         "      : UNKNOWN;\n  const personal = personalEvidence.known",
         "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
+      ),
+  },
+  // WEB-11a (plan §7.4, N-P1..N-P3): real-engine mutants, each caught by its native case.
+  {
+    id: "MU-2141",
+    title:
+      "WEB-11a N-P1: (REAL ENGINE) the field editor's draft is not retained across the remount a 403 causes",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P11:",
+    expect: /E-P11:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const kept = env.memory.drafts.get(draftKey) as Retained | undefined;",
+        "    const kept = undefined as Retained | undefined;",
+      ),
+  },
+  {
+    id: "MU-2142",
+    title:
+      "WEB-11a N-P2: (REAL ENGINE) a held change's content step is queued before replace_policy",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P6:",
+    expect: /E-P6:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  // Already confirmed by an earlier run",
+        "  return enqueueContent(held, held.from.version, enqueue);\n  // Already confirmed by an earlier run",
+      ),
+  },
+  {
+    id: "MU-2143",
+    title:
+      "WEB-11a N-P3: (REAL ENGINE) a queued field create is not projected into the person's table",
+    file: "src/features/people/model/project.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P2:",
+    expect: /E-P2:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (rowKind !== kind) continue;",
+        '      if (rowKind !== kind || rowKind === "field") continue;',
       ),
   },
 ];

@@ -400,9 +400,12 @@ describe("updating a field", () => {
     ).toBeInTheDocument();
     fireEvent.click(within(d).getByRole("button", { name: "Hold as draft" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(
-      await screen.findByText("Waiting to change who can see Note"),
-    ).toBeInTheDocument();
+    // The held row (the announcer's live region repeats its text, so the row is found by its own attribute).
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-held-change="${F}"]`),
+      ).toHaveTextContent("Waiting to change who can see Note"),
+    );
     expect(w.built).toEqual([]);
     w.sharing.next.policy.push(
       ok({ version: 6, policy: HOME_VIEW }),
@@ -421,9 +424,7 @@ describe("updating a field", () => {
       value: { kind: "text", text: "Inhaler" },
     });
     await waitFor(() =>
-      expect(
-        screen.queryByText("Waiting to change who can see Note"),
-      ).toBeNull(),
+      expect(document.querySelector(`[data-held-change="${F}"]`)).toBeNull(),
     );
   });
 
@@ -456,9 +457,11 @@ describe("updating a field", () => {
       ok({ version: 8, policy: HOME_VIEW }),
     );
     await w.mount(`/people/${P}`);
-    expect(
-      await screen.findByText(/The sharing changed since you opened this/),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-held-change="${F}"]`),
+      ).toHaveTextContent(/The sharing changed since you opened this/),
+    );
     expect(w.built).toEqual([]);
     expect(
       screen.getByRole("button", { name: "Try again" }),
