@@ -868,6 +868,7 @@ function Editor({
                   : null;
               })()}
               saveReason={rebindReason}
+              refused={outcome?.kind === "stale"}
               onDiscard={async () => close()}
               onSaveMine={async () => rebind()}
             />
@@ -1157,6 +1158,7 @@ function ReviewPanel({
   audienceNow,
   mine,
   saveReason,
+  refused = false,
   onDiscard,
   onSaveMine,
 }: {
@@ -1166,6 +1168,8 @@ function ReviewPanel({
   audienceNow: string | false | null;
   mine: { label: string; value: FieldValue } | null;
   saveReason: string | null;
+  /** A save was just refused because of this change: said, so a refused save is never silent. */
+  refused?: boolean;
   onDiscard(): Promise<void>;
   onSaveMine(): Promise<void>;
 }) {
@@ -1176,6 +1180,11 @@ function ReviewPanel({
       className="flex flex-col gap-2 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
     >
       <h3 className="text-[14px] font-medium text-ink-1">{title}</h3>
+      {refused ? (
+        <p className="text-[12.5px] text-ink-1" data-review-refused="">
+          {copy.STALE_NOT_SAVED}
+        </p>
+      ) : null}
       <p className="text-[12.5px] text-ink-1" data-review-current="">
         {copy.CONFLICT_CURRENT}: {current.label}
         {value === null ? "" : ` — ${formatValue(value)}`}

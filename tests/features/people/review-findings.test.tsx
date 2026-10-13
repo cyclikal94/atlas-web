@@ -128,6 +128,11 @@ describe("finding 1: an edit keeps the versions and audience it began on", () =>
     await settle();
     expect(w.built).toEqual([]);
     expect(w.sharing.sent).toEqual([]);
+    expect(
+      within(panel).queryByText(
+        "Nothing was saved. Check the current value, then save yours on it or discard it.",
+      ),
+    ).not.toBeNull();
     fireEvent.click(
       within(panel).getByRole("button", {
         name: "Save mine on the current version",

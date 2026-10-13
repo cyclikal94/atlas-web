@@ -172,10 +172,10 @@ Escalations and their decisions (revision 1, 13 October 2026):
 - **E-1** (finding 6) — DECIDED by Kieran: durable, in WEB-11a. Implemented over the account database's form copies (D-11a-12); no schema
   change was needed (the `form_recovery` store and its port already carry the account's unsent form content with every Q20 rule). The
   integration owner of WEB-14a (Q4 recovery) must keep `people-held:` copies out of any form it restores or discards by family.
-- **E-2** (finding 8) — DECIDED by Kieran: **WEB-11a is BLOCKED until a backend viewer-safe audience/linkage summary ships.** The drawn
-  "In Home / Shared with me / Not linked" filters, the "Visible to" column, per-row audience tags and the detail rail's "Shared with" need
-  what a viewer may know of each row's audience and linkage without the owner-only `GET /policies/{id}` (a speculative `403` remounts the
-  protected tree, D-12a-13). The backend work is to be commissioned (owner: a backend card, then a WEB-11 follow-up to build the filters
-  and columns on it); the brief is `.agtx/backend-brief-people-audience-summary.md` in the task worktree. WEB-11a cannot pass review before
-  that ships and the filters are built; nothing here substitutes unsafe per-row reads.
+- **E-2** (finding 8) — DECIDED by Kieran: **WEB-11a is on an explicit dependency hold until BE-PEOPLE-SUMMARY (a backend viewer-safe
+  audience/linkage summary; created, researched and in Planning on 14 October 2026) is accepted and shipped and its verified API types are
+  adopted here.** The drawn "In Home / Shared with me / Not linked" filters, the "Visible to" column, per-row audience tags and the detail
+  rail's "Shared with" need what a viewer may know of each row's audience and linkage without the owner-only `GET /policies/{id}` (a
+  speculative `403` remounts the protected tree, D-12a-13). The remaining implementation resumes then, followed by an independent review of
+  the complete result; nothing here substitutes unsafe per-row reads.
 - **E-3** the list's duplicate banner (one read per person) and the Requests entry (WEB-11b) are not built; recorded for the checkpoint.

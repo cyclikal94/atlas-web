@@ -274,6 +274,8 @@ export const CONFLICT_AUDIENCE_UNKNOWN =
 export const CONFLICT_NEEDS_AUDIENCE =
   "Check who can see it first: that needs a connection"; // PROVISIONAL
 export const LOADING_MINE = "Loading your saved change…"; // PROVISIONAL
+export const STALE_NOT_SAVED =
+  "Nothing was saved. Check the current value, then save yours on it or discard it."; // PROVISIONAL
 export const STALE_TITLE = "This field changed since you opened it"; // PROVISIONAL (finding 1)
 export const STALE_RENAME =
   "This person changed since you started. Review the name, then save again."; // PROVISIONAL

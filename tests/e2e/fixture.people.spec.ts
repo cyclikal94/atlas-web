@@ -944,7 +944,10 @@ test.describe("E-P14: an edit keeps the versions and audience it began on (A4, A
     await expect(panel).toContainText("This field changed since you opened it");
     await expect(panel).toContainText("Who can see it now: Home · can view");
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
-    await expect(dialog).toBeVisible();
+    // A definite answer: the refused save says so (the dialog stays open and nothing is written).
+    await expect(panel).toContainText(
+      "Nothing was saved. Check the current value, then save yours on it or discard it.",
+    );
     expect(await draftsOf(page)).toEqual([]);
     await panel
       .getByRole("button", { name: "Save mine on the current version" })

@@ -19852,21 +19852,10 @@ export const ENGINE = [
         "isCurrentMemory(memory) && deps.listed();",
       ),
   },
-  {
-    id: "MU-2162",
-    title:
-      "WEB-11a R1 finding 4: (REAL ENGINE) a person's screen is not keyed by its person",
-    file: "src/features/people/screens.tsx",
-    spec: "tests/e2e/fixture.people.spec.ts",
-    grep: "E-P17:",
-    expect: /E-P17:/,
-    patch: (t) =>
-      sub(
-        t,
-        "    <PersonDetail\n      key={personId}\n",
-        "    <PersonDetail\n",
-      ),
-  },
+  // MU-2162 (a person's screen not keyed, E-P17) was RETIRED after campaign 6 (pool request request-5ce6cedd4a164dbeb1a7): it survived with
+  // its control passing in all three engines because a real store answers a new person's read asynchronously, so navigation always passes
+  // the loading skeleton, which unmounts the header: equivalent in real engines. The defect (state carried by a synchronous answer) is caught
+  // at component level by MU-2145; E-P17 stays as the native behaviour check.
   {
     id: "MU-2163",
     title:
