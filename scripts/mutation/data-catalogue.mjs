@@ -19850,4 +19850,50 @@ export const ENGINE = [
         "            happenedAt: Math.floor(env.now() / 1000) + 3_600,",
       ),
   },
+  // ---- WEB-10a revision 1 (R2, R3, R7): N-T4..N-T6 -------------------------------------------------------------------------------------
+  {
+    id: "MU-2061",
+    title:
+      "WEB-10a N-T4: (REAL ENGINE) a mounted Today keeps the /daily answer it received online after the device goes offline",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9b:",
+    expect: /E-T9b:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    answer !== null && answer.key === key ? answer : null;",
+      ),
+  },
+  {
+    id: "MU-2062",
+    title:
+      "WEB-10a N-T5: (REAL ENGINE) a correction refused on a version conflict offers neither 'Save mine on the current version' nor 'Discard mine'",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7b:",
+    expect: /E-T7b:/,
+    patch: (t) =>
+      sub(
+        t,
+        '    row.attention.status === "version_conflict"',
+        '    row.attention.status === "rejected"',
+      ),
+  },
+  {
+    id: "MU-2063",
+    title:
+      "WEB-10a N-T6: (REAL ENGINE) the correction being edited is not kept when the person opens the queue from the dialog",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7c:",
+    expect: /E-T7c:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onRetainDraft={() => retained.set(key, state)}",
+        "      onRetainDraft={() => undefined}",
+      ),
+  },
 ];

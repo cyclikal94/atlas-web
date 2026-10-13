@@ -24,6 +24,7 @@ import {
   slotOn,
   todayIn,
 } from "../../src/features/tasks/model/time";
+import { taskCommandSpecs } from "../../src/features/tasks/register";
 import {
   ACCOUNTS,
   bootHarness,
@@ -49,7 +50,9 @@ import {
  * #5); I-T7 Everyone: all excluded, a non-consented stream, an invisible stream, personal scope (TASK-23 #3/#4, TASK-31 #4/#5, TASK-17);
  * I-T9 late completion and offline finalisation (TASK-31 #1/#2/#6); I-T10 correction (TASK-27 #3-#5); I-T11 archive/restore; I-T12
  * TASK-7; I-T13 stale progress version; I-T14 enrolment; I-T15 corrections and the journal (TASK-12/12a); I-T17 defaults review; I-T18
- * Vienna gap and fold.
+ * Vienna gap and fold. Revision 1: I-T19 task edit in the UI and the task's sharing editor; I-T20 record and correction in the UI and the
+ * progress sharing editor; I-T21 a version conflict resent from /sync and a record after it; I-T22 a rebuilt first Anyone record keeps its
+ * defaults guard.
  */
 const API = "/api/experimental/v1";
 
@@ -1565,6 +1568,426 @@ test.describe("I-T18: Vienna's spring gap and autumn fold (A5, A6; TASK-8/9)", (
       expect(dateIn(view?.data.slot.instant as number, "Europe/London")).toBe(
         date,
       );
+    }
+  });
+});
+
+// ---- revision 1 (review of 13 October 2026, R5 and R7): the composed journeys -------------------------------------------------------
+
+const goOffline = (page: Page) =>
+  page.evaluate(() => {
+    const w = window as unknown as { __offline?: boolean };
+    w.__offline = true;
+    Object.defineProperty(Navigator.prototype, "onLine", {
+      configurable: true,
+      get: () => w.__offline !== true,
+    });
+    window.dispatchEvent(new Event("offline"));
+  });
+const goOnline = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as { __offline?: boolean }).__offline = false;
+    window.dispatchEvent(new Event("online"));
+  });
+const policyOf = async (page: Page, id: Id, rid: string) =>
+  (await call(page, id, "GET", `/policies/${rid}`)).body as {
+    version: number;
+    policy: { grants: Array<{ kind: string; id: string; edit: boolean }> };
+  };
+const accountIdOf = async (page: Page, id: Id, username: string) => {
+  const found = (
+    await call(
+      page,
+      id,
+      "GET",
+      `/directory?username=${encodeURIComponent(username)}`,
+    )
+  ).body as Array<{ id: string; username: string }>;
+  const entry = (found ?? []).find((e) => e.username === username);
+  if (!entry) throw new Error(`no directory entry for ${username}`);
+  return entry.id;
+};
+/** The shared policy editor of WEB-12a, opened by the task screen: one account grant added and saved. */
+async function grantInEditor(page: Page, opener: string, username: string) {
+  await page.getByRole("button", { name: opener }).click({ timeout: 60_000 });
+  const dialog = page.getByRole("dialog", { name: /^Sharing/ });
+  await expect(dialog.locator("[data-audience]")).toBeVisible({
+    timeout: 30_000,
+  });
+  await dialog.getByRole("button", { name: "+ Add account grant" }).click();
+  await dialog.getByRole("textbox", { name: "Exact username" }).fill(username);
+  await dialog.getByRole("button", { name: "Look up" }).click();
+  await dialog.getByRole("button", { name: `Choose: ${username}` }).click();
+  await dialog.locator("[data-save]").click();
+  await expect(dialog).toBeHidden({ timeout: 30_000 });
+}
+/** Until the leader's cache holds `rid` (each round asks the leader to sync). */
+async function untilCached(page: Page, account: string, rid: string) {
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate(() => window.__atlasData?.nudgeSync());
+        return (await cacheRow(page, account, rid)) !== undefined;
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true);
+}
+
+test.describe("I-T19: a task edited in the UI, and its own sharing section (A10, A16; R7 of revision 1)", () => {
+  test("Edit task saves a revise_task that the server applies (title and definition, Q1 policy version); Sharing grants the task to another account through the shared editor", async ({
+    context,
+  }) => {
+    const { page, id } = await bootAs(context, main);
+    const goal = {
+      kind: "numeric" as const,
+      minimum: null,
+      maximum: "8",
+      unit: "cups",
+    };
+    const made = await makeTask(page, id, def({ goal }), {
+      title: `I-T19 ${Date.now() % 100_000}`,
+    });
+    await untilCached(page, id.account_id, made.taskId);
+    await go(page, `/tasks/${made.taskId}`);
+    await page
+      .getByRole("link", { name: "Edit task" })
+      .click({ timeout: 60_000 });
+    const renamed = `I-T19 renamed ${Date.now() % 100_000}`;
+    await page.getByLabel("Name", { exact: true }).fill(renamed);
+    await page.getByLabel("At most", { exact: true }).fill("6");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.locator("[data-task-detail]")).toBeVisible({
+      timeout: 30_000,
+    });
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await expect
+      .poll(
+        async () => {
+          const detail = (await call(page, id, "GET", `/tasks/${made.taskId}`))
+            .body as {
+            task: { label: string };
+            execution: {
+              value: { goal: { maximum: string | null } };
+            } | null;
+          };
+          return [detail.task.label, detail.execution?.value.goal.maximum];
+        },
+        { timeout: 60_000 },
+      )
+      .toEqual([renamed, "6"]);
+    // The task's own sharing section: the shared editor (WEB-12a) on the task.
+    const bob = await accountIdOf(page, id, ACCOUNTS.bob.username);
+    await untilCached(page, id.account_id, made.taskId);
+    await go(page, `/tasks/${made.taskId}`);
+    await grantInEditor(page, "Sharing", ACCOUNTS.bob.username);
+    await expect
+      .poll(async () => (await policyOf(page, id, made.taskId)).policy.grants, {
+        timeout: 60_000,
+      })
+      .toContainEqual({ kind: "account", id: bob, edit: false });
+  });
+});
+
+test.describe("I-T20: an amount recorded and the day corrected in the UI, and my progress's sharing (A8, A14, A16; R7 of revision 1)", () => {
+  test("Record, then Correct this day through the dialog (id, slot key and roster kept; a maximum below the amount accepted); 'Who sees my progress' grants through the shared editor", async ({
+    context,
+  }) => {
+    const { page, id } = await bootAs(context, main);
+    const goal = {
+      kind: "numeric" as const,
+      minimum: null,
+      maximum: "8",
+      unit: "cups",
+    };
+    const bob = await accountIdOf(page, id, ACCOUNTS.bob.username);
+    const made = await makeTask(
+      page,
+      id,
+      def({ goal, participation: "anyone" }),
+      { grants: [{ kind: "account", id: bob, edit: false }] },
+    );
+    await untilCached(page, id.account_id, made.occurrenceId);
+    const before = await viewOf(
+      page,
+      id,
+      made.taskId,
+      made.occurrenceId,
+      "personal",
+    );
+    await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+    const card = page.locator("[data-record-card]");
+    await card.getByLabel("Amount (cups)").fill("5", { timeout: 60_000 });
+    await card.getByRole("button", { name: "Record" }).click();
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await expect
+      .poll(
+        async () =>
+          (
+            (await progressOf(page, id, made.occurrenceId)).find(
+              (p) => p.id === made.progressId,
+            )?.value as { action?: { amount?: string } } | undefined
+          )?.action?.amount,
+        { timeout: 60_000 },
+      )
+      .toBe("5");
+    await untilCached(page, id.account_id, made.progressId);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("At most").fill("2");
+    await dialog.getByRole("button", { name: "Save correction" }).click();
+    await expect(dialog).toBeHidden({ timeout: 30_000 });
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await expect
+      .poll(
+        async () =>
+          (await viewOf(page, id, made.taskId, made.occurrenceId, "personal"))
+            ?.data.definition.goal,
+        { timeout: 60_000 },
+      )
+      .toEqual({ ...goal, maximum: "2" });
+    const after = await viewOf(
+      page,
+      id,
+      made.taskId,
+      made.occurrenceId,
+      "personal",
+    );
+    expect(after?.id).toBe(made.occurrenceId);
+    expect(after?.data.slot.key).toBe(before?.data.slot.key);
+    expect(after?.data.participants).toEqual(before?.data.participants);
+    // My progress's own sharing section: the shared editor (WEB-12a) on my stream. Whoever is granted a progress stream must already see
+    // its occurrence (the server's IdentityGrantRequired, reported as invalid_value): Bob takes part in this Anyone task (granted on it from
+    // the start), so he can be granted my progress.
+    await untilCached(page, id.account_id, made.progressId);
+    await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+    await grantInEditor(page, "Who sees my progress", ACCOUNTS.bob.username);
+    await expect
+      .poll(
+        async () => (await policyOf(page, id, made.progressId)).policy.grants,
+        { timeout: 60_000 },
+      )
+      .toContainEqual({ kind: "account", id: bob, edit: false });
+  });
+});
+
+test.describe("I-T21: a version conflict resent from /sync, then a record after it (A7, A17; R5 of revision 1)", () => {
+  test("'Resend as a new operation' on the reviewed version is applied, and a record made after it is applied on the version the replacement left (no 409)", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(409);
+    const { page, id } = await bootAs(context, main);
+    const made = await makeTask(page, id, def());
+    await untilCached(page, id.account_id, made.progressId);
+    await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+    const card = page.locator("[data-record-card]");
+    await expect(card.getByRole("button", { name: "Mark done" })).toBeVisible({
+      timeout: 60_000,
+    });
+    await goOffline(page);
+    await card.getByRole("button", { name: "Mark done" }).click();
+    // Meanwhile my stream moves on the server (another device of mine): version 1 → 2.
+    expect(
+      (
+        await send(
+          page,
+          id,
+          record(made.occurrenceId, made.progressId, id.account_id, {
+            kind: "checkbox",
+            complete: false,
+          }),
+          { [made.progressId]: 1 },
+        )
+      ).status,
+    ).toBe(200);
+    await goOnline(page);
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    // The drafts as stored (header rows), oldest first.
+    const queue = async () =>
+      (
+        ((await page.evaluate(
+          (a) => window.__atlasData?.rows(a, "drafts"),
+          id.account_id,
+        )) ?? []) as Array<{
+          local_id: string;
+          status: string;
+          kind: string;
+          created_seq: number;
+        }>
+      ).sort((x, y) => x.created_seq - y.created_seq);
+    await expect
+      .poll(async () => (await queue()).map((d) => [d.kind, d.status]), {
+        timeout: 60_000,
+      })
+      .toEqual([["record", "version_conflict"]]);
+    // /sync: the item's authorised current read shows version 2; the person resends on it.
+    await go(page, "/sync?tab=conflicts");
+    await page
+      .getByRole("button", { name: /^Details: Progress entry/ })
+      .click({ timeout: 60_000 });
+    const item = page.getByRole("dialog");
+    const resend = item.getByRole("button", {
+      name: "Resend as a new operation",
+    });
+    await expect(resend).toBeEnabled({ timeout: 30_000 });
+    // Offline from here: the replacement and the record after it are both saved before either is sent.
+    await goOffline(page);
+    await resend.click();
+    await expect(item).toBeHidden({ timeout: 30_000 });
+    await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+    await card
+      .getByRole("button", { name: "Mark not done" })
+      .click({ timeout: 30_000 });
+    await expect
+      .poll(async () => (await queue()).map((d) => [d.kind, d.status]))
+      .toEqual([
+        ["record", "queued"],
+        ["record", "queued"],
+      ]);
+    await goOnline(page);
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await expect
+      .poll(
+        async () =>
+          (await progressOf(page, id, made.occurrenceId)).find(
+            (p) => p.id === made.progressId,
+          )?.version,
+        { timeout: 60_000 },
+      )
+      .toBe(4);
+    await expect
+      .poll(
+        async () => (await queue()).filter((d) => d.status !== "acknowledged"),
+        {
+          timeout: 60_000,
+        },
+      )
+      .toEqual([]);
+  });
+});
+
+test.describe("I-T22: the first record of an Anyone task, rebuilt, keeps its defaults guard (A16; R5 of revision 1)", () => {
+  test("captured under the defaults B saw; the defaults move; the rebuilt request is refused defaults_changed, while the same body without the guard would be applied", async ({
+    context,
+    browser,
+    provokes,
+  }) => {
+    provokes(409);
+    const { page, id } = await bootAs(context, main);
+    const other = await browser.newContext();
+    try {
+      const b = await apiAs(other, "frank");
+      // An amount (not version-checked): the path that may continue without a current read (the stream does not exist yet).
+      const made = await makeTask(
+        page,
+        id,
+        def({
+          participation: "anyone",
+          goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+        }),
+        { grants: [{ kind: "account", id: b.id.account_id, edit: true }] },
+      );
+      const bProg = await progressId(made.occurrenceId, b.id.account_id);
+      const snapshot = (await call(b.page, b.id, "GET", "/defaults/snapshot"))
+        .body as never;
+      const original = record(
+        made.occurrenceId,
+        bProg,
+        b.id.account_id,
+        { kind: "quantity", amount: "1" },
+        {
+          firstAnyoneStream: true,
+          defaults: {
+            format: 1,
+            snapshot,
+            fetched_at: Date.now(),
+            issued_at: Date.now(),
+            epoch: b.id.epoch,
+          },
+        },
+      );
+      const captured = original.build({ [bProg]: 1 });
+      expect(captured.defaultsRevision).toBeTruthy();
+      // The draft as the outbox stores it, refused for some other reason (an operation conflict), then rebuilt by "save as new".
+      const draft = {
+        local_id: crypto.randomUUID(),
+        kind: "record",
+        status: "operation_conflict",
+        command_digest: "d",
+        endpoint: "/task-commands",
+        command: captured.command,
+        target_resource_ids: original.targets
+          .filter((t) => t.role === "primary")
+          .map((t) => t.resourceId),
+        side_effect_bases: Object.fromEntries(
+          original.targets
+            .filter((t) => t.role === "side_effect")
+            .map((t) => [t.resourceId, 1]),
+        ),
+        defaults_revision: captured.defaultsRevision ?? null,
+        defaults_context: captured.defaultsContext ?? null,
+      } as never;
+      const rebuilt = taskCommandSpecs().record?.rebuild?.(draft, null);
+      expect(rebuilt).toBeTruthy();
+      const body = rebuilt?.build({ [bProg]: 1 }).command as {
+        defaults_revision?: string;
+        command: Record<string, unknown>;
+      };
+      expect(body.defaults_revision).toBe(captured.defaultsRevision);
+      // B's progress defaults change before the rebuilt request is sent.
+      const templates = await call(b.page, b.id, "GET", "/defaults/templates");
+      expect(
+        (
+          await call(
+            b.page,
+            b.id,
+            "POST",
+            "/management-commands",
+            {
+              commands: [
+                {
+                  kind: "set_defaults",
+                  household_id: null,
+                  resource_kind: "progress",
+                  expected_version: (
+                    templates.body as { progress: { version: number } }
+                  ).progress.version,
+                  template: { kind: "private" },
+                },
+              ],
+            },
+            crypto.randomUUID(),
+          )
+        ).status,
+      ).toBe(200);
+      const guarded = await call(
+        b.page,
+        b.id,
+        "POST",
+        "/task-commands",
+        body,
+        crypto.randomUUID(),
+      );
+      expect(guarded.status, JSON.stringify(guarded.body)).toBe(409);
+      expect((guarded.body as { code: string }).code).toBe("defaults_changed");
+      expect(
+        (await progressOf(b.page, b.id, made.occurrenceId)).some(
+          (p) => p.id === bProg,
+        ),
+      ).toBe(false);
+      // What a rebuild that dropped the guard would send (the defect of review R5): the server applies it under the changed defaults.
+      const unguarded = await call(
+        b.page,
+        b.id,
+        "POST",
+        "/task-commands",
+        { command: body.command },
+        crypto.randomUUID(),
+      );
+      expect(unguarded.status, JSON.stringify(unguarded.body)).toBe(200);
+    } finally {
+      await other.close();
     }
   });
 });

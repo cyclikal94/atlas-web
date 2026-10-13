@@ -1,5 +1,14 @@
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { recordEvidence } from "./data-evidence";
+import {
+  deltaPage,
+  fresh,
+  leaderPage,
+  rowsOf,
+  settleElsewhere,
+  snapshotPage,
+  untilSync,
+} from "./data-leader-helpers";
 import { serveIdentityReads } from "./data-local-faults";
 import {
   ACCOUNT,
@@ -35,7 +44,10 @@ import {
  *
  * E-T1 Today from /daily and from the cache, axe at five viewports; E-T2 Mark done offline, then sent; E-T3 create offline and an immediate
  * Mark done; E-T4 presets; E-T5 closure and exclusion; E-T6 archive offline leaves the day; E-T7 correction; E-T8 keyboard; E-T9 a real
- * window boundary; E-T11 a 403 read once across remounts; E-T12 display-zone change and the gap explainer.
+ * window boundary; E-T11 a 403 read once across remounts; E-T12 display-zone change and the gap explainer. Revision 1 adds E-T9b (online,
+ * then offline in place), E-T7b/E-T7c (the correction conflict choices; the edit kept across the queue), E-T8b (forms and dialogs by
+ * keyboard, focus return), E-T13 (axe of the forms and dialogs), E-T2b (the PRODUCTION leader sends a save made in the tree) and E-T10 (a
+ * held `/daily` answer across a real account switch).
  */
 const TODAY = todayUtc();
 const todayRoute = (zone = "UTC", day = TODAY) =>
@@ -676,5 +688,444 @@ test.describe("E-T12: display zone and the gap explainer (A6)", () => {
     await expect(page).toHaveURL(/tz=America%2FNew_York/);
     // 01:30Z is 21:30 on the 28th in New York: not on the 29th there.
     await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
+  });
+});
+
+// ---- revision 1 (review of 13 October 2026, R2/R3/R7) -------------------------------------------------------------------------------
+
+const VIEWED = "22222222-2222-4222-8222-222222222222";
+/** A settled record of `account` at `epoch` (a sign-in in another tab), as the production store writes it. */
+const settledAt = (account: string, epoch: number, session: string) => ({
+  schema: 1,
+  latest_epoch: epoch,
+  fence_seq: 0,
+  attempt: null,
+  settled: {
+    account_id: account,
+    epoch,
+    settled_at: new Date().toISOString(),
+    session_id: session,
+  },
+  fences: {},
+  leases: {},
+});
+const conflict = (code: string) => ({
+  status: 409,
+  body: JSON.stringify({
+    code,
+    message: "m",
+    request_id: "11111111-1111-4111-8111-111111111111",
+    details: [],
+  }),
+});
+/**
+ * Serves `/daily` (call AFTER the network stub: a later route wins). `who` is the account the stub's session answers for WHEN THE REQUEST
+ * ARRIVES: the answer is that account's, and `hold` (asked with it) keeps the request unanswered until `release`.
+ */
+async function serveDaily(
+  context: BrowserContext,
+  answer: (account: string) => { status: number; body: unknown },
+  hold: (account: string) => boolean = () => false,
+  who: () => string = () => ACCOUNT,
+) {
+  const held: Array<() => Promise<void>> = [];
+  const asked: Array<{ account: string; url: string }> = [];
+  await context.route("**/api/experimental/v1/daily**", async (route) => {
+    const account = who();
+    asked.push({ account, url: route.request().url() });
+    const fulfil = async () => {
+      const a = answer(account);
+      await route
+        .fulfill({
+          status: a.status,
+          contentType: "application/json",
+          body: JSON.stringify(a.body),
+        })
+        .catch(() => undefined);
+    };
+    if (hold(account)) held.push(fulfil);
+    else await fulfil();
+  });
+  return {
+    asked,
+    held,
+    release: async () => {
+      for (const fulfil of held.splice(0)) await fulfil();
+    },
+  };
+}
+
+test.describe("E-T9b: online, then offline without a remount (A4; R2 of revision 1)", () => {
+  test("a row the server answered provisional is finalised from the saved summary when the real window closes after the device went offline", async ({
+    context,
+  }) => {
+    const closesAt = Math.floor(Date.now() / 1000) + 8;
+    const a = buildTask({
+      n: 15,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt,
+    });
+    const { page } = await setup(context, todayRoute(), [a], (r) => {
+      r.respond = () =>
+        dailyPage([
+          view(a, { outcome: "provisional", period_outcome: "provisional" }),
+        ]);
+    });
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "server",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "on_track",
+    );
+    // Offline in place: the same mounted Today stops using the answer received online.
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+      { timeout: 20_000 },
+    );
+    expect(Math.floor(Date.now() / 1000)).toBeGreaterThanOrEqual(closesAt);
+  });
+});
+
+test.describe("E-T7b: a correction that met another correction (A14; R7 of revision 1)", () => {
+  for (const choice of ["Save mine on the current version", "Discard mine"])
+    test(`'${choice}'`, async ({ context }) => {
+      const a = buildTask({
+        n: 16,
+        title: "Cups",
+        goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      });
+      const { page, net } = await setup(
+        context,
+        `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+        [a],
+      );
+      await goOfflineAtBoundary(page);
+      await page.getByRole("button", { name: "Correct this day" }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByLabel("At most").fill("2");
+      await dialog.getByRole("button", { name: "Save correction" }).click();
+      await expect(dialog).toHaveCount(0);
+      // Someone else corrected the day first: the server refuses ours on version 1.
+      net.commandScript.push(() => conflict("conflict"));
+      await goOnlineAtBoundary(page);
+      await send(page);
+      await expect
+        .poll(async () => (await draftsOf(page)).map((d) => d.status))
+        .toEqual(["version_conflict"]);
+      // Their correction arrives with the next sync page: the occurrence at version 2, at most 6.
+      const theirs = (
+        a.upserts as Array<{
+          kind: string;
+          resource: { kind: string; value: Record<string, unknown> };
+        }>
+      ).find((u) => u.resource.kind === "occurrence");
+      if (theirs === undefined) throw new Error("setup: no occurrence upsert");
+      const definition = (theirs.resource.value as { definition: object })
+        .definition as Record<string, unknown>;
+      net.script.push(() => ({
+        status: 200,
+        body: pageText(
+          [
+            [
+              {
+                ...theirs,
+                resource: {
+                  ...theirs.resource,
+                  version: 2,
+                  value: {
+                    ...theirs.resource.value,
+                    definition: {
+                      ...definition,
+                      goal: {
+                        kind: "numeric",
+                        minimum: null,
+                        maximum: "6",
+                        unit: "cups",
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          ],
+          "cursor-2",
+        ),
+      }));
+      await page.evaluate(() => window.__atlasData?.nudgeSync());
+      const block = page.locator("[data-correction-conflict]");
+      await expect(block).toContainText(
+        "Someone else corrected this day first",
+      );
+      await block.getByRole("button", { name: choice }).click();
+      if (choice === "Discard mine") {
+        await expect(block).toHaveCount(0);
+        await expect.poll(async () => (await draftsOf(page)).length).toBe(0);
+        return;
+      }
+      await expect(block).toHaveCount(0);
+      await send(page);
+      await expect.poll(() => net.commands.length).toBe(2);
+      const resent = JSON.parse(net.commands[1]?.body ?? "{}") as {
+        command: Record<string, unknown>;
+      };
+      // Mine again, on the version now saved, by the person's act.
+      expect(resent.command).toMatchObject({
+        kind: "revise_occurrence",
+        id: a.occurrenceId,
+        expected_version: 2,
+        definition: { goal: { maximum: "2" } },
+      });
+      expect(net.commands[1]?.key).not.toBe(net.commands[0]?.key);
+    });
+});
+
+test.describe("E-T7c: a correction kept while the person visits the queue (A14; R3/R7 of revision 1)", () => {
+  test("the in-dialog sync control keeps the edit for this day; back on the day, the dialog opens on it", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 17,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const detail = `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`;
+    const { page } = await setup(context, detail, [a]);
+    await goOfflineAtBoundary(page);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    let dialog = page.getByRole("dialog");
+    await dialog.getByLabel("At most").fill("4");
+    await dialog.locator("[data-sync-tone]").click();
+    await expect(page).toHaveURL(/\/sync/);
+    await expect(dialog).toHaveCount(0);
+    await navigateInApp(page, detail);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    dialog = page.getByRole("dialog");
+    await expect(dialog.getByLabel("At most")).toHaveValue("4");
+    expect(await draftsOf(page)).toEqual([]);
+  });
+});
+
+test.describe("E-T8b: keyboard only, forms and dialogs (A10, A14, A19; R7 of revision 1)", () => {
+  test("the correction dialog opens, closes by Escape and saves by Enter, focus returning to its control each time", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 18,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const { page } = await setup(
+      context,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+      [a],
+    );
+    await goOfflineAtBoundary(page);
+    const opener = page.getByRole("button", { name: "Correct this day" });
+    await opener.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            document.activeElement?.closest('[role="dialog"]') !== null &&
+            document.activeElement !== null,
+        ),
+      )
+      .toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel("At most").focus();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("3");
+    await dialog.getByRole("button", { name: "Save correction" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    expect((await draftsOf(page)).map((d) => d.kind)).toEqual([
+      "revise_occurrence",
+    ]);
+  });
+
+  test("the task form is filled and saved by keyboard; the new task's detail follows", async ({
+    context,
+  }) => {
+    const { page } = await setup(context, "/tasks/new", []);
+    await goOfflineAtBoundary(page);
+    await page
+      .getByRole("button", { name: "Start from scratch instead" })
+      .focus();
+    await page.keyboard.press("Enter");
+    const name = page.getByLabel("Name", { exact: true });
+    await name.focus();
+    await page.keyboard.type("Water the plants");
+    await page.getByRole("radio", { name: "Only me" }).focus();
+    await page.keyboard.press("Space");
+    await expect(page.getByRole("radio", { name: "Only me" })).toBeChecked();
+    await page.getByRole("button", { name: "Save" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    expect((await draftsOf(page)).map((d) => d.kind)).toEqual(["create_task"]);
+  });
+});
+
+test.describe("E-T13: axe and layout of the forms and dialogs (A19; R7 of revision 1)", () => {
+  for (const [width, height] of [
+    [390, 844],
+    [1440, 900],
+  ] as const)
+    for (const scheme of ["light", "dark"] as const)
+      test(`the task form, the task detail and the correction dialog at ${width}×${height}, ${scheme} (browser emulation, not a device)`, async ({
+        context,
+      }) => {
+        const a = buildTask({
+          n: 19,
+          title: "Cups",
+          goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+        });
+        const { page } = await setup(
+          context,
+          `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+          [a],
+          () => undefined,
+          { viewport: { width, height }, colorScheme: scheme },
+        );
+        await goOfflineAtBoundary(page);
+        const overflow = () =>
+          page.evaluate(
+            () =>
+              document.documentElement.scrollWidth -
+              document.documentElement.clientWidth,
+          );
+        await expect(page.locator("[data-record-card]")).toBeVisible();
+        expect(await runAxe(page), "the task detail").toEqual([]);
+        expect(await overflow()).toBeLessThanOrEqual(0);
+        await page.getByRole("button", { name: "Correct this day" }).click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+        expect(await runAxe(page), "the correction dialog").toEqual([]);
+        expect(await overflow()).toBeLessThanOrEqual(0);
+        await page.keyboard.press("Escape");
+        await navigateInApp(page, "/tasks/new");
+        await page
+          .getByRole("button", { name: "Start from scratch instead" })
+          .click();
+        await expect(page.getByLabel("Name", { exact: true })).toBeVisible();
+        expect(await runAxe(page), "the task form").toEqual([]);
+        expect(await overflow()).toBeLessThanOrEqual(0);
+      });
+});
+
+test.describe("E-T2b: the PRODUCTION leader sends a save made in the tree (A7, A18; R7 of revision 1)", () => {
+  test("Mark done online with ?leader=production: the record is sent with its own key, with no harness call to wake anything", async ({
+    context,
+  }) => {
+    const a = buildTask({ n: 20, title: "Brush your teeth" });
+    const net = await fresh(context);
+    net.answer = (call) =>
+      call.cursor === null
+        ? snapshotPage(a.upserts, "delta-0", false)
+        : deltaPage([], call.cursor);
+    await serveDaily(context, () => dailyPage([view(a)]));
+    const page = await leaderPage(context, net, "one", undefined, {
+      route: todayRoute(),
+    });
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible({ timeout: 20_000 });
+    await rowOf(page, a.occurrenceId)
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    // Nothing but the tree's own save: the production dispatcher hears it and sends.
+    await expect
+      .poll(() => net.commands.map((c) => c.path), { timeout: 20_000 })
+      .toEqual(["/task-commands"]);
+    const records = (
+      (await rowsOf(page, "drafts")) as Array<{
+        kind: string;
+        local_id: string;
+      }>
+    ).filter((d) => d.kind === "record");
+    expect(records).toHaveLength(1);
+    expect(net.commands[0]?.key).toBe(records[0]?.local_id);
+    expect(net.commands[0]?.page).toBe("one");
+  });
+});
+
+test.describe("E-T10: a /daily answer held across an account switch (A20; R7 of revision 1)", () => {
+  test("the answer for the previous account arrives after another account is displayed and is never shown", async ({
+    context,
+  }) => {
+    const a = buildTask({ n: 21, title: "Theirs" });
+    const net = await fresh(context);
+    net.answer = (call) =>
+      call.cursor === null
+        ? snapshotPage(
+            net.identity.account === ACCOUNT ? a.upserts : [],
+            "delta-0",
+            false,
+          )
+        : deltaPage([], call.cursor);
+    // The previous account's reads are held; the next account's are answered at once, with its own (empty) day.
+    const daily = await serveDaily(
+      context,
+      (account) =>
+        account === ACCOUNT
+          ? dailyPage([
+              view(a, {
+                outcome: "complete",
+                period_outcome: "complete",
+                actionable: false,
+              }),
+            ])
+          : dailyPage([]),
+      (account) => account === ACCOUNT,
+      () => net.identity.account,
+    );
+    const page = await leaderPage(context, net, "one", undefined, {
+      route: todayRoute(),
+    });
+    // The account's day from its cache, while both of its /daily reads are held.
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+      { timeout: 20_000 },
+    );
+    await expect.poll(() => daily.held.length).toBeGreaterThanOrEqual(2);
+    // Another tab signs in as someone else: this page now displays that account.
+    net.identity = { account: VIEWED, session: "s2" };
+    await settleElsewhere(context, settledAt(VIEWED, 2, "s2"));
+    // The leading page follows the new settlement: its binding moves to that account, whose cache it brings up to date.
+    const synced = await untilSync(
+      page,
+      (state) => state?.cache_status === "valid",
+      VIEWED,
+    );
+    expect(synced?.cache_status).toBe("valid");
+    await expect(page.locator("[data-today-page]")).toBeVisible({
+      timeout: 20_000,
+    });
+    const heldBefore = daily.held.length;
+    expect(heldBefore).toBeGreaterThanOrEqual(2);
+    await daily.release();
+    // Long enough for a late answer to be composed and shown, were it applied.
+    await page.waitForTimeout(1_500);
+    await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
+    // The next account's own day was asked for and answered (so the screen is live, not stuck), and the held answers were delivered.
+    expect(daily.asked.some((q) => q.account === VIEWED)).toBe(true);
+    expect(daily.held).toHaveLength(0);
   });
 });
