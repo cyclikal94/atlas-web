@@ -262,39 +262,36 @@ describe("online: /daily", () => {
 
   test("a late answer for a previous identity is never shown under the new one", async () => {
     const a = await seededTask({ title: "Theirs" });
-    let release: (v: unknown) => void = () => undefined;
-    const held = new Promise((r) => {
-      release = r;
-    });
+    // Strengthened in revision 1 (the assertion is unchanged): EVERY read made under the first identity is held, whichever mount makes it.
+    // The screens mount twice while the cache facts load (CacheGate), and a scripted queue of two held answers was used up by whichever
+    // mount read first: when that was the discarded one, no late answer could ever reach the view, and the three-layer mutant MU-2025
+    // survived a managed run. The reads of the second identity answer at once with an empty day.
+    const held: Array<() => void> = [];
     const api = fakeApi();
-    api.daily.joint.push(async () => {
-      await held;
-      return page([
-        view(a, {
-          outcome: "complete",
-          period_outcome: "complete",
-          actionable: false,
-        }),
-      ]);
-    });
-    api.daily.personal.push(async () => {
-      await held;
-      return page([
-        view(a, {
-          outcome: "complete",
-          period_outcome: "complete",
-          actionable: false,
-        }),
-      ]);
-    });
+    api.readDaily = () =>
+      new Promise((resolve) => {
+        held.push(() =>
+          resolve(
+            page([
+              view(a, {
+                outcome: "complete",
+                period_outcome: "complete",
+                actionable: false,
+              }),
+            ]),
+          ),
+        );
+      });
     const t = await mountTasks({ path: PATH, api });
+    expect(held.length).toBeGreaterThanOrEqual(2);
     const next = fakeApi();
     t.rerender(tasksEnv(next, { identity: `${ME}:2` }));
     await t.settle();
-    await act(async () => release(null));
-    // Strengthened in revision 1 (the assertion is unchanged): a late answer that WERE applied needs several turns to be composed (the
-    // related rows are read after it), so the test waits, bounded, for the row to appear before asserting that it never does. A fixed
-    // number of turns let the three-layer mutant MU-2025 go unseen under load.
+    await act(async () => {
+      for (const release of held.splice(0)) release();
+    });
+    // A late answer that WERE applied needs several turns to be composed (the related rows are read after it), so the test waits, bounded,
+    // for the row to appear before asserting that it never does.
     await t.until(() => row(a.occurrenceId) !== null);
     expect(row(a.occurrenceId)).toBeNull();
   });
