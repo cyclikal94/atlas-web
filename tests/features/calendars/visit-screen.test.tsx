@@ -411,3 +411,226 @@ describe("leaving the screen ends the visit (C2, Q6)", () => {
     expect(reads(w)).toHaveLength(2);
   });
 });
+
+/**
+ * Revision 6 (R13; design assessment C2, Q8-Q11): the visit ends when the DOCUMENT leaves the screen, whether or not the tree is mounted.
+ * The session's protective closure (an Atlas `403`) unmounts the tree at the same address; the person can press Back while nothing is
+ * mounted. Here the closure is `detach()` (the session double does not close the tree by itself; the real composition is E-CAL15), the
+ * address moves through the document's REAL history (`history.go`, raw `pushState`/`replaceState`), and `attach()` mounts a new tree with
+ * a new router wherever the document is then. Each schedule has its control: the same steps without a departure read nothing again.
+ */
+describe("revision 6 (R13): leaving while the tree is unmounted ends the visit", () => {
+  const refreshPath = "/calendar-sources/{id}/refresh";
+  /** Settings → Calendars in the document's history (a new visit, read once), so that Back has somewhere to go. */
+  const throughSettings = async (w: World) => {
+    await w.navigate("/settings");
+    await w.navigate("/settings/calendars");
+    await waitFor(() => expect(row().dataset.observation).toBe("idle"));
+  };
+
+  for (const departs of [true, false])
+    test(`${departs ? "Q8, R13's witness" : "Q8 control"}: a press refused 403, the tree closed, ${departs ? "Back to Settings while closed, then Calendars opened" : "and opened again at the same address"}: ${departs ? "ONE fresh list read (the source seen busy) and ONE capability read" : "nothing read again"}; no automatic POST`, async () => {
+      fake();
+      const w = await calendarWorld({
+        cache: [sourceRow()],
+        replies: [["/calendar-sources", [live(false), live(false)]]],
+      });
+      await throughSettings(w);
+      expect(reads(w)).toHaveLength(2);
+      expect(capabilityReads(w)).toHaveLength(2);
+      w.replies.set(refreshPath, [forbidden]);
+      fireEvent.click(
+        within(row()).getByRole("button", { name: "Refresh Family calendar" }),
+      );
+      await w.settle();
+      expect(sends(w)).toHaveLength(1);
+      await w.detach();
+      expect(row()).toBeNull();
+      w.replies.set("/calendar-sources", [live(true), live(true)]);
+      if (departs) {
+        await w.traverse(-1);
+        expect(w.path()).toBe("/settings");
+        await w.attach();
+        expect(row()).toBeNull();
+        await w.navigate("/settings/calendars");
+        await waitFor(() => expect(row().dataset.observation).toBe("busy"));
+        expect(reads(w)).toHaveLength(3);
+        expect(capabilityReads(w)).toHaveLength(3);
+      } else {
+        await w.attach();
+        expect(w.path()).toBe("/settings/calendars");
+        await elapse(w, OBSERVE_POLL_MS);
+        expect(reads(w)).toHaveLength(2);
+        expect(capabilityReads(w)).toHaveLength(2);
+        expect(row().dataset.observation).not.toBe("busy");
+      }
+      expect(sends(w)).toHaveLength(1);
+    });
+
+  for (const [label, move, departs] of [
+    [
+      "Back, then Forward",
+      async (w: World) => {
+        await w.traverse(-1);
+        await w.traverse(1);
+      },
+      true,
+    ],
+    [
+      "raw pushState away, then replaceState back",
+      async (w: World) => {
+        await w.write("push", "/settings");
+        await w.write("replace", "/settings/calendars");
+      },
+      true,
+    ],
+    [
+      "control: pushState of the same path with a query",
+      async (w: World) => {
+        await w.write("push", "/settings/calendars?view=all");
+      },
+      false,
+    ],
+    [
+      "control: nothing (the protective remount alone)",
+      async () => undefined,
+      false,
+    ],
+  ] as const)
+    test(`Q9: leaving and coming back entirely while unmounted (${label}): ${departs ? "the next mount is a new visit and reads once" : "the visit goes on and reads nothing"}`, async () => {
+      fake();
+      const w = await calendarWorld({
+        cache: [sourceRow()],
+        replies: [["/calendar-sources", [live(false), live(false)]]],
+      });
+      // Seen idle: a terminal visit (nothing more is read within it).
+      await throughSettings(w);
+      w.replies.set("/calendar-sources", [live(true)]);
+      await w.detach();
+      await move(w);
+      expect(w.path()).toBe("/settings/calendars");
+      await w.attach();
+      if (departs) {
+        await waitFor(() => expect(row().dataset.observation).toBe("busy"));
+        expect(reads(w)).toHaveLength(3);
+        expect(capabilityReads(w)).toHaveLength(3);
+      } else {
+        await elapse(w, OBSERVE_POLL_MS);
+        expect(reads(w)).toHaveLength(2);
+        expect(capabilityReads(w)).toHaveLength(2);
+        expect(row().dataset.observation).toBe("idle");
+      }
+      expect(sends(w)).toEqual([]);
+    });
+
+  test("Q9 control: Back pressed on the MOUNTED screen ends the visit too; the reopened screen reads once", async () => {
+    fake();
+    const w = await calendarWorld({
+      cache: [sourceRow()],
+      replies: [["/calendar-sources", [live(false), live(false), live(true)]]],
+    });
+    await throughSettings(w);
+    await w.traverse(-1);
+    expect(w.path()).toBe("/settings");
+    expect(row()).toBeNull();
+    await w.navigate("/settings/calendars");
+    await waitFor(() => expect(row().dataset.observation).toBe("busy"));
+    expect(reads(w)).toHaveLength(3);
+    expect(capabilityReads(w)).toHaveLength(3);
+  });
+
+  test("Q9/Q13: leaving while unmounted with a read out: its answer reaches nothing, and the reopened screen reads afresh", async () => {
+    fake();
+    const hold = held();
+    const w = await calendarWorld({
+      cache: [sourceRow()],
+      replies: [["/calendar-sources", [live(false), hold.reply, live(false)]]],
+    });
+    await w.navigate("/settings");
+    await w.navigate("/settings/calendars");
+    expect(reads(w)).toHaveLength(2);
+    await w.detach();
+    await w.traverse(-1);
+    hold.release(live(true) as never);
+    await w.settle();
+    await w.attach();
+    await w.navigate("/settings/calendars");
+    await waitFor(() => expect(row().dataset.observation).toBe("idle"));
+    expect(reads(w)).toHaveLength(3);
+  });
+});
+
+/**
+ * Revision 6 (R12; design assessment C1, Q1-Q3): the production screen composes each mount's refresh controller with the identity's
+ * refresh ownership (`memory.ts`), so a press's answer that arrives after the person left and came back is shown by the screen mounted
+ * then only if no newer press of that source was admitted since. The review's witness, at component level: A held; Settings and back;
+ * B pressed (a NEW key) and refused `422 invalid_ics`; then A's success arrives. The real composition is E-CAL15.
+ */
+describe("revision 6 (R12): an older press's late answer never replaces a newer press's", () => {
+  const refreshPath = "/calendar-sources/{id}/refresh";
+  const state = () =>
+    row().querySelector<HTMLElement>("[data-refresh]")?.dataset.refresh ?? null;
+  for (const schedule of [
+    "no newer press",
+    "newer press running",
+    "newer press finished",
+  ] as const)
+    test(`${schedule}: ${schedule === "no newer press" ? "A's late success is shown (the legitimate late outcome)" : "the row keeps B's state, and then B's failure"}`, async () => {
+      fake();
+      const a = held();
+      const b = held();
+      const w = await calendarWorld({
+        cache: [sourceRow()],
+        replies: [
+          ["/calendar-sources", [live(false), live(false)]],
+          [refreshPath, [a.reply, b.reply]],
+        ],
+      });
+      await waitFor(() => expect(row().dataset.observation).toBe("idle"));
+      fireEvent.click(
+        within(row()).getByRole("button", { name: "Refresh Family calendar" }),
+      );
+      await w.settle();
+      expect(state()).toBe("refreshing");
+      await w.navigate("/settings");
+      await w.navigate("/settings/calendars");
+      await waitFor(() =>
+        expect(row().dataset.observation).not.toBe("checking"),
+      );
+      if (schedule !== "no newer press") {
+        fireEvent.click(
+          within(row()).getByRole("button", {
+            name: "Refresh Family calendar",
+          }),
+        );
+        await w.settle();
+        expect(sends(w)).toHaveLength(2);
+        expect(sends(w)[1]?.key).not.toBe(sends(w)[0]?.key);
+        if (schedule === "newer press finished") {
+          b.release({ status: 422, json: atlasBody("invalid_ics") } as never);
+          await w.settle();
+          expect(state()).toBe("failed");
+        }
+      }
+      a.release({ status: 200, json: { revision: 9 } } as never);
+      await w.settle();
+      expect(state()).toBe(
+        schedule === "no newer press"
+          ? "succeeded"
+          : schedule === "newer press running"
+            ? "refreshing"
+            : "failed",
+      );
+      if (schedule === "newer press running") {
+        b.release({ status: 422, json: atlasBody("invalid_ics") } as never);
+        await w.settle();
+        expect(state()).toBe("failed");
+      }
+      // A screen mounted later (the session's re-check) shows the same outcome.
+      await remount(w);
+      expect(state()).toBe(
+        schedule === "no newer press" ? "succeeded" : "failed",
+      );
+      expect(sends(w)).toHaveLength(schedule === "no newer press" ? 1 : 2);
+    });
+});

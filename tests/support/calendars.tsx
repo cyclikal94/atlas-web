@@ -17,6 +17,7 @@ import { accountDatabaseName } from "../../src/data/model/schema";
 import { w as writes } from "../../src/data/store/port";
 import { forgetIdentityMemories } from "../../src/features/calendars/memory";
 import { registerCalendarCommands } from "../../src/features/calendars/register";
+import { documentRouteChanges } from "../../src/lib/route-changes";
 import {
   type ApiCompatibility,
   type Identity,
@@ -98,9 +99,22 @@ export interface CalendarWorld {
    * re-check of a `403` does (a new router, a new screen; the per-identity memory and the document stay). Settles after.
    */
   remount(): Promise<void>;
+  /**
+   * Revision 6 (R13): the two halves of `remount`, so that the document can move while NO tree is mounted (the session's protective
+   * closure). `detach` unmounts the tree; `attach` mounts a new one (a new router) wherever the document is now. Both settle after.
+   */
+  detach(): Promise<void>;
+  attach(): Promise<void>;
   /** Revision 5: an in-app navigation (the router's own), then settles. */
   navigate(to: string): Promise<void>;
-  /** Revision 5: the current address of the mounted tree's router. */
+  /**
+   * Revision 6 (R13): the browser's own history traversal (`history.go`: Back is -1, Forward 1), mounted or not; resolves after its
+   * `popstate`, then settles.
+   */
+  traverse(delta: number): Promise<void>;
+  /** Revision 6 (R13): an address written straight into the document's history, by no router (`pushState` or `replaceState`). */
+  write(how: "push" | "replace", to: string): Promise<void>;
+  /** Revision 5: the current address of the mounted tree's router (revision 6: the document's, when no tree is mounted). */
   path(): string;
   /**
    * Commits a change to the account database through the production store, as a sync or a recovery would (one transaction), then
@@ -256,9 +270,11 @@ export async function calendarWorld(
       api: { client: () => client, fetchFor: () => fetch } as never,
     },
   );
-  let router = createAppRouter({
-    initialPath: options.route ?? "/settings/calendars",
-  });
+  // Revision 6 (R13): the document's real history, as production: the route record is installed before the first router (as
+  // `createProtectedTree` does), every router is a browser-history router over this document, and the address starts where asked.
+  documentRouteChanges();
+  window.history.replaceState(null, "", options.route ?? "/settings/calendars");
+  let router = createAppRouter();
   const tree = () => (
     <SessionProvider session={session}>
       <ProtectedProviders>
@@ -275,7 +291,7 @@ export async function calendarWorld(
       </ProtectedProviders>
     </SessionProvider>
   );
-  let mounted = render(tree());
+  let mounted: ReturnType<typeof render> | null = render(tree());
   const settle = async () => {
     await act(async () => {
       for (let i = 0; i < 20; i += 1) {
@@ -298,9 +314,19 @@ export async function calendarWorld(
     rows: (store) => world.idb.snapshot(DB)?.[store] ?? [],
     snapshot: () => world.idb.snapshot(DB),
     async remount() {
-      const at = router.history.location.pathname;
-      act(() => mounted.unmount());
-      router = createAppRouter({ initialPath: at });
+      act(() => mounted?.unmount());
+      router = createAppRouter();
+      mounted = render(tree());
+      await settle();
+    },
+    async detach() {
+      act(() => mounted?.unmount());
+      mounted = null;
+      await settle();
+    },
+    async attach() {
+      if (mounted !== null) throw new Error("a tree is mounted");
+      router = createAppRouter();
       mounted = render(tree());
       await settle();
     },
@@ -310,7 +336,27 @@ export async function calendarWorld(
       });
       await settle();
     },
-    path: () => router.history.location.pathname,
+    async traverse(delta) {
+      const popped = new Promise<void>((resolve) =>
+        window.addEventListener("popstate", () => resolve(), { once: true }),
+      );
+      await act(async () => {
+        window.history.go(delta);
+        await popped;
+      });
+      await settle();
+    },
+    async write(how, to) {
+      act(() => {
+        if (how === "push") window.history.pushState(null, "", to);
+        else window.history.replaceState(null, "", to);
+      });
+      await settle();
+    },
+    path: () =>
+      mounted === null
+        ? window.location.pathname
+        : router.history.location.pathname,
     async commit(change) {
       const service = env.service();
       if (service === null) throw new Error("no account database");

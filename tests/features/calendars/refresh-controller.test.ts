@@ -10,6 +10,7 @@ import type {
   LiveSources,
 } from "../../../src/features/calendars/model/result";
 import { createRefreshController } from "../../../src/features/calendars/refresh-controller";
+import { createRefreshOwnership } from "../../../src/features/calendars/refresh-ownership";
 import { StampedRequestError } from "../../../src/session";
 
 /**
@@ -199,7 +200,8 @@ describe("stopping", () => {
 
 describe("an outcome outlives a remount of the screen under the same identity (the session's re-check of a 403)", () => {
   test("an answer that arrives AFTER dispose ends the run in the memory and performs nothing; the next controller shows it", async () => {
-    const remembered = new Map();
+    // Revision 6 (R12): the identity's memory of ended runs is its refresh ownership (`refresh-ownership.ts`); same assertions.
+    const remembered = createRefreshOwnership();
     const h = harness();
     const first = createRefreshController({
       api: {
@@ -216,12 +218,12 @@ describe("an outcome outlives a remount of the screen under the same identity (t
         capabilities: () => Promise.reject(new Error("not used")),
       },
       mintKey: () => "k1",
-      remembered,
+      ownership: remembered,
     });
     first.refresh("S");
     first.dispose();
     await h.flush();
-    expect(remembered.get("S")?.view).toEqual({
+    expect(remembered.shown("S")?.run.view).toEqual({
       kind: "failed",
       cause: "unavailable",
     });
@@ -235,17 +237,19 @@ describe("an outcome outlives a remount of the screen under the same identity (t
         capabilities: () => Promise.reject(new Error("not used")),
       },
       mintKey: () => "k2",
-      remembered,
+      ownership: remembered,
     });
     expect(second.view("S")).toEqual({ kind: "failed", cause: "unavailable" });
     expect(second.running("S")).toBe(false);
     // A new press is a new operation: the remembered outcome is forgotten (it would be stale after a remount mid-run).
     second.refresh("S");
-    expect(remembered.has("S")).toBe(false);
+    expect(remembered.shown("S")).toBeNull();
   });
 
-  test("revision 5: the NEXT controller is already built when the late answer arrives: it adopts the outcome (told through onLate), unless a run of its own is going", async () => {
-    const remembered = new Map();
+  test("revision 5: the NEXT controller is already built when the late answer arrives: it adopts the outcome, unless a run of its own is going", async () => {
+    // Revision 6 (R12): told through the shared ownership's subscription instead of `onLate`/`adopt`; an OLDER admission's outcome is
+    // refused by the ownership itself (it no longer owns the source), so it cannot replace the press of its own.
+    const remembered = createRefreshOwnership();
     const h = harness();
     let answer: (r: never) => void = () => undefined;
     const api = (refresh: CalendarApi["refresh"]) => ({
@@ -255,15 +259,10 @@ describe("an outcome outlives a remount of the screen under the same identity (t
       command: () => Promise.reject(new Error("not used")),
       capabilities: () => Promise.reject(new Error("not used")),
     });
-    const adopters = new Set<(id: string) => void>();
-    const onLate = (id: string) => {
-      for (const adopt of [...adopters]) adopt(id);
-    };
     const first = createRefreshController({
       api: api(() => new Promise((resolve) => (answer = resolve as never))),
       mintKey: () => "k1",
-      remembered,
-      onLate,
+      ownership: remembered,
     });
     first.refresh("S");
     first.dispose();
@@ -271,10 +270,8 @@ describe("an outcome outlives a remount of the screen under the same identity (t
     const second = createRefreshController({
       api: api(() => new Promise(() => undefined)),
       mintKey: () => "k2",
-      remembered,
-      onLate,
+      ownership: remembered,
     });
-    adopters.add((id) => second.adopt(id));
     let notified = 0;
     second.subscribe(() => {
       notified += 1;
@@ -290,18 +287,21 @@ describe("an outcome outlives a remount of the screen under the same identity (t
     expect(second.view("S")).toEqual({ kind: "failed", cause: "unavailable" });
     expect(second.running("S")).toBe(false);
     expect(notified).toBe(1);
-    // A press of its own owns the row: a later adoption of an older outcome does not replace it.
+    // A press of its own owns the row: a later outcome of an older admission does not replace it.
+    const older = remembered.claim("T", "k0");
     second.refresh("T");
-    remembered.set("T", remembered.get("S"));
-    second.adopt("T");
+    const ended = remembered.shown("S")?.run;
+    if (ended === undefined) throw new Error("no outcome");
+    expect(remembered.publish(older, ended)).toBe(false);
     expect(second.running("T")).toBe(true);
     // A disposed controller adopts nothing.
     second.dispose();
-    second.adopt("S");
+    expect(remembered.publish(remembered.claim("S", "k3"), ended)).toBe(true);
+    expect(second.view("S")).toBeNull();
   });
 
   test("a run that was only WAITING to retry at dispose ends with nothing remembered, and nothing resumes", async () => {
-    const remembered = new Map();
+    const remembered = createRefreshOwnership();
     const sends: string[] = [];
     const timers = new Map<number, () => void>();
     let n = 0;
@@ -323,7 +323,7 @@ describe("an outcome outlives a remount of the screen under the same identity (t
     const controller = createRefreshController({
       api,
       mintKey: () => "k",
-      remembered,
+      ownership: remembered,
       timers: {
         setTimeout: (fn) => {
           n += 1;
@@ -338,7 +338,7 @@ describe("an outcome outlives a remount of the screen under the same identity (t
     expect(timers.size).toBe(1);
     controller.dispose();
     expect(timers.size).toBe(0);
-    expect(remembered.size).toBe(0);
+    expect(remembered.outcomes()).toHaveLength(0);
     expect(sends).toEqual(["k"]);
   });
 

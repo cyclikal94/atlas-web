@@ -1,4 +1,4 @@
-import { Link, useRouter } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import {
   useCallback,
   useEffect,
@@ -55,7 +55,7 @@ import {
 } from "./refresh-controller";
 import { projectSourceCreate } from "./register";
 import { PendingRow, SourceRow } from "./SourceRow";
-import { type CalendarVisit, enterVisit } from "./visit";
+import { type CalendarVisit, documentVisitBoundary, enterVisit } from "./visit";
 
 /**
  * "Calendar sources" (WEB-13a; `wireframes/q21/calendar-journeys.html`), the Settings registry's Calendars page. It lists the cached
@@ -66,7 +66,8 @@ import { type CalendarVisit, enterVisit } from "./visit";
  * A queued create is stored and shown as pending, and is sent by the production leader (WEB-09b, `app/data-leader.ts`) when this
  * device's leader runs. When the screen opens it reads the live list once for the sources it shows, and follows a refresh it finds
  * running elsewhere until it ends (`observation-controller.ts`, D-13a-13): it sends nothing. What it reads by itself (that list and the
- * capability) is read once per VISIT, which a remount under the same identity continues (`visit.ts`, revision 5, R11).
+ * capability) is read once per VISIT, which a remount under the same identity continues and the person leaving the screen ends, whether
+ * or not it is mounted then (`visit.ts`, revisions 5 and 6, R11 and R13).
  */
 export function CalendarSources() {
   const env = useOptionalDataEnv();
@@ -123,11 +124,15 @@ function useCompat(): Compat {
 }
 
 /**
- * One refresh controller per calendar client: replaced with the identity, disposed on unmount (Strict Mode safe). The observer of
- * refresh activity and the capability read are the VISIT's (`visit.ts`, revision 5, R11): the mount attaches to the identity's current
- * visit and detaches on unmount. The visit ends only when the screen unmounts because the person left it (the address changed): a
- * remount at the same address (the session's re-check of a `403`, a router made again, Strict Mode) continues it, reading nothing
- * again. A press admitted by the controller ends that source's observation (revision 4, R10).
+ * One refresh controller per calendar client: replaced with the identity, disposed on unmount (Strict Mode safe). Which press of a
+ * source may record its outcome is the identity's (`refresh-ownership.ts`, revision 6, R12), so an answer that arrives after a remount
+ * is shown by the screen mounted then, unless a newer press of that source was admitted since. The observer of refresh activity and
+ * the capability read are the VISIT's (`visit.ts`, revision 5, R11): the mount attaches to the identity's current visit and detaches
+ * on unmount, and never ends it. The visit ends when the DOCUMENT leaves the screen (`VisitBoundary`, revision 6, R13), observed whether
+ * or not this screen is mounted: a remount at the same address (the session's re-check of a `403`, a router made again, Strict Mode)
+ * continues it, reading nothing again. The document entering or leaving the screen while this is mounted builds afresh, and no
+ * visit is entered while the document is not at the screen (its own address, not the router's). A press admitted by the controller
+ * ends that source's observation (revision 4, R10).
  */
 function useRefresh(api: CalendarApi | null): {
   controller: RefreshController | null;
@@ -135,7 +140,6 @@ function useRefresh(api: CalendarApi | null): {
   attachment: ObserverAttachment | null;
   visit: CalendarVisit | null;
 } {
-  const router = useRouter();
   const [built, setBuilt] = useState<{
     controller: RefreshController;
     observer: SourceObserver;
@@ -143,43 +147,44 @@ function useRefresh(api: CalendarApi | null): {
     visit: CalendarVisit;
   } | null>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
+  const boundary = documentVisitBoundary();
+  const moved = useSyncExternalStore(
+    boundary.subscribe,
+    boundary.changes,
+    boundary.changes,
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the document entering or leaving the screen while it is mounted builds afresh (the boundary is read itself)
   useEffect(() => {
-    if (api === null) {
+    // The visit has ended already at a departure (`enterVisit`), and none is entered while the DOCUMENT is not at the screen. Its own
+    // address, not the router's: Back is seen by the document's record before the router (a browser runs this between the two), and a
+    // router's push reaches the document a moment after the router has it (the screen then mounts, and builds once the document is there).
+    if (api === null || !boundary.inside()) {
       setBuilt(null);
       return;
     }
     const memory = identityMemory(api.identity.account, api.identity.epoch);
-    const visit = enterVisit(memory, api);
+    const visit = enterVisit(memory, api, boundary);
     const observer = visit.observer;
     const attachment = observer.attach();
-    const opened = router.history.location.pathname;
     const controller = createRefreshController({
       api,
       mintKey: () => crypto.randomUUID(),
-      // What must outlive a remount of this screen under the same identity (a `403` is re-checked by the session): `memory.ts`.
-      remembered: memory.runs,
-      // An outcome that arrives after a remount is shown by the controller of the screen mounted then (revision 5).
-      onLate: (id) => {
-        for (const adopt of [...memory.lateRuns]) adopt(id);
-      },
+      // What must outlive a remount of this screen under the same identity (a `403` is re-checked by the session), and who may still
+      // record a refresh's outcome: `memory.ts`, `refresh-ownership.ts`.
+      ownership: memory.refresh,
       onBegin: (id) => observer.yieldTo(id),
     });
-    const adopt = (id: string) => controller.adopt(id);
-    memory.lateRuns.add(adopt);
     const offController = controller.subscribe(rerender);
     const offObserver = observer.subscribe(rerender);
     setBuilt({ controller, observer, attachment, visit });
     return () => {
       offController();
       offObserver();
-      memory.lateRuns.delete(adopt);
       controller.dispose();
+      // Only this mount's hold ends: the visit goes on until the document leaves the screen (`VisitBoundary`), mounted or not.
       attachment.detach();
-      // The person left the screen (another route, back or forward): the visit ends, and opening the screen again reads afresh.
-      // Unmounted at the same address, the tree was only remounted: the visit goes on.
-      if (router.history.location.pathname !== opened) visit.dispose();
     };
-  }, [api, router]);
+  }, [api, boundary, moved]);
   return {
     controller: built?.controller ?? null,
     observer: built?.observer ?? null,

@@ -7,14 +7,25 @@ import {
   refreshStep,
   startRefresh,
 } from "./model/refresh";
+import {
+  createRefreshOwnership,
+  type RefreshOwnership,
+  type RefreshTicket,
+} from "./refresh-ownership";
 
 /**
  * The manual refreshes of ONE mounted calendar screen (WEB-13a, D-13a-6): it performs what `model/refresh.ts` decides (send with the
  * run's key, read the live list, wait) and nothing else. Memory only. It is disposed when the screen unmounts and replaced when the
- * identity changes (the screen builds one per client), and an answer that arrives after either is dropped: nothing it started is
- * resumed, and nothing is sent on reconnect. Every request it makes asks the client to admit it only while its run is current, so a
- * request still waiting to be sent (`not_sent`) is never sent once its run was stopped, replaced or disposed. While the page is
- * offline it starts nothing, whichever action asks (Refresh or "Check again").
+ * identity changes (the screen builds one per client): nothing it started is resumed, and nothing is sent on reconnect. Every request
+ * it makes asks the client to admit it only while its run is current, so a request still waiting to be sent (`not_sent`) is never sent
+ * once its run was stopped, replaced or disposed. While the page is offline it starts nothing, whichever action asks (Refresh or
+ * "Check again").
+ *
+ * Who may say how a run ended is decided by ADMISSION, across controllers (`refresh-ownership.ts`, revision 6, R12): every admitted
+ * execution claims its source with a new ticket before anything is sent, and only the source's latest ticket may record or show an
+ * outcome. An answer that arrives after `dispose()` (the remount a `403` causes) is therefore recorded only if it ENDS the run and no
+ * newer press of that source was admitted since, by this controller or a later one; it performs nothing (no send, no read, no wait).
+ * Every other late answer is dropped: one whose run was stopped, replaced or superseded, and one that does not end its run.
  */
 export interface Timers {
   setTimeout(fn: () => void, ms: number): unknown;
@@ -36,19 +47,18 @@ export interface RefreshController {
   online(): void;
   /** Clears what a row shows after the person has seen it (for example after a new press elsewhere). */
   forget(sourceId: string): void;
-  /**
-   * An earlier controller of this identity, disposed by a remount, has just recorded the OUTCOME of a run whose answer came after it
-   * (`late`): show it, unless a run of this source is going here (a new press owns the row). Revision 5: the remount can finish before
-   * that answer arrives, and this controller read the memory only when it was built.
-   */
-  adopt(sourceId: string): void;
   subscribe(listener: () => void): () => void;
-  /** Stops every run and drops every answer still to come. Idempotent. */
+  /**
+   * Stops every run and makes no further request. An answer still to come may only record its run's outcome, if it ends the run and
+   * its ticket still owns the source (`refresh-ownership.ts`). Idempotent.
+   */
   dispose(): void;
 }
 
 interface Entry {
   run: RefreshRun;
+  /** The admission this run belongs to (`refresh-ownership.ts`): it shows and records only while the ticket owns its source. */
+  ticket: RefreshTicket;
   /** Bumped whenever the entry is replaced or stopped: a completion of an older generation is dropped. */
   generation: number;
   timer: unknown;
@@ -59,13 +69,11 @@ export function createRefreshController(deps: {
   mintKey(): string;
   timers?: Timers;
   /**
-   * The ended runs of this identity that must outlive a remount of the screen (`memory.ts`): they are shown again by the next
-   * controller of the same identity, and an answer that arrives after `dispose()` still records its outcome there (and performs
-   * nothing: no send, no read, no wait).
+   * The identity's ownership of manual refreshes (`memory.ts`, `refresh-ownership.ts`), shared by every controller of the identity: the
+   * owners' ended runs outlive a remount of the screen and are shown by the next controller, and an outcome another controller records
+   * later (its answer came after its remount) is shown here too. A new one (nothing shared) when not given.
    */
-  remembered?: Map<string, RefreshRun>;
-  /** A run's outcome was recorded after this controller was disposed (`late`): the next controller is told to `adopt` it. */
-  onLate?(sourceId: string): void;
+  ownership?: RefreshOwnership;
   /**
    * A run of `sourceId` was admitted (a press of Refresh or "Check again"), before its request: the screen's observer of refresh activity
    * stops observing that source (`observation-controller.ts`, revision 4), so a read it made earlier cannot change what the run shows.
@@ -78,15 +86,19 @@ export function createRefreshController(deps: {
   };
   const entries = new Map<string, Entry>();
   const listeners = new Set<() => void>();
-  const remembered = deps.remembered ?? new Map<string, RefreshRun>();
+  const ownership = deps.ownership ?? createRefreshOwnership();
   let disposed = false;
   let connected = true;
   let generations = 0;
-  for (const [id, run] of remembered)
-    if (run.ended) {
-      generations += 1;
-      entries.set(id, { run, generation: generations, timer: null });
-    }
+  for (const { ticket, run } of ownership.outcomes()) {
+    generations += 1;
+    entries.set(ticket.source, {
+      run,
+      ticket,
+      generation: generations,
+      timer: null,
+    });
+  }
 
   const notify = (): void => {
     for (const listener of [...listeners]) listener();
@@ -94,7 +106,10 @@ export function createRefreshController(deps: {
 
   const current = (id: string, generation: number): Entry | null => {
     const entry = entries.get(id);
-    return !disposed && entry !== undefined && entry.generation === generation
+    return !disposed &&
+      entry !== undefined &&
+      entry.generation === generation &&
+      ownership.owns(entry.ticket)
       ? entry
       : null;
   };
@@ -133,64 +148,91 @@ export function createRefreshController(deps: {
     }
   };
 
-  const record = (id: string, run: RefreshRun): void => {
-    if (run.ended && run.view !== null) remembered.set(id, run);
-  };
-
   const dispatch = (id: string, event: RefreshEvent): void => {
     const entry = entries.get(id);
     if (entry === undefined) return;
     const next = refreshStep(entry.run, event);
     entry.run = next.run;
-    record(id, next.run);
     perform(id, entry, next.effect);
+    // Remembered for a later screen only if it ended with something to show; listeners (this controller included) are told.
+    ownership.publish(entry.ticket, next.run);
     notify();
   };
 
-  /** Runs of the generation that was current when the controller was disposed, whose answers arrive afterwards. */
-  const atDisposal = new Map<string, { generation: number; run: RefreshRun }>();
+  /** Runs that were current when the controller was disposed, whose answers arrive afterwards. */
+  const atDisposal = new Map<
+    string,
+    { generation: number; ticket: RefreshTicket; run: RefreshRun }
+  >();
   /**
    * An answer to a run this controller no longer drives. After `dispose()` (the screen was unmounted, typically by the session's re-check
-   * of a `403`), the run's OUTCOME is recorded for the next controller of this identity if it ends the run; nothing is performed. An
-   * answer of a run that was replaced or stopped (a new press, offline) is dropped.
+   * of a `403`), the run's OUTCOME is recorded for the screen of this identity mounted now if it ends the run and its ticket still owns
+   * the source; nothing is performed. An answer of a run that was replaced or stopped (a new press, offline), or superseded by a newer
+   * press on a later screen, is dropped.
    */
   const late = (id: string, generation: number, event: RefreshEvent): void => {
     const held = atDisposal.get(id);
     if (!disposed || held === undefined || held.generation !== generation)
       return;
-    const next = refreshStep(held.run, event);
     atDisposal.delete(id);
-    record(id, next.run);
-    if (next.run.ended && next.run.view !== null) deps.onLate?.(id);
+    if (!ownership.owns(held.ticket)) return;
+    ownership.publish(held.ticket, refreshStep(held.run, event).run);
   };
+
+  /** Another controller of this identity recorded the outcome of `id` (its answer came after its remount): it is shown here. */
+  const adopt = (id: string): void => {
+    if (disposed) return;
+    const shown = ownership.shown(id);
+    if (shown === null) return;
+    const entry = entries.get(id);
+    if (entry !== undefined && entry.ticket === shown.ticket) return;
+    if (entry?.timer) timers.clearTimeout(entry.timer);
+    generations += 1;
+    entries.set(id, {
+      run: shown.run,
+      ticket: shown.ticket,
+      generation: generations,
+      timer: null,
+    });
+    notify();
+  };
+  const offOwnership = ownership.subscribe(adopt);
 
   const begin = (id: string, key: () => string): void => {
     if (disposed || !connected) return;
     const old = entries.get(id);
-    if (old !== undefined && !old.run.ended) return;
+    if (old !== undefined && !old.run.ended && ownership.owns(old.ticket))
+      return;
     if (old?.timer) timers.clearTimeout(old.timer);
     const { run, effect } = startRefresh(key());
+    // Claimed before anything else (the observer's yield, the request): from now on no older admission of this source may record or
+    // show an outcome, here or on any screen of this identity.
+    const ticket = ownership.claim(id, run.key);
     deps.onBegin?.(id);
-    remembered.delete(id);
     generations += 1;
-    const entry: Entry = { run, generation: generations, timer: null };
+    const entry: Entry = { run, ticket, generation: generations, timer: null };
     entries.set(id, entry);
     perform(id, entry, effect);
     notify();
   };
 
+  const owned = (id: string): Entry | null => {
+    const entry = entries.get(id);
+    return entry !== undefined && ownership.owns(entry.ticket) ? entry : null;
+  };
+
   return {
     refresh: (id) => begin(id, deps.mintKey),
     checkAgain(id) {
-      const entry = entries.get(id);
-      if (entry === undefined || !entry.run.ended) return;
+      const entry = owned(id);
+      if (entry === null || !entry.run.ended) return;
       const key = entry.run.key;
       begin(id, () => key);
     },
-    view: (id) => entries.get(id)?.run.view ?? null,
+    view: (id) => owned(id)?.run.view ?? null,
     running: (id) => {
-      const entry = entries.get(id);
-      return entry !== undefined && !entry.run.ended;
+      const entry = owned(id);
+      return entry !== null && !entry.run.ended;
     },
     offline() {
       connected = false;
@@ -212,18 +254,8 @@ export function createRefreshController(deps: {
       const entry = entries.get(id);
       if (entry === undefined || !entry.run.ended) return;
       entries.delete(id);
-      remembered.delete(id);
-      notify();
-    },
-    adopt(id) {
-      if (disposed) return;
-      const run = remembered.get(id);
-      const entry = entries.get(id);
-      if (run === undefined || !run.ended) return;
-      if (entry !== undefined && (!entry.run.ended || entry.run === run))
-        return;
-      generations += 1;
-      entries.set(id, { run, generation: generations, timer: null });
+      // What was shown is cleared; the admission keeps owning the source (an older answer still cannot be recorded).
+      ownership.clear(entry.ticket);
       notify();
     },
     subscribe(listener) {
@@ -235,12 +267,17 @@ export function createRefreshController(deps: {
     dispose() {
       if (disposed) return;
       disposed = true;
+      offOwnership();
       for (const [id, entry] of entries) {
         if (entry.timer) timers.clearTimeout(entry.timer);
-        // A request or read still out may still END the run: its outcome is recorded, never acted on (`late`). A run that is only
-        // waiting to retry ends here with nothing to show: nothing resumes.
+        // A request or read still out may still END the run: its outcome is recorded if its ticket still owns the source, never acted
+        // on (`late`). A run that is only waiting to retry ends here with nothing to show: nothing resumes.
         if (!entry.run.ended && entry.timer === null)
-          atDisposal.set(id, { generation: entry.generation, run: entry.run });
+          atDisposal.set(id, {
+            generation: entry.generation,
+            ticket: entry.ticket,
+            run: entry.run,
+          });
       }
       entries.clear();
       listeners.clear();

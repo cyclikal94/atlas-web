@@ -2539,3 +2539,168 @@ test.describe("E-CAL14: automatic reads are once per visit (revision 5, R11)", (
     expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
   });
 });
+
+/**
+ * Revision 6 (R12, R13; design assessment C1, C2, Q2, Q3, Q8). Through the PRODUCTION session and protected tree, with the review's
+ * schedules adopted as regression cases (its probes are preserved separately):
+ *
+ *  - R12: who may record a refresh's outcome is decided by admission. Refresh A is held; the person goes to Settings and back (a new
+ *    screen and controller); Refresh B (a new key) is pressed and, in one schedule, refused `422 invalid_ics`; then A's success arrives.
+ *    A newer admission owns the source for good, so the row keeps B's state. With no newer press, A's late success is shown (the
+ *    legitimate late outcome, and the positive control that the late answer is delivered within the bounded window the other two use;
+ *    production timers are unchanged).
+ *  - R13: a visit ends when the DOCUMENT leaves the screen, even while the protected tree is closed. A manual Refresh refused with an
+ *    ordinary `403` makes the session close the tree; its classification is held (the answer's `Response.json()`) so the row is proved
+ *    absent before the browser's Back; after releasing it and returning to Calendars, with the source now busy, the new visit reads the
+ *    list once and observes it. Control: Back on the mounted screen.
+ */
+test.describe("E-CAL15: refresh ownership by admission and departures while closed (revision 6, R12 and R13)", () => {
+  for (const schedule of [
+    "no newer press",
+    "newer press running",
+    "newer press finished",
+  ] as const)
+    test(`R12: an older press's late success after Settings and back — ${schedule}`, async ({
+      context,
+    }) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      const older = holdAnswer();
+      const newer = holdAnswer();
+      const endpoint = `/calendar-sources/${SOURCE}/refresh`;
+      cal.answers.set(endpoint, [older.answer, newer.answer]);
+      const row = page.locator(`[data-source-row="${SOURCE}"]`);
+      const state = row.locator("[data-refresh]");
+      await row
+        .getByRole("button", { name: "Refresh Work rota", exact: true })
+        .click();
+      await expect.poll(() => refreshes(cal).length).toBe(1);
+      await expect(state).toHaveAttribute("data-refresh", "refreshing");
+      await page
+        .locator("#main")
+        .getByRole("link", { name: "Settings", exact: true })
+        .click();
+      await expect(row).toHaveCount(0);
+      await page.getByRole("link", { name: "Calendars", exact: true }).click();
+      await expect(row).toHaveAttribute("data-observation", OBSERVED);
+      if (schedule !== "no newer press") {
+        await row
+          .getByRole("button", { name: "Refresh Work rota", exact: true })
+          .click();
+        await expect.poll(() => refreshes(cal).length).toBe(2);
+        expect(refreshes(cal)[1]?.key).not.toBe(refreshes(cal)[0]?.key);
+        if (schedule === "newer press finished") {
+          newer.release({
+            status: 422,
+            body: JSON.parse(atlasError("invalid_ics")),
+          });
+          await expect(state).toHaveAttribute("data-refresh", "failed");
+        }
+      }
+      const answered = page.waitForResponse(
+        (r) => r.url().endsWith(endpoint) && r.status() === 200,
+      );
+      older.release({ status: 200, body: { revision: 201 } });
+      await (await answered).finished();
+      if (schedule === "no newer press")
+        await expect(state).toHaveAttribute("data-refresh", "succeeded");
+      else {
+        await page.waitForTimeout(750);
+        await expect(state).toHaveAttribute(
+          "data-refresh",
+          schedule === "newer press running" ? "refreshing" : "failed",
+        );
+      }
+      if (schedule === "newer press running") {
+        newer.release({
+          status: 422,
+          body: JSON.parse(atlasError("invalid_ics")),
+        });
+        await expect(state).toHaveAttribute("data-refresh", "failed");
+      }
+      expect(refreshes(cal)).toHaveLength(
+        schedule === "no newer press" ? 1 : 2,
+      );
+    });
+
+  for (const closed of [true, false])
+    test(`R13: ${closed ? "Back while the protective closure has the tree closed" : "control: Back on the mounted screen"}, then Calendars again with the source busy: one fresh list read, observed busy`, async ({
+      context,
+    }) => {
+      test.setTimeout(60_000);
+      const { page, cal } = await calendarsPage(context, {
+        cache: [projection()],
+      });
+      const row = page.locator(`[data-source-row="${SOURCE}"]`);
+      // A same-document history entry to go Back to.
+      await page
+        .locator("#main")
+        .getByRole("link", { name: "Settings", exact: true })
+        .click();
+      await expect(row).toHaveCount(0);
+      await page.getByRole("link", { name: "Calendars", exact: true }).click();
+      await expect(row).toHaveAttribute("data-observation", OBSERVED);
+      if (closed) {
+        // Holds only the classification of the refresh's 403 (its JSON), so the closure is observed before navigating; the refusal,
+        // the session's decision, its timers and the identity are unchanged.
+        await page.evaluate(() => {
+          const original = Response.prototype.json;
+          const probe = window as unknown as {
+            __r6Held?: boolean;
+            __r6Release?: () => void;
+          };
+          probe.__r6Held = false;
+          let release: () => void = () => undefined;
+          const held = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          probe.__r6Release = () => {
+            Response.prototype.json = original;
+            release();
+          };
+          Response.prototype.json = async function (this: Response) {
+            if (this.status === 403 && this.url.endsWith("/refresh")) {
+              probe.__r6Held = true;
+              await held;
+            }
+            return original.call(this);
+          };
+        });
+        cal.answers.set(`/calendar-sources/${SOURCE}/refresh`, [
+          forbidden403(),
+        ]);
+        await row
+          .getByRole("button", { name: "Refresh Work rota", exact: true })
+          .click();
+        await page.waitForFunction(
+          () => (window as unknown as { __r6Held?: boolean }).__r6Held === true,
+        );
+        await expect(row).toHaveCount(0);
+      }
+      await page.evaluate(() => history.back());
+      await expect.poll(() => new URL(page.url()).pathname).toBe("/settings");
+      if (closed)
+        await page.evaluate(() =>
+          (window as unknown as { __r6Release: () => void }).__r6Release(),
+        );
+      await expect(
+        page.getByRole("link", { name: "Calendars", exact: true }),
+      ).toBeVisible();
+      cal.phase = "returned";
+      cal.live = [leased(true)];
+      await page.getByRole("link", { name: "Calendars", exact: true }).click();
+      await expect(row).toBeVisible();
+      await test.info().attach("wire-at-reopen", {
+        body: JSON.stringify(cal.wire, null, 2),
+        contentType: "application/json",
+      });
+      await expect(row).toHaveAttribute("data-observation", "busy");
+      expect(liveReads(cal, "returned")).toHaveLength(1);
+      expect(capabilityReads(cal, "returned")).toHaveLength(1);
+      expect(cal.wire.filter((w) => w.method === "POST")).toHaveLength(
+        closed ? 1 : 0,
+      );
+    });
+});

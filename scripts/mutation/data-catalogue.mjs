@@ -15546,8 +15546,9 @@ export const UNIT = [
       sub(
         sub(
           t,
-          "    return !disposed && entry !== undefined && entry.generation === generation",
-          "    return entry !== undefined && entry.generation === generation",
+          // Re-anchored in revision 6 (the condition is formatted over lines and also checks ownership): same mutation.
+          "    return !disposed &&\n      entry !== undefined &&",
+          "    return entry !== undefined &&",
         ),
         "      for (const [id, entry] of entries) {\n        if (entry.timer) timers.clearTimeout(entry.timer);\n",
         "      for (const [id, entry] of entries) {\n",
@@ -16482,24 +16483,30 @@ export const UNIT = [
     tests: ["tests/features/calendars/visit-screen.test.tsx"],
     expect:
       /six remounts: ONE list read|answer arriving after the remount|a remount: nothing is read again|without reading again|read once in the visit/,
+    // Re-anchored in revision 6 (the cleanup no longer ends the visit; departures do): every unmount ends it again.
     patch: (t) =>
       sub(
         t,
-        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
-        "      visit.dispose();\n",
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      visit.dispose();\n",
       ),
   },
   {
     id: "MU-1415",
     title:
       "WEB-13a R11: leaving the screen does not end the visit (opening it again reads nothing afresh)",
-    file: "src/features/calendars/CalendarSources.tsx",
+    // Re-anchored in revision 6 to the visit's own departure handling (`visit.ts`): no departure ends a visit.
+    file: "src/features/calendars/visit.ts",
     tests: ["tests/features/calendars/visit-screen.test.tsx"],
     expect: /leaves and opens the screen again|leaving while a read is out/,
     patch: (t) =>
       sub(
-        t,
-        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
+        sub(
+          t,
+          "  if (current !== null && current.departures === departures) return current;\n",
+          "  if (current !== null) return current;\n",
+        ),
+        "  off = at.subscribe(() => visit.dispose());\n",
         "",
       ),
   },
@@ -16645,22 +16652,24 @@ export const UNIT = [
     file: "src/features/calendars/memory.ts",
     tests: ["tests/features/calendars/visit.test.ts"],
     expect: /another identity/,
-    patch: (t) => sub(t, "      dropped.visit?.dispose();\n", ""),
+    // Re-anchored in revision 6 (an identity's memory is dropped by `drop`, which also revokes its refresh ownership).
+    patch: (t) => sub(t, "  memory.visit?.dispose();\n", ""),
   },
   {
     id: "MU-1429",
     title:
       "WEB-13a R11 (Q4): a refresh outcome recorded after its controller was disposed is not announced (the screen mounted before it never shows it)",
-    file: "src/features/calendars/refresh-controller.ts",
     tests: [
       "tests/features/calendars/refresh-controller.test.ts",
       "tests/features/calendars/visit-screen.test.tsx",
     ],
     expect: /adopts the outcome|shows the press's outcome/,
+    // Re-anchored in revision 6: a recorded outcome is announced by the shared ownership (`refresh-ownership.ts`), not `onLate`.
+    file: "src/features/calendars/refresh-ownership.ts",
     patch: (t) =>
       sub(
         t,
-        "    if (next.run.ended && next.run.view !== null) deps.onLate?.(id);\n",
+        "      for (const listener of [...listeners]) listener(ticket.source);\n",
         "",
       ),
   },
@@ -16674,35 +16683,47 @@ export const UNIT = [
       "tests/features/calendars/visit-screen.test.tsx",
     ],
     expect: /adopts the outcome|shows the press's outcome/,
+    // Re-anchored in revision 6: the controller's listener on the shared ownership.
     patch: (t) =>
       sub(
         t,
-        "    adopt(id) {\n      if (disposed) return;\n",
-        "    adopt(id) {\n      return;\n",
+        "  const adopt = (id: string): void => {\n    if (disposed) return;\n",
+        "  const adopt = (id: string): void => {\n    return;\n",
       ),
   },
   {
     id: "MU-1431",
     title:
       "WEB-13a R11 (Q4): an adopted outcome replaces a run this screen's own press has going",
-    file: "src/features/calendars/refresh-controller.ts",
     tests: ["tests/features/calendars/refresh-controller.test.ts"],
     expect: /unless a run of its own is going/,
+    // Re-anchored in revision 6: a press of its own is protected only by owning its source; here any admission of the source owns it
+    // (the controller's late guard and the publication check both ask `owns`, so this is the whole path).
+    file: "src/features/calendars/refresh-ownership.ts",
     patch: (t) =>
       sub(
         t,
-        "      if (entry !== undefined && (!entry.run.ended || entry.run === run))\n",
-        "      if (entry !== undefined && entry.run === run)\n",
+        "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+        "    !revoked && slots.has(ticket.source);\n",
       ),
   },
   {
     id: "MU-1432",
     title:
       "WEB-13a R11 (Q4): the screen's controller does not listen for outcomes recorded after the remount",
-    file: "src/features/calendars/CalendarSources.tsx",
-    tests: ["tests/features/calendars/visit-screen.test.tsx"],
-    expect: /shows the press's outcome/,
-    patch: (t) => sub(t, "    memory.lateRuns.add(adopt);\n", ""),
+    tests: [
+      "tests/features/calendars/visit-screen.test.tsx",
+      "tests/features/calendars/refresh-controller.test.ts",
+    ],
+    expect: /shows the press's outcome|adopts the outcome/,
+    // Re-anchored in revision 6: the controller subscribes to the shared ownership itself.
+    file: "src/features/calendars/refresh-controller.ts",
+    patch: (t) =>
+      sub(
+        t,
+        "  const offOwnership = ownership.subscribe(adopt);\n",
+        "  const offOwnership = (): void => undefined;\n",
+      ),
   },
   {
     id: "MU-1433",
@@ -16773,6 +16794,169 @@ export const UNIT = [
         t,
         "                    (declined || result.unsent === true))\n",
         "                    declined)\n",
+      ),
+  },
+  // Revision 6 (R12, R13; design assessment M1-M10). M2 (adoption guarded only while the successor runs) has no separate anchor: the
+  // design has no running-only guard, and its failure (an older publication over a finished successor) is MU-1431 and MU-1439. M6
+  // (a new visit at every remount) is MU-1414.
+  {
+    id: "MU-1438",
+    title:
+      "WEB-13a R12 (M1): a newer admission does not take the source from an older one (the first press keeps the authority to record its outcome)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: [
+      "tests/features/calendars/refresh-ownership.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /R12's order|Q3: B still running|newer press/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!revoked) slots.set(source, { owner: ticket, run: null });\n",
+        "      if (!revoked && !slots.has(source))\n        slots.set(source, { owner: ticket, run: null });\n",
+      ),
+  },
+  {
+    id: "MU-1439",
+    title:
+      "WEB-13a R12 (M3): the fence ends when the owner's run is recorded (ownership by completion, not by admission)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: [
+      "tests/features/calendars/refresh-ownership.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /R12's order|newer press finished|Q4: B ended/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+          "    !revoked &&\n    ((slots.get(ticket.source) as { released?: boolean } | undefined)?.released === true ||\n      slots.get(ticket.source)?.owner === ticket);\n",
+        ),
+        "      slot.run = run;\n",
+        "      slot.owner = ticket;\n      slot.run = run;\n      (slot as { released?: boolean }).released = true;\n",
+      ),
+  },
+  {
+    id: "MU-1440",
+    title:
+      "WEB-13a R12 (M4): the legitimate late outcome is dropped (an answer after the remount is never recorded, even with no newer press)",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: [
+      "tests/features/calendars/refresh-ownership.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /NO newer press|no newer press/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!ownership.owns(held.ticket)) return;\n",
+        "    return;\n",
+      ),
+  },
+  {
+    id: "MU-1441",
+    title:
+      "WEB-13a R13 (M5): departures are noticed only at the screen's own cleanup (revision 5): Back while the tree is closed keeps the visit",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/visit-screen.test.tsx"],
+    expect:
+      /R13's witness|leaving and coming back entirely while unmounted \((Back|raw)/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    const visit = enterVisit(memory, api, boundary);\n",
+          "    const visit = enterVisit(memory, api, {\n      departures: () => 0,\n      subscribe: () => () => undefined,\n    });\n    const opened = window.location.pathname;\n",
+        ),
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
+      ),
+  },
+  {
+    id: "MU-1442",
+    title:
+      "WEB-13a R13 (M7): the document's record misses pushState and replaceState (only popstate is seen)",
+    file: "src/lib/route-changes.ts",
+    tests: [
+      "tests/lib/route-changes.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect:
+      /raw pushState|router's history made AFTER|routers made and abandoned/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    const result = push.apply(this, args);\n    changed();\n",
+          "    const result = push.apply(this, args);\n",
+        ),
+        "    const result = replace.apply(this, args);\n    changed();\n",
+        "    const result = replace.apply(this, args);\n",
+      ),
+  },
+  {
+    id: "MU-1443",
+    title:
+      "WEB-13a R13 (M7): the document's record misses popstate (Back, Forward and go are not seen)",
+    file: "src/lib/route-changes.ts",
+    tests: [
+      "tests/lib/route-changes.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /R13's witness|Back, then Forward|Back and Forward|MOUNTED screen/,
+    patch: (t) => sub(t, '  win.addEventListener("popstate", changed);\n', ""),
+  },
+  {
+    id: "MU-1444",
+    title:
+      "WEB-13a R13 (M8): a late dispose of an ended visit ends the current visit",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /a late dispose of an ended visit/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (memory.visit === visit) memory.visit = null;\n",
+        "      memory.visit = null;\n",
+      ),
+  },
+  {
+    id: "MU-1445",
+    title:
+      "WEB-13a R13 (M9): a sent capability read that was refused is unread again (the next attachment of the same visit reads it)",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect:
+      /not read again within the visit|terminal visit \(capability refused\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '          state = sent ? "read" : "unread";\n',
+        '          state = "unread";\n',
+      ),
+  },
+  {
+    id: "MU-1446",
+    title:
+      "WEB-13a R12 (M10): another identity does not revoke the refresh ownership (an answer out for the old identity is still recorded)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: ["tests/features/calendars/refresh-ownership.test.ts"],
+    expect: /another identity revokes/,
+    patch: (t) => sub(t, "      revoked = true;\n      slots.clear();\n", ""),
+  },
+  {
+    id: "MU-1447",
+    title:
+      "WEB-13a R12 (Q5): the wire key stands for the admission (Check again's same key keeps the earlier admission's authority)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: ["tests/features/calendars/refresh-ownership.test.ts"],
+    expect: /SAME key is a new admission/,
+    patch: (t) =>
+      sub(
+        t,
+        "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+        "    !revoked && slots.get(ticket.source)?.owner.key === ticket.key;\n",
       ),
   },
   // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
@@ -20779,11 +20963,12 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.calendars.spec.ts",
     grep: "E-CAL14",
     expect: /E-CAL14/,
+    // Re-anchored in revision 6 (the cleanup no longer ends the visit; departures do): every unmount ends it again.
     patch: (t) =>
       sub(
         t,
-        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
-        "      visit.dispose();\n",
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      visit.dispose();\n",
       ),
   },
   {
@@ -20805,15 +20990,55 @@ export const ENGINE = [
     id: "MU-1428",
     title:
       "WEB-13a R11: (REAL ENGINE) leaving the screen does not end the visit (opening it again reads nothing afresh)",
-    file: "src/features/calendars/CalendarSources.tsx",
+    // Re-anchored in revision 6 to the visit's own departure handling (`visit.ts`): no departure ends a visit.
+    file: "src/features/calendars/visit.ts",
     spec: "tests/e2e/fixture.calendars.spec.ts",
     grep: "E-CAL14",
     expect: /E-CAL14/,
     patch: (t) =>
       sub(
-        t,
-        "      if (router.history.location.pathname !== opened) visit.dispose();\n",
+        sub(
+          t,
+          "  if (current !== null && current.departures === departures) return current;\n",
+          "  if (current !== null) return current;\n",
+        ),
+        "  off = at.subscribe(() => visit.dispose());\n",
         "",
+      ),
+  },
+  // Revision 6 (R12, R13), in a real engine through the production composition.
+  {
+    id: "MU-1448",
+    title:
+      "WEB-13a R12: (REAL ENGINE) any admission of a source may record its outcome (an older press's late success replaces a newer press's state)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL15",
+    expect: /E-CAL15/,
+    patch: (t) =>
+      sub(
+        t,
+        "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+        "    !revoked && slots.has(ticket.source);\n",
+      ),
+  },
+  {
+    id: "MU-1449",
+    title:
+      "WEB-13a R13: (REAL ENGINE) departures are noticed only at the screen's own cleanup: Back while the protective closure has the tree closed keeps the visit",
+    file: "src/features/calendars/CalendarSources.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL15",
+    expect: /E-CAL15/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    const visit = enterVisit(memory, api, boundary);\n",
+          "    const visit = enterVisit(memory, api, {\n      departures: () => 0,\n      subscribe: () => () => undefined,\n    });\n    const opened = window.location.pathname;\n",
+        ),
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
       ),
   },
   // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
