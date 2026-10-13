@@ -21,7 +21,7 @@ import {
   waitForState,
 } from "./data-sync-helpers";
 import { expect, test } from "./helpers";
-import { commitsOf, oneColdRun } from "./profile-cold-run";
+import { commitsOf, oneColdRun, unusableRuns } from "./profile-cold-run";
 import {
   beginCollection,
   browserMemory,
@@ -409,6 +409,16 @@ test("P-11: W1, W3, W4, W6 (five cold runs each) and the W7 negative controls th
       "snapshot pages are not ordinary pages; the shared processing path (scan, validate every change) runs in /profile-harness",
   });
   expect(rows.length).toBeGreaterThan(0);
+  // The stage barrier (revision 9, review 9 R2), after the file and every row are written: a run with no verdict on the page fails the
+  // stage, so the programme stops instead of measuring on. A valid workload refused, or a control admitted, stays a reported finding.
+  expect(
+    rows.flatMap((row) =>
+      unusableRuns(row.runs as Array<{ outcome: string; detail: string }>).map(
+        (problem) => `${row.workload} ${problem}`,
+      ),
+    ),
+    "cold runs without a usable outcome observation",
+  ).toEqual([]);
 });
 
 // ---- the device page itself, on this desktop: the whole protocol, validated ---------------------------------------------------------------

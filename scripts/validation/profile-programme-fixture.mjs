@@ -350,8 +350,12 @@ export function writeProgramme(
       process_identities: procs.map((p) => `${p.pid}@${p.start}`).sort(),
     };
   };
-  /** One cold run as `oneColdRun` returns it, every figure its own; heap samples where the engine has them. */
-  const coldRun = (engine, key, outcome = "admitted") => {
+  /**
+   * One cold run as `oneColdRun` returns it, every figure its own; heap samples where the engine has them. Revision 9 (review 9 R2): with
+   * the one observation its outcome is classified from (tests/e2e/profile-cold-outcome.ts, written out here): the request's `running`,
+   * the step's end and the state it recorded, and the served page's commit (`bytes`) when it was admitted.
+   */
+  const coldRun = (engine, key, bytes, outcome = "admitted") => {
     const s = seeded(key);
     const rss = rssOf(engine, key);
     const heap =
@@ -361,14 +365,42 @@ export function writeProgramme(
             (_, i) => 1e7 + (s % 1e6) + i * 3_333,
           )
         : [];
+    const state =
+      outcome === "admitted"
+        ? { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" }
+        : { kind: "stopped", cause: "floor" };
+    const commits =
+      outcome === "admitted"
+        ? [
+            {
+              bytes,
+              scan_ms: 30 + (s % 40),
+              commit_ms: 200 + (s % 300),
+              kind: "applied",
+              value: "applied",
+            },
+          ]
+        : [];
     return {
       outcome,
-      detail: JSON.stringify({
-        kind: outcome === "admitted" ? "idle" : "stopped",
-      }),
+      detail: JSON.stringify(state),
+      observation: {
+        method: "engine-state-log/1",
+        run: 1,
+        request: { index: 2, at: 400 + (s % 50), trace: 6 },
+        terminal: { index: 3, at: 600 + (s % 90), trace: 9, state },
+        step_end: { trace: 9, event: "data.sync_next", recorded: state.kind },
+        states: [
+          "waiting/cache_not_valid",
+          "waiting/cache_not_valid",
+          "running",
+          outcome === "admitted" ? "idle" : "stopped/floor",
+        ],
+        commits,
+      },
       elapsed_ms: 1_000 + (s % 900),
-      scan_ms: outcome === "admitted" ? 30 + (s % 40) : null,
-      commit_ms: outcome === "admitted" ? 200 + (s % 300) : null,
+      scan_ms: commits[0]?.scan_ms ?? null,
+      commit_ms: commits[0]?.commit_ms ?? null,
       requests: 2,
       heap_baseline_bytes: engine === "chromium" ? 9e6 : null,
       heap_samples_bytes: heap,
@@ -536,19 +568,34 @@ export function writeProgramme(
       dense.map((x) => x / 201),
     );
     const rows = [];
+    const servedBytes = (workload) =>
+      100_000 + (seeded(`bytes|${workload}`) % 900_000);
     for (const workload of ["W1", "W3", "W4", "W6"])
       rows.push({
         workload,
+        bytes: servedBytes(workload),
         expected: "admitted",
         runs: [1, 2, 3, 4, 5].map((run) =>
-          coldRun(engine, `P-11|${engine}|${workload}|${run}`),
+          coldRun(
+            engine,
+            `P-11|${engine}|${workload}|${run}`,
+            servedBytes(workload),
+          ),
         ),
       });
     for (const workload of W7)
       rows.push({
         workload,
+        bytes: servedBytes(workload),
         expected: "refused",
-        runs: [coldRun(engine, `P-11|${engine}|${workload}|1`, controlOutcome)],
+        runs: [
+          coldRun(
+            engine,
+            `P-11|${engine}|${workload}|1`,
+            servedBytes(workload),
+            controlOutcome,
+          ),
+        ],
       });
     json(`memory/P-11.${engine}.json`, {
       engine,
@@ -1170,9 +1217,24 @@ export function writeProgramme(
       };
       if (limit === 1) w2Body = text;
     }
-    const liveRun = coldRun(engine, `P-W2|${engine}|live`);
+    const liveRun = coldRun(
+      engine,
+      `P-W2|${engine}|live`,
+      Buffer.byteLength(w2Body),
+    );
     const live = {
       outcome: "admitted",
+      observation: {
+        method: "live-dense-commit/1",
+        state: { kind: "idle", lastSyncedAt: "2026-10-13T01:00:00.000Z" },
+        dense: {
+          bytes: Buffer.byteLength(w2Body),
+          scan_ms: 20,
+          commit_ms: 300,
+          kind: "applied",
+        },
+        trace: 40,
+      },
       elapsed_ms: liveRun.elapsed_ms + 500,
       commits: [
         { bytes: Buffer.byteLength(w2Body), scan_ms: 20, commit_ms: 300 },
@@ -1187,7 +1249,7 @@ export function writeProgramme(
       label: "synthetic",
     };
     const w2Runs = [1, 2, 3, 4, 5].map((run) =>
-      coldRun(engine, `P-W2|${engine}|${run}`),
+      coldRun(engine, `P-W2|${engine}|${run}`, Buffer.byteLength(w2Body)),
     );
     json(`w2/P-W2.${engine}.json`, {
       engine,
@@ -1422,7 +1484,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 3,
+      contract_version: 4,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

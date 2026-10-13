@@ -2044,8 +2044,105 @@ function runsSource(ev, cell) {
     };
   const run = runs[cell.run - 1];
   return isObj(run)
-    ? { run, identity }
+    ? { run, identity, servedBytes: rows[0].bytes }
     : { missing: `cold run ${cell.run} is missing` };
+}
+
+/** The engine's refusal states (tests/e2e/profile-cold-outcome.ts: REFUSED_STATES; a `waiting` after the request is refused too). */
+const REFUSED_STATES = ["stopped", "backing_off", "paused"];
+const COLD_METHOD = "engine-state-log/1";
+const LIVE_METHOD = "live-dense-commit/1";
+
+/**
+ * Revision 9 (review 9 R2): a cold run's outcome is a verdict only when the ONE observation it was classified from shows it. The rules
+ * are those of `observationProblems` and `classifyColdOutcome` (tests/e2e/profile-cold-outcome.ts), applied again to the record: the
+ * observation is the measured request's step and its end; the published state is the one the step's end records; the first commit after
+ * the request is the served page (its bytes); admitted is idle with that page applied; refused is a refusal state (or waiting for a valid
+ * cache); the recorded detail is that terminal state and the scan/commit figures are the first commit's. A `refused` whose state is
+ * `running` (the two WebKit runs of profile-20261013-013915-cf05e051) is contradictory, not a refusal.
+ */
+function coldObservationProblems(run, servedBytes) {
+  if (!["admitted", "refused"].includes(run.outcome)) return [];
+  const o = run.observation;
+  if (!isObj(o))
+    return [
+      `a ${run.outcome} run without the observation it was classified from`,
+    ];
+  const problems = [];
+  if (o.method !== COLD_METHOD) problems.push(`observation method ${o.method}`);
+  const state = o.terminal?.state;
+  if (!isObj(state) || typeof state.kind !== "string")
+    return [...problems, "the observation has no terminal state"];
+  if (!isCount(o.request?.index) || !isCount(o.terminal?.index))
+    problems.push("the observation does not place the request and its end");
+  else if (o.terminal.index < o.request.index)
+    problems.push("the terminal state precedes the request");
+  if (state.kind === "running" || state.kind === "not_started")
+    problems.push(`the step ended in ${state.kind}`);
+  if (
+    o.step_end?.event === "data.sync_next"
+      ? o.step_end.recorded !== state.kind
+      : o.step_end?.event !== "data.sync_step_failed"
+  )
+    problems.push(
+      `the step's end (${o.step_end?.event} ${o.step_end?.recorded}) does not record the published ${state.kind}`,
+    );
+  if (!(isCount(run.requests) && run.requests >= 1))
+    problems.push("no /sync request reached the stub");
+  const commits = Array.isArray(o.commits) ? o.commits : null;
+  if (!commits) problems.push("the observation's commits are not retained");
+  const first = commits?.[0];
+  if (first?.bytes !== undefined && first.bytes !== servedBytes)
+    problems.push(
+      `the first commit after the request is ${first.bytes} bytes, not the served ${servedBytes}`,
+    );
+  if (state.kind === "idle" && first?.kind !== "applied")
+    problems.push("idle without the served page's applied commit");
+  if (state.kind === "waiting" && state.reason !== "cache_not_valid")
+    problems.push(
+      `the step ended waiting (${state.reason}): not a verdict on the page`,
+    );
+  const shows =
+    state.kind === "idle"
+      ? "admitted"
+      : REFUSED_STATES.includes(state.kind) || state.kind === "waiting"
+        ? "refused"
+        : null;
+  if (shows !== run.outcome)
+    problems.push(
+      `recorded ${run.outcome}, but the observation shows ${shows ?? `no verdict (${state.kind})`}`,
+    );
+  if (run.detail !== JSON.stringify(state).slice(0, 200))
+    problems.push("the detail is not the observed terminal state");
+  if (run.outcome === "admitted")
+    for (const key of ["scan_ms", "commit_ms"])
+      if (run[key] !== (first?.[key] ?? null))
+        problems.push(
+          `${key} ${run[key]} is not the served page's commit (${first?.[key]})`,
+        );
+  return problems;
+}
+
+/** The live application's outcome against its one observation (tests/e2e/profile-cold-outcome.ts: `classifyLiveOutcome`). */
+function liveObservationProblems(run) {
+  if (!["admitted", "refused"].includes(run.outcome)) return [];
+  const o = run.observation;
+  if (!isObj(o))
+    return [
+      `a ${run.outcome} live application without the observation it was classified from`,
+    ];
+  if (o.method !== LIVE_METHOD) return [`observation method ${o.method}`];
+  const shows =
+    o.state?.kind === "idle" && o.dense?.kind === "applied"
+      ? "admitted"
+      : o.state?.kind === "stopped"
+        ? "refused"
+        : null;
+  return shows === run.outcome
+    ? []
+    : [
+        `recorded ${run.outcome}, but the observation shows ${shows ?? `no verdict (${o.state?.kind})`}`,
+      ];
 }
 
 /** W2's capture value row repeats the live application and the cold outcomes: the same, or the representations disagree. */
@@ -2080,11 +2177,15 @@ function resolveOutcome(ev, cell) {
       for (const key of ["scan_ms", "commit_ms"])
         if (!isNonNeg(run[key]))
           problems.push(`an admitted run without its engine ${key}`);
-  } else if (
-    run.outcome === "admitted" &&
-    (!Array.isArray(run.commits) || run.commits.length === 0)
-  )
-    problems.push("an admitted live application without its commits");
+    problems.push(...coldObservationProblems(run, source.servedBytes));
+  } else {
+    if (
+      run.outcome === "admitted" &&
+      (!Array.isArray(run.commits) || run.commits.length === 0)
+    )
+      problems.push("an admitted live application without its commits");
+    problems.push(...liveObservationProblems(run));
+  }
   if (problems.length) return result(cell, "invalid", problems);
   if (cell.control && run.outcome !== "refused")
     return result(

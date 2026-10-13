@@ -375,6 +375,12 @@ export interface DataHarness {
   syncReceived: SyncMessage[];
   /** The engine's own trace events (fixed vocabulary), for assertions about why a step ran. */
   engineTrace: string[];
+  /**
+   * FIXTURE (WEB-09c revision 9, review 9 R2): every state the engines started by `startSync` published, in order, as it was published
+   * (the store notifies synchronously): which engine (`run`), when, and the trace position at that moment (`trace`: the index the next
+   * trace line takes). A profiling observation reads the whole sequence in one evaluation instead of polling for a state it might miss.
+   */
+  engineStates: EngineStateEntry[];
   /** Listen on `atlas-sync` in this page (a follower). */
   follow(): void;
   /**
@@ -805,6 +811,15 @@ let quotaRelease: (() => void) | null = null;
 const syncPosted: SyncMessage[] = [];
 const syncReceived: SyncMessage[] = [];
 const engineTrace: string[] = [];
+/** One published engine state (see `DataHarness.engineStates`). */
+export interface EngineStateEntry {
+  run: number;
+  at: number;
+  trace: number;
+  state: EngineState;
+}
+const engineStates: EngineStateEntry[] = [];
+let engineRuns = 0;
 
 let gateEnv: DataEnv | null = null;
 let gateSeen: CacheState[] = [];
@@ -1202,6 +1217,17 @@ function startEngine(wiring: EngineWiring): void {
         );
       },
     },
+  });
+  // Recorded before the start, so the start's own state is the first entry of this engine.
+  const run = ++engineRuns;
+  const published = engine.state;
+  published.subscribe(() => {
+    engineStates.push({
+      run,
+      at: performance.now(),
+      trace: engineTrace.length,
+      state: published.get(),
+    });
   });
   engine.start({ token: null, signal: engineAbort.signal });
 }
@@ -1909,6 +1935,7 @@ const harness: DataHarness = {
   syncPosted,
   syncReceived,
   engineTrace,
+  engineStates,
   follow() {
     createBroadcastSyncChannel().subscribe((message) => {
       syncReceived.push(message);

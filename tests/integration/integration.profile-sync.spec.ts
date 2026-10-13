@@ -7,7 +7,12 @@ import {
   sameTargetProblems,
   type W2Observation,
 } from "../../scripts/lib/profile-w2-capture.mjs";
-import { oneColdRun } from "../e2e/profile-cold-run";
+import {
+  classifyLiveOutcome,
+  type LiveObservation,
+  observeLiveOutcome,
+} from "../e2e/profile-cold-outcome";
+import { oneColdRun, unusableRuns } from "../e2e/profile-cold-run";
 import {
   beginCollection,
   browserMemory,
@@ -619,36 +624,24 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     if (!data) throw new Error("no data harness");
     await data.startSync(a);
   }, id.account_id);
-  let liveOutcome = "admitted";
+  // Revision 9 (review 9 R2): the outcome is classified from the one evaluation that found the end (`observeLiveOutcome`: the dense
+  // commit and the state at that same moment), never from a second read, which could already see the next live-edge poll running.
+  let liveOutcome = "timeout";
+  let liveObservation: LiveObservation | null = null;
+  let liveElapsed: number | null = null;
   try {
-    await page.waitForFunction(
-      (least) => {
-        const trace = window.__atlasData?.engineTrace ?? [];
-        const state = window.__atlasData?.engineState();
-        const dense = trace.some((l) => {
-          if (!l.includes("data.sync_commit")) return false;
-          const at = l.indexOf("{");
-          try {
-            return (
-              at >= 0 && (JSON.parse(l.slice(at)).bytes ?? 0) >= least * 0.9
-            );
-          } catch {
-            return false;
-          }
-        });
-        // Admitted: the dense page committed and the engine is idle. Refused: the engine stopped. Anything else is waited out (a
-        // back-off is transient) until the time-out, which is recorded as such.
-        return (dense && state?.kind === "idle") || state?.kind === "stopped";
-      },
+    const found = await page.waitForFunction(
+      observeLiveOutcome,
       w2Body.length,
       { timeout: 240_000, polling: 25 },
     );
-    const state = await page.evaluate(() => window.__atlasData?.engineState());
-    liveOutcome = state?.kind === "idle" ? "admitted" : "refused";
+    liveElapsed = Date.now() - liveStarted;
+    liveObservation = (await found.jsonValue()) as LiveObservation;
+    liveOutcome = classifyLiveOutcome(liveObservation);
   } catch {
     liveOutcome = "timeout";
   }
-  const liveElapsed = Date.now() - liveStarted;
+  liveElapsed ??= Date.now() - liveStarted;
   const heapSamples = await heapSampler.stop();
   await memory.stop();
   await memory.after();
@@ -679,6 +672,8 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
   );
   const live = {
     outcome: liveOutcome,
+    // The one observation the outcome was classified from (null: the time-out; the trace file says what happened).
+    observation: liveObservation,
     elapsed_ms: liveElapsed,
     commits,
     limits_the_engine_asked_for: limitsAsked,
@@ -793,6 +788,18 @@ test("W2: the server-maximal dense batch from the released backend (a person hol
     delivered: boundRead,
     reading: `what the released ${contractPin.backend_tag} did; the publisher's bound (B-7) belongs to BE-B1 and is not a client requirement`,
   });
+  // The stage barrier (revision 9, review 9 R2), after every row and file above is kept: an application with no verdict on the page (a
+  // contradictory observation, an error or a time-out) is not a measurement, so the stage fails and the programme stops on it. A refusal
+  // is the engine's verdict and stays a recorded finding, never decided here.
+  expect(
+    [
+      ...(["admitted", "refused"].includes(liveOutcome)
+        ? []
+        : [`live: ${liveOutcome}`]),
+      ...unusableRuns(coldRuns),
+    ],
+    "applications without a usable outcome observation",
+  ).toEqual([]);
 });
 
 // ---- W2-limits: the old probes, and the proxy's 502 diagnosed (each oversized body is also sent directly to the backend) ----------------

@@ -51,9 +51,13 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * version 1 evidence is historical and resolves incomplete; it is never rewritten. Version 3 (WEB-09c revision 8, review 8 R1): every
  * stage record carries the invocation's isolation context and every load sample is bound to it (method, invocation, stage, root pid and
  * start, sampler process) with the identities its verdict rests on; version 2 evidence (every attempt up to the Air request
- * profile-20261012-211000-fb04d06e) has no such context, resolves incomplete, and stays history, unchanged.
+ * profile-20261012-211000-fb04d06e) has no such context, resolves incomplete, and stays history, unchanged. Version 4 (WEB-09c revision 9,
+ * review 9 R2): every admitted or refused cold run and live W2 application carries the ONE observation its outcome was classified from,
+ * and the contract checks that the observation shows that outcome; version 3 evidence (up to and including the Air request
+ * profile-20261013-013915-cf05e051, whose two WebKit cold runs recorded `refused` over a `running` state) resolves incomplete and stays
+ * history, unchanged.
  */
-export const CONTRACT_VERSION = 3;
+export const CONTRACT_VERSION = 4;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [

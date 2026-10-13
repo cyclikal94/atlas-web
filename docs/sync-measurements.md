@@ -86,6 +86,18 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > identities behind its verdict (whole foreign commands, support records, the own tree), and the contract (version 3) refuses samples that are not bound to
 > their stage's context. Whether the status reader is recognised depends on the transport supplying that pin, a change for its tooling owner. The failed
 > package stays failed; its P-1 and P-1S cells (all `ok`) are used below, as labelled component observations, for the budget successor (C11).
+>
+> **Status after review 9 (revision 9, 13 October 2026).** The complete Air programme after revision 8 (request `profile-20261013-013915-cf05e051`) was
+> isolated (387 of 387 judged cells clean) and structurally complete, but two WebKit cold runs (P-11 W4 run 2, P-W2 run 5) recorded `refused` with the state
+> `running`: they were not refusals (R2). The cold-run helper took any state but `running` or `not_started` as the end, which includes the engine's own
+> `waiting` before its first step, then read the state again and called whatever it saw then a refusal. Revision 9 observes once. The fixture harness keeps
+> every state the engine publishes, in order, with its trace position; the observed operation is the measured request (the first `running` after the run
+> begins), and its outcome is the state the engine showed when that request's step ended (`data.sync_next`, following a page with `has_more`). The run keeps
+> that observation. `admitted` needs the served page's applied commit (its bytes) and idle; `refused` needs the engine's own refusal (stopped, backing off,
+> paused, or waiting for a valid cache); anything else is an `error`, and the scan and commit figures are the measured page's first commit. The live W2
+> application keeps the one evaluation that found its end. The contract (version 4) checks every recorded outcome against its observation, and P-11 and W2
+> fail their stage on an error or time-out after writing every run, so a programme stops there. The two runs stay failed in that package; nothing in it is
+> reclassified, and it supports no desktop decision.
 
 ## Read this first
 
@@ -481,6 +493,11 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
 * P-4: each sync-page total is the sum of its segments (a draft total at least theirs); the shell's medians and every derived figure follow from its runs;
 * the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures;
 * every row lies in the lines its stage sealed; malformed nested evidence is a named finding of its cell, never a crash or an empty success.
+
+From revision 9 (review 9 R2; contract version 4) every admitted or refused P-11 and P-W2 cold run carries the one observation it was classified from
+(`tests/e2e/profile-cold-outcome.ts`): the request's step, the state published when that step ended and the trace line that ended it, and the commits since
+the request. The contract refuses a record whose observation does not show its outcome, whose detail is not the observed state, whose first commit is not
+the served page or whose figures are not that commit's; the live W2 application is checked against its own observation the same way.
 
 ## What the released backend does (read from its source at the pinned commit, then measured)
 
