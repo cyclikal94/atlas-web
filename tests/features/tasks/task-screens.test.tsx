@@ -309,6 +309,42 @@ describe("the task form (WF-TASK-02; A10)", () => {
     expect(item?.value).toBe("Bag");
   });
 
+  test("D-10a-13: saving the form of a task whose create is still queued edits that draft in place; its defaults review is kept", async () => {
+    const t = await mountTasks({ path: "/tasks/new", env: { online: false } });
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: PRESET_COPY.scratch }) !== null,
+    );
+    fireEvent.click(screen.getByRole("button", { name: PRESET_COPY.scratch }));
+    await t.until(() => document.querySelector("[data-task-form]") !== null);
+    fireEvent.change(screen.getByLabelText(FORM_COPY.name), {
+      target: { value: "First name" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    await t.settle();
+    const [created] = t.drafts();
+    expect(created?.kind).toBe("create_task");
+    // Captured from defaults never fetched here: held for review.
+    expect(created?.review_block).not.toBeNull();
+    const taskId = created?.target_resource_ids[0] as string;
+    await t.router.navigate({ to: "/tasks/$taskId/edit", params: { taskId } });
+    await t.until(
+      () => document.querySelector('[data-task-form="edit"]') !== null,
+    );
+    fireEvent.change(screen.getByLabelText(FORM_COPY.name), {
+      target: { value: "Second name" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    await t.settle();
+    const drafts = t.drafts();
+    expect(drafts.map((d) => d.local_id)).toEqual([created?.local_id]);
+    expect(drafts[0]?.review_block).toEqual(created?.review_block);
+    expect(command(t, "create_task")).toMatchObject({
+      id: taskId,
+      title: "Second name",
+    });
+  });
+
   test("a refused save keeps every value and says why; nothing is shown as saved", async () => {
     const t = await mountTasks({ path: "/tasks/new", env: { online: false } });
     await t.until(
