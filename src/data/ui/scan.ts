@@ -1,6 +1,9 @@
 import type { ResourceId, ResourceKind } from "../model/types";
 import { type ListedResource, readResourceList } from "../plans/outbox";
-import { readResourcesById } from "../plans/outstanding-reads";
+import {
+  readCachePosition,
+  readResourcesById,
+} from "../plans/outstanding-reads";
 import type { DataEnv } from "./env";
 
 /**
@@ -84,4 +87,25 @@ export async function readResourcesNow(
       if (row !== null) out.set(id, row);
   }
   return out;
+}
+
+/**
+ * The cache's page sequence read NOW from the durable sync state (WEB-10a revision 2, C2): a view that composes from several separate reads
+ * reads it before and after them, and discards what it read when a sync page was committed in between (a hint or a live query may arrive
+ * after the reads). `null` when the database has no sync state yet; `"closed"` when there is no open database or the read failed.
+ */
+export async function readCacheSeqNow(
+  env: Pick<DataEnv, "service">,
+): Promise<number | null | "closed"> {
+  const service = env.service();
+  if (service === null) return "closed";
+  try {
+    const position = await service.store.run(readCachePosition, {
+      incarnationId: service.incarnationId,
+    });
+    if (env.service() !== service) return "closed";
+    return position === null ? null : position.pageSeq;
+  } catch {
+    return "closed";
+  }
 }

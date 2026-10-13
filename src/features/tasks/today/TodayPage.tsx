@@ -230,7 +230,10 @@ export function TodayPage({
           </p>
         ) : null
       ) : (
-        <div className="flex flex-col gap-5">
+        <div
+          className="flex flex-col gap-5"
+          data-today-refreshing={view.refreshing ? "" : undefined}
+        >
           {GROUP_ORDER.filter((g) => groups.has(g)).map((group) => (
             <section
               key={group}

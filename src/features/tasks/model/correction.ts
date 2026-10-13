@@ -1,5 +1,5 @@
 import type { Goal, OccurrenceData, TaskDefinition } from "./contract";
-import { isContractDate } from "./contract";
+import { isContractDate, parseDefinition } from "./contract";
 import { parseDecimalInput, toUnits } from "./decimal";
 import { MESSAGES } from "./form";
 
@@ -125,4 +125,37 @@ export function correctionResult(
   if (new TextEncoder().encode(JSON.stringify(definition)).length > 4096)
     return { ok: false, errors: { labels: MESSAGES.size } };
   return { ok: true, definition, date: date === "" ? null : date, time };
+}
+
+/**
+ * What a queued correction SUBMITTED, read back from its durable command (revision 2, design assessment C5): the full corrected definition,
+ * the date and the time, for the version-conflict choices. Page memory is never the authority (a reload, another tab or the replacement made
+ * by "Save mine" all keep their command). `null` when the command is not a correction of this occurrence or does not parse: the choice is
+ * then unavailable, never guessed from newer unsaved input.
+ */
+export interface SubmittedCorrection {
+  definition: TaskDefinition;
+  date: string | null;
+  time: string | null;
+}
+
+export function submittedCorrection(
+  command: Record<string, unknown> | null,
+  occurrenceId: string,
+): SubmittedCorrection | null {
+  if (
+    command === null ||
+    command.kind !== "revise_occurrence" ||
+    command.id !== occurrenceId
+  )
+    return null;
+  const definition = parseDefinition(command.definition);
+  const date = command.date;
+  const time = command.time;
+  if (definition === null) return null;
+  if (date !== null && (typeof date !== "string" || !isContractDate(date)))
+    return null;
+  if (time !== null && typeof time !== "string") return null;
+  if (date === null && time !== null) return null;
+  return { definition, date, time };
 }

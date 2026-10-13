@@ -1,5 +1,12 @@
 import { useNavigate } from "@tanstack/react-router";
-import { type ReactNode, useId, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -245,6 +252,15 @@ function TaskForm({
   const outstanding = useAllOutstandingByKind(QUEUED_KINDS);
   const [state, setState] = useState<TaskFormState>(initial);
   const revision = useRef(0);
+  // Whether this form is still mounted (revision 2): a save that completes after the person left (another form, another task) never
+  // navigates them away from where they are now.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [errors, setErrors] = useState<FormErrors>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -387,7 +403,7 @@ function TaskForm({
         ok = saved.ok;
         if (!saved.ok) setNotice(saved.message);
       }
-      if (!ok) return;
+      if (!ok || !mounted.current) return;
       // A success closes the form only if nothing was typed after the save began; newer edits stay open.
       if (ticket === revision.current)
         void navigate({ to: "/tasks/$taskId", params: { taskId }, search: {} });

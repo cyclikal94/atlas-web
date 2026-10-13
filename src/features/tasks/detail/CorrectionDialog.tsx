@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
@@ -14,6 +14,19 @@ import {
 } from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import type { RowModel } from "../view";
+import {
+  completeCorrection,
+  correctionKey,
+  discardCorrection,
+  editCorrection,
+  forgetCorrectionSessions,
+  openCorrection,
+  releaseCorrection,
+  resumable,
+  retainCorrection,
+  submitCorrection,
+  subscribeCorrection,
+} from "./correction-owner";
 
 export const CORRECTION_COPY = {
   open: "Correct this day",
@@ -41,25 +54,19 @@ export const CORRECTION_COPY = {
   mine: "Yours",
   saveMine: "Save mine on the current version",
   discardMine: "Discard mine",
+  mineUnavailable: "Your saved correction can't be read on this device.",
   undated: "No date",
 } as const;
 
 /**
- * The draft of an open correction, kept for its occurrence and the displayed identity while the in-dialog sync control takes the person to
- * the queue (the `retained.ts` pattern of WEB-12a): page memory only, never stored. Cancel, Escape and the close icon discard it.
+ * The draft of an open correction is owned by `correction-owner.ts` (R3, revision 2): kept for its occurrence and the displayed identity while
+ * the in-dialog sync control takes the person to the queue (the `retained.ts` pattern of WEB-12a), page memory only, never stored. Cancel,
+ * Escape and the close icon discard it. A save consumes only the exact session and revision it submitted.
  */
-const retained = new Map<string, CorrectionState>();
-export const retainedKey = (identity: string, occurrenceId: string) =>
-  `${identity}\u0000${occurrenceId}`;
+export const retainedKey = correctionKey;
 export function forgetAllCorrections(): void {
-  retained.clear();
+  forgetCorrectionSessions();
 }
-/** What the person last saved, by draft: so a version conflict can be resolved by their explicit act, on the current version. */
-const saved = new Map<
-  string,
-  { occurrenceId: string; state: CorrectionState }
->();
-export const savedCorrection = (localId: string) => saved.get(localId) ?? null;
 
 export function CorrectionDialog({
   row,
@@ -79,18 +86,39 @@ export function CorrectionDialog({
   progressIds: readonly string[];
   writable: boolean;
 }) {
-  const key = retainedKey(identity, row.id);
+  const key = correctionKey(identity, row.id);
   const [state, setState] = useState<CorrectionState>(
-    () => retained.get(key) ?? correctionFrom(row.data),
+    () => resumable(key) ?? correctionFrom(row.data),
   );
   const [errors, setErrors] = useState<
     Partial<Record<CorrectionField, string>>
   >({});
   const [busy, setBusy] = useState(false);
-  // Every edit moves this revision. A save that succeeds closes the dialog and forgets the retained draft only if nothing was edited after
-  // the state it submitted (R3, revision 1; PRODUCT-DECISIONS-20261011): newer input stays in the open dialog, or retained while the person
-  // is in the queue, and is never consumed by the older save's acknowledgement.
-  const edits = useRef(0);
+  // The editing session this dialog holds (R3, revision 2): every edit moves its revision in the owner, which outlives this mount. A save
+  // that succeeds consumes the draft, and the session's current editor closes, only if nothing was edited after the state it submitted
+  // (PRODUCT-DECISIONS-20261011): newer input stays in the open dialog, or retained while the person is in the queue, and is never consumed
+  // by the older save's acknowledgement, whichever mount made it.
+  const session = useRef<number | null>(null);
+  const latest = useRef({ onClose, row });
+  latest.current = { onClose, row };
+  useEffect(() => {
+    const opened = openCorrection(key, identity, () =>
+      correctionFrom(latest.current.row.data),
+    );
+    session.current = opened.session;
+    setState(opened.state);
+    setBusy(opened.submitting !== null);
+    const stop = subscribeCorrection(key, (event) => {
+      if (event.session !== opened.session) return;
+      setBusy(false);
+      if (event.kind === "consumed") latest.current.onClose();
+    });
+    return () => {
+      stop();
+      releaseCorrection(key, opened.session);
+      session.current = null;
+    };
+  }, [key, identity]);
   const formId = useId();
   const weekday =
     row.data.slot.date === null
@@ -98,8 +126,9 @@ export function CorrectionDialog({
       : weekdayLabel(row.data.slot.date);
   const goal = row.data.definition.goal;
   const set = (patch: Partial<CorrectionState>) => {
-    edits.current += 1;
-    setState((s) => ({ ...s, ...patch }));
+    const next = { ...state, ...patch };
+    if (session.current !== null) editCorrection(key, session.current, next);
+    setState(next);
   };
   const field = (name: CorrectionField) =>
     errors[name]
@@ -112,7 +141,7 @@ export function CorrectionDialog({
       </p>
     ) : null;
   const discard = () => {
-    retained.delete(key);
+    if (session.current !== null) discardCorrection(key, session.current);
     setState(correctionFrom(row.data));
     setErrors({});
   };
@@ -122,8 +151,11 @@ export function CorrectionDialog({
       setErrors(result.errors);
       return;
     }
-    const submitted = edits.current;
+    const ticket =
+      session.current === null ? null : submitCorrection(key, session.current);
+    if (ticket === null) return;
     setBusy(true);
+    let ok = false;
     try {
       const outcome = await actions.enqueue(
         reviseOccurrence(
@@ -139,15 +171,14 @@ export function CorrectionDialog({
         ),
         CORRECTION_COPY.saved,
       );
-      if (outcome.ok) {
-        saved.set(outcome.localId, { occurrenceId: row.id, state });
-        if (edits.current === submitted) {
-          retained.delete(key);
-          onClose();
-        }
-      }
+      ok = outcome.ok;
+    } catch {
+      // The actions report a store that threw as a refusal; anything else that throws saved nothing either: the input stays.
+      ok = false;
     } finally {
-      setBusy(false);
+      // The owner decides: it consumes only this exact session and revision, and tells the session's CURRENT editor (this one only if it
+      // is still mounted and still holds the session) to close or to clear its pending mark.
+      completeCorrection(ticket, ok);
     }
   };
   const was = (text: string | null) =>
@@ -163,7 +194,9 @@ export function CorrectionDialog({
       title={CORRECTION_COPY.title(weekday)}
       description={CORRECTION_COPY.lead(weekday)}
       onDiscard={discard}
-      onRetainDraft={() => retained.set(key, state)}
+      onRetainDraft={() => {
+        if (session.current !== null) retainCorrection(key, session.current);
+      }}
       footer={
         <div className="flex flex-col gap-2">
           <p className="text-[12px] text-ink-2">{CORRECTION_COPY.footer}</p>

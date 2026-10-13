@@ -94,6 +94,9 @@ export function TodayRow({
       data-today-row={row.id}
       data-pill={row.pill}
       data-source={row.source}
+      data-structure={row.structureFrom}
+      data-version={row.version}
+      data-can-edit={row.canEdit ? "true" : "false"}
       className="flex list-none flex-col gap-2 border-b border-hairline px-1 py-3 tablet:flex-row tablet:items-center tablet:gap-3"
     >
       <span className="w-24 flex-none text-[12.5px] tabular-nums text-ink-2">

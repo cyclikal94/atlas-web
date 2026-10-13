@@ -28,8 +28,19 @@ import { projectCreateTask } from "./register";
  * by its deterministic id), the outstanding drafts that name them (their display patches, my pending evidence, the projection of a create
  * the cache does not hold yet), and this page's last `/daily` answers for the identity (Q8: the joint result is only ever the server's).
  *
- * Precedence (§4.1): a row with NO outstanding draft takes the server's derived fields when there is an answer; a row with outstanding
- * drafts shows the locally layered personal result with its pending mark until the drafts' effects are in the cache.
+ * Precedence (§4.1): a row with NO outstanding draft takes the server's derived fields when there is a CURRENT answer for it; a row with
+ * outstanding drafts shows the locally layered personal result with its pending mark until the drafts' effects are in the cache.
+ *
+ * WHOLE-INPUT FRESHNESS (R2, revision 2; design assessment C1). The structure of the row (definition, window, participants, `can_edit`,
+ * version) and its derived fields (my outcome, `actionable`) are chosen separately:
+ * - Structure: the committed cache row, unless the daily item is AHEAD of it: a newer version, or the same version read after the cache's
+ *   last commit, or a row the cache does not hold yet (the delta has not delivered it) and that this view never held (an old answer cannot
+ *   bring back a row the cache removed). A committed correction therefore always defeats an older daily item, and a permission the cache
+ *   committed after the read began defeats the item's `can_edit`.
+ * - Derived fields: the server's only while no cache page was committed since the read was DISPATCHED, no window boundary of the row has
+ *   passed since it was dispatched (delivery time is not evaluation time: a slow answer is not renewed by arriving late), and the server's
+ *   item is of the version the structure is. Otherwise my result is the personal reapplication of ARCH §3.3c over the saved summary, with its
+ *   finalisation. The joint result is never computed here.
  */
 export interface Outstanding {
   drafts: readonly DraftWithCommand[];
@@ -42,34 +53,79 @@ export interface RowSources {
   occurrence: CacheRow | null;
   task: CacheRow | null;
   progress: CacheRow | null;
+  /** The listed daily item (joint scope) for this occurrence, or null. */
   joint: OccurrenceView | null;
+  /** My daily item (personal scope), or null. */
   personal: OccurrenceView | null;
-  /**
-   * When the server's answers were received (ms), or null. The caller passes null when the personal answer is not current (offline, or a
-   * sync page committed after its read began); `composeRow` also ignores it once a window boundary of the row has passed since then.
-   */
-  answeredAt: number | null;
+  /** Where the two items above come from; absent or null when there is no answer to apply (offline, none yet, the detail). */
+  answer?: AnswerBasis | null;
+}
+
+/** The provenance of a `/daily` answer as one row sees it (R2, revision 2). */
+export interface AnswerBasis {
+  /** When the accepted page chains were DISPATCHED (ms, the earlier of the two scopes): the answer describes no later instant for certain. */
+  requestedAt: number;
+  /** No cache page is known to have been committed between the read's dispatch and the cache rows given with it. */
+  current: boolean;
+  /** This view has never held the occurrence in its cache: a daily item the cache lacks is ahead of the delta, not a removed row. */
+  neverCached: boolean;
 }
 
 /**
- * Whether the server's derived fields for a row still describe it now (R2, revision 1): they were evaluated when they were answered, so a
- * window that opened or closed since then (`opens_at`/`closes_at` in `(answeredAt, now]`) makes them stale. My result is then the personal
- * reapplication over the saved summary, finalised when the window has closed, until a newer answer arrives.
+ * Whether the server's derived fields for a row can still describe it now (R2): they were evaluated no earlier than the read was dispatched,
+ * so a window that opened or closed since then (`opens_at`/`closes_at` in `(requestedAt, now]`) makes them stale, however late the answer
+ * was delivered. My result is then the personal reapplication over the saved summary, finalised when the window has closed, until a newer
+ * answer (dispatched after the boundary) arrives.
  */
 export function answerCovers(
   data: Pick<OccurrenceData, "opens_at" | "closes_at">,
-  answeredAt: number | null,
+  requestedAt: number | null,
   nowMs: number,
 ): boolean {
-  if (answeredAt === null) return false;
+  if (requestedAt === null) return false;
   for (const boundary of [data.opens_at, data.closes_at])
     if (
       boundary !== null &&
-      answeredAt < boundary * 1000 &&
+      requestedAt < boundary * 1000 &&
       boundary * 1000 <= nowMs
     )
       return false;
   return true;
+}
+
+/** The structure a daily item describes, as a cache row (its parent and label from the cached row when there is one). */
+function dailyRow(item: OccurrenceView, cached: CacheRow | null): CacheRow {
+  return {
+    id: item.id,
+    kind: "occurrence",
+    parent_id: cached?.parent_id ?? null,
+    label: cached?.label ?? "",
+    value: item.data as unknown as CacheRow["value"],
+    version: item.version,
+    can_edit: item.can_edit,
+    archived: cached?.archived ?? false,
+    kind_date: cached?.kind_date ?? null,
+  };
+}
+
+/**
+ * The row's structure (R2, revision 2): the daily item only when it is ahead of the committed cache (see the module comment); `null` when
+ * neither can be used (a daily-only row whose answer predates a commit, of an occurrence this view once held: it may have been removed).
+ */
+export function structureOf(
+  cached: CacheRow | null,
+  item: OccurrenceView | null,
+  basis: AnswerBasis | null,
+): { row: CacheRow | null; from: "cache" | "daily" } {
+  if (item === null || basis === null) return { row: cached, from: "cache" };
+  const ahead =
+    cached === null
+      ? basis.current || basis.neverCached
+      : item.version > cached.version ||
+        (item.version === cached.version && basis.current);
+  return ahead
+    ? { row: dailyRow(item, cached), from: "daily" }
+    : { row: cached, from: "cache" };
 }
 
 export type PendingMark = "queued" | "sending" | "waiting";
@@ -100,14 +156,21 @@ export interface RowModel {
   drafts: readonly DraftWithCommand[];
   /** Where the derived fields came from. */
   source: "server" | "local";
+  /** Where the structure (definition, window, permission, version) came from. */
+  structureFrom: "cache" | "daily";
+  /** The server lists this row in a CURRENT answer (its membership of the day is the server's). */
+  listed: boolean;
   joint: OccurrenceView | null;
-  answeredAt: number | null;
+  /** When the answer applied to this row was dispatched (ms), or null. */
+  requestedAt: number | null;
 }
 
 export type RowResult =
   | { kind: "row"; row: RowModel }
   /** The cached value does not parse (a contract drift): "This item can't be shown on this device". Never guessed. */
-  | { kind: "unreadable"; id: string };
+  | { kind: "unreadable"; id: string }
+  /** Nothing current describes the row (a daily item that may have been removed since): not shown. */
+  | { kind: "absent"; id: string };
 
 /** The drafts naming any of `ids`, oldest first. */
 export function draftsNaming(
@@ -176,14 +239,13 @@ export function composeRow(
     progressId,
     ...(sources.task ? [sources.task.id] : []),
   ]);
-  const occurrenceRow = patched(sources.occurrence, occurrenceId, drafts);
-  const useServer = drafts.length === 0 && sources.joint !== null;
-  const data = useServer
-    ? (sources.joint as OccurrenceView).data
-    : occurrenceRow === null
-      ? null
-      : parseOccurrenceData(occurrenceRow.value);
+  const basis = sources.answer ?? null;
+  const structure = structureOf(sources.occurrence, sources.joint, basis);
+  const occurrenceRow = patched(structure.row, occurrenceId, drafts);
+  if (occurrenceRow === null) return { kind: "absent", id: occurrenceId };
+  const data = parseOccurrenceData(occurrenceRow.value);
   if (data === null) return { kind: "unreadable", id: occurrenceId };
+  const version = occurrenceRow.version;
   const taskDrafts = sources.task
     ? drafts
     : [
@@ -204,11 +266,14 @@ export function composeRow(
         d.target_resource_ids.includes(progressId) ||
         d.index_targets.includes(progressId),
     );
+  // An entry the synced stream already lists has landed: it is not pending any more, whatever the overlay read (a separate transaction)
+  // still says, so it is never counted twice (design assessment F4).
+  const landed = new Set((progress?.recent_entries ?? []).map((e) => e.id));
   const pending: PendingEvidence[] = drafts
     .map((d) => pendingEvidenceOf(d, me))
     .filter(
       (p): p is PendingEvidence & { occurrenceId: string } =>
-        p !== null && p.occurrenceId === occurrenceId,
+        p !== null && p.occurrenceId === occurrenceId && !landed.has(p.entryId),
     );
   const personal = personalResult({
     occurrence: data,
@@ -218,9 +283,7 @@ export function composeRow(
     me,
     nowMs,
   });
-  const canEdit = useServer
-    ? (sources.joint as OccurrenceView).can_edit
-    : (occurrenceRow?.can_edit ?? false);
+  const canEdit = occurrenceRow.can_edit;
   let outcome: Outcome | null =
     personal.kind === "result" ? personal.outcome : null;
   let periodOutcome: Outcome | null =
@@ -234,13 +297,21 @@ export function composeRow(
     nowMs,
   });
   let source: RowModel["source"] = "local";
-  if (drafts.length === 0 && answerCovers(data, sources.answeredAt, nowMs)) {
-    if (sources.personal !== null) {
+  const answerCurrent =
+    basis !== null &&
+    basis.current &&
+    answerCovers(data, basis.requestedAt, nowMs);
+  if (drafts.length === 0 && answerCurrent) {
+    if (sources.personal !== null && sources.personal.version === version) {
       outcome = sources.personal.outcome;
       periodOutcome = sources.personal.period_outcome;
       actionable = sources.personal.actionable;
       source = "server";
-    } else if (sources.joint !== null && personal.kind !== "result") {
+    } else if (
+      sources.joint !== null &&
+      sources.joint.version === version &&
+      personal.kind !== "result"
+    ) {
       // No stream of mine (an Anyone task not joined yet): what I can do is the joint answer's.
       actionable = sources.joint.actionable;
       source = "server";
@@ -267,9 +338,7 @@ export function composeRow(
       taskId: data.task_id,
       title: taskRow?.label ?? null,
       data,
-      version: useServer
-        ? (sources.joint as OccurrenceView).version
-        : (occurrenceRow?.version ?? 1),
+      version,
       canEdit,
       archived: taskRow?.archived ?? false,
       progress,
@@ -286,8 +355,11 @@ export function composeRow(
       attention,
       drafts,
       source,
+      structureFrom: structure.from,
+      listed:
+        answerCurrent && (sources.joint !== null || sources.personal !== null),
       joint: sources.joint,
-      answeredAt: sources.answeredAt,
+      requestedAt: basis?.requestedAt ?? null,
     },
   };
 }

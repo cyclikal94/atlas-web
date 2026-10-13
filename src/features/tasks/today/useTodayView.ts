@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type CacheRow,
+  readCacheSeqNow,
   readResourcesNow,
   scanResources,
   useAllOutstandingByKind,
@@ -8,6 +9,7 @@ import {
   useDataEnv,
 } from "../../../data";
 import type { TasksApi, TasksResult } from "../api";
+import { useBoundaryClock } from "../clock";
 import { useTasksEnv } from "../env";
 import { forgetRefusal, noteIfRefused, noteJoint, refusalOf } from "../memory";
 import { QUEUED_KINDS } from "../model/commands";
@@ -19,7 +21,13 @@ import {
 import { inDayView } from "../model/evaluate";
 import { progressId } from "../model/ids";
 import { dayEnd } from "../model/time";
-import { composeRow, type Outstanding, type RowModel } from "../view";
+import {
+  type AnswerBasis,
+  answerCovers,
+  composeRow,
+  type Outstanding,
+  type RowModel,
+} from "../view";
 
 /**
  * The Today view's data (D-10a-1, §4.1). Resources come from the cache; the derived fields (outcomes, `actionable`, membership,
@@ -33,9 +41,18 @@ export interface DailyAnswer {
   joint: Map<string, OccurrenceView>;
   personal: Map<string, OccurrenceView>;
   pendingTasks: string[];
-  at: number;
-  /** The cache generation (`syncTick`) the read began under: a sync page committed since makes the personal results stale. */
-  tick: number;
+  /**
+   * When the accepted page chains were DISPATCHED (ms, the earlier of the two scopes; a chain restarted on `409` counts from its restart).
+   * The server evaluated the day no earlier than this; a window boundary after it makes a row's derived fields stale, whenever the answer
+   * was delivered (R2, revision 2).
+   */
+  requestedAt: number;
+  /** When both scopes had answered (ms): for display only, never evaluation time. */
+  receivedAt: number;
+  /** The cache page sequence read from the durable sync state when the read was dispatched (null: none yet; `"closed"`: no database). */
+  seq: number | null | "closed";
+  /** Each scope's `revision` (the server's sync clock when it was read). */
+  revisions: { joint: number; personal: number };
 }
 
 export type DailyError =
@@ -51,6 +68,8 @@ export interface TodayView {
   error: DailyError | null;
   /** The rows come from the cache only (offline, or the server read failed). */
   fromDevice: boolean;
+  /** The shown rows are the last coherent composition while a newer one is read (a sync page committed, or new rows were listed). */
+  refreshing: boolean;
   /** The database is absent: nothing was ever saved or synced on this device. */
   noDatabase: boolean;
   now: number;
@@ -60,7 +79,11 @@ export interface TodayView {
 const RESTARTS = 3;
 const DAILY = "daily";
 
-/** One scope of `/daily`, every page, restarting from the first page on `409 conflict` (TASK-7): never a mix of revisions. */
+/**
+ * One scope of `/daily`, every page, restarting from the first page on `409 conflict` (TASK-7): never a mix of revisions. The answer carries
+ * the scope's `revision` and when its accepted chain was DISPATCHED (`startedAt`, from `clock`): a restart discards the earlier pages and their
+ * time with them.
+ */
 export async function readWholeDay(
   api: TasksApi,
   query: {
@@ -72,11 +95,19 @@ export async function readWholeDay(
   isCurrent: () => boolean,
   /** Called with every answer as it arrives, before anything else (the refusal memo, which must not depend on the screen). */
   onAnswer: (result: TasksResult<OccurrencePage>) => void = () => undefined,
+  clock: () => number = () => Date.now(),
 ): Promise<
-  | { ok: true; items: OccurrenceView[]; pendingTasks: string[] }
+  | {
+      ok: true;
+      items: OccurrenceView[];
+      pendingTasks: string[];
+      revision: number;
+      startedAt: number;
+    }
   | { ok: false; error: DailyError | "refused" | "closed" | "offline" }
 > {
   for (let restart = 0; restart < RESTARTS; restart += 1) {
+    const startedAt = clock();
     const items: OccurrenceView[] = [];
     let revision: number | undefined;
     let after: string | undefined;
@@ -116,7 +147,13 @@ export async function readWholeDay(
       }
       items.push(...page.value.items);
       if (page.value.next_after === null)
-        return { ok: true, items, pendingTasks };
+        return {
+          ok: true,
+          items,
+          pendingTasks,
+          revision: revision ?? page.value.revision,
+          startedAt,
+        };
       after = page.value.next_after;
     }
     if (!conflicted) break;
@@ -147,7 +184,6 @@ export function useTodayView(day: string, zone: string): TodayView {
   const data = useDataEnv();
   const outstandingPage = useAllOutstandingByKind(QUEUED_KINDS);
   const position = useCachePosition();
-  const [now, setNow] = useState(() => env.now());
   const [scan, setScan] = useState<{
     key: string;
     rows: Map<string, CacheRow>;
@@ -155,10 +191,6 @@ export function useTodayView(day: string, zone: string): TodayView {
   const [answer, setAnswer] = useState<DailyAnswer | null>(null);
   const [error, setError] = useState<DailyError | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [related, setRelated] = useState<{
-    progressIds: Map<string, string>;
-    rows: Map<string, CacheRow>;
-  }>({ progressIds: new Map(), rows: new Map() });
   const key = `${env.identity}\u0000${day}\u0000${zone}`;
   const pageSeq =
     position.status === "ready" ? (position.value?.pageSeq ?? -1) : -2;
@@ -188,11 +220,13 @@ export function useTodayView(day: string, zone: string): TodayView {
         : { drafts: [], attention: [] },
     [outstandingPage],
   );
+  // A queued draft edited under the same id and status changes its digest (revision 2): the walk sees its new candidates too.
   const draftsKey = outstanding.drafts
-    .map((d) => `${d.local_id}:${d.status}`)
+    .map((d) => `${d.local_id}:${d.status}:${d.command_digest}`)
     .join(",");
 
   // ---- the cache walk (D-10a-2): on mount, on day/zone change, when a sync page commits or the queue changes (debounced) -----------
+  // The walk only DISCOVERS candidate occurrences; their rows are read again with the related rows (below), at one cache position.
   const scanned = useRef(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-walked when the cache position or the queue changes
   useEffect(() => {
@@ -226,80 +260,8 @@ export function useTodayView(day: string, zone: string): TodayView {
     };
   }, [data, key, ready, syncTick, draftsKey]);
 
-  // ---- the two /daily reads: on mount, day/zone change, reconnect, a committed sync page, a retry, a window boundary --------------
-  const read = useRef(0);
-  const answered = useRef(false);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-read on the listed triggers; `now` moves at window boundaries
-  useEffect(() => {
-    if (!env.online) return;
-    // A refused read is not asked again on a remount, only on "Try again" (D-12a-13).
-    if (refusalOf(env.identity, DAILY) !== null) {
-      setError({ kind: "failed" });
-      return;
-    }
-    const mine = ++read.current;
-    const isCurrent = () => mine === read.current;
-    const tick = syncTick;
-    const delay = answered.current ? 750 : 0;
-    const timer = setTimeout(() => {
-      const query = { day, zone, limit: env.dailyPageSize };
-      void Promise.all([
-        readWholeDay(env.api, { ...query, scope: "joint" }, isCurrent, (r) =>
-          noteIfRefused(env.identity, DAILY, r),
-        ),
-        readWholeDay(env.api, { ...query, scope: "personal" }, isCurrent, (r) =>
-          noteIfRefused(env.identity, DAILY, r),
-        ),
-      ]).then(([joint, personal]) => {
-        if (!isCurrent()) return;
-        if (!joint.ok || !personal.ok) {
-          const failed = !joint.ok
-            ? joint.error
-            : !personal.ok
-              ? personal.error
-              : "closed";
-          if (failed === "closed" || failed === "offline") return;
-          setError(failed === "refused" ? { kind: "failed" } : failed);
-          return;
-        }
-        const at = env.now();
-        const jointMap = new Map(joint.items.map((item) => [item.id, item]));
-        for (const item of joint.items)
-          noteJoint(env.identity, item.id, {
-            outcome: item.outcome,
-            periodOutcome: item.period_outcome,
-            actionable: item.actionable,
-            at,
-          });
-        answered.current = true;
-        setError(null);
-        setAnswer({
-          key,
-          joint: jointMap,
-          personal: new Map(personal.items.map((item) => [item.id, item])),
-          pendingTasks: joint.pendingTasks,
-          at,
-          tick,
-        });
-      });
-    }, delay);
-    return () => {
-      clearTimeout(timer);
-      // A late answer for another identity, day or zone is dropped.
-      if (read.current === mine) read.current += 1;
-    };
-  }, [env.api, env.identity, env.online, key, syncTick, attempt, now]);
-
-  // FRESHNESS OF THE SERVER'S ANSWER (R2, revision 1). The last `/daily` answer for this identity, day and zone lists the day and carries
-  // the joint fields only while the device is ONLINE: offline the day is what the device holds, and my result is the personal reapplication
-  // of ARCH §3.3c over the saved summary (with its finalisation once a window closes), never an answer received before going offline. My
-  // personal result from the server also stops applying once a sync page has committed after its read began (the cache may hold newer
-  // progress than it: the re-read follows) and, row by row, once a window boundary has passed since it was answered (`composeRow`). The
-  // joint result stays the server's alone, shown with its time by the detail (Q8).
   const listed =
     env.online && answer !== null && answer.key === key ? answer : null;
-  const personalFresh = listed !== null && listed.tick === syncTick;
-  const current = listed;
   const local = scan !== null && scan.key === key ? scan : null;
 
   // ---- the projected first occurrences of outstanding creates (§4.3) ----------------------------------------------------------------
@@ -315,13 +277,131 @@ export function useTodayView(day: string, zone: string): TodayView {
   const ids = useMemo(() => {
     const set = new Set<string>(projected);
     for (const id of local?.rows.keys() ?? []) set.add(id);
-    for (const id of current?.joint.keys() ?? []) set.add(id);
-    for (const id of current?.personal.keys() ?? []) set.add(id);
+    for (const id of listed?.joint.keys() ?? []) set.add(id);
+    for (const id of listed?.personal.keys() ?? []) set.add(id);
     return [...set].sort();
-  }, [local, current, projected]);
+  }, [local, listed, projected]);
   const idsKey = ids.join(",");
 
-  // ---- related rows: my progress stream by its deterministic id, and the task, for every candidate ------------------------------------
+  // ---- the clock (R8/R2, revision 2): the boundaries of every CANDIDATE row, not only the rows that pass the day's filter ---------------
+  const windows = useMemo(() => {
+    const out: Array<{ opens_at: number | null; closes_at: number | null }> =
+      [];
+    for (const row of local?.rows.values() ?? []) {
+      const parsed = parseOccurrenceData(row.value);
+      if (parsed) out.push(parsed);
+    }
+    for (const item of listed?.joint.values() ?? []) out.push(item.data);
+    for (const item of listed?.personal.values() ?? []) out.push(item.data);
+    return out;
+  }, [local, listed]);
+  const clock = useBoundaryClock(env.now, windows);
+  const now = clock.now;
+
+  // ---- the two /daily reads: on mount, day/zone change, reconnect, a committed sync page, a retry, a crossed window boundary ----------
+  const read = useRef(0);
+  const answered = useRef(false);
+  const [restale, setRestale] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-read on the listed triggers; `clock.epoch` moves at window boundaries
+  useEffect(() => {
+    if (!env.online) return;
+    // A refused read is not asked again on a remount, only on "Try again" (D-12a-13).
+    if (refusalOf(env.identity, DAILY) !== null) {
+      setError({ kind: "failed" });
+      return;
+    }
+    const mine = ++read.current;
+    const isCurrent = () => mine === read.current;
+    const delay = answered.current ? 750 : 0;
+    const timer = setTimeout(() => {
+      const query = { day, zone, limit: env.dailyPageSize };
+      void (async () => {
+        // The durable cache position when the read is DISPATCHED: a page committed after it makes the answer older than the cache.
+        const seq = await readCacheSeqNow(data);
+        if (!isCurrent()) return;
+        const [joint, personal] = await Promise.all([
+          readWholeDay(
+            env.api,
+            { ...query, scope: "joint" },
+            isCurrent,
+            (r) => noteIfRefused(env.identity, DAILY, r),
+            env.now,
+          ),
+          readWholeDay(
+            env.api,
+            { ...query, scope: "personal" },
+            isCurrent,
+            (r) => noteIfRefused(env.identity, DAILY, r),
+            env.now,
+          ),
+        ]);
+        if (!isCurrent()) return;
+        if (!joint.ok || !personal.ok) {
+          const failed = !joint.ok
+            ? joint.error
+            : !personal.ok
+              ? personal.error
+              : "closed";
+          if (failed === "closed" || failed === "offline") return;
+          setError(failed === "refused" ? { kind: "failed" } : failed);
+          return;
+        }
+        const requestedAt = Math.min(joint.startedAt, personal.startedAt);
+        // Sampled at publication: an answer dispatched before a boundary that has now passed is stale on arrival.
+        const receivedAt = clock.revalidate();
+        const jointMap = new Map(joint.items.map((item) => [item.id, item]));
+        for (const item of joint.items)
+          noteJoint(env.identity, item.id, {
+            outcome: item.outcome,
+            periodOutcome: item.period_outcome,
+            actionable: item.actionable,
+            at: requestedAt,
+          });
+        answered.current = true;
+        setError(null);
+        setAnswer({
+          key,
+          joint: jointMap,
+          personal: new Map(personal.items.map((item) => [item.id, item])),
+          pendingTasks: joint.pendingTasks,
+          requestedAt,
+          receivedAt,
+          seq,
+          revisions: { joint: joint.revision, personal: personal.revision },
+        });
+        // Stale on arrival (a boundary of a listed row passed while it was read): ask once more, now that the boundary is behind the
+        // dispatch; the new read's own dispatch time then covers it, so this cannot repeat for the same boundary.
+        const staleOnArrival = [...joint.items, ...personal.items].some(
+          (item) => !answerCovers(item.data, requestedAt, receivedAt),
+        );
+        if (staleOnArrival) setRestale((n) => n + 1);
+      })();
+    }, delay);
+    return () => {
+      clearTimeout(timer);
+      // A late answer for another identity, day or zone is dropped.
+      if (read.current === mine) read.current += 1;
+    };
+  }, [
+    env.api,
+    env.identity,
+    env.online,
+    key,
+    syncTick,
+    attempt,
+    clock.epoch,
+    restale,
+  ]);
+
+  // ---- related rows: the occurrence itself, my progress stream by its deterministic id and the task, for every candidate, read at ONE
+  // cache position (revision 2, C2): the position is read before and after, and a read that spans a committed page is read again. --------
+  const [related, setRelated] = useState<{
+    idsKey: string;
+    key: string;
+    seq: number | null | "closed";
+    progressIds: Map<string, string>;
+    rows: Map<string, CacheRow>;
+  } | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by the ids, the cache position and the queue
   useEffect(() => {
     let live = true;
@@ -332,38 +412,82 @@ export function useTodayView(day: string, zone: string): TodayView {
       const taskIds = new Set<string>();
       for (const id of ids) {
         const value =
-          current?.joint.get(id)?.data ??
+          listed?.joint.get(id)?.data ??
+          listed?.personal.get(id)?.data ??
           parseOccurrenceData(local?.rows.get(id)?.value ?? null);
         if (value) taskIds.add(value.task_id);
       }
-      const rows = await readResourcesNow(data, [
-        ...progressIds.values(),
-        ...taskIds,
-      ]);
-      // The merged rows (cache with its admitted overlay), never the listing wrapper.
-      const merged = new Map<string, CacheRow>();
-      for (const [rowId, listed] of rows ?? [])
-        merged.set(rowId, listed.merged);
-      if (live) setRelated({ progressIds, rows: merged });
+      for (let attempt = 0; attempt < 3 && live; attempt += 1) {
+        const before = await readCacheSeqNow(data);
+        const rows = await readResourcesNow(data, [
+          ...ids,
+          ...progressIds.values(),
+          ...taskIds,
+        ]);
+        const after = await readCacheSeqNow(data);
+        if (!live) return;
+        if (before !== after && attempt < 2) continue;
+        // The merged rows (cache with its admitted overlay), never the listing wrapper.
+        const merged = new Map<string, CacheRow>();
+        for (const [rowId, row] of rows ?? []) merged.set(rowId, row.merged);
+        setRelated({ idsKey, key, seq: after, progressIds, rows: merged });
+        return;
+      }
     })();
     return () => {
       live = false;
     };
-  }, [idsKey, ready, syncTick, draftsKey, env.accountId, data]);
+  }, [idsKey, key, ready, syncTick, draftsKey, env.accountId, data]);
 
-  // ---- rows ----------------------------------------------------------------------------------------------------------------------------
+  // Occurrences this view has held in its cache, for this identity, day and zone: a daily item the cache lacks is ahead of the delta only
+  // if the cache never held it here (an old answer cannot bring back a row the cache removed).
+  const everCached = useRef<{ key: string; ids: Set<string> }>({
+    key,
+    ids: new Set(),
+  });
+  if (everCached.current.key !== key)
+    everCached.current = { key, ids: new Set() };
+  if (related !== null && related.key === key)
+    for (const [rowId, row] of related.rows)
+      if (row.kind === "occurrence") everCached.current.ids.add(rowId);
+
+  // ---- rows: composed only from related rows read for the CURRENT candidates; otherwise the last coherent composition is kept ----------
+  const coherent =
+    related !== null && related.key === key && related.idsKey === idsKey;
+  const lastComposed = useRef<{
+    key: string;
+    rows: RowModel[];
+    unreadable: string[];
+  } | null>(null);
   const composed = useMemo(() => {
     const rows: RowModel[] = [];
     const unreadable: string[] = [];
-    if (overlayLoading) return { rows, unreadable };
+    // Nothing to compose from yet: neither the walk nor an answer (unless there is no database at all).
+    const sourcesReady = local !== null || listed !== null || noDatabase;
+    if (overlayLoading || !coherent || related === null || !sourcesReady)
+      return null;
+    const cacheSeq = related.seq;
     for (const id of ids) {
       const pid = related.progressIds.get(id);
       if (pid === undefined) continue;
-      const occurrence = local?.rows.get(id) ?? null;
-      const joint = current?.joint.get(id) ?? null;
-      const taskId =
-        joint?.data.task_id ??
-        parseOccurrenceData(occurrence?.value ?? null)?.task_id;
+      const occurrence = related.rows.get(id) ?? null;
+      const joint = listed?.joint.get(id) ?? null;
+      const mine = listed?.personal.get(id) ?? null;
+      const basis: AnswerBasis | null =
+        listed === null
+          ? null
+          : {
+              requestedAt: listed.requestedAt,
+              current:
+                cacheSeq === "closed" ||
+                (listed.seq !== "closed" && listed.seq === cacheSeq),
+              neverCached: !everCached.current.ids.has(id),
+            };
+      const taskId = (
+        occurrence === null
+          ? (joint?.data ?? mine?.data ?? null)
+          : parseOccurrenceData(occurrence.value)
+      )?.task_id;
       const result = composeRow(
         {
           occurrenceId: id,
@@ -373,61 +497,74 @@ export function useTodayView(day: string, zone: string): TodayView {
             taskId === undefined ? null : (related.rows.get(taskId) ?? null),
           progress: related.rows.get(pid) ?? null,
           joint,
-          personal: personalFresh ? (current?.personal.get(id) ?? null) : null,
-          answeredAt: personalFresh ? (current?.at ?? null) : null,
+          personal: mine,
+          answer: basis,
         },
         outstanding,
         env.accountId,
         now,
       );
+      if (result.kind === "absent") continue;
       if (result.kind === "unreadable") {
         unreadable.push(id);
         continue;
       }
       const row = result.row;
       if (row.archived) continue;
-      const fromServer =
-        current !== null && (current.joint.has(id) || current.personal.has(id));
-      if (!fromServer && !inDayView(row.data, day, zone, row.actionable))
+      // The server's membership of the day only while its answer for the row is current; otherwise the device decides (§4.1).
+      if (!row.listed && !inDayView(row.data, day, zone, row.actionable))
         continue;
       rows.push(row);
     }
-    return { rows, unreadable };
+    return { key, rows, unreadable };
   }, [
     ids,
     related,
-    local,
-    current,
+    listed,
     outstanding,
     env.accountId,
     now,
     day,
     zone,
-    personalFresh,
     overlayLoading,
+    coherent,
+    key,
+    local,
+    noDatabase,
   ]);
+  if (composed !== null) lastComposed.current = composed;
+  const shown =
+    composed ??
+    (lastComposed.current !== null && lastComposed.current.key === key
+      ? lastComposed.current
+      : null);
 
-  // ---- the next window boundary among the shown rows re-evaluates them (E-T9: no timer is shortened) -----------------------------------
+  // An answer dispatched before the cache position the rows were read at is older than the cache (a page committed meanwhile, or the
+  // database was created after it): ask again, once for each such pair. A committed page also re-reads through `syncTick`; this covers a
+  // commit no notification reported before the read (for example the first page that creates the database).
+  const behind =
+    listed !== null &&
+    related !== null &&
+    related.key === key &&
+    related.seq !== "closed" &&
+    listed.seq !== related.seq
+      ? `${listed.receivedAt}|${String(related.seq)}`
+      : null;
+  const askedFor = useRef<string | null>(null);
   useEffect(() => {
-    const nowSec = Math.floor(now / 1000);
-    let next = Number.POSITIVE_INFINITY;
-    for (const row of composed.rows)
-      for (const t of [row.data.opens_at, row.data.closes_at])
-        if (t !== null && t > nowSec && t < next) next = t;
-    if (!Number.isFinite(next)) return;
-    const wait = Math.min(next * 1000 - env.now() + 50, 6 * 60 * 60 * 1000);
-    const timer = setTimeout(() => setNow(env.now()), Math.max(0, wait));
-    return () => clearTimeout(timer);
-  }, [composed.rows, now, env]);
+    if (behind === null || askedFor.current === behind) return;
+    askedFor.current = behind;
+    setRestale((n) => n + 1);
+  }, [behind]);
 
   return {
-    loading:
-      (local === null && current === null && !noDatabase) || overlayLoading,
-    rows: composed.rows,
-    unreadable: composed.unreadable,
-    pendingTasks: current?.pendingTasks ?? [],
+    loading: shown === null,
+    rows: shown?.rows ?? [],
+    unreadable: shown?.unreadable ?? [],
+    pendingTasks: listed?.pendingTasks ?? [],
     error: env.online ? error : null,
-    fromDevice: current === null,
+    fromDevice: listed === null,
+    refreshing: composed === null && shown !== null,
     noDatabase,
     now,
     retry: () => {

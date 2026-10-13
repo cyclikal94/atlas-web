@@ -2,22 +2,18 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { PageHeading } from "../../../components/ui/page-heading";
-import { useDataEnv } from "../../../data";
+import { useDataEnv, useDraftWithCommand } from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel, longDayLabel } from "../format";
-import { reviseOccurrence } from "../model/commands";
-import { correctionResult } from "../model/correction";
+import { commandOf, reviseOccurrence } from "../model/commands";
+import { submittedCorrection } from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import { pillTone } from "../today/TodayRow";
 import { ArchiveControl, ClosureControls, Participation } from "./Controls";
-import {
-  CORRECTION_COPY,
-  CorrectionDialog,
-  savedCorrection,
-} from "./CorrectionDialog";
+import { CORRECTION_COPY, CorrectionDialog } from "./CorrectionDialog";
 import { EntryHistory } from "./EntryHistory";
 import { RecordCard } from "./RecordCard";
 import { useTaskDetail } from "./useTaskDetail";
@@ -58,11 +54,19 @@ export function TaskDetail({
   const navigate = useNavigate();
   const view = useTaskDetail(taskId, occurrence);
   const actions = useTaskActions();
-  const [correcting, setCorrecting] = useState(false);
+  // The day the correction dialog was opened for (revision 2): it never follows another day under the person.
+  const [correcting, setCorrecting] = useState<string | null>(null);
   const [sharing, setSharing] = useState<string | null>(null);
   const dayId = useId();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const now = env.now();
+  // A correction that met another one (version conflict): what the person submitted is read from the queued operation itself (revision 2,
+  // C5), so the choice survives a reload, another tab and a second conflict of its own replacement.
+  const conflictId =
+    view.row?.attention?.kind === "revise_occurrence" &&
+    view.row.attention.status === "version_conflict"
+      ? view.row.attention.local_id
+      : null;
+  const conflictDraft = useDraftWithCommand(conflictId);
   if (view.status === "loading")
     return (
       <p aria-busy="true" className="text-[13px] text-ink-2">
@@ -84,9 +88,19 @@ export function TaskDetail({
     row.attention.status === "version_conflict"
       ? row.attention
       : null;
-  const mine = correctionConflict
-    ? savedCorrection(correctionConflict.local_id)
-    : null;
+  const stored =
+    correctionConflict !== null &&
+    conflictDraft.status === "ready" &&
+    conflictDraft.value !== null &&
+    conflictDraft.value.local_id === correctionConflict.local_id &&
+    conflictDraft.value.kind === "revise_occurrence" &&
+    conflictDraft.value.status === "version_conflict"
+      ? conflictDraft.value
+      : null;
+  const mine =
+    stored === null || row === null
+      ? null
+      : submittedCorrection(commandOf(stored), row.id);
   const progressIds = [
     ...view.progressRows.map((p) => p.id),
     ...(row && (row.streamPresent || row.streamPending)
@@ -156,7 +170,7 @@ export function TaskDetail({
             </Link>
           )}
           {row ? (
-            <Button onClick={() => setCorrecting(true)}>
+            <Button onClick={() => setCorrecting(row.id)}>
               {CORRECTION_COPY.open}
             </Button>
           ) : null}
@@ -264,32 +278,46 @@ export function TaskDetail({
                   ? dayLabel(row.data.slot.date)
                   : DETAIL_COPY.undated}
                 {mine
-                  ? ` · ${CORRECTION_COPY.mine}: ${mine.state.date ? dayLabel(mine.state.date) : DETAIL_COPY.undated}`
+                  ? ` · ${CORRECTION_COPY.mine}: ${mine.date ? dayLabel(mine.date) : DETAIL_COPY.undated}`
                   : ""}
               </p>
+              {mine === null && conflictDraft.status === "ready" ? (
+                <p className="text-[12.5px] text-ink-2">
+                  {CORRECTION_COPY.mineUnavailable}
+                </p>
+              ) : null}
               <div className="flex flex-wrap gap-2">
-                {mine && env.writable ? (
+                {mine && stored && env.writable ? (
                   <Button
                     variant="primary"
                     onClick={() => {
                       const outbox = data.outbox();
-                      const result = correctionResult(row.data, mine.state);
-                      if (outbox === null || !result.ok) return;
-                      // The person's explicit act: their correction again, on the version now saved (never automatic).
-                      void outbox.supersede(
-                        correctionConflict.local_id,
-                        reviseOccurrence(
-                          {
-                            occurrenceId: row.id,
-                            current: row.data,
-                            definition: result.definition,
-                            date: result.date,
-                            time: result.time,
-                            progressIds,
-                          },
-                          resolveWallTime,
-                        ),
+                      if (outbox === null) return;
+                      // The person's explicit act: the correction they SUBMITTED (its durable command) again, built in full on the version
+                      // they are shown now (`reviewedBase`), and only if the queued operation is still the one read (`expectDraft`).
+                      const request = reviseOccurrence(
+                        {
+                          occurrenceId: row.id,
+                          current: row.data,
+                          definition: mine.definition,
+                          date: mine.date,
+                          time: mine.time,
+                          progressIds,
+                        },
+                        resolveWallTime,
                       );
+                      void outbox.supersede(correctionConflict.local_id, {
+                        ...request,
+                        targets: request.targets.map((target) =>
+                          target.resourceId === row.id
+                            ? { ...target, reviewedBase: row.version }
+                            : target,
+                        ),
+                        expectDraft: (now) =>
+                          now.local_id === stored.local_id &&
+                          now.status === stored.status &&
+                          now.command_digest === stored.command_digest,
+                      });
                     }}
                   >
                     {CORRECTION_COPY.saveMine}
@@ -306,14 +334,16 @@ export function TaskDetail({
             </section>
           ) : null}
           <RecordCard
+            key={`record:${row.id}`}
             row={row}
             actions={actions}
-            now={now}
+            now={view.now}
             zone={zone}
             writable={env.writable}
             focus={focusRecord === true}
           />
           <EntryHistory
+            key={`history:${row.id}`}
             row={row}
             actions={actions}
             zone={zone}
@@ -339,12 +369,13 @@ export function TaskDetail({
             actions={actions}
             writable={env.writable}
           />
-          {correcting ? (
+          {correcting === row.id ? (
             <CorrectionDialog
+              key={`correction:${row.id}`}
               row={row}
               identity={env.identity}
               open
-              onClose={() => setCorrecting(false)}
+              onClose={() => setCorrecting(null)}
               actions={actions}
               progressIds={progressIds}
               writable={env.writable}

@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { DraftRow, DraftWithCommand, ResourceId } from "../model/types";
+import { readDraftWithCommand } from "../plans/draft-detail";
 import type { ListedResource } from "../plans/outbox";
 import {
   type CachePosition,
@@ -293,4 +294,26 @@ export function useCachePosition(): Loadable<CachePosition | null> {
         })
       : null;
   }, []);
+}
+
+/**
+ * ONE draft with its stored command, live (WEB-10a revision 2, C5): what a slice's conflict choices read to know what the person actually
+ * submitted, durably (a reload, another tab or a second conflict of a replacement still have it), never page memory. `null` when the draft
+ * no longer exists. One body read for one draft, as every body read is (D-23).
+ */
+export function useDraftWithCommand(
+  localId: string | null,
+): Loadable<DraftWithCommand | null> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service && localId !== null
+        ? service.store.watch(readDraftWithCommand, {
+            incarnationId: service.incarnationId,
+            localId,
+          })
+        : null;
+    },
+    [localId],
+  );
 }

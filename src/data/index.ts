@@ -140,6 +140,7 @@ export {
   useAllOutstandingByKind,
   useCachedResources,
   useCachePosition,
+  useDraftWithCommand,
   useOutstanding,
   useOutstandingByKind,
 } from "./ui/outstanding";
@@ -163,4 +164,9 @@ export {
   useStatusInputs,
   useSyncStatusModel,
 } from "./ui/react";
-export { readResourcesNow, type ScanEnd, scanResources } from "./ui/scan";
+export {
+  readCacheSeqNow,
+  readResourcesNow,
+  type ScanEnd,
+  scanResources,
+} from "./ui/scan";

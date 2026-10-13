@@ -89,7 +89,17 @@ export function EntryHistory({
     error: "failed" | "refused" | null;
   } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [fixing, setFixing] = useState<string | null>(null);
+  // The open fix: the entry and a session number that is never reused (R3, revision 2): a save made by an earlier fix of the same entry
+  // (cancelled, then opened again) cannot close the newer one.
+  const [fixing, setFixing] = useState<{
+    entryId: string;
+    session: number;
+  } | null>(null);
+  const sessions = useRef(0);
+  const openFix = (entryId: string) => {
+    sessions.current += 1;
+    setFixing({ entryId, session: sessions.current });
+  };
   const readKey = `journal:${row.progressId}`;
   const load = async (after: number) => {
     if (refusalOf(env.identity, readKey) !== null && after === 0) {
@@ -230,8 +240,10 @@ export function EntryHistory({
                   </span>
                 ) : null}
               </span>
-              {fixing === entry.id ? (
+              {fixing?.entryId === entry.id ? (
                 <FixForm
+                  key={fixing.session}
+                  session={fixing.session}
                   entry={entry}
                   goal={goal}
                   onCancel={() => setFixing(null)}
@@ -244,13 +256,15 @@ export function EntryHistory({
                     );
                     return saved.ok;
                   }}
-                  onSaved={() =>
-                    setFixing((open) => (open === entry.id ? null : open))
+                  onSaved={(session) =>
+                    setFixing((open) =>
+                      open !== null && open.session === session ? null : open,
+                    )
                   }
                 />
               ) : canFix(entry) ? (
                 <span>
-                  <Button variant="quiet" onClick={() => setFixing(entry.id)}>
+                  <Button variant="quiet" onClick={() => openFix(entry.id)}>
                     {HISTORY_COPY.fix}
                   </Button>
                 </span>
@@ -296,21 +310,25 @@ export function EntryHistory({
 
 /**
  * The fix of one entry. A save is one attempt at a time (Save waits while it is pending), and its success closes the form only if the value
- * was not edited after it was submitted (R3, revision 1): a newer value stays in the open form for another save, and a failed or uncertain
+ * was not edited after it was submitted (R3, revision 1) AND the parent's open fix is still this form's session (revision 2): a newer value
+ * stays in the open form for another save, a newer fix of the same entry is never closed by an older one's save, and a failed or uncertain
  * save keeps the form as it is.
  */
 function FixForm({
+  session,
   entry,
   goal,
   onSave,
   onSaved,
   onCancel,
 }: {
+  session: number;
   entry: Shown;
   goal: Goal;
   /** Whether the replacement was saved. */
   onSave(evidence: Evidence): Promise<boolean>;
-  onSaved(): void;
+  /** The session whose save succeeded with nothing typed since: the parent closes only that session. */
+  onSaved(session: number): void;
   onCancel(): void;
 }) {
   const [amount, setAmount] = useState(
@@ -323,7 +341,8 @@ function FixForm({
     const submitted = edits.current;
     setBusy(true);
     try {
-      if ((await onSave(evidence)) && edits.current === submitted) onSaved();
+      if ((await onSave(evidence)) && edits.current === submitted)
+        onSaved(session);
     } finally {
       setBusy(false);
     }

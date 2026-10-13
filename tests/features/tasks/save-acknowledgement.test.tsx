@@ -76,7 +76,7 @@ async function rowFor(
       progress: task.rows[3] ?? null,
       joint: null,
       personal: null,
-      answeredAt: null,
+      answer: null,
     },
     { drafts: [], attention: [] },
     ME,

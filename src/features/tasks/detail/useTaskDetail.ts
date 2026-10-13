@@ -9,6 +9,7 @@ import {
   useDataEnv,
   useResourceList,
 } from "../../../data";
+import { useBoundaryClock } from "../clock";
 import { useTasksEnv } from "../env";
 import { type JointAnswer, jointOf } from "../memory";
 import { QUEUED_KINDS } from "../model/commands";
@@ -24,7 +25,13 @@ import {
   slotKey,
 } from "../model/ids";
 import { todayIn } from "../model/time";
-import { composeRow, type Outstanding, patched, type RowModel } from "../view";
+import {
+  composeRow,
+  draftsNaming,
+  type Outstanding,
+  patched,
+  type RowModel,
+} from "../view";
 
 /**
  * Everything the task detail shows (WF-TASK-01), from the cache and the outstanding drafts (a task created offline shows at once, projected,
@@ -36,6 +43,10 @@ import { composeRow, type Outstanding, patched, type RowModel } from "../view";
  * on this device or not this task's the view says so (`selection: "unavailable"`) and offers nothing to record: it never shows, or records
  * against, another day in its place. Without one: today's deterministic slot (or `once`) when this device holds it, else the latest by date
  * of ALL the task's saved days (a bounded walk), never only the first page's.
+ *
+ * The default day is chosen once for the visit (revision 2, assessed against design assessment C3): moving it at midnight while the person
+ * is on the page would retarget an open record card or correction (their input belongs to the day they were opened for). The DISPLAYED
+ * day's own window is followed by the clock (`now`); the next visit, or the day picker, chooses again.
  */
 export interface TaskDetailView {
   status: "loading" | "absent" | "ready";
@@ -63,6 +74,11 @@ export interface TaskDetailView {
   joint: JointAnswer | null;
   /** My progress ids by occurrence (deterministic), for a correction's side effects: other people's are read from the cache by parent. */
   progressRows: CacheRow[];
+  /**
+   * The time the displayed day is evaluated against (R8, revision 2): it moves when the day's window opens or closes, and when the page is
+   * shown, focused or restored, so the result, the pill and the recording controls follow the clock without any other change.
+   */
+  now: number;
 }
 
 const progressCache = new Map<string, string>();
@@ -338,13 +354,25 @@ export function useTaskDetail(
   }, [outstanding, all]);
 
   const joint = chosen === null ? null : jointOf(env.identity, chosen);
+  const occurrenceRow =
+    chosen !== null && occurrenceCached.status === "ready"
+      ? (occurrenceCached.value[chosen]?.merged ?? null)
+      : null;
+  // The displayed day's window as it will be composed (its queued correction applied): the clock wakes at its boundaries (R8, revision 2).
+  const shownWindow =
+    chosen === null
+      ? null
+      : parseOccurrenceData(
+          patched(occurrenceRow, chosen, draftsNaming(detail, [chosen]))
+            ?.value ?? null,
+        );
+  const clock = useBoundaryClock(
+    env.now,
+    shownWindow === null ? [] : [shownWindow],
+  );
   let row: RowModel | null = null;
   let unreadable = false;
   if (chosen !== null && progressId !== null) {
-    const occurrenceRow =
-      occurrenceCached.status === "ready"
-        ? (occurrenceCached.value[chosen]?.merged ?? null)
-        : null;
     const progressRow =
       progressCached.status === "ready"
         ? (progressCached.value[progressId]?.merged ?? null)
@@ -358,14 +386,14 @@ export function useTaskDetail(
         progress: progressRow,
         joint: null,
         personal: null,
-        answeredAt: null,
+        answer: null,
       },
       detail,
       env.accountId,
-      env.now(),
+      clock.now,
     );
     if (result.kind === "row") row = result.row;
-    else unreadable = true;
+    else if (result.kind === "unreadable") unreadable = true;
   }
   const loading =
     cachedTask.status === "loading" || executions.status === "loading";
@@ -413,7 +441,13 @@ export function useTaskDetail(
       showPrevious: () =>
         setCursors((c) => (c.length > 1 ? c.slice(0, -1) : c)),
     },
-    selection: overlayLoading && chosen !== null ? "loading" : selection,
+    selection:
+      (overlayLoading ||
+        occurrenceCached.status === "loading" ||
+        progressCached.status === "loading") &&
+      chosen !== null
+        ? "loading"
+        : selection,
     row: overlayLoading ? null : row,
     unreadable,
     synced: taskBase !== null,
@@ -423,5 +457,6 @@ export function useTaskDetail(
       othersList.status === "ready"
         ? othersList.value.rows.map((r) => r.merged)
         : [],
+    now: clock.now,
   };
 }

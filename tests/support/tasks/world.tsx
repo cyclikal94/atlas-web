@@ -308,9 +308,9 @@ export interface Mounted {
   unmount(): void;
   /**
    * Commits ONE delta sync page carrying `rows` through the PRODUCTION `commitPage` plan, as the leader does: the cache changes and its
-   * position (`page_seq`) moves, which every live read hears (a seeded row is not heard).
+   * position (`page_seq`) moves, which every live read hears (a seeded row is not heard). `removed` ids are removed by the same page.
    */
-  commitSync(rows: CacheRow[]): Promise<void>;
+  commitSync(rows: CacheRow[], removed?: string[]): Promise<void>;
 }
 
 export async function mountTasks(options: {
@@ -407,7 +407,7 @@ export async function mountTasks(options: {
     bodies: () => (world.idb.snapshot(NAME)?.draft_commands ?? []) as never,
     rerender: (env) => view.rerender(tree(env)),
     unmount: () => view.unmount(),
-    commitSync: async (rows) => {
+    commitSync: async (rows, removed = []) => {
       const service = data.service();
       if (service === null) throw new Error("commitSync: no open service");
       const before = world.idb.peek(NAME, "sync_state", "singleton") as
@@ -428,22 +428,25 @@ export async function mountTasks(options: {
           batches: [
             {
               revision: (s.applied_revision ?? 0) + 1,
-              changes: rows.map((row) => ({
-                kind: "upsert" as const,
-                resource: {
-                  id: row.id,
-                  kind: row.kind,
-                  parent_id: row.parent_id,
-                  label: row.label,
-                  value: row.value as Record<string, unknown> | null,
-                  version: row.version,
-                  can_edit: row.can_edit,
-                  archived: row.archived,
-                  ...(row.policy_version === undefined
-                    ? {}
-                    : { policy_version: row.policy_version }),
-                },
-              })),
+              changes: [
+                ...removed.map((id) => ({ kind: "remove" as const, id })),
+                ...rows.map((row) => ({
+                  kind: "upsert" as const,
+                  resource: {
+                    id: row.id,
+                    kind: row.kind,
+                    parent_id: row.parent_id,
+                    label: row.label,
+                    value: row.value as Record<string, unknown> | null,
+                    version: row.version,
+                    can_edit: row.can_edit,
+                    archived: row.archived,
+                    ...(row.policy_version === undefined
+                      ? {}
+                      : { policy_version: row.policy_version }),
+                  },
+                })),
+              ],
             },
           ],
           nextCursor: `cursor-${s.page_seq + 1}`,
