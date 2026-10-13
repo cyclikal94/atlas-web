@@ -280,6 +280,35 @@ describe("the task form (WF-TASK-02; A10)", () => {
     expect(t.router.state.location.pathname).toBe(`/tasks/${c?.id}`);
   });
 
+  test("switching the goal kind away and back keeps the checklist items typed (hidden values are kept while editing)", async () => {
+    const t = await mountTasks({ path: "/tasks/new", env: { online: false } });
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: PRESET_COPY.scratch }) !== null,
+    );
+    fireEvent.click(screen.getByRole("button", { name: PRESET_COPY.scratch }));
+    await t.until(() => document.querySelector("[data-task-form]") !== null);
+    fireEvent.click(
+      screen.getByRole("radio", { name: FORM_COPY.goal.checklist }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.addItem }));
+    fireEvent.change(screen.getByLabelText(FORM_COPY.item(1)), {
+      target: { value: "Bag" },
+    });
+    fireEvent.click(
+      screen.getByRole("radio", { name: FORM_COPY.goal.checkbox }),
+    );
+    expect(screen.queryByLabelText(FORM_COPY.item(1))).toBeNull();
+    fireEvent.click(
+      screen.getByRole("radio", { name: FORM_COPY.goal.checklist }),
+    );
+    // Queried, not got: a missing item is an assertion failure, never an error.
+    const item = screen.queryByLabelText(
+      FORM_COPY.item(1),
+    ) as HTMLInputElement | null;
+    expect(item?.value).toBe("Bag");
+  });
+
   test("a refused save keeps every value and says why; nothing is shown as saved", async () => {
     const t = await mountTasks({ path: "/tasks/new", env: { online: false } });
     await t.until(

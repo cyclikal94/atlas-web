@@ -1,0 +1,133 @@
+# Today and tasks (WEB-10a)
+
+*Written by WEB-10a, 12 October 2026, against the pinned contract `v0.28.0-rc.1`. Consumers: WEB-10b (lists), WEB-10c (materialisation,
+dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people names). Fixture-stage work: `integration_passed` is false.*
+
+## What this slice does
+
+- **Today (`/today?day=YYYY-MM-DD&tz=Area/City`, WF-TODAY-01).** The day's occurrences in a display zone: filters All / To do / Done /
+  Missed, the summary "{done} of {total} done · {to do} still to do" (with "· {n} not known" when a state is not known: unknown is never
+  counted as zero), time-of-day groups, one row per occurrence with my state, a pending mark, the carry consequence, who takes part and the
+  quick action ("Mark done" for a tick goal; "Record" opens the task). States: loading, empty, error (banner with request ID and Try again;
+  cached rows stay under it), offline, and the `pending_tasks` notice.
+- **Tasks (`/tasks`, `/tasks/new`, `/tasks/<id>?occurrence=<id>`, `/tasks/<id>/edit`, WF-TASK-01/02/03).** The list (100 a page, an
+  Archived filter), the detail (record card for every goal kind, history with corrections, participation and the joint line, enrolment,
+  closure and streak exclusion, archive/restore, sharing through WEB-12a's editor), the form with presets, and the one-day correction.
+- **Commands.** `create_task`, `revise_task`, `record`, `exclude`, `resolve`, `revise_occurrence` and `archive` are queued through the
+  outbox (`model/commands.ts`); `enrol` is online-only (`/task-access-commands`, one attempt per body).
+
+## Public interface (`src/features/tasks/index.ts`)
+
+Import only from the index.
+
+| Export | What it is |
+| --- | --- |
+| `model/contract.ts` types and parsers | `TaskDefinition`, `OccurrenceData`, `ProgressState`, `OccurrenceView`, … and `parseDefinition`, `parseOccurrenceData`, `parseProgressState`, `parseOccurrencePage`, `parsePresets`, `parseJournalPage`, `parseEnrolment`, `parseTaskDetail`, `parseProjection`. Strict: exact keys, every bound; `null` on any mismatch. |
+| `evaluate`, `aggregate`, `finalise`, `layer`, `personalResult`, `eligible`, `actionable`, `scheduledOn`, `inDayView` | The server's evaluation mirrored (`crates/core/src/tasks/mod.rs`, `service/reads.rs`). `aggregate` is for tests and documentation only: **the client never shows a joint result it computed (Q8).** |
+| `uuidV5`, `occurrenceId`, `progressId`, `slotKey` | The deterministic ids (async, SHA-1 through `crypto.subtle`): compute them BEFORE enqueueing. |
+| `model/time.ts` | `resolveWallTime` (fold → earlier; gap → forward by the change of offset), `windows`, `firstSlot`, `slotOn`, `dateIn`, `todayIn`, `dayEnd`, `gapShifted`. |
+| `model/commands.ts` | The request builders (`createTask`, `reviseTask`, `record`, `exclude`, `resolve`, `reviseOccurrence`, `archive`), `QUEUED_KINDS`, `commandOf`, `pendingEvidenceOf`, `canonicalDefinition`. |
+| `registerTaskCommands(registry)` | Describe / project / current read / rebuild for every queued kind; idempotent per registry. The protected tree registers into the page's registry. |
+| `TasksBoundary`, `TasksEnvProvider`, `useTasksEnv` | The environment (the `SharingEnv` pattern): the stamped client for the displayed `(account, epoch)`, `identity`, `online`, `writable`, clock and ids. |
+| `useTaskActions`, `RecordCard`, `TodayRow`, `composeRow`, `RowModel` | The acts and the shared components. |
+| `taskPath(id, occurrence?)`, `todayPath(day?, zone?)` | Route helpers. |
+
+### Obligations of a consumer
+
+- A command for a task resource goes through the builders here, or follows the same targets and version bases (table in the plan §3.3):
+  `record` is checked against **my progress stream** only for checkbox and checklist evidence without `replaces`; quantity, observe and
+  corrections raise the stream as a side effect and send no `expected_version`. `exclude` is checked against my stream, `resolve`,
+  `revise_occurrence` and `archive` against their own resource, `revise_task` against the task with `expected_policy_version`.
+- Never record for another person (TASK-18): `subject_account_id` is the signed-in account.
+- `happened_at` is the instant of the person's act (Unix seconds), taken when it happens, never at send.
+- A value from the cache or the server is parsed with the strict parsers at READ time. No page-level value validator is registered for a
+  task kind (D-10a-3): one bad value would fail a whole sync page.
+- A screen that reads on mount records a `403`/`404` with `noteIfRefused` **when the answer arrives**, not after checking it is still
+  mounted: a `403` remounts the protected tree before the screen's continuation runs (measured: dozens of `/daily` reads a second).
+
+## Decisions taken in this slice (D-10a-1 … D-10a-15)
+
+1. **Sources.** Resources from the cache; derived fields (`outcome`, `period_outcome`, `actionable`, membership, `pending_tasks`) from `GET /daily`
+   while online, in page memory for the displayed identity only. Two reads per view (`scope=joint`, `scope=personal`), both `state=all`. Offline the
+   day is derived from the cache (§ offline below).
+2. **No `kind_date` deriver, no schema change.** The offline day is a bounded walk of every cached occurrence (`scanResources`, 100 rows a
+   window, a macrotask between windows). A recorded departure from WEB-04 D's `by_kind_date`. The cost at large caches is a diagnostic for
+   WEB-09c/09d (trigger: a desktop full walk of 10,000 occurrences over 2 s in Chromium).
+3. **Strict parsing at read time**, never a page-level validator. An unparseable row says "This item can't be shown on this device".
+4. **Create sharing**: "Use my defaults" (the task audience from the B5 record) or "Only me" (an explicit empty policy, still queueable).
+   Choosing people is done after save through Sharing on the task (WEB-12a's editor); there is no second policy editor.
+5. **Online reads are this slice's own loader**, bound to `(account, epoch)`; refusals are remembered per identity (`memory.ts`).
+6. **`pending_tasks` disclosure without catch-up.** A non-blocking notice; `materialise` and "Catch up" are WEB-10c's (escalation E-1 below).
+7. **Enrolment** is online-only, one attempt per body (`model/attempt.ts`).
+8. **Status vocabulary** (first rule wins): Conflict, Excluded, Done (Done late), Waiting on an earlier day, Closed not completed, Missed, On
+   track, To do, Not open yet, Not available offline, Not known.
+9. **Pending marks**: "Not sent yet" (queued, or held for a review), "Sending…" (in flight), "Waiting for the server" (acknowledged, effect not in
+   the cache). The locally layered result is labelled "provisional".
+10. **Display zone and day in the address**; the default zone is the device's, shown on the chip and changeable; the default day rolls over at
+    local midnight.
+11. **Time-of-day groups** by the slot instant in the display zone: Morning before 12:00, Afternoon to 17:59, Evening; date-only, undated and
+    overdue rows in "Any time today" (an overdue row shows "From {day}"). Within a group: by instant, title, id.
+12. **"Record" opens the task** for that day and focuses the record card; "Mark done" records in place (tick goals only).
+13. **Queued-edit coalescing.** Saving the form of a task whose `create_task` is still `queued` edits that draft in place; a second
+    `revise_task` that is still queued and never sent is edited. The defaults review block is kept or widened, never cleared by an edit.
+14. **No `happened_at` editor.**
+15. **WF-QUEUE-02 current reads**: task-level kinds read `GET /tasks/{id}`; `record`/`exclude` read `GET /progress?parent_id=<occurrence>`.
+    `resolve` and `revise_occurrence` register none (no single-occurrence read in the contract).
+
+## Personal results offline (ARCH §3.3c, TASK-31)
+
+In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
+by its DETERMINISTIC id (never `participants`): absent with nothing pending → "Not available offline" (listed, or Anyone) or no result (not
+listed); present → the stored outcome finalised when the window has closed (provisional → complete, incomplete → missed, unknown → missed only
+for checkbox, checklist and minimum-only goals), never re-derived from `recent_entries` (at most eight) or `entry_count`; my pending evidence
+layered on (exact for appended evidence; a correction only when the whole stream is known, otherwise "waiting for the server to check the full
+history").
+
+## Deviations and additions, for the connected-app checkpoint (STAGED-ACCEPTANCE-20261011)
+
+Provisional copy and these choices do not block; they are collected for the human review after WEB-10a/10b/11a and Settings are integrated.
+Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.ts` (the case named).
+
+| Item | Route and fixture state |
+| --- | --- |
+| Pill words beyond the drawings, "· n not known" | `/today` (E-T1, E-T9; jsdom `today-page.test.tsx`) |
+| `pending_tasks` notice without "Catch up" | `/today` with `pending_tasks` (E-T1) |
+| Error banner keeps cached rows under it ("Showing what's on this device") | `/today` with a failing `/daily` |
+| Joint-line wording ("Withheld — …", "No one has finished it yet that you can see", "Shared result not known yet", "last checked …") | `/tasks/<id>` of a shared task |
+| Pending marks | `/today` after "Mark done" offline (E-T2) |
+| Time-of-day boundaries; overdue rows "From {day}" | `/today` (E-T12) |
+| "Record" navigates to the task | `/today` numeric row |
+| Create sharing as "Use my defaults / Only me" | `/tasks/new` (E-T3) |
+| No search in the list; an "Archived" filter instead of the Settings ledger | `/tasks` (E-T6) |
+| Time of day added to the correction dialog | `/tasks/<id>` → Correct this day (E-T7) |
+| No `happened_at` editor | — |
+| "Let people skip a day without breaking their streak" toggle (required by Q21, absent from the drawings) | `/tasks/new` |
+| Time zone and participation fields from the baseline | `/tasks/new` |
+| Participants as counts ("You and 2 others"), names are WEB-11a's | `/tasks/<id>` |
+| The header says "Who can see this is set in Sharing." instead of naming the audience (the policy is readable by its owner only, online) | `/tasks/<id>` |
+| The "‹ Tasks" link shows at every width (the CSS budget had no room for a desktop-only rule); the mobile tab bar stays on the detail | `/tasks/<id>` |
+| Status colour only for Missed and Conflict (Done uses the neutral pill: the CSS budget); the words always say the state | `/today` |
+| Preset subtexts are built by the client from the definition | `/tasks/new` (E-T4) |
+| Tablet landscape at 1180×820 and 1112×834 both tested | E-T1 |
+
+## Escalation E-1 (material, not blocking WEB-10a)
+
+No fixed-recurrence task gets a second occurrence until WEB-10c's `materialise` exists: the server makes only the start-date slot at
+`create_task`. At the connected-app checkpoint recurring tasks would show only on their first day, with the `pending_tasks` notice. The options
+are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal catch-up here by a scope change). Nothing here adds
+`materialise`.
+
+## Limits
+
+- **Client "today" vs server "today".** A create's first occurrence is projected from the device's day in the task's zone; after a long offline
+  period the server may make another slot. The next sync replaces the projection; a record queued against the projected id meets a real
+  `404`/`409` and shows in the queue. It is never silently retargeted.
+- **Device time-zone data** can differ from the server's bundled data; server values win wherever they exist.
+- **Two `/daily` reads per view**, not profiled here (WEB-09c owns measurements).
+- **A `403` re-check of the session** closes and reopens the display: a screen remounts, by design of the session.
+
+## Not claimed
+
+No PostgreSQL, HTTPS deployment, production-leader journey, physical device, installed PWA or manual screen-reader evidence (WEB-09d,
+collected by WEB-15). Browser viewport and colour-scheme emulation is not device evidence. Fixture evidence (stubbed `/daily`,
+`/task-presets`, the fixture leader) is never integration evidence. Backend gates BE-Q1 and BE-CH1 have no completion record.

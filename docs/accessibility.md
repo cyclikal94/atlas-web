@@ -56,6 +56,21 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Remove is described by its consequence.** The "signs you out everywhere" paragraph has an id and every Remove control (enabled, "Removing…", or disabled with its reason) lists it in `aria-describedby`, on the mobile sheet and the desktop dialog. A disabled control's own reason is read first. axe does not check this association, so `tests/e2e/fixture.auth-settings.spec.ts` asserts the accessible description at 320 and 1280 px.
 - **A refusal that arrives after "Finishing sign-in"** is shown by the sign-in form that mounts next (the heading is focused as for any new state, and the message is a `role="alert"` inserted after the form appears, so it is announced once).
 
+
+## Today and tasks (WEB-10a)
+
+- Every page has one `h1` (Today, Tasks, the task's title, New task / Edit task); sections are labelled by their `h2`.
+- The Today filters are a native radio group (`fieldset`/`legend`: arrow keys move and select); the day and zone are labelled native controls.
+- A disabled action always states why beside it (`Button`'s `reason`): "Not open until …", "This day is closed", "Only participants can record this",
+  "Wait for this task to finish syncing before editing it".
+- A result shown from saved, unsent work is named "provisional" in its text; pending marks are words, never colour alone (the pill tone is decoration).
+- Saves and refusals are announced through the announcer only (lint R6); nothing new is a live region.
+- Radio choices with a consequence line are named by both, separated (found by the component tests: the names ran together).
+- The correction dialog uses the shared `Dialog` (focus trap, Escape discards, focus return, in-dialog sync control keeps the draft).
+- Automated: jest-axe in the component tests; axe with real layout and contrast in Chromium, Firefox and WebKit at 390×844, 834×1112, 1112×834,
+  1180×820 and 1440×900 in light and dark (`fixture.tasks.spec.ts` E-T1; theme set before load), no horizontal overflow, and a keyboard-only journey
+  (E-T8). This is browser emulation: physical devices and manual screen readers are WEB-09d's (collected by WEB-15).
+
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
 For each core journey (open the app, move between destinations, open Appearance and change it, open the More sheet, read the sync status, reach a compatibility screen):

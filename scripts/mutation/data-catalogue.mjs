@@ -16343,6 +16343,431 @@ export const UNIT = [
         "void k.disposed;",
       ),
   },
+  // ---- WEB-10a (Today view, task/occurrence core): MU-2001..MU-2030 (a range no sibling branch uses) -------------------------------
+  {
+    id: "MU-2001",
+    title:
+      "WEB-10a: an unobserved closed window of a goal with a maximum finalises to missed (it stays unknown)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /unobserved closed window|finalise\(evaluate\(open\)\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  goal.kind === "checkbox" || goal.kind === "checklist" || minimumOnly(goal);',
+        '  goal.kind === "checkbox" || goal.kind === "checklist" || goal.kind === "numeric";',
+      ),
+  },
+  {
+    id: "MU-2002",
+    title:
+      "WEB-10a: offline finalisation leaves a provisional result provisional after the window closes (late completion never Done)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /late completion|finalise\(evaluate\(open\)\)|nine-against-eight/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "provisional":\n      return "complete";\n',
+        '    case "provisional":\n      return "provisional";\n',
+      ),
+  },
+  {
+    id: "MU-2003",
+    title:
+      "WEB-10a: a correction is layered as exact when the stream has more than eight entries (only eight are known)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /a correction is exact only when the whole stream is known/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (base.entry_count > 8 || base.recent_entries.length !== base.entry_count)",
+        "  if (base.recent_entries.length > base.entry_count)",
+      ),
+  },
+  {
+    id: "MU-2004",
+    title:
+      "WEB-10a: my exclusion is checked before a covered day (ARCH §3.3c order inverted)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /covered comes BEFORE excluded/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (occ.covered_by !== null && occ.participants.includes(me)) {",
+        "  if (\n    occ.covered_by !== null &&\n    occ.participants.includes(me) &&\n    !(stream?.excluded && occ.definition.allow_streak_exclusions)\n  ) {",
+      ),
+  },
+  {
+    id: "MU-2005",
+    title:
+      "WEB-10a: actionable ignores close_incomplete's closes_at (a closed day stays to do)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /close_incomplete is not actionable after closes_at/,
+    patch: (t) =>
+      sub(
+        t,
+        '    (occurrence.definition.carry !== "close_incomplete" ||\n      occurrence.closes_at === null ||\n      now < occurrence.closes_at) &&\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2006",
+    title:
+      "WEB-10a: an Anyone occurrence I may edit is not eligible without a stream of mine",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /Anyone with occurrence can_edit is eligible/,
+    patch: (t) =>
+      sub(
+        t,
+        '    input.streamPresent ||\n    (occurrence.definition.participation === "anyone" && input.canEdit)\n',
+        "    input.streamPresent\n",
+      ),
+  },
+  {
+    id: "MU-2007",
+    title:
+      "WEB-10a: offline, the joint line shows the last server answer as if it were current (Q8: never presented as fresh)",
+    file: "src/features/tasks/model/row-state.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect: /the joint line is the server's or nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!input.online)\n",
+        "    if (!input.online && (false as boolean))\n",
+      ),
+  },
+  {
+    id: "MU-2008",
+    title:
+      "WEB-10a: day membership uses slot.date for a timed slot (the instant's date in the display zone is ignored)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /a timed slot belongs to the day of its INSTANT/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (slot.instant !== null) return dateIn(slot.instant, zone) === day;",
+        "  if (slot.instant !== null && slot.date === null)\n    return dateIn(slot.instant, zone) === day;",
+      ),
+  },
+  {
+    id: "MU-2009",
+    title:
+      "WEB-10a: the occurrence id is a UUIDv5 under NAMESPACE_URL instead of the task's own UUID",
+    file: "src/features/tasks/model/ids.ts",
+    tests: ["tests/features/tasks/ids.test.ts"],
+    expect: /the documented first occurrence/,
+    patch: (t) =>
+      sub(
+        t,
+        "uuidV5(taskId, `atlas-occurrence-v1:${slotKey}`)",
+        'uuidV5("6ba7b811-9dad-11d1-80b4-00c04fd430c8", `atlas-occurrence-v1:${slotKey}`)',
+      ),
+  },
+  {
+    id: "MU-2010",
+    title: "WEB-10a: a dated one-off's slot key is its date, not `once`",
+    file: "src/features/tasks/model/ids.ts",
+    tests: ["tests/features/tasks/ids.test.ts"],
+    expect: /slot keys: `once` for every schedule without repeat/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (\n    schedule.repeat === null ||\n    schedule.repeat.frequency === "after_completion" ||',
+        '  if (\n    schedule.repeat?.frequency === "after_completion" ||',
+      ),
+  },
+  {
+    id: "MU-2011",
+    title: "WEB-10a: in a fold the LATER instant is taken",
+    file: "src/features/tasks/model/time.ts",
+    tests: ["tests/features/tasks/time.test.ts"],
+    expect: /autumn fold/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (found.length > 0) return found[0] as number;",
+        "  if (found.length > 0) return found[found.length - 1] as number;",
+      ),
+  },
+  {
+    id: "MU-2012",
+    title:
+      "WEB-10a: in a gap the wall time moves BACKWARDS by the change of offset",
+    file: "src/features/tasks/model/time.ts",
+    tests: ["tests/features/tasks/time.test.ts"],
+    expect: /spring gap|Lord Howe/,
+    patch: (t) =>
+      sub(
+        t,
+        "instantsOf(zone, wall + gap)[0]",
+        "instantsOf(zone, wall - gap)[0]",
+      ),
+  },
+  {
+    id: "MU-2013",
+    title:
+      "WEB-10a: a checkbox record omits expected_version (the server refuses it: required for checkbox and checklist)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /a create seeds task, details, first occurrence/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ? { expected_version: bases[input.progressId] as number }\n",
+        "          ? {}\n",
+      ),
+  },
+  {
+    id: "MU-2014",
+    title:
+      "WEB-10a: exclude is checked against the OCCURRENCE's version instead of my progress stream's",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /exclude is checked against MY PROGRESS version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          expected_version: bases[input.progressId] as number,\n",
+        "          expected_version: bases[input.occurrenceId] as number,\n",
+      ),
+  },
+  {
+    id: "MU-2015",
+    title:
+      "WEB-10a: revise_task does not raise the task's details (the server raises the execution too)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /revise_task: the task's version and its policy_version/,
+    patch: (t) =>
+      sub(
+        t,
+        '      {\n        resourceId: input.executionId,\n        role: "side_effect",\n        basis: "resource",\n        versionChecked: true,\n      },\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2016",
+    title:
+      "WEB-10a: revise_occurrence raises no progress stream (the server raises every participant's)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect:
+      /revise_occurrence: the occurrence's version, and EVERY known progress stream raised/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const progress = [...new Set(input.progressIds)];",
+        "  const progress: string[] = [];",
+      ),
+  },
+  {
+    id: "MU-2017",
+    title:
+      "WEB-10a: revise_task omits expected_policy_version (Q1: refused with conflict)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /revise_task: the task's version and its policy_version/,
+    patch: (t) =>
+      sub(t, "          expected_policy_version: input.policyVersion,\n", ""),
+  },
+  {
+    id: "MU-2018",
+    title:
+      "WEB-10a: a private ('Only me') create does not capture the progress defaults (the creator's enrolment uses them)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /never fetched is held for review|a create seeds task/,
+    patch: (t) =>
+      sub(
+        t,
+        '["task", "progress"] : ["progress"];',
+        '["task", "progress"] : [];',
+      ),
+  },
+  {
+    id: "MU-2019",
+    title:
+      "WEB-10a: an Anyone first record does not capture the progress defaults (the stream is created on demand from them)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /an Anyone first stream is seeded at 1 and captures progress/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const captured = input.firstAnyoneStream\n",
+        "  const captured = input.firstAnyoneStream && (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2020",
+    title:
+      "WEB-10a: a successful save sends hidden numeric bounds after switching to a tick (PRODUCT-DECISIONS item 2)",
+    file: "src/features/tasks/model/form.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect: /switching numeric → checkbox keeps the bounds/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (show.numeric) {",
+        '  if (show.numeric || state.minimum.trim() !== "") {',
+      ),
+  },
+  {
+    id: "MU-2021",
+    title:
+      "WEB-10a: switching the goal kind discards the hidden checklist items",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /switching the goal kind away and back keeps the checklist items/,
+    patch: (t) =>
+      sub(
+        t,
+        "onChange={() => set({ goalKind: kind })}",
+        "onChange={() => set({ goalKind: kind, checklist: [] })}",
+      ),
+  },
+  {
+    id: "MU-2022",
+    title:
+      "WEB-10a: a refused save clears the form (a failure must keep every value)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /a refused save keeps every value/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!saved.ok) setNotice(saved.message);",
+        "        if (!saved.ok) {\n          setNotice(saved.message);\n          setState(initial);\n        }",
+      ),
+  },
+  {
+    id: "MU-2023",
+    title:
+      "WEB-10a: a 409 on a /daily continuation is not a restart (TASK-7: the read fails instead of starting again)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-page.test.tsx"],
+    expect: /TASK-7/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (page.kind === "conflict" && revision !== undefined) {',
+        '        if (page.kind === "conflict" && revision !== undefined && (false as boolean)) {',
+      ),
+  },
+  {
+    id: "MU-2024",
+    title:
+      "WEB-10a: a refused mount-time read is not remembered (the remount asks again, for ever)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/today-page.test.tsx",
+      "tests/features/tasks/model.test.ts",
+    ],
+    expect: /a 403 is remembered|AFTER the view unmounted/,
+    patch: (t) =>
+      sub(t, "    noteRefusal(identity, read, result.kind);", "    void read;"),
+  },
+  {
+    id: "MU-2025",
+    title:
+      "WEB-10a: a late /daily answer of the previous identity is applied (the read's currency, checked per page and on completion, and the answer's key are all ignored)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-page.test.tsx"],
+    expect: /a late answer for a previous identity is never shown/,
+    patch: (t) =>
+      sub(
+        t.replace(
+          "const isCurrent = () => mine === read.current;",
+          "const isCurrent = () => mine === mine;",
+        ),
+        "  const current = answer !== null && answer.key === key ? answer : null;",
+        "  const current = answer;",
+      ),
+  },
+  {
+    id: "MU-2026",
+    title:
+      "WEB-10a: mergeResource takes a projection of another resource (a multi-resource create projects the task as its occurrence)",
+    file: "src/data/model/overlay.ts",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/data/outcomes-model.test.ts",
+    ],
+    expect: /mergeResource ignores a projection with another id/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (projected !== null && projected.id === target) {",
+        "      if (projected !== null) {",
+      ),
+  },
+  {
+    id: "MU-2027",
+    title:
+      "WEB-10a: commandKindOf ignores a wrapped `{command: {kind}}` (every task draft's kind is the endpoint)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/features/tasks/commands.test.ts",
+    ],
+    expect: /commandKindOf reads a WRAPPED command|a create seeds task/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const kind = (wrapped as Record<string, unknown>).kind;\n    if (typeof kind === "string") return kind;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2028",
+    title:
+      "WEB-10a: readOutstanding keeps an acknowledged draft whose effect is gone (counted twice once the cache has it)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /queued, in-flight and blocked drafts naming a resource/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (\n          (await reader.get("pending_effects", [id, draft.local_id])) !==\n          undefined\n        )\n          drafts.push(draft);',
+        "        drafts.push(draft);",
+      ),
+  },
+  {
+    id: "MU-2029",
+    title:
+      "WEB-10a: 'Exclude from my streak' is offered when the task does not allow exclusions",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /Exclude is hidden entirely when the policy is off/,
+    patch: (t) =>
+      sub(
+        t,
+        "    data.definition.allow_streak_exclusions &&\n    data.covered_by === null &&",
+        "    data.covered_by === null &&",
+      ),
+  },
+  {
+    id: "MU-2030",
+    title:
+      "WEB-10a: a pooled task with a tick goal passes validation (pooled needs an amount)",
+    file: "src/features/tasks/model/form.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect:
+      /validation matches the contract bounds, and pooled needs an amount/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (state.participation === "pooled" && goal.kind !== "numeric")',
+        '  if (state.participation === "pooled" && goal.kind !== "numeric" && (false as boolean))',
+      ),
+  },
 ];
 
 /**
@@ -18994,6 +19419,46 @@ export const ENGINE = [
         t,
         "      : UNKNOWN;\n  const personal = personalEvidence.known",
         "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
+      ),
+  },
+  {
+    id: "MU-2031",
+    title:
+      "WEB-10a N-T1: (REAL ENGINE) the offline Today walk keeps the occurrences of an archived task",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T6:",
+    expect: /E-T6:/,
+    patch: (t) => sub(t, "      if (row.archived) continue;\n", ""),
+  },
+  {
+    id: "MU-2032",
+    title:
+      "WEB-10a N-T2: (REAL ENGINE) the first occurrence of a repeating schedule is keyed `once` (its deterministic id is not the server's)",
+    file: "src/features/tasks/model/ids.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T3:",
+    expect: /E-T3:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (\n    schedule.repeat === null ||\n",
+        "  if (\n    schedule.repeat !== undefined ||\n",
+      ),
+  },
+  {
+    id: "MU-2033",
+    title:
+      "WEB-10a N-T3: (REAL ENGINE) happened_at is not the instant of the person's act (an hour later)",
+    file: "src/features/tasks/actions.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T2:",
+    expect: /E-T2:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            happenedAt: Math.floor(env.now() / 1000),",
+        "            happenedAt: Math.floor(env.now() / 1000) + 3_600,",
       ),
   },
 ];

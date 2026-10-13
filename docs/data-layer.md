@@ -12,7 +12,7 @@ departed from, the departure is listed under "Departures from the plan".
 
 `src/data/index.ts` is the only import path other slices may use (lint rule R15). It exports the UI hooks and provider, the outbox types and
 the command and conflict registries, the account-database name function, the deletion-port factory and the status types, and (WEB-12a) the sharing defaults:
-`useSharingDefaults`, `captureDefaults`, the snapshot types and parsers, `defaultsReviewCase`, `reviewKinds` and the review's `ReviewConfirmation`/`ConfirmReviewOutcome`. What the **boot path** imports from it is small and
+`useSharingDefaults`, `captureDefaults`, the snapshot types and parsers, `defaultsReviewCase`, `reviewKinds` and the review's `ReviewConfirmation`/`ConfirmReviewOutcome`, and (WEB-10a) the outstanding-work reads below (`useOutstanding`, `useOutstandingByKind`, `useCachedResources`, `useCachePosition`, `scanResources`, `readResourcesNow`). What the **boot path** imports from it is small and
 must not reach Dexie: `createDataDeletionPorts` is a static shim that loads the implementation lazily, the UI composition is a dynamic import, and `vite.config.ts` marks
 `src/data` modules side-effect free. `pnpm check:artefacts` runs `scripts/check-initial-chunk.mjs`, which fails if Dexie, an engine or a plan is in the initial chunk
 (`tests/static/initial-chunk.test.ts` shows the check failing on a seeded violation). A module imported by both the boot path and a lazy chunk is placed whole in
@@ -35,6 +35,7 @@ src/data/
   ui/        the env (no React), the hooks and provider, the browser composition, the production quota guard (`production-quota.ts`)
 src/features/sync/   the sync screen (`/sync`), the banners, the cache gate
 src/features/sharing/ WEB-12a: the policy and defaults editors, the directory lookup, the defaults review (docs/sharing.md)
+src/features/tasks/   WEB-10a: Today, the task screens, the task model and commands (docs/tasks.md)
 ```
 
 Lint enforces the boundaries (`scripts/check-data-conventions.mjs`, rules R13 to R18, run by `pnpm lint`, with positive and negative fixtures in
@@ -647,6 +648,34 @@ the current epoch is shown with no request, one persisted for another epoch is n
 * **Capture.** `captureDefaults(record, kinds)` (pure) is what a queued create attaches: the revision for `defaults_revision`, and per template kind the template with every household it names from the SAME snapshot (`defaults_context`, format `atlas-defaults-context-v1`). With no record it is `never_fetched`; a named household the snapshot does not list is captured `unavailable`. Both put the kinds in `defaultsReview`.
 * **`BuildResult.defaultsReview`.** A non-empty list stores the draft with `review_block { kind: "defaults", kinds }`: the dispatcher never claims it (`markInFlight` refuses a review block) and the queue is held from it (D-19), exactly as for a draft refused with `409 defaults_changed`. On an EDIT the field decides the block: absent keeps it (an edit of the content is not a review of its audience), `[]` clears it, a list replaces it. A non-list is `not_json`.
 * **`Outbox.confirmDefaultsReview(localId, { reviewed, defaultsRevision, defaultsContext, replacementId? })`** is the person's confirmation in the review, and the only thing that releases a defaults review: it reads the draft, its body and the basis of each target (`readReviewDraft`, read-only), rebuilds the stored command with ONLY its top-level `defaults_revision` replaced and its context replaced (`model/review-confirmation.ts`), and goes through `editQueued` (a queued draft blocked locally: same `local_id`) or `supersede` (a draft refused with `defaults_changed`: a fresh `local_id`, `replacementId` on a retry). The build refuses versions other than the draft's stored bases (`rebuild_refused`): a body this layer did not author is never sent on a version it was not composed against. `DataActions.confirmDefaultsReview` routes it to the leader's facade when one is attached, so its dispatcher wakes. **It is conditional on the draft the person reviewed** (WEB-12a review cycle 1, R2): `reviewed` is the row the review showed (`reviewedOf`: its body digest, revision, captured context, review block and status). The facade compares it with what it read, and the rebuild's request carries `EnqueueRequest.expectDraft`, which `planEdit` and `decideSupersede` call with the draft as stored INSIDE the writing transaction; a draft that changed in between (another page's `editQueued` of the same queued draft, a changed block or context) refuses the confirmation with `draft_changed` and nothing is written, so a committed edit is never overwritten by a body built from the earlier read. `expectDraft` is generic (`EditOutcome` and `SupersedeOutcome` gain `draft_changed`) and only a caller that decided on an earlier read needs it.
+
+
+## Outstanding work, reads by id and the whole-kind walk (WEB-10a)
+
+*Added by WEB-10a, 12 October 2026. Generic: nothing here knows what a task is. The consumer contract is `docs/tasks.md`.*
+
+* **Why.** A QUEUED draft has no `pending_effects` row (the claim writes them), so `readResourceList` and `readMerged` show nothing of a draft until it
+  is sent, and a create the cache does not hold is in no list. A screen that must show saved, unsent work layers it itself from these reads.
+* **`plans/outstanding-reads.ts`** (read plans, not writers: the writer inventory is unchanged). `readOutstanding({ ids })` (at most 100 ids): per id,
+  the drafts naming it (`index_targets`) whose effect the cache does not show yet, WITH their bodies, oldest first (`queued`, `in_flight`, `blocked`,
+  and `acknowledged` while its `pending_effects` row for that id stands), and the headers of `version_conflict`/`operation_conflict`/`rejected` drafts;
+  at most one window (100) of bodies per call, `next` names the first id left for the next call. `readOutstandingByKind({ kinds, after? })`: the same
+  for the drafts of some kinds (a slice's commands, its creates included), oldest window first, with the attention headers. `readResourcesById({ ids })`:
+  cached rows with their overlays (the fold of `readResourceList`), `null` where none is cached. `readCachePosition()`: `page_seq`, `applied_revision`,
+  `last_synced_at`, a cheap signal that a sync page was committed.
+* **Hooks** (`ui/outstanding.tsx`, a module of its own so the plans stay out of every initial bundle): `useOutstanding(ids)`, `useOutstandingByKind(kinds)`,
+  `useCachedResources(ids)`, `useCachePosition()`. **Imperative** (`ui/scan.ts`): `scanResources(env, { kind, parentId?, window? }, visit, signal)` walks
+  every cached resource of a kind a window at a time (one `readResourceList` transaction each, a macrotask between windows, at most one window held) and
+  ends `complete`, `aborted` (signal or `visit` returned `"stop"`) or `closed` (no database, or the account's database changed under the walk);
+  `readResourcesNow(env, ids)` reads by id now, 100 per transaction.
+* **`commandKindOf` reads a wrapped command.** The kind of `{ command: { kind } }` (the body of `/task-commands`, `/calendar-commands` and
+  `/reminder-commands`) is the inner kind; before, every such draft's header said the endpoint. Byte-identical to WEB-13a's fix.
+* **A projection is taken only for the resource asked about.** `CommandSpec.projectCreate(draft, resourceId)` is told the id; `mergeResource`
+  (`window.id`, else the draft's only target) and `CommandRegistry.projectCreate` accept a projected row only when `row.id` is that id. A create that
+  introduces several resources (a task, its details, its first occurrence and progress) can no longer project the task's row in its occurrence's place;
+  a multi-target create with no named id projects nothing.
+* **Departure (D-10a-2).** WEB-04 D's `by_kind_date` stays empty: no key deriver is registered for tasks (one registered now would leave existing caches
+  inconsistent without a backfill). The offline day is the bounded walk above.
 
 ## Snapshot, production leadership and recovery (WEB-09b)
 
