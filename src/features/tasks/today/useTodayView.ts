@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type CacheRow,
-  readCacheSeqNow,
+  readCacheRevisionNow,
   readResourcesNow,
   scanResources,
   useAllOutstandingByKind,
@@ -192,18 +192,23 @@ export function useTodayView(day: string, zone: string): TodayView {
   const [error, setError] = useState<DailyError | null>(null);
   const [attempt, setAttempt] = useState(0);
   const key = `${env.identity}\u0000${day}\u0000${zone}`;
-  const pageSeq =
-    position.status === "ready" ? (position.value?.pageSeq ?? -1) : -2;
-  // A committed sync page moves `pageSeq`; the position's own first load (loading → ready) is not a change of the cache, so the server
+  // The cache's CONTENT generation (revision 2): the applied revision moves only with a page that carries changes. `page_seq` also moves
+  // with an empty delta page, and re-reading `/daily` on each of those looped: the read's own request woke the leader's engine, whose
+  // empty page moved `page_seq` again (found by E-C13: two reads per tab and a sync every 0.8 s, for ever).
+  const cacheRevision =
+    position.status === "ready"
+      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))
+      : -2;
+  // Committed content moves `cacheRevision`; the position's own first load (loading → ready) is not a change of the cache, so the server
   // read is not restarted (and its first answer discarded) by it.
   const [syncTick, setSyncTick] = useState(0);
   const lastSeq = useRef<number | null>(null);
   useEffect(() => {
-    if (pageSeq < 0) return;
-    if (lastSeq.current !== null && lastSeq.current !== pageSeq)
+    if (cacheRevision < 0) return;
+    if (lastSeq.current !== null && lastSeq.current !== cacheRevision)
       setSyncTick((n) => n + 1);
-    lastSeq.current = pageSeq;
-  }, [pageSeq]);
+    lastSeq.current = cacheRevision;
+  }, [cacheRevision]);
   const ready = position.status;
   const noDatabase = position.status === "unavailable";
 
@@ -317,7 +322,7 @@ export function useTodayView(day: string, zone: string): TodayView {
       const query = { day, zone, limit: env.dailyPageSize };
       void (async () => {
         // The durable cache position when the read is DISPATCHED: a page committed after it makes the answer older than the cache.
-        const seq = await readCacheSeqNow(data);
+        const seq = await readCacheRevisionNow(data);
         if (!isCurrent()) return;
         const [joint, personal] = await Promise.all([
           readWholeDay(
@@ -418,13 +423,13 @@ export function useTodayView(day: string, zone: string): TodayView {
         if (value) taskIds.add(value.task_id);
       }
       for (let attempt = 0; attempt < 3 && live; attempt += 1) {
-        const before = await readCacheSeqNow(data);
+        const before = await readCacheRevisionNow(data);
         const rows = await readResourcesNow(data, [
           ...ids,
           ...progressIds.values(),
           ...taskIds,
         ]);
-        const after = await readCacheSeqNow(data);
+        const after = await readCacheRevisionNow(data);
         if (!live) return;
         if (before !== after && attempt < 2) continue;
         // The merged rows (cache with its admitted overlay), never the listing wrapper.

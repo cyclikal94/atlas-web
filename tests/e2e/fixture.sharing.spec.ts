@@ -1350,10 +1350,13 @@ test.describe("E-SH15: a defaults answer belongs to the database it was asked un
   type Acquired = { outcome: string; record: unknown };
   /**
    * The page's PRODUCTION controller (the harness's gate) with its PRODUCTION defaults source over the account's real database, and every
-   * `GET /defaults/snapshot` held until the spec releases it with a revision. The page shows Today, which reads no defaults of its own.
+   * `GET /defaults/snapshot` held until the spec releases it with a revision. The page shows the task list, which reads no defaults of its
+   * own. (Labelled adaptation, WEB-10a revision 2: this was Today, a placeholder when the case was written; WEB-10a's Today reads the
+   * defaults for its quick actions, so its own `GET /defaults/snapshot` was held here and released in place of the gate's. The intent, a page
+   * that asks for no defaults itself, is unchanged; the assertions are unchanged.)
    */
   async function heldDefaults(context: BrowserContext) {
-    const { page } = await setup(context, "/today");
+    const { page } = await setup(context, "/tasks");
     const held: Array<(revision: number) => void> = [];
     await context.route(`**${API}/defaults/snapshot`, async (route) => {
       const revision = await new Promise<number>((resolve) =>
@@ -1482,14 +1485,15 @@ test.describe("E-SH15: a defaults answer belongs to the database it was asked un
     await acquire(page);
     await expect.poll(() => held.length).toBe(1);
     const release = held.shift();
-    const other = await bootAt(context, "/today");
+    // A page that reads no defaults of its own (labelled adaptation, revision 2 of WEB-10a: was Today, see `heldDefaults`).
+    const other = await bootAt(context, "/tasks");
     const replacement = await replaceDatabase(page, other, incarnation);
     release?.(44);
     const got = await acquired(page);
     expect(await storedRevision(other)).toBeNull();
     expect(got).toEqual({ outcome: "closed", record: null });
     // Durable state, read by a page that loads afresh.
-    const fresh = await bootAt(context, "/today");
+    const fresh = await bootAt(context, "/tasks");
     // A page that has just booted remounts its tree once (WEB-09a r19/r23), and that disposal closes the page's registry, the harness's
     // store included (revision 5: reproduced in Firefox, a `closed_for_deletion` from the tree's dispose 131 ms after boot, then "no open
     // store"). The harness reads only once the page has settled (no binding required). `other` above keeps its original schedule: there

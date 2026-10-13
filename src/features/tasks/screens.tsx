@@ -1,7 +1,5 @@
 import { Outlet, useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { PageHeading } from "../../components/ui/page-heading";
-import { TASKS_TITLE } from "./copy";
 import { TaskDetail } from "./detail/TaskDetail";
 import { TaskList } from "./detail/TaskList";
 import { TasksBoundary } from "./env";
@@ -108,7 +106,7 @@ function TasksLayoutInner() {
       <aside
         className={`${child ? "hidden desktop:block" : "block"} desktop:w-[300px]`}
       >
-        {child ? null : <PageHeading>{TASKS_TITLE}</PageHeading>}
+        {/* The list's heading is the route's (`route.tsx`), outside the cache gate and this lazy screen. */}
         <div className={child ? "" : "mt-4"}>
           <TaskList
             selected={

@@ -17530,6 +17530,71 @@ export const UNIT = [
     patch: (t) =>
       sub(t, "    return revealInBody(body);", "    return undefined;"),
   },
+  {
+    id: "MU-2091",
+    title:
+      "WEB-10a heading regression (rev 2): Today's level-one heading is not the route's (the gated or loading page has none)",
+    file: "src/features/today/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /Today: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "          <PageHeading>{TODAY_TITLE}</PageHeading>\n          <CacheGate>",
+        "          <CacheGate>",
+      ),
+  },
+  {
+    id: "MU-2092",
+    title:
+      "WEB-10a heading regression (rev 2): a task's gated page shows no heading",
+    file: "src/features/tasks/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "      <CacheGate heading={child ? heading : null}>",
+        "      <CacheGate>",
+      ),
+  },
+  {
+    id: "MU-2093",
+    title:
+      "WEB-10a heading regression (rev 2): the task list's level-one heading is not the route's",
+    file: "src/features/tasks/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) => sub(t, "      {child ? null : heading}", "      {null}"),
+  },
+  {
+    id: "MU-2094",
+    title:
+      "WEB-10a heading regression (rev 2): the cache gate's refreshing state drops the heading it was given",
+    file: "src/features/sync/CacheGate.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "    <>\n      {heading}\n      <section",
+        "    <>\n      <section",
+      ),
+  },
+  {
+    id: "MU-2102",
+    title:
+      "WEB-10a loop (rev 2): Today asks /daily again on every committed page, an empty one included (page_seq instead of the content revision)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /empty delta page/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
+        "      ? (position.value?.pageSeq ?? -1)",
+      ),
+  },
 ];
 
 /**
@@ -20370,6 +20435,21 @@ export const ENGINE = [
         t,
         "      : submittedCorrection(commandOf(stored), row.id);",
         "      : null;",
+      ),
+  },
+  {
+    id: "MU-2103",
+    title:
+      "WEB-10a N-T14: (REAL ENGINE) Today asks /daily again on every committed page, an empty one included: with the production leader the read wakes the engine and they loop",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.data-wake.spec.ts",
+    grep: "E-C13: .*a healthy engine beside a second real tab",
+    expect: /E-C13:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
+        "      ? (position.value?.pageSeq ?? -1)",
       ),
   },
 ];

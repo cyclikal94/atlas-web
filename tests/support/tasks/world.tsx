@@ -310,7 +310,11 @@ export interface Mounted {
    * Commits ONE delta sync page carrying `rows` through the PRODUCTION `commitPage` plan, as the leader does: the cache changes and its
    * position (`page_seq`) moves, which every live read hears (a seeded row is not heard). `removed` ids are removed by the same page.
    */
-  commitSync(rows: CacheRow[], removed?: string[]): Promise<void>;
+  commitSync(
+    rows: CacheRow[],
+    removed?: string[],
+    options?: { empty?: boolean },
+  ): Promise<void>;
 }
 
 export async function mountTasks(options: {
@@ -321,6 +325,8 @@ export async function mountTasks(options: {
   api?: FakeApi;
   env?: Partial<TasksEnv>;
   database?: boolean;
+  /** The cache's state as the sync state records it (revision 2: `invalid` hides cache-sourced content behind the gate). */
+  cacheStatus?: "valid" | "invalid";
 }): Promise<Mounted> {
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
   await import("../../../src/features/tasks/screens");
@@ -334,6 +340,15 @@ export async function mountTasks(options: {
     if (options.rows?.length) world.idb.seed(NAME, "cache", options.rows);
     if (options.drafts?.length)
       world.idb.seed(NAME, "drafts", options.drafts as never);
+    if (options.cacheStatus !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        { ...sync, cache_status: options.cacheStatus },
+      ]);
+    }
   }
   const identity = new Cell<Identity | null>({
     account_id: ME,
@@ -407,7 +422,7 @@ export async function mountTasks(options: {
     bodies: () => (world.idb.snapshot(NAME)?.draft_commands ?? []) as never,
     rerender: (env) => view.rerender(tree(env)),
     unmount: () => view.unmount(),
-    commitSync: async (rows, removed = []) => {
+    commitSync: async (rows, removed = [], options = {}) => {
       const service = data.service();
       if (service === null) throw new Error("commitSync: no open service");
       const before = world.idb.peek(NAME, "sync_state", "singleton") as
@@ -425,30 +440,34 @@ export async function mountTasks(options: {
       const s = world.idb.peek(NAME, "sync_state", "singleton") as SyncStateRow;
       const bytes = bytesOf(
         pageJson({
-          batches: [
-            {
-              revision: (s.applied_revision ?? 0) + 1,
-              changes: [
-                ...removed.map((id) => ({ kind: "remove" as const, id })),
-                ...rows.map((row) => ({
-                  kind: "upsert" as const,
-                  resource: {
-                    id: row.id,
-                    kind: row.kind,
-                    parent_id: row.parent_id,
-                    label: row.label,
-                    value: row.value as Record<string, unknown> | null,
-                    version: row.version,
-                    can_edit: row.can_edit,
-                    archived: row.archived,
-                    ...(row.policy_version === undefined
-                      ? {}
-                      : { policy_version: row.policy_version }),
+          // An empty delta page (no batch) moves `page_seq` and the cursor but no row and no revision.
+          batches:
+            options.empty === true
+              ? []
+              : [
+                  {
+                    revision: (s.applied_revision ?? 0) + 1,
+                    changes: [
+                      ...removed.map((id) => ({ kind: "remove" as const, id })),
+                      ...rows.map((row) => ({
+                        kind: "upsert" as const,
+                        resource: {
+                          id: row.id,
+                          kind: row.kind,
+                          parent_id: row.parent_id,
+                          label: row.label,
+                          value: row.value as Record<string, unknown> | null,
+                          version: row.version,
+                          can_edit: row.can_edit,
+                          archived: row.archived,
+                          ...(row.policy_version === undefined
+                            ? {}
+                            : { policy_version: row.policy_version }),
+                        },
+                      })),
+                    ],
                   },
-                })),
-              ],
-            },
-          ],
+                ],
           nextCursor: `cursor-${s.page_seq + 1}`,
         }),
       );

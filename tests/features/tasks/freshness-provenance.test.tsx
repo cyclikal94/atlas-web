@@ -657,6 +657,41 @@ describe("Today: a committed occurrence defeats an older daily answer (F2)", () 
   );
 });
 
+describe("Today: only committed CONTENT asks /daily again (the E-C13 loop)", () => {
+  test(
+    "an empty delta page (page_seq and cursor move, no row and no revision) asks nothing; a page with content asks again",
+    SLOW,
+    async () => {
+      const { task, answer } = await provisionalTask(600);
+      const other = await seededTask({ title: "Other" });
+      const daily = holdingApi();
+      daily.answerWith(() => pageOf([answer()]));
+      const t = await mountTasks({
+        path: PATH,
+        rows: task.rows,
+        api: daily.api,
+      });
+      await untilLong(
+        t,
+        () => row(task.occurrenceId)?.dataset.source === "server",
+      );
+      await waitReal(1_000);
+      const settled = daily.api.calls.readDaily ?? 0;
+      // An empty page: in production the engine's own wake (a stamped read changes the session's view) fetches one after every read.
+      await t.commitSync([], [], { empty: true });
+      await waitReal(1_500);
+      await t.settle();
+      expect(daily.api.calls.readDaily ?? 0).toBe(settled);
+      expect(row(task.occurrenceId)?.dataset.source).toBe("server");
+      // Control: content committed is asked about again.
+      await t.commitSync([other.rows[0] as CacheRow]);
+      await waitReal(1_500);
+      await untilLong(t, () => (daily.api.calls.readDaily ?? 0) > settled);
+      expect(daily.api.calls.readDaily ?? 0).toBeGreaterThan(settled);
+    },
+  );
+});
+
 describe("Today: an old answer never brings back a row the cache removed (F6)", () => {
   test(
     "a listed occurrence removed by a committed page leaves the day while the re-read is held",

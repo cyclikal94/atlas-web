@@ -102,7 +102,7 @@ Revision 2 (review of 13 October 2026 and its design assessment) adds:
 
 19. **Whole-input freshness (R2; supersedes the time and generation rules of 16).** A `/daily` answer carries its provenance: when each scope's
     accepted page chain was DISPATCHED (a `409` restart counts from the restart), each scope's `revision`, and the durable cache position read
-    when the read was dispatched (`readCacheSeqNow`). A row's STRUCTURE (definition, window, participants, `can_edit`, version) and its DERIVED
+    when the read was dispatched (`readCacheRevisionNow`, the content revision: an empty delta page changes nothing and asks for no re-read). A row's STRUCTURE (definition, window, participants, `can_edit`, version) and its DERIVED
     fields are chosen separately (`structureOf`, `composeRow`): the committed cache row wins unless the daily item is ahead of it (a newer
     version; the same version read after the cache's last commit; or a row the cache does not hold that this view never held, so an old answer
     cannot bring back a removed one). My result is the server's only when no cache page was committed since dispatch, no window boundary of the
@@ -133,6 +133,18 @@ Revision 2 (review of 13 October 2026 and its design assessment) adds:
     read (`expectDraft`: id, status, digest). A reload, another tab, or a second conflict of the replacement all work from the durable
     operation; page memory is not used. "Save mine" is offered only once a version newer than the one the operation was built on is on the
     device; an unreadable command says so. "Discard mine" is always offered.
+25. **Today asks `/daily` again only when committed CONTENT changed (a regression of revisions 0–1, found in revision 2).** It followed
+    `page_seq`, which an empty delta page also moves. With the production leader every stamped read changes the session's view, which wakes
+    the idle engine; its empty page moved `page_seq`; Today read again 750 ms later: two reads per tab and one sync every ~0.8 s, for ever
+    (E-C13's healthy engine never went quiet; E-C8's follower kept seeing its gate re-read). The generation is now the applied revision
+    (`readCacheRevisionNow`). Tests: `freshness-provenance.test.tsx` (an empty page asks nothing; content asks again; MU-2102), E-C13 and E-C8
+    unchanged (MU-2103 natively).
+24. **The destinations' heading is the route's (a regression of revisions 0–1, found in revision 2).** Today and the task list replaced
+    placeholders whose level-one heading was always there; the screens then put it inside the cache gate and the lazy chunk, so a gated or
+    still-loading page had no h1 (the sync-screen specs' axe "page-has-heading-one") and a route change found no heading to focus (the shell's
+    route-focus case). Both routes now render their heading outside the gate and the lazy screen; `CacheGate` takes an optional `heading` that a
+    gated task page shows (its own heading is part of the hidden content). Tests: `route-headings.test.tsx` (MU-2091…MU-2094); the shell and
+    sync-screen specs.
 
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
@@ -193,6 +205,9 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 - **The first answer on a device without a database.** An answer dispatched before the database existed is not current for my result; Today
   asks again once its rows are read at a cache position (the `behind` re-read). That path has no separate test (the jsdom world cannot create
   the database after mount); its effect is limited to one extra `/daily` read.
+- **Other cards' specs that used Today as a neutral page.** E-SH15 (WEB-12a's sharing spec) held every `GET /defaults/snapshot` on a page
+  showing Today, whose own defaults read (now needed by its quick actions) was then released in place of the gate's: it boots on the task list
+  instead (labelled adaptation, assertions unchanged). The shell and sync-screen specs needed no change once the heading regression was fixed.
 - **The dialog reveals a focused control whole** (`src/components/ui/dialog.tsx`, revision 2): a shared component changed for R7's keyboard
   evidence; every dialog benefits. Covered by `tests/components/dialog-reveal.test.tsx` (MU-2090) and E-T8d in WebKit.
 - **Shared files with WEB-11a.** `plans/outstanding-reads.ts` and `ui/outstanding.tsx` also carry WEB-11a's `readOutstandingCreates`; the

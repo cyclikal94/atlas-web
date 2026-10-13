@@ -1,7 +1,6 @@
 import { useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
-import { PageHeading } from "../../../components/ui/page-heading";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -81,10 +80,8 @@ export function TodayPage({
   }
   return (
     <div className="flex max-w-[760px] flex-col gap-5" data-today-page="">
-      <div className="flex flex-col gap-1">
-        <PageHeading>{copy.TODAY_TITLE}</PageHeading>
-        <p className="text-[13px] text-ink-2">{longDayLabel(day)}</p>
-      </div>
+      {/* The page's heading is the route's (`features/today/route.tsx`), outside the cache gate and this lazy screen. */}
+      <p className="text-[13px] text-ink-2">{longDayLabel(day)}</p>
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex items-end gap-1.5">
           <Button

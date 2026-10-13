@@ -90,11 +90,13 @@ export async function readResourcesNow(
 }
 
 /**
- * The cache's page sequence read NOW from the durable sync state (WEB-10a revision 2, C2): a view that composes from several separate reads
- * reads it before and after them, and discards what it read when a sync page was committed in between (a hint or a live query may arrive
- * after the reads). `null` when the database has no sync state yet; `"closed"` when there is no open database or the read failed.
+ * The cache's CONTENT revision read NOW from the durable sync state (`applied_revision`, 0 before any batch; WEB-10a revision 2, C2): a view
+ * that composes from several separate reads reads it before and after them, and discards what it read when content was committed in between
+ * (a hint or a live query may arrive after the reads). Not `page_seq`: an empty delta page moves `page_seq` (and the cursor) without changing
+ * any row, and a view that re-read the server on every such page woke the engine with its own request and looped. `null` when the database
+ * has no sync state yet; `"closed"` when there is no open database or the read failed.
  */
-export async function readCacheSeqNow(
+export async function readCacheRevisionNow(
   env: Pick<DataEnv, "service">,
 ): Promise<number | null | "closed"> {
   const service = env.service();
@@ -104,7 +106,7 @@ export async function readCacheSeqNow(
       incarnationId: service.incarnationId,
     });
     if (env.service() !== service) return "closed";
-    return position === null ? null : position.pageSeq;
+    return position === null ? null : (position.appliedRevision ?? 0);
   } catch {
     return "closed";
   }

@@ -1,4 +1,8 @@
-import { type AnyRoute, createRoute } from "@tanstack/react-router";
+import {
+  type AnyRoute,
+  createRoute,
+  useMatchRoute,
+} from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 import { PageHeading } from "../../components/ui/page-heading";
 import { useOptionalDataEnv } from "../../data";
@@ -35,14 +39,24 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * `/tasks/$taskId/edit`. The screens are one lazy chunk (`screens.tsx`).
  */
 function TasksLayout() {
-  if (useOptionalDataEnv() === null)
-    return <PageHeading>{TASKS_TITLE}</PageHeading>;
+  const env = useOptionalDataEnv();
+  const matchRoute = useMatchRoute();
+  if (env === null) return <PageHeading>{TASKS_TITLE}</PageHeading>;
+  // The list's heading is the route's, outside the cache gate and the lazy screens (revision 2), so it exists at once and in every gate
+  // state; a task's own page has its own heading, and while the gate hides it the gate shows the list's.
+  const child =
+    matchRoute({ to: "/tasks/$taskId", fuzzy: true }) !== false ||
+    matchRoute({ to: "/tasks/new" }) !== false;
+  const heading = <PageHeading>{TASKS_TITLE}</PageHeading>;
   return (
-    <CacheGate>
-      <Suspense fallback={null}>
-        <TasksLayoutScreen />
-      </Suspense>
-    </CacheGate>
+    <>
+      {child ? null : heading}
+      <CacheGate heading={child ? heading : null}>
+        <Suspense fallback={null}>
+          <TasksLayoutScreen />
+        </Suspense>
+      </CacheGate>
+    </>
   );
 }
 

@@ -35,10 +35,15 @@ export const todayRoute = (parent: AnyRoute) => {
       // A shell rendered without the data layer (the shell's own tests) shows the destination's heading and no account data.
       if (useOptionalDataEnv() === null)
         return <PageHeading>{TODAY_TITLE}</PageHeading>;
+      // The heading is the route's, outside the cache gate and the lazy screen (revision 2): the page has its one level-one heading in every
+      // gate state and at once, so a route change can move focus to it (RouteFocus), as the placeholder this replaced did.
       return (
-        <CacheGate>
-          <TodayFromSearch />
-        </CacheGate>
+        <div className="flex flex-col gap-1">
+          <PageHeading>{TODAY_TITLE}</PageHeading>
+          <CacheGate>
+            <TodayFromSearch />
+          </CacheGate>
+        </div>
       );
     },
   });

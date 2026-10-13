@@ -12,7 +12,7 @@ departed from, the departure is listed under "Departures from the plan".
 
 `src/data/index.ts` is the only import path other slices may use (lint rule R15). It exports the UI hooks and provider, the outbox types and
 the command and conflict registries, the account-database name function, the deletion-port factory and the status types, and (WEB-12a) the sharing defaults:
-`useSharingDefaults`, `captureDefaults`, the snapshot types and parsers, `defaultsReviewCase`, `reviewKinds` and the review's `ReviewConfirmation`/`ConfirmReviewOutcome`, and (WEB-10a) the outstanding-work reads below (`useOutstanding`, `useOutstandingByKind`, `useCachedResources`, `useCachePosition`, `useDraftWithCommand`, `scanResources`, `readResourcesNow`, `readCacheSeqNow`). What the **boot path** imports from it is small and
+`useSharingDefaults`, `captureDefaults`, the snapshot types and parsers, `defaultsReviewCase`, `reviewKinds` and the review's `ReviewConfirmation`/`ConfirmReviewOutcome`, and (WEB-10a) the outstanding-work reads below (`useOutstanding`, `useOutstandingByKind`, `useCachedResources`, `useCachePosition`, `useDraftWithCommand`, `scanResources`, `readResourcesNow`, `readCacheRevisionNow`). What the **boot path** imports from it is small and
 must not reach Dexie: `createDataDeletionPorts` is a static shim that loads the implementation lazily, the UI composition is a dynamic import, and `vite.config.ts` marks
 `src/data` modules side-effect free. `pnpm check:artefacts` runs `scripts/check-initial-chunk.mjs`, which fails if Dexie, an engine or a plan is in the initial chunk
 (`tests/static/initial-chunk.test.ts` shows the check failing on a seeded violation). A module imported by both the boot path and a lazy chunk is placed whole in
@@ -674,9 +674,10 @@ the current epoch is shown with no request, one persisted for another epoch is n
   `unavailable`/`error` for a cursor that does not advance), `useCachedResources(ids)`, `useCachePosition()`. **Imperative** (`ui/scan.ts`): `scanResources(env, { kind, parentId?, window? }, visit, signal)` walks
   every cached resource of a kind a window at a time (one `readResourceList` transaction each, a macrotask between windows, at most one window held) and
   ends `complete`, `aborted` (signal or `visit` returned `"stop"`) or `closed` (no database, or the account's database changed under the walk);
-  `readResourcesNow(env, ids)` reads by id now, 100 per transaction. `readCacheSeqNow(env)` (revision 2) reads the durable `page_seq` now: a view
-  that composes from several separate reads reads it before and after them and discards a read that spans a committed page (a live query or a
-  hint can arrive after the reads). `useDraftWithCommand(localId)` (revision 2, `ui/outstanding.tsx`) watches ONE draft with its stored command
+  `readResourcesNow(env, ids)` reads by id now, 100 per transaction. `readCacheRevisionNow(env)` (revision 2) reads the durable content revision
+  (`applied_revision`, 0 before any batch) now: a view that composes from several separate reads reads it before and after them and discards a
+  read that spans committed content (a live query or a hint can arrive after the reads). Not `page_seq`, which an empty delta page also moves:
+  a view that re-reads the server on every `page_seq` change loops (its own request wakes the leader's engine, whose empty page moves it again). `useDraftWithCommand(localId)` (revision 2, `ui/outstanding.tsx`) watches ONE draft with its stored command
   (`readDraftWithCommand`), for a slice's conflict choices that must work from the durable operation (a reload, another tab).
 * **`commandKindOf` reads a wrapped command.** The kind of `{ command: { kind } }` (the body of `/task-commands`, `/calendar-commands` and
   `/reminder-commands`) is the inner kind; before, every such draft's header said the endpoint. Byte-identical to WEB-13a's fix.

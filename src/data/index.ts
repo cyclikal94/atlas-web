@@ -165,7 +165,7 @@ export {
   useSyncStatusModel,
 } from "./ui/react";
 export {
-  readCacheSeqNow,
+  readCacheRevisionNow,
   readResourcesNow,
   type ScanEnd,
   scanResources,
