@@ -66,6 +66,8 @@ Every outcome type is a closed union. A refusal is a value, never an exception, 
 * **WEB-09d** — the retained whole functional browser suite, the session matrix, the full released-backend integration, affected performance acceptance, supported-device dense workloads, real lifecycle/freeze and accessibility ownership, and integrated acceptance (gates BE-B1, BE-Q23, BE-B2, BE-CH3).
 * **WEB-17** — post-beta hardening: D5's causal investigation (the revision-34 WebKit stall stays **unresolved, accepted as a deferred diagnostic risk**; the revision-38 collector `tests/e2e/d5-collector.ts` and its controls are the starting point), the full mutation catalogues (932 unit, 141 real-engine at revision 38) and extended stress/soak. A consequential product failure found there is an ordinary bug, not a deferral.
 
+* **WEB-11a** (12 October 2026, for review) — the first slice that saves from the protected tree: `commandKindOf` recognises a wrapped command, and `readOutstandingCreates`/`useOutstandingCreates` list a kind's outstanding drafts with their bodies (docs/data-layer.md, docs/people.md). No schema change and no new writer.
+
 ## Not claimed
 
 No PostgreSQL, HTTPS deployment, production-leader integration evidence (WEB-09b's leader is fixture-evidenced; its focused integration against the released backend is reported separately and is not WEB-08c's composed acceptance), real device, real Safari or installed-app evidence. No guarantee of hint delivery after a page is killed. No cross-page serialisation of identity reads (two pages may overlap by one request before a shared pause is read). Fixture evidence is never integration evidence.

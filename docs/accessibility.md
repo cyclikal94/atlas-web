@@ -42,6 +42,15 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - The in-dialog sync control keeps the editors' unsaved choices and says so when the editor reopens ("Your unsaved changes are shown again"); Cancel, Done, Escape and the close icon discard them (ia.md §1.3.3). The defaults review lists each principal of both audiences with its access and each exclusion, as text.
 - Automated: jest-axe on every sharing screen (`tests/features/sharing/*`) and keyboard, viewport and focus checks in the three engines (`tests/e2e/fixture.sharing.spec.ts`). The manual pass below and the real assistive technology passes of Layer 3 apply to these screens too and are not claimed.
 
+### The people screens (WEB-11a)
+
+- One `h1` per screen: "People" while the list is shown; the person's name when the detail stands alone (below 1280 px); the duplicates page its own title. Route changes move focus to it.
+- List rows are links with `aria-current="page"` on the selected person; the "All / Archived" filter is a pair of toggle buttons (`aria-pressed`); search is a labelled `searchbox`.
+- Every choice (who can see a new person or field, the audience of an existing field, the offline save-now / hold choice, Yes or no) is a labelled `role="radiogroup"` with roving `tabindex` (arrows move, Space checks); a choice that cannot be made says why under it.
+- Disabled actions state their reason beside them (needs a connection, someone else owns this name, wait for this person or field to finish syncing, defaults still loading). Errors carry a copyable reference. Announcements (saved, not sent yet, renamed, unlinked) go through the announcer only; no live region is added.
+- The field editor and the unlink confirmation use the shared `Dialog` (focus trap, focus returned, in-dialog sync control), a full-bleed sheet below 768 px; the field editor's Type select keeps a 44 px target in WebKit (its native appearance is removed). Values are text, never colour alone; a checklist's done items are announced as "Done:".
+- Automated: jest-axe on every people screen (`tests/features/people/*`), and keyboard, viewport (390, 834, 1180, 1440 px, light and dark) and focus checks in the three engines (`tests/e2e/fixture.people.spec.ts`, E-P12/E-P13). Browser emulation only: no device, no screen reader (WEB-09d).
+
 ## What WEB-08b built in
 
 - **The sign-in and join pages are real forms.** `<form>`, labels bound to inputs, `autocomplete` tokens (`username`, `current-password`, `new-password`), no `autofocus` on a field; Enter submits; a password manager can fill and save.
