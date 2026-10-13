@@ -128,6 +128,9 @@ describe("the Settings registry (F-REG)", () => {
   });
 
   test("every registered section has a working route", async () => {
+    // "Archived items" is served by the lazy People chunk (WEB-11a). Its module is loaded first, so the query below waits for the route,
+    // never for a cold transform of the chunk (about 2 s on a cold cache, measured, against the query's 1 s).
+    await import("../../../src/features/people/screens");
     for (const section of settingsSections()) {
       cleanup();
       await mount(`/settings/${section.route}`);
