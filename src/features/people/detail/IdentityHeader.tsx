@@ -5,6 +5,7 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
 import { PageHeading } from "../../../components/ui/page-heading";
+import type { DraftWithCommand } from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
 import type { PeopleFailure } from "../api";
 import * as copy from "../copy";
@@ -12,6 +13,7 @@ import { usePeopleEnv } from "../env";
 import { isCurrentMemory, useMemoryRevision } from "../memory";
 import {
   archiveRequest,
+  baseGuard,
   renameEditRequest,
   renameProfileBody,
   unlinkBody,
@@ -19,6 +21,7 @@ import {
 import { firstPageCount } from "../model/duplicates";
 import { type LinkageState, renameRoute, unlinkOffer } from "../model/linkage";
 import type { ShownRow } from "../model/project";
+import { type EditSnapshot, snapshotOf, stillBound } from "../model/snapshot";
 import { charCount } from "../model/values";
 import { sendOnline } from "../online";
 import { Avatar, Banner, PendingBadge, useOutboxSave } from "../parts";
@@ -29,16 +32,24 @@ import { readLinkage, usePersonLinkage } from "../reads";
  * (`archive-restore.html`): the linkage line (only what a `GET /people/{id}` answer says, D-11a-2), Manage sharing (WEB-12a's editor on
  * the person), Possible duplicates, Rename (D-11a-5), Unlink account (D-11a-6) and Archive / Restore (D-11a-10). `headerActions` is the
  * slot WEB-11b fills ("Ask to link…"); WEB-11a renders nothing in it.
+ *
+ * Its state (an open rename form or unlink dialog, the sharing editor) belongs to ONE person: the person's screen is keyed by the person's
+ * id (`screens.tsx`), so a
+ * change of the route's person never carries a form, a typed name or a dialog over to another person (finding 4 of the review of 13
+ * October). A typed rename is kept under its own person (`rename:<id>` in page memory) and comes back only on that person.
  */
 export function IdentityHeader({
   shown,
   asPage,
   headerActions,
+  drafts,
 }: {
   shown: ShownRow;
   /** The person's name is the page's heading (no list beside it). */
   asPage: boolean;
   headerActions?: (personId: string) => ReactNode;
+  /** This device's outstanding saves (the rename's base, `model/snapshot.ts`). */
+  drafts: readonly DraftWithCommand[];
 }) {
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
@@ -119,6 +130,7 @@ export function IdentityHeader({
         <RenameForm
           shown={shown}
           linkage={linkage}
+          drafts={drafts}
           onDone={() => setRenaming(false)}
         />
       ) : null}
@@ -296,13 +308,21 @@ function failureMessage(failure: PeopleFailure): string | null {
  * locked (no resubmission). Success closes it. A conflict keeps the typed text ("Someone else already changed this — reload and try
  * again."). `rename_profile` needs a connection (Save is disabled with the reason); the unlinked person's content edit queues.
  */
+interface RetainedRename {
+  name: string;
+  /** The versions the form opened on (Q21: captured when the form opens; finding 1 of the review of 13 October). */
+  snapshot: EditSnapshot;
+}
+
 function RenameForm({
   shown,
   linkage,
+  drafts,
   onDone,
 }: {
   shown: ShownRow;
   linkage: LinkageState;
+  drafts: readonly DraftWithCommand[];
   onDone(): void;
 }) {
   const env = usePeopleEnv();
@@ -311,11 +331,19 @@ function RenameForm({
   const person = shown.row;
   const route = renameRoute(linkage, person.can_edit);
   const retainedKey = `rename:${person.id}`;
-  const [name, setName] = useState(
-    () =>
-      (env.memory.drafts.get(retainedKey) as string | undefined) ??
-      person.label,
-  );
+  const [initial] = useState<RetainedRename>(() => {
+    const kept = env.memory.drafts.get(retainedKey) as
+      | RetainedRename
+      | undefined;
+    return (
+      kept ?? {
+        name: person.label,
+        snapshot: snapshotOf(person, drafts, shown.latest?.localId ?? null),
+      }
+    );
+  });
+  const [name, setName] = useState(initial.name);
+  const [snapshot, setSnapshot] = useState(initial.snapshot);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{
     text: string;
@@ -324,10 +352,18 @@ function RenameForm({
   } | null>(null);
   const errorId = useId();
   const max = route.kind === "rename_profile" ? 200 : 300;
-  // The typed name is kept across a remount of the tree (a 403 elsewhere), for this identity only.
+  // The typed name is kept across a remount of the tree (a 403 elsewhere), for this identity and this person only.
   useEffect(() => {
-    env.memory.drafts.set(retainedKey, name);
-  }, [env, retainedKey, name]);
+    env.memory.drafts.set(retainedKey, {
+      name,
+      snapshot,
+    } satisfies RetainedRename);
+  }, [env, retainedKey, name, snapshot]);
+  /** The person changed since the form opened: nothing is sent; the form is re-bound to the person as shown now, for a deliberate re-save. */
+  const stale = () => {
+    setSnapshot(snapshotOf(person, drafts, shown.latest?.localId ?? null));
+    setMessage({ text: copy.STALE_RENAME });
+  };
   const close = () => {
     env.memory.drafts.delete(retainedKey);
     onDone();
@@ -349,9 +385,10 @@ function RenameForm({
       return;
     }
     setMessage(null);
+    if (!stillBound(snapshot, person)) return stale();
     setSaving(true);
     if (route.kind === "rename_profile") {
-      const version = shown.row.version;
+      const version = snapshot.version;
       const body = renameProfileBody({
         personId: person.id,
         version,
@@ -384,32 +421,44 @@ function RenameForm({
         });
       return;
     }
-    if (route.kind !== "edit" || person.policy_version === undefined) {
+    if (route.kind !== "edit" || snapshot.policyVersion === null) {
       setSaving(false);
       setMessage({ text: copy.WAIT_FOR_SYNC_PERSON });
       return;
     }
-    const request = renameEditRequest({
+    const input = {
       personId: person.id,
       name: trimmed,
-      policyVersion: person.policy_version,
-    });
+      policyVersion: snapshot.policyVersion,
+    };
+    const guard = baseGuard(snapshot.expectedBase);
     const latest = shown.latest;
     const outcome = await save(async (outbox) => {
-      // D-11a-15: an unsent rename of this person is edited in place; anything else is a new draft.
-      if (latest?.kind === "edit" && latest.status === "queued") {
-        const edited = await outbox.editQueued(latest.localId, request);
+      // D-11a-15: the unsent rename the form OPENED on is edited in place, while it is still queued; anything else is a new draft.
+      if (
+        latest?.kind === "edit" &&
+        latest.status === "queued" &&
+        latest.localId === snapshot.latestLocalId
+      ) {
+        const edited = await outbox.editQueued(latest.localId, {
+          ...renameEditRequest(input),
+          expectDraft: (draft) =>
+            draft.local_id === snapshot.latestLocalId &&
+            draft.status === "queued",
+        });
         if (
           edited.kind === "edited" ||
           (edited.reason !== "not_queued" &&
             edited.reason !== "not_found" &&
-            edited.reason !== "retargeted")
+            edited.reason !== "retargeted" &&
+            edited.reason !== "draft_changed")
         )
           return edited;
       }
-      return outbox.enqueue(request);
+      return outbox.enqueue(renameEditRequest({ ...input, guard }));
     });
     setSaving(false);
+    if (guard.moved) return stale();
     if (!outcome.ok) {
       if (outcome.message !== null) setMessage({ text: outcome.message });
       return;

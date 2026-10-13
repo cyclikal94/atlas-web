@@ -124,6 +124,11 @@ export interface DataEnv {
   outbox(): Outbox | null;
   /** The displayed account's open service, or null. Read-only views use it through the hooks; nothing here creates it. */
   service(): AccountService | null;
+  /**
+   * The page's quota guard (the one the outbox and the defaults record are admitted by), for a slice that writes through a port of its
+   * own over the displayed account's database (WEB-11a's held audience changes, written as form copies through `FormRecoveryPort`).
+   */
+  readonly quota: QuotaGuard;
   /** The same, observable: a database that another tab creates later appears here without a reload. */
   readonly serviceStore: Store<AccountService | null>;
   /**
@@ -1161,6 +1166,7 @@ export function createDataEnv(
     actions,
     outbox: () => outbox,
     service: () => (current?.service.live ? current.service : null),
+    quota: deps.quota,
     serviceStore,
     attachLeader(next) {
       // A leader that is replaced keeps what it knew of the cache it could not write an invalidation for.

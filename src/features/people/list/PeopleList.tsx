@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
@@ -16,30 +16,37 @@ import { useMemoryRevision } from "../memory";
 import type { LinkageState } from "../model/linkage";
 import {
   byName,
+  type Change,
+  changesById,
   changesOfAll,
-  foldRows,
+  foldOne,
+  projectedRows,
   type ShownRow,
 } from "../model/project";
 import { Avatar, Banner, PendingBadge } from "../parts";
 import {
   linkageIn,
   OutstandingChain,
-  ResourceChain,
+  ResourceScan,
   readLinkage,
+  type ScanResult,
 } from "../reads";
 import { NewPersonDialog } from "./NewPersonDialog";
 
 /**
- * WF-PEOPLE-01, the people list (§4.1). Rows come from the cache (a bounded chain of live pages, D-11a-4) with this device's outstanding
- * saves folded over them (a queued new person is shown, marked "Not sent yet"). Search is over the names shown, which are only names the
- * person can see. "All" lists people that are not archived; "Archived" lists the archived ones. The "Account" text appears only for people
- * whose linkage this page has read (D-11a-3): while online, the first 25 rows shown are read, two at a time, once per identity.
+ * WF-PEOPLE-01, the people list (§4.1). Rows come from the cache with this device's outstanding saves folded over them (a queued new person
+ * is shown, marked "Not sent yet"). The list is read in BOUNDED STEPS (Q9; finding 7 of the review of 13 October 2026): a step keeps at most
+ * 100 people that match the view and the search, reading at most 20 pages of 100 to find them, and "Next people" / "Keep searching"
+ * continue from where it stopped ("Previous people" goes back), so every person stays reachable and nothing past the step is read. The
+ * cache lists people by id, so a step is sorted by name within itself. Search is over the names shown, which are only names the person can
+ * see. "All" lists people that are not archived; "Archived" lists the archived ones. The "Account" text appears only for people whose
+ * linkage this page has read (D-11a-3): while online, the first 25 rows shown are read, two at a time, once per identity.
  *
  * States: Loading (five skeleton rows; header and controls paint at once), Empty (a completed sync with nobody), Offline-first-visit (no
  * sync yet: never shown as Empty), Error (the store failed: a banner with Try again), each with "New person" still offered.
  */
-const PEOPLE_PAGES = 20;
-const SHOWN_STEP = 100;
+const PEOPLE_STEP = 100;
+const PEOPLE_STEP_PAGES = 20;
 
 const normalise = (text: string) =>
   text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
@@ -49,6 +56,8 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"all" | "archived">("all");
   const [creating, setCreating] = useState(false);
+  // The start of each step walked so far (null: the first); a new search or view begins again from the first.
+  const [starts, setStarts] = useState<(string | null)[]>([null]);
   const searchId = useId();
   return (
     <div className="flex min-w-0 flex-col gap-4" data-people-list="">
@@ -68,7 +77,10 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
           aria-label={copy.SEARCH}
           placeholder={copy.SEARCH}
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setStarts([null]);
+          }}
         />
         <fieldset className="flex flex-wrap items-center gap-1.5">
           <legend className="sr-only">{copy.FILTER_LABEL}</legend>
@@ -79,7 +91,10 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
               aria-pressed={view === value}
               data-people-filter={value}
               data-status={view === value ? "active" : undefined}
-              onClick={() => setView(value)}
+              onClick={() => {
+                setView(value);
+                setStarts([null]);
+              }}
               className={`atlas-transition min-h-11 rounded-control border px-3 text-[13px] text-ink-1 hover:bg-row-hover data-[status=active]:bg-select-tint ${view === value ? "border-action-fill" : "border-hairline-strong"}`}
             >
               {value === "all" ? copy.FILTER_ALL : copy.FILTER_ARCHIVED}
@@ -88,75 +103,138 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
         </fieldset>
       </div>
       <CacheGate>
-        <ResourceChain kind="person" cap={PEOPLE_PAGES}>
-          {(cached) => (
-            <OutstandingChain>
-              {(outstanding) => (
-                <Rows
-                  env={env}
-                  status={cached.status}
-                  capped={cached.capped}
-                  shown={foldRows(
-                    cached.rows,
-                    changesOfAll(outstanding.rows),
-                    "person",
-                  )}
-                  query={query}
-                  view={view}
-                  selectedId={selectedId}
-                  onNew={() => setCreating(true)}
-                />
-              )}
-            </OutstandingChain>
+        <OutstandingChain>
+          {(outstanding) => (
+            <PeopleSteps
+              env={env}
+              changes={changesOfAll(outstanding.rows)}
+              outstandingCapped={outstanding.capped}
+              query={query}
+              view={view}
+              starts={starts}
+              onStarts={setStarts}
+              selectedId={selectedId}
+              onNew={() => setCreating(true)}
+            />
           )}
-        </ResourceChain>
+        </OutstandingChain>
       </CacheGate>
       <NewPersonDialog open={creating} onClose={() => setCreating(false)} />
     </div>
   );
 }
 
-function Rows({
+function PeopleSteps({
   env,
-  status,
-  capped,
-  shown,
+  changes,
+  outstandingCapped,
   query,
   view,
+  starts,
+  onStarts,
   selectedId,
   onNew,
 }: {
   env: PeopleEnv;
-  status: "loading" | "ready" | "absent" | "failed";
-  capped: boolean;
+  changes: Change[];
+  outstandingCapped: boolean;
+  query: string;
+  view: "all" | "archived";
+  starts: (string | null)[];
+  onStarts(starts: (string | null)[]): void;
+  selectedId: string | null;
+  onNew(): void;
+}) {
+  const wanted = normalise(query);
+  const byId = useMemo(() => changesById(changes), [changes]);
+  const shows = useCallback(
+    (row: CacheRow) =>
+      (view === "archived" ? row.archived : !row.archived) &&
+      (wanted === "" || normalise(row.label).includes(wanted)),
+    [view, wanted],
+  );
+  const keep = useCallback(
+    (row: CacheRow) => shows(foldOne(row, byId).row),
+    [shows, byId],
+  );
+  const start = starts.at(-1) ?? null;
+  return (
+    <ResourceScan
+      kind="person"
+      start={start}
+      keep={keep}
+      limit={PEOPLE_STEP}
+      pages={PEOPLE_STEP_PAGES}
+    >
+      {(step) => (
+        <Rows
+          env={env}
+          step={step}
+          first={start === null}
+          shown={[
+            ...step.rows.map((row) => foldOne(row, byId)),
+            // This device's queued new people are shown once, with the first step.
+            ...(start === null
+              ? projectedRows(
+                  new Set(step.rows.map((row) => row.id)),
+                  changes,
+                  "person",
+                ).filter((row) => shows(row.row))
+              : []),
+          ].sort(byName)}
+          outstandingCapped={outstandingCapped}
+          query={query}
+          view={view}
+          selectedId={selectedId}
+          onNew={onNew}
+          onPrevious={
+            starts.length > 1 ? () => onStarts(starts.slice(0, -1)) : null
+          }
+          onNext={
+            step.settled && step.next !== null
+              ? () => onStarts([...starts, step.next])
+              : null
+          }
+        />
+      )}
+    </ResourceScan>
+  );
+}
+
+function Rows({
+  env,
+  step,
+  first,
+  shown,
+  outstandingCapped,
+  query,
+  view,
+  selectedId,
+  onNew,
+  onPrevious,
+  onNext,
+}: {
+  env: PeopleEnv;
+  step: ScanResult;
+  first: boolean;
   shown: ShownRow[];
+  outstandingCapped: boolean;
   query: string;
   view: "all" | "archived";
   selectedId: string | null;
   onNew(): void;
+  onPrevious: (() => void) | null;
+  onNext: (() => void) | null;
 }) {
   useMemoryRevision(env.memory);
   const inputs = useStatusInputs();
   const actions = useDataActions();
-  const [limit, setLimit] = useState(SHOWN_STEP);
   const wanted = normalise(query);
-  const rows = useMemo(
-    () =>
-      shown
-        .filter((row) =>
-          view === "archived" ? row.row.archived : !row.row.archived,
-        )
-        .filter(
-          (row) => wanted === "" || normalise(row.row.label).includes(wanted),
-        )
-        .sort(byName),
-    [shown, view, wanted],
-  );
-  const displayed = rows.slice(0, limit);
   usePrefetchLinkage(
     env,
-    displayed.filter((row) => !row.projected).map((row) => row.row.id),
+    shown.filter((row) => !row.projected).map((row) => row.row.id),
   );
+  const status = step.status;
 
   if (status === "failed")
     return (
@@ -167,7 +245,7 @@ function Rows({
         }
       />
     );
-  if (status === "loading" && shown.length === 0)
+  if ((status === "loading" || !step.settled) && shown.length === 0)
     return (
       <div
         aria-busy="true"
@@ -186,7 +264,10 @@ function Rows({
     status === "absent" ||
     inputs.cache === "empty" ||
     inputs.cache === "unknown";
-  if (shown.length === 0)
+  // Nobody at all: the whole walk from the first person found none to show in "All", and nothing is searched for.
+  const nobody =
+    first && step.end && shown.length === 0 && wanted === "" && view === "all";
+  if (nobody || (neverSynced && shown.length === 0))
     return (
       <div
         data-people-state={neverSynced ? "offline-first-visit" : "empty"}
@@ -202,6 +283,8 @@ function Rows({
         <Button onClick={onNew}>{copy.NEW_PERSON}</Button>
       </div>
     );
+  // The step stopped at its page bound before it found a full step: more people may match further on.
+  const partial = step.settled && !step.end && shown.length < PEOPLE_STEP;
   return (
     <div className="flex flex-col gap-2">
       {neverSynced ? (
@@ -209,17 +292,19 @@ function Rows({
           {inputs.online ? copy.NOT_SYNCED_YET : copy.OFFLINE_FIRST_VISIT}
         </p>
       ) : null}
-      {rows.length === 0 ? (
+      {shown.length === 0 ? (
         <p data-people-state="no-match" className="text-[13px] text-ink-2">
           {wanted !== ""
-            ? copy.NO_MATCH(query.trim())
+            ? step.end
+              ? copy.NO_MATCH(query.trim())
+              : copy.NO_MATCH_YET(query.trim())
             : view === "archived"
               ? copy.EMPTY_ARCHIVED
               : copy.EMPTY}
         </p>
       ) : (
         <List className="flex flex-col gap-1">
-          {displayed.map((row) => (
+          {shown.map((row) => (
             <PersonRow
               key={row.row.id}
               env={env}
@@ -229,14 +314,31 @@ function Rows({
           ))}
         </List>
       )}
-      {rows.length > limit ? (
-        <Button onClick={() => setLimit(limit + SHOWN_STEP)}>
-          {copy.SHOW_MORE}
-        </Button>
+      {partial && shown.length > 0 ? (
+        <p className="text-[12.5px] text-ink-2" data-people-state="partial">
+          {copy.SEARCH_PARTIAL(shown.length)}
+        </p>
       ) : null}
-      {capped ? (
-        <p className="text-[12.5px] text-ink-2">
-          {copy.CAPPED(PEOPLE_PAGES * 100)}
+      {onPrevious !== null || onNext !== null ? (
+        <div className="flex flex-wrap gap-2" data-people-steps="">
+          {onPrevious !== null ? (
+            <Button data-people-action="previous-people" onClick={onPrevious}>
+              {copy.PREVIOUS_PEOPLE}
+            </Button>
+          ) : null}
+          {onNext !== null ? (
+            <Button data-people-action="next-people" onClick={onNext}>
+              {partial ? copy.KEEP_SEARCHING : copy.NEXT_PEOPLE}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {outstandingCapped ? (
+        <p
+          className="text-[12.5px] text-ink-2"
+          data-people-state="outstanding-capped"
+        >
+          {copy.OUTSTANDING_CAPPED}
         </p>
       ) : null}
     </div>

@@ -10,6 +10,7 @@ import { atlasError, startOutbox } from "./data-sync-helpers";
 import { pressTab } from "./helpers";
 import {
   atlas,
+  bootAt,
   connectivity,
   draftsOf,
   fieldP,
@@ -32,7 +33,9 @@ import {
  * E-P1 the list; E-P2 a field saved offline, sent with its own key; E-P3 every value kind through the editor; E-P4 conditional values;
  * E-P5 Q1's policy version and a version conflict; E-P6 a held audience change, policy before content; E-P7 linkage, rename and unlink;
  * E-P8 archive and restore; E-P9 duplicates (PPL-3); E-P10 a new person with a note, held for the defaults review; E-P11 a 403 on the
- * field's policy across the remount; E-P12 viewports and themes; E-P13 keyboard only.
+ * field's policy across the remount; E-P12 viewports and themes; E-P13 keyboard only. Revision 1 (the review of 13 October 2026):
+ * E-P14 an edit bound to what it began on; E-P15 a held change durable across a reload; E-P16 Discard stops a running held change;
+ * E-P17 state stays with its person; E-P18 every person reachable in bounded steps. E-P5 also asserts the conflicted save's content.
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -322,7 +325,7 @@ test.describe("E-P4: conditional values (A7)", () => {
 });
 
 test.describe("E-P5: Q1's policy version and a conflict (A5)", () => {
-  test("an update carries expected_policy_version; a 409 becomes a version conflict; 'Save mine' supersedes on the current bases", async ({
+  test("an update carries expected_policy_version; a 409 becomes a version conflict; 'Save mine' supersedes THAT save's content on the current bases, after the audience now is shown", async ({
     context,
   }, info) => {
     const { net, page, served } = await setup(
@@ -375,9 +378,15 @@ test.describe("E-P5: Q1's policy version and a conflict (A5)", () => {
       ],
       { start: false },
     );
+    // The policy moved to 7 on the server too: the conflicted save was made under 6, so the audience NOW is read and shown first.
+    served.policies.set(F, { version: 7, policy: PRIVATE });
     await navigateInApp(page, `/people/${P}/fields/${F}`);
     const again = page.getByRole("dialog", { name: "Edit Phone" });
-    await again
+    const panel = again.locator("[data-field-conflict]");
+    await expect(panel).toContainText("Current: Phone — 0779");
+    await expect(panel).toContainText("Yours: Phone — 0771");
+    await expect(panel).toContainText("Who can see it now: Only you");
+    await panel
       .getByRole("button", { name: "Save mine on the current version" })
       .click();
     await send(page);
@@ -385,6 +394,7 @@ test.describe("E-P5: Q1's policy version and a conflict (A5)", () => {
     expect(JSON.parse(net.commands[1]?.body ?? "{}").command).toMatchObject({
       expected_version: 5,
       expected_policy_version: 7,
+      value: { kind: "text", text: "0771" },
     });
     recordEvidence(info, "e-p5", { commands: net.commands });
   });
@@ -425,7 +435,7 @@ test.describe("E-P6: a held audience change (A6)", () => {
     );
     await dialog.getByRole("button", { name: "Hold as draft" }).click();
     await expect(dialog).toBeHidden();
-    await expect(page.locator(`[data-held-change="${F}"]`)).toBeVisible();
+    await expect(page.locator(`[data-held-field="${F}"]`)).toBeVisible();
     served.policyScript.push(
       () => ({ status: 200, body: { version: 6, policy: HOME_VIEW } }),
       () => ({ status: 200, body: { version: 7, policy: PRIVATE } }),
@@ -880,5 +890,240 @@ test.describe("E-P13: keyboard only (A21)", () => {
     await page.keyboard.press("Enter");
     await expect(dialog).toBeHidden();
     await expect(detail(page)).toContainText("Nuts");
+  });
+});
+
+/** A gate a stubbed answer waits on (the request is logged and held until `open()`). */
+function gate() {
+  let open!: () => void;
+  const after = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { after, open };
+}
+
+test.describe("E-P14: an edit keeps the versions and audience it began on (A4, A5, Q1; finding 1 of the review of 13 October)", () => {
+  test("a policy published while the editor is open: Save writes no draft; the audience now is shown and 'Save mine' re-binds to it", async ({
+    context,
+  }, info) => {
+    const { net, page, served } = await setup(
+      context,
+      `/people/${P}/fields/${F}`,
+      [
+        personP(P, "Ada"),
+        fieldP(
+          F,
+          P,
+          "Phone",
+          { kind: "text", text: "0770" },
+          { version: 4, policy_version: 6 },
+        ),
+      ],
+      { arrange: (s) => s.policies.set(F, { version: 6, policy: PRIVATE }) },
+    );
+    const dialog = page.getByRole("dialog", { name: "Edit Phone" });
+    await expect(dialog.getByRole("radio", { name: "Only you" })).toBeChecked();
+    await dialog.getByRole("textbox", { name: "Value" }).fill("Confidential");
+    // Version 7 widened the audience to the household.
+    served.policies.set(F, { version: 7, policy: HOME_VIEW });
+    await publish(
+      page,
+      net,
+      [
+        fieldP(
+          F,
+          P,
+          "Phone",
+          { kind: "text", text: "0770" },
+          { version: 4, policy_version: 7 },
+        ),
+      ],
+      { start: false },
+    );
+    const panel = dialog.locator("[data-field-conflict]");
+    await expect(panel).toContainText("This field changed since you opened it");
+    await expect(panel).toContainText("Who can see it now: Home · can view");
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    expect(await draftsOf(page)).toEqual([]);
+    await panel
+      .getByRole("button", { name: "Save mine on the current version" })
+      .click();
+    await expect(dialog).toBeHidden();
+    const bodies = (await page.evaluate(
+      (a) => window.__atlasData?.rows(a, "draft_commands"),
+      ME,
+    )) as Array<{ command: { command: Record<string, unknown> } }>;
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.command.command).toMatchObject({
+      expected_version: 4,
+      expected_policy_version: 7,
+      value: { kind: "text", text: "Confidential" },
+    });
+    recordEvidence(info, "e-p14", { bodies });
+  });
+});
+
+test.describe("E-P15: a held change is durable for its account (Q3, Q20; finding 6)", () => {
+  test("held offline, it survives the page closing (a new page reads it from real IndexedDB) and runs there: the audience first, then the content", async ({
+    context,
+  }, info) => {
+    const { net, page, served } = await setup(
+      context,
+      `/people/${P}/fields/${F}`,
+      [
+        personP(P, "Ada"),
+        fieldP(
+          F,
+          P,
+          "Note",
+          { kind: "text", text: "Inhaler" },
+          { version: 4, policy_version: 6 },
+        ),
+      ],
+      { arrange: (s) => s.policies.set(F, { version: 6, policy: HOME_VIEW }) },
+    );
+    await startOutbox(page);
+    const dialog = page.getByRole("dialog", { name: "Edit Note" });
+    await expect(
+      dialog.getByRole("radio", { name: "Home · can view" }),
+    ).toBeChecked();
+    await connectivity(context, page, false);
+    await dialog.getByRole("textbox", { name: "Value" }).fill("Kept");
+    await dialog.getByRole("radio", { name: "Only you", exact: true }).click();
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await dialog.getByRole("button", { name: "Hold as draft" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.locator(`[data-held-field="${F}"]`)).toBeVisible();
+    // The page goes away while the device is offline (nothing has run); a NEW page of the same browser profile opens the account later.
+    await page.close();
+    await connectivity(context, await context.newPage(), true);
+    served.policyScript.push(
+      () => ({ status: 200, body: { version: 6, policy: HOME_VIEW } }),
+      () => ({ status: 200, body: { version: 7, policy: PRIVATE } }),
+    );
+    const reopened = await bootAt(context, `/people/${P}`);
+    await startOutbox(reopened);
+    await expect
+      .poll(() => served.management.length, { timeout: 15_000 })
+      .toBe(1);
+    await expect.poll(async () => (await draftsOf(reopened)).length).toBe(1);
+    await send(reopened);
+    await expect.poll(() => net.commands.length).toBe(1);
+    expect(JSON.parse(net.commands[0]?.body ?? "{}").command).toMatchObject({
+      expected_version: 4,
+      expected_policy_version: 7,
+      value: { kind: "text", text: "Kept" },
+    });
+    await expect(reopened.locator(`[data-held-field="${F}"]`)).toHaveCount(0);
+    recordEvidence(info, "e-p15", { log: served.log, commands: net.commands });
+  });
+});
+
+test.describe("E-P16: Discard stops a held change that is running (A6; finding 2)", () => {
+  test("discarded while its policy read is on its way: no replace_policy is sent and no content is queued", async ({
+    context,
+  }, info) => {
+    const { page, served } = await setup(
+      context,
+      `/people/${P}/fields/${F}`,
+      [
+        personP(P, "Ada"),
+        fieldP(
+          F,
+          P,
+          "Note",
+          { kind: "text", text: "Inhaler" },
+          { version: 4, policy_version: 6 },
+        ),
+      ],
+      { arrange: (s) => s.policies.set(F, { version: 6, policy: HOME_VIEW }) },
+    );
+    const dialog = page.getByRole("dialog", { name: "Edit Note" });
+    await expect(
+      dialog.getByRole("radio", { name: "Home · can view" }),
+    ).toBeChecked();
+    await connectivity(context, page, false);
+    await dialog.getByRole("radio", { name: "Only you", exact: true }).click();
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await dialog.getByRole("button", { name: "Hold as draft" }).click();
+    const row = page.locator(`[data-held-field="${F}"]`);
+    await expect(row).toBeVisible();
+    const held = gate();
+    served.policyScript.push(() => ({
+      status: 200,
+      body: { version: 6, policy: HOME_VIEW },
+      after: held.after,
+    }));
+    const before = served.log.length;
+    await connectivity(context, page, true);
+    await expect
+      .poll(() => served.log.slice(before))
+      .toEqual([`GET /policies/${F}`]);
+    await row.getByRole("button", { name: "Discard" }).click();
+    held.open();
+    await expect(row).toHaveCount(0);
+    await expect(page.locator("body")).toContainText(
+      "The held change to Note was discarded. Nothing was sent.",
+    );
+    expect(served.management).toEqual([]);
+    expect(await draftsOf(page)).toEqual([]);
+    recordEvidence(info, "e-p16", { log: served.log });
+  });
+});
+
+test.describe("E-P17: state stays with its person (A9, A13; finding 4)", () => {
+  test("a rename typed on one person is not carried to another by in-app navigation, and nothing is sent", async ({
+    context,
+  }) => {
+    const { page, served } = await setup(
+      context,
+      `/people/${P}`,
+      [personP(P, "Ada", { version: 3 }), personP(Q, "Bob")],
+      { linked: { [P]: ME, [Q]: null } },
+    );
+    const header = page.locator("[data-identity-header]");
+    await header.getByRole("button", { name: "Rename" }).click();
+    await header.getByRole("textbox", { name: "Name" }).fill("Ada corrected");
+    await navigateInApp(page, `/people/${Q}`);
+    await expect(page.locator(`[data-person-detail="${Q}"]`)).toBeVisible();
+    await expect(page.locator("[data-rename-form]")).toHaveCount(0);
+    expect(served.peopleCommands).toEqual([]);
+    expect(await draftsOf(page)).toEqual([]);
+  });
+});
+
+test.describe("E-P18: every person stays reachable in bounded steps (Q9; finding 7)", () => {
+  test("250 people in real IndexedDB: 'Next people' continues from the cursor, 'Previous people' goes back, nobody is skipped", async ({
+    context,
+  }) => {
+    const people = Array.from({ length: 250 }, (_, i) =>
+      personP(
+        `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        `Person ${String(i).padStart(3, "0")}`,
+      ),
+    );
+    const { page } = await setup(context, "/people", people);
+    const rows = page.locator("[data-person-row]");
+    await expect(rows).toHaveCount(100);
+    await expect(rows.first()).toContainText("Person 000");
+    await expect(rows.last()).toContainText("Person 099");
+    await expect(
+      page.getByRole("button", { name: "Next people" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Next people" }).click();
+    await expect(rows.first()).toContainText("Person 100");
+    await expect(rows.last()).toContainText("Person 199");
+    await expect(
+      page.getByRole("button", { name: "Next people" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Next people" }).click();
+    await expect(rows).toHaveCount(50);
+    await expect(rows.last()).toContainText("Person 249");
+    await expect(page.getByRole("button", { name: "Next people" })).toHaveCount(
+      0,
+    );
+    await page.getByRole("button", { name: "Previous people" }).click();
+    await expect(rows.first()).toContainText("Person 100");
   });
 });

@@ -1,11 +1,20 @@
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import {
+  type CacheRow,
   useCachedResource,
   useConflictInbox,
+  useFormCopies,
   useSharingDefaults,
 } from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
@@ -13,7 +22,13 @@ import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
 import { runHeldChange } from "../field/held";
-import { type HeldChange, isCurrentMemory, useMemoryRevision } from "../memory";
+import {
+  decodeHeld,
+  type HeldChange,
+  type HeldFailure,
+  heldPrefixOf,
+} from "../field/held-store";
+import { type HeldRun, isCurrentMemory, useMemoryRevision } from "../memory";
 import {
   audienceLabel,
   classify,
@@ -23,12 +38,15 @@ import {
 import { archiveRequest } from "../model/commands";
 import {
   type Change,
+  changesById,
   changesOfAll,
+  foldOne,
   foldRows,
+  projectedRows,
   type ShownRow,
 } from "../model/project";
 import { Banner, PendingBadge, useOutboxSave } from "../parts";
-import { OutstandingChain, ResourceChain } from "../reads";
+import { OutstandingChain, ResourceScan } from "../reads";
 import { FieldValueView } from "./FieldValueView";
 import { IdentityHeader } from "./IdentityHeader";
 
@@ -45,7 +63,10 @@ export interface PersonDetailSlots {
   duplicateActions?: (personId: string, otherId: string) => ReactNode;
 }
 
-const FIELD_PAGES = 10;
+/** One step of the person's fields: at most 100 kept, from at most 10 pages; "Next fields" continues (Q9, finding 7). */
+const FIELD_STEP = 100;
+const FIELD_STEP_PAGES = 10;
+const keepAll = () => true;
 
 export function PersonDetail({
   personId,
@@ -85,6 +106,7 @@ export function PersonDetail({
               <IdentityHeader
                 shown={shown}
                 asPage={asPage}
+                drafts={outstanding.rows}
                 {...(slots.headerActions
                   ? { headerActions: slots.headerActions }
                   : {})}
@@ -209,36 +231,100 @@ function FieldsSection({
           )}
         </span>
       </div>
-      <ResourceChain kind="field" parentId={personId} cap={FIELD_PAGES}>
-        {(chain) => {
-          const rows = foldRows(chain.rows, changes, "field", personId);
-          const active = rows.filter((row) => !row.row.archived);
-          const archived = rows.filter((row) => row.row.archived);
-          return (
-            <>
-              <FieldRows rows={active} person={person} />
-              {chain.capped ? (
-                <p className="text-[12.5px] text-ink-2">
-                  {copy.CAPPED(FIELD_PAGES * 100)}
-                </p>
-              ) : null}
-              <HeldChanges
-                personId={personId}
-                fields={rows}
-                ready={chain.status === "ready" && !chain.capped}
-              />
-              <ArchivedFields rows={archived} />
-            </>
-          );
-        }}
-      </ResourceChain>
+      <FieldSteps person={person} changes={changes} />
+      <HeldChanges personId={personId} />
     </section>
   );
 }
 
-function FieldRows({ rows, person }: { rows: ShownRow[]; person: ShownRow }) {
+/** The person's fields one bounded step at a time, with the way to the next and previous steps (every field stays reachable). */
+function FieldSteps({
+  person,
+  changes,
+}: {
+  person: ShownRow;
+  changes: Change[];
+}) {
+  const personId = person.row.id;
+  // The cursors of the steps before this one (null: the first step), so "Previous fields" goes back without reading anything twice.
+  const [starts, setStarts] = useState<(string | null)[]>([null]);
+  const start = starts.at(-1) ?? null;
+  const byId = changesById(changes);
+  return (
+    <ResourceScan
+      kind="field"
+      parentId={personId}
+      start={start}
+      keep={keepAll}
+      limit={FIELD_STEP}
+      pages={FIELD_STEP_PAGES}
+    >
+      {(step) => {
+        const cached = step.rows.map((row) => foldOne(row, byId));
+        // The fields only this device's queued creates project are shown once, with the first step.
+        const rows =
+          start === null
+            ? [
+                ...cached,
+                ...projectedRows(
+                  new Set(step.rows.map((row) => row.id)),
+                  changes,
+                  "field",
+                  personId,
+                ),
+              ]
+            : cached;
+        const active = rows.filter((row) => !row.row.archived);
+        const archived = rows.filter((row) => row.row.archived);
+        return (
+          <>
+            <FieldRows
+              rows={active}
+              person={person}
+              settled={step.settled || step.status !== "ready"}
+            />
+            {starts.length > 1 || (step.settled && step.next !== null) ? (
+              <div className="flex flex-wrap gap-2" data-field-steps="">
+                {starts.length > 1 ? (
+                  <Button
+                    data-people-action="previous-fields"
+                    onClick={() => setStarts(starts.slice(0, -1))}
+                  >
+                    {copy.PREVIOUS_FIELDS}
+                  </Button>
+                ) : null}
+                {step.settled && step.next !== null ? (
+                  <Button
+                    data-people-action="next-fields"
+                    onClick={() => setStarts([...starts, step.next])}
+                  >
+                    {copy.NEXT_FIELDS}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            <ArchivedFields rows={archived} />
+          </>
+        );
+      }}
+    </ResourceScan>
+  );
+}
+
+function FieldRows({
+  rows,
+  person,
+  settled,
+}: {
+  rows: ShownRow[];
+  person: ShownRow;
+  /** The step's walk is over: only then does "no fields" mean anything (finding 5). */
+  settled: boolean;
+}) {
   if (rows.length === 0)
-    return <p className="text-[13px] text-ink-2">{copy.NO_FIELDS}</p>;
+    return settled ? (
+      <p className="text-[13px] text-ink-2">{copy.NO_FIELDS}</p>
+    ) : null;
   return (
     <div className="flex flex-col gap-1">
       <div
@@ -463,105 +549,240 @@ function DefaultsPanel() {
 }
 
 /**
- * The audience changes held for this person's fields (D-11a-12), with their state and "Try again" / "Discard". While the page is open,
- * online and writable, waiting ones run one at a time (`runHeldChange`): the audience first, then the content.
+ * The audience changes held for this person's fields (D-11a-12), DURABLE in the account's database (`field/held-store.ts`, finding 6),
+ * with their state and "Try again" / "Discard". While the page is open, online and writable, waiting ones run one at a time
+ * (`runHeldChange`), by one page of the browser at a time (`exclusive`): the audience first, then the content. Each runs against a DIRECT
+ * read of its own field (a complete answer for that one row), never against a list that may still be loading (finding 5).
  */
-function HeldChanges({
-  personId,
-  fields,
-  ready,
-}: {
-  personId: string;
-  fields: ShownRow[];
-  /** The person's fields have been read in full: only then does a missing or changed field mean anything. */
-  ready: boolean;
-}) {
+function HeldChanges({ personId }: { personId: string }) {
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
-  const save = useOutboxSave();
-  const announcer = useAnnouncer();
-  const held = [...env.memory.held.values()].filter(
-    (change) => change.personId === personId,
-  );
-  const running = useRef(false);
-  const fieldsRef = useRef(fields);
-  fieldsRef.current = fields;
-  const waiting = held.find((change) => change.status.kind === "waiting");
-  useEffect(() => {
-    if (
-      !ready ||
-      !env.online ||
-      !env.writable ||
-      running.current ||
-      waiting === undefined
-    )
-      return;
-    running.current = true;
-    const memory = env.memory;
-    waiting.status = { kind: "running" };
-    memory.touch();
-    const current =
-      fieldsRef.current.find(
-        (row) => row.row.id === waiting.fieldId && !row.projected,
-      )?.row ?? null;
-    void runHeldChange(env, waiting, current, save).then((result) => {
-      running.current = false;
-      if (!isCurrentMemory(memory)) return;
-      if (result.kind === "done") {
-        memory.held.delete(waiting.fieldId);
-        announcer.announce(copy.SAVED_NOT_SENT, "polite");
-      } else waiting.status = result;
-      memory.touch();
-    });
-  }, [env, waiting, save, announcer, ready]);
-  if (held.length === 0) return null;
+  const copies = useFormCopies(heldPrefixOf(personId));
+  if (copies.status !== "ready" || copies.value.copies.length === 0)
+    return null;
   return (
-    <List className="flex flex-col gap-2">
-      {held.map((change) => (
-        <HeldRow key={change.fieldId} env={env} change={change} />
-      ))}
+    <List className="flex flex-col gap-2" data-held-changes="">
+      {copies.value.copies.map((row) => {
+        const change = decodeHeld(row);
+        return change === null || change.personId !== personId ? (
+          <UnreadableHeld
+            key={row.tab_instance_id}
+            formContext={row.form_context}
+            holdId={row.tab_instance_id}
+          />
+        ) : (
+          <HeldRow key={change.holdId} env={env} change={change} />
+        );
+      })}
     </List>
   );
 }
 
-function HeldRow({ env, change }: { env: PeopleEnv; change: HeldChange }) {
-  const status = change.status;
+function UnreadableHeld({
+  formContext,
+  holdId,
+}: {
+  formContext: string;
+  holdId: string;
+}) {
+  const env = usePeopleEnv();
+  const [, personId = "", fieldId = ""] = formContext.split(":");
   return (
     <li
-      data-held-change={change.fieldId}
+      data-held-change={holdId}
+      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+    >
+      <p className="text-[13px] text-ink-1">{copy.HELD_UNREADABLE}</p>
+      <Button
+        variant="quiet"
+        onClick={() => void env.held.discard({ personId, fieldId, holdId })}
+      >
+        {copy.DISCARD}
+      </Button>
+    </li>
+  );
+}
+
+function HeldRow({ env, change }: { env: PeopleEnv; change: HeldChange }) {
+  const memory = env.memory;
+  const save = useOutboxSave();
+  const announcer = useAnnouncer();
+  const field = useCachedResource(change.fieldId);
+  const current: CacheRow | null =
+    field.status === "ready" &&
+    field.value.merged?.kind === "field" &&
+    field.value.merged.parent_id === change.personId
+      ? field.value.merged
+      : null;
+  const currentRef = useRef(current);
+  currentRef.current = current;
+  // Listed while this row is mounted: the hold was not finished or discarded by another page meanwhile (that removes it from the list).
+  const listed = useRef(true);
+  useEffect(() => {
+    listed.current = true;
+    return () => {
+      listed.current = false;
+    };
+  }, []);
+  // A run that came back `waiting` (not sent) runs again only when the env changes (online again, another identity): never in a loop.
+  const [pausedFor, setPausedFor] = useState<PeopleEnv | null>(null);
+  const [failure, setFailure] = useState<HeldFailure | null>(
+    change.status.kind === "failed" ? change.status.reason : null,
+  );
+  const run = memory.heldRuns.get(change.holdId);
+  const fieldSettled = field.status !== "loading";
+  const start = useCallback(() => {
+    if (memory.heldRuns.size > 0 || memory.heldEnded.has(change.holdId)) return;
+    const mine: HeldRun = {
+      holdId: change.holdId,
+      cancelled: false,
+      policyDone: false,
+    };
+    memory.heldRuns.set(change.holdId, mine);
+    memory.touch();
+    const held: HeldChange = { ...change, status: { kind: "waiting" } };
+    const hold = {
+      personId: change.personId,
+      fieldId: change.fieldId,
+      holdId: change.holdId,
+    };
+    const finish = async () => {
+      const result = await env.exclusive(
+        `atlas-people-held:${env.accountId}:${change.holdId}`,
+        () =>
+          runHeldChange(env, held, mine, {
+            current: () => currentRef.current,
+            listed: () => listed.current,
+            persist: (next) => env.held.save(next),
+            enqueue: save,
+          }),
+      );
+      // What the run decided is made durable BEFORE the run lets go: until then no other run of this hold can start on this page.
+      const current = isCurrentMemory(memory);
+      let message: string | null = null;
+      if (current && result !== null)
+        switch (result.kind) {
+          case "done":
+            memory.heldEnded.add(change.holdId);
+            await env.held.discard(hold);
+            message = copy.SAVED_NOT_SENT;
+            break;
+          case "failed":
+            // Written back only while the hold is still listed: a hold another page ended is never brought back.
+            if (listed.current)
+              await env.held.save({
+                ...held,
+                status: { kind: "failed", reason: result.reason },
+              });
+            break;
+          case "cancelled":
+            if (!mine.cancelled) break;
+            // The person discarded it while it ran: it ends here, and what was already done is said truthfully.
+            memory.heldEnded.add(change.holdId);
+            await env.held.discard(hold);
+            if (held.attempt !== null)
+              memory.attempts.set(`policy:${change.fieldId}`, held.attempt);
+            message = result.policyDone
+              ? copy.HELD_POLICY_DONE(change.label)
+              : held.attempt !== null
+                ? copy.HELD_POLICY_UNCERTAIN(change.label)
+                : copy.HELD_STOPPED(change.label);
+            break;
+          case "waiting":
+            break;
+        }
+      if (memory.heldRuns.get(change.holdId) === mine)
+        memory.heldRuns.delete(change.holdId);
+      if (!current) return;
+      // Another page runs it (no lock), or it was not sent: this page waits until the env changes.
+      if (result === null || result.kind === "waiting") setPausedFor(env);
+      else if (result.kind === "failed") setFailure(result.reason);
+      if (message !== null) announcer.announce(message, "polite");
+      memory.touch();
+    };
+    void finish();
+  }, [env, memory, change, save, announcer]);
+  const ended = memory.heldEnded.has(change.holdId);
+  useEffect(() => {
+    if (
+      ended ||
+      failure !== null ||
+      run !== undefined ||
+      !fieldSettled ||
+      !env.online ||
+      !env.writable ||
+      pausedFor === env
+    )
+      return;
+    start();
+  }, [ended, failure, run, fieldSettled, env, pausedFor, start]);
+  const stopping = run?.cancelled === true;
+  if (ended && run === undefined) return null;
+  return (
+    <li
+      data-held-change={change.holdId}
+      data-held-field={change.fieldId}
       className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
     >
       <p className="text-[13px] text-ink-1">
-        {status.kind === "running"
-          ? copy.HELD_RUNNING(change.label)
-          : copy.HELD_WAITING(change.label)}
+        {stopping
+          ? copy.HELD_STOPPING(change.label)
+          : run !== undefined
+            ? copy.HELD_RUNNING(change.label)
+            : copy.HELD_WAITING(change.label)}
       </p>
-      {status.kind === "failed" ? (
+      {failure !== null && run === undefined ? (
         <p className="text-[12.5px] text-conflict-text">
-          {copy.HELD_FAILED[status.reason]}
+          {copy.HELD_FAILED[failure]}
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        {status.kind === "failed" ? (
+        {failure !== null && run === undefined ? (
           <Button
             onClick={() => {
-              change.status = { kind: "waiting" };
-              env.memory.touch();
+              setFailure(null);
+              setPausedFor(null);
+              void env.held.save({ ...change, status: { kind: "waiting" } });
             }}
           >
             {copy.TRY_AGAIN}
           </Button>
         ) : null}
-        <Button
-          variant="quiet"
-          onClick={() => {
-            env.memory.held.delete(change.fieldId);
-            env.memory.attempts.delete(`policy:${change.fieldId}`);
-            env.memory.touch();
-          }}
-        >
-          {copy.DISCARD}
-        </Button>
+        {stopping ? (
+          <Button variant="quiet" disabled reason={copy.SAVING}>
+            {copy.DISCARD}
+          </Button>
+        ) : (
+          <Button
+            variant="quiet"
+            onClick={() => {
+              if (run !== undefined) {
+                // Running: the run stops at its next admission boundary and ends the hold itself (see `runHeldChange`).
+                run.cancelled = true;
+                memory.touch();
+                return;
+              }
+              memory.heldEnded.add(change.holdId);
+              memory.touch();
+              // Its uncertain policy attempt outlives the hold: a later audience change of the field sends the same key and body.
+              if (change.attempt !== null)
+                memory.attempts.set(`policy:${change.fieldId}`, change.attempt);
+              void env.held.discard({
+                personId: change.personId,
+                fieldId: change.fieldId,
+                holdId: change.holdId,
+              });
+              announcer.announce(
+                change.attempt !== null
+                  ? copy.HELD_POLICY_UNCERTAIN(change.label)
+                  : copy.HELD_STOPPED(change.label),
+                "polite",
+              );
+            }}
+          >
+            {copy.DISCARD}
+          </Button>
+        )}
       </div>
     </li>
   );

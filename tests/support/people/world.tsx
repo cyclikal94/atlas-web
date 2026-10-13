@@ -10,9 +10,14 @@ import {
   type DraftWithCommand,
   type EnqueueOutcome,
   type EnqueueRequest,
+  type FormRecoveryRow,
+  type JsonObject,
   type Loadable,
 } from "../../../src/data";
-import { commandKindOf } from "../../../src/data/model/outbox";
+import {
+  commandKindOf,
+  estimateDraftBytes,
+} from "../../../src/data/model/outbox";
 import type {
   CommandAttempt,
   PeopleApi,
@@ -24,6 +29,13 @@ import {
   type PeopleEnv,
   PeopleEnvProvider,
 } from "../../../src/features/people/env";
+import {
+  decodeHeld,
+  encodeHeld,
+  type HeldChange,
+  type HeldStore,
+  heldContextOf,
+} from "../../../src/features/people/field/held-store";
 import { peopleMemory } from "../../../src/features/people/memory";
 import { SharingEnvProvider } from "../../../src/features/sharing/env";
 import { SessionProvider } from "../../../src/session";
@@ -42,8 +54,12 @@ import { ME } from "./records";
  *
  *  - The data layer is the stub controller (`stubEnv`) with a store double that answers the three read plans the screens use
  *    (`data.readMerged`, `data.readResourceList`, `data.readOutstandingCreates`) from `cache` and `drafts`, live.
- *  - The outbox is a double that runs each request's `build` on the bases the real plan would resolve (the cached version of a checked
- *    target, the seed of a created one) and records it; a queued draft then appears among the outstanding drafts, as the real store would.
+ *  - The outbox is a double that runs each request's `build` on the bases the real plan would resolve (the record a queued save of this
+ *    device raised, else the cached version of a checked target, else the seed of a created one; the record follows a newer cached version
+ *    as the real reconciliation does) and records it; a queued draft then appears among the outstanding drafts, with its bases, as the
+ *    real store would. A build that throws is a refused write (the real facade reports it as a failed save). A save under a local id that is
+ *    already a draft is the same save (a duplicate adds nothing).
+ *  - Held audience changes are form copies (`copies`), written by a double of the held store and read by `data.readFormCopies`.
  *  - The people and sharing APIs are scriptable doubles that record every call.
  */
 export interface Built {
@@ -148,6 +164,20 @@ export interface PeopleWorld {
   setCache(rows: CacheRow[]): void;
   putCache(row: CacheRow): void;
   setDrafts(drafts: DraftWithCommand[]): void;
+  /** The body of a draft the conflict inbox lists (the inbox lists headers; `data.readDraftWithCommand` answers with this). */
+  putBody(localId: string, command: JsonObject): void;
+  /** The outbox's version record (`resource_versions`), by resource id. */
+  versions: Map<string, number>;
+  /** The form copies of the account's database, by `[form_context, tab]`. */
+  copies: Map<string, FormRecoveryRow>;
+  /** The held changes the form copies carry now (live, non-terminal). */
+  held(): HeldChange[];
+  /** Puts a held change as a form copy (as a page that held it earlier did). */
+  putHeld(change: HeldChange): void;
+  /** What the held store's next saves answer (default `saved`). */
+  heldSaves: Array<"saved" | "failed" | "refused">;
+  /** Locks another page of the browser holds (`exclusive` answers null for them). */
+  heldElsewhere: Set<string>;
   setOnline(online: boolean): void;
   /** The outbox is null (no database bound yet). */
   noDatabase(): void;
@@ -162,6 +192,12 @@ export function peopleWorld(
   const env = stubEnv();
   const cache = new Map<string, CacheRow>();
   let drafts: DraftWithCommand[] = [];
+  const versions = new Map<string, number>();
+  const bodies = new Map<string, JsonObject>();
+  const copies = new Map<string, FormRecoveryRow>();
+  const heldSaves: Array<"saved" | "failed" | "refused"> = [];
+  const heldElsewhere = new Set<string>();
+  const held = new Set<string>();
   const listeners = new Set<Listener>();
   let version = 0;
   let failing = false;
@@ -216,6 +252,34 @@ export function peopleWorld(
         },
       };
     },
+    "data.readFormCopies": (input) => {
+      const prefix = input.prefix as string;
+      const live = [...copies.values()]
+        .filter((row) => !row.terminal && row.form_context.startsWith(prefix))
+        .sort((a, b) => (a.saved_at < b.saved_at ? -1 : 1));
+      return {
+        status: "ready",
+        value: { copies: live.slice(0, 100), more: live.length > 100 },
+      };
+    },
+    "data.readDraftWithCommand": (input) => {
+      const id = input.localId as string;
+      const draft = drafts.find((d) => d.local_id === id);
+      if (draft !== undefined) return { status: "ready", value: draft };
+      const body = bodies.get(id);
+      const page = env.conflicts.get();
+      const listed =
+        page.status === "ready"
+          ? page.value.rows.find((row) => row.draft.local_id === id)?.draft
+          : undefined;
+      return {
+        status: "ready",
+        value:
+          body === undefined || listed === undefined
+            ? null
+            : { ...listed, command: body },
+      };
+    },
     "data.readOutstandingCreates": (input) => {
       const kinds = input.kinds as string[];
       const after = (input.after as number | undefined) ?? 0;
@@ -268,12 +332,25 @@ export function peopleWorld(
   const basesOf = (request: EnqueueRequest) => {
     const bases: Record<string, number> = {};
     for (const target of request.targets) {
+      const tracked = versions.get(target.resourceId);
       const cached = cache.get(target.resourceId)?.version;
-      const base = cached ?? target.seedIfUntracked;
+      const base = tracked ?? cached ?? target.seedIfUntracked;
       if (base !== undefined) bases[target.resourceId] = base;
     }
     return bases;
   };
+  const bumpedOf = (request: EnqueueRequest) =>
+    request.targets
+      .filter((target) => target.versionChecked)
+      .map((target) => target.resourceId);
+  /** Whether an outstanding draft other than `except` raised `id`. */
+  const raisedBy = (id: string, except?: string) =>
+    drafts.some(
+      (d) =>
+        d.local_id !== except &&
+        d.bumped.includes(id) &&
+        ["queued", "in_flight", "blocked", "acknowledged"].includes(d.status),
+    );
   const nextLocalId = () => {
     seq += 1;
     return `00000000-0000-4000-8000-${String(seq).padStart(12, "0")}`;
@@ -284,7 +361,13 @@ export function peopleWorld(
     localId: string,
     target?: string,
   ) => {
-    const result = request.build(basesOf(request));
+    // The real facade sizes the write first, building from placeholder bases (no bases, the widest version) before the transaction.
+    estimateDraftBytes(request);
+    const bases = basesOf(request);
+    const result = request.build(bases);
+    if (op !== "edit")
+      for (const id of bumpedOf(request))
+        versions.set(id, (bases[id] as number) + 1);
     built.push({
       request,
       command: result.command as Record<string, unknown>,
@@ -298,7 +381,7 @@ export function peopleWorld(
       op,
       ...(target === undefined ? {} : { target }),
     });
-    return result;
+    return { ...result, bases };
   };
   let outboxAvailable = true;
   const outbox = {
@@ -307,6 +390,9 @@ export function peopleWorld(
       if (scripted !== undefined && scripted.kind === "refused")
         return scripted;
       const localId = request.localId ?? nextLocalId();
+      // The same save again (a retry after a lost completion): nothing is added.
+      if (drafts.some((d) => d.local_id === localId))
+        return { kind: "queued", localId, createdSeq: seq } as EnqueueOutcome;
       const result = record("enqueue", request, localId);
       drafts = [
         ...drafts,
@@ -322,8 +408,8 @@ export function peopleWorld(
           target_resource_ids: request.targets.map((t) => t.resourceId),
           side_effect_bases: {},
           index_targets: request.targets.map((t) => t.resourceId),
-          bases: {},
-          bumped: [],
+          bases: result.bases,
+          bumped: bumpedOf(request),
           defaults_context: null,
           review_block:
             result.defaultsReview && result.defaultsReview.length > 0
@@ -354,6 +440,8 @@ export function peopleWorld(
       if (draft === undefined) return { kind: "refused", reason: "not_found" };
       if (draft.status !== "queued")
         return { kind: "refused", reason: "not_queued" };
+      if (request.expectDraft !== undefined && !request.expectDraft(draft))
+        return { kind: "refused", reason: "draft_changed" };
       const result = record("edit", request, localId, localId);
       drafts = drafts.map((d) =>
         d.local_id === localId ? { ...d, command: result.command } : d,
@@ -362,6 +450,9 @@ export function peopleWorld(
       return { kind: "edited", localId };
     },
     supersede: async (old: string, request: EnqueueRequest) => {
+      // The old draft's contribution is retired first, and the replacement reads the corrected record (the real plan's order).
+      for (const id of bumpedOf(request))
+        if (!raisedBy(id, old)) versions.delete(id);
       const localId = nextLocalId();
       record("supersede", request, localId, old);
       return { kind: "superseded", localId, paused: [] };
@@ -371,6 +462,54 @@ export function peopleWorld(
     outboxAvailable ? outbox : null;
 
   const api = fakePeopleApi(() => cache);
+  // The real list of form copies is a live read that answers AFTER the write (a later task): never in the same turn as the write.
+  const later = () =>
+    setTimeout(() => {
+      act(() => notify());
+    }, 0);
+  const copyKey = (context: string, tab: string) => `${context}\u0000${tab}`;
+  const heldStore: HeldStore = {
+    async save(change) {
+      const answer = heldSaves.shift() ?? "saved";
+      if (answer !== "saved") return answer;
+      const context = heldContextOf(change.personId, change.fieldId);
+      copies.set(copyKey(context, change.holdId), {
+        form_context: context,
+        tab_instance_id: change.holdId,
+        fields: encodeHeld(change),
+        redacted: [],
+        saved_at: new Date(Date.now() + copies.size).toISOString(),
+        capture_seq: 1,
+        terminal: false,
+        content_digest: "x",
+      });
+      later();
+      return "saved";
+    },
+    async discard(hold) {
+      const key = copyKey(
+        heldContextOf(hold.personId, hold.fieldId),
+        hold.holdId,
+      );
+      const row = copies.get(key);
+      if (row !== undefined)
+        copies.set(key, { ...row, fields: {}, terminal: true });
+      later();
+      return "discarded";
+    },
+  };
+  const exclusive = async <T,>(
+    name: string,
+    run: () => Promise<T>,
+  ): Promise<T | null> => {
+    if (heldElsewhere.has(name) || held.has(name)) return null;
+    held.add(name);
+    try {
+      return await run();
+    } finally {
+      held.delete(name);
+    }
+  };
   const sharing = fakeSharingApi();
   const identity = options.identity ?? `${ME}:1`;
   let online = options.online ?? true;
@@ -388,6 +527,8 @@ export function peopleWorld(
       now: () => Date.now(),
       prefetchLinkage: 25,
       memory: peopleMemory(identity),
+      held: heldStore,
+      exclusive,
     };
   };
   let peopleEnv = people();
@@ -427,6 +568,34 @@ export function peopleWorld(
     },
     built,
     outcomes,
+    versions,
+    copies,
+    heldSaves,
+    heldElsewhere,
+    held() {
+      return [...copies.values()]
+        .filter((row) => !row.terminal)
+        .map(decodeHeld)
+        .filter((change): change is HeldChange => change !== null);
+    },
+    putHeld(change) {
+      const context = heldContextOf(change.personId, change.fieldId);
+      copies.set(copyKey(context, change.holdId), {
+        form_context: context,
+        tab_instance_id: change.holdId,
+        fields: encodeHeld(change),
+        redacted: [],
+        saved_at: new Date(Date.now() + copies.size).toISOString(),
+        capture_seq: 1,
+        terminal: false,
+        content_digest: "x",
+      });
+      act(() => notify());
+    },
+    putBody(localId, command) {
+      bodies.set(localId, command);
+      act(() => notify());
+    },
     setCache(rows) {
       cache.clear();
       for (const row of rows) cache.set(row.id, row);
@@ -434,6 +603,14 @@ export function peopleWorld(
     },
     putCache(row) {
       cache.set(row.id, row);
+      // `reconcileVersions`: a delivered version at or above the record ends it when nothing of this device is outstanding for the row;
+      // a higher one otherwise raises the record (queued drafts keep their bases and meet a genuine 409).
+      const tracked = versions.get(row.id);
+      if (tracked !== undefined) {
+        if (row.version >= tracked && !raisedBy(row.id))
+          versions.delete(row.id);
+        else if (row.version > tracked) versions.set(row.id, row.version);
+      }
       act(() => notify());
     },
     setDrafts(next) {

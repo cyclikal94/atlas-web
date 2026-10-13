@@ -1,5 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+} from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
@@ -12,9 +19,15 @@ import {
 import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
 import { archiveRequest } from "../model/commands";
-import { changesOfAll, foldRows, type ShownRow } from "../model/project";
+import {
+  type Change,
+  changesById,
+  changesOfAll,
+  foldOne,
+  type ShownRow,
+} from "../model/project";
 import { PendingBadge, useOutboxSave } from "../parts";
-import { OutstandingChain, ResourceChain } from "../reads";
+import { OutstandingChain, ResourceScan } from "../reads";
 import { archivedLedgerKinds } from "./ledger";
 
 /**
@@ -22,7 +35,8 @@ import { archivedLedgerKinds } from "./ledger";
  * projection has no `archived_at`). People and fields are WEB-11a's kinds; other slices add theirs through `archivedLedgerKinds`. A field
  * is listed only while its person is on this device and visible (PPL-5), named with its person ("Old emergency contact · Mo").
  */
-const LEDGER_PAGES = 50;
+const LEDGER_STEP = 100;
+const LEDGER_STEP_PAGES = 50;
 
 export function ArchivedItems() {
   const env = useOptionalDataEnv();
@@ -148,36 +162,116 @@ function LedgerRow({
   );
 }
 
+/** Archived rows of one kind, one bounded step at a time, with "Next items" / "Previous items" (Q9, finding 7): every one reachable. */
+function ArchivedSteps({
+  kind,
+  children,
+}: {
+  kind: "person" | "field";
+  /** `more`: there is a step to move to (a kind with one is never "empty"). */
+  children(rows: ShownRow[], settled: boolean, more: boolean): ReactNode;
+}) {
+  const [starts, setStarts] = useState<(string | null)[]>([null]);
+  const start = starts.at(-1) ?? null;
+  return (
+    <OutstandingChain>
+      {(outstanding) => (
+        <ArchivedStep
+          kind={kind}
+          changes={changesOfAll(outstanding.rows)}
+          start={start}
+          onPrevious={
+            starts.length > 1 ? () => setStarts(starts.slice(0, -1)) : null
+          }
+          onNext={(next) => setStarts([...starts, next])}
+        >
+          {children}
+        </ArchivedStep>
+      )}
+    </OutstandingChain>
+  );
+}
+
+function ArchivedStep({
+  kind,
+  changes,
+  start,
+  onPrevious,
+  onNext,
+  children,
+}: {
+  kind: "person" | "field";
+  changes: Change[];
+  start: string | null;
+  onPrevious: (() => void) | null;
+  onNext(next: string): void;
+  /** `more`: there is a step to move to (a kind with one is never "empty"). */
+  children(rows: ShownRow[], settled: boolean, more: boolean): ReactNode;
+}) {
+  const byId = useMemo(() => changesById(changes), [changes]);
+  const keep = useCallback(
+    (row: CacheRow) => foldOne(row, byId).row.archived,
+    [byId],
+  );
+  return (
+    <ResourceScan
+      kind={kind}
+      start={start}
+      keep={keep}
+      limit={LEDGER_STEP}
+      pages={LEDGER_STEP_PAGES}
+    >
+      {(step) => {
+        const rows = step.rows.map((row) => foldOne(row, byId));
+        const next = step.settled ? step.next : null;
+        return (
+          <>
+            {children(
+              rows,
+              step.settled || step.status === "failed",
+              onPrevious !== null || next !== null,
+            )}
+            {onPrevious !== null || next !== null ? (
+              <li
+                className="flex list-none flex-wrap gap-2"
+                data-ledger-steps={kind}
+              >
+                {onPrevious !== null ? (
+                  <Button onClick={onPrevious}>{copy.PREVIOUS_ITEMS}</Button>
+                ) : null}
+                {next !== null ? (
+                  <Button onClick={() => onNext(next)}>
+                    {copy.NEXT_ITEMS}
+                  </Button>
+                ) : null}
+              </li>
+            ) : null}
+          </>
+        );
+      }}
+    </ResourceScan>
+  );
+}
+
 function ArchivedPeople({ report }: { report(count: number): void }) {
   return (
-    <ResourceChain kind="person" cap={LEDGER_PAGES}>
-      {(chain) => (
-        <OutstandingChain>
-          {(outstanding) => {
-            const rows = foldRows(
-              chain.rows,
-              changesOfAll(outstanding.rows),
-              "person",
-            ).filter((row) => row.row.archived);
-            return (
-              <Reported
-                count={chain.status === "loading" ? null : rows.length}
-                report={report}
-              >
-                {rows.map((row) => (
-                  <LedgerRow
-                    key={row.row.id}
-                    kindLabel={copy.KIND_PERSON}
-                    name={row.row.label}
-                    shown={row}
-                  />
-                ))}
-              </Reported>
-            );
-          }}
-        </OutstandingChain>
+    <ArchivedSteps kind="person">
+      {(rows, settled, more) => (
+        <Reported
+          count={settled ? rows.length + (more ? 1 : 0) : null}
+          report={report}
+        >
+          {rows.map((row) => (
+            <LedgerRow
+              key={row.row.id}
+              kindLabel={copy.KIND_PERSON}
+              name={row.row.label}
+              shown={row}
+            />
+          ))}
+        </Reported>
       )}
-    </ResourceChain>
+    </ArchivedSteps>
   );
 }
 
@@ -191,35 +285,25 @@ function ArchivedFields({ report }: { report(count: number): void }) {
     [],
   );
   return (
-    <ResourceChain kind="field" cap={LEDGER_PAGES}>
-      {(chain) => (
-        <OutstandingChain>
-          {(outstanding) => {
-            const rows = foldRows(
-              chain.rows,
-              changesOfAll(outstanding.rows),
-              "field",
-            ).filter((row) => row.row.archived);
-            const count =
-              chain.status === "loading" ||
-              rows.some((row) => visible[row.row.id] === undefined)
-                ? null
-                : rows.filter((row) => visible[row.row.id]).length;
-            return (
-              <Reported count={count} report={report}>
-                {rows.map((row) => (
-                  <FieldLedgerRow
-                    key={row.row.id}
-                    shown={row}
-                    onVisible={onVisible}
-                  />
-                ))}
-              </Reported>
-            );
-          }}
-        </OutstandingChain>
-      )}
-    </ResourceChain>
+    <ArchivedSteps kind="field">
+      {(rows, settled, more) => {
+        const count =
+          !settled || rows.some((row) => visible[row.row.id] === undefined)
+            ? null
+            : rows.filter((row) => visible[row.row.id]).length + (more ? 1 : 0);
+        return (
+          <Reported count={count} report={report}>
+            {rows.map((row) => (
+              <FieldLedgerRow
+                key={row.row.id}
+                shown={row}
+                onVisible={onVisible}
+              />
+            ))}
+          </Reported>
+        );
+      }}
+    </ArchivedSteps>
   );
 }
 

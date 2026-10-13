@@ -21,13 +21,14 @@ describe("page memory", () => {
     const a = peopleMemory("acct:1");
     a.dismiss("p", "q");
     a.attempts.set("rename:p", { key: "k", body: "{}" });
-    a.held.set("f", {} as never);
+    a.heldRuns.set("h", { holdId: "h", cancelled: false, policyDone: false });
     const b = peopleMemory("acct:2");
     expect(b.dismissedOf("p").size).toBe(0);
     expect(b.attempts.size).toBe(0);
-    expect(b.held.size).toBe(0);
+    expect(b.heldRuns.size).toBe(0);
     expect(isCurrentMemory(a)).toBe(false);
-    // Coming back to the first identity does not bring its memory back.
+    // Coming back to the first identity does not bring its PAGE memory back (held changes are durable, in the account's database:
+    // field/held-store.ts; this memory holds only what a page learnt).
     expect(peopleMemory("acct:1").dismissedOf("p").size).toBe(0);
   });
 

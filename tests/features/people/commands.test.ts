@@ -1,7 +1,10 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
+import { estimateDraftBytes } from "../../../src/data/model/outbox";
 import {
   archiveRequest,
+  BaseMoved,
+  baseGuard,
   createPersonRequest,
   editCreateRequest,
   putFieldCreateRequest,
@@ -417,5 +420,91 @@ describe("through the real outbox (fixture IndexedDB)", () => {
         ["create_person", undefined],
       ]),
     );
+  });
+});
+
+describe("the base guard (finding 1 of the review of 13 October)", () => {
+  test("only the writing transaction's base is judged: the outbox estimate's placeholder builds neither refuse nor flag", () => {
+    const guard = baseGuard(4);
+    const request = putFieldUpdateRequest({
+      fieldId: "f",
+      personId: "p",
+      label: "Phone",
+      value: { kind: "text", text: "0771" },
+      policyVersion: 6,
+      sameKind: true,
+      guard,
+    });
+    // What `estimateDraftBytes` asks for: no bases, then the widest version.
+    expect(estimateDraftBytes(request)).toBeGreaterThan(0);
+    expect(() => request.build({})).not.toThrow();
+    expect(() => request.build({ f: Number.MAX_SAFE_INTEGER })).not.toThrow();
+    expect(guard.moved).toBe(false);
+    expect(request.build({ f: 4 }).command).toMatchObject({
+      command: { expected_version: 4, expected_policy_version: 6 },
+    });
+    expect(guard.moved).toBe(false);
+    expect(() => request.build({ f: 5 })).toThrow(BaseMoved);
+    expect(guard.moved).toBe(true);
+  });
+});
+
+describe("the base guard through the REAL outbox (estimate, then the transaction)", () => {
+  const field = (version: number) => ({
+    id: FIELD,
+    kind: "field" as const,
+    parent_id: PERSON,
+    label: "Medical note",
+    value: TEXT as unknown as null,
+    version,
+    can_edit: true,
+    policy_version: 7,
+    archived: false,
+    kind_date: null,
+  });
+
+  test("the base the edit began on: queued, and the guard is not flagged", async () => {
+    const w = await outboxWorld();
+    w.put("cache", [field(4)]);
+    const guard = baseGuard(4);
+    const answer = await w.outbox.enqueue(
+      putFieldUpdateRequest({
+        fieldId: FIELD,
+        personId: PERSON,
+        label: "Medical note",
+        value: TEXT,
+        policyVersion: 7,
+        sameKind: true,
+        guard,
+      }),
+    );
+    expect(answer.kind).toBe("queued");
+    expect(guard.moved).toBe(false);
+    expect(
+      (w.rows("drafts") as Array<{ expected_version?: number }>).map(
+        (d) => d.expected_version,
+      ),
+    ).toEqual([4]);
+  });
+
+  test("another base resolved in the transaction: nothing is written and the guard says why", async () => {
+    const w = await outboxWorld();
+    w.put("cache", [field(5)]);
+    const guard = baseGuard(4);
+    await expect(
+      w.outbox.enqueue(
+        putFieldUpdateRequest({
+          fieldId: FIELD,
+          personId: PERSON,
+          label: "Medical note",
+          value: TEXT,
+          policyVersion: 7,
+          sameKind: true,
+          guard,
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(guard.moved).toBe(true);
+    expect(w.rows("drafts")).toEqual([]);
   });
 });

@@ -91,7 +91,10 @@ export function PersonScreen({
 }) {
   const mode = useLayoutMode();
   return (
+    // Keyed: everything on a person's screen (an open rename and its typed name, the fields' step, the held changes' runs) belongs to
+    // ONE person; another person's route mounts a new screen (finding 4 of the review of 13 October).
     <PersonDetail
+      key={personId}
       personId={personId}
       asPage={mode !== "desktop"}
       slots={peopleSlots}
@@ -122,7 +125,9 @@ export function FieldEditorScreen({
 
 export function DuplicatesScreen({ personId }: { personId: string }) {
   return (
+    // Keyed: a duplicates view's pages, its first-page flag and its reads belong to ONE person (finding 4).
     <DuplicatesView
+      key={personId}
       personId={personId}
       {...(peopleSlots.duplicateActions
         ? { duplicateActions: peopleSlots.duplicateActions }

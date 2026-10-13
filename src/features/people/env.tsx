@@ -1,7 +1,9 @@
 import { createContext, type ReactNode, useContext, useMemo } from "react";
+import { createFormRecoveryPort, useDataEnv } from "../../data";
 import { useIdentity, useSession } from "../../session";
 import { type SharingApi, SharingBoundary, useSharingEnv } from "../sharing";
 import { createPeopleApi, type PeopleApi } from "./api";
+import { type HeldStore, heldStoreOver } from "./field/held-store";
 import { type PeopleMemory, peopleMemory } from "./memory";
 
 /**
@@ -28,6 +30,23 @@ export interface PeopleEnv {
   /** How many people the list reads the linkage of while online (D-11a-3: 25). */
   prefetchLinkage: number;
   memory: PeopleMemory;
+  /** The account's DURABLE held audience changes (form copies of its database, finding 6). */
+  held: HeldStore;
+  /**
+   * Runs `run` while this page holds the lock `name` across every page of the browser (Web Locks, Q12), or does nothing and answers
+   * null when another page holds it: a held change is run by one page at a time.
+   */
+  exclusive<T>(name: string, run: () => Promise<T>): Promise<T | null>;
+}
+
+/** `exclusive` over Web Locks (`ifAvailable`: never queued behind another page's run). */
+export function webLocksExclusive<T>(
+  name: string,
+  run: () => Promise<T>,
+): Promise<T | null> {
+  return navigator.locks.request(name, { ifAvailable: true }, (lock) =>
+    lock === null ? null : run(),
+  ) as Promise<T | null>;
 }
 
 const PeopleEnvContext = createContext<PeopleEnv | null>(null);
@@ -55,6 +74,7 @@ export function usePeopleEnv(): PeopleEnv {
 
 function ProductionPeopleEnv({ children }: { children: ReactNode }) {
   const sharing = useSharingEnv();
+  const data = useDataEnv();
   const session = useSession();
   const identity = useIdentity();
   const epoch = identity?.epoch ?? null;
@@ -66,6 +86,18 @@ function ProductionPeopleEnv({ children }: { children: ReactNode }) {
         : createPeopleApi(session, account, epoch),
     [session, account, epoch, identity?.account_id],
   );
+  // The port writes to whichever account's database the data env has bound; the protected tree is remounted on any change of identity.
+  const held = useMemo(() => {
+    const now = () => new Date().toISOString();
+    return heldStoreOver(
+      createFormRecoveryPort({
+        service: () => data.service(),
+        quota: data.quota,
+        now,
+      }),
+      now,
+    );
+  }, [data]);
   const value = useMemo<PeopleEnv | null>(
     () =>
       api === null
@@ -81,8 +113,10 @@ function ProductionPeopleEnv({ children }: { children: ReactNode }) {
             now: sharing.now,
             prefetchLinkage: 25,
             memory: peopleMemory(sharing.identity),
+            held,
+            exclusive: webLocksExclusive,
           },
-    [api, sharing, account],
+    [api, sharing, account, held],
   );
   // No identity is displayed: there is nothing to show (the gate has taken over).
   if (value === null) return null;

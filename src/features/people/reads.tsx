@@ -28,12 +28,18 @@ export type ChainStatus = "loading" | "ready" | "absent" | "failed";
 
 export interface ChainResult<Row> {
   status: ChainStatus;
+  /** The rows of the pages that have reported, in order: READABLE, never an inventory unless `complete`. */
   rows: Row[];
   /** The cap was reached while more pages followed: the view says it shows the first n. */
   capped: boolean;
+  /**
+   * Every page from the first to the last (`next: null`) has reported ready: only then is a row's ABSENCE from `rows` evidence that it
+   * is not there. A later page still loading, absent or failed, or the cap, is not complete (finding 5 of the review of 13 October).
+   */
+  complete: boolean;
 }
 
-interface Report<Row, Cursor> {
+export interface Report<Row, Cursor> {
   status: ChainStatus;
   rows: Row[];
   next: Cursor | null;
@@ -45,8 +51,8 @@ function statusOf(loadable: Loadable<unknown>): ChainStatus {
   return loadable.reason === "error" ? "failed" : "absent";
 }
 
-/** The reports of a chain, followed from page 0 through each page's `next` (a stale later report is never counted). */
-function useChain<Row, Cursor>(cap: number) {
+/** The reports of the pages of a walk, by index, each with the cursor it was read after. */
+function useReports<Row, Cursor>() {
   const [reports, setReports] = useState<
     ReadonlyMap<number, { after: Cursor | null; report: Report<Row, Cursor> }>
   >(() => new Map());
@@ -74,40 +80,76 @@ function useChain<Row, Cursor>(cap: number) {
       }),
     [],
   );
-  const result = useMemo<ChainResult<Row>>(() => {
-    const rows: Row[] = [];
-    let after: Cursor | null = null;
-    for (let index = 0; index < cap; index += 1) {
-      const entry = reports.get(index);
-      if (entry === undefined || entry.after !== after)
-        return {
-          status: index === 0 ? "loading" : "ready",
-          rows,
-          capped: false,
-        };
-      const { status, next } = entry.report;
-      if (status !== "ready")
-        return {
-          status: index === 0 || status === "failed" ? status : "ready",
-          rows,
-          capped: false,
-        };
-      rows.push(...entry.report.rows);
-      if (next === null) return { status: "ready", rows, capped: false };
-      after = next;
-    }
-    return { status: "ready", rows, capped: true };
-  }, [reports, cap]);
+  return { reports, report };
+}
+
+/** What the reports of a chain say, followed from page 0 through each page's `next` (a stale later report is never counted). PURE. */
+export function chainResult<Row, Cursor>(
+  reports: ReadonlyMap<
+    number,
+    { after: Cursor | null; report: Report<Row, Cursor> }
+  >,
+  cap: number,
+): ChainResult<Row> {
+  const rows: Row[] = [];
+  let after: Cursor | null = null;
+  for (let index = 0; index < cap; index += 1) {
+    const entry = reports.get(index);
+    if (entry === undefined || entry.after !== after)
+      return {
+        status: index === 0 ? "loading" : "ready",
+        rows,
+        capped: false,
+        complete: false,
+      };
+    const { status, next } = entry.report;
+    if (status !== "ready")
+      return {
+        status: index === 0 || status === "failed" ? status : "ready",
+        rows,
+        capped: false,
+        complete: false,
+      };
+    rows.push(...entry.report.rows);
+    if (next === null)
+      return { status: "ready", rows, capped: false, complete: true };
+    after = next;
+  }
+  return { status: "ready", rows, capped: true, complete: false };
+}
+
+function useChain<Row, Cursor>(cap: number) {
+  const { reports, report } = useReports<Row, Cursor>();
+  const result = useMemo(() => chainResult(reports, cap), [reports, cap]);
   return { result, report };
 }
 
-// ---- cached resources ---------------------------------------------------------------------------------------------------------------
-interface ResourcePageProps {
+// ---- cached resources: a bounded scan with a continuation (Q9) ----------------------------------------------------------------------
+/**
+ * One STEP of a walk over the cached rows of `kind` (under `parentId`), from the cursor `start`: the live pages are read one after
+ * another, each row is offered to `keep`, and the step ends as soon as `limit` rows were kept, `pages` pages were read, or the last page
+ * was reached. Nothing past the step is read, and every row stays reachable: `next` is where the following step begins (Q9 "keep further
+ * records accessible through pagination"; finding 7 of the review of 13 October: a fixed cap is not a continuation).
+ */
+export interface ScanResult {
+  status: ChainStatus;
+  /** The kept rows of this step, in cursor order, at most `limit`. Live while the step is mounted. */
+  rows: CacheRow[];
+  /** The step's walk is over (`limit` kept, `pages` read, or the end); before that `rows` is partial. */
+  settled: boolean;
+  /** Where the next step begins (pass it as `start`), or null: the step reached the last row (or has not settled). */
+  next: string | null;
+  /** The step reached the last row: nothing follows it. */
+  end: boolean;
+}
+
+interface ScanPageProps {
   kind: ResourceKind;
   parentId: string | undefined;
   after: string | null;
   index: number;
-  cap: number;
+  /** How many pages the step needs mounted now (the walk asks for one more only when the pages before it did not settle it). */
+  depth: number;
   report(
     index: number,
     after: string | null,
@@ -115,8 +157,8 @@ interface ResourcePageProps {
   ): void;
 }
 
-function ResourcePageReader(props: ResourcePageProps) {
-  const { kind, parentId, after, index, cap, report } = props;
+function ScanPageReader(props: ScanPageProps) {
+  const { kind, parentId, after, index, depth, report } = props;
   const page: Loadable<ResourcePage> = useResourceList({
     kind,
     ...(parentId === undefined ? {} : { parentId }),
@@ -132,31 +174,106 @@ function ResourcePageReader(props: ResourcePageProps) {
     report(index, after, { status: statusOf(page), rows, next });
   }, [report, index, after, page, rows, next]);
   useEffect(() => () => report(index, after, null), [report, index, after]);
-  if (next === null || index + 1 >= cap) return null;
-  return <ResourcePageReader {...props} after={next} index={index + 1} />;
+  if (next === null || index + 1 >= depth) return null;
+  return <ScanPageReader {...props} after={next} index={index + 1} />;
 }
 
-/** Every cached row of `kind` (under `parentId`), merged with its claimed overlay, at most `cap` pages of 100. */
-export function ResourceChain({
+/** The step a set of page reports describes (PURE; exported for its tests). */
+export function scanStep(
+  reports: ReadonlyMap<
+    number,
+    { after: string | null; report: Report<CacheRow, string> }
+  >,
+  start: string | null,
+  keep: (row: CacheRow) => boolean,
+  limit: number,
+  pages: number,
+): ScanResult & { depth: number } {
+  const rows: CacheRow[] = [];
+  let after = start;
+  for (let index = 0; index < pages; index += 1) {
+    const entry = reports.get(index);
+    const partial = (status: ChainStatus) => ({
+      status,
+      rows,
+      settled: false,
+      next: null,
+      end: false,
+      depth: index + 1,
+    });
+    if (entry === undefined || entry.after !== after)
+      return partial(index === 0 ? "loading" : "ready");
+    const { status, next } = entry.report;
+    if (status !== "ready")
+      return partial(index === 0 || status === "failed" ? status : "ready");
+    for (const row of entry.report.rows) {
+      if (!keep(row)) continue;
+      rows.push(row);
+      if (rows.length >= limit)
+        return {
+          status: "ready",
+          rows,
+          settled: true,
+          next: row.id,
+          end: false,
+          depth: index + 1,
+        };
+    }
+    if (next === null)
+      return {
+        status: "ready",
+        rows,
+        settled: true,
+        next: null,
+        end: true,
+        depth: index + 1,
+      };
+    after = next;
+  }
+  return {
+    status: "ready",
+    rows,
+    settled: true,
+    next: after,
+    end: false,
+    depth: pages,
+  };
+}
+
+/**
+ * One step of the walk (see `ScanResult`). `keep` must be stable while what it keeps is the same (a `useCallback`); a new `start` is a new step.
+ */
+export function ResourceScan({
   kind,
   parentId,
-  cap,
+  start,
+  keep,
+  limit,
+  pages,
   children,
 }: {
   kind: ResourceKind;
   parentId?: string;
-  cap: number;
-  children(result: ChainResult<CacheRow>): ReactNode;
+  start: string | null;
+  keep(row: CacheRow): boolean;
+  limit: number;
+  pages: number;
+  children(result: ScanResult): ReactNode;
 }) {
-  const { result, report } = useChain<CacheRow, string>(cap);
+  const { reports, report } = useReports<CacheRow, string>();
+  const step = useMemo(
+    () => scanStep(reports, start, keep, limit, pages),
+    [reports, start, keep, limit, pages],
+  );
+  const { depth, ...result } = step;
   return (
     <>
-      <ResourcePageReader
+      <ScanPageReader
         kind={kind}
         parentId={parentId}
-        after={null}
+        after={start}
         index={0}
-        cap={cap}
+        depth={depth}
         report={report}
       />
       {children(result)}

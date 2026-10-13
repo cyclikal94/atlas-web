@@ -24,7 +24,20 @@ export const NOT_SYNCED_YET =
 export const LOAD_FAILED = "Couldn't load people on this device.";
 export const TRY_AGAIN = "Try again";
 export const NO_MATCH = (query: string) => `No one matches “${query}”.`; // PROVISIONAL
-export const CAPPED = (n: number) => `Showing the first ${n} on this device.`; // PROVISIONAL
+// Bounded steps with a continuation (Q9; finding 7 of the review of 13 October): every record stays reachable.
+export const NEXT_PEOPLE = "Next people"; // PROVISIONAL
+export const PREVIOUS_PEOPLE = "Previous people"; // PROVISIONAL
+export const KEEP_SEARCHING = "Keep searching"; // PROVISIONAL
+export const SEARCH_PARTIAL = (n: number) =>
+  `Showing ${n} so far. There may be more further on.`; // PROVISIONAL
+export const NO_MATCH_YET = (query: string) =>
+  `No one matches “${query}” so far. There are more people to check.`; // PROVISIONAL
+export const NEXT_FIELDS = "Next fields"; // PROVISIONAL
+export const PREVIOUS_FIELDS = "Previous fields"; // PROVISIONAL
+export const NEXT_ITEMS = "Next items"; // PROVISIONAL
+export const PREVIOUS_ITEMS = "Previous items"; // PROVISIONAL
+export const OUTSTANDING_CAPPED =
+  "More unsent changes are waiting than this page shows. All of them are in Sync."; // PROVISIONAL
 export const COLUMN_PERSON = "Person";
 export const COLUMN_ACCOUNT = "Account";
 export const COLUMN_DETAILS = "Details";
@@ -214,7 +227,7 @@ export const SAVE_NOW_BODY =
   "Sends as soon as you're online, under the current audience.";
 export const HOLD_TITLE = "Hold it as a draft until I'm online";
 export const HOLD_BODY = (name: string) =>
-  `Nothing sends now. When you reconnect, Atlas changes the audience first and only sends the ${name} once that's confirmed. Kept while Atlas stays open on this device.`; // DEVIATION (D-11a-12, E-1)
+  `Nothing sends now. When you reconnect, Atlas changes the audience first and only sends the ${name} once that's confirmed. Kept on this device until then, even if you reload or switch accounts.`; // PROVISIONAL (durable, finding 6)
 export const HOLD_CAVEAT = (name: string) =>
   `Atlas checks the sharing policy hasn't changed before sending — if it has, you'll be asked to review and resend rather than the ${name} landing under a changed audience.`;
 export const HOLD_CAVEAT_2 =
@@ -226,11 +239,24 @@ export const CURRENT_AUDIENCE_UNKNOWN = "the current audience";
 export const HELD_WAITING = (name: string) =>
   `Waiting to change who can see ${name}`; // PROVISIONAL
 export const HELD_RUNNING = (name: string) => `Changing who can see ${name}…`; // PROVISIONAL
+export const HELD_STOPPING = (name: string) =>
+  `Stopping the held change to ${name}…`; // PROVISIONAL
+export const HELD_STOPPED = (name: string) =>
+  `The held change to ${name} was discarded. Nothing was sent.`; // PROVISIONAL
+export const HELD_POLICY_DONE = (name: string) =>
+  `Who can see ${name} had already changed when you discarded it. Your edit wasn't saved.`; // PROVISIONAL
+export const HELD_POLICY_UNCERTAIN = (name: string) =>
+  `The change to who can see ${name} may already have been made. Check it on the field's row; your edit wasn't saved.`; // PROVISIONAL
+export const HELD_UNREADABLE =
+  "A held change on this device can't be read any more. Discard it."; // PROVISIONAL
+export const HELD_SAVE_FAILED =
+  "Couldn't keep this on the device. Try again, or save it now."; // PROVISIONAL
 export const HELD_FAILED: Record<string, string> = {
   changed: SHARING_CHANGED,
   conflict: SHARING_CHANGED,
   content_changed:
     "Someone else changed this field. Open it to see the current value.",
+  gone: "This field isn't on this device any more.",
   forbidden: AUDIENCE_OWNER_ONLY,
   uncertain: UNCERTAIN,
   not_saved: "Couldn't save on this device. Try again.",
@@ -240,7 +266,17 @@ export const DISCARD = "Discard";
 // conflicts (§4.4)
 export const CONFLICT_TITLE = "Someone else changed this field";
 export const CONFLICT_CURRENT = "Current";
-export const CONFLICT_MINE = "Yours is in the form below."; // PROVISIONAL
+export const CONFLICT_MINE = "Yours"; // PROVISIONAL (finding 3: the conflicted save's own content)
+export const CONFLICT_AUDIENCE_NOW = (audience: string) =>
+  `Who can see it now: ${audience}`; // PROVISIONAL
+export const CONFLICT_AUDIENCE_UNKNOWN =
+  "Who can see it changed since you saved. Check it before saving yours again."; // PROVISIONAL
+export const CONFLICT_NEEDS_AUDIENCE =
+  "Check who can see it first: that needs a connection"; // PROVISIONAL
+export const LOADING_MINE = "Loading your saved change…"; // PROVISIONAL
+export const STALE_TITLE = "This field changed since you opened it"; // PROVISIONAL (finding 1)
+export const STALE_RENAME =
+  "This person changed since you started. Review the name, then save again."; // PROVISIONAL
 export const SAVE_MINE = "Save mine on the current version";
 export const DISCARD_MINE = "Discard mine";
 export const POLICY_CONFLICT =

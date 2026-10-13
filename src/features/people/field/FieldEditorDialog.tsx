@@ -10,6 +10,8 @@ import {
   useCachedResource,
   useConflictInbox,
   useDataActions,
+  useDraftWithCommand,
+  useFormCopies,
   useSharingDefaults,
 } from "../../../data";
 import {
@@ -31,6 +33,7 @@ import {
 } from "../model/audience";
 import {
   archiveRequest,
+  baseGuard,
   editCreateRequest,
   putFieldCreateRequest,
   putFieldSharedBody,
@@ -49,14 +52,23 @@ import {
 } from "../model/field-form";
 import { changesOfAll, foldRows, type ShownRow } from "../model/project";
 import {
+  draftFieldContent,
+  type EditSnapshot,
+  expectedBaseOf,
+  snapshotOf,
+  stillBound,
+} from "../model/snapshot";
+import {
   FIELD_KINDS,
   type FieldKind,
+  type FieldValue,
   formatValue,
   parseFieldValue,
 } from "../model/values";
 import { sendOnline } from "../online";
 import { Banner, Choices, FieldError, useOutboxSave } from "../parts";
 import { OutstandingChain, usePersonLinkage } from "../reads";
+import { heldContextOf, heldPrefixOf } from "./held-store";
 import { ValueInput } from "./ValueInput";
 
 /**
@@ -69,8 +81,12 @@ import { ValueInput } from "./ValueInput";
  *  - Update: `put_field` with `expected_version` and `expected_policy_version` (Q1). An audience change is the policy's (online:
  *    `applyPolicyChange`, then the content with the CONFIRMED policy version); offline the person chooses between "Save now" (under the
  *    current audience) and "Hold as draft" (D-11a-12).
- *  - A version conflict of this field's draft shows the current value beside the person's, with "Save mine on the current version" (a
- *    supersession on the current bases, the person's explicit act) and "Discard mine".
+ *  - A version conflict of this field's draft shows the current value (and the audience now, when it changed) beside the CONFLICTED
+ *    SAVE'S OWN content, with "Save mine on the current version" (a supersession of that content on the version and audience the person
+ *    sees, the person's explicit act) and "Discard mine" (finding 3 of the review of 13 October).
+ *  - An edit is BOUND to the field as it was when it began (`model/snapshot.ts`, finding 1): a save after the field's content or policy
+ *    changed, or after another save of the field was queued, writes nothing; the person reviews the current value and audience and chooses
+ *    "Save mine on the current version" (re-binding) or "Discard mine".
  */
 export function FieldEditorDialog({
   personId,
@@ -87,10 +103,14 @@ export function FieldEditorDialog({
   return (
     <OutstandingChain>
       {(outstanding) => {
+        // The edit's snapshot needs this device's whole chain of saves (finding 5): a later window still loading is not "none".
         if (
           person.status === "loading" ||
           (fieldId !== null && field.status === "loading") ||
-          outstanding.status === "loading"
+          outstanding.status === "loading" ||
+          (outstanding.status === "ready" &&
+            !outstanding.complete &&
+            !outstanding.capped)
         )
           return null;
         const changes = changesOfAll(outstanding.rows);
@@ -138,12 +158,16 @@ interface Retained {
   newFieldId: string;
   /** The audience choice was changed by the person (an existing field's choice otherwise follows its policy). */
   touched: boolean;
+  /** What an edit of an existing field began on (finding 1); kept with the draft, so a remount restores the same binding. */
+  snapshot: EditSnapshot | null;
 }
 
 type Outcome =
   | null
   | { kind: "message"; text: string; requestId?: string }
-  | { kind: "offline_choice" };
+  | { kind: "offline_choice" }
+  /** The field changed since the edit began (finding 1): nothing was saved; the person reviews the current value and audience. */
+  | { kind: "stale" };
 
 function Editor({
   env,
@@ -164,6 +188,7 @@ function Editor({
   const defaults = useSharingDefaults();
   const actions = useDataActions();
   const conflicts = useConflictInbox();
+  const heldCopies = useFormCopies(heldPrefixOf(person.row.id));
   const { linkage } = usePersonLinkage(person.row.id);
   const draftKey = `field:${person.row.id}:${field?.row.id ?? "new"}`;
   const existing = field?.row ?? null;
@@ -178,12 +203,21 @@ function Editor({
           ? { ...newFieldForm(), name: existing.label }
           : newFieldForm();
     return {
-      retained: { form, newFieldId: env.newId(), touched: false },
+      retained: {
+        form,
+        newFieldId: env.newId(),
+        touched: false,
+        snapshot:
+          existing === null || field?.projected
+            ? null
+            : snapshotOf(existing, drafts, field?.latest?.localId ?? null),
+      },
       restored: false,
     };
   });
   const [state, dispatch] = useReducer(reduceFieldForm, initial.retained.form);
   const [touched, setTouched] = useState(initial.retained.touched);
+  const [snapshot, setSnapshot] = useState(initial.retained.snapshot);
   const [problems, setProblems] = useState<
     Partial<Record<ProblemSlot, FieldInputProblem>>
   >({});
@@ -204,8 +238,9 @@ function Editor({
       form: state,
       newFieldId: initial.retained.newFieldId,
       touched,
+      snapshot,
     } satisfies Retained);
-  }, [env, draftKey, state, touched, initial.retained.newFieldId]);
+  }, [env, draftKey, state, touched, snapshot, initial.retained.newFieldId]);
   const forget = () => env.memory.drafts.delete(draftKey);
   const close = () => {
     forget();
@@ -218,21 +253,34 @@ function Editor({
   const canEdit = existing === null ? true : existing.can_edit;
   const known =
     existing === null ? undefined : env.memory.policies.get(existing.id);
+  const livePolicyVersion = existing?.policy_version ?? null;
   const policyLoad: "idle" | "loading" | "forbidden" | "failed" =
     existing === null
       ? "idle"
       : env.memory.policyReads.has(existing.id)
         ? "loading"
         : (env.memory.policyRefusals.get(existing.id) ?? "idle");
+  // A policy read OLDER than the field's published policy version is not the audience any more: it is asked again, once per version.
+  const asked = useRef<number | null>(null);
   useEffect(() => {
     if (existing === null || projected || !canEdit || !env.online) return;
     const memory = env.memory;
+    const read = memory.policies.get(existing.id);
+    const outdated =
+      read !== undefined &&
+      livePolicyVersion !== null &&
+      read.version < livePolicyVersion &&
+      asked.current !== livePolicyVersion;
     if (
-      memory.policies.has(existing.id) ||
+      (read !== undefined && !outdated) ||
       memory.policyReads.has(existing.id) ||
       memory.policyRefusals.get(existing.id) === "forbidden"
     )
       return;
+    if (outdated) {
+      asked.current = livePolicyVersion;
+      memory.policies.delete(existing.id);
+    }
     memory.policyReads.add(existing.id);
     memory.policyRefusals.delete(existing.id);
     memory.touch();
@@ -247,12 +295,26 @@ function Editor({
         );
       memory.touch();
     });
-  }, [env, existing, projected, canEdit]);
+  }, [env, existing, projected, canEdit, livePolicyVersion]);
 
   const home = primaryHousehold(defaults.record);
   const homeName = home?.household?.name ?? "Home";
+  // The audience this edit may show and act on: the policy read AT the version the edit began on (finding 1). A read of another version
+  // is another audience than the one the edit is bound to; it is never shown as the edit's.
+  const shownPolicy =
+    known !== undefined &&
+    snapshot !== null &&
+    known.version === snapshot.policyVersion
+      ? known
+      : undefined;
+  const policyMoved =
+    known !== undefined &&
+    snapshot !== null &&
+    known.version !== snapshot.policyVersion;
   const current: AudienceClass | null =
-    known === undefined ? null : classify(known.policy, home?.id ?? null);
+    shownPolicy === undefined
+      ? null
+      : classify(shownPolicy.policy, home?.id ?? null);
   const currentChoice: ExistingAudience | null =
     current === null
       ? null
@@ -272,6 +334,20 @@ function Editor({
     current === null
       ? copy.CURRENT_AUDIENCE_UNKNOWN
       : audienceLabel(current, homeName);
+  // The audience as it is NOW (the read of the field's current policy version), for the review of a changed field or a conflict.
+  const nowAudience =
+    known !== undefined &&
+    livePolicyVersion !== null &&
+    known.version === livePolicyVersion
+      ? audienceLabel(classify(known.policy, home?.id ?? null), homeName)
+      : null;
+
+  // ---- the edit is still bound to the field as it was when it began (finding 1) ------------------------------------------------
+  const unbound =
+    existing !== null &&
+    !projected &&
+    snapshot !== null &&
+    (!stillBound(snapshot, existing) || policyMoved);
 
   // ---- a version conflict of this field's draft --------------------------------------------------------------------------------
   const conflict =
@@ -283,6 +359,17 @@ function Editor({
             row.draft.kind === "put_field" &&
             row.draft.target_resource_ids[0] === existing.id,
         ) ?? null);
+
+  // The conflicted save's own body (the inbox lists headers): what "Yours" shows and "Save mine" sends (finding 3).
+  const conflictBody = useDraftWithCommand(conflict?.draft.local_id ?? null);
+  const conflicted =
+    conflictBody.status === "ready" &&
+    conflictBody.value !== null &&
+    conflictBody.value.local_id === conflict?.draft.local_id
+      ? conflictBody.value
+      : null;
+  const conflictContent =
+    conflicted === null ? null : draftFieldContent(conflicted);
 
   const readOnly = !canEdit;
   const title = isNew
@@ -305,6 +392,52 @@ function Editor({
       return;
     }
     close();
+  };
+
+  /** Queues the content update bound to `bound` (its policy version and expected base). */
+  const queueUpdate = async (
+    bound: EditSnapshot,
+    ready: { label: string; value: FieldValue },
+    policyVersion: number,
+  ) => {
+    const sameKind = parsed !== null && parsed.kind === ready.value.kind;
+    const guard = baseGuard(bound.expectedBase);
+    const base = {
+      fieldId: (existing as CacheRow).id,
+      personId: person.row.id,
+      label: ready.label,
+      value: ready.value,
+      policyVersion,
+      sameKind,
+    };
+    const latest = field?.latest ?? null;
+    const outcome = await save(async (outbox) => {
+      // D-11a-15: only the unsent save the edit BEGAN on is edited in place, and only while it is still queued as it was.
+      if (
+        latest !== null &&
+        latest.localId === bound.latestLocalId &&
+        latest.kind === "put_field_update" &&
+        latest.status === "queued" &&
+        !latest.reviewing &&
+        policyVersion === bound.policyVersion
+      ) {
+        const edited = await outbox.editQueued(latest.localId, {
+          ...putFieldUpdateRequest(base),
+          expectDraft: (draft) =>
+            draft.local_id === bound.latestLocalId && draft.status === "queued",
+        });
+        if (
+          edited.kind === "edited" ||
+          (edited.reason !== "not_queued" &&
+            edited.reason !== "not_found" &&
+            edited.reason !== "retargeted" &&
+            edited.reason !== "draft_changed")
+        )
+          return edited;
+      }
+      return outbox.enqueue(putFieldUpdateRequest({ ...base, guard }));
+    });
+    return { outcome, moved: guard.moved };
   };
 
   const submit = async (choice?: "save_now" | "hold") => {
@@ -391,60 +524,51 @@ function Editor({
       if (!outcome.ok) return fail(outcome.message ?? null);
       return succeeded(copy.SAVED_NOT_SENT, ticket);
     }
-    // ---- update ----
-    const policyVersion = existing.policy_version;
-    if (policyVersion === undefined) return fail(copy.WAIT_FOR_SYNC_FIELD);
+    // ---- update: bound to what the edit began on (finding 1) ----
+    const bound = snapshot;
+    if (bound === null || bound.policyVersion === null)
+      return fail(copy.WAIT_FOR_SYNC_FIELD);
+    if (
+      !stillBound(bound, existing) ||
+      (known !== undefined && known.version !== bound.policyVersion)
+    ) {
+      setOutcome({ kind: "stale" });
+      return;
+    }
     const contentChanged =
       ready.label !== existing.label ||
       JSON.stringify(ready.value) !== JSON.stringify(parsed);
     const sameKind = parsed !== null && parsed.kind === ready.value.kind;
-    const queueUpdate = async (version: number) => {
-      const request = putFieldUpdateRequest({
-        fieldId: existing.id,
-        personId: person.row.id,
-        label: ready.label,
-        value: ready.value,
-        policyVersion: version,
-        sameKind,
-      });
-      const latest = field?.latest ?? null;
-      return save(async (outbox) => {
-        if (
-          latest?.kind === "put_field_update" &&
-          latest.status === "queued" &&
-          !latest.reviewing &&
-          version === policyVersion
-        ) {
-          const edited = await outbox.editQueued(latest.localId, request);
-          if (
-            edited.kind === "edited" ||
-            (edited.reason !== "not_queued" &&
-              edited.reason !== "not_found" &&
-              edited.reason !== "retargeted")
-          )
-            return edited;
-        }
-        return outbox.enqueue(request);
-      });
+    const content = { label: ready.label, value: ready.value };
+    const queued = async (policyVersion: number) => {
+      setSaving(true);
+      const { outcome, moved } = await queueUpdate(
+        bound,
+        content,
+        policyVersion,
+      );
+      setSaving(false);
+      if (moved) {
+        setOutcome({ kind: "stale" });
+        return;
+      }
+      if (!outcome.ok) return fail(outcome.message);
+      return succeeded(copy.SAVED_NOT_SENT, ticket);
     };
     if (!audienceChanged) {
       if (!contentChanged) return close();
-      setSaving(true);
-      const outcome = await queueUpdate(policyVersion);
-      setSaving(false);
-      if (!outcome.ok) return fail(outcome.message);
-      return succeeded(copy.SAVED_NOT_SENT, ticket);
+      return queued(bound.policyVersion);
     }
-    // The audience changes: the policy's own, online-only step.
+    // The audience changes: the policy's own, online-only step, from the audience the edit shows (read at the bound policy version).
     const target =
       audience === "custom"
         ? null
         : quickPolicy(
             audience as "only_you" | "home",
-            known?.policy ?? null,
+            shownPolicy?.policy ?? null,
             home?.id ?? null,
           );
-    if (target === null || known === undefined)
+    if (target === null || shownPolicy === undefined)
       return fail(copy.SHARING_CHANGED);
     if (!env.online) {
       if (choice === undefined) {
@@ -453,24 +577,44 @@ function Editor({
       }
       if (choice === "save_now") {
         if (!contentChanged) return close();
-        setSaving(true);
-        const outcome = await queueUpdate(policyVersion);
-        setSaving(false);
-        if (!outcome.ok) return fail(outcome.message);
-        return succeeded(copy.SAVED_NOT_SENT, ticket);
+        return queued(bound.policyVersion);
       }
-      env.memory.held.set(existing.id, {
+      // "Hold as draft": kept DURABLY in the account's database (finding 6); earlier holds of this field are replaced once it is kept.
+      setSaving(true);
+      const holdId = env.newId();
+      const kept = await env.held.save({
+        holdId,
         fieldId: existing.id,
         personId: person.row.id,
         label: ready.label,
         value: ready.value,
         sameKind,
-        baseVersion: existing.version,
-        from: { version: known.version, policy: known.policy },
+        version: bound.version,
+        expectedBase: bound.expectedBase,
+        from: { version: shownPolicy.version, policy: shownPolicy.policy },
         to: target,
+        attempt: null,
         status: { kind: "waiting" },
+        heldAt: new Date(env.now()).toISOString(),
       });
-      env.memory.touch();
+      if (kept !== "saved") {
+        setSaving(false);
+        return fail(
+          kept === "refused" ? copy.REFUSED.closing : copy.HELD_SAVE_FAILED,
+        );
+      }
+      if (heldCopies.status === "ready")
+        for (const row of heldCopies.value.copies)
+          if (
+            row.form_context === heldContextOf(person.row.id, existing.id) &&
+            row.tab_instance_id !== holdId
+          )
+            await env.held.discard({
+              personId: person.row.id,
+              fieldId: existing.id,
+              holdId: row.tab_instance_id,
+            });
+      setSaving(false);
       return succeeded(copy.HELD_WAITING(ready.label), ticket);
     }
     setSaving(true);
@@ -479,7 +623,7 @@ function Editor({
       { api: env.sharing, newId: env.newId },
       {
         resourceId: existing.id,
-        from: { version: known.version, policy: known.policy },
+        from: { version: shownPolicy.version, policy: shownPolicy.policy },
         to: target,
         attempt: memory.attempts.get(`policy:${existing.id}`) ?? null,
         isCurrent: () => isCurrentMemory(memory),
@@ -513,12 +657,83 @@ function Editor({
       policy: target,
     });
     memory.touch();
-    if (contentChanged) {
-      const outcome = await queueUpdate(result.policyVersion);
+    // The edit is now bound to the audience the person just confirmed (its new policy version); the content base is unchanged.
+    const confirmed = { ...bound, policyVersion: result.policyVersion };
+    setSnapshot(confirmed);
+    setTouched(false);
+    if (!contentChanged) {
       setSaving(false);
-      if (!outcome.ok) return fail(outcome.message);
-    } else setSaving(false);
+      return succeeded(copy.SAVED_NOT_SENT, ticket);
+    }
+    const { outcome, moved } = await queueUpdate(
+      confirmed,
+      content,
+      result.policyVersion,
+    );
+    setSaving(false);
+    if (moved) {
+      setOutcome({ kind: "stale" });
+      return;
+    }
+    if (!outcome.ok) return fail(outcome.message);
     return succeeded(copy.SAVED_NOT_SENT, ticket);
+  };
+
+  const policyChangedSince =
+    snapshot !== null &&
+    livePolicyVersion !== null &&
+    livePolicyVersion !== snapshot.policyVersion;
+  /**
+   * "Save mine on the current version" after a change since the edit began: the person's explicit act, after seeing the current value and
+   * (when it changed) the current audience, re-binds the edit to the field as it is now; the save then runs on that binding.
+   */
+  const [resubmit, setResubmit] = useState(false);
+  const rebind = () => {
+    if (existing === null) return;
+    setSnapshot(snapshotOf(existing, drafts, field?.latest?.localId ?? null));
+    setOutcome(null);
+    setResubmit(true);
+  };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs the save once, on the render that holds the new binding
+  useEffect(() => {
+    if (!resubmit) return;
+    setResubmit(false);
+    void submit();
+  }, [resubmit]);
+  /** The current audience must be known before an edit is re-bound to a changed one (offline it cannot be checked). */
+  const rebindReason =
+    policyChangedSince && nowAudience === null
+      ? copy.CONFLICT_NEEDS_AUDIENCE
+      : null;
+
+  /** "Save mine on the current version" of a CONFLICTED save (finding 3): ITS content, on the version and audience the person sees now. */
+  const saveConflicted = async (draft: DraftWithCommand) => {
+    const content = draftFieldContent(draft);
+    if (existing === null || content === null || livePolicyVersion === null)
+      return fail(copy.WAIT_FOR_SYNC_FIELD);
+    if (content.policyVersion !== livePolicyVersion && nowAudience === null)
+      return fail(copy.CONFLICT_NEEDS_AUDIENCE);
+    const guard = baseGuard(expectedBaseOf(existing, drafts, draft.local_id));
+    const outcome = await save((outbox) =>
+      outbox.supersede(draft.local_id, {
+        ...putFieldUpdateRequest({
+          fieldId: existing.id,
+          personId: person.row.id,
+          label: content.label,
+          value: content.value,
+          policyVersion: livePolicyVersion,
+          sameKind: parsed?.kind === content.value.kind,
+          guard,
+        }),
+        // The draft the person decided on, as it is stored now (a change committed by another page in between is not overwritten).
+        expectDraft: (stored) =>
+          stored.local_id === draft.local_id &&
+          stored.command_digest === draft.command_digest,
+      }),
+    );
+    if (guard.moved) return fail(copy.STALE_TITLE);
+    if (outcome.ok) announcer.announce(copy.SAVED_NOT_SENT, "polite");
+    else fail(outcome.message);
   };
 
   if (policyEditor && existing !== null)
@@ -539,7 +754,7 @@ function Editor({
       ? copy.SAVING
       : isNew && state.audience === "defaults" && defaults.status === "loading"
         ? copy.DEFAULTS_LOADING_REASON
-        : !isNew && !projected && existing.policy_version === undefined
+        : !isNew && !projected && snapshot?.policyVersion == null
           ? copy.WAIT_FOR_SYNC_FIELD
           : null;
 
@@ -616,32 +831,45 @@ function Editor({
             <p className="text-[13px] text-ink-2">{copy.READ_ONLY_FIELD}</p>
           ) : null}
           {conflict !== null && existing !== null ? (
-            <ConflictPanel
+            <ReviewPanel
+              title={copy.CONFLICT_TITLE}
               current={existing}
+              audienceNow={
+                conflictContent === null ||
+                conflictContent.policyVersion === livePolicyVersion
+                  ? null
+                  : (nowAudience ?? false)
+              }
+              mine={conflictContent}
+              saveReason={
+                conflicted === null || conflictContent === null
+                  ? copy.LOADING_MINE
+                  : conflictContent.policyVersion !== livePolicyVersion &&
+                      nowAudience === null
+                    ? copy.CONFLICT_NEEDS_AUDIENCE
+                    : null
+              }
               onDiscard={async () => {
                 await actions.discard(conflict.draft.local_id);
               }}
               onSaveMine={async () => {
-                const policyVersion = existing.policy_version;
-                const ready = applicable(stateRef.current);
-                if (policyVersion === undefined || !ready.ok) return;
-                const outcome = await save((outbox) =>
-                  outbox.supersede(
-                    conflict.draft.local_id,
-                    putFieldUpdateRequest({
-                      fieldId: existing.id,
-                      personId: person.row.id,
-                      label: ready.label,
-                      value: ready.value,
-                      policyVersion,
-                      sameKind: parsed?.kind === ready.value.kind,
-                    }),
-                  ),
-                );
-                if (outcome.ok)
-                  announcer.announce(copy.SAVED_NOT_SENT, "polite");
-                else fail(outcome.message);
+                if (conflicted !== null) await saveConflicted(conflicted);
               }}
+            />
+          ) : (unbound || outcome?.kind === "stale") && existing !== null ? (
+            <ReviewPanel
+              title={copy.STALE_TITLE}
+              current={existing}
+              audienceNow={policyChangedSince ? (nowAudience ?? false) : null}
+              mine={(() => {
+                const ready = applicable(state);
+                return ready.ok
+                  ? { label: ready.label, value: ready.value }
+                  : null;
+              })()}
+              saveReason={rebindReason}
+              onDiscard={async () => close()}
+              onSaveMine={async () => rebind()}
             />
           ) : null}
           {outcome?.kind === "message" ? (
@@ -918,12 +1146,26 @@ function OfflineChoice({
   );
 }
 
-function ConflictPanel({
+/**
+ * The review of a field that changed under an edit (finding 1) or of a conflicted save (finding 3, A5, plan §4.4 "current … next to
+ * mine"): the current value, the audience NOW when it is not the one the edit or the save was bound to, and the person's own content.
+ * "Save mine on the current version" is the person's explicit act; it is withheld while a changed audience cannot be shown.
+ */
+function ReviewPanel({
+  title,
   current,
+  audienceNow,
+  mine,
+  saveReason,
   onDiscard,
   onSaveMine,
 }: {
+  title: string;
   current: CacheRow;
+  /** The current audience's label; `false`: it changed and is not known here; null: unchanged (nothing to say). */
+  audienceNow: string | false | null;
+  mine: { label: string; value: FieldValue } | null;
+  saveReason: string | null;
   onDiscard(): Promise<void>;
   onSaveMine(): Promise<void>;
 }) {
@@ -933,22 +1175,36 @@ function ConflictPanel({
       data-field-conflict=""
       className="flex flex-col gap-2 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
     >
-      <h3 className="text-[14px] font-medium text-ink-1">
-        {copy.CONFLICT_TITLE}
-      </h3>
-      <p className="text-[12.5px] text-ink-1">
+      <h3 className="text-[14px] font-medium text-ink-1">{title}</h3>
+      <p className="text-[12.5px] text-ink-1" data-review-current="">
         {copy.CONFLICT_CURRENT}: {current.label}
         {value === null ? "" : ` — ${formatValue(value)}`}
       </p>
-      <p className="text-[12.5px] text-ink-2">{copy.CONFLICT_MINE}</p>
+      {audienceNow === null ? null : (
+        <p className="text-[12.5px] text-ink-1" data-review-audience="">
+          {audienceNow === false
+            ? copy.CONFLICT_AUDIENCE_UNKNOWN
+            : copy.CONFLICT_AUDIENCE_NOW(audienceNow)}
+        </p>
+      )}
+      <p className="text-[12.5px] text-ink-1" data-review-mine="">
+        {copy.CONFLICT_MINE}
+        {mine === null ? "" : `: ${mine.label} — ${formatValue(mine.value)}`}
+      </p>
       <div className="flex flex-wrap gap-2">
-        <Button
-          variant="primary"
-          data-people-action="save-mine"
-          onClick={() => void onSaveMine()}
-        >
-          {copy.SAVE_MINE}
-        </Button>
+        {saveReason === null ? (
+          <Button
+            variant="primary"
+            data-people-action="save-mine"
+            onClick={() => void onSaveMine()}
+          >
+            {copy.SAVE_MINE}
+          </Button>
+        ) : (
+          <Button variant="primary" disabled reason={saveReason}>
+            {copy.SAVE_MINE}
+          </Button>
+        )}
         <Button
           variant="quiet"
           data-people-action="discard-mine"

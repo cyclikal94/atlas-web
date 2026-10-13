@@ -16353,8 +16353,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "          expected_version: bases[input.fieldId] as number,\n          expected_policy_version: input.policyVersion,\n",
-        "          expected_version: bases[input.fieldId] as number,\n",
+        "          expected_version: guardedBase(bases, input.fieldId, input.guard),\n          expected_policy_version: input.policyVersion,\n",
+        "          expected_version: guardedBase(bases, input.fieldId, input.guard),\n",
       ),
   },
   {
@@ -16674,8 +16674,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "  // Already confirmed by an earlier run",
-        "  return enqueueContent(held, held.from.version, enqueue);\n  // Already confirmed by an earlier run",
+        "  if (!samePolicy(held.from.policy, held.to)) {",
+        "  if (false) {",
       ),
   },
   {
@@ -16688,8 +16688,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "  held.from = { version: result.policyVersion, policy: held.to };\n  return enqueueContent(held, result.policyVersion, enqueue);",
-        "  const before = held.from.version;\n  held.from = { version: result.policyVersion, policy: held.to };\n  return enqueueContent(held, before, enqueue);",
+        "      held.from = { version: result.policyVersion, policy: held.to };\n",
+        "",
       ),
   },
   {
@@ -16776,6 +16776,321 @@ export const UNIT = [
     expect: /an acknowledged draft is listed only while its own effect/,
     patch: (t) =>
       sub(t, "            if (effect === undefined) continue;\n", ""),
+  },
+  // WEB-11a revision 1 (the review of 13 October 2026): each correction's mutant, caught by the named assertion of its own test. Where a
+  // correction has two protective layers in one file, the mutant removes both (the original defect), so it is never equivalent.
+  {
+    id: "MU-2133",
+    title:
+      "WEB-11a R1 finding 1: the base guard never refuses (an update is silently re-based on a base the edit did not begin on)",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /the outbox base moved, so nothing is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (guard !== undefined && !isEstimate(base) && base !== guard.expectedBase) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2134",
+    title:
+      "WEB-11a R1 finding 1: the editor's save is not refused when the field's policy version moved since the edit began (both checks)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a policy published while the edit is open: Save writes NOTHING/,
+    patch: (t) =>
+      sub(
+        t,
+        "      !stillBound(bound, existing) ||\n      (known !== undefined && known.version !== bound.policyVersion)\n",
+        "      false\n",
+      ),
+  },
+  {
+    id: "MU-2135",
+    title:
+      "WEB-11a R1 finding 1 (the reported defect): the save re-binds silently to the live row (its policy version and base)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /a policy published while the edit is open: Save writes NOTHING|content published while the edit is open: nothing is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const bound = snapshot;",
+        "    const bound =\n      snapshot === null\n        ? snapshot\n        : snapshotOf(existing, drafts, field?.latest?.localId ?? null);",
+      ),
+  },
+  {
+    id: "MU-2136",
+    title:
+      "WEB-11a R1 finding 1: a rename is sent on the version the person shows now, not the one its form opened on",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a linked rename \(rename_profile, online-only\) sends nothing/,
+    patch: (t) =>
+      sub(
+        sub(t, "    if (!stillBound(snapshot, person)) return stale();\n", ""),
+        "      const version = snapshot.version;",
+        "      const version = shown.row.version;",
+      ),
+  },
+  {
+    id: "MU-2137",
+    title:
+      "WEB-11a R1 finding 1: a held change's content step is not re-checked after its policy step (neither the field nor the base)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /a field changed WHILE the policy step ran|whose field changed while its policy read was on its way/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const after = bound();\n  if (after !== null) return after;\n",
+          "",
+        ),
+        "    sameKind: held.sameKind,\n    guard,\n",
+        "    sameKind: held.sameKind,\n",
+      ),
+  },
+  {
+    id: "MU-2138",
+    title:
+      "WEB-11a R1 finding 2: a held change's run ignores the person's Discard",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /discarded while its policy read was on its way|Discard while its policy read is on its way/,
+    patch: (t) =>
+      sub(
+        t,
+        "isCurrentMemory(memory) && !run.cancelled && deps.listed();",
+        "isCurrentMemory(memory) && deps.listed();",
+      ),
+  },
+  {
+    id: "MU-2139",
+    title:
+      "WEB-11a R1 finding 2: the content step's transaction does not check that the hold is still owned",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect:
+      /discarded at the last moment, inside the content step's transaction/,
+    patch: (t) => sub(t, "        if (!owns()) {", "        if (false) {"),
+  },
+  {
+    id: "MU-2140",
+    title:
+      "WEB-11a R1 finding 3 (the reported defect): 'Save mine' sends the current value instead of the conflicted save's content",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: [
+      "tests/features/people/review-findings.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /supersedes with THAT content on the current version|supersedes the CONFLICTED save's content/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const content = draftFieldContent(draft);",
+        "    const mine = draftFieldContent(draft);\n    const content =\n      mine === null || parsed === null || existing === null\n        ? mine\n        : { label: existing.label, value: parsed, policyVersion: mine.policyVersion };",
+      ),
+  },
+  {
+    id: "MU-2144",
+    title:
+      "WEB-11a R1 finding 3: 'Save mine' of a save made under another audience is offered without the current audience (both gates)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a conflicted save under an older audience/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (content.policyVersion !== livePolicyVersion && nowAudience === null)\n      return fail(copy.CONFLICT_NEEDS_AUDIENCE);\n",
+          "",
+        ),
+        /: conflictContent\.policyVersion !== livePolicyVersion &&\n\s+nowAudience === null\n\s+\? copy\.CONFLICT_NEEDS_AUDIENCE\n\s+: null/,
+        ": null",
+      ),
+  },
+  {
+    id: "MU-2145",
+    title:
+      "WEB-11a R1 finding 4: a person's screen is not keyed by its person (an open rename, its typed name and the fields' step survive navigation)",
+    file: "src/features/people/screens.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /a rename typed on one person is never shown or saved on another|the step of one person's fields is not carried to another person/,
+    patch: (t) =>
+      sub(
+        t,
+        "    <PersonDetail\n      key={personId}\n",
+        "    <PersonDetail\n",
+      ),
+  },
+  {
+    id: "MU-2147",
+    title:
+      "WEB-11a R1 finding 4: the duplicates view is not keyed by its person (pages and the first-page flag survive navigation)",
+    file: "src/features/people/screens.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /the duplicates view of another person asks for THAT person's first page/,
+    patch: (t) =>
+      sub(
+        t,
+        "    <DuplicatesView\n      key={personId}\n",
+        "    <DuplicatesView\n",
+      ),
+  },
+  {
+    id: "MU-2148",
+    title:
+      "WEB-11a R1 finding 5: a step with a later page still loading is reported as settled",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/scan.test.ts"],
+    expect:
+      /a later page still loading \(or a stale report\) is NOT a settled step/,
+    patch: (t) =>
+      sub(
+        t,
+        "      settled: false,\n      next: null,\n      end: false,\n      depth: index + 1,",
+        "      settled: true,\n      next: null,\n      end: false,\n      depth: index + 1,",
+      ),
+  },
+  {
+    id: "MU-2149",
+    title:
+      "WEB-11a R1 finding 5: a chain whose later page is not ready is reported as a complete inventory",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/scan.test.ts"],
+    expect: /leaves READABLE rows but no complete inventory/,
+    patch: (t) =>
+      sub(
+        t,
+        '        status: index === 0 || status === "failed" ? status : "ready",\n        rows,\n        capped: false,\n        complete: false,',
+        '        status: index === 0 || status === "failed" ? status : "ready",\n        rows,\n        capped: false,\n        complete: index > 0,',
+      ),
+  },
+  {
+    id: "MU-2150",
+    title:
+      "WEB-11a R1 finding 5: the editor binds an edit before this device's whole chain of saves has been read",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /the editor waits for this device's WHOLE chain of saves/,
+    patch: (t) =>
+      sub(
+        t,
+        "            !outstanding.complete &&\n            !outstanding.capped)",
+        "            false)",
+      ),
+  },
+  {
+    id: "MU-2151",
+    title:
+      "WEB-11a R1 finding 6: 'Hold as draft' keeps the change nowhere durable (acknowledged without a write)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /'Hold as draft' writes the change, with the versions it began on, to the account's database/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const kept = await env.held.save({",
+        '      const kept: string = "saved";\n      void ({',
+      ),
+  },
+  {
+    id: "MU-2152",
+    title:
+      "WEB-11a R1 finding 6: the form copies of a family include terminal (discarded or finished) copies",
+    file: "src/data/plans/form-copies.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect: /never a terminal \(discarded or finished\) one/,
+    patch: (t) => sub(t, "        if (row.terminal) continue;\n", ""),
+  },
+  {
+    id: "MU-2153",
+    title:
+      "WEB-11a R1 finding 6: a held copy is decoded as a change of a field its context does not name",
+    file: "src/features/people/field/held-store.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect:
+      /a copy that is not a held change this page can read is never decoded as one/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (row.form_context !== heldContextOf(raw.personId, raw.fieldId))",
+        "  if (false)",
+      ),
+  },
+  {
+    id: "MU-2154",
+    title:
+      "WEB-11a R1 finding 6: a held change is run without the cross-page lock (two pages may run one hold)",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /run by one page at a time: while another page holds it, this page sends nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const result = await env.exclusive(",
+        "      const result = await ((_name: string, go: () => Promise<unknown>) => go())(",
+      ),
+  },
+  {
+    id: "MU-2155",
+    title:
+      "WEB-11a R1 finding 7: a step that kept `limit` rows continues after its whole page (the rest of the page is skipped)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/scan.test.ts"],
+    expect: /ends at the last row it kept: the next step begins right after it/,
+    patch: (t) =>
+      sub(
+        t,
+        "          next: row.id,",
+        "          next: entry.report.next ?? row.id,",
+      ),
+  },
+  {
+    id: "MU-2156",
+    title:
+      "WEB-11a R1 finding 7: the people list offers no continuation past its step (a cap, not pagination)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /search continues with 'Keep searching'|'Next people' moves a step at a time/,
+    patch: (t) =>
+      sub(
+        t,
+        "            step.settled && step.next !== null\n              ? () => onStarts([...starts, step.next])\n              : null",
+        "            null",
+      ),
+  },
+  {
+    id: "MU-2157",
+    title:
+      "WEB-11a R1 finding 7: a person's fields offer no continuation past their step",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a person's fields beyond one step are reached with 'Next fields'/,
+    patch: (t) =>
+      sub(
+        t,
+        '                {step.settled && step.next !== null ? (\n                  <Button\n                    data-people-action="next-fields"',
+        '                {false ? (\n                  <Button\n                    data-people-action="next-fields"',
+      ),
   },
 ];
 
@@ -19457,8 +19772,8 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        "  // Already confirmed by an earlier run",
-        "  return enqueueContent(held, held.from.version, enqueue);\n  // Already confirmed by an earlier run",
+        "  if (!samePolicy(held.from.policy, held.to)) {",
+        "  if (false) {",
       ),
   },
   {
@@ -19474,6 +19789,97 @@ export const ENGINE = [
         t,
         "      if (rowKind !== kind) continue;",
         '      if (rowKind !== kind || rowKind === "field") continue;',
+      ),
+  },
+  // WEB-11a revision 1 (the review of 13 October 2026): real-engine mutants of the corrections, each caught by its native case.
+  {
+    id: "MU-2158",
+    title:
+      "WEB-11a R1 finding 1: (REAL ENGINE) the editor's save re-binds silently to the live row's policy version and base",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P14:",
+    expect: /E-P14:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const bound = snapshot;",
+        "    const bound =\n      snapshot === null\n        ? snapshot\n        : snapshotOf(existing, drafts, field?.latest?.localId ?? null);",
+      ),
+  },
+  {
+    id: "MU-2159",
+    title:
+      "WEB-11a R1 finding 3: (REAL ENGINE) 'Save mine' sends the current value instead of the conflicted save's content",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P5:",
+    expect: /E-P5:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const content = draftFieldContent(draft);",
+        "    const mine = draftFieldContent(draft);\n    const content =\n      mine === null || parsed === null || existing === null\n        ? mine\n        : { label: existing.label, value: parsed, policyVersion: mine.policyVersion };",
+      ),
+  },
+  {
+    id: "MU-2160",
+    title:
+      "WEB-11a R1 finding 6: (REAL ENGINE) 'Hold as draft' is acknowledged without a durable write",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P15:",
+    expect: /E-P15:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const kept = await env.held.save({",
+        '      const kept: string = "saved";\n      void ({',
+      ),
+  },
+  {
+    id: "MU-2161",
+    title:
+      "WEB-11a R1 finding 2: (REAL ENGINE) a running held change ignores the person's Discard",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P16:",
+    expect: /E-P16:/,
+    patch: (t) =>
+      sub(
+        t,
+        "isCurrentMemory(memory) && !run.cancelled && deps.listed();",
+        "isCurrentMemory(memory) && deps.listed();",
+      ),
+  },
+  {
+    id: "MU-2162",
+    title:
+      "WEB-11a R1 finding 4: (REAL ENGINE) a person's screen is not keyed by its person",
+    file: "src/features/people/screens.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P17:",
+    expect: /E-P17:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    <PersonDetail\n      key={personId}\n",
+        "    <PersonDetail\n",
+      ),
+  },
+  {
+    id: "MU-2163",
+    title:
+      "WEB-11a R1 finding 7: (REAL ENGINE) the people list offers no continuation past its step",
+    file: "src/features/people/list/PeopleList.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P18:",
+    expect: /E-P18:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            step.settled && step.next !== null\n              ? () => onStarts([...starts, step.next])\n              : null",
+        "            null",
       ),
   },
 ];

@@ -7,10 +7,7 @@ import {
 } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import {
-  forgetAllPeopleMemory,
-  peopleMemory,
-} from "../../../src/features/people/memory";
+import { forgetAllPeopleMemory } from "../../../src/features/people/memory";
 import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
@@ -403,7 +400,7 @@ describe("updating a field", () => {
     // The held row (the announcer's live region repeats its text, so the row is found by its own attribute).
     await waitFor(() =>
       expect(
-        document.querySelector(`[data-held-change="${F}"]`),
+        document.querySelector(`[data-held-field="${F}"]`),
       ).toHaveTextContent("Waiting to change who can see Note"),
     );
     expect(w.built).toEqual([]);
@@ -424,7 +421,7 @@ describe("updating a field", () => {
       value: { kind: "text", text: "Inhaler" },
     });
     await waitFor(() =>
-      expect(document.querySelector(`[data-held-change="${F}"]`)).toBeNull(),
+      expect(document.querySelector(`[data-held-field="${F}"]`)).toBeNull(),
     );
   });
 
@@ -441,16 +438,20 @@ describe("updating a field", () => {
       }),
     ]);
     w.env.setDefaults(record());
-    peopleMemory(w.people.identity).held.set(F, {
+    w.putHeld({
+      holdId: "hold-1",
       fieldId: F,
       personId: P,
       label: "Note",
       value: { kind: "text", text: "Inhaler" },
       sameKind: true,
-      baseVersion: 4,
+      version: 4,
+      expectedBase: 4,
       from: { version: 6, policy: HOME_VIEW },
       to: PRIVATE,
+      attempt: null,
       status: { kind: "waiting" },
+      heldAt: "2026-10-13T09:00:00.000Z",
     });
     w.sharing.next.policy.push(
       ok({ version: 6, policy: HOME_VIEW }),
@@ -459,7 +460,7 @@ describe("updating a field", () => {
     await w.mount(`/people/${P}`);
     await waitFor(() =>
       expect(
-        document.querySelector(`[data-held-change="${F}"]`),
+        document.querySelector(`[data-held-field="${F}"]`),
       ).toHaveTextContent(/The sharing changed since you opened this/),
     );
     expect(w.built).toEqual([]);
@@ -553,13 +554,24 @@ describe("updating a field", () => {
     expect(w.built[0]?.target).toBe("f1");
   });
 
-  test("a version conflict: 'Save mine on the current version' supersedes with the current bases", async () => {
+  test("a version conflict: 'Save mine on the current version' supersedes the CONFLICTED save's content on the current bases", async () => {
     const w = peopleWorld();
     w.setCache([
       person({ id: P, label: "Ada" }),
       fieldRow({ id: F, parent_id: P, version: 9, policy_version: 3 }),
     ]);
     w.env.setDefaults(record());
+    const command = {
+      command: {
+        kind: "put_field",
+        id: F,
+        parent_id: P,
+        expected_version: 8,
+        expected_policy_version: 3,
+        label: "Phone",
+        value: { kind: "text", text: "07700 900999" },
+      },
+    };
     w.env.setDrafts([
       draftRow({
         local_id: "c",
@@ -567,8 +579,10 @@ describe("updating a field", () => {
         status: "version_conflict",
         index_targets: [F],
         target_resource_ids: [F],
+        command,
       }),
     ]);
+    w.putBody("c", command);
     await w.mount(`/people/${P}/fields/${F}`);
     const d = await dialog();
     fireEvent.click(
@@ -584,6 +598,7 @@ describe("updating a field", () => {
     ).toMatchObject({
       expected_version: 9,
       expected_policy_version: 3,
+      value: { kind: "text", text: "07700 900999" },
     });
   });
 });

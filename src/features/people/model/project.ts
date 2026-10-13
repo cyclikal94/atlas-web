@@ -235,3 +235,54 @@ const collator = new Intl.Collator(undefined, { sensitivity: "base" });
 export const byName = (a: ShownRow, b: ShownRow): number =>
   collator.compare(a.row.label.trim(), b.row.label.trim()) ||
   (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);
+
+/** The later changes (not creates) of each row id, in queue order: for folding one cached row at a time (`foldOne`). */
+export function changesById(
+  changes: readonly Change[],
+): ReadonlyMap<string, Change[]> {
+  const out = new Map<string, Change[]>();
+  for (const change of changes) {
+    if (CREATES.has(change.kind)) continue;
+    const list = out.get(change.id);
+    if (list === undefined) out.set(change.id, [change]);
+    else list.push(change);
+  }
+  return out;
+}
+
+/** One CACHED row as shown: its own outstanding changes applied in queue order (what `foldRows` does for a cached row). */
+export function foldOne(
+  row: CacheRow,
+  byId: ReadonlyMap<string, readonly Change[]>,
+): ShownRow {
+  const shown: ShownRow = {
+    row,
+    pending: null,
+    projected: false,
+    createDraft: null,
+    latest: null,
+  };
+  for (const change of byId.get(row.id) ?? []) {
+    const next = { ...shown.row };
+    if (change.label !== undefined) next.label = change.label;
+    if (change.value !== undefined)
+      next.value = change.value as CacheRow["value"];
+    if (change.archived !== undefined) next.archived = change.archived;
+    shown.row = next;
+    shown.pending = markOf(change);
+    shown.latest = change;
+  }
+  return shown;
+}
+
+/** The rows only this device's queued CREATES project (not yet in the cache), of one kind (under one parent). */
+export function projectedRows(
+  cachedIds: ReadonlySet<string>,
+  changes: readonly Change[],
+  kind: "person" | "field",
+  parentId?: string,
+): ShownRow[] {
+  return foldRows([], changes, kind, parentId).filter(
+    (row) => row.projected && !cachedIds.has(row.row.id),
+  );
+}

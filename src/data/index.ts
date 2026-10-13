@@ -84,6 +84,7 @@ export type {
   DraftRow,
   DraftStatus,
   DraftWithCommand,
+  FormRecoveryRow,
   JsonObject,
   LocalId,
   ProjectionPatch,
@@ -110,6 +111,7 @@ export {
   createCommandRegistry,
   createConflictHandlerRegistry,
 } from "./outbox/registries";
+export type { FormCopiesPage } from "./plans/form-copies";
 export type {
   ConflictPage,
   ListedResource,
@@ -121,13 +123,17 @@ export {
   createDataDeletionPorts,
   type DeletionPortsOptions,
 } from "./ports/deletion-ports";
+// A port over the account database's form copies (WEB-11a's held changes): only lazy screens import it.
+export { createFormRecoveryPort } from "./ports/form-recovery";
 export type { Loadable } from "./store/port";
+export { useDraftWithCommand } from "./ui/draft-body";
 export {
   createDataEnv,
   type DataActions,
   type DataEnv,
   type DataEnvDeps,
 } from "./ui/env";
+export { useFormCopies } from "./ui/form-copies";
 export { useOutstandingCreates } from "./ui/outstanding";
 export {
   type ConflictRow,

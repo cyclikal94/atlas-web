@@ -243,6 +243,16 @@ export function stubEnv(
     actions,
     outbox: () => null,
     service: () => serviceCell.get() as never,
+    quota: {
+      check: async () => "ok",
+      reserve: async () => ({
+        verdict: "ok",
+        live: () => true,
+        settle: () => undefined,
+      }),
+      lastFree: () => null,
+      invalidate: () => undefined,
+    },
     serviceStore: serviceCell as never,
     setResource(id, merged) {
       resources.set(id, {

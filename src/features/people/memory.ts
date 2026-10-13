@@ -2,7 +2,6 @@ import { useCallback, useSyncExternalStore } from "react";
 import type { Policy } from "../../data";
 import type { Attempt } from "./model/attempt";
 import type { LinkageState } from "./model/linkage";
-import type { FieldValue } from "./model/values";
 
 /**
  * The people screens' PAGE memory (§3.2 `memory.ts`): what this page learnt or kept for ONE displayed identity (`account:epoch`), outside
@@ -12,7 +11,8 @@ import type { FieldValue } from "./model/values";
  *  - `refused`: a person read that was refused (`403`/`404`), remembered until an explicit "Try again" (D-12a-13);
  *  - `prefetched`: the people whose linkage the list asked for already (once per identity per page lifetime, D-11a-3);
  *  - `dismissed`: duplicate pairs hidden with "Not the same" (D-11a-9);
- *  - `held`: audience changes held until the connection returns (D-11a-12);
+ *  - `heldRuns`: the held audience changes this page is running now, and whether the person discarded one while it ran (the held
+ *    changes themselves are DURABLE, in the account's database: `field/held-store.ts`, finding 6 of the review of 13 October);
  *  - `drafts`: editor input kept by the in-dialog sync control or across a remount (field editor, rename);
  *  - `attempts`: the uncertain attempt of an online-only command, per target (same key and body on "Try again").
  *
@@ -26,31 +26,15 @@ export interface LinkageEntry {
   person: { id: string; label: string; version: number } | null;
 }
 
-export interface HeldChange {
-  fieldId: string;
-  personId: string;
-  label: string;
-  value: FieldValue;
-  sameKind: boolean;
-  /** The field's content version when the edit began: the content step is refused if the field changed since. */
-  baseVersion: number;
-  /** The policy as last read on this page (owner only), with its version: the policy change is guarded by it. */
-  from: { version: number; policy: Policy };
-  to: Policy;
-  /** What happened when it last ran; `waiting` until then. */
-  status:
-    | { kind: "waiting" }
-    | { kind: "running" }
-    | {
-        kind: "failed";
-        reason:
-          | "changed"
-          | "conflict"
-          | "forbidden"
-          | "uncertain"
-          | "content_changed"
-          | "not_saved";
-      };
+/**
+ * One held change this page is running (`field/held.ts`). `cancelled`: the person discarded it while it ran; every later admission boundary
+ * of the run checks it, and nothing more is sent or queued. `policyDone`: the audience step was confirmed before that (it cannot be
+ * undone; the person is told so).
+ */
+export interface HeldRun {
+  holdId: string;
+  cancelled: boolean;
+  policyDone: boolean;
 }
 
 type Listener = () => void;
@@ -63,7 +47,13 @@ export class PeopleMemory {
   readonly failed = new Set<string>();
   readonly prefetched = new Set<string>();
   readonly dismissed = new Map<string, Set<string>>();
-  readonly held = new Map<string, HeldChange>();
+  /** The held changes running on this page, by hold id (at most one at a time). */
+  readonly heldRuns = new Map<string, HeldRun>();
+  /**
+   * Holds this page finished or discarded: never run again here, and not shown, even while the durable list has not caught up yet (its
+   * read is live but asynchronous).
+   */
+  readonly heldEnded = new Set<string>();
   readonly drafts = new Map<string, unknown>();
   /** Field policies this page read (owner-only `GET /policies/{id}`), with their versions: the only audiences the table names. */
   readonly policies = new Map<string, { version: number; policy: Policy }>();

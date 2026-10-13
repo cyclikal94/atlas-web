@@ -161,15 +161,62 @@ export function putFieldCreateRequest(
   };
 }
 
+/**
+ * The content base an edit BEGAN on (finding 1 of the review of 13 October): the version the outbox must resolve for the target inside the
+ * writing transaction. When it resolves another (someone else's change was published, or another save of this device was queued since),
+ * the build refuses, `moved` is set, and nothing is written: the edit is reviewed against the current value, never silently re-based.
+ */
+export interface BaseGuard {
+  expectedBase: number;
+  /** Set by a build that found another base (the caller tells this refusal from a storage failure). */
+  moved: boolean;
+}
+
+export const baseGuard = (expectedBase: number): BaseGuard => ({
+  expectedBase,
+  moved: false,
+});
+
+/** Thrown by a build whose base moved; the outbox reports it as `build_failed` and writes nothing. */
+export class BaseMoved extends Error {
+  constructor() {
+    super("the base this edit began on is no longer the outbox's");
+    this.name = "BaseMoved";
+  }
+}
+
+/**
+ * The outbox's size estimate (`estimateDraftBytes`) builds every request from two placeholder sets before the transaction: no bases, and
+ * the widest version (`Number.MAX_SAFE_INTEGER`) for every target. Neither is a base the outbox resolved, so neither is judged: only the
+ * writing transaction's build (a real version) refuses or sets `moved`. A real version is never the widest one.
+ */
+const isEstimate = (base: number | undefined): boolean =>
+  base === undefined || base === Number.MAX_SAFE_INTEGER;
+
+function guardedBase(
+  bases: Readonly<Record<string, number>>,
+  id: string,
+  guard: BaseGuard | undefined,
+): number {
+  const base = bases[id] as number;
+  if (guard !== undefined && !isEstimate(base) && base !== guard.expectedBase) {
+    guard.moved = true;
+    throw new BaseMoved();
+  }
+  return base;
+}
+
 export interface PutFieldUpdateInput {
   fieldId: string;
   personId: string;
   label: string;
   value: FieldValue;
-  /** The field's merged `policy_version` when the edit began (Q1); the save is refused without one. */
+  /** The field's `policy_version` when the edit began (Q1), from the edit's snapshot, never the live row. */
   policyVersion: number;
   /** Whether the value keeps the field's current type: only then is the value part of the display patch (a shallow merge). */
   sameKind: boolean;
+  /** The content base the edit began on: absent only for an in-place edit of a queued draft (its stored bases are the draft's own). */
+  guard?: BaseGuard;
 }
 
 export function putFieldUpdateRequest(
@@ -184,7 +231,7 @@ export function putFieldUpdateRequest(
           kind: "put_field",
           id: input.fieldId,
           parent_id: input.personId,
-          expected_version: bases[input.fieldId] as number,
+          expected_version: guardedBase(bases, input.fieldId, input.guard),
           expected_policy_version: input.policyVersion,
           label: input.label,
           value: input.value as unknown as JsonObject,
@@ -238,7 +285,10 @@ export function editCreateRequest(
 export function renameEditRequest(input: {
   personId: string;
   name: string;
+  /** The person's `policy_version` when the rename form OPENED (Q21: the versions are captured at open). */
   policyVersion: number;
+  /** The content base the form opened on (absent only for an in-place edit of a queued rename). */
+  guard?: BaseGuard;
 }): EnqueueRequest {
   return {
     endpoint: "/commands",
@@ -249,7 +299,7 @@ export function renameEditRequest(input: {
           {
             kind: "edit",
             id: input.personId,
-            expected_version: bases[input.personId] as number,
+            expected_version: guardedBase(bases, input.personId, input.guard),
             expected_policy_version: input.policyVersion,
             label: input.name,
             value: "",
