@@ -17,10 +17,13 @@ import type {
  *    A hand-off whose lock is held belongs to a live page (the one that wrote it, or the one that claimed it) and is shown to nobody else.
  *  - A REFERENCE reaches the replacement page in `sessionStorage` (this tab only; a reload keeps it): only the form context, the account
  *    database's scope and the hand-off identifier, never any form value. Only after the copy is durable is the reference written, and only
- *    then may the page reload (a failure keeps the form open, as any failed save does).
- *  - The replacement restores that copy first (never submitting it) and, holding its lock, removes it once its own copy is saved, or at its
- *    own submission or discard: the hand-off is its source, and only it may remove it. A page that does not hold the lock (a duplicated or
- *    opener-copied tab carrying the same reference) restores the same input as its own, without the right to remove the hand-off.
+ *    then may the page reload (a failure keeps the form open, as any failed save does). Revision 7 (DA-A): the record is never rewritten
+ *    from one that could not be read, and the reload is certified on the record itself.
+ *  - The replacement takes its lock, THEN reads it (revision 7, R15: what it shows is what it read while holding the lock, so nobody can
+ *    have resolved it since), restores it first (never submitting it) and removes it once its own copy is saved, or at its own submission
+ *    or discard: the hand-off is its source, and only it may remove it. A page that cannot take the lock in time (a duplicated or
+ *    opener-copied tab carrying the same reference, while the page holding it lives) neither reads nor shows it: it falls back to the
+ *    ordinary copies (the owner's decision).
  *  - A hand-off nobody holds (its replacement never came: the tab closed or crashed during the reload) is offered to later pages of the
  *    form as an alternative they may restore, never remove; only an explicit "Discard this copy" of that alternative removes it.
  *
@@ -41,13 +44,22 @@ export interface HandoffRef {
 }
 
 /**
+ * What the tab's reference record holds (revision 7, DA-A): its references, with every entry this page cannot read KEPT as it is (another
+ * build's, say), or `unknown` when the record could not be read or is not a list. An unknown record is never an empty one: nothing is
+ * written over it (that could drop another form's reference while its hand-off still counts as made), and no reference is taken from it.
+ */
+export type HandoffRecord =
+  | { kind: "read"; refs: HandoffRef[]; others: unknown[] }
+  | { kind: "unknown" };
+
+/**
  * Where a tab keeps its hand-off references across a reload (the page's `sessionStorage`), and what THIS page wrote itself (memory only:
  * a page never takes its own hand-off for one left to it).
  */
 export interface HandoffStore {
-  read(): HandoffRef[];
-  /** False when the references could not be written (nothing then reaches the next page). */
-  write(refs: readonly HandoffRef[]): boolean;
+  read(): HandoffRecord;
+  /** False when the record could not be written (nothing then reaches the next page). */
+  write(entries: readonly unknown[]): boolean;
   readonly written: Set<string>;
 }
 
@@ -60,23 +72,30 @@ const valid = (ref: unknown): ref is HandoffRef =>
   typeof (ref as HandoffRef).scope === "string" &&
   typeof (ref as HandoffRef).id === "string";
 
-/** A store over `storage` (the page's `sessionStorage`); an unreadable or malformed record is no reference. */
+/** A store over `storage` (the page's `sessionStorage`). No record is an empty one; one that cannot be read, or is not a list, is `unknown`. */
 export function storageHandoffs(storage: () => Storage | null): HandoffStore {
   return {
     read() {
       try {
-        const parsed: unknown = JSON.parse(storage()?.getItem(KEY) ?? "[]");
-        return Array.isArray(parsed) ? parsed.filter(valid) : [];
+        const target = storage();
+        if (!target) return { kind: "unknown" };
+        const parsed: unknown = JSON.parse(target.getItem(KEY) ?? "[]");
+        if (!Array.isArray(parsed)) return { kind: "unknown" };
+        return {
+          kind: "read",
+          refs: parsed.filter(valid),
+          others: parsed.filter((entry) => !valid(entry)),
+        };
       } catch {
-        return [];
+        return { kind: "unknown" };
       }
     },
-    write(refs) {
+    write(entries) {
       try {
         const target = storage();
         if (!target) return false;
-        if (refs.length === 0) target.removeItem(KEY);
-        else target.setItem(KEY, JSON.stringify(refs));
+        if (entries.length === 0) target.removeItem(KEY);
+        else target.setItem(KEY, JSON.stringify(entries));
         return true;
       } catch {
         return false;
@@ -95,31 +114,69 @@ export const pageHandoffs: HandoffStore = storageHandoffs(() => {
   }
 });
 
-/** The hand-off left to this page for `form` in `scope`, unless this page wrote it itself. */
+/**
+ * The hand-off left to this page for `form` in `scope` (revision 7): `none` (no reference for it, or one this page wrote itself), its
+ * identifier, or `unknown` (the record could not be read: whether one was left is not known, so the look cannot finish).
+ */
+export type HandoffLeft =
+  | { kind: "none" }
+  | { kind: "left"; id: string }
+  | { kind: "unknown" };
+
 export function handoffFor(
   store: HandoffStore,
   form: string,
   scope: string,
-): string | null {
-  const ref = store
-    .read()
-    .find((entry) => entry.form === form && entry.scope === scope);
-  return ref && !store.written.has(ref.id) ? ref.id : null;
+): HandoffLeft {
+  const record = store.read();
+  if (record.kind === "unknown") return record;
+  const ref = record.refs.find(
+    (entry) => entry.form === form && entry.scope === scope,
+  );
+  return ref && !store.written.has(ref.id)
+    ? { kind: "left", id: ref.id }
+    : { kind: "none" };
 }
 
-/** Leaves `ref` to the next page (in place of any other for the same form and scope); false when it could not be written. */
+/**
+ * Leaves `ref` to the next page (in place of any other for the same form and scope; every other entry kept as it is); false when it could
+ * not be written, or the record could not be read (revision 7, DA-A: never written over from an unknown base).
+ */
 export function rememberHandoff(store: HandoffStore, ref: HandoffRef): boolean {
-  const others = store
-    .read()
-    .filter((entry) => entry.form !== ref.form || entry.scope !== ref.scope);
-  return store.write([...others, ref]);
+  const record = store.read();
+  if (record.kind === "unknown") return false;
+  const others = record.refs.filter(
+    (entry) => entry.form !== ref.form || entry.scope !== ref.scope,
+  );
+  return store.write([...record.others, ...others, ref]);
 }
 
-/** The hand-off `id` is resolved (removed from the store): its reference goes (only that exact one). */
-export function forgetHandoff(store: HandoffStore, id: string): void {
-  const refs = store.read();
-  const rest = refs.filter((entry) => entry.id !== id);
-  if (rest.length !== refs.length) store.write(rest);
+/** Whether the record holds exactly `ref` now (revision 7, DA-A: what the reload is certified on, read in the same step). */
+export function referenced(store: HandoffStore, ref: HandoffRef): boolean {
+  const record = store.read();
+  return (
+    record.kind === "read" &&
+    record.refs.some(
+      (entry) =>
+        entry.id === ref.id &&
+        entry.form === ref.form &&
+        entry.scope === ref.scope,
+    )
+  );
+}
+
+/**
+ * The hand-off `id` is resolved (removed from the store): its reference goes (only that exact one). False when the record could not be
+ * read or written (a stale reference is harmless: the next page reads the hand-off again and finds it gone).
+ */
+export function forgetHandoff(store: HandoffStore, id: string): boolean {
+  const record = store.read();
+  if (record.kind === "unknown") return false;
+  const rest = record.refs.filter((entry) => entry.id !== id);
+  return (
+    rest.length === record.refs.length ||
+    store.write([...record.others, ...rest])
+  );
 }
 
 /** Every form handle the page has: the registered ones and the sessions it keeps for a later mount (a clean form with a copy included). */

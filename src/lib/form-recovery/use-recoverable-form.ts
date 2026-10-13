@@ -29,18 +29,21 @@ import {
 } from "./fields";
 import { restoreSnapshot } from "./guard";
 import {
+  forgetHandoff,
   HANDOFF_PREFIX,
   type HandoffStore,
   handoffContext,
   handoffFor,
   pageHandoffs,
 } from "./handoff";
-import type {
-  DiscardResult,
-  FormRecoveryPort,
-  RecoverableFieldSpec,
-  RecoverySnapshot,
-  SaveResult,
+import {
+  type DiscardResult,
+  type FormRecoveryPort,
+  type RecoverableFieldSpec,
+  type RecoverySnapshot,
+  readCopies,
+  readCopy,
+  type SaveResult,
 } from "./port";
 import {
   pageFormRegistry,
@@ -126,7 +129,13 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  * UPDATE HAND-OFF (a copy no other page may take or remove), and the next page of the same tab restores that first, whatever another page
  * did with the ordinary copies meanwhile. A hand-off whose page never came back (the tab closed or crashed during the reload) is offered as
  * an alternative: `isHandoff(copy)` says so, and only `discardAlternative` (the person's explicit "Discard this copy") removes it.
- * `formContext` must not start with `HANDOFF_PREFIX` (reserved).
+ * `formContext` must not start with `HANDOFF_PREFIX` (reserved). Revision 7 (R15): the hand-off is read only while its lock is held; a
+ * duplicated tab that cannot take it falls back to the ordinary copies.
+ *
+ * WHEN THE STORE CANNOT BE READ (revision 7, R13). `ready` is true only once the look has READ the store. A look that could not (the copies,
+ * or the tab's hand-off record) leaves the form `unavailable`: nothing restored or removed, `ready` false. Show `RecoveryBanner`
+ * "unavailable" with `retry` ("Try again"); an update's save does not reload the page until a look has read the store. `restoreAlternative`
+ * is asynchronous: it reads the chosen copy again and answers what it did (DA-B).
  *
  * THE MOUNTED ALLOW-LIST IS THE SCHEMA; A HIDDEN FIELD KEEPS ITS VALUE (revision 3, R11; revision 4; PRODUCT-DECISIONS-20261011 item 2).
  * Captures and restores admit the fields of the allow-list this mount COMMITTED (the empty list too; a mount with another list, or a list
@@ -163,20 +172,36 @@ export interface SubmissionTicket {
   failed(): void;
 }
 
+/** What `restoreAlternative` did (revision 7, DA-B). */
+export type AlternativeResult = "restored" | "gone" | "unavailable" | "refused";
+
 export interface RecoverableForm {
   /** The copy restored at mount (or chosen from the alternatives), or null. */
   restored: RecoverySnapshot | null;
   /** Other restorable copies of this form, newest first. */
   alternatives: readonly RecoverySnapshot[];
-  /** Puts another copy in the form. Refused (nothing changes) while `locked`. */
-  restoreAlternative(tabInstanceId: string): void;
+  /**
+   * Puts another copy in the form. Revision 7 (DA-B): the copy is READ AGAIN first (an abandoned hand-off while holding its lock, an
+   * ordinary copy while its tab is still gone) and shown from that read, only if nothing changed in the form meanwhile: `restored`;
+   * `gone` (submitted or discarded since it was offered: no longer offered, nothing shown); `unavailable` (it could not be read: try again);
+   * `refused` (nothing changes: `locked`, a live page holds it now, or the form changed meanwhile). Outstanding work until it settles.
+   */
+  restoreAlternative(tabInstanceId: string): Promise<AlternativeResult>;
   /**
    * Revision 6 (R13): "Discard this copy" for an alternative that is a hand-off left by a page that never came back (`isHandoff`): removes
    * it from the store. `failed` (nothing done) while `locked`, for any other alternative, or when a live page holds that hand-off.
    */
   discardAlternative(tabInstanceId: string): Promise<DiscardResult>;
-  /** Whether the look for a copy to restore has finished. */
+  /** Whether the look for a copy to restore has finished. False while `unavailable`. */
   ready: boolean;
+  /**
+   * Revision 7 (R13): the look could not read the store, so what was left to this form (an update's hand-off, another tab's copy) is not
+   * known: nothing was restored or removed. Say so (`RecoveryBanner` "unavailable") and offer `retry`. An update's save does not reload the
+   * page meanwhile (it tries the look once more itself).
+   */
+  unavailable: boolean;
+  /** Revision 7 (R13): makes the look again; true once it has read the store. */
+  retry(): Promise<boolean>;
   /** Revision 2 (R3): this tab is preparing an update reload; the recovery actions are unavailable (disable their controls). */
   locked: boolean;
   /** Before sending a submission (revision 2, R3); null while `locked`: send nothing then. */
@@ -191,6 +216,20 @@ export interface RecoverableForm {
 }
 
 const NO_VIEW: SessionView = { restored: null, alternatives: [] };
+
+/** What a look read (revision 7): the hand-off held and read just now, the gone tabs' copies, the abandoned hand-offs, this page's id. */
+interface Found {
+  handed: RecoverySnapshot | null;
+  gone: RecoverySnapshot[];
+  left: RecoverySnapshot[];
+  own: string | null;
+}
+
+/** A look being made: its cancellation, and its outcome (true once it read the store and showed or offered what it found). */
+interface LookRun {
+  cancel(): void;
+  done: Promise<boolean>;
+}
 
 /** Revision 6 (R13): whether a copy offered is an update hand-off (a page's that never came back, or one left to this page). */
 export const isHandoff = (copy: RecoverySnapshot): boolean =>
@@ -236,6 +275,8 @@ export function useRecoverableForm(
   const handoffs = options.handoffs ?? pageHandoffs;
   const [view, setViewState] = useState<SessionView>(NO_VIEW);
   const [ready, setReady] = useState(false);
+  // Revision 7 (R13): the mount's last look could not read the store.
+  const [unavailable, setUnavailable] = useState(false);
   const locked = useSyncExternalStore(
     registry.subscribe,
     registry.frozen,
@@ -347,75 +388,119 @@ export function useRecoverableForm(
   }, [registry, formContext, formRef]);
 
   /**
-   * The look, made by `shown` through `through`. Its answer is applied only to this mount, only if nothing of the session has happened since
-   * it began (a save, a discard, a submission: DA-1), only if the person has not typed meanwhile, and not while an update reload is
-   * prepared (R3): otherwise every copy is offered instead, and the form is not touched. `offer` (a mount resuming its session, which
-   * already shows its input): the copies other tabs left since are offered, nothing is restored. Returns the cancellation.
+   * The look, made by `shown`. Its answer is applied only to this mount, only if nothing of the session has happened since it began (a save,
+   * a discard, a submission: DA-1), only if the person has not typed meanwhile, and not while an update reload is prepared (R3): otherwise
+   * every copy is offered instead, and the form is not touched. `offer` (a mount resuming its session, which already shows its input): the
+   * copies other tabs left since are offered, nothing is restored. Returns the cancellation and the outcome (true once it read the store).
+   *
+   * Revision 7 (review of 13 October 2026, R13 and R15; design assessment C2-C4):
+   *  - ONE DATABASE. Every read of a look goes through the port pinned when it BEGINS (`targetOf`), and nothing is applied, claimed or
+   *    shown if the session's scope is no longer the port's when the answer comes.
+   *  - A READ THAT FAILS IS NOT AN EMPTY ANSWER. If any read cannot be made (a copy, a listing, or the tab's hand-off record), what was left
+   *    to the form is not known: the look ends UNAVAILABLE (the form is not ready; nothing is restored, offered, claimed, removed or
+   *    forgotten), the mount says so with "Try again" (`retry`), and an update's save does not reload the page until a look has read it
+   *    (`unresolved`). A later look reads everything again.
+   *  - AUTHORITY BEFORE THE READ. The hand-off left to this page is read only once its lock is held, and what is shown is that read: while
+   *    this page holds the lock no other page may resolve the hand-off, so nothing it shows can have been submitted or discarded meanwhile
+   *    (R15: an answer read before the lock was never checked again). A page that cannot take the lock in time (a duplicated or opener-copied
+   *    tab while the page holding it lives) neither reads nor shows it: it falls back to the ordinary copies, as the owner's decision says.
+   *    A hand-off found resolved falls back the same way (its stale reference goes).
+   *  - A look still being made is outstanding work of the session (`track`): an update's checkpoint waits for it.
    */
   const look = useCallback(
     (
       current: FormSession,
       shown: Attachment,
-      through: FormRecoveryPort,
       mode: "restore" | "offer" = "restore",
-    ): (() => void) => {
+    ): LookRun => {
       if (mode === "restore") current.look = "running";
       const began = current.order.next;
       // Revision 4 (design assessment Q8): an edit while the look runs, even one undone since, keeps the copy out of the form.
       const beganInput = current.fields.input;
+      // Revision 7 (C4): pinned NOW; every read of this look reaches this one database, or the look reads nothing.
+      const reader = targetOf(current);
+      const context = current.formContext;
       let cancelled = false;
       let finished = false;
-      void (async () => {
-        const context = current.formContext;
-        // Revision 6 (R13): the hand-off this tab's previous page left for this form comes first, and is this page's to remove when it
-        // holds its lock (a duplicated tab carrying the same reference may restore it too, without that right).
-        const ref =
-          mode === "restore"
-            ? handoffFor(current.handoffs, context, current.scope)
-            : null;
-        const handed =
-          ref === null
-            ? null
-            : await through.load(handoffContext(context), ref);
-        if (
-          handed !== null &&
-          (await (current.tab.holdHandoff?.(
-            ref as string,
-            HANDOFF_CLAIM_WAIT_MS,
-          ) ?? true))
-        )
-          current.claimed = handed.tabInstanceId;
-        const listed = await through.list(context);
+      /** Every read of the look; null when one could not be made (nothing is then known). */
+      const read = async (through: FormRecoveryPort): Promise<Found | null> => {
+        // Revision 6 (R13): the hand-off this tab's previous page left for this form comes first. Revision 7 (R15): its lock first, then the
+        // read; without the lock it is neither read nor shown (a live page holds it).
+        let handed: RecoverySnapshot | null = null;
+        if (mode === "restore") {
+          const left = handoffFor(current.handoffs, context, current.scope);
+          if (left.kind === "unknown") return null;
+          if (
+            left.kind === "left" &&
+            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??
+              true))
+          ) {
+            const found = await readCopy(
+              through,
+              handoffContext(context),
+              left.id,
+            );
+            if (found.kind === "unavailable") return null;
+            if (found.kind === "found") handed = found.copy;
+            // Resolved already (its page submitted or discarded it): nothing to take over; the stale reference goes (this page holds it).
+            else forgetHandoff(current.handoffs, left.id);
+          }
+        }
+        const listed = await readCopies(through, context);
+        if (listed.kind === "unavailable") return null;
         // What may be restored: THIS page's own copy first (the form was mounted again in the same page after its session ended), then the
         // copies of tabs that have gone, newest first. Another OPEN tab's copy is never taken over.
         const own = current.tab.current();
-        const gone: RecoverySnapshot[] = listed.filter(
+        const gone: RecoverySnapshot[] = listed.copies.filter(
           (copy) => copy.tabInstanceId === own,
         );
-        for (const copy of listed)
+        for (const copy of listed.copies)
           if (
             copy.tabInstanceId !== own &&
             !(await current.tab.ownerOpen(copy.tabInstanceId))
           )
             gone.push(copy);
         // Hand-offs no live page holds (their page never came back): offered, never restored at once, never removed by this page.
+        const abandoned = await readCopies(through, handoffContext(context));
+        if (abandoned.kind === "unavailable") return null;
         const left: RecoverySnapshot[] = [];
-        for (const copy of await through.list(handoffContext(context)))
+        for (const copy of abandoned.copies)
           if (
-            copy.tabInstanceId !== ref &&
+            copy.tabInstanceId !== handed?.tabInstanceId &&
             !current.handoffs.written.has(copy.tabInstanceId) &&
             !(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false))
           )
             left.push(copy);
+        return { handed, gone, left, own };
+      };
+      const done = (async (): Promise<boolean> => {
+        const found = reader ? await read(reader).catch(() => null) : null;
+        if (cancelled) return false;
+        finished = true;
+        if (current.attached?.token !== shown.token) return false;
+        // Revision 7 (R13): not read (or read from a database the session no longer shows): nothing is known, nothing is done.
+        if (found === null || targetOf(current) === null) {
+          if (mode === "restore") current.look = "none";
+          current.recovery = "unavailable";
+          current.relook = () => retryRef.current();
+          setUnavailable(true);
+          setReady(false);
+          return false;
+        }
+        current.recovery = "ok";
+        current.relook = null;
+        setUnavailable(false);
+        const { handed, gone, left, own } = found;
+        // Holding its lock, read just now: the hand-off is this page's to remove (its source, once restored or chosen).
+        if (handed) current.claimed = handed.tabInstanceId;
         // The ordinary copy the previous page left with exactly the hand-off's values (its twin) is not offered: it holds nothing more.
-        const twin =
-          handed && current.claimed === handed.tabInstanceId
-            ? gone.find(
-                (copy) =>
-                  copy.tabInstanceId !== own &&
-                  sameValues(copy.values, handed.values),
-              )
-            : undefined;
+        const twin = handed
+          ? gone.find(
+              (copy) =>
+                copy.tabInstanceId !== own &&
+                sameValues(copy.values, handed.values),
+            )
+          : undefined;
         // This page's own copy first (it is newer than anything left to it), then the hand-off, then the gone tabs' copies.
         const candidates = [
           ...gone.filter((copy) => copy.tabInstanceId === own),
@@ -432,9 +517,6 @@ export function useRecoverableForm(
               ),
           ),
         ];
-        if (cancelled) return;
-        finished = true;
-        if (current.attached?.token !== shown.token) return;
         if (mode === "offer") {
           offerOwed.current = false;
           const showing = current.view.restored?.tabInstanceId;
@@ -446,72 +528,102 @@ export function useRecoverableForm(
             ),
           });
           setReady(true);
-          return;
+          return true;
         }
         current.look = "done";
-        const form = elementOf(current);
-        const fields = current.fields;
-        const untouched =
-          form !== null &&
-          Object.entries(valuesOf(current)).every(
-            ([name, value]) => value === (fields.initial[name] ?? ""),
-          ) &&
-          !hasDebt(fields) &&
-          fields.input === beganInput &&
-          current.order.next === began &&
-          !current.registry.frozen();
-        const newest = candidates[0];
-        if (newest && form && untouched) {
-          applySnapshot(fields, form, newest);
-          const values = valuesOf(current);
-          if (newest === handed)
-            // The hand-off left to this page: its source when it holds the hand-off (with its twin), else input of its own (R13).
-            current.persisted = {
-              ...current.persisted,
-              source:
-                current.claimed === newest.tabInstanceId
-                  ? {
-                      id: newest.tabInstanceId,
-                      context: newest.formContext,
-                      values,
-                    }
-                  : null,
-              twin: twin ? { id: twin.tabInstanceId } : null,
-            };
-          else if (newest.tabInstanceId === own)
-            current.persisted = {
-              ...current.persisted,
-              own: { values, op: 0 },
-              ownAsked: true,
-            };
-          else
-            current.persisted = {
-              ...current.persisted,
-              source: { id: newest.tabInstanceId, context, values },
-            };
-          setView({ restored: newest, alternatives: offered(newest) });
-        } else {
-          const alternatives = offered(null);
-          if (alternatives.length > 0)
-            setView({ restored: current.view.restored, alternatives });
+        try {
+          const form = elementOf(current);
+          const fields = current.fields;
+          const untouched =
+            form !== null &&
+            Object.entries(valuesOf(current)).every(
+              ([name, value]) => value === (fields.initial[name] ?? ""),
+            ) &&
+            !hasDebt(fields) &&
+            fields.input === beganInput &&
+            current.order.next === began &&
+            !current.registry.frozen();
+          const newest = candidates[0];
+          if (newest && form && untouched) {
+            applySnapshot(fields, form, newest);
+            const values = valuesOf(current);
+            if (newest === handed)
+              // The hand-off left to this page, held by it: its source (with its twin) (R13).
+              current.persisted = {
+                ...current.persisted,
+                source: {
+                  id: newest.tabInstanceId,
+                  context: newest.formContext,
+                  values,
+                },
+                twin: twin ? { id: twin.tabInstanceId } : null,
+              };
+            else if (newest.tabInstanceId === own)
+              current.persisted = {
+                ...current.persisted,
+                own: { values, op: 0 },
+                ownAsked: true,
+              };
+            else
+              current.persisted = {
+                ...current.persisted,
+                source: { id: newest.tabInstanceId, context, values },
+              };
+            setView({ restored: newest, alternatives: offered(newest) });
+          } else {
+            const alternatives = offered(null);
+            if (alternatives.length > 0)
+              setView({ restored: current.view.restored, alternatives });
+          }
+        } catch {
+          // The store was read; a restore that throws (the form went meanwhile) leaves the form as it is.
         }
         setReady(true);
-      })().catch(() => {
-        if (cancelled) return;
-        finished = true;
-        if (mode === "offer") offerOwed.current = false;
-        else if (current.attached?.token === shown.token) current.look = "done";
-        setReady(true);
-      });
-      return () => {
-        cancelled = true;
-        // Only a look that did not finish is made again (React replays effects in development; a new port asks again).
-        if (!finished && mode === "restore" && current.look === "running")
-          current.look = "none";
+        return true;
+      })();
+      track(current, done);
+      return {
+        cancel: () => {
+          cancelled = true;
+          // Only a look that did not finish is made again (React replays effects in development; a new port asks again).
+          if (!finished && mode === "restore" && current.look === "running")
+            current.look = "none";
+        },
+        done,
       };
     },
     [setView],
   );
+
+  /** The look this mount is making now: a new one (a retry, a new port) cancels it. */
+  const running = useRef<LookRun | null>(null);
+  const startLook = useCallback(
+    (
+      current: FormSession,
+      shown: Attachment,
+      mode: "restore" | "offer" = "restore",
+    ): LookRun => {
+      running.current?.cancel();
+      const run = look(current, shown, mode);
+      running.current = run;
+      return run;
+    },
+    [look],
+  );
+
+  /** Revision 7 (R13): "Try again" after a look that could not read the store; true once a look has read it. */
+  const retry = useCallback((): Promise<boolean> => {
+    const current = session.current;
+    const shown = attachment.current;
+    if (!current || !shown || current.attached?.token !== shown.token)
+      return Promise.resolve(false);
+    if (current.recovery !== "unavailable") return Promise.resolve(true);
+    setUnavailable(false);
+    return startLook(current, shown, offerOwed.current ? "offer" : "restore")
+      .done;
+  }, [startLook]);
+  const retryRef = useRef(retry);
+  retryRef.current = retry;
 
   // The binding: the first time the form and the port are both there, the mount shows its session (the one this page already has for
   // this form and database, or a new one), and a session that has not looked for copies to restore looks once.
@@ -522,14 +634,19 @@ export function useRecoverableForm(
     const pinned = port.pin?.() ?? null;
     const bound = session.current;
     const shownBefore = attachment.current;
+    const cancel = () => running.current?.cancel();
     if (bound && shownBefore) {
       // Never bound again to another scope (DA-2); a new port for the same database is used from now on.
       if (port.pin && pinned?.scope !== bound.scope) return;
       bound.port = port;
       // A resumed mount whose look for new copies was cancelled (a new port) makes it again: it is not ready until it has.
-      if (offerOwed.current && bound.look === "done")
-        return look(bound, shownBefore, port, "offer");
-      return bound.look === "none" ? look(bound, shownBefore, port) : undefined;
+      if (offerOwed.current && bound.look === "done") {
+        startLook(bound, shownBefore, "offer");
+        return cancel;
+      }
+      if (bound.look !== "none") return undefined;
+      startLook(bound, shownBefore);
+      return cancel;
     }
     if (port.pin && pinned === null) return;
     const scope = pinned?.scope ?? UNSCOPED;
@@ -590,10 +707,12 @@ export function useRecoverableForm(
       // Resumed: the session's input and view are shown at once; the mount is ready once the copies other tabs left since are known.
       setView(current.view);
       offerOwed.current = true;
-      return look(current, shown, port, "offer");
+      startLook(current, shown, "offer");
+      return cancel;
     }
-    return look(current, shown, port);
-  }, [port, formContext, formRef, tab, handoffs, registry, setView, look]);
+    startLook(current, shown);
+    return cancel;
+  }, [port, formContext, formRef, tab, handoffs, registry, setView, startLook]);
 
   /**
    * The terminal act of the session (R4: in the session's order NOW), with its clean state becoming `clean(form)`, where `form` is what
@@ -744,40 +863,103 @@ export function useRecoverableForm(
   }, [registry, terminal, formContext]);
 
   const restoreAlternative = useCallback(
-    (tabInstanceId: string) => {
+    (tabInstanceId: string): Promise<AlternativeResult> => {
       // Refused while an update reload is prepared (R3): it would change the form after its last save.
-      if (registry.frozen()) return;
+      if (registry.frozen()) return Promise.resolve("refused");
       const current = session.current;
-      const form = current ? elementOf(current) : null;
-      const chosen = view.alternatives.find(
+      const shown = attachment.current;
+      const chosen = current?.view.alternatives.find(
         (copy) => copy.tabInstanceId === tabInstanceId,
       );
-      if (!current || !form || !chosen) return;
-      applySnapshot(current.fields, form, chosen);
-      const values = valuesOf(current);
-      // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back. A
-      // hand-off is this page's source only when it is the one left to this page and held by it (revision 6, R13); any other is input of
+      if (
+        !current ||
+        !shown ||
+        !chosen ||
+        current.attached?.token !== shown.token
+      )
+        return Promise.resolve("refused");
+      // Pinned NOW (revision 7, C4): the copy is read again from this database, or not at all.
+      const reader = targetOf(current);
+      if (!reader) return Promise.resolve("unavailable");
+      const began = current.order.next;
+      const beganInput = current.fields.input;
+      // A hand-off is this page's source only when it is the one left to this page and held by it (revision 6, R13); any other is input of
       // its own, never removed by this page.
       const handoff = isHandoff(chosen);
-      current.persisted = {
-        ...current.persisted,
-        source:
-          !handoff || chosen.tabInstanceId === current.claimed
-            ? { id: chosen.tabInstanceId, context: chosen.formContext, values }
-            : null,
-        twin: null,
+      const ours = handoff && tabInstanceId === current.claimed;
+      /** Applied in the same step as its checks, from the copy read just now (revision 7, DA-B), never from the one listed earlier. */
+      const apply = (copy: RecoverySnapshot): AlternativeResult => {
+        const form = elementOf(current);
+        if (
+          current.attached?.token !== shown.token ||
+          !form ||
+          registry.frozen() ||
+          targetOf(current) === null ||
+          current.order.next !== began ||
+          current.fields.input !== beganInput
+        )
+          return "refused";
+        applySnapshot(current.fields, form, copy);
+        const values = valuesOf(current);
+        // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
+        current.persisted = {
+          ...current.persisted,
+          source:
+            !handoff || ours
+              ? { id: tabInstanceId, context: copy.formContext, values }
+              : null,
+          twin: null,
+        };
+        const view = current.view;
+        setSessionView(current, {
+          restored: copy,
+          alternatives: [
+            ...(view.restored ? [view.restored] : []),
+            ...view.alternatives.filter(
+              (other) => other.tabInstanceId !== tabInstanceId,
+            ),
+          ],
+        });
+        return "restored";
       };
-      setView({
-        restored: chosen,
-        alternatives: [
-          ...(view.restored ? [view.restored] : []),
-          ...view.alternatives.filter(
-            (copy) => copy.tabInstanceId !== tabInstanceId,
-          ),
-        ],
-      });
+      const fresh = async (): Promise<AlternativeResult> => {
+        const found = await readCopy(reader, chosen.formContext, tabInstanceId);
+        if (found.kind === "unavailable") return "unavailable";
+        return found.kind === "absent" ? "gone" : apply(found.copy);
+      };
+      const chose = (async (): Promise<AlternativeResult> => {
+        if (handoff && !ours)
+          // A hand-off nobody holds: read and shown while this page holds its lock (nobody may resolve it meanwhile), never taken over.
+          // Held by a live page now (its page came back, or another took it): not this page's to show.
+          return (
+            (await (current.tab.whileFree
+              ? current.tab.whileFree(tabInstanceId, fresh)
+              : fresh())) ?? "refused"
+          );
+        // An ordinary copy: only while its tab is still gone (or it is this page's own).
+        if (
+          !handoff &&
+          tabInstanceId !== current.tab.current() &&
+          (await current.tab.ownerOpen(tabInstanceId))
+        )
+          return "refused";
+        return fresh();
+      })()
+        .catch((): AlternativeResult => "unavailable")
+        .then((result) => {
+          // Resolved since it was offered (submitted or discarded elsewhere): no longer offered.
+          if (result === "gone" && current.attached?.token === shown.token)
+            setSessionView(current, {
+              ...current.view,
+              alternatives: current.view.alternatives.filter(
+                (other) => other.tabInstanceId !== tabInstanceId,
+              ),
+            });
+          return result;
+        });
+      return track(current, chose);
     },
-    [registry, view, setView],
+    [registry],
   );
 
   const discardAlternative = useCallback(
@@ -816,6 +998,8 @@ export function useRecoverableForm(
     restoreAlternative,
     discardAlternative,
     ready,
+    unavailable,
+    retry,
     locked,
     submitting,
     onSubmitted,

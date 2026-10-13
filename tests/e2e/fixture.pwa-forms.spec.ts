@@ -2244,3 +2244,232 @@ test.describe("revision 6, R13: the update hands the form to the next page of th
     expect(await liveCopies(context, generations)).toEqual([]);
   });
 });
+
+// ---- revision 7 -------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 7 (review of 13 October 2026, R6 `update-discard-recovery-invalidation`, regression; R13 `recovery-shared-source-reload-coverage`,
+ * incomplete fix; design assessment of 13 October 2026, Q1 and Q4). Through the REAL update (generations A to B, production timers, COOP):
+ *  - R6: the form's own copy is saved (the form is clean), then its hand-off or its reference cannot be written. "Discard and reload
+ *    anyway" must discard what that save wrote: B shows the form empty, nothing submitted, no copy left. Controls: no failure; the storage
+ *    repaired and "Retry save".
+ *  - R13: the page the update brings cannot read the hand-off once (fixture TEST INJECTION `atlas-fixture-fail-handoff-read`, the real
+ *    port's first hand-off read refused) after another tab took A's ordinary copy and saved different input: it is NOT ready, shows nothing
+ *    restored and says so; the hand-off is still there; "Try again" restores ORIGINAL, unsubmitted. FIXTURE evidence.
+ */
+/** TEST INJECTION (revision 7, R6): every write of the tab's hand-off reference fails (sessionStorage refuses it) until `repairReference`. */
+const failReference = (page: Page) =>
+  page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    const scope = window as unknown as {
+      __refFailures?: number;
+      __repairReference?: () => void;
+    };
+    scope.__refFailures = 0;
+    scope.__repairReference = () => {
+      Storage.prototype.setItem = original;
+    };
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (this === sessionStorage && key === "atlas-update-handoff") {
+        scope.__refFailures = (scope.__refFailures ?? 0) + 1;
+        throw new DOMException(
+          "injected reference failure",
+          "QuotaExceededError",
+        );
+      }
+      return original.call(this, key, value);
+    };
+  });
+const repairReference = (page: Page) =>
+  page.evaluate(() =>
+    (
+      window as unknown as { __repairReference?: () => void }
+    ).__repairReference?.(),
+  );
+/** TEST INJECTION (revision 7, R6): every write of a hand-off ROW of `form_recovery` throws (the transaction aborts); ordinary rows are written. */
+const failHandoffRows = (page: Page) =>
+  page.evaluate(() => {
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      this: IDBObjectStore,
+      ...args: Parameters<IDBObjectStore["put"]>
+    ) {
+      const row = args[0] as { form_context?: unknown } | undefined;
+      if (
+        this.name === "form_recovery" &&
+        typeof row?.form_context === "string" &&
+        row.form_context.startsWith("atlas-update-handoff:")
+      )
+        throw new DOMException(
+          "injected hand-off write failure",
+          "UnknownError",
+        );
+      return put.apply(this, args);
+    };
+  });
+
+test.describe("revision 7, R6: 'Discard and reload anyway' after a save that failed part of the way discards what it wrote", () => {
+  type Leg = {
+    name: string;
+    fail?: "reference" | "row";
+    choice: "none" | "retry" | "discard";
+  };
+  const legs: Leg[] = [
+    { name: "control: nothing fails", choice: "none" },
+    {
+      name: "control: the reference fails, repaired, 'Retry save'",
+      fail: "reference",
+      choice: "retry",
+    },
+    {
+      name: "the reference fails, 'Discard and reload anyway'",
+      fail: "reference",
+      choice: "discard",
+    },
+    {
+      name: "the hand-off row fails, 'Discard and reload anyway'",
+      fail: "row",
+      choice: "discard",
+    },
+  ];
+  for (const leg of legs)
+    test(`${leg.name}: B shows ${leg.choice === "discard" ? "the form empty, no copy left" : "ORIGINAL"}, nothing submitted`, async ({
+      context,
+      generations,
+    }) => {
+      await seedAccount(context, generations);
+      const page = await openApp(context, generations);
+      await workerActive(page);
+      await reloadQuietly(page);
+      await formReady(page);
+      await title(page).fill(ORIGINAL);
+      await generations.serve("fixture-b");
+      await checkForUpdate(page);
+      await quiet(page);
+      if (leg.fail === "reference") await failReference(page);
+      if (leg.fail === "row") await failHandoffRows(page);
+      await updateRegion(page)
+        .getByRole("button", { name: "Save and reload", exact: true })
+        .click();
+      if (leg.fail) {
+        await expect(
+          updateRegion(page).getByRole("button", {
+            name: "Retry save",
+            exact: true,
+          }),
+        ).toBeVisible();
+        // The decisive precondition: the form's own copy WAS saved (it is clean) and A did not reload.
+        expect(
+          await page.evaluate(
+            () =>
+              (
+                window as unknown as { __atlasForms: { dirty(): unknown[] } }
+              ).__atlasForms.dirty().length,
+          ),
+        ).toBe(0);
+        expect(await build(page)).toBe("a");
+        expect(
+          (await liveCopies(context, generations)).filter(
+            ([where]) => where === "ordinary",
+          ),
+        ).toEqual([["ordinary", ORIGINAL]]);
+        if (leg.fail === "reference")
+          expect(
+            await page.evaluate(
+              () =>
+                (window as unknown as { __refFailures?: number }).__refFailures,
+            ),
+          ).toBeGreaterThan(0);
+        if (leg.choice === "retry") await repairReference(page);
+        await updateRegion(page)
+          .getByRole("button", {
+            name:
+              leg.choice === "retry"
+                ? "Retry save"
+                : "Discard and reload anyway",
+            exact: true,
+          })
+          .click();
+      }
+      await expect.poll(() => build(page).catch(() => null)).toBe("b");
+      await displayed(page);
+      await formReady(page);
+      await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+      if (leg.choice === "discard") {
+        await expect(title(page)).toHaveValue("");
+        await expect(restoredBanner(page)).toHaveCount(0);
+        // Nothing of A's left that a later page could restore: no ordinary copy, no hand-off.
+        expect(await liveCopies(context, generations)).toEqual([]);
+      } else {
+        await expect(title(page)).toHaveValue(ORIGINAL);
+        await expect(restoredBanner(page)).toBeVisible();
+      }
+    });
+});
+
+test.describe("revision 7, R13: a successor that cannot read the hand-off says so, and 'Try again' restores it", () => {
+  for (const failing of [false, true])
+    test(`${failing ? "" : "control: "}C takes A's ordinary copy and saves different input; A2's first hand-off read ${failing ? "fails: not ready, nothing restored, then 'Try again' restores ORIGINAL" : "succeeds: ORIGINAL"}`, async ({
+      context,
+      generations,
+    }) => {
+      const first = await updatedAndHeld(context, generations);
+      if (failing)
+        await first.evaluate(() =>
+          sessionStorage.setItem("atlas-fixture-fail-handoff-read", "1"),
+        );
+      const peer = await openApp(context, generations);
+      await formReady(peer);
+      await expect(title(peer)).toHaveValue(ORIGINAL);
+      await title(peer).fill(PEER);
+      expect(await flushAll(peer)).toEqual(["saved"]);
+      // C consumed A's ordinary copy and stays alive; the hand-off is untouched.
+      expect(await liveCopies(context, generations)).toEqual(
+        expect.arrayContaining([
+          ["handoff", ORIGINAL],
+          ["ordinary", PEER],
+        ]),
+      );
+      // A2's form is mounted again, still unbound, so it reads the injection from its session storage (set after A2 booted); the control
+      // makes the same remount without it.
+      await first.evaluate(() =>
+        (window as unknown as FixtureWindow).__atlasRemountForm?.(),
+      );
+      await releaseNext(first);
+      const form = first.locator("[data-fixture-form]");
+      await expect(form).toHaveAttribute("data-port", "open");
+      if (failing) {
+        await expect(form).toHaveAttribute("data-unavailable", "true");
+        await expect(form).toHaveAttribute("data-ready", "false");
+        await expect(
+          first.locator('[data-recovery-state="unavailable"]'),
+        ).toBeVisible();
+        await expect(title(first)).toHaveValue("");
+        await expect(restoredBanner(first)).toHaveCount(0);
+        await expect(first.locator("[data-alternatives]")).toHaveCount(0);
+        // Nothing removed or forgotten: the hand-off and its reference are still there.
+        expect(await liveCopies(context, generations)).toContainEqual([
+          "handoff",
+          ORIGINAL,
+        ]);
+        expect(
+          await first.evaluate(() =>
+            sessionStorage.getItem("atlas-update-handoff"),
+          ),
+        ).not.toBeNull();
+        await first
+          .getByRole("button", { name: "Try again", exact: true })
+          .click();
+      }
+      await formReady(first);
+      await expect(form).toHaveAttribute("data-unavailable", "false");
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+      await expect(form).toHaveAttribute("data-submitted", "0");
+      // C keeps its own input.
+      await expect(title(peer)).toHaveValue(PEER);
+    });
+});

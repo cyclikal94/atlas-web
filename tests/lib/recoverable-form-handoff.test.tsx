@@ -512,9 +512,10 @@ describe("R13: who may remove a hand-off", () => {
     const offered = d.handle?.alternatives ?? [];
     expect(offered).toHaveLength(1);
     expect(offered[0] && isHandoff(offered[0])).toBe(true);
-    act(() =>
-      d.handle?.restoreAlternative(offered[0]?.tabInstanceId as string),
-    );
+    // Revision 7 (DA-B): the choice reads the hand-off again (holding its lock) before it is shown; awaited.
+    await act(async () => {
+      await d.handle?.restoreAlternative(offered[0]?.tabInstanceId as string);
+    });
     expect(d.title).toBe(ORIGINAL);
     // D's own save, and then its discard, leave the hand-off where it is.
     expect(await d.flush()).toEqual(["saved"]);

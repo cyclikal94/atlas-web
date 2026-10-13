@@ -21,6 +21,7 @@ import {
   forgetHandoff,
   type HandoffStore,
   handoffContext,
+  referenced,
   rememberHandoff,
 } from "./handoff";
 import type {
@@ -183,6 +184,14 @@ export interface FormSession extends PageFormSession {
   view: SessionView;
   /** The look for copies to restore: not made yet, being made (by the attachment named), or made. */
   look: "none" | "running" | "done";
+  /**
+   * Revision 7 (R13): the attached mount's last look could not read the store (or the tab's hand-off record): what may be left to this form
+   * is NOT known, so the form is not ready and an update's save does not reload the page until a look has read it (`relook`, the person's
+   * "Try again" or the update's own retry). Nothing is removed or forgotten because of it.
+   */
+  recovery: "ok" | "unavailable";
+  /** Revision 7 (R13): makes the failed look again (in the mount that failed it); true once it has read the store. */
+  relook: (() => Promise<boolean>) | null;
   attached: Attachment | null;
   /** While no mount shows the form: whether its last mount had a sensitive field in its allow-list (the strict guard refuses its capture). */
   left: { sensitive: boolean } | null;
@@ -419,7 +428,46 @@ export const handedOff = (session: FormSession): boolean => {
   if (session.retired || own === null) return true;
   const shown = session.port.pin?.();
   if (shown && shown.scope !== session.scope) return true;
-  return (session.persisted.handoff?.op ?? -1) >= own.op;
+  const id = session.handoffId;
+  // Revision 7 (DA-A): and the tab's record holds its reference NOW (another form's write cannot have dropped it unseen). Only the form
+  // context's own session has a reference (one per form and scope); a second mount's session of the same context hands its copy off
+  // unreferenced, so the next page offers it (as an abandoned hand-off) instead of the two replacing each other's reference.
+  return (
+    id !== null &&
+    (session.persisted.handoff?.op ?? -1) >= own.op &&
+    (!referencing(session) ||
+      referenced(session.handoffs, {
+        form: session.formContext,
+        scope: session.scope,
+        id,
+      }))
+  );
+};
+
+/** Whether the session's hand-off is the one its form context's reference names (the context's session). */
+const referencing = (session: FormSession): boolean =>
+  session.registry.session(session.formContext) === session;
+
+/**
+ * Revision 7 (R6): nothing of this page's for the form can come back after a reload: no copy of its own, no copy it was restored from or
+ * its twin, no update hand-off of its own, no discard owed, and its newest operation is a terminal act that landed (a save or a hand-off
+ * asked for since, landed or not, may have left a copy). Clean is not enough: a save can make the form clean and then its hand-off fail,
+ * and the copies that save wrote are exactly what "Discard and reload anyway" must remove. A session of another account's database than
+ * the one shown cannot be discarded through it (as `handedOff`).
+ */
+export const discarded = (session: FormSession): boolean => {
+  const shown = session.port.pin?.();
+  if (shown && shown.scope !== session.scope) return true;
+  const state = session.persisted;
+  return (
+    state.owed === 0 &&
+    state.own === null &&
+    state.source === null &&
+    state.twin === null &&
+    session.handoffId === null &&
+    session.order.lastTerminal === session.order.next &&
+    !isDirty(session)
+  );
 };
 
 /**
@@ -454,6 +502,7 @@ export async function handOff(session: FormSession): Promise<SaveResult> {
   // Removed meanwhile (a terminal act), or the reference cannot reach the next page: not handed off.
   if (session.handoffId !== id || overtaken()) return "failed";
   if (
+    referencing(session) &&
     !rememberHandoff(session.handoffs, {
       form: session.formContext,
       scope: session.scope,
@@ -682,6 +731,8 @@ export function openSession(options: OpenSession): FormSession {
     acknowledged: null,
     view: { restored: null, alternatives: [] },
     look: "none",
+    recovery: "ok",
+    relook: null,
     attached: null,
     left: null,
     pending: new Set(),
@@ -701,6 +752,9 @@ export function openSession(options: OpenSession): FormSession {
           : Promise.allSettled([...session.pending]).then(() => undefined),
       handoff: () => track(session, handOff(session)),
       handedOff: () => handedOff(session),
+      discarded: () => discarded(session),
+      unresolved: () => session.recovery === "unavailable",
+      retryRecovery: () => session.relook?.() ?? Promise.resolve(false),
     },
   };
   if (options.keep) options.registry.keep(session);
@@ -815,7 +869,9 @@ export function detach(session: FormSession, attachment: Attachment): void {
   releaseAttached(session);
   session.attached = null;
   session.left = { sensitive };
-  // A look the mount was making is made again by the next mount.
+  // A look the mount was making is made again by the next mount; so is one that could not read the store (revision 7, R13).
   if (session.look === "running") session.look = "none";
+  session.recovery = "ok";
+  session.relook = null;
   unlistIfIdle(session);
 }

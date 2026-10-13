@@ -190,7 +190,10 @@ describe("restore after a reload", () => {
       (await port.list(CONTEXT)).map((c) => c.tabInstanceId).sort(),
     ).toEqual(["old-1", "old-2", "open-3"]);
     // The alternative can be chosen instead.
-    act(() => handle?.restoreAlternative("old-1"));
+    // Revision 7 (DA-B): the choice reads the copy again before it is shown; awaited.
+    await act(async () => {
+      await handle?.restoreAlternative("old-1");
+    });
     expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe(
       "older",
     );
@@ -465,7 +468,10 @@ describe("dirty means: a reload would not bring back what the form shows (R2)", 
     await port.save(snapshot("newer", "B", "2026-10-01T10:00:00.000Z"));
     const registry = await mounted(port);
     expect(handle?.restored?.tabInstanceId).toBe("newer");
-    act(() => handle?.restoreAlternative("older"));
+    // Revision 7 (DA-B): the choice reads the copy again before it is shown; awaited.
+    await act(async () => {
+      await handle?.restoreAlternative("older");
+    });
     expect(registry.dirty()).toHaveLength(1);
     expect(await registry.dirty()[0]?.flush()).toBe("saved");
     expect(registry.dirty()).toHaveLength(0);

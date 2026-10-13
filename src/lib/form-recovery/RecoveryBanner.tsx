@@ -20,6 +20,11 @@ export type RecoveryBannerState =
    */
   | { kind: "discard-failed"; onRetry(): void; onReloadAnyway(): void }
   /**
+   * The form's look for what was left to it (an update's hand-off, another tab's copy) could not read the store (WEB-14a revision 7, R13:
+   * `useRecoverableForm().unavailable`): nothing was restored or removed. `onRetry` is `retry`. PROPOSED copy, not accepted.
+   */
+  | { kind: "unavailable"; onRetry(): void }
+  /**
    * `disabled` (WEB-14a revision 2, R3): this tab is preparing an update reload (`useRecoverableForm().locked`), so "Discard instead" would
    * change the form after its last save; it is shown unavailable, with its reason (PROPOSED copy, not accepted).
    */
@@ -37,6 +42,9 @@ export const SAVE_REFUSED_TEXT =
   "Can't save your unfinished form while you're signing out. Nothing was lost — your form is still here.";
 export const DISCARD_FAILED_TEXT =
   "Couldn't clear the saved copy of your unfinished form. If you reload now, that copy may be restored afterwards. Your form is still here.";
+/** PROPOSED copy (WEB-14a revision 7, R13), not accepted. */
+export const UNAVAILABLE_TEXT =
+  "Couldn't check for a saved copy of this form. Nothing was removed — try again before you start.";
 /** PROPOSED copy (WEB-14a revision 2, R3), not accepted: why a recovery action is unavailable while the tab reloads onto an update. */
 export const UNAVAILABLE_WHILE_RELOADING =
   "Unavailable while Atlas saves your form and reloads.";
@@ -56,7 +64,9 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
           ? SAVE_REFUSED_TEXT
           : kind === "discard-failed"
             ? DISCARD_FAILED_TEXT
-            : RESTORED_TEXT,
+            : kind === "unavailable"
+              ? UNAVAILABLE_TEXT
+              : RESTORED_TEXT,
       kind === "restored" ? "polite" : "assertive",
     );
   }, [kind, announce]);
@@ -102,6 +112,23 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
           </Button>
           <Button variant="quiet" onClick={state.onReloadAnyway}>
             Reload anyway
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (state.kind === "unavailable") {
+    return (
+      <div
+        data-recovery-state="unavailable"
+        className="flex flex-col gap-3 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+      >
+        <p className="text-[13.5px] leading-[1.6] text-conflict-text">
+          {UNAVAILABLE_TEXT}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={state.onRetry}>
+            Try again
           </Button>
         </div>
       </div>

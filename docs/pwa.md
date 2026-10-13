@@ -79,18 +79,38 @@ takes focus, is announced once, and NEVER reloads on its own:
   written; then a reference in this tab's `sessionStorage` (`atlas-update-handoff`: the form context, the account database's scope and the
   hand-off identifier only, never a value). The checkpoint above also requires every form with a copy (a clean one with a copy, and a kept
   session no mount shows, included) to have handed off its current copy; a hand-off or reference that cannot be written is a failed save.
-  The next page of the tab restores that hand-off first (never submitting it), takes its lock, and removes it (with the old page's identical
-  ordinary copy) once its own copy is saved, or at its own submission or discard. Other tabs never see a hand-off a live page holds and
-  can never remove one by their own saves, submissions or discards. A duplicated or opener-copied tab carrying the same reference restores
-  the same input without the right to remove it (whichever page holds the lock saves first and takes over). A hand-off nobody holds (its
-  page never came back: the tab was closed or crashed during the reload) is offered to later pages of the form as an alternative they may
-  restore but never remove; only its explicit "Discard this copy" (`discardAlternative`) removes it. No timer removes a hand-off. An
+  The next page of the tab takes the hand-off's lock FIRST, then reads it (revision 7, R15: nothing read before the lock is shown), restores
+  it (never submitting it), and removes it (with the old page's identical ordinary copy) once its own copy is saved, or at its own
+  submission or discard. Other tabs never see a hand-off a live page holds and can never remove one by their own saves, submissions or
+  discards. A duplicated or opener-copied tab carrying the same reference that cannot take the lock within `HANDOFF_CLAIM_WAIT_MS` (2 s:
+  the page holding it lives) neither reads nor shows the hand-off: it falls back to ordinary selection (the owner's decision; revision 6
+  showed the hand-off's input there too). A hand-off found resolved already (submitted or discarded) also falls back, and its stale
+  reference goes. The reference record is never rewritten from a record that could not be read or is not a list (revision 7, DA-A: an
+  entry this build cannot read is kept as it is), and the checkpoint certifies each form's reference in the record itself, not a flag. Only
+  the form context's own session writes the reference; a second simultaneous mount of the same form context hands its copy off unreferenced
+  (the next page offers it as an abandoned hand-off). A hand-off nobody holds (its page never came back: the tab was closed or crashed
+  during the reload) is offered to later pages of the form as an alternative they may restore but never remove; only its explicit "Discard
+  this copy" (`discardAlternative`) removes it. Choosing an alternative reads it again first (revision 7, DA-B; an abandoned hand-off while
+  holding its lock), and shows it only if it is still there and the form has not changed meanwhile: `restoreAlternative` answers
+  `restored`, `gone`, `unavailable` or `refused`.
+- **A read that fails is not an empty answer (revision 7, R13).** `FormRecoveryPort.load`/`list` resolve only with what a read FOUND (null,
+  [] included) and reject when the store cannot be read (no store open, an aborted transaction, a closed handle); `readCopy`/`readCopies`
+  type them (`found`/`absent`/`listed` vs `unavailable`). A look (all of whose reads go through the port pinned when it begins) that cannot
+  make any read is `unavailable`: not `ready`, nothing restored, offered, claimed, removed or forgotten; the form shows `RecoveryBanner`
+  "unavailable" (PROPOSED copy: "Couldn't check for a saved copy of this form. Nothing was removed — try again before you start. [Try
+  again]") and `retry()` looks again. While a form is unresolved an update's "Save and reload" asks it to look once more and, if it still
+  cannot read the store, stops with "Couldn't save…" ("Retry save" / "Discard and reload anyway"): the hand-off and its reference stay for
+  the next page either way. A look still being made counts as outstanding work of the form. No timer removes a hand-off. An
   ordinary browser reload, closing a tab and the sync-recovery reload write none (their copies are the ordinary ones, as before);
   "Discard and reload anyway" and "Reload anyway" write none (the person chose not to keep the input). Hand-offs are ordinary
   `form_recovery` rows written by the same four W9 plans (so the restricted recovery connection, quota admission, ordering, tombstones and
   the wipe consent summary all apply); an older client's `list` of the form never reaches them.
-- **"Discard and reload anyway" discards (revision 1, R6).** It discards the copies of every dirty form (this page's own earlier copy and the
-  one the form was restored from), so none comes back after the reload. A discard that cannot be written says so (`discard_failed`,
+- **"Discard and reload anyway" discards (revision 1, R6; revision 7, R6).** It discards the copies of every form of the act, not only the
+  dirty ones: a save that failed part of the way (the form's own copy saved, then its hand-off or reference not written) leaves the form
+  clean with copies that would come back. The coordinator keeps the act's forms (`participants`, also a form that left the registry since)
+  and every form of the page with a copy, calls each form's own discard (its own copy, the copy it was restored from with its twin, its own
+  hand-off and reference; never another page's), and reloads only when each says nothing of it can come back (`discarded()`), so none comes
+  back after the reload. A discard that cannot be written says so (`discard_failed`,
   PROPOSED copy: "Couldn't clear the saved copy of your unfinished form. If you reload now, that copy may be restored afterwards. Your form
   is still here. [Try again] [Reload anyway]") and reloads nothing; a refusal while signing out proceeds (the database is deleted with every
   copy).

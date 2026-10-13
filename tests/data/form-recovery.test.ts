@@ -218,7 +218,10 @@ describe("FormRecoveryPort over the form_recovery store", () => {
     expect(await port.save(snap({ title: "x" }))).toBe("saved");
     drop();
     expect(await port.save(snap({ title: "y" }))).toBe("failed");
-    expect(await port.load("task-edit:42", "tab-a")).toBeNull();
+    // ADAPTED (WEB-14a revision 7, R13: review of 13 October 2026). Was `expect(await port.load(...)).toBeNull()`: with no store open the
+    // read answered "no copy", which a successor took for a successful empty look. A read that cannot be made now rejects (it says nothing
+    // about whether a copy exists); `readCopy` makes that `unavailable`. The intent kept: nothing is read from a store that is not open.
+    await expect(port.load("task-edit:42", "tab-a")).rejects.toThrow();
     // ADAPTED (WEB-14a revision 1, R6): a discard with no open store resolved `undefined`; it now says it did nothing (`failed`), so no
     // caller can claim the copy is gone. The intent kept: it never throws.
     await expect(port.discard("task-edit:42", "tab-a")).resolves.toBe("failed");

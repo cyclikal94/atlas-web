@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/button";
 import { useFormRecoveryPort } from "../data";
+import { HANDOFF_PREFIX } from "../lib/form-recovery/handoff";
+import type { FormRecoveryPort } from "../lib/form-recovery/port";
 import {
   RecoveryBanner,
   UNAVAILABLE_WHILE_RELOADING,
@@ -34,9 +36,48 @@ import {
  * page that never came back also offers "Discard this copy" (the only way it is removed). TEST INJECTION (revision 6): with
  * `atlas-fixture-hold-form` set in the tab's session storage, the form of the NEXT page of the tab starts `unbound` (no recovery read
  * at all) until a spec gives the port back, so a spec can hold the page an update reload brings before its first recovery read without
- * touching any lock or the worker.
+ * touching any lock or the worker. TEST INJECTION (revision 7, R13): with `atlas-fixture-fail-handoff-read` set to "1" in the tab's session
+ * storage when the form mounts, the form's FIRST read of an update hand-off (through the real port, pinned) is refused as an unreadable store
+ * refuses it, and the flag is removed; every other read, and every write, is the real port's. Without the flag the port is not wrapped.
  */
 const HOLD_KEY = "atlas-fixture-hold-form";
+const FAIL_READ_KEY = "atlas-fixture-fail-handoff-read";
+
+/** The real port, with its first hand-off read refused (TEST INJECTION, above); one wrapper per port, so a pinned port stays the same. */
+const injected = new WeakMap<FormRecoveryPort, FormRecoveryPort>();
+function failingFirstHandoffRead(port: FormRecoveryPort): FormRecoveryPort {
+  const known = injected.get(port);
+  if (known) return known;
+  const wrapped: FormRecoveryPort = {
+    save: (snapshot) => port.save(snapshot),
+    discard: (formContext, id) => port.discard(formContext, id),
+    list: (formContext) => port.list(formContext),
+    load: (formContext, id) => {
+      if (
+        formContext.startsWith(HANDOFF_PREFIX) &&
+        sessionStorage.getItem(FAIL_READ_KEY) === "1"
+      ) {
+        sessionStorage.removeItem(FAIL_READ_KEY);
+        return Promise.reject(
+          new Error("TEST INJECTION: the hand-off read failed"),
+        );
+      }
+      return port.load(formContext, id);
+    },
+    ...(port.pin
+      ? {
+          pin: () => {
+            const pinned = port.pin?.() ?? null;
+            return pinned
+              ? { ...pinned, port: failingFirstHandoffRead(pinned.port) }
+              : null;
+          },
+        }
+      : {}),
+  };
+  injected.set(port, wrapped);
+  return wrapped;
+}
 export const FIXTURE_FORM_CONTEXT = "fixture-note:/today";
 const ALLOW = ["title", "notes"];
 
@@ -81,7 +122,14 @@ function FixtureRecoveryFormMount({
   unbound,
 }: FixtureProps) {
   const opened = useFormRecoveryPort();
-  const port = unbound ? null : opened;
+  const [failRead] = useState(
+    () => sessionStorage.getItem(FAIL_READ_KEY) === "1",
+  );
+  const reaching = useMemo(
+    () => (opened && failRead ? failingFirstHandoffRead(opened) : opened),
+    [opened, failRead],
+  );
+  const port = unbound ? null : reaching;
   const form = useRef<HTMLFormElement>(null);
   const first = useRef<HTMLInputElement>(null);
   const [submitted, setSubmitted] = useState(0);
@@ -101,12 +149,18 @@ function FixtureRecoveryFormMount({
       aria-label="Fixture recovery form"
       data-fixture-form=""
       data-ready={recovery.ready ? "true" : "false"}
+      data-unavailable={recovery.unavailable ? "true" : "false"}
       data-port={port ? "open" : "none"}
       data-submitted={submitted}
       data-locked={recovery.locked ? "true" : "false"}
       data-form-context={formContext}
       className="m-4 flex flex-col gap-3"
     >
+      {recovery.unavailable ? (
+        <RecoveryBanner
+          state={{ kind: "unavailable", onRetry: () => void recovery.retry() }}
+        />
+      ) : null}
       {recovery.restored ? (
         <RecoveryBanner
           state={{
@@ -133,7 +187,7 @@ function FixtureRecoveryFormMount({
               <span key={copy.tabInstanceId} data-handoff={isHandoff(copy)}>
                 <Button
                   onClick={() =>
-                    recovery.restoreAlternative(copy.tabInstanceId)
+                    void recovery.restoreAlternative(copy.tabInstanceId)
                   }
                 >
                   {`Restore the copy saved ${copy.savedAt}`}

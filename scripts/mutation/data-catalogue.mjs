@@ -15558,10 +15558,11 @@ export const UNIT = [
     expect: /never restored over input typed before the look finished/,
     // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     // Re-anchored in revision 4 (the whole untouched guard of the look: values at their initial state, nothing owed, no edit since the look began); the defect is unchanged.
+    // Re-anchored in revision 7 (the look was rewritten: pinned typed reads, the hand-off read under its lock, `startLook`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '          Object.entries(valuesOf(current)).every(\n            ([name, value]) => value === (fields.initial[name] ?? ""),\n          ) &&\n          !hasDebt(fields) &&\n          fields.input === beganInput &&\n',
+        '            Object.entries(valuesOf(current)).every(\n              ([name, value]) => value === (fields.initial[name] ?? ""),\n            ) &&\n            !hasDebt(fields) &&\n            fields.input === beganInput &&\n',
         "",
       ),
   },
@@ -15573,11 +15574,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /the look is made once per mount/,
     // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '      return bound.look === "none" ? look(bound, shownBefore, port) : undefined;',
-        "      return look(bound, shownBefore, port);",
+        '      if (bound.look !== "none") return undefined;\n      startLook(bound, shownBefore);',
+        "      startLook(bound, shownBefore);",
       ),
   },
   {
@@ -16102,11 +16104,12 @@ export const UNIT = [
     ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /look answers during a freeze/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "          current.order.next === began &&\n          !current.registry.frozen();",
-        "          current.order.next === began;",
+        "            current.order.next === began &&\n            !current.registry.frozen();",
+        "            current.order.next === began;",
       ),
   },
   {
@@ -16120,11 +16123,18 @@ export const UNIT = [
     ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /change nothing; `locked` says so/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    // Revision 7: the choice is applied after a fresh read, and the freeze is checked again at that moment (a second layer); the defect (a
+    // copy put in a held form) needs both checks gone, so the mutant removes both.
     patch: (t) =>
       sub(
-        t,
-        "      // Refused while an update reload is prepared (R3): it would change the form after its last save.\n      if (registry.frozen()) return;\n",
-        "",
+        sub(
+          t,
+          '      // Refused while an update reload is prepared (R3): it would change the form after its last save.\n      if (registry.frozen()) return Promise.resolve("refused");\n',
+          "",
+        ),
+        "          !form ||\n          registry.frozen() ||\n",
+        "          !form ||\n",
       ),
   },
   {
@@ -16216,11 +16226,12 @@ export const UNIT = [
     ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /is still listed|a ticket outlives a remount/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '  if (session.look === "running") session.look = "none";\n  unlistIfIdle(session);',
-        '  if (session.look === "running") session.look = "none";\n  retire(session);',
+        "  session.relook = null;\n  unlistIfIdle(session);\n}",
+        "  session.relook = null;\n  retire(session);\n}",
       ),
   },
   {
@@ -16398,10 +16409,11 @@ export const UNIT = [
     ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /restores this page's own copy first/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '      return look(current, shown, port, "offer");',
+        '      startLook(current, shown, "offer");\n      return cancel;',
         "      setReady(true);\n      return;",
       ),
   },
@@ -16416,11 +16428,12 @@ export const UNIT = [
     ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /not ready until the copies other tabs left since are known/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '      offerOwed.current = true;\n      return look(current, shown, port, "offer");',
-        '      offerOwed.current = true;\n      setReady(true);\n      return look(current, shown, port, "offer");',
+        '      offerOwed.current = true;\n      startLook(current, shown, "offer");',
+        '      offerOwed.current = true;\n      setReady(true);\n      startLook(current, shown, "offer");',
       ),
   },
   {
@@ -18461,11 +18474,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /C saves different input before A2 reads/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "          ref === null\n            ? null\n            : await through.load(handoffContext(context), ref);",
-        "          ref === null\n            ? null\n            : null;",
+        '            if (found.kind === "found") handed = found.copy;',
+        '            if (found.kind === "found") handed = null;',
       ),
   },
   {
@@ -18486,10 +18500,11 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /session storage refuses/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '  if (\n    !rememberHandoff(session.handoffs, {\n      form: session.formContext,\n      scope: session.scope,\n      id,\n    })\n  )\n    return "failed";',
+        '  if (\n    referencing(session) &&\n    !rememberHandoff(session.handoffs, {\n      form: session.formContext,\n      scope: session.scope,\n      id,\n    })\n  )\n    return "failed";',
         "  rememberHandoff(session.handoffs, {\n    form: session.formContext,\n    scope: session.scope,\n    id,\n  });",
       ),
   },
@@ -18501,11 +18516,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /an edit after the hand-off makes the form dirty/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "  return (session.persisted.handoff?.op ?? -1) >= own.op;",
-        "  return session.persisted.handoff !== null;",
+        "    (session.persisted.handoff?.op ?? -1) >= own.op &&",
+        "    session.persisted.handoff !== null &&",
       ),
   },
   {
@@ -18531,12 +18547,8 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /abandoned \(A2 never came\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "          !handoff || chosen.tabInstanceId === current.claimed",
-        "          true",
-      ),
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) => sub(t, "            !handoff || ours", "            true"),
   },
   {
     id: "MU-1846",
@@ -18591,11 +18603,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /another account's database/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    .find((entry) => entry.form === form && entry.scope === scope);",
-        "    .find((entry) => entry.form === form);",
+        "    (entry) => entry.form === form && entry.scope === scope,",
+        "    (entry) => entry.form === form,",
       ),
   },
   {
@@ -18606,11 +18619,12 @@ export const UNIT = [
     tests: ["tests/pwa/coordinator-handoff.test.ts"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /a hand-off made stale before it is written again first/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '    return mode !== "save" || handedOff(forms);',
-        "    return true;",
+        "    return !handoffHandles(forms).some(unresolved) && handedOff(forms);",
+        "    return !handoffHandles(forms).some(unresolved);",
       ),
   },
   {
@@ -18635,11 +18649,12 @@ export const UNIT = [
     tests: ["tests/pwa/coordinator-handoff.test.ts"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /write no hand-off/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '    return mode !== "save" || handedOff(forms);',
-        '    return mode === "anyway" || handedOff(forms);',
+        '    if (mode === "discard") return discardTargets().length === 0;\n',
+        "",
       ),
   },
   {
@@ -18697,6 +18712,426 @@ export const UNIT = [
         // biome-ignore lint/suspicious/noTemplateCurlyInString: the patched source is itself a template literal
         '  if (formContext.startsWith(HANDOFF_PREFIX))\n    throw new Error(`"${HANDOFF_PREFIX}" is reserved for update hand-offs`);\n',
         "",
+      ),
+  },
+  {
+    id: "MU-1857",
+    title:
+      "WEB-14a revision 7 (R6): 'Discard and reload anyway' discards only the dirty forms (a form its failed save made clean keeps its copies)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /own copy was saved \(clean\)|a clean form with copies whose hand-off failed|two forms and a kept form/,
+    patch: (t) =>
+      sub(
+        t,
+        "    [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(\n      (form) => !refused.has(form) && !discardedNow(form),\n    );",
+        "    deps.forms.dirty().filter((form) => !refused.has(form));",
+      ),
+  },
+  {
+    id: "MU-1858",
+    title:
+      "WEB-14a revision 7 (R6): a discard's reload is sealed once no form is dirty (clean forms' copies are not waited for)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /own copy was saved \(clean\)|a clean form with copies whose hand-off failed|two forms and a kept form/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (mode === "discard") return discardTargets().length === 0;\n',
+        '    if (mode === "discard") return forms.dirty().length === 0;\n',
+      ),
+  },
+  {
+    id: "MU-1859",
+    title:
+      "WEB-14a revision 7 (R6): a form of the act that left the registry is not discarded",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /even after it left the registry/,
+    patch: (t) =>
+      sub(
+        t,
+        "    [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(",
+        "    [...new Set([...handoffHandles(deps.forms)])].filter(",
+      ),
+  },
+  {
+    id: "MU-1860",
+    title:
+      "WEB-14a revision 7 (R6): a new 'Save and reload' keeps the earlier act's forms",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /starts a new act/,
+    patch: (t) => sub(t, "    if (fresh) participants = new Set();\n", ""),
+  },
+  {
+    id: "MU-1861",
+    title:
+      "WEB-14a revision 7 (R6): a form counts as discarded when it is clean",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /own copy was saved \(clean\)|two forms and a kept form/,
+    patch: (t) =>
+      sub(
+        t,
+        "    state.owed === 0 &&\n    state.own === null &&\n    state.source === null &&\n    state.twin === null &&\n    session.handoffId === null &&\n    session.order.lastTerminal === session.order.next &&\n    !isDirty(session)",
+        "    !isDirty(session)",
+      ),
+  },
+  {
+    id: "MU-1862",
+    title:
+      "WEB-14a revision 7 (R13): a load with no store open answers 'no copy'",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a failed write is `failed`, never a throw/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!service) throw new Error(NO_STORE);\n      const row =",
+        "      if (!service) return null;\n      const row =",
+      ),
+  },
+  {
+    id: "MU-1863",
+    title:
+      "WEB-14a revision 7 (R13): a list with no store open answers 'no copies'",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no open database: the read rejects/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!service) throw new Error(NO_STORE);\n      const rows =",
+        "      if (!service) return [];\n      const rows =",
+      ),
+  },
+  {
+    id: "MU-1864",
+    title:
+      "WEB-14a revision 7 (R13): a list whose transaction fails answers 'no copies'",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a list or load whose transaction fails is unavailable/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const rows = await service.store.run(listFormRecovery, {\n        incarnationId: service.incarnationId,\n        formContext,\n      });",
+        "      const rows = await service.store\n        .run(listFormRecovery, {\n          incarnationId: service.incarnationId,\n          formContext,\n        })\n        .catch(() => []);",
+      ),
+  },
+  {
+    id: "MU-1865",
+    title:
+      "WEB-14a revision 7 (R13): a listing that cannot be read is an empty listing",
+    file: "src/lib/form-recovery/port.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/data/form-recovery-list.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the ordinary list cannot be read|the list of abandoned hand-offs cannot be read|no open database: the read rejects|transaction fails is unavailable/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ? { kind: "listed", copies }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "unavailable" };',
+        '      ? { kind: "listed", copies }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "listed", copies: [] };',
+      ),
+  },
+  {
+    id: "MU-1866",
+    title: "WEB-14a revision 7 (R13): a copy that cannot be read is absent",
+    file: "src/lib/form-recovery/port.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/data/form-recovery-list.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hand-off read fails after C consumed|transaction fails is unavailable/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ? { kind: "found", copy }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "unavailable" };',
+        '      ? { kind: "found", copy }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "absent" };',
+      ),
+  },
+  {
+    id: "MU-1867",
+    title:
+      "WEB-14a revision 7 (R13): a look that could not read the store says the form is ready",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hand-off read fails after C consumed|cannot be read: unavailable|offer look fails|created again while A2's look reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "          setUnavailable(true);\n          setReady(false);\n          return false;",
+        "          setUnavailable(false);\n          setReady(true);\n          return false;",
+      ),
+  },
+  {
+    id: "MU-1868",
+    title:
+      "WEB-14a revision 7 (R13): a look that could not read the store leaves the form resolved for the update",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hand-off read fails after C consumed|still unreadable at the update's own retry/,
+    patch: (t) =>
+      sub(
+        t,
+        '          current.recovery = "unavailable";',
+        '          current.recovery = "ok";',
+      ),
+  },
+  {
+    id: "MU-1869",
+    title:
+      "WEB-14a revision 7 (R13): the reload checkpoint ignores a form whose look could not read the store",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /still cannot read it: no reload|still unreadable at the update's own retry/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return !handoffHandles(forms).some(unresolved) && handedOff(forms);",
+        "    return handedOff(forms);",
+      ),
+  },
+  {
+    id: "MU-1870",
+    title:
+      "WEB-14a revision 7 (R13): the update never asks an unresolved form to look again",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /reads the store when asked again|readable at the update's own retry|unresolved before 'Save and reload' is asked to look once/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (form.retryRecovery?.() ?? Promise.resolve(false)).catch(",
+        "            Promise.resolve(false).catch(",
+      ),
+  },
+  {
+    id: "MU-1871",
+    title:
+      "WEB-14a revision 7 (R13): an unreadable reference record is no reference",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the tab's reference record cannot be read/,
+    patch: (t) =>
+      sub(t, '          if (left.kind === "unknown") return null;\n', ""),
+  },
+  {
+    id: "MU-1872",
+    title:
+      "WEB-14a revision 7 (R13): a hand-off read that fails is taken as resolved (ordinary selection)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /hand-off read fails after C consumed/,
+    patch: (t) =>
+      sub(
+        t,
+        '            if (found.kind === "unavailable") return null;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1873",
+    title:
+      "WEB-14a revision 7 (R13): an ordinary list that fails is taken as empty",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the ordinary list cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        '        const listed = await readCopies(through, context);\n        if (listed.kind === "unavailable") return null;',
+        '        const answered = await readCopies(through, context);\n        const listed =\n          answered.kind === "unavailable"\n            ? { kind: "listed" as const, copies: [] }\n            : answered;',
+      ),
+  },
+  {
+    id: "MU-1874",
+    title:
+      "WEB-14a revision 7 (C4): a look's answer is applied after the account's database changed under it",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is created again while A2's look reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (found === null || targetOf(current) === null) {",
+        "        if (found === null) {",
+      ),
+  },
+  {
+    id: "MU-1875",
+    title:
+      "WEB-14a revision 7 (R15): the hand-off is read without waiting for its lock",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /DUP reads only once it holds it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true))",
+        "            true",
+      ),
+  },
+  {
+    id: "MU-1876",
+    title:
+      "WEB-14a revision 7 (R15): a page that cannot take the hand-off's lock reads it and takes it all the same",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /falls back to the ordinary copies without reading the hand-off|lock manager throws/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true))",
+        "            ((await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true)) ||\n              true)",
+      ),
+  },
+  {
+    id: "MU-1877",
+    title:
+      "WEB-14a revision 7 (DA-B): a chosen alternative is shown from the copy listed earlier",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /explicitly discarded by E after D listed it|discarded since it was listed/,
+    patch: (t) =>
+      sub(
+        t,
+        '        return found.kind === "absent" ? "gone" : apply(found.copy);',
+        '        return found.kind === "unavailable" ? "unavailable" : apply(chosen);',
+      ),
+  },
+  {
+    id: "MU-1878",
+    title:
+      "WEB-14a revision 7 (DA-B): an abandoned hand-off is chosen without holding its lock",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a live page took the abandoned hand-off before D chose it/,
+    patch: (t) =>
+      sub(
+        t,
+        '            (await (current.tab.whileFree\n              ? current.tab.whileFree(tabInstanceId, fresh)\n              : fresh())) ?? "refused"',
+        '            (await fresh()) ?? "refused"',
+      ),
+  },
+  {
+    id: "MU-1879",
+    title:
+      "WEB-14a revision 7 (DA-B): a chosen copy is shown over input typed while it was read",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the form changed while the choice read the copy/,
+    patch: (t) =>
+      sub(
+        t,
+        "          current.order.next !== began ||\n          current.fields.input !== beganInput\n",
+        "          current.order.next !== began\n",
+      ),
+  },
+  {
+    id: "MU-1880",
+    title:
+      "WEB-14a revision 7 (DA-A): an unreadable reference record is an empty one",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /unreadable or not a list|the record cannot be read during the second form's hand-off/,
+    patch: (t) =>
+      sub(
+        t,
+        '      } catch {\n        return { kind: "unknown" };\n      }',
+        '      } catch {\n        return { kind: "read", refs: [], others: [] };\n      }',
+      ),
+  },
+  {
+    id: "MU-1881",
+    title:
+      "WEB-14a revision 7 (DA-A): entries of the record this page cannot read are dropped when it writes",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /unreadable or not a list/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return store.write([...record.others, ...others, ref]);",
+        "  return store.write([...others, ref]);",
+      ),
+  },
+  {
+    id: "MU-1882",
+    title:
+      "WEB-14a revision 7 (DA-A): a hand-off counts as made whether or not its reference is in the record",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /no longer certified|the record cannot be read during the second form's hand-off/,
+    patch: (t) => sub(t, "    (!referencing(session) ||", "    (true ||"),
+  },
+  {
+    id: "MU-1883",
+    title:
+      "WEB-14a revision 7 (DA-A): a second mount of the same form context writes the context's reference too",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /two mounts of one form context/,
+    patch: (t) =>
+      sub(
+        t,
+        "    referencing(session) &&\n    !rememberHandoff(session.handoffs, {",
+        "    !rememberHandoff(session.handoffs, {",
       ),
   },
 ];

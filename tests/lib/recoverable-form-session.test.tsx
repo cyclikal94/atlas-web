@@ -488,7 +488,10 @@ describe("Q5 (R3): while an update reload is prepared, the recovery actions are 
       release = registry.freeze();
     });
     expect(handle?.locked).toBe(true);
-    act(() => handle?.restoreAlternative("gone-old"));
+    // Revision 7 (DA-B): the choice reads the copy again before it is shown; awaited.
+    await act(async () => {
+      await handle?.restoreAlternative("gone-old");
+    });
     expect(title().value).toBe("newer");
     expect(handle?.restored?.tabInstanceId).toBe("gone-new");
     expect(await handle?.discard()).toBe("failed");
@@ -500,13 +503,19 @@ describe("Q5 (R3): while an update reload is prepared, the recovery actions are 
     expect(registry.dirty()).toHaveLength(1);
     act(() => release());
     expect(handle?.locked).toBe(false);
-    act(() => handle?.restoreAlternative("gone-old"));
+    // Revision 7 (DA-B): the choice reads the copy again before it is shown; awaited.
+    await act(async () => {
+      await handle?.restoreAlternative("gone-old");
+    });
     expect(title().value).toBe("older");
   });
 
   test("an alternative chosen BEFORE the freeze is what the update's save keeps", async () => {
     const { port, registry } = await twoCopies();
-    act(() => handle?.restoreAlternative("gone-old"));
+    // Revision 7 (DA-B): the choice reads the copy again before it is shown; awaited.
+    await act(async () => {
+      await handle?.restoreAlternative("gone-old");
+    });
     let release: () => void = () => undefined;
     act(() => {
       release = registry.freeze();

@@ -865,7 +865,10 @@ describe("R13 (Q9): saving and cleaning up are separate facts", () => {
       saving = flushDirty(a.registry);
     });
     await waitFor(() => expect(cleanup.reached).toBe(true));
-    act(() => a.handle?.restoreAlternative("T"));
+    // Revision 7 (DA-B): the choice reads the copy again before it is shown; awaited.
+    await act(async () => {
+      await a.handle?.restoreAlternative("T");
+    });
     expect(a.value()).toBe("OLDER TEXT");
     cleanup.open();
     await act(async () => {

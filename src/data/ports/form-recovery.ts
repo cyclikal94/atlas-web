@@ -86,6 +86,9 @@ interface Writer {
 /** Per store handle, then per [form, tab]. A WeakMap: the state lives exactly as long as the page's handle to the account does. */
 const writers = new WeakMap<object, Map<string, Writer>>();
 
+/** Why a read was refused: no store open (a read of nothing is not an empty answer). */
+const NO_STORE = "no recovery store open";
+
 /** How many times one copy is admitted when the hold it was admitted under ends before the write begins (the outbox's bound, R28). */
 const ADMISSION_ROUNDS = 3;
 
@@ -325,45 +328,39 @@ export function createFormRecoveryPort(
       });
     },
 
+    // Reads (WEB-14a revision 7, R13): null and [] are only ever what a read FOUND. No open store, or a read that fails (a closed or
+    // replaced handle, an aborted transaction, another incarnation), rejects: it says nothing about whether a copy exists.
     async load(formContext, tabInstanceId) {
       const service = deps.service();
-      if (!service) return null;
-      try {
-        const row = await service.store.run(loadFormRecovery, {
-          incarnationId: service.incarnationId,
-          formContext,
-          tabInstanceId,
-        });
-        return row
-          ? {
-              formContext: row.form_context,
-              tabInstanceId: row.tab_instance_id,
-              values: { ...row.fields },
-              savedAt: row.saved_at,
-            }
-          : null;
-      } catch {
-        return null;
-      }
+      if (!service) throw new Error(NO_STORE);
+      const row = await service.store.run(loadFormRecovery, {
+        incarnationId: service.incarnationId,
+        formContext,
+        tabInstanceId,
+      });
+      return row
+        ? {
+            formContext: row.form_context,
+            tabInstanceId: row.tab_instance_id,
+            values: { ...row.fields },
+            savedAt: row.saved_at,
+          }
+        : null;
     },
 
     async list(formContext) {
       const service = deps.service();
-      if (!service) return [];
-      try {
-        const rows = await service.store.run(listFormRecovery, {
-          incarnationId: service.incarnationId,
-          formContext,
-        });
-        return rows.map((row) => ({
-          formContext: row.form_context,
-          tabInstanceId: row.tab_instance_id,
-          values: { ...row.fields },
-          savedAt: row.saved_at,
-        }));
-      } catch {
-        return [];
-      }
+      if (!service) throw new Error(NO_STORE);
+      const rows = await service.store.run(listFormRecovery, {
+        incarnationId: service.incarnationId,
+        formContext,
+      });
+      return rows.map((row) => ({
+        formContext: row.form_context,
+        tabInstanceId: row.tab_instance_id,
+        values: { ...row.fields },
+        savedAt: row.saved_at,
+      }));
     },
 
     async discard(formContext, tabInstanceId) {

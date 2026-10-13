@@ -1,4 +1,8 @@
-import { handedOff, prepareHandoffs } from "../form-recovery/handoff";
+import {
+  handedOff,
+  handoffHandles,
+  prepareHandoffs,
+} from "../form-recovery/handoff";
 import type { DiscardResult, SaveResult } from "../form-recovery/port";
 import {
   discardDirty,
@@ -43,6 +47,13 @@ import type { AppUpdatesActions, UpdateState } from "./store";
  *    and reload anyway" and "Reload anyway" write none: the person chose not to keep the input.
  *  - "Discard and reload anyway" DISCARDS the copies of the dirty forms (revision 1, R6: the copy saved earlier and the one a form was
  *    restored from would otherwise come back after the reload); a discard that does not land says so (`discard_failed`) and reloads nothing.
+ *    Revision 7 (R6): not only the dirty ones. A save that failed part of the way (a form saved, then its hand-off or its reference not
+ *    written) leaves forms CLEAN with copies that would come back; so the discard reaches every form of the act (`participants`, kept even
+ *    when a form leaves the registry meanwhile) and every form of the page with a copy, and the reload waits until each says nothing of it
+ *    can come back (`discarded`), or its discard was refused (signing out). A form's own discard reaches only its own copies, the copy it was
+ *    restored from and its own hand-off: never another page's.
+ *  - A FORM WHOSE LOOK COULD NOT READ THE STORE (revision 7, R13: `unresolved`) does not know what was left to it; "Reload" asks it to look
+ *    again once, and a save's reload waits until it has read the store (otherwise `save_failed`: retry, or discard and reload anyway).
  *  - It NEVER reloads on its own: only `accept`, `retrySave`, `discardAndReload` and `reloadAnyway` lead to `reload()`.
  *
  * It also checks for updates: at start (registration), on `online`, on a return to the page at most every `UPDATE_CHECK_VISIBLE_MIN_MS`,
@@ -210,14 +221,40 @@ export function startAppUpdates(
   let mode: Mode = "save";
   /** The forms whose discard was refused in this act (the account is being signed out: the database goes with every copy). */
   let refused = new Set<RecoverableFormHandle>();
+  /**
+   * Revision 7 (R6): every form an update act of this tab has saved or handed off since the person accepted it, kept across "Retry save" and
+   * "Discard and reload anyway" (a form may leave the registry meanwhile: its copies are still this act's to discard).
+   */
+  let participants = new Set<RecoverableFormHandle>();
+  const discardedNow = (form: RecoverableFormHandle): boolean => {
+    try {
+      return form.discarded ? form.discarded() : !form.isDirty();
+    } catch {
+      return false;
+    }
+  };
+  const unresolved = (form: RecoverableFormHandle): boolean => {
+    try {
+      return form.unresolved?.() ?? false;
+    } catch {
+      return true;
+    }
+  };
+  /** Revision 7 (R6): the forms a discard reload must still discard (the act's, the page's with a copy, the dirty ones), but not a refused one. */
+  const discardTargets = (): RecoverableFormHandle[] =>
+    [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(
+      (form) => !refused.has(form) && !discardedNow(form),
+    );
   /** Whether the reload may happen NOW (R3): read in the same step as the reload, never across an await. */
   const sealed = (): boolean => {
     if (mode === "anyway") return true;
     const forms = deps.forms;
     if (forms.pending() > 0 || forms.unheld() > 0) return false;
-    if (!forms.dirty().every((form) => refused.has(form))) return false;
-    // Revision 6 (R13): a save's reload hands every form's copy to the next page of this tab first.
-    return mode !== "save" || handedOff(forms);
+    // Revision 7 (R6): a discard's reload waits until nothing of any form of the act can come back, clean ones included.
+    if (mode === "discard") return discardTargets().length === 0;
+    if (forms.dirty().length > 0) return false;
+    // Revision 7 (R13): every form knows what was left to it; revision 6: every form's copy is handed to the next page of this tab first.
+    return !handoffHandles(forms).some(unresolved) && handedOff(forms);
   };
   let resealing = false;
   /** The ONLY way to `deps.reload()`: checked and done in one step; otherwise this tab's forms are settled again first. */
@@ -521,6 +558,28 @@ export function startAppUpdates(
    */
   const settleForms = async (act: Mode): Promise<boolean> => {
     if (act === "anyway") return true;
+    if (act === "save") {
+      for (const form of handoffHandles(deps.forms)) participants.add(form);
+      // Revision 7 (R13): a form that could not read what was left to it looks again, once per act; still unknown, nothing reloads.
+      const unread = handoffHandles(deps.forms).filter(unresolved);
+      if (unread.length > 0) {
+        busy = { kind: "saving" };
+        publish();
+        await Promise.all(
+          unread.map((form) =>
+            (form.retryRecovery?.() ?? Promise.resolve(false)).catch(
+              () => false,
+            ),
+          ),
+        );
+        if (disposed) return false;
+        if (handoffHandles(deps.forms).some(unresolved)) {
+          busy = { kind: "save_failed", refused: false };
+          publish();
+          return false;
+        }
+      }
+    }
     for (let round = 0; round < SETTLE_ROUNDS; round += 1) {
       if (deps.forms.pending() > 0) {
         busy = { kind: "saving" };
@@ -532,6 +591,7 @@ export function startAppUpdates(
       }
       if (sealed()) return true;
       if (act === "save") {
+        for (const form of handoffHandles(deps.forms)) participants.add(form);
         if (deps.forms.dirty().length > 0) {
           busy = { kind: "saving" };
           publish();
@@ -555,7 +615,8 @@ export function startAppUpdates(
           }
         }
       } else {
-        const forms = deps.forms.dirty().filter((form) => !refused.has(form));
+        // Revision 7 (R6): every form of the act with something that could come back, clean or not, waiting for each form's own result.
+        const forms = discardTargets();
         const results: DiscardResult[] = await discardDirty(deps.forms, forms);
         if (disposed) return false;
         if (results.includes("failed")) {
@@ -624,11 +685,13 @@ export function startAppUpdates(
   offs.push(unfreeze);
 
   let acting = false;
-  const act = async (next: Mode): Promise<void> => {
+  const act = async (next: Mode, fresh = false): Promise<void> => {
     if (acting || accepting || resealing || reloaded || disposed) return;
     acting = true;
     mode = next;
     refused = new Set();
+    // A new acceptance starts a new act; "Retry save" and "Discard and reload anyway" continue the one that failed (revision 7, R6).
+    if (fresh) participants = new Set();
     // Synchronously, before the save reads the forms: nothing typed from now on could be saved before the reload.
     frozen ??= deps.forms.freeze();
     try {
@@ -651,7 +714,7 @@ export function startAppUpdates(
   }
 
   const actions: AppUpdatesActions = {
-    accept: () => void act("save"),
+    accept: () => void act("save", true),
     retrySave: () => void act("save"),
     discardAndReload: () => void act("discard"),
     reloadAnyway: () => void act("anyway"),

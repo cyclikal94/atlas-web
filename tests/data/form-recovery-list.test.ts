@@ -7,6 +7,7 @@ import {
 } from "../../src/data/plans/form-recovery";
 import { listPlans } from "../../src/data/plans/registry";
 import { createFormRecoveryPort } from "../../src/data/ports/form-recovery";
+import { readCopies, readCopy } from "../../src/lib/form-recovery/port";
 import { DataTestWorld } from "../support/data/env";
 
 /**
@@ -138,12 +139,48 @@ describe("FormRecoveryPort.list", () => {
     expect(accountDatabaseName(ACCOUNT)).not.toBe(accountDatabaseName(OTHER));
   });
 
-  test("no open database: an empty list, never a throw", async () => {
+  // ADAPTED (WEB-14a revision 7, R13: review of 13 October 2026). Was "no open database: an empty list, never a throw" with
+  // `expect(await port.list(...)).toEqual([])`: an empty list from a store that is not open looked like a successful empty look. The intent
+  // kept (nothing is listed from it; the caller is never misled) is now that it rejects, and the typed read says `unavailable`.
+  test("no open database: the read rejects (unavailable), never an empty list", async () => {
     const port = createFormRecoveryPort({
       service: () => null,
       now: () => "2026-10-01T12:00:00.000Z",
     });
-    expect(await port.list("task-edit:42")).toEqual([]);
+    await expect(port.list("task-edit:42")).rejects.toThrow();
+    expect(await readCopies(port, "task-edit:42")).toEqual({
+      kind: "unavailable",
+    });
+  });
+
+  test("revision 7 (R13): a list or load whose transaction fails is unavailable, not empty; a successful empty read is absent; control: the copy", async () => {
+    const { env, port } = await portFor(ACCOUNT);
+    expect(await readCopies(port, "task-edit:42")).toEqual({
+      kind: "listed",
+      copies: [],
+    });
+    expect(await readCopy(port, "task-edit:42", "tab-a")).toEqual({
+      kind: "absent",
+    });
+    await port.save(snap("tab-a", 1));
+    for (const label of ["data.listFormRecovery", "data.loadFormRecovery"]) {
+      env.idb.inject({
+        match: (tx) => tx.label === label,
+        mode: "error",
+        times: 1,
+      });
+      const read =
+        label === "data.listFormRecovery"
+          ? await readCopies(port, "task-edit:42")
+          : await readCopy(port, "task-edit:42", "tab-a");
+      expect(read).toEqual({ kind: "unavailable" });
+    }
+    // Control: the same reads, with nothing injected, find the copy.
+    expect(
+      (await readCopies(port, "task-edit:42")).kind === "listed" &&
+        (await port.list("task-edit:42")).map((s) => s.tabInstanceId),
+    ).toEqual(["tab-a"]);
+    expect((await readCopy(port, "task-edit:42", "tab-a")).kind).toBe("found");
   });
 });
 

@@ -304,6 +304,10 @@ export async function seedAccount(
     (state) => window.__atlasFixture?.session?.seedAuthState(state),
     settled(account, 1, session),
   );
+  // HARNESS (WEB-14a revision 7): the harness page imports its data labs without awaiting them; leaving it while one is still loading makes
+  // WebKit (and Firefox) report the cancelled import as a page error, which the console guard rightly fails. Diagnosed with the order
+  // forced (`.agtx/evidence/WEB-14a/revision-7/diag-seed`): leave only once the page's network is idle. No product code is involved.
+  await page.waitForLoadState("networkidle");
   await page.goto(`${world.url}/__data`);
   await page.waitForFunction(() => window.__atlasData !== undefined);
   const created = await page.evaluate(async (id) => {

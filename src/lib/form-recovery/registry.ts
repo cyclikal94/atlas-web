@@ -34,6 +34,15 @@ export interface RecoverableFormHandle {
   handoff?(): Promise<SaveResult>;
   /** Revision 6 (R13): the form has no copy to hand off, or its hand-off holds its current copy. */
   handedOff?(): boolean;
+  /**
+   * Revision 7 (R6): nothing of this page's for the form can come back after a reload (no copy, hand-off or discard owed; its newest
+   * operation a landed terminal act). A handle without it counts as discarded when it is clean.
+   */
+  discarded?(): boolean;
+  /** Revision 7 (R13): the form's look for what was left to it could not read the store; what it may restore is not known yet. */
+  unresolved?(): boolean;
+  /** Revision 7 (R13): makes that look again; true once it has read the store. Never throws. */
+  retryRecovery?(): Promise<boolean>;
 }
 
 /** What the registry keeps of a form session (`session.ts`) for the page's life: its form context and the account database it is bound to. */
