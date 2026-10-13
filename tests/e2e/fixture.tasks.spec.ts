@@ -501,9 +501,14 @@ test.describe("E-T6: archive offline leaves the day (A13)", () => {
     context,
   }) => {
     const a = buildTask({ n: 7, title: "Archive me" });
-    const { page } = await setup(context, todayRoute(), [a]);
+    // Strengthened in revision 1 (the assertions are unchanged): a task that STAYS on the day is the control that Today has composed its
+    // rows before the archived one's absence is asserted. Since R4, Today shows no row until the whole outstanding overlay is read, so an
+    // absence checked at once could pass before any row was composed (the real-engine mutant MU-2031 survived that way).
+    const stays = buildTask({ n: 22, title: "Stays" });
+    const { page } = await setup(context, todayRoute(), [a, stays]);
     await goOfflineAtBoundary(page);
     await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+    await expect(rowOf(page, stays.occurrenceId)).toBeVisible();
     await navigateInApp(
       page,
       `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
@@ -512,6 +517,7 @@ test.describe("E-T6: archive offline leaves the day (A13)", () => {
     await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
     await navigateInApp(page, todayRoute());
     await expect(page.locator("[data-today-page]")).toBeVisible();
+    await expect(rowOf(page, stays.occurrenceId)).toBeVisible();
     await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
     await navigateInApp(page, "/tasks");
     await page.getByRole("checkbox", { name: "Archived" }).check();
@@ -667,10 +673,13 @@ test.describe("E-T12: display zone and the gap explainer (A6)", () => {
       opensAt: Date.UTC(2026, 2, 28, 23) / 1000,
       closesAt: Date.UTC(2026, 2, 29, 22) / 1000,
     });
+    // Strengthened in revision 1 (the assertions are unchanged): an undated task, on every day in every zone, is the control that the
+    // regrouped day has been composed before the timed row's absence is asserted.
+    const anyDay = buildTask({ n: 24, title: "Any day", date: null });
     const { page } = await setup(
       context,
       todayRoute("Europe/Vienna", "2026-03-29"),
-      [a],
+      [a, anyDay],
     );
     await goOfflineAtBoundary(page);
     await expect(rowOf(page, a.occurrenceId)).toBeVisible();
@@ -686,6 +695,7 @@ test.describe("E-T12: display zone and the gap explainer (A6)", () => {
     );
     await page.getByLabel("Time zone").selectOption("America/New_York");
     await expect(page).toHaveURL(/tz=America%2FNew_York/);
+    await expect(rowOf(page, anyDay.occurrenceId)).toBeVisible();
     // 01:30Z is 21:30 on the 28th in New York: not on the 29th there.
     await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
   });
@@ -1118,11 +1128,17 @@ test.describe("E-T10: a /daily answer held across an account switch (A20; R7 of 
     await expect(page.locator("[data-today-page]")).toBeVisible({
       timeout: 20_000,
     });
+    // The next account's day is composed (empty, not loading) before the late answers are delivered: the absence below is then a
+    // statement about a live view, not about one that has not been drawn yet.
+    await expect(page.locator("[data-today-empty]")).toBeVisible({
+      timeout: 20_000,
+    });
     const heldBefore = daily.held.length;
     expect(heldBefore).toBeGreaterThanOrEqual(2);
     await daily.release();
     // Long enough for a late answer to be composed and shown, were it applied.
     await page.waitForTimeout(1_500);
+    await expect(page.locator("[data-today-empty]")).toBeVisible();
     await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
     // The next account's own day was asked for and answered (so the screen is live, not stuck), and the held answers were delivered.
     expect(daily.asked.some((q) => q.account === VIEWED)).toBe(true);
