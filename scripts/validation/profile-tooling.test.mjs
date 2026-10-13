@@ -581,7 +581,12 @@ test("case: another stage's samples never stand in for a stage that has none, an
 
 test("case: the real sampler is ready only after a valid first sample and writes a final one when stopped; one that cannot get ready fails its stage before the action", async (t) => {
   const dir = scratch(t);
+  const context = isolation.directContext({
+    invocation: "inv",
+    evidenceDir: dir,
+  });
   const sampler = await isolation.startLoadSampler(dir, "probe", {
+    context,
     intervalMs: 200,
   });
   assert.equal(sampler.ready, true);
@@ -606,9 +611,10 @@ test("case: the real sampler is ready only after a valid first sample and writes
         return 0;
       },
       {
-        sample: (d, s) =>
-          isolation.startLoadSampler(d, s, { readyWithinMs: 0 }),
+        sample: (d, s, c) =>
+          isolation.startLoadSampler(d, s, { context: c, readyWithinMs: 0 }),
         invocation: "inv",
+        context,
         extra: { root },
       },
     );
@@ -635,8 +641,13 @@ test("case: an action that throws is sealed as a failure with its interval insid
         throw new Error("synthetic stage failure");
       },
       {
-        sample: (d, s) => isolation.startLoadSampler(d, s, { intervalMs: 200 }),
+        sample: (d, s, c) =>
+          isolation.startLoadSampler(d, s, { context: c, intervalMs: 200 }),
         invocation: "inv",
+        context: isolation.directContext({
+          invocation: "inv",
+          evidenceDir: dir,
+        }),
         extra: { root },
       },
     );

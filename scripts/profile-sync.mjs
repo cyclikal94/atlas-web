@@ -474,7 +474,8 @@ function contention() {
       "--evidence",
       out,
     ],
-    // The nested driver runs under this invocation's claim; it records and seals its own stage.
+    // The nested driver runs under this invocation's claim; it records and seals its own stage, and samples it by this invocation's
+    // isolation context (its root is this process), which it takes from the claim after proving this process is its ancestor.
     {
       cwd: root,
       stdio: "inherit",
@@ -652,8 +653,11 @@ const run = async (stage, action) => {
   // sealed whatever happens; a sampler that never becomes ready fails the stage before its action.
   status = await runStage(out, stage, action, {
     sample:
-      stage === "handoff" ? null : (dir, name) => startLoadSampler(dir, name),
+      stage === "handoff"
+        ? null
+        : (dir, name, context) => startLoadSampler(dir, name, { context }),
     invocation: claim.invocation,
+    context: claim.context,
     extra: { root, machine: machineRecord },
   });
 };

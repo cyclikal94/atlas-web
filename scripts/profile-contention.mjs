@@ -11,7 +11,8 @@
 // `--evidence` is required and nothing is deleted: a directory whose contention stage is already recorded is refused (exit 2).
 // `--samples N` is a DEBUGGING run with at most N per cell; it is never recorded as evidence (its stage record says so).
 // The controller's load is sampled throughout (`<dir>/isolation/contention.jsonl`, scripts/lib/profile-isolation.mjs), and the stage is
-// sealed with its action interval inside the sampler's first and last samples, whatever happens to the action.
+// sealed with its action interval inside the sampler's first and last samples, whatever happens to the action. Run by `profile-sync.mjs`, the
+// samples attribute by that invocation's root (the claim's isolation context), which must be this driver's live ancestor.
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -109,8 +110,11 @@ const status = await runStage(
     });
   },
   {
-    sample: (dir, stage) => startLoadSampler(dir, stage),
+    // The invocation's context, from this driver's own claim or (delegated) the claim it runs under: its samples attribute by the
+    // invocation's root, so the parent driver's tree (and the launcher's helper under it) is this run's (review 8 R1).
+    sample: (dir, stage, context) => startLoadSampler(dir, stage, { context }),
     invocation: claim.invocation,
+    context: claim.context,
     extra: {
       root,
       debugging_samples: samples || null,

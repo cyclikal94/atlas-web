@@ -1,36 +1,74 @@
 {
-  "_": "Size budgets and recorded baselines. check-budgets.mjs fails above a shared `budget` figure or more than `tolerance` above the build baseline, and refuses the retired `provisional`/`provisional_by_build` keys. The JavaScript ceiling carries the accepted WEB-12a temporary allowance; WEB-09c still owes the reasoned P-1/P-1S successor.",
+  "_": "Size budgets and recorded baselines. check-budgets.mjs fails above a shared `budget` figure or more than `tolerance` above the build baseline, and refuses the retired `provisional`/`provisional_by_build` keys. The figures are WEB-09c's reasoned successor (C11, FB-20261010, revision 8): `budget_basis` gives the measurement, the rationale, the effective bounds and the named obligations. Size guards, not performance targets.",
   "budget": {
-    "initial_js_gzip": 266057,
-    "css_gzip": 7560,
+    "initial_js_gzip": 289142,
+    "css_gzip": 8078,
     "fonts": 92110
   },
   "budget_basis": {
-    "rule": "One shared ceiling per figure, plus each build baseline and tolerance. Initial JavaScript carries the accepted WEB-12a temporary ceiling of 266,057 bytes into this checker format; CSS and fonts retain WEB-09c OD-2 ceilings. This merge makes no new baseline reset or performance claim. The reasoned successor, using current P-1/P-1S measurements, headroom and approved growth under FB-20261010, remains pending.",
-    "authority": "OD-2, \"Signed-in size + 10% (Recommended)\", Kieran, 10 October 2026, WEB-09c Planning session 7ad2f6a0-8e07-47d7-8373-0c45e823ea68 (the agent question mechanism)",
+    "rule": "OD-2: one shared ceiling per figure, round(signed-in shell (dist-fixture) measurement x (1 + tolerance)), with tolerance 0.10 retained for the reasons in `rationale`; each build is also held to its own baseline plus the tolerance. The dist-fixture baseline is the same measurement, so its guard and the shared ceiling coincide (to rounding); the production baseline is unchanged.",
+    "authority": "OD-2, \"Signed-in size + 10% (Recommended)\", Kieran, 10 October 2026, WEB-09c Planning session 7ad2f6a0-8e07-47d7-8373-0c45e823ea68 (the agent question mechanism). FB-20261010 (approval/fixture-budget-20261010.json 7414b09a5fa9dcb094a5e5cbaf4645f24fee413f49999c13a975ac888aa584bc; delivery/handoffs/fixture-budget-20261010.md d2852ad606f8759f2f41f24043a38df02e6fcb2a77b67ecc859fe769682ec430): WEB-09c owns the reasoned successor. Feature records reconciled: FB-20261010-WEB12A (delivery/handoffs/web12a-fixture-budget-20261010.md 73cac22e13e30743c6a4b899161d1ffccadae8e12b29ff25b79ed4243619b52f), FB-20261010-08C-14A (approval/web08c-web14a-fixture-budgets-20261010.json 777f7db96d3c30abd00f6bc9706c2630b3a5d2e4d867d6ad93d04d69914e1223; hand-off 8507fa8cee064014c42f39a13c972b2e3aaaec7e32ac93c3b2a33431a110e963), FB-20261011-08D (approval/web08d-fixture-budget-20261011.json 2006d78812da545b5161a5e74a4f50b88337b5462d505cbc76a38e3fd1bcc2b0; hand-off 41c1451937d28ffb5d39ca87fcc2ee0a7df447268e2d85158f172cd2ce038173). All in the atlas-orchestrator repository.",
     "measurement": {
-      "build": "dist-fixture",
-      "initial_js_gzip": 219582,
-      "css_gzip": 6873,
+      "build": "dist-fixture (the signed-in shell proxy) and dist (the neutral production entry), check-budgets.mjs gzip level 9",
+      "initial_js_gzip": 262856,
+      "css_gzip": 7344,
       "fonts": 83736,
-      "candidate": "the WEB-09c revision-1 candidate on 8e24e0aa478d4ab3b83b3a410456cce572a28fc1: its only src/ change is the fixture device page (a lazy chunk), which changes the chunk names the fixture entry references, so the entry measures 219,582 (the first WEB-09c candidate and WEB-09a R61 measured 219,586)",
-      "evidence": "validation run 2026-10-10T10-48-05.449Z-104ce4d2 (check-budgets-fixture.log) on this candidate; the final profiling run's bundle/bundle-profile-dist-fixture.json is the recorded measurement (its path and SHA-256 are in the hand-over's P-1)"
-    },
-    "replaces": "the WEB-07 provisional figures (204,800 / 30,720 / 256,000), the WEB-09a R61 dist-fixture-only ceiling (241,544) and the first WEB-09c candidate's ceiling (241,545 from 219,586); the CSS and font ceilings are TIGHTER than WEB-07's, which the rule selected",
-    "production": "the production build (dist) is held to the same budget and, as before, to its own baseline plus the tolerance; that baseline is unchanged and only Kieran can raise it",
-    "status": "Temporary accepted-base reconciliation at the WEB-09c merge of 38b7db9; the measurement below is historical revision-1 evidence, not a measurement of the merged candidate.",
-    "accepted_base": {
-      "commit": "38b7db9ee256fc2d1cd1c2614ede367893c3209d",
-      "fixture_baseline": {
-        "initial_js_gzip": 241870,
-        "css_gzip": 7059,
+      "production": {
+        "initial_js_gzip": 108391,
+        "css_gzip": 7344,
         "fonts": 83736
       },
-      "fixture_initial_js_ceiling": 266057,
-      "authority": "FB-20261010-WEB12A; atlas-orchestrator delivery/handoffs/web12a-fixture-budget-20261010.md, SHA-256 73cac22e13e30743c6a4b899161d1ffccadae8e12b29ff25b79ed4243619b52f; accepted exact-tree main integration delivery/integrations/web12a-20261011/acceptance.md",
-      "policy_history": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010-WEB12A (approved by Kieran on 10 October 2026; approval/fixture-budget-20261010.json and delivery/handoffs/web12a-fixture-budget-20261010.md in the orchestrator), WEB-12a revision 4 only: the measured candidate's fixture initial JavaScript was 241,870 bytes, 326 above the R61 ceiling 241,544 (the R10 defaults-source correction +310, the policy editor's DA-P1 fix +20, the fixture harness +10). The dist-fixture baseline was re-recorded on that candidate (initial JavaScript 241,870, CSS 7,059, fonts 83,736) and its initial JavaScript ceiling set to 266,057 (floor of 241,870 x 1.10). A one-off adjustment for this measured candidate, not authority for later resets; WEB-09c owns the reasoned successor ceiling (FB-20261010). Production baseline, shared provisional ceilings and tolerance are unchanged.",
-      "follow_up": "Remeasure the combined build without summing branch figures. WEB-09c must justify the successor with the finite P-1/P-1S programme; other unmerged feature ceilings remain named integration obligations."
-    }
+      "source": "P-1 of the complete Air programme, request profile-20261012-211000-fb04d06e (m4-air, Apple M4, macOS 26.3.1, Node 22.23.2, pnpm 12.4.2, 12 October 2026): parentless execution commit 39a26cfb84c0cd5b8d05c64e7e57185d12aa0ab1 (manifest fingerprint c48de57ed0a7048d22a7f20c7b1f9cada949d0a6ce28b212c0765c14c8fae215) of this branch at e87859f49cec02a3435f443e799efffd7594bcc3; bundle/bundle-profile-dist-fixture.json bfe53dba03c786dd94aaa790d2e061788f35a8d37b4e4f692707ebfb3e3d8c8c, bundle/bundle-profile-dist.json 9051dc9fba4d265b361b21558b4c9383344c845f0985f0b93ac43c80cce2ac7d; both builds node_env null; P-1 and all 24 P-1S cells ok in that package's resolution",
+      "package_status": "the package as a whole FAILED its strict validation (113 of 796 cells not isolated: contention and one P-10 cell, review 8 R1); its P-1/P-1S cells are used as component observations, not as an accepted hand-over",
+      "reproduced": "rebuilt locally from git archive of e87859f without .agents/ and .mcp.json (the files the Air snapshot excludes): exactly 108,391 / 262,856 / 7,344 / 83,736. With those tracked files present a build measures 108,393 / 262,853 / 7,358: Tailwind CSS v4 scans every non-ignored text file of the repository for class names, so CSS (and, through hashed asset names, a few bytes of initial JS gzip) can move with text outside src/",
+      "accepted_main": "accepted main 38b7db9ee256fc2d1cd1c2614ede367893c3209d (WEB-07, WEB-08a, WEB-08b, WEB-09a, WEB-09b, WEB-12a) builds 108,389 / 262,856 / 7,338 / 83,736 locally (git archive, tracked files present): this branch adds nothing measurable to the initial JavaScript; its device-page modules are lazy, fixture-only chunks"
+    },
+    "rationale": [
+      "Fixture-only overhead as C11 defines it (fixture entry minus production entry): 154,465 B gzip. Most of it is signed-in application code that the production build loads lazily after sign-in (production lazy chunks sum to about 215 kB gzip, so production entry plus lazy is about 324 kB against the fixture's 263 kB entry plus 117 kB lazy); the fixture is a proxy for the signed-in shell, not a measurement of production's signed-in cost.",
+      "Loading beside size (P-1S, Chromium, CDP-emulated throttling with 4x CPU on the Air desktop, three cold runs each, medians and ranges): the fixture entry's first contentful paint is 132 ms later than production's on fast 4G (300 [288-332] vs 168 [164-176] ms, mobile viewport) and 228 ms later on slow 4G (796 [772-800] vs 568 [568-572] ms); largest contentful paint is about 2.0 s on slow 4G for both (1,952 [1,944-1,960] fixture vs 2,040 [2,016-2,040] ms production) and about 0.5 s on fast 4G. Read as a linear order of magnitude, about 1.5 ms of slow-4G first contentful paint per kB of initial JavaScript gzip.",
+      "Headroom: 10 % of 262,856 is 26,286 B, about 38-39 ms of emulated slow-4G first contentful paint by that reading, within twice the run-to-run FCP range observed (up to 28 ms on slow 4G, 44 ms on fast 4G). No performance cliff was observed or is claimed; no responsiveness target is set.",
+      "Expected growth: the four named branches not in this build recorded their growth: WEB-13a about 2.6 kB (243,097 against the 240,479-byte main of 10 October, its decision's comparison), WEB-08d 4,234 B (its author's attribution against its base); WEB-14a and WEB-08c record overruns of 2,021 and 426 B over the old 241,544 ceiling, about 3.1 kB and 1.5 kB above that 240,479-byte main (an approximation: their own bases are not recorded). As an estimate of DELTAS only (branch bundles are not additive and none is a measurement of the combined application), about 11.4 kB of 26.3 kB, leaving about 14.9 kB (about 5.7 %) for chunk-layout effects and unattributed growth before an explicit decision is needed.",
+      "Why 10 % rather than less or more: 5 % (13.1 kB) would leave about 1.7 kB after the named branches, so the first integration would need another decision with no evidence of benefit; a larger figure has no measured basis and would weaken the guard as a regression detector. The 10 % tolerance is therefore kept, as OD-2 permits, for reasons stated here rather than by default."
+    ],
+    "effective_bounds": {
+      "dist": {
+        "initial_js_gzip": "109,795 (its baseline 99,814 + 10 %; binds before the shared 289,142); measured 108,391: 1,404 B headroom",
+        "css_gzip": "7,378 (its baseline 6,708 + 10 %; binds before the shared 8,078); measured 7,344 (Air) / 7,358 (with .agents/): 34 / 20 B headroom",
+        "fonts": "92,109 (its baseline 83,736 + 10 %, under the shared 92,110); measured 83,736"
+      },
+      "dist-fixture": {
+        "initial_js_gzip": "289,141 (its baseline 262,856 + 10 %, one byte under the shared 289,142); measured 262,856: 26,285 B headroom",
+        "css_gzip": "8,078 (shared, and its baseline 7,344 + 10 %); measured 7,344",
+        "fonts": "92,109; measured 83,736"
+      }
+    },
+    "production": "the production build (dist) keeps its baseline 99,814 / 6,708 / 83,736 and the 10 % regression guard; only Kieran can raise it. Its headroom is small (1,404 B JS; 34 B CSS, 20 B with the tracked .agents/ files scanned): named branches already measured production entries of 108,567 (WEB-08d), 108,620 (WEB-08c) and 109,128 (WEB-14a), so the combined build may need a production decision that this successor does not make.",
+    "scope": "Production, signed-in and fixture scopes are distinct: dist is the neutral production entry; dist-fixture eagerly includes the signed-in shell, the fixture data, test leader and harness. Desktop/emulated evidence only; supported-device boot and responsiveness remain WEB-09d's; no device threshold is inferred.",
+    "replaces": "the temporary FB-20261010-WEB12A ceiling (initial JS 266,057 over the 241,870 fixture baseline of WEB-12a revision 4) carried by the accepted base; the OD-2 revision-1 ceilings 241,540 / 7,560 / 92,110 from 219,582 / 6,873 / 83,736; the WEB-07 provisional figures (204,800 / 30,720 / 256,000) and the WEB-09a R61 ceiling (241,544). The growth from 241,870 to 262,856 is accepted main's merged WEB-08b/WEB-09b authentication and recovery baseline (WEB-12a's integration report attributes 842 B to WEB-12a's last revision), not this branch's.",
+    "history": {
+      "accepted_base": {
+        "commit": "38b7db9ee256fc2d1cd1c2614ede367893c3209d",
+        "fixture_baseline": {
+          "initial_js_gzip": 241870,
+          "css_gzip": 7059,
+          "fonts": 83736
+        },
+        "fixture_initial_js_ceiling": 266057,
+        "shared_budget": {
+          "initial_js_gzip": 266057,
+          "css_gzip": 7560,
+          "fonts": 92110
+        },
+        "authority": "FB-20261010-WEB12A; accepted exact-tree main integration delivery/integrations/web12a-20261011/acceptance.md"
+      },
+      "od2_revision_1": "dist-fixture 219,582 / 6,873 / 83,736 on the WEB-09c revision-1 candidate (validation run 2026-10-10T10-48-05.449Z-104ce4d2), ceilings 241,540 / 7,560 / 92,110"
+    },
+    "follow_up": [
+      "Combined-build remeasurement when WEB-08c, WEB-08d, WEB-13a and WEB-14a are integrated with this successor: rebuild dist and dist-fixture, run node scripts/check-budgets.mjs dist and dist-fixture and the P-1 attribution (node scripts/profile-sync.mjs --evidence <fresh dir> --only bundle) on the combined candidate. Branch sizes are not additive.",
+      "Budget metadata at that integration: those branches carry provisional_by_build ceilings (266,167 / 269,183 / 267,406 / 267,921) that this checker refuses; reconcile them deliberately into this shared budget. No branch may restore an older ceiling or carry a temporary one forward unexamined.",
+      "Any increase beyond these figures, and any change to the production baseline, needs attributed growth and an explicit decision; there is no automatic reset per card.",
+      "The final WEB-09c Air programme re-measures P-1/P-1S on the revision-8 candidate; its P-1 must equal the measurement above to the bytes, or the difference must be attributed (Tailwind's scan of changed non-src text) before this basis is relied on."
+    ]
   },
   "tolerance": 0.1,
   "baseline": {
@@ -40,8 +78,8 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 241870,
-      "css_gzip": 7059,
+      "initial_js_gzip": 262856,
+      "css_gzip": 7344,
       "fonts": 83736
     }
   }

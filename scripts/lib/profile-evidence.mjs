@@ -11,6 +11,12 @@
 // into `writers/`; an interrupted one leaves it, so the directory is refused from then on and its evidence stays as it was for diagnosis.
 // Each stage record is SEALED when its action ends: its action interval (inside the load sampler's first and last samples), the sampler's
 // state, and the line ranges of the shared files its rows occupy.
+//
+// Revision 8 (review 8 R1; design assessment A1): the claim also records the invocation's ISOLATION CONTEXT (scripts/lib/profile-isolation.mjs):
+// the invocation, the canonical evidence directory, the root process (the claim holder) by pid and start, and the launcher's support pin if one
+// was handed over (`ATLAS_PROFILE_SUPPORT`). A delegated driver takes the context from the claim only after proving that the recorded root is
+// its own live ancestor with the recorded start and that the directory is the claim's; otherwise it is refused before it writes anything.
+// Every stage records the context it was sampled by, and its sampler attributes by that root, not by whichever process started it.
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -19,6 +25,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -26,6 +33,14 @@ import {
 import { loadavg } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fingerprint } from "../validation/runtime.mjs";
+import {
+  contextProblems,
+  isAncestor,
+  isolationContext,
+  processStart,
+  psRows,
+  supportFromEnv,
+} from "./profile-isolation.mjs";
 
 export const EVIDENCE_KEY = "WEB-09a:sync-profiling";
 export const EVIDENCE_OWNER = "WEB-09c";
@@ -33,9 +48,12 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * The version of the evidence contract (scripts/lib/profile-contract.mjs) a stage was recorded under. Version 2 (WEB-09c revision 3,
  * review 3 R2): the contents of every observation and the support its derived figures are recomputed from (P-Q2's initial and ledger
  * readings, P-8's trace support, P-13's observed hints and transactions, memory and heap samples, W2's seeded person) are required, so
- * version 1 evidence is historical and resolves incomplete; it is never rewritten.
+ * version 1 evidence is historical and resolves incomplete; it is never rewritten. Version 3 (WEB-09c revision 8, review 8 R1): every
+ * stage record carries the invocation's isolation context and every load sample is bound to it (method, invocation, stage, root pid and
+ * start, sampler process) with the identities its verdict rests on; version 2 evidence (every attempt up to the Air request
+ * profile-20261012-211000-fb04d06e) has no such context, resolves incomplete, and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 2;
+export const CONTRACT_VERSION = 3;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [
@@ -198,13 +216,67 @@ export function claimHolder(dir) {
 }
 
 /**
+ * Why the claim `holder` cannot lend its isolation context to this process for `dir` under the delegated invocation `delegated` (an empty
+ * list when it can): the context must be valid and the invocation's, name this directory, and its root must be this process's live
+ * ancestor with the recorded start (a reused pid is a different process). `rows` is the process table (`psRows()`).
+ */
+export function delegationProblems(
+  dir,
+  delegated,
+  holder,
+  rows,
+  self = process.pid,
+) {
+  const context = holder?.isolation_context;
+  const problems = contextProblems(context);
+  if (problems.length)
+    return [
+      `the claim carries no valid isolation context (${problems.join("; ")})`,
+    ];
+  if (context.invocation !== delegated)
+    problems.push(`its context belongs to invocation ${context.invocation}`);
+  let canonical = null;
+  try {
+    canonical = realpathSync(dir);
+  } catch {
+    canonical = null;
+  }
+  if (context.evidence_dir !== canonical)
+    problems.push(
+      `its context names ${context.evidence_dir}, not ${canonical}`,
+    );
+  if (
+    holder.pid !== context.root.pid ||
+    holder.pid_started !== context.root.started
+  )
+    problems.push("its context's root is not the claim holder");
+  const root = rows.find((r) => r.pid === context.root.pid);
+  if (!root || root.started !== context.root.started)
+    problems.push(
+      `its root ${context.root.pid} (started ${context.root.started}) is ${root ? `now a process started ${root.started}` : "gone"}`,
+    );
+  else if (!isAncestor(rows, context.root.pid, self))
+    problems.push(
+      `its root ${context.root.pid} is not an ancestor of this process ${self}`,
+    );
+  return problems;
+}
+
+/**
  * Claims `dir` for this invocation, or runs under the claim `delegated` names (a nested driver). The claim is created with O_EXCL: of two
  * invocations that reach this point together, exactly one succeeds; the other is refused (exit 2) without touching anything. Returns the
- * invocation id and `release(status)`, which moves the claim to `writers/<invocation>.json` with its end.
+ * invocation id, its isolation `context` and `release(status)`, which moves the claim to `writers/<invocation>.json` with its end. A
+ * delegated claim is refused (exit 2, nothing written) unless `delegationProblems` finds nothing wrong; a direct claim records this process
+ * as the root and `support` (by default the launcher's `ATLAS_PROFILE_SUPPORT`; an invalid pin is refused before anything is written).
  */
 export function claimDirectory(
   dir,
-  { stages, delegated = process.env.ATLAS_PROFILE_CLAIM, log = console.error },
+  {
+    stages,
+    delegated = process.env.ATLAS_PROFILE_CLAIM,
+    support,
+    log = console.error,
+  },
 ) {
   if (delegated) {
     const holder = claimHolder(dir);
@@ -214,7 +286,35 @@ export function claimDirectory(
       );
       process.exit(2);
     }
-    return { invocation: delegated, delegated: true, release: () => undefined };
+    const problems = delegationProblems(dir, delegated, holder, psRows());
+    if (problems.length) {
+      log(
+        `refused: the delegating invocation ${delegated} cannot lend its isolation context to this process (${problems.join("; ")}); nothing was changed`,
+      );
+      process.exit(2);
+    }
+    return {
+      invocation: delegated,
+      delegated: true,
+      context: holder.isolation_context,
+      release: () => undefined,
+    };
+  }
+  let pin;
+  try {
+    pin = support === undefined ? supportFromEnv() : support;
+  } catch (error) {
+    log(
+      `refused: ATLAS_PROFILE_SUPPORT is not a valid support pin (${error.message}); nothing was changed`,
+    );
+    process.exit(2);
+  }
+  const started = processStart(process.pid);
+  if (!started) {
+    log(
+      `refused: the start of this process (${process.pid}) cannot be read, so its samples could not be attributed; nothing was changed`,
+    );
+    process.exit(2);
   }
   mkdirSync(dir, { recursive: true });
   const invocation = randomUUID();
@@ -229,18 +329,28 @@ export function claimDirectory(
     );
     process.exit(2);
   }
+  const context = isolationContext({
+    invocation,
+    evidenceDir: realpathSync(dir),
+    rootPid: process.pid,
+    rootStarted: started,
+    support: pin,
+  });
   const record = {
     invocation,
     pid: process.pid,
+    pid_started: started,
     started_at: new Date().toISOString(),
     stages,
     argv: process.argv.slice(1),
+    isolation_context: context,
   };
   writeSync(fd, `${JSON.stringify(record, null, 2)}\n`);
   closeSync(fd);
   return {
     invocation,
     delegated: false,
+    context,
     /** Withdraws a claim under which nothing was written (a refusal after the claim): the directory is left as it was found. */
     withdraw() {
       unlinkSync(file);
@@ -361,15 +471,21 @@ export function finishStage(dir, stage, status, seal = {}) {
 /**
  * Runs one stage's `action` between the sampler's barriers and seals it whatever happens: the sampler must have written a valid first
  * sample before the action starts (otherwise the stage fails closed), the action's interval is recorded inside it, a throw is recorded as
- * a failure, and the sampler's final sample is written after the action. Returns the exit status.
+ * a failure, and the sampler's final sample is written after the action. `sample(dir, stage, context)` starts the sampler with the
+ * invocation's isolation `context`, which the stage record keeps; a sampled stage without its invocation's context fails before its action.
+ * Returns the exit status.
  */
 export async function runStage(
   dir,
   stage,
   action,
-  { sample, invocation, extra = {} },
+  { sample, invocation, context = null, extra = {} },
 ) {
-  recordStage(dir, stage, { ...extra, invocation });
+  recordStage(dir, stage, {
+    ...extra,
+    invocation,
+    isolation_context: context,
+  });
   let sampler = null;
   let status = 1;
   let failure = null;
@@ -377,7 +493,11 @@ export async function runStage(
   let finished = null;
   let stopped = null;
   try {
-    sampler = sample ? await sample(dir, stage) : null;
+    if (sample && context?.invocation !== invocation)
+      throw new Error(
+        `stage ${stage} has no isolation context of its invocation ${invocation}: the stage cannot be judged and does not run`,
+      );
+    sampler = sample ? await sample(dir, stage, context) : null;
     started = new Date().toISOString();
     status = (await action()) ?? 1;
   } catch (error) {
@@ -397,6 +517,8 @@ export async function runStage(
       ? {
           ready: sampler.ready === true,
           ready_at: sampler.ready_at ?? null,
+          pid: sampler.pid ?? null,
+          owner_pid: sampler.owner_pid ?? null,
           final_sample: stopped?.final_sample === true,
           exit_code: stopped?.exit_code ?? null,
           samples: stopped?.samples ?? null,

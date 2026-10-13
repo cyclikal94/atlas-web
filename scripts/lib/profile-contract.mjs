@@ -41,7 +41,11 @@ import {
   REQUIRED_CASES,
   SHARED_ROWS,
 } from "./profile-evidence.mjs";
-import { classifyWindow, SAMPLE_INTERVAL_MS } from "./profile-isolation.mjs";
+import {
+  classifyWindow,
+  SAMPLE_INTERVAL_MS,
+  sampleIdentityProblem,
+} from "./profile-isolation.mjs";
 import {
   observeW2Capture,
   sameTargetProblems,
@@ -1245,6 +1249,16 @@ export function loadEvidence(dir) {
           "the stage record does not show a sampler that was ready before its action";
       else if (!problem && sampler.final_sample !== true)
         problem = "the sampler did not write its final sample after the action";
+      // Revision 8 (review 8 R1): the samples must be this stage's sampler's, taken by the invocation's isolation context (its root by pid
+      // and start), and record the identities their verdicts rest on; a support process must be one the context's pin authorises.
+      if (!problem)
+        problem = sampleIdentityProblem({
+          context: record?.isolation_context,
+          invocation: record?.invocation,
+          stage,
+          sampler,
+          rows: read.rows,
+        });
     }
     const entry = {
       rows: read.rows,

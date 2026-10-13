@@ -11,12 +11,17 @@
 // (written out again, not imported), and the support each is recomputed from is kept: P-Q2's readings, P-8's trace events, P-13's
 // hints and transactions, every memory and heap sample, the W2 capture's real-shaped bytes and its seeded person.
 //
+// Revision 8 (review 8 R1): every stage record carries the invocation's isolation context (contract version 3) and every load sample is
+// bound to it: the method, the invocation, stage, root pid and start, the stage's sampler process, and the identities its verdict rests on
+// (the own tree with the root in it, foreign processes as records agreeing with the display strings, support processes). The literals
+// are written out here, not imported, for the same reason.
+//
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
 // thing and expect the exact cell the contract must name.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -35,6 +40,10 @@ const STAGE_ORDER = [
 ];
 const SHARED = ["measurements.jsonl", "values.jsonl", "collection.jsonl"];
 const INTERVAL = 5_000;
+/** The synthetic invocation root (pid and `ps lstart` start) and each stage's sampler process. */
+export const ROOT_PID = 4242;
+export const ROOT_STARTED = "Mon Oct 12 09:00:00 2026";
+const SAMPLER_PID = (stage) => 5000 + STAGE_ORDER.indexOf(stage);
 const W7 = recorded.workloads
   .map((w) => w.name)
   .filter((n) => n.startsWith("W7-"));
@@ -1413,8 +1422,16 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 2,
+      contract_version: 3,
       invocation,
+      isolation_context: {
+        schema: "atlas-profile-isolation-context/1",
+        method: "invocation-root/1",
+        invocation,
+        evidence_dir: resolve(dir),
+        root: { pid: ROOT_PID, started: ROOT_STARTED },
+        support: null,
+      },
       started_at: t(stage, -10),
       rows_at_start: start,
       candidate,
@@ -1425,7 +1442,15 @@ export function writeProgramme(
       exit_status: 0,
       sealed: true,
       rows_at_end: end,
-      sampler: { ready: true, final_sample: true, exit_code: 0, samples: 603 },
+      sampler: {
+        ready: true,
+        ready_at: t(stage, -5),
+        pid: SAMPLER_PID(stage),
+        owner_pid: ROOT_PID,
+        final_sample: true,
+        exit_code: 0,
+        samples: 603,
+      },
       failure: null,
     });
     const samples = [];
@@ -1434,8 +1459,40 @@ export function writeProgramme(
       samples.push({
         at: t(stage, s),
         interval_ms: INTERVAL,
+        method: "invocation-root/1",
+        context: {
+          invocation,
+          stage,
+          root_pid: ROOT_PID,
+          root_started: ROOT_STARTED,
+        },
+        sampler_pid: SAMPLER_PID(stage),
+        owner_pid: ROOT_PID,
         foreign_heavy: foreign,
+        foreign: foreign.map((f) => {
+          const [pid, ppid, pcpu, ...command] = f.split(" ");
+          return {
+            pid: Number(pid),
+            ppid: Number(ppid),
+            pcpu: Number(pcpu),
+            started: ROOT_STARTED,
+            command: command.join(" "),
+            heavy: "synthetic",
+          };
+        }),
+        support: [],
+        own: [
+          [ROOT_PID, 1, ROOT_STARTED, 50, "/usr/local/bin/node"],
+          [
+            SAMPLER_PID(stage),
+            ROOT_PID,
+            ROOT_STARTED,
+            0.1,
+            "/usr/local/bin/node",
+          ],
+        ],
         foreign_heavy_cpu_percent: foreign.length ? 180 : 0,
+        support_cpu_percent: 0,
         other_cpu_percent: 10,
       });
     }
