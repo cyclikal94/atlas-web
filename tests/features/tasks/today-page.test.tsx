@@ -150,12 +150,20 @@ describe("online: /daily", () => {
     expect(row(b.occurrenceId)).toBeNull();
   });
 
-  test("TASK-7: a 409 on a continuation restarts the scope from the first page; no page of the old revision is kept", async () => {
+  test("TASK-7: a 409 on a continuation restarts the scope from the first page; no page of the old revision is kept", {
+    timeout: 20_000,
+  }, async () => {
     const a = await seededTask({ title: "A" });
     const b = await seededTask({ title: "B" });
     const api = fakeApi();
+    // Strengthened in revision 1 (the assertions are unchanged): the scenario is played in ONE read chain. While the screen settles
+    // (StrictMode and the protected tree may start more than one chain) every read gets an empty day; then a committed sync page starts
+    // exactly one new chain, and only that chain meets the 409. With a flag shared by several chains, a second chain that began after the
+    // 409 reached the right state on its own and hid a chain that did not restart (MU-2023 survived the revision-1 qualification).
+    let scenario = false;
     let conflicted = false;
     api.respond = (q) => {
+      if (!scenario) return page([]);
       if (q.scope === "personal") return page([view(b)], { revision: 6 });
       if (q.revision === 5) {
         conflicted = true;
@@ -170,13 +178,18 @@ describe("online: /daily", () => {
       rows: [...a.rows, ...b.rows],
       api,
     });
-    await t.until(
-      () =>
-        row(b.occurrenceId)?.dataset.source === "server" &&
-        row(a.occurrenceId) !== null,
-    );
+    await t.until(() => row(a.occurrenceId) !== null);
+    scenario = true;
+    const from = api.queries.length;
+    await t.commitSync([a.rows[0] as never]);
+    for (let i = 0; i < 5; i += 1)
+      await t.until(
+        () =>
+          row(b.occurrenceId)?.dataset.source === "server" &&
+          row(a.occurrenceId) !== null,
+      );
     // The continuation carried the first page's revision; after the 409 the next read is a FIRST page again (no revision).
-    const joint = api.queries.filter((q) => q.scope === "joint");
+    const joint = api.queries.slice(from).filter((q) => q.scope === "joint");
     const at = joint.findIndex((q) => q.revision === 5);
     expect(joint[at]).toEqual({
       scope: "joint",
