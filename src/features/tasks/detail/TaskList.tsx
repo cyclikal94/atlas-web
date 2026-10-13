@@ -2,7 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
-import { useOutstandingByKind, useResourceList } from "../../../data";
+import { useAllOutstandingByKind, useResourceList } from "../../../data";
 import * as copy from "../copy";
 import { QUEUED_KINDS } from "../model/commands";
 import { patched } from "../view";
@@ -28,7 +28,7 @@ export function TaskList({ selected }: { selected?: string }) {
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const after = cursors[cursors.length - 1] ?? null;
   const page = useResourceList({ kind: "task", after, limit: 100 });
-  const outstanding = useOutstandingByKind(QUEUED_KINDS);
+  const outstanding = useAllOutstandingByKind(QUEUED_KINDS);
   const drafts = outstanding.status === "ready" ? outstanding.value.drafts : [];
   const creates = drafts
     .filter((d) => d.kind === "create_task")

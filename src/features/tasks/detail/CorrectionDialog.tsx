@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
@@ -87,14 +87,20 @@ export function CorrectionDialog({
     Partial<Record<CorrectionField, string>>
   >({});
   const [busy, setBusy] = useState(false);
+  // Every edit moves this revision. A save that succeeds closes the dialog and forgets the retained draft only if nothing was edited after
+  // the state it submitted (R3, revision 1; PRODUCT-DECISIONS-20261011): newer input stays in the open dialog, or retained while the person
+  // is in the queue, and is never consumed by the older save's acknowledgement.
+  const edits = useRef(0);
   const formId = useId();
   const weekday =
     row.data.slot.date === null
       ? CORRECTION_COPY.undated
       : weekdayLabel(row.data.slot.date);
   const goal = row.data.definition.goal;
-  const set = (patch: Partial<CorrectionState>) =>
+  const set = (patch: Partial<CorrectionState>) => {
+    edits.current += 1;
     setState((s) => ({ ...s, ...patch }));
+  };
   const field = (name: CorrectionField) =>
     errors[name]
       ? { "aria-invalid": true, "aria-describedby": `${formId}-${name}` }
@@ -116,6 +122,7 @@ export function CorrectionDialog({
       setErrors(result.errors);
       return;
     }
+    const submitted = edits.current;
     setBusy(true);
     try {
       const outcome = await actions.enqueue(
@@ -134,8 +141,10 @@ export function CorrectionDialog({
       );
       if (outcome.ok) {
         saved.set(outcome.localId, { occurrenceId: row.id, state });
-        retained.delete(key);
-        onClose();
+        if (edits.current === submitted) {
+          retained.delete(key);
+          onClose();
+        }
       }
     } finally {
       setBusy(false);

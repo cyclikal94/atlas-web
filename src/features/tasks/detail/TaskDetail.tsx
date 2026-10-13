@@ -34,6 +34,12 @@ export const DETAIL_COPY = {
   day: "Day",
   undated: "No date",
   noOccurrence: "This task has no day to show yet.",
+  dayLoading: "Loading this day",
+  dayUnavailable:
+    "This day isn't saved on this device, or isn't one of this task's days. Nothing can be recorded for it here.",
+  showDays: "Show this task's days",
+  moreDays: "More saved days",
+  previousDays: "Previous saved days",
   sharingLine: "Who can see this is set in Sharing.",
 } as const;
 
@@ -173,8 +179,11 @@ export function TaskDetail({
           />
         </div>
       </div>
-      {view.occurrences.length > 1 ? (
-        <div className="flex flex-col gap-1">
+      {view.occurrences.length > 1 ||
+      view.days.more ||
+      view.days.previous ||
+      view.days.paged ? (
+        <div className="flex flex-col gap-1" data-day-picker="">
           <label htmlFor={dayId} className="text-[12px] font-medium text-ink-2">
             {DETAIL_COPY.day}
           </label>
@@ -192,6 +201,7 @@ export function TaskDetail({
             }
             className="min-h-11 max-w-[260px] rounded-control border border-field-edge bg-canvas px-3 text-[13.5px] text-ink-1"
           >
+            {row === null ? <option value="" /> : null}
             {view.occurrences.map((o) => (
               <option key={o.id} value={o.id}>
                 {o.data?.slot.date
@@ -200,9 +210,39 @@ export function TaskDetail({
               </option>
             ))}
           </select>
+          {view.days.more || view.days.previous ? (
+            <span className="flex flex-wrap gap-2">
+              {view.days.previous ? (
+                <Button variant="quiet" onClick={view.days.showPrevious}>
+                  {DETAIL_COPY.previousDays}
+                </Button>
+              ) : null}
+              {view.days.more ? (
+                <Button variant="quiet" onClick={view.days.showMore}>
+                  {DETAIL_COPY.moreDays}
+                </Button>
+              ) : null}
+            </span>
+          ) : null}
         </div>
       ) : null}
-      {view.unreadable ? (
+      {view.selection === "loading" ? (
+        <p aria-busy="true" className="text-[13px] text-ink-2">
+          {DETAIL_COPY.dayLoading}
+        </p>
+      ) : view.selection === "unavailable" ? (
+        <div className="flex flex-col gap-2" data-day-unavailable="">
+          <p className="text-[13px] text-ink-2">{DETAIL_COPY.dayUnavailable}</p>
+          <Link
+            to="/tasks/$taskId"
+            params={{ taskId: task.id }}
+            search={{}}
+            className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13px] text-ink-2 hover:text-ink-1"
+          >
+            {DETAIL_COPY.showDays}
+          </Link>
+        </div>
+      ) : view.unreadable ? (
         <p className="text-[13px] text-ink-2">{copy.UNREADABLE}</p>
       ) : row === null ? (
         <p className="text-[13px] text-ink-2" data-no-occurrence="">

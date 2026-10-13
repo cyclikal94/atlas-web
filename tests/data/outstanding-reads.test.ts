@@ -10,6 +10,8 @@ import {
   readOutstandingByKind,
   readResourcesById,
 } from "../../src/data/plans/outstanding-reads";
+import type { Loadable, Watchable } from "../../src/data/store/port";
+import { chainWatch } from "../../src/data/ui/outstanding";
 import { readResourcesNow, scanResources } from "../../src/data/ui/scan";
 import { pageWorld } from "../support/data/page-world";
 import { cacheRow, draftRow, effectRow } from "../support/data/rows";
@@ -171,7 +173,10 @@ describe("readOutstanding", () => {
     ]);
   });
 
-  test("bodies are read for one window per call: the ids that would go over it are left for the next call", async () => {
+  // Adapted (WEB-10a revision 1, R4): a call still reads at most one window of bodies, but the resource that would go over it is now
+  // answered from its OLDEST entries up to the window and CONTINUED by a cursor (`{id, after}`), instead of being left whole for the next
+  // call (which cut a single resource with more than a window of drafts with no continuation at all). The window bound is kept.
+  test("bodies are read for one window per call: the id that would go over it is answered from its oldest and continued by the cursor", async () => {
     const w = await pageWorld();
     const rows = [];
     for (let i = 0; i < 90; i += 1)
@@ -192,12 +197,23 @@ describe("readOutstanding", () => {
       );
     w.put("drafts", rows);
     const page = (await run(w, readOutstanding as never, { ids: [A, B] })) as {
-      byId: Record<string, { drafts: unknown[] }>;
-      next: string | null;
+      byId: Record<string, { drafts: { local_id: string }[] }>;
+      next: { id: string; after: number } | null;
     };
     expect(page.byId[A]?.drafts).toHaveLength(90);
-    expect(page.byId[B]).toBeUndefined();
-    expect(page.next).toBe(B);
+    expect(page.byId[B]?.drafts.map((d) => d.local_id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => uuid(300 + i)),
+    );
+    expect(page.next).toEqual({ id: B, after: 309 });
+    const rest = (await run(w, readOutstanding as never, {
+      ids: [A, B],
+      after: page.next,
+    })) as typeof page;
+    expect(rest.byId[A]).toBeUndefined();
+    expect(rest.byId[B]?.drafts.map((d) => d.local_id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => uuid(310 + i)),
+    );
+    expect(rest.next).toBeNull();
   });
 });
 
@@ -372,5 +388,325 @@ describe("scanResources walks a whole kind a window at a time", () => {
       uuid(9999),
     ]);
     expect([...(now?.keys() ?? [])]).toEqual([uuid(2000)]);
+  });
+});
+
+/**
+ * R4 (review of 13 October 2026, family `task-outstanding-pagination-completeness`): the outstanding reads are resumable and never drop
+ * saved work without a continuation. Every page stays bounded (one window of entries and bodies; a bounded number of headers looked at);
+ * a reader that follows `next` sees every entry once.
+ */
+describe("R4: readOutstanding continues a resource with more than a window of entries", () => {
+  type Page = {
+    byId: Record<
+      string,
+      { drafts: { local_id: string }[]; attention: { local_id: string }[] }
+    >;
+    next: { id: string; after: number } | null;
+  };
+  const records = (n: number, over: (i: number) => object = () => ({})) =>
+    Array.from({ length: n }, (_, i) =>
+      draftRow({
+        local_id: uuid(1000 + i),
+        created_seq: i + 1,
+        kind: "record",
+        index_targets: [A],
+        target_resource_ids: [A],
+        ...over(i),
+      }),
+    );
+  async function follow(w: World, ids: string[]) {
+    const drafts: string[] = [];
+    const attention: string[] = [];
+    let after: Page["next"] = null;
+    let pages = 0;
+    do {
+      const page = (await run(w, readOutstanding as never, {
+        ids,
+        ...(after === null ? {} : { after }),
+      })) as Page;
+      pages += 1;
+      for (const entry of Object.values(page.byId)) {
+        drafts.push(...entry.drafts.map((d) => d.local_id));
+        attention.push(...entry.attention.map((d) => d.local_id));
+      }
+      after = page.next;
+    } while (after !== null && pages < 50);
+    return { drafts, attention, pages };
+  }
+
+  for (const count of [100, 101])
+    test(`${count} outstanding drafts of one resource: every one is answered (${count === 100 ? "one page" : "a continuation"})`, async () => {
+      const w = await pageWorld();
+      w.put("drafts", records(count));
+      const first = (await run(w, readOutstanding as never, {
+        ids: [A],
+      })) as Page;
+      expect(first.byId[A]?.drafts).toHaveLength(100);
+      expect(first.next).toEqual(count === 100 ? null : { id: A, after: 100 });
+      const all = await follow(w, [A]);
+      expect(all.drafts).toEqual(
+        Array.from({ length: count }, (_, i) => uuid(1000 + i)),
+      );
+    });
+
+  test("attention headers beyond the window are continued as well, in queue order with the drafts", async () => {
+    const w = await pageWorld();
+    w.put(
+      "drafts",
+      records(150, (i) => ({ status: i % 2 === 0 ? "queued" : "rejected" })),
+    );
+    const all = await follow(w, [A]);
+    expect(all.pages).toBe(2);
+    expect(all.drafts).toHaveLength(75);
+    expect(all.attention).toHaveLength(75);
+    expect(new Set([...all.drafts, ...all.attention]).size).toBe(150);
+  });
+
+  test("more ids than one call reads: the rest are continued, none dropped", async () => {
+    const w = await pageWorld();
+    const ids = Array.from({ length: 120 }, (_, i) => uuid(5000 + i));
+    w.put(
+      "drafts",
+      ids.map((id, i) =>
+        draftRow({
+          local_id: uuid(7000 + i),
+          created_seq: i + 1,
+          index_targets: [id],
+          target_resource_ids: [id],
+        }),
+      ),
+    );
+    const all = await follow(w, ids);
+    expect(all.drafts).toHaveLength(120);
+    expect(all.pages).toBe(2);
+  });
+});
+
+describe("R4: readOutstandingByKind continues through rows that do not match", () => {
+  type Page = {
+    drafts: { local_id: string }[];
+    attention: { local_id: string }[];
+    next: number | null;
+  };
+  async function follow(w: World, kinds: string[]) {
+    const drafts: string[] = [];
+    const attention: string[] = [];
+    let after: number | null = null;
+    let pages = 0;
+    do {
+      const page = (await run(w, readOutstandingByKind as never, {
+        kinds,
+        ...(after === null ? {} : { after }),
+      })) as Page;
+      pages += 1;
+      drafts.push(...page.drafts.map((d) => d.local_id));
+      attention.push(...page.attention.map((d) => d.local_id));
+      after = page.next;
+    } while (after !== null && pages < 50);
+    return { drafts, attention, pages };
+  }
+  const acknowledged = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      draftRow({
+        local_id: uuid(1000 + i),
+        created_seq: i + 1,
+        kind: "record",
+        status: "acknowledged",
+        index_targets: [A],
+        target_resource_ids: [A],
+      }),
+    );
+
+  for (const settled of [100, 101])
+    test(`an acknowledged draft whose effect stands, after ${settled} whose effects are in the cache, is found`, async () => {
+      const w = await pageWorld();
+      w.put("drafts", acknowledged(settled + 1));
+      w.put("pending_effects", [
+        effectRow({ resource_id: A, local_id: uuid(1000 + settled) }),
+      ]);
+      const first = (await run(w, readOutstandingByKind as never, {
+        kinds: ["record"],
+      })) as Page;
+      // Never "nothing, and no continuation" while an outstanding entry is left.
+      expect(
+        first.drafts.some((d) => d.local_id === uuid(1000 + settled)) ||
+          first.next !== null,
+      ).toBe(true);
+      expect((await follow(w, ["record"])).drafts).toEqual([
+        uuid(1000 + settled),
+      ]);
+    });
+
+  test("one match after more headers of other kinds than a page looks at: an empty page with a continuation, then the match", async () => {
+    const w = await pageWorld();
+    w.put(
+      "drafts",
+      Array.from({ length: 1_200 }, (_, i) =>
+        draftRow({
+          local_id: uuid(10_000 + i),
+          created_seq: i + 1,
+          kind: "create_list",
+        }),
+      ),
+    );
+    w.put("drafts", [
+      draftRow({
+        local_id: uuid(30_000),
+        created_seq: 1_201,
+        kind: "record",
+        target_resource_ids: [A],
+        index_targets: [A],
+      }),
+    ]);
+    const first = (await run(w, readOutstandingByKind as never, {
+      kinds: ["record"],
+    })) as Page;
+    expect(first.drafts).toEqual([]);
+    expect(first.next).toBe(1_000);
+    const all = await follow(w, ["record"]);
+    expect(all.drafts).toEqual([uuid(30_000)]);
+    expect(all.pages).toBe(2);
+  });
+
+  test("statuses merge in queue order across pages; attention beyond a window is continued; every entry once", async () => {
+    const w = await pageWorld();
+    const statuses = ["queued", "in_flight", "blocked", "rejected"] as const;
+    w.put(
+      "drafts",
+      Array.from({ length: 330 }, (_, i) =>
+        draftRow({
+          local_id: uuid(1000 + i),
+          created_seq: i + 1,
+          kind: "record",
+          status: statuses[i % 4],
+          target_resource_ids: [A],
+          index_targets: [A],
+        }),
+      ),
+    );
+    const all = await follow(w, ["record"]);
+    expect(all.pages).toBe(4);
+    expect(all.drafts).toEqual(
+      Array.from({ length: 330 }, (_, i) => i)
+        .filter((i) => i % 4 !== 3)
+        .map((i) => uuid(1000 + i)),
+    );
+    expect(all.attention).toEqual(
+      Array.from({ length: 330 }, (_, i) => i)
+        .filter((i) => i % 4 === 3)
+        .map((i) => uuid(1000 + i)),
+    );
+  });
+});
+
+describe("R4: chainWatch follows a live read's cursors", () => {
+  type Pg = { n: number; next: number | null };
+  /** A controllable watch per cursor: `set` answers it, `fail` makes it unavailable; listeners hear each change. */
+  function pages() {
+    const made = new Map<
+      number,
+      {
+        state: Loadable<Pg>;
+        listeners: Set<() => void>;
+        subscribed: number;
+      }
+    >();
+    const of = (cursor: number) => {
+      let w = made.get(cursor);
+      if (!w) {
+        w = {
+          state: { status: "loading" },
+          listeners: new Set(),
+          subscribed: 0,
+        };
+        made.set(cursor, w);
+      }
+      return w;
+    };
+    return {
+      open: (cursor: number | null): Watchable<Pg> => {
+        const w = of(cursor ?? 0);
+        return {
+          get: () => w.state,
+          subscribe(listener) {
+            w.listeners.add(listener);
+            w.subscribed += 1;
+            return () => {
+              w.listeners.delete(listener);
+            };
+          },
+        };
+      },
+      set(cursor: number, state: Loadable<Pg>) {
+        const w = of(cursor);
+        w.state = state;
+        for (const l of [...w.listeners]) l();
+      },
+      live: (cursor: number) => of(cursor).listeners.size,
+    };
+  }
+  const ready = (n: number, next: number | null): Loadable<Pg> => ({
+    status: "ready",
+    value: { n, next },
+  });
+
+  test("ready only when every page to the last is ready; a page that changes its continuation re-chains; the last complete value is kept meanwhile", () => {
+    const p = pages();
+    const chain = chainWatch<Pg, number>(
+      p.open,
+      (page) => page.next,
+      (c) => String(c),
+    );
+    const heard: string[] = [];
+    const off = chain.subscribe(() => heard.push(chain.get().status));
+    expect(chain.get().status).toBe("loading");
+    p.set(0, ready(0, 1));
+    expect(chain.get().status).toBe("loading");
+    expect(p.live(1)).toBe(1);
+    p.set(1, ready(1, 2));
+    expect(chain.get().status).toBe("loading");
+    p.set(2, ready(2, null));
+    const complete = chain.get();
+    expect(complete).toEqual({
+      status: "ready",
+      value: [
+        { n: 0, next: 1 },
+        { n: 1, next: 2 },
+        { n: 2, next: null },
+      ],
+    });
+    // Page 1 now ends the chain: page 2 is no longer watched.
+    p.set(1, ready(11, null));
+    expect(p.live(2)).toBe(0);
+    expect(chain.get()).toEqual({
+      status: "ready",
+      value: [
+        { n: 0, next: 1 },
+        { n: 11, next: null },
+      ],
+    });
+    // Page 0 is re-evaluated (loading): the last complete value stands until it is ready again.
+    p.set(0, { status: "loading" });
+    expect(chain.get().status).toBe("ready");
+    p.set(0, { status: "unavailable", reason: "closed" });
+    expect(chain.get()).toEqual({ status: "unavailable", reason: "closed" });
+    off();
+    expect(p.live(0)).toBe(0);
+    expect(heard.length).toBeGreaterThan(0);
+  });
+
+  test("a continuation that does not advance (a cursor already in the chain) is an error, never a loop", () => {
+    const p = pages();
+    const chain = chainWatch<Pg, number>(
+      p.open,
+      (page) => page.next,
+      (c) => String(c),
+    );
+    const off = chain.subscribe(() => undefined);
+    p.set(0, ready(0, 5));
+    p.set(5, ready(5, 5));
+    expect(chain.get()).toEqual({ status: "unavailable", reason: "error" });
+    off();
   });
 });

@@ -38,15 +38,38 @@ function TodayWithDefaults({
   const zone = search.tz ?? deviceZone();
   const [now, setNow] = useState(() => Date.now());
   const today = todayIn(zone, now);
-  // With no day in the address the view is today's, and rolls over at local midnight.
+  // With no day in the address the view is today's, and rolls over at local midnight (R6, revision 1). The wait is capped at six hours,
+  // and a wake that finds the same day arms the next wait ITSELF, so the chain continues until the day changes whatever the length of the
+  // remaining wait; only a change of day re-renders. A device that slept or whose clock was changed reads the day again when the page is
+  // shown or focused (a timer does not run while a device sleeps). A day in the address is the person's choice and never moves.
   useEffect(() => {
     if (search.day !== undefined) return;
-    const wait = dayEnd(today, zone) * 1000 - Date.now() + 50;
-    const timer = setTimeout(
-      () => setNow(Date.now()),
-      Math.max(1_000, Math.min(wait, 6 * 3_600_000)),
-    );
-    return () => clearTimeout(timer);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = (): boolean => {
+      if (todayIn(zone, Date.now()) === today) return false;
+      setNow(Date.now());
+      return true;
+    };
+    const arm = () => {
+      const wait = dayEnd(today, zone) * 1000 - Date.now() + 50;
+      timer = setTimeout(
+        () => {
+          if (!check()) arm();
+        },
+        Math.max(1_000, Math.min(wait, 6 * 3_600_000)),
+      );
+    };
+    arm();
+    const resume = () => {
+      if (document.visibilityState === "visible") check();
+    };
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("focus", resume);
+    };
   }, [search.day, today, zone]);
   return (
     <TodayPage

@@ -6,8 +6,8 @@ import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type DraftWithCommand,
   type EnqueueRequest,
+  useAllOutstandingByKind,
   useDataEnv,
-  useOutstandingByKind,
   useSharingDefaults,
 } from "../../../data";
 import { useTaskActions } from "../actions";
@@ -242,7 +242,7 @@ function TaskForm({
   const actions = useTaskActions();
   const defaults = useSharingDefaults();
   const navigate = useNavigate();
-  const outstanding = useOutstandingByKind(QUEUED_KINDS);
+  const outstanding = useAllOutstandingByKind(QUEUED_KINDS);
   const [state, setState] = useState<TaskFormState>(initial);
   const revision = useRef(0);
   const [errors, setErrors] = useState<FormErrors>({});

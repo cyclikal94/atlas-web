@@ -8,7 +8,14 @@ import type {
   EnqueueRequest,
   JsonObject,
 } from "../../data";
-import { canonicalDefinition, commandOf } from "./model/commands";
+import {
+  archive,
+  canonicalDefinition,
+  commandOf,
+  exclude,
+  record,
+  reviseTask,
+} from "./model/commands";
 import {
   parseDefinition,
   parseEvidence,
@@ -147,6 +154,21 @@ async function readTaskCurrent(
     : { kind: "loaded", value: detail.task };
 }
 
+/**
+ * My progress stream among a draft's targets: the target that is not the occurrence. A version-checked record or an exclusion names it as
+ * a primary; a record that is NOT version-checked (an amount, an observation) names it as a SIDE EFFECT (`side_effect_bases`), so both
+ * are looked at (R5, revision 1: the primaries alone missed it, and such a record could not be read or rebuilt).
+ */
+function streamOf(
+  draft: DraftWithCommand,
+  occurrenceId: unknown,
+): string | undefined {
+  return [
+    ...draft.target_resource_ids,
+    ...Object.keys(draft.side_effect_bases ?? {}),
+  ].find((id) => id !== occurrenceId);
+}
+
 /** Progress-level kinds: my stream from `GET /progress?parent_id=<occurrence>`, matched by its id. */
 async function readProgressCurrent(
   draft: DraftWithCommand,
@@ -154,7 +176,7 @@ async function readProgressCurrent(
 ): Promise<CurrentRead> {
   const command = commandOf(draft);
   const occurrence = command?.occurrence_id;
-  const stream = draft.target_resource_ids.find((id) => id !== occurrence);
+  const stream = streamOf(draft, occurrence);
   if (typeof occurrence !== "string" || stream === undefined)
     return { kind: "failed", reason: "unavailable" };
   const { status, body } = await readJson(
@@ -170,69 +192,180 @@ async function readProgressCurrent(
     : { kind: "loaded", value: row };
 }
 
-/** A request that sends `body` with `expected_version` taken from the reviewed current state (never the cache). */
-function resend(
+/**
+ * "Save as new" (WF-QUEUE-02) for a task command (R5, revision 1): the replacement is the SAME kind of request the person's act made, built
+ * by its own builder from the stored command, so it keeps every target the original named (the ordering targets, the side effects whose
+ * versions the server raises) with their roles and version checks, and the defaults the original captured (top-level `defaults_revision`
+ * and context: a first record on an Anyone task is still checked against the audience the person saw, and the server refuses it when the
+ * defaults have changed since, which sends it to the defaults review). The target the reviewed read is of is based on the REVIEWED version
+ * (`reviewedBase`), never silently rebased on the cache, and the record of versions is raised from it, so a later save of the same target
+ * follows on. The supersession is conditional on the draft still being the one reviewed (`expectDraft`).
+ */
+function asReplacement(
   draft: DraftWithCommand,
-  command: Obj,
-  current: CacheRow,
-  extra: Obj = {},
+  request: EnqueueRequest,
+  reviewed: { id: string; version: number } | null,
 ): EnqueueRequest {
-  const next: JsonObject = {
-    command: {
-      ...command,
-      expected_version: current.version,
-      ...extra,
-    } as JsonObject,
-  };
-  const primary = draft.target_resource_ids[0] as string;
+  const body = draft.command as Obj;
+  const capturedRevision =
+    typeof body.defaults_revision === "string" ? body.defaults_revision : null;
+  const captured =
+    capturedRevision !== null ||
+    draft.defaults_revision !== null ||
+    draft.defaults_context !== null;
   return {
-    endpoint: draft.endpoint,
-    targets: [
-      {
-        resourceId: primary,
-        role: "primary",
-        basis: draft.kind === "exclude" ? "progress_stream" : "resource",
-        versionChecked: false,
-      },
-    ],
-    build: () => ({ command: next }),
+    ...request,
+    targets: request.targets.map((target) =>
+      reviewed !== null && target.resourceId === reviewed.id
+        ? { ...target, reviewedBase: reviewed.version }
+        : target,
+    ),
+    expectDraft: (stored) =>
+      stored.local_id === draft.local_id &&
+      stored.status === draft.status &&
+      stored.command_digest === draft.command_digest,
+    build: (bases) => {
+      const built = request.build(bases);
+      if (!captured) return built;
+      const { defaultsReview: _review, ...rest } = built;
+      const inner = (built.command as Obj).command as JsonObject;
+      return {
+        ...rest,
+        command:
+          capturedRevision === null
+            ? { command: inner }
+            : { command: inner, defaults_revision: capturedRevision },
+        defaultsRevision: draft.defaults_revision,
+        defaultsContext: draft.defaults_context,
+      };
+    },
   };
 }
+
+const isString = (value: unknown): value is string => typeof value === "string";
 
 function rebuildRecord(
   draft: DraftWithCommand,
   current: CacheRow | null,
 ): EnqueueRequest | null {
   const command = commandOf(draft);
-  if (command === null || parseEvidence(command.evidence) === null) return null;
+  if (command === null) return null;
+  const evidence = parseEvidence(command.evidence);
+  const occurrenceId = command.occurrence_id;
+  const subject = command.subject_account_id;
+  const stream = streamOf(draft, occurrenceId);
+  if (
+    evidence === null ||
+    !isString(occurrenceId) ||
+    !isString(subject) ||
+    stream === undefined ||
+    typeof command.happened_at !== "number"
+  )
+    return null;
+  const replaces = isString(command.replaces) ? command.replaces : null;
   const checked = typeof command.expected_version === "number";
+  // A version-checked record needs the reviewed version of my stream; a record that is not checked may continue without it.
   if (checked && current === null) return null;
-  const { expected_version: _old, ...rest } = command;
-  // A new operation: a new entry id; the person's `happened_at` is kept.
-  const next: JsonObject = {
-    command: {
-      ...rest,
-      entry_id: crypto.randomUUID(),
-      ...(checked && current !== null
-        ? { expected_version: current.version }
-        : {}),
-    } as JsonObject,
-  };
-  const stream = draft.target_resource_ids.find(
-    (id) => id !== command.occurrence_id,
+  if (current !== null && current.id !== stream) return null;
+  const captured =
+    draft.defaults_revision !== null || draft.defaults_context !== null;
+  return asReplacement(
+    draft,
+    record({
+      occurrenceId,
+      progressId: stream,
+      me: subject,
+      // A new operation: a new entry id; the person's `happened_at` is kept.
+      entryId: crypto.randomUUID(),
+      evidence,
+      happenedAt: command.happened_at,
+      replaces,
+      // The stream the original created on demand (an Anyone task's first record): seeded at 1 again unless the read found it.
+      firstAnyoneStream: captured,
+      defaults: null,
+    }),
+    current === null ? null : { id: stream, version: current.version },
   );
-  return {
-    endpoint: draft.endpoint,
-    targets: [
-      {
-        resourceId: stream ?? (command.occurrence_id as string),
-        role: "primary",
-        basis: "progress_stream",
-        versionChecked: false,
-      },
-    ],
-    build: () => ({ command: next }),
-  };
+}
+
+function rebuildReviseTask(
+  draft: DraftWithCommand,
+  current: CacheRow | null,
+): EnqueueRequest | null {
+  const command = commandOf(draft);
+  const [taskId, executionId] = draft.target_resource_ids;
+  if (
+    command === null ||
+    current === null ||
+    current.policy_version === undefined ||
+    taskId === undefined ||
+    current.id !== taskId
+  )
+    return null;
+  const definition = parseDefinition(command.definition);
+  const execution =
+    executionId ??
+    Object.keys(draft.side_effect_bases).find((id) => id !== taskId);
+  if (
+    definition === null ||
+    !isString(command.title) ||
+    execution === undefined
+  )
+    return null;
+  return asReplacement(
+    draft,
+    reviseTask({
+      taskId,
+      executionId: execution,
+      title: command.title,
+      definition,
+      policyVersion: current.policy_version,
+    }),
+    { id: taskId, version: current.version },
+  );
+}
+
+function rebuildExclude(
+  draft: DraftWithCommand,
+  current: CacheRow | null,
+): EnqueueRequest | null {
+  const command = commandOf(draft);
+  const occurrenceId = command?.occurrence_id;
+  const stream = streamOf(draft, occurrenceId);
+  if (
+    command === null ||
+    current === null ||
+    !isString(occurrenceId) ||
+    stream === undefined ||
+    current.id !== stream ||
+    typeof command.excluded !== "boolean"
+  )
+    return null;
+  return asReplacement(
+    draft,
+    exclude({ occurrenceId, progressId: stream, excluded: command.excluded }),
+    { id: stream, version: current.version },
+  );
+}
+
+function rebuildArchive(
+  draft: DraftWithCommand,
+  current: CacheRow | null,
+): EnqueueRequest | null {
+  const command = commandOf(draft);
+  const taskId = draft.target_resource_ids[0];
+  if (
+    command === null ||
+    current === null ||
+    taskId === undefined ||
+    current.id !== taskId ||
+    typeof command.archived !== "boolean"
+  )
+    return null;
+  return asReplacement(draft, archive({ taskId, archived: command.archived }), {
+    id: taskId,
+    version: current.version,
+  });
 }
 
 export function taskCommandSpecs(): Record<string, CommandSpec> {
@@ -245,14 +378,7 @@ export function taskCommandSpecs(): Record<string, CommandSpec> {
     revise_task: {
       describe: describe("revise_task"),
       readCurrent: readTaskCurrent,
-      rebuild(draft, current) {
-        const command = commandOf(draft);
-        if (command === null || current === null) return null;
-        if (current.policy_version === undefined) return null;
-        return resend(draft, command, current, {
-          expected_policy_version: current.policy_version,
-        });
-      },
+      rebuild: rebuildReviseTask,
     },
     record: {
       describe: describe("record"),
@@ -262,32 +388,16 @@ export function taskCommandSpecs(): Record<string, CommandSpec> {
     exclude: {
       describe: describe("exclude"),
       readCurrent: readProgressCurrent,
-      rebuild(draft, current) {
-        const command = commandOf(draft);
-        return command === null || current === null
-          ? null
-          : resend(draft, command, current);
-      },
+      rebuild: rebuildExclude,
     },
-    resolve: {
-      describe: describe("resolve"),
-      rebuild(draft, current) {
-        const command = commandOf(draft);
-        return command === null || current === null
-          ? null
-          : resend(draft, command, current);
-      },
-    },
+    // No authorised read of one occurrence exists for its draft (`/occurrences` lists by task, which the draft does not name), so a
+    // closure cannot be rebuilt on a reviewed version: only discarded (R5, revision 1; it was never rebuildable without one).
+    resolve: { describe: describe("resolve") },
     revise_occurrence: { describe: describe("revise_occurrence") },
     archive: {
       describe: describe("archive"),
       readCurrent: readTaskCurrent,
-      rebuild(draft, current) {
-        const command = commandOf(draft);
-        return command === null || current === null
-          ? null
-          : resend(draft, command, current);
-      },
+      rebuild: rebuildArchive,
     },
   };
 }

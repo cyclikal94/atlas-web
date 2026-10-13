@@ -120,6 +120,7 @@ export type {
 export type {
   CachePosition,
   OutstandingByKindPage,
+  OutstandingCursor,
   OutstandingForResource,
   OutstandingPage,
 } from "./plans/outstanding-reads";
@@ -135,6 +136,8 @@ export {
   type DataEnvDeps,
 } from "./ui/env";
 export {
+  useAllOutstanding,
+  useAllOutstandingByKind,
   useCachedResources,
   useCachePosition,
   useOutstanding,

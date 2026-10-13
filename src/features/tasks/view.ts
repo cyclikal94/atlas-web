@@ -44,8 +44,32 @@ export interface RowSources {
   progress: CacheRow | null;
   joint: OccurrenceView | null;
   personal: OccurrenceView | null;
-  /** When the server's answers were received (ms), or null. */
+  /**
+   * When the server's answers were received (ms), or null. The caller passes null when the personal answer is not current (offline, or a
+   * sync page committed after its read began); `composeRow` also ignores it once a window boundary of the row has passed since then.
+   */
   answeredAt: number | null;
+}
+
+/**
+ * Whether the server's derived fields for a row still describe it now (R2, revision 1): they were evaluated when they were answered, so a
+ * window that opened or closed since then (`opens_at`/`closes_at` in `(answeredAt, now]`) makes them stale. My result is then the personal
+ * reapplication over the saved summary, finalised when the window has closed, until a newer answer arrives.
+ */
+export function answerCovers(
+  data: Pick<OccurrenceData, "opens_at" | "closes_at">,
+  answeredAt: number | null,
+  nowMs: number,
+): boolean {
+  if (answeredAt === null) return false;
+  for (const boundary of [data.opens_at, data.closes_at])
+    if (
+      boundary !== null &&
+      answeredAt < boundary * 1000 &&
+      boundary * 1000 <= nowMs
+    )
+      return false;
+  return true;
 }
 
 export type PendingMark = "queued" | "sending" | "waiting";
@@ -210,7 +234,7 @@ export function composeRow(
     nowMs,
   });
   let source: RowModel["source"] = "local";
-  if (drafts.length === 0) {
+  if (drafts.length === 0 && answerCovers(data, sources.answeredAt, nowMs)) {
     if (sources.personal !== null) {
       outcome = sources.personal.outcome;
       periodOutcome = sources.personal.period_outcome;

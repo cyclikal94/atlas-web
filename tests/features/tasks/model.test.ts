@@ -536,8 +536,15 @@ describe("registrations (A17)", () => {
       id: "p",
       version: 7,
     } as never);
+    // Adapted (WEB-10a revision 1, R5): the reviewed version now reaches the command the way every save's base does, through the target
+    // (`reviewedBase`, which the outbox resolves into the bases it hands `build`), so the record of versions is raised from it too. The
+    // original intent is kept: the rebuilt command is sent on the REVIEWED version 7 (not the draft's 2) with a new entry id.
+    const replacement = rebuilt as NonNullable<typeof rebuilt>;
+    expect(replacement.targets.find((t) => t.resourceId === "p")).toMatchObject(
+      { reviewedBase: 7, versionChecked: true, role: "primary" },
+    );
     const command = (
-      (rebuilt as NonNullable<typeof rebuilt>).build({}).command as {
+      replacement.build({ p: 7 }).command as {
         command: Record<string, unknown>;
       }
     ).command;

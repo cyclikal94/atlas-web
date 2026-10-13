@@ -48,6 +48,9 @@ export function RecordCard({
   const section = useRef<HTMLElement>(null);
   const [mode, setMode] = useState<"amount" | "observe">("amount");
   const [amount, setAmount] = useState("");
+  // Every edit of the amount moves this revision: a save clears the field only if nothing was typed after the amount it submitted (R3,
+  // revision 1; PRODUCT-DECISIONS-20261011): a successful older save never consumes newer input.
+  const edits = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const reason = recordBlock(row, now, zone, writable);
@@ -141,6 +144,7 @@ export function RecordCard({
                   aria-invalid={error !== null}
                   aria-describedby={error ? `${heading}-error` : undefined}
                   onChange={(event) => {
+                    edits.current += 1;
                     setAmount(event.target.value);
                     setError(null);
                   }}
@@ -157,6 +161,7 @@ export function RecordCard({
                       setError(MESSAGES.amount);
                       return;
                     }
+                    const submitted = edits.current;
                     void run(async () => {
                       const saved = await actions.record(
                         row,
@@ -164,7 +169,8 @@ export function RecordCard({
                         null,
                         RECORD_COPY.recorded,
                       );
-                      if (saved.ok) setAmount("");
+                      if (saved.ok && edits.current === submitted)
+                        setAmount("");
                     });
                   }}
                 >

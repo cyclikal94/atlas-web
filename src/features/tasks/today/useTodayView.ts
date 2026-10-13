@@ -3,9 +3,9 @@ import {
   type CacheRow,
   readResourcesNow,
   scanResources,
+  useAllOutstandingByKind,
   useCachePosition,
   useDataEnv,
-  useOutstandingByKind,
 } from "../../../data";
 import type { TasksApi, TasksResult } from "../api";
 import { useTasksEnv } from "../env";
@@ -34,6 +34,8 @@ export interface DailyAnswer {
   personal: Map<string, OccurrenceView>;
   pendingTasks: string[];
   at: number;
+  /** The cache generation (`syncTick`) the read began under: a sync page committed since makes the personal results stale. */
+  tick: number;
 }
 
 export type DailyError =
@@ -143,7 +145,7 @@ function candidate(
 export function useTodayView(day: string, zone: string): TodayView {
   const env = useTasksEnv();
   const data = useDataEnv();
-  const outstandingPage = useOutstandingByKind(QUEUED_KINDS);
+  const outstandingPage = useAllOutstandingByKind(QUEUED_KINDS);
   const position = useCachePosition();
   const [now, setNow] = useState(() => env.now());
   const [scan, setScan] = useState<{
@@ -173,6 +175,9 @@ export function useTodayView(day: string, zone: string): TodayView {
   const ready = position.status;
   const noDatabase = position.status === "unavailable";
 
+  // Every page of the outstanding work (R4, revision 1): until the whole overlay is read no row is composed, so a personal result is never
+  // computed from part of what this device saved.
+  const overlayLoading = outstandingPage.status === "loading";
   const outstanding: Outstanding = useMemo(
     () =>
       outstandingPage.status === "ready"
@@ -234,6 +239,7 @@ export function useTodayView(day: string, zone: string): TodayView {
     }
     const mine = ++read.current;
     const isCurrent = () => mine === read.current;
+    const tick = syncTick;
     const delay = answered.current ? 750 : 0;
     const timer = setTimeout(() => {
       const query = { day, zone, limit: env.dailyPageSize };
@@ -273,6 +279,7 @@ export function useTodayView(day: string, zone: string): TodayView {
           personal: new Map(personal.items.map((item) => [item.id, item])),
           pendingTasks: joint.pendingTasks,
           at,
+          tick,
         });
       });
     }, delay);
@@ -283,7 +290,16 @@ export function useTodayView(day: string, zone: string): TodayView {
     };
   }, [env.api, env.identity, env.online, key, syncTick, attempt, now]);
 
-  const current = answer !== null && answer.key === key ? answer : null;
+  // FRESHNESS OF THE SERVER'S ANSWER (R2, revision 1). The last `/daily` answer for this identity, day and zone lists the day and carries
+  // the joint fields only while the device is ONLINE: offline the day is what the device holds, and my result is the personal reapplication
+  // of ARCH §3.3c over the saved summary (with its finalisation once a window closes), never an answer received before going offline. My
+  // personal result from the server also stops applying once a sync page has committed after its read began (the cache may hold newer
+  // progress than it: the re-read follows) and, row by row, once a window boundary has passed since it was answered (`composeRow`). The
+  // joint result stays the server's alone, shown with its time by the detail (Q8).
+  const listed =
+    env.online && answer !== null && answer.key === key ? answer : null;
+  const personalFresh = listed !== null && listed.tick === syncTick;
+  const current = listed;
   const local = scan !== null && scan.key === key ? scan : null;
 
   // ---- the projected first occurrences of outstanding creates (§4.3) ----------------------------------------------------------------
@@ -339,6 +355,7 @@ export function useTodayView(day: string, zone: string): TodayView {
   const composed = useMemo(() => {
     const rows: RowModel[] = [];
     const unreadable: string[] = [];
+    if (overlayLoading) return { rows, unreadable };
     for (const id of ids) {
       const pid = related.progressIds.get(id);
       if (pid === undefined) continue;
@@ -356,8 +373,8 @@ export function useTodayView(day: string, zone: string): TodayView {
             taskId === undefined ? null : (related.rows.get(taskId) ?? null),
           progress: related.rows.get(pid) ?? null,
           joint,
-          personal: current?.personal.get(id) ?? null,
-          answeredAt: current?.at ?? null,
+          personal: personalFresh ? (current?.personal.get(id) ?? null) : null,
+          answeredAt: personalFresh ? (current?.at ?? null) : null,
         },
         outstanding,
         env.accountId,
@@ -386,6 +403,8 @@ export function useTodayView(day: string, zone: string): TodayView {
     now,
     day,
     zone,
+    personalFresh,
+    overlayLoading,
   ]);
 
   // ---- the next window boundary among the shown rows re-evaluates them (E-T9: no timer is shortened) -----------------------------------
@@ -402,7 +421,8 @@ export function useTodayView(day: string, zone: string): TodayView {
   }, [composed.rows, now, env]);
 
   return {
-    loading: local === null && current === null && !noDatabase,
+    loading:
+      (local === null && current === null && !noDatabase) || overlayLoading,
     rows: composed.rows,
     unreadable: composed.unreadable,
     pendingTasks: current?.pendingTasks ?? [],

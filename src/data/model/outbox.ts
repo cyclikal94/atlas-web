@@ -31,6 +31,13 @@ export interface TargetSpec {
   versionChecked: boolean;
   /** The version to assume for a resource nothing tracks yet: `1` for a resource this client creates. */
   seedIfUntracked?: number;
+  /**
+   * The version the person REVIEWED, from the authorised current-state read of WF-QUEUE-02 (a "save as new" built on what the dialog showed,
+   * WEB-10a R5): the base of this target instead of the local record or the cache, so the command is sent on that version and the record
+   * is raised from it (a later save of the same target is based on what this one leaves). Only a supersession built on a reviewed read
+   * passes it; an ordinary save never does.
+   */
+  reviewedBase?: number;
 }
 
 /** The versions the command is built from, by resource id (only the targets that have one). */
@@ -413,6 +420,9 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
       ...(target.seedIfUntracked === undefined
         ? {}
         : { seedIfUntracked: target.seedIfUntracked }),
+      ...(target.reviewedBase === undefined
+        ? {}
+        : { reviewedBase: target.reviewedBase }),
     })),
     build: (bases) => build.call(request, bases),
     ...(request.targetId === undefined ? {} : { targetId: request.targetId }),
@@ -448,6 +458,11 @@ export function validateRequest(request: EnqueueRequest): void {
     if (target.role === "primary" && target.versionChecked) versioned += 1;
     if (target.role === "side_effect" && !target.versionChecked)
       throw new OutboxRequestError("side_effect_unversioned");
+    if (
+      target.reviewedBase !== undefined &&
+      (!Number.isSafeInteger(target.reviewedBase) || target.reviewedBase < 1)
+    )
+      throw new OutboxRequestError("reviewed_base");
   }
   if (versioned > 1) throw new OutboxRequestError("two_versioned_primaries");
 }
@@ -525,7 +540,12 @@ function resolveTargets(
     const tracked = facts.versions.get(id)?.locally_assumed_version;
     const cached = facts.cache.get(id)?.version;
     const untracked = tracked === undefined && cached === undefined;
-    const base = tracked ?? cached ?? target.seedIfUntracked ?? null;
+    const base =
+      target.reviewedBase ??
+      tracked ??
+      cached ??
+      target.seedIfUntracked ??
+      null;
     const bumps = target.role === "side_effect" || target.versionChecked;
     if (bumps) {
       if (base === null) return null;

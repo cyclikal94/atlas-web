@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import type { TaskActions } from "../actions";
@@ -242,8 +242,11 @@ export function EntryHistory({
                       entry.id,
                       HISTORY_COPY.fixed,
                     );
-                    if (saved.ok) setFixing(null);
+                    return saved.ok;
                   }}
+                  onSaved={() =>
+                    setFixing((open) => (open === entry.id ? null : open))
+                  }
                 />
               ) : canFix(entry) ? (
                 <span>
@@ -291,27 +294,46 @@ export function EntryHistory({
   );
 }
 
+/**
+ * The fix of one entry. A save is one attempt at a time (Save waits while it is pending), and its success closes the form only if the value
+ * was not edited after it was submitted (R3, revision 1): a newer value stays in the open form for another save, and a failed or uncertain
+ * save keeps the form as it is.
+ */
 function FixForm({
   entry,
   goal,
   onSave,
+  onSaved,
   onCancel,
 }: {
   entry: Shown;
   goal: Goal;
-  onSave(evidence: Evidence): Promise<void>;
+  /** Whether the replacement was saved. */
+  onSave(evidence: Evidence): Promise<boolean>;
+  onSaved(): void;
   onCancel(): void;
 }) {
   const [amount, setAmount] = useState(
     entry.evidence.kind === "quantity" ? entry.evidence.amount : "",
   );
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const edits = useRef(0);
+  const submit = async (evidence: Evidence) => {
+    const submitted = edits.current;
+    setBusy(true);
+    try {
+      if ((await onSave(evidence)) && edits.current === submitted) onSaved();
+    } finally {
+      setBusy(false);
+    }
+  };
   const save = () => {
     const ev = entry.evidence;
     if (ev.kind === "checkbox")
-      return onSave({ kind: "checkbox", complete: !ev.complete });
+      return submit({ kind: "checkbox", complete: !ev.complete });
     if (ev.kind === "checklist")
-      return onSave({
+      return submit({
         kind: "checklist",
         item_id: ev.item_id,
         complete: !ev.complete,
@@ -321,7 +343,7 @@ function FixForm({
       setError(MESSAGES.amount);
       return;
     }
-    return onSave({ kind: "quantity", amount: value });
+    return submit({ kind: "quantity", amount: value });
   };
   return (
     <div className="flex flex-wrap items-end gap-2" data-fix-form="">
@@ -332,6 +354,7 @@ function FixForm({
             inputMode="decimal"
             value={amount}
             onChange={(event) => {
+              edits.current += 1;
               setAmount(event.target.value);
               setError(null);
             }}
@@ -351,9 +374,15 @@ function FixForm({
               : ""}
         </span>
       )}
-      <Button variant="primary" onClick={() => void save()}>
-        {HISTORY_COPY.fixSave}
-      </Button>
+      {busy ? (
+        <Button disabled reason={copy.SAVING}>
+          {HISTORY_COPY.fixSave}
+        </Button>
+      ) : (
+        <Button variant="primary" onClick={() => void save()}>
+          {HISTORY_COPY.fixSave}
+        </Button>
+      )}
       <Button variant="quiet" onClick={onCancel}>
         {HISTORY_COPY.cancel}
       </Button>

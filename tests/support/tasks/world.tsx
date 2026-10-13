@@ -13,6 +13,13 @@ import {
 import { createQuotaGuard } from "../../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../../src/data/engine/sync-channel";
 import { accountDatabaseName } from "../../../src/data/model/schema";
+import type { SyncStateRow } from "../../../src/data/model/types";
+import { commitPage } from "../../../src/data/plans/commit-page";
+import { scanSyncPage } from "../../../src/data/scan/scan";
+import {
+  createKeyDerivers,
+  createValueValidators,
+} from "../../../src/data/scan/validate";
 import type { TasksApi, TasksResult } from "../../../src/features/tasks/api";
 import {
   type TasksEnv,
@@ -36,6 +43,7 @@ import {
 import type { Identity, Store } from "../../../src/session";
 import { DataTestWorld } from "../data/env";
 import { cacheRow } from "../data/rows";
+import { bytesOf, pageJson } from "../data/sync-pages";
 
 /**
  * The task screens' world (FIXTURE evidence): the PRODUCTION data controller, plans and outbox over the double of IndexedDB, the app's own
@@ -298,11 +306,18 @@ export interface Mounted {
   }>;
   rerender(env: TasksEnv): void;
   unmount(): void;
+  /**
+   * Commits ONE delta sync page carrying `rows` through the PRODUCTION `commitPage` plan, as the leader does: the cache changes and its
+   * position (`page_seq`) moves, which every live read hears (a seeded row is not heard).
+   */
+  commitSync(rows: CacheRow[]): Promise<void>;
 }
 
 export async function mountTasks(options: {
   path: string;
   rows?: CacheRow[];
+  /** Drafts seeded before the screens mount (a draft carrying `command` is split into its header and body, as the enqueue writes them). */
+  drafts?: object[];
   api?: FakeApi;
   env?: Partial<TasksEnv>;
   database?: boolean;
@@ -317,6 +332,8 @@ export async function mountTasks(options: {
     const created = await page.open(ME, { create: true });
     if (created.kind !== "opened") throw new Error("setup");
     if (options.rows?.length) world.idb.seed(NAME, "cache", options.rows);
+    if (options.drafts?.length)
+      world.idb.seed(NAME, "drafts", options.drafts as never);
   }
   const identity = new Cell<Identity | null>({
     account_id: ME,
@@ -390,5 +407,76 @@ export async function mountTasks(options: {
     bodies: () => (world.idb.snapshot(NAME)?.draft_commands ?? []) as never,
     rerender: (env) => view.rerender(tree(env)),
     unmount: () => view.unmount(),
+    commitSync: async (rows) => {
+      const service = data.service();
+      if (service === null) throw new Error("commitSync: no open service");
+      const before = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (before === undefined) throw new Error("commitSync: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        {
+          ...before,
+          phase: "delta",
+          cache_status: "valid",
+          cursor: before.cursor ?? "cursor-0",
+        },
+      ]);
+      const s = world.idb.peek(NAME, "sync_state", "singleton") as SyncStateRow;
+      const bytes = bytesOf(
+        pageJson({
+          batches: [
+            {
+              revision: (s.applied_revision ?? 0) + 1,
+              changes: rows.map((row) => ({
+                kind: "upsert" as const,
+                resource: {
+                  id: row.id,
+                  kind: row.kind,
+                  parent_id: row.parent_id,
+                  label: row.label,
+                  value: row.value as Record<string, unknown> | null,
+                  version: row.version,
+                  can_edit: row.can_edit,
+                  archived: row.archived,
+                  ...(row.policy_version === undefined
+                    ? {}
+                    : { policy_version: row.policy_version }),
+                },
+              })),
+            },
+          ],
+          nextCursor: `cursor-${s.page_seq + 1}`,
+        }),
+      );
+      const scan = scanSyncPage(bytes);
+      if (!scan.ok) throw new Error(`commitSync: ${scan.reason}`);
+      let outcome: unknown;
+      await act(async () => {
+        outcome = await service.commit(commitPage, {
+          captured: service.capture(1, {
+            requestSeq: s.request_seq,
+            ownershipToken: s.owner?.ownership_token ?? null,
+            recoveryGeneration: s.recovery_generation,
+            expectedPosition: s.cursor,
+          }),
+          bytes,
+          scan,
+          now: new Date().toISOString(),
+          decode: {
+            validators: createValueValidators(),
+            derivers: createKeyDerivers(),
+          },
+        });
+      });
+      const committed = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (committed === undefined || committed.page_seq === s.page_seq)
+        throw new Error(
+          `commitSync: the page was not committed (${JSON.stringify(outcome)})`,
+        );
+      await settle();
+    },
   };
 }
