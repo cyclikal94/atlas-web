@@ -6,7 +6,10 @@ import {
   UNAVAILABLE_WHILE_RELOADING,
 } from "../lib/form-recovery/RecoveryBanner";
 import { pageFormRegistry } from "../lib/form-recovery/registry";
-import { useRecoverableForm } from "../lib/form-recovery/use-recoverable-form";
+import {
+  isHandoff,
+  useRecoverableForm,
+} from "../lib/form-recovery/use-recoverable-form";
 
 // FIXTURE: the page's registry of recoverable forms, for a spec to read what the app-update coordinator sees.
 (window as unknown as { __atlasForms?: typeof pageFormRegistry }).__atlasForms =
@@ -27,8 +30,13 @@ import { useRecoverableForm } from "../lib/form-recovery/use-recoverable-form";
  * (field names) says which of the title and notes fields are ON THE PAGE, separately from what is admitted, as a conditional field that a
  * feature form hides would be; given with `allow` in one call, the field and its admission go in the same render. Revision 5 (R3):
  * `unbound` withholds the port from the form (as before the account's database is open), so a spec can type into a mount before it binds
- * the page's session (late binding); `unbound: false` gives it back.
+ * the page's session (late binding); `unbound: false` gives it back. Revision 6 (R13): an alternative that is an update hand-off left by a
+ * page that never came back also offers "Discard this copy" (the only way it is removed). TEST INJECTION (revision 6): with
+ * `atlas-fixture-hold-form` set in the tab's session storage, the form of the NEXT page of the tab starts `unbound` (no recovery read
+ * at all) until a spec gives the port back, so a spec can hold the page an update reload brings before its first recovery read without
+ * touching any lock or the worker.
  */
+const HOLD_KEY = "atlas-fixture-hold-form";
 export const FIXTURE_FORM_CONTEXT = "fixture-note:/today";
 const ALLOW = ["title", "notes"];
 
@@ -47,11 +55,12 @@ type FixtureScope = {
 
 export function FixtureRecoveryForm() {
   const [key, setKey] = useState(0);
-  const [props, setProps] = useState<FixtureProps>({
+  const [props, setProps] = useState<FixtureProps>(() => ({
     formContext: FIXTURE_FORM_CONTEXT,
     allow: ALLOW,
     shown: ALLOW,
-  });
+    unbound: sessionStorage.getItem(HOLD_KEY) === "1",
+  }));
   useEffect(() => {
     const scope = window as unknown as FixtureScope;
     scope.__atlasRemountForm = () => setKey((n) => n + 1);
@@ -121,12 +130,25 @@ function FixtureRecoveryFormMount({
                 {`Restore the copy saved ${copy.savedAt}`}
               </Button>
             ) : (
-              <Button
-                key={copy.tabInstanceId}
-                onClick={() => recovery.restoreAlternative(copy.tabInstanceId)}
-              >
-                {`Restore the copy saved ${copy.savedAt}`}
-              </Button>
+              <span key={copy.tabInstanceId} data-handoff={isHandoff(copy)}>
+                <Button
+                  onClick={() =>
+                    recovery.restoreAlternative(copy.tabInstanceId)
+                  }
+                >
+                  {`Restore the copy saved ${copy.savedAt}`}
+                </Button>
+                {isHandoff(copy) ? (
+                  <Button
+                    variant="quiet"
+                    onClick={() =>
+                      void recovery.discardAlternative(copy.tabInstanceId)
+                    }
+                  >
+                    {`Discard the copy saved ${copy.savedAt}`}
+                  </Button>
+                ) : null}
+              </span>
             ),
           )}
         </div>

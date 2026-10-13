@@ -27,12 +27,21 @@ export interface RecoverableFormHandle {
   freeze?(): () => void;
   /** Revision 2: settles when every operation of the form outstanding NOW (a save, a discard, a submission) has settled; null when none is. */
   settled?(): Promise<void> | null;
+  /**
+   * Revision 6 (R13): writes the form's update hand-off for the copy it has (`handoff.ts`), before an update reload; `saved` when it needs
+   * none. Never throws.
+   */
+  handoff?(): Promise<SaveResult>;
+  /** Revision 6 (R13): the form has no copy to hand off, or its hand-off holds its current copy. */
+  handedOff?(): boolean;
 }
 
 /** What the registry keeps of a form session (`session.ts`) for the page's life: its form context and the account database it is bound to. */
 export interface PageFormSession {
   readonly formContext: string;
   readonly scope: string;
+  /** Revision 6 (R13): its handle, so a kept session no mount shows still hands its copy off before an update reload. */
+  readonly handle?: RecoverableFormHandle;
 }
 
 export interface RecoverableFormRegistry {

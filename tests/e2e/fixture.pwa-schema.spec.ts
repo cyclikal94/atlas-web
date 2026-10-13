@@ -106,7 +106,11 @@ const recoveryState = (page: Page) =>
     (n) =>
       new Promise<{
         version: number;
-        rows: Array<{ terminal: boolean; fields: Record<string, string> }>;
+        rows: Array<{
+          terminal: boolean;
+          form_context: string;
+          fields: Record<string, string>;
+        }>;
       }>((resolve, reject) => {
         const request = indexedDB.open(n);
         request.onsuccess = () => {
@@ -220,9 +224,18 @@ test.describe("revision 1, R7: the form's recovery path through a newer build's 
     await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
     const state = await recoveryState(open);
     expect(state.version).toBe(30);
+    // ADAPTED (revision 6, R13; owner decision of 12 October 2026). Was: every non-terminal row's title, `["unfinished after first copy"]`.
+    // The update now also writes its hand-off (through the same fresh recovery connection): the ordinary copy as before, and the hand-off
+    // holding the same edits.
+    const live = state.rows.filter((row) => !row.terminal);
+    const handoff = (row: { form_context: string }) =>
+      row.form_context.startsWith("atlas-update-handoff:");
     expect(
-      state.rows.filter((row) => !row.terminal).map((row) => row.fields.title),
+      live.filter((row) => !handoff(row)).map((row) => row.fields.title),
     ).toEqual(["unfinished after first copy"]);
+    expect(live.filter(handoff).map((row) => row.fields.title)).toEqual([
+      "unfinished after first copy",
+    ]);
   });
 
   test("a migration that failed (rolled back to 20): the old tab saves through a fresh connection, and the reloaded tab restores the form", async ({

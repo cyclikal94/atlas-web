@@ -15606,10 +15606,11 @@ export const UNIT = [
     expect: /submission discards both copies/,
     // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
     // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 6 (R13: `discardAt` keys each copy by where it is stored); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "  if (own !== null && (state.ownAsked || state.own !== null)) ids.add(own);\n",
+        "  if (own !== null && (state.ownAsked || state.own !== null))\n    copies.set(own, [context, own]);\n",
         "",
       ),
   },
@@ -18424,6 +18425,277 @@ export const UNIT = [
       sub(
         t,
         "      delete fields.shadowed[name];\n      fields.shadowedAt.delete(name);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1838",
+    title:
+      "WEB-14a revision 6 (R13): the update writes no hand-off copy (only its reference)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const written = await target\n    .save({\n      formContext: handoffContext(session.formContext),",
+        '  const written: SaveResult = "saved";\n  void target\n    .save({\n      formContext: handoffContext("unwritten:" + session.formContext),',
+      ),
+  },
+  {
+    id: "MU-1839",
+    title:
+      "WEB-14a revision 6 (R13): the hand-off is stored under the form's own context (any page may take and remove it)",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    patch: (t) => sub(t, "  HANDOFF_PREFIX + formContext;", "  formContext;"),
+  },
+  {
+    id: "MU-1840",
+    title:
+      "WEB-14a revision 6 (R13): the next page ignores the hand-off left to it",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ref === null\n            ? null\n            : await through.load(handoffContext(context), ref);",
+        "          ref === null\n            ? null\n            : null;",
+      ),
+  },
+  {
+    id: "MU-1841",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off whose save failed is still referenced and counted as handed off",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the hand-off's save fails/,
+    patch: (t) => sub(t, '  if (written !== "saved") return written;\n', ""),
+  },
+  {
+    id: "MU-1842",
+    title:
+      "WEB-14a revision 6 (R13): a reference that could not be written is ignored",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /session storage refuses/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (\n    !rememberHandoff(session.handoffs, {\n      form: session.formContext,\n      scope: session.scope,\n      id,\n    })\n  )\n    return "failed";',
+        "  rememberHandoff(session.handoffs, {\n    form: session.formContext,\n    scope: session.scope,\n    id,\n  });",
+      ),
+  },
+  {
+    id: "MU-1843",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off of an older copy counts as handed off",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an edit after the hand-off makes the form dirty/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return (session.persisted.handoff?.op ?? -1) >= own.op;",
+        "  return session.persisted.handoff !== null;",
+      ),
+  },
+  {
+    id: "MU-1844",
+    title:
+      "WEB-14a revision 6 (R13): a page that cannot hold the hand-off takes it all the same (a duplicated tab removes it)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a duplicated tab carrying the same reference/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (wait <= 0) return false;",
+        "          return true;",
+      ),
+  },
+  {
+    id: "MU-1845",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off chosen from the alternatives becomes the page's source (it removes it)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /abandoned \(A2 never came\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "          !handoff || chosen.tabInstanceId === current.claimed",
+        "          true",
+      ),
+  },
+  {
+    id: "MU-1846",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off a live page holds is offered to other pages",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a hand-off is shown to no other page while a live page holds it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            !(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false))",
+        "            true",
+      ),
+  },
+  {
+    id: "MU-1847",
+    title:
+      "WEB-14a revision 6 (R13): 'Discard this copy' removes a hand-off a live page holds",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard this copy' is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        '        (await (current.tab.whileFree\n          ? current.tab.whileFree(tabInstanceId, remove)\n          : remove())) ?? "failed";',
+        '        (await remove()) ?? "failed";',
+      ),
+  },
+  {
+    id: "MU-1848",
+    title:
+      "WEB-14a revision 6 (R13): a terminal act leaves the page's own hand-off behind",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /A's own submission after an abandoned reload/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (handoff !== null) copies.set(handoff, [handoffContext(context), handoff]);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1849",
+    title:
+      "WEB-14a revision 6 (R13): a reference left for another account's database is taken",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another account's database/,
+    patch: (t) =>
+      sub(
+        t,
+        "    .find((entry) => entry.form === form && entry.scope === scope);",
+        "    .find((entry) => entry.form === form);",
+      ),
+  },
+  {
+    id: "MU-1850",
+    title:
+      "WEB-14a revision 6 (R13): the reload checkpoint ignores the hand-offs",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a hand-off made stale before it is written again first/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return mode !== "save" || handedOff(forms);',
+        "    return true;",
+      ),
+  },
+  {
+    id: "MU-1851",
+    title: "WEB-14a revision 6 (R13): 'Save and reload' writes no hand-off",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the hand-off is written before the other tabs are asked/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (!sealed()) {\n          busy = { kind: "saving" };\n          publish();\n          const failed = verdict(await prepareHandoffs(deps.forms));',
+        '        if (false as boolean) {\n          busy = { kind: "saving" };\n          publish();\n          const failed = verdict(await prepareHandoffs(deps.forms));',
+      ),
+  },
+  {
+    id: "MU-1852",
+    title:
+      "WEB-14a revision 6 (R13): 'Discard and reload anyway' waits for hand-offs it never writes",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /write no hand-off/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return mode !== "save" || handedOff(forms);',
+        '    return mode === "anyway" || handedOff(forms);',
+      ),
+  },
+  {
+    id: "MU-1853",
+    title:
+      "WEB-14a revision 6 (R13): the ordinary copy identical to the hand-off is left behind",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /control: A updates; no other tab before A2 reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const twin = session.persisted.twin;\n",
+        "  const twin = null as typeof session.persisted.twin;\n",
+      ),
+  },
+  {
+    id: "MU-1854",
+    title:
+      "WEB-14a revision 6 (R13): the next page's own save does not remove the hand-off (wrong context)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "      .discard(source.context, source.id)",
+        "      .discard(session.formContext, source.id)",
+      ),
+  },
+  {
+    id: "MU-1855",
+    title:
+      "WEB-14a revision 6 (R13): a kept session no mount shows is not handed off",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a kept session no mount shows/,
+    patch: (t) =>
+      sub(t, "    if (session.handle) handles.add(session.handle);\n", ""),
+  },
+  {
+    id: "MU-1856",
+    title:
+      "WEB-14a revision 6 (R13): a form context with the reserved prefix is accepted",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /reserved prefix is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: the patched source is itself a template literal
+        '  if (formContext.startsWith(HANDOFF_PREFIX))\n    throw new Error(`"${HANDOFF_PREFIX}" is reserved for update hand-offs`);\n',
         "",
       ),
   },

@@ -74,6 +74,10 @@ async function recoveryRows(
   }
 }
 
+/** Revision 6 (R13): a row of an update hand-off (stored under the form's hand-off context, never listed as the form's own). */
+const isHandoffRow = (row: { form_context: string }) =>
+  row.form_context.startsWith("atlas-update-handoff:");
+
 /** Two tabs on generation A, controlled, with B installed and waiting. */
 async function twoTabsWithUpdate(
   context: BrowserContext,
@@ -148,7 +152,14 @@ test.describe("P-U3: save before the reload, restore after it, never submit", ()
       (await generations.log()).filter((entry) => entry.method !== "GET"),
     ).toEqual([]);
     const saved = await recoveryRows(context, generations);
-    expect(saved.filter((row) => !row.terminal)).toHaveLength(1);
+    // ADAPTED (revision 6, R13; owner decision of 12 October 2026). Was: `expect(saved.filter((row) => !row.terminal)).toHaveLength(1)`.
+    // The update now also writes its hand-off: ONE ordinary copy (the old page's), and ONE hand-off holding exactly the same input, which
+    // this page restored (its source).
+    const live = saved.filter((row) => !row.terminal);
+    expect(live.filter((row) => !isHandoffRow(row))).toHaveLength(1);
+    expect(live.filter(isHandoffRow).map((row) => row.fields)).toEqual([
+      { title: "Half-written title", notes: "Some notes" },
+    ]);
     expect(JSON.stringify(saved)).not.toContain("hunter2");
 
     await first.getByRole("button", { name: "Discard instead" }).click();
@@ -266,14 +277,21 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     ).toBeVisible();
     expect(await marked(second)).toBe(true);
     await expect(title(second)).toHaveValue("From the second tab");
-    const rows = (await recoveryRows(context, generations)).filter(
+    // ADAPTED (revision 6, R13; owner decision of 12 October 2026). Was: every non-terminal row (2, distinct identifiers, both titles).
+    // The first tab's update also wrote its hand-off (the same input under a hand-off identifier): the ordinary copies are asserted as
+    // before, and the hand-off separately.
+    const all = (await recoveryRows(context, generations)).filter(
       (row) => !row.terminal,
     );
+    const rows = all.filter((row) => !isHandoffRow(row));
     expect(rows).toHaveLength(2);
     expect(new Set(rows.map((row) => row.tab_instance_id)).size).toBe(2);
     expect(rows.map((row) => row.fields.title).sort()).toEqual([
       "From the first tab",
       "From the second tab",
+    ]);
+    expect(all.filter(isHandoffRow).map((row) => row.fields.title)).toEqual([
+      "From the first tab",
     ]);
     // The reloaded first tab restored its own copy and left the open second tab's alone.
     await formReady(first);
@@ -297,12 +315,16 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     // available", is asserted instead: both inputs are durable, and the first tab's is restored once that tab has gone.
     await expect(second.locator("[data-alternatives]")).toHaveCount(0);
     await expect(title(first)).toHaveValue("From the first tab");
+    // ADAPTED (revision 6, R13): the ordinary copies, as before (the second tab's own update left its hand-off too, restored here).
     expect(
       (await recoveryRows(context, generations))
-        .filter((row) => !row.terminal)
+        .filter((row) => !row.terminal && !isHandoffRow(row))
         .map((row) => row.fields.title)
         .sort(),
     ).toEqual(["From the first tab", "From the second tab, later"]);
+    expect(await handoffTitles(context, generations)).toEqual([
+      "From the second tab, later",
+    ]);
     // The second tab saves its own copy (so the next page's choice is not a race between two gone copies), then the first tab goes.
     expect(await flushNow(second)).toBe("saved");
     await first.close();
@@ -841,9 +863,19 @@ const slowPeer = (page: Page) =>
   });
 
 /** The live (restorable) rows' titles. */
+/**
+ * ADAPTED (revision 6, R13; owner decision of 12 October 2026): the titles of the ORDINARY non-terminal copies. Was: every non-terminal
+ * row. An update now also writes a hand-off copy (`handoffTitles`), which no ordinary page lists; the cases that run an update assert it
+ * separately.
+ */
 const liveTitles = async (context: BrowserContext, world: Generations) =>
   (await recoveryRows(context, world))
-    .filter((row) => !row.terminal)
+    .filter((row) => !row.terminal && !isHandoffRow(row))
+    .map((row) => row.fields.title);
+/** Revision 6 (R13): the titles of the non-terminal update hand-offs. */
+const handoffTitles = async (context: BrowserContext, world: Generations) =>
+  (await recoveryRows(context, world))
+    .filter((row) => !row.terminal && isHandoffRow(row))
     .map((row) => row.fields.title);
 
 test.describe("revision 2, R2: one baseline across a remount (the form's session)", () => {
@@ -1196,6 +1228,10 @@ test.describe("revision 3, R3: a submission's success acknowledges what it SENT;
     expect(await liveTitles(context, generations)).toEqual([
       "LATER UNSENT EDIT",
     ]);
+    // Revision 6 (R13): the update's hand-off holds the same later input (this page's source until it saves its own copy).
+    expect(await handoffTitles(context, generations)).toEqual([
+      "LATER UNSENT EDIT",
+    ]);
   });
 });
 
@@ -1435,6 +1471,8 @@ test.describe("revision 4, R3: a later edit back to an EARLIER successful submis
         "0",
       );
       expect(await liveTitles(context, generations)).toEqual([later]);
+      // Revision 6 (R13): the update's hand-off holds the same later input.
+      expect(await handoffTitles(context, generations)).toEqual([later]);
     });
 });
 
@@ -2007,4 +2045,202 @@ test.describe("revision 5: the real worker update (generations A to B) keeps lat
       await expect(title(first)).toHaveValue(ORIGINAL);
       await expect(restoredBanner(first)).toBeVisible();
     });
+});
+
+// ---- revision 6 -------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 6 (review of 11 October 2026, R13 `recovery-shared-source-reload-coverage`, incomplete fix; design assessment of 11 October 2026,
+ * Q3/Q4; owner decision of 12 October 2026: "protected hand-off", an abandoned hand-off "revealed, can't be removed"). Through the REAL
+ * update (generations A to B, production timers and headers): A types ORIGINAL and accepts "Save and reload"; the NEXT document of A's tab
+ * (A2) is held before its first Web Lock request (an init script on that tab only: nothing of A, the worker, the other tab or any lock
+ * already held changes); another tab C restores A's ordinary copy and acts on it; then A2 is released. The review's matrix (no C, restore
+ * only, unchanged save, divergent save) plus the legs it did not run through the worker (discard, a successful submission). FIXTURE evidence.
+ */
+/**
+ * The NEXT page of this tab starts its form unbound (fixture `atlas-fixture-hold-form`): it makes no recovery read until `releaseNext`.
+ * Revision 6 harness note: an init script wrapping `navigator.locks.request` (the review's gate) was installed in WebKit only after the
+ * reloaded document's first lock requests in 3 of 8 runs (`.agtx/evidence/WEB-14a/revision-6/q-pwa-r6-1`), so it is not used here.
+ */
+const holdNextDocument = (page: Page) =>
+  page.evaluate(() => sessionStorage.setItem("atlas-fixture-hold-form", "1"));
+const releaseNext = (page: Page) =>
+  page.evaluate(() => {
+    sessionStorage.removeItem("atlas-fixture-hold-form");
+    (window as unknown as FixtureWindow).__atlasFormProps?.({ unbound: false });
+  });
+
+/** A typed ORIGINAL on generation A and accepted "Save and reload"; A2 (on B) is held before its first lock request. */
+async function updatedAndHeld(
+  context: BrowserContext,
+  world: Generations,
+): Promise<Page> {
+  await seedAccount(context, world);
+  const first = await openApp(context, world);
+  await workerActive(first);
+  await reloadQuietly(first);
+  await formReady(first);
+  await title(first).fill(ORIGINAL);
+  await world.serve("fixture-b");
+  await checkForUpdate(first);
+  await quiet(first);
+  await mark(first);
+  await holdNextDocument(first);
+  await updateRegion(first)
+    .getByRole("button", { name: "Save and reload", exact: true })
+    .click();
+  await expect.poll(() => build(first).catch(() => null)).toBe("b");
+  // A2 is the page B brought (A's mark is gone), its form held unbound: it has read nothing.
+  await expect.poll(() => marked(first).catch(() => true)).toBe(false);
+  await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
+    "data-port",
+    "none",
+  );
+  return first;
+}
+
+/** The non-terminal rows, as [hand-off or ordinary, title]. */
+const liveCopies = async (context: BrowserContext, world: Generations) =>
+  (await recoveryRows(context, world))
+    .filter((row) => !row.terminal)
+    .map((row) => [
+      isHandoffRow(row) ? "handoff" : "ordinary",
+      row.fields.title,
+    ]);
+
+test.describe("revision 6, R13: the update hands the form to the next page of the tab, whatever another tab does with the copies", () => {
+  type Act = {
+    name: string;
+    control?: boolean;
+    run(peer: Page): Promise<void>;
+  };
+  const acts: Act[] = [
+    { name: "no other tab", control: true, run: async () => undefined },
+    { name: "C restores only", control: true, run: async () => undefined },
+    {
+      name: "C saves it unchanged",
+      run: async (peer) => {
+        expect(await flushAll(peer)).toEqual(["saved"]);
+      },
+    },
+    {
+      name: "C saves different input",
+      run: async (peer) => {
+        await title(peer).fill(PEER);
+        expect(await flushAll(peer)).toEqual(["saved"]);
+      },
+    },
+    {
+      name: "C's 'Discard instead'",
+      run: async (peer) => {
+        await peer.getByRole("button", { name: "Discard instead" }).click();
+        await expect(title(peer)).toHaveValue("");
+        await expect.poll(() => pendingCount(peer)).toBe(0);
+      },
+    },
+    {
+      name: "C's submission succeeds",
+      run: async (peer) => {
+        await peer
+          .getByRole("button", { name: "Save note", exact: true })
+          .click();
+        await expect(peer.locator("[data-fixture-form]")).toHaveAttribute(
+          "data-submitted",
+          "1",
+        );
+        await expect.poll(() => pendingCount(peer)).toBe(0);
+      },
+    },
+  ];
+  for (const act of acts)
+    test(`${act.control ? "control: " : ""}${act.name} while A2 is held; A2 restores ORIGINAL on B, nothing submitted`, async ({
+      context,
+      generations,
+    }) => {
+      const first = await updatedAndHeld(context, generations);
+      // The hand-off was written before the reload.
+      expect(await liveCopies(context, generations)).toContainEqual([
+        "handoff",
+        ORIGINAL,
+      ]);
+      let peer: Page | null = null;
+      if (act.name !== "no other tab") {
+        peer = await openApp(context, generations);
+        await formReady(peer);
+        await expect(title(peer)).toHaveValue(ORIGINAL);
+        await act.run(peer);
+      }
+      // Whatever C did, the hand-off is still there.
+      expect(await liveCopies(context, generations)).toContainEqual([
+        "handoff",
+        ORIGINAL,
+      ]);
+      await releaseNext(first);
+      await bindForm(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+      await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+      // A2's own save removes the hand-off (only the page holding it may).
+      expect(await flushAll(first)).toEqual(["saved"]);
+      expect(
+        (await liveCopies(context, generations)).filter(
+          ([where]) => where === "handoff",
+        ),
+      ).toEqual([]);
+    });
+
+  /** As above, but A2 never comes back (its tab is closed while held), and C removes A's ordinary copy: only the hand-off is left. */
+  async function abandoned(
+    context: BrowserContext,
+    world: Generations,
+  ): Promise<Page> {
+    const first = await updatedAndHeld(context, world);
+    await first.close();
+    const peer = await openApp(context, world);
+    await formReady(peer);
+    await expect(title(peer)).toHaveValue(ORIGINAL);
+    await peer.getByRole("button", { name: "Discard instead" }).click();
+    await expect(title(peer)).toHaveValue("");
+    await expect.poll(() => pendingCount(peer)).toBe(0);
+    await peer.close();
+    expect(await liveCopies(context, world)).toEqual([["handoff", ORIGINAL]]);
+    const later = await openApp(context, world);
+    await formReady(later);
+    // Offered, never restored at once.
+    await expect(title(later)).toHaveValue("");
+    await expect(restoredBanner(later)).toHaveCount(0);
+    await expect(later.locator('[data-handoff="true"]')).toHaveCount(1);
+    return later;
+  }
+
+  test("abandoned: a later page may restore the hand-off; its own save leaves the hand-off where it is", async ({
+    context,
+    generations,
+  }) => {
+    const later = await abandoned(context, generations);
+    await later
+      .getByRole("button", { name: /^Restore the copy saved / })
+      .click();
+    await expect(title(later)).toHaveValue(ORIGINAL);
+    expect(await flushAll(later)).toEqual(["saved"]);
+    expect(await liveCopies(context, generations)).toContainEqual([
+      "handoff",
+      ORIGINAL,
+    ]);
+  });
+
+  test("abandoned: only the explicit 'Discard the copy' removes the hand-off", async ({
+    context,
+    generations,
+  }) => {
+    const later = await abandoned(context, generations);
+    await later
+      .getByRole("button", { name: /^Discard the copy saved / })
+      .click();
+    await expect(later.locator('[data-handoff="true"]')).toHaveCount(0);
+    expect(await liveCopies(context, generations)).toEqual([]);
+  });
 });

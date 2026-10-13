@@ -70,6 +70,25 @@ takes focus, is announced once, and NEVER reloads on its own:
   arrived during the waits (a form mounted again, a submission's success) is settled first (up to three rounds); what cannot be settled
   stops this tab's reload ("Couldn't save your unfinished form…", the forms released, "Retry save" available), even if the worker has
   activated for the other tabs. A form that cannot be held still is never taken for safe.
+- **The update hands each form to the next page of the tab (revision 6, R13; owner decision of 12 October 2026; `src/lib/form-recovery/handoff.ts`).**
+  A page's own copy protects its input only while the page lives: once the update reload unloads it, any other tab could restore that copy
+  and, by saving different input, submitting or discarding, remove it before the replacement page read it (the replacement opened blank,
+  and divergent saves or discards lost the input). So after the saves, "Reload" and "Retry save" write each form's UPDATE HAND-OFF: the
+  form's copy again under a new random hand-off identifier (never the page's writer identity), stored under the form's hand-off context
+  (`atlas-update-handoff:<form context>`, which no ordinary read lists), holding the Web Lock `atlas-recovery-handoff-<id>` before it is
+  written; then a reference in this tab's `sessionStorage` (`atlas-update-handoff`: the form context, the account database's scope and the
+  hand-off identifier only, never a value). The checkpoint above also requires every form with a copy (a clean one with a copy, and a kept
+  session no mount shows, included) to have handed off its current copy; a hand-off or reference that cannot be written is a failed save.
+  The next page of the tab restores that hand-off first (never submitting it), takes its lock, and removes it (with the old page's identical
+  ordinary copy) once its own copy is saved, or at its own submission or discard. Other tabs never see a hand-off a live page holds and
+  can never remove one by their own saves, submissions or discards. A duplicated or opener-copied tab carrying the same reference restores
+  the same input without the right to remove it (whichever page holds the lock saves first and takes over). A hand-off nobody holds (its
+  page never came back: the tab was closed or crashed during the reload) is offered to later pages of the form as an alternative they may
+  restore but never remove; only its explicit "Discard this copy" (`discardAlternative`) removes it. No timer removes a hand-off. An
+  ordinary browser reload, closing a tab and the sync-recovery reload write none (their copies are the ordinary ones, as before);
+  "Discard and reload anyway" and "Reload anyway" write none (the person chose not to keep the input). Hand-offs are ordinary
+  `form_recovery` rows written by the same four W9 plans (so the restricted recovery connection, quota admission, ordering, tombstones and
+  the wipe consent summary all apply); an older client's `list` of the form never reaches them.
 - **"Discard and reload anyway" discards (revision 1, R6).** It discards the copies of every dirty form (this page's own earlier copy and the
   one the form was restored from), so none comes back after the reload. A discard that cannot be written says so (`discard_failed`,
   PROPOSED copy: "Couldn't clear the saved copy of your unfinished form. If you reload now, that copy may be restored afterwards. Your form
@@ -131,6 +150,7 @@ const port = useFormRecoveryPort(); // src/data: the displayed account's store, 
 const recovery = useRecoverableForm({ formContext: `task-edit:${path}`, allow, formRef, port });
 // render <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard, disabled: recovery.locked }} firstFieldRef={...} />
 // offer recovery.alternatives (other copies, newest first) with recovery.restoreAlternative(tabInstanceId), disabled while recovery.locked
+// revision 6: an alternative with isHandoff(copy) also offers "Discard this copy": recovery.discardAlternative(tabInstanceId)
 // submitting (revision 2): take a ticket BEFORE sending; none while an update reload is prepared (send nothing then)
 const ticket = recovery.submitting(); // in the same task as reading the values you send (revision 3)
 if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); // "discarded" | "kept" | "failed" | "refused"
@@ -158,6 +178,8 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   the Web Lock `atlas-recovery-tab-<id>` for its life. A form restores, once per mount and never over input typed meanwhile, this page's own
   copy first (the tree may be mounted again), then the newest copy of a tab that has GONE; another open tab's copy is never taken over.
   After this page's own copy is saved, the copy it was restored from is discarded; a submission or "Discard instead" discards both.
+  Revision 6 (R13): the update hand-off left to this page of the tab comes before any gone tab's copy (above); a `formContext` starting
+  with `atlas-update-handoff:` is refused (reserved).
 - **One session per form, whatever mounts it (revision 2; R2, R4, DA-1, DA-2; `src/lib/form-recovery/session.ts`).** The form's state
   belongs to a SESSION in the page's registry, bound to the account's database (account and incarnation, `FormRecoveryPort.pin().scope`)
   when the form first has a port; a mount of the hook is only a view of it. One order numbers every save and discard of the session when it

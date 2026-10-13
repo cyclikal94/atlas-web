@@ -1,3 +1,4 @@
+import { handedOff, prepareHandoffs } from "../form-recovery/handoff";
 import type { DiscardResult, SaveResult } from "../form-recovery/port";
 import {
   discardDirty,
@@ -35,6 +36,11 @@ import type { AppUpdatesActions, UpdateState } from "./store";
  *    forms is outstanding (a save, a discard, a submission sent before the person accepted), every form is held still, and none is dirty
  *    (in a discard, none still holds input that was not discarded). Work that arrived during the waits (a form mounted again with its
  *    input, a submission that succeeded) is settled first; what cannot be settled stops this tab's reload and is shown, never lost.
+ *  - A SAVE HANDS THE FORMS TO THE NEXT PAGE (revision 6, R13; `form-recovery/handoff.ts`). After the saves, "Reload" and "Retry save"
+ *    write every form's update hand-off (a copy no other tab may take or remove, with a reference this tab's next page reads), and the
+ *    checkpoint holds only when every form with a copy has handed it off: another tab can no longer leave the next page blank by restoring
+ *    and removing the copy in between. A hand-off that cannot be written is a failed save (retry, or discard and reload anyway). "Discard
+ *    and reload anyway" and "Reload anyway" write none: the person chose not to keep the input.
  *  - "Discard and reload anyway" DISCARDS the copies of the dirty forms (revision 1, R6: the copy saved earlier and the one a form was
  *    restored from would otherwise come back after the reload); a discard that does not land says so (`discard_failed`) and reloads nothing.
  *  - It NEVER reloads on its own: only `accept`, `retrySave`, `discardAndReload` and `reloadAnyway` lead to `reload()`.
@@ -209,7 +215,9 @@ export function startAppUpdates(
     if (mode === "anyway") return true;
     const forms = deps.forms;
     if (forms.pending() > 0 || forms.unheld() > 0) return false;
-    return forms.dirty().every((form) => refused.has(form));
+    if (!forms.dirty().every((form) => refused.has(form))) return false;
+    // Revision 6 (R13): a save's reload hands every form's copy to the next page of this tab first.
+    return mode !== "save" || handedOff(forms);
   };
   let resealing = false;
   /** The ONLY way to `deps.reload()`: checked and done in one step; otherwise this tab's forms are settled again first. */
@@ -528,6 +536,17 @@ export function startAppUpdates(
           busy = { kind: "saving" };
           publish();
           const failed = verdict(await flushDirty(deps.forms));
+          if (disposed) return false;
+          if (failed) {
+            busy = failed;
+            publish();
+            return false;
+          }
+        }
+        if (!sealed()) {
+          busy = { kind: "saving" };
+          publish();
+          const failed = verdict(await prepareHandoffs(deps.forms));
           if (disposed) return false;
           if (failed) {
             busy = failed;

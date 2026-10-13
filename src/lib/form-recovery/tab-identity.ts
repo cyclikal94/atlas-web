@@ -21,6 +21,17 @@ export interface RecoveryTab {
   current(): string | null;
   /** Whether the tab that owns `id` is still open (this page's own identifier is always open). */
   ownerOpen(id: string): Promise<boolean>;
+  /**
+   * Revision 6 (R13; `handoff.ts`): holds the update hand-off `id`'s lock (`atlas-recovery-handoff-<id>`) for the page's life. True once
+   * held (at once when this page holds it already); false when it cannot be had: another live page holds it after `wait` ms, or the lock
+   * manager refused. Only authority depends on it, never whether input is shown. The three hand-off methods are optional for a double
+   * written before revision 6, which then behaves as one with no lock manager (holds any hand-off; sees none held but its own).
+   */
+  holdHandoff?(id: string, wait?: number): Promise<boolean>;
+  /** Whether a live page (this one included) holds the hand-off `id`. A probe that cannot be made says held. */
+  handoffHeld?(id: string): Promise<boolean>;
+  /** Runs `act` holding the hand-off `id`'s lock if nobody holds it; null (nothing run) when somebody does or it cannot be asked. */
+  whileFree?<T>(id: string, act: () => Promise<T>): Promise<T | null>;
 }
 
 export interface RecoveryTabDeps {
@@ -43,11 +54,24 @@ export class RecoveryIdentityError extends Error {
 export const recoveryLockName = (id: string): string =>
   `atlas-recovery-tab-${id}`;
 
+export const handoffLockName = (id: string): string =>
+  `atlas-recovery-handoff-${id}`;
+
+/** Granted only when nobody holds `name`: the probe's own hold ends when the callback returns. */
+const free = (locks: Pick<LockManager, "request">, name: string) =>
+  locks.request(
+    name,
+    { mode: "exclusive", ifAvailable: true },
+    (lock) => lock !== null,
+  );
+
 export function createRecoveryTab(deps: RecoveryTabDeps): RecoveryTab {
   /** The identifier whose lock this page holds, once granted. */
   let owned: string | null = null;
   /** The acquisition in flight (its candidate is not the page's yet), shared by every caller. */
   let acquiring: { candidate: string; held: Promise<string> } | null = null;
+  /** The hand-offs this page holds or is asking for (revision 6, R13). */
+  const handoffs = new Map<string, Promise<boolean>>();
   return {
     id() {
       if (owned !== null) return Promise.resolve(owned);
@@ -103,6 +127,74 @@ export function createRecoveryTab(deps: RecoveryTabDeps): RecoveryTab {
         return true;
       }
     },
+    holdHandoff(id, wait = 0) {
+      const known = handoffs.get(id);
+      if (known) return known;
+      const locks = deps.locks;
+      const name = handoffLockName(id);
+      // Held for the page's life once granted: the callback's promise never settles.
+      const hold = (options: LockOptions): Promise<boolean> =>
+        new Promise<boolean>((resolve, reject) => {
+          locks
+            ?.request(name, options, (lock) => {
+              if (lock === null) {
+                resolve(false);
+                return;
+              }
+              resolve(true);
+              return new Promise<never>(() => undefined);
+            })
+            .catch(reject);
+        });
+      const asked = (async (): Promise<boolean> => {
+        if (!locks) return true;
+        try {
+          if (await hold({ mode: "exclusive", ifAvailable: true })) return true;
+          if (wait <= 0) return false;
+          // Another page holds it now (a page that is going, whose locks the browser has not released yet, or a duplicated tab).
+          const stop = new AbortController();
+          const timer = setTimeout(() => stop.abort(), wait);
+          try {
+            return await hold({ mode: "exclusive", signal: stop.signal });
+          } finally {
+            clearTimeout(timer);
+          }
+        } catch {
+          return false;
+        }
+      })();
+      handoffs.set(id, asked);
+      // Not held: the next ask asks again.
+      void asked.then((held) => {
+        if (!held && handoffs.get(id) === asked) handoffs.delete(id);
+      });
+      return asked;
+    },
+    async handoffHeld(id) {
+      const known = handoffs.get(id);
+      if (known && (await known)) return true;
+      const locks = deps.locks;
+      if (!locks) return false;
+      try {
+        return !(await free(locks, handoffLockName(id)));
+      } catch {
+        return true;
+      }
+    },
+    async whileFree(id, act) {
+      if (handoffs.has(id)) return null;
+      const locks = deps.locks;
+      if (!locks) return act();
+      try {
+        return await locks.request(
+          handoffLockName(id),
+          { mode: "exclusive", ifAvailable: true },
+          (lock) => (lock === null ? null : act()),
+        );
+      } catch {
+        return null;
+      }
+    },
   };
 }
 
@@ -113,6 +205,9 @@ const unavailable: RecoveryTab = {
     Promise.reject(new RecoveryIdentityError("no Web Locks in this page")),
   current: () => null,
   ownerOpen: async () => true,
+  holdHandoff: async () => false,
+  handoffHeld: async () => true,
+  whileFree: async () => null,
 };
 
 /** The page's recovery identity (memoised). */

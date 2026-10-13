@@ -28,6 +28,13 @@ import {
   watch,
 } from "./fields";
 import { restoreSnapshot } from "./guard";
+import {
+  HANDOFF_PREFIX,
+  type HandoffStore,
+  handoffContext,
+  handoffFor,
+  pageHandoffs,
+} from "./handoff";
 import type {
   DiscardResult,
   FormRecoveryPort,
@@ -57,6 +64,7 @@ import {
   schemaKey,
   setSessionView,
   submissionOf,
+  targetOf,
   terminalAct,
   track,
   UNSCOPED,
@@ -114,6 +122,12 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  * context, never another; until then the update coordinator still waits for it. `onSubmitted()` acknowledges what the form holds at the
  * moment it is called: use it only in the same task as the send's success, with nothing typed in between (prefer `submitting`).
  *
+ * AN UPDATE HANDS THE FORM TO THE NEXT PAGE OF THE TAB (revision 6, R13; `handoff.ts`). Before an update reload the page writes each form's
+ * UPDATE HAND-OFF (a copy no other page may take or remove), and the next page of the same tab restores that first, whatever another page
+ * did with the ordinary copies meanwhile. A hand-off whose page never came back (the tab closed or crashed during the reload) is offered as
+ * an alternative: `isHandoff(copy)` says so, and only `discardAlternative` (the person's explicit "Discard this copy") removes it.
+ * `formContext` must not start with `HANDOFF_PREFIX` (reserved).
+ *
  * THE MOUNTED ALLOW-LIST IS THE SCHEMA; A HIDDEN FIELD KEEPS ITS VALUE (revision 3, R11; revision 4; PRODUCT-DECISIONS-20261011 item 2).
  * Captures and restores admit the fields of the allow-list this mount COMMITTED (the empty list too; a mount with another list, or a list
  * changed while mounted, makes a transition at the commit, `fields.ts`). The hook keeps the latest value of every admitted field in memory,
@@ -134,6 +148,7 @@ export interface UseRecoverableFormOptions {
   /** Tests only. */
   registry?: RecoverableFormRegistry;
   tab?: RecoveryTab;
+  handoffs?: HandoffStore;
 }
 
 /** A submission sent while the form is mounted (revision 2, R3): the update coordinator waits for it before a reload. */
@@ -155,6 +170,11 @@ export interface RecoverableForm {
   alternatives: readonly RecoverySnapshot[];
   /** Puts another copy in the form. Refused (nothing changes) while `locked`. */
   restoreAlternative(tabInstanceId: string): void;
+  /**
+   * Revision 6 (R13): "Discard this copy" for an alternative that is a hand-off left by a page that never came back (`isHandoff`): removes
+   * it from the store. `failed` (nothing done) while `locked`, for any other alternative, or when a live page holds that hand-off.
+   */
+  discardAlternative(tabInstanceId: string): Promise<DiscardResult>;
   /** Whether the look for a copy to restore has finished. */
   ready: boolean;
   /** Revision 2 (R3): this tab is preparing an update reload; the recovery actions are unavailable (disable their controls). */
@@ -171,6 +191,25 @@ export interface RecoverableForm {
 }
 
 const NO_VIEW: SessionView = { restored: null, alternatives: [] };
+
+/** Revision 6 (R13): whether a copy offered is an update hand-off (a page's that never came back, or one left to this page). */
+export const isHandoff = (copy: RecoverySnapshot): boolean =>
+  copy.formContext.startsWith(HANDOFF_PREFIX);
+
+/**
+ * How long the next page waits for the hand-off left to it while another page holds it (revision 6, R13): the page it replaces, whose
+ * locks the browser may not have released yet, or a duplicated tab. Only the right to remove the hand-off depends on it, never what is
+ * restored.
+ */
+export const HANDOFF_CLAIM_WAIT_MS = 2_000;
+
+const sameValues = (a: Values, b: Values): boolean => {
+  const keys = Object.keys(a);
+  return (
+    keys.length === Object.keys(b).length &&
+    keys.every((key) => b[key] === a[key])
+  );
+};
 
 /** A ticket taken while the mount had no session (revision 3, R10): held by the mount until the mount binds a session of its context. */
 interface Provisional {
@@ -189,9 +228,12 @@ export function useRecoverableForm(
   options: UseRecoverableFormOptions,
 ): RecoverableForm {
   const { formContext, allow, formRef, port } = options;
+  if (formContext.startsWith(HANDOFF_PREFIX))
+    throw new Error(`"${HANDOFF_PREFIX}" is reserved for update hand-offs`);
   // The allow-list is read through `fields`, so a caller that builds it afresh on every render does not restart anything.
   const registry = options.registry ?? pageFormRegistry;
   const tab = options.tab ?? getPageRecoveryTab();
+  const handoffs = options.handoffs ?? pageHandoffs;
   const [view, setViewState] = useState<SessionView>(NO_VIEW);
   const [ready, setReady] = useState(false);
   const locked = useSyncExternalStore(
@@ -324,7 +366,26 @@ export function useRecoverableForm(
       let cancelled = false;
       let finished = false;
       void (async () => {
-        const listed = await through.list(current.formContext);
+        const context = current.formContext;
+        // Revision 6 (R13): the hand-off this tab's previous page left for this form comes first, and is this page's to remove when it
+        // holds its lock (a duplicated tab carrying the same reference may restore it too, without that right).
+        const ref =
+          mode === "restore"
+            ? handoffFor(current.handoffs, context, current.scope)
+            : null;
+        const handed =
+          ref === null
+            ? null
+            : await through.load(handoffContext(context), ref);
+        if (
+          handed !== null &&
+          (await (current.tab.holdHandoff?.(
+            ref as string,
+            HANDOFF_CLAIM_WAIT_MS,
+          ) ?? true))
+        )
+          current.claimed = handed.tabInstanceId;
+        const listed = await through.list(context);
         // What may be restored: THIS page's own copy first (the form was mounted again in the same page after its session ended), then the
         // copies of tabs that have gone, newest first. Another OPEN tab's copy is never taken over.
         const own = current.tab.current();
@@ -337,6 +398,40 @@ export function useRecoverableForm(
             !(await current.tab.ownerOpen(copy.tabInstanceId))
           )
             gone.push(copy);
+        // Hand-offs no live page holds (their page never came back): offered, never restored at once, never removed by this page.
+        const left: RecoverySnapshot[] = [];
+        for (const copy of await through.list(handoffContext(context)))
+          if (
+            copy.tabInstanceId !== ref &&
+            !current.handoffs.written.has(copy.tabInstanceId) &&
+            !(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false))
+          )
+            left.push(copy);
+        // The ordinary copy the previous page left with exactly the hand-off's values (its twin) is not offered: it holds nothing more.
+        const twin =
+          handed && current.claimed === handed.tabInstanceId
+            ? gone.find(
+                (copy) =>
+                  copy.tabInstanceId !== own &&
+                  sameValues(copy.values, handed.values),
+              )
+            : undefined;
+        // This page's own copy first (it is newer than anything left to it), then the hand-off, then the gone tabs' copies.
+        const candidates = [
+          ...gone.filter((copy) => copy.tabInstanceId === own),
+          ...(handed ? [handed] : []),
+          ...gone.filter((copy) => copy.tabInstanceId !== own && copy !== twin),
+        ];
+        // A left hand-off holding what another copy offered holds is not offered twice.
+        const offered = (shown: RecoverySnapshot | null) => [
+          ...candidates.filter((copy) => copy !== shown),
+          ...left.filter(
+            (copy) =>
+              !candidates.some((other) =>
+                sameValues(other.values, copy.values),
+              ),
+          ),
+        ];
         if (cancelled) return;
         finished = true;
         if (current.attached?.token !== shown.token) return;
@@ -345,7 +440,7 @@ export function useRecoverableForm(
           const showing = current.view.restored?.tabInstanceId;
           setView({
             restored: current.view.restored,
-            alternatives: gone.filter(
+            alternatives: offered(null).filter(
               (copy) =>
                 copy.tabInstanceId !== own && copy.tabInstanceId !== showing,
             ),
@@ -365,11 +460,25 @@ export function useRecoverableForm(
           fields.input === beganInput &&
           current.order.next === began &&
           !current.registry.frozen();
-        const newest = gone[0];
+        const newest = candidates[0];
         if (newest && form && untouched) {
           applySnapshot(fields, form, newest);
           const values = valuesOf(current);
-          if (newest.tabInstanceId === own)
+          if (newest === handed)
+            // The hand-off left to this page: its source when it holds the hand-off (with its twin), else input of its own (R13).
+            current.persisted = {
+              ...current.persisted,
+              source:
+                current.claimed === newest.tabInstanceId
+                  ? {
+                      id: newest.tabInstanceId,
+                      context: newest.formContext,
+                      values,
+                    }
+                  : null,
+              twin: twin ? { id: twin.tabInstanceId } : null,
+            };
+          else if (newest.tabInstanceId === own)
             current.persisted = {
               ...current.persisted,
               own: { values, op: 0 },
@@ -378,11 +487,14 @@ export function useRecoverableForm(
           else
             current.persisted = {
               ...current.persisted,
-              source: { id: newest.tabInstanceId, values },
+              source: { id: newest.tabInstanceId, context, values },
             };
-          setView({ restored: newest, alternatives: gone.slice(1) });
-        } else if (gone.length > 0)
-          setView({ restored: current.view.restored, alternatives: gone });
+          setView({ restored: newest, alternatives: offered(newest) });
+        } else {
+          const alternatives = offered(null);
+          if (alternatives.length > 0)
+            setView({ restored: current.view.restored, alternatives });
+        }
         setReady(true);
       })().catch(() => {
         if (cancelled) return;
@@ -440,6 +552,7 @@ export function useRecoverableForm(
         account: pinned?.account ?? UNSCOPED,
         registry,
         tab,
+        handoffs,
         fields: mount,
         port,
         // Another mount of the same form is showing the context's session: this one has a session of its own.
@@ -480,7 +593,7 @@ export function useRecoverableForm(
       return look(current, shown, port, "offer");
     }
     return look(current, shown, port);
-  }, [port, formContext, formRef, tab, registry, setView, look]);
+  }, [port, formContext, formRef, tab, handoffs, registry, setView, look]);
 
   /**
    * The terminal act of the session (R4: in the session's order NOW), with its clean state becoming `clean(form)`, where `form` is what
@@ -642,10 +755,17 @@ export function useRecoverableForm(
       if (!current || !form || !chosen) return;
       applySnapshot(current.fields, form, chosen);
       const values = valuesOf(current);
-      // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
+      // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back. A
+      // hand-off is this page's source only when it is the one left to this page and held by it (revision 6, R13); any other is input of
+      // its own, never removed by this page.
+      const handoff = isHandoff(chosen);
       current.persisted = {
         ...current.persisted,
-        source: { id: chosen.tabInstanceId, values },
+        source:
+          !handoff || chosen.tabInstanceId === current.claimed
+            ? { id: chosen.tabInstanceId, context: chosen.formContext, values }
+            : null,
+        twin: null,
       };
       setView({
         restored: chosen,
@@ -660,10 +780,41 @@ export function useRecoverableForm(
     [registry, view, setView],
   );
 
+  const discardAlternative = useCallback(
+    async (tabInstanceId: string): Promise<DiscardResult> => {
+      // Refused while an update reload is prepared (R3), and for anything but a hand-off left by a page that never came back (R13).
+      const current = registry.frozen() ? null : session.current;
+      const chosen = current?.view.alternatives.find(
+        (copy) => copy.tabInstanceId === tabInstanceId && isHandoff(copy),
+      );
+      const target = current ? targetOf(current) : null;
+      if (!current || !chosen || !target) return "failed";
+      // Only while no live page holds it (its replacement may have come back meanwhile): then this page holds it while it removes it.
+      const remove = () =>
+        target
+          .discard(chosen.formContext, tabInstanceId)
+          .catch((): DiscardResult => "failed");
+      const result =
+        (await (current.tab.whileFree
+          ? current.tab.whileFree(tabInstanceId, remove)
+          : remove())) ?? "failed";
+      if (result === "discarded")
+        setSessionView(current, {
+          ...current.view,
+          alternatives: current.view.alternatives.filter(
+            (copy) => copy !== chosen,
+          ),
+        });
+      return result;
+    },
+    [registry],
+  );
+
   return {
     restored: view.restored,
     alternatives: view.alternatives,
     restoreAlternative,
+    discardAlternative,
     ready,
     locked,
     submitting,
