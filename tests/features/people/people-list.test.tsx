@@ -123,8 +123,11 @@ describe("the people list", () => {
     const w = peopleWorld();
     w.failReads();
     await w.mount("/people");
+    // The banner's own text: the announcer's assertive region repeats it a frame later.
     expect(
-      await screen.findByText("Couldn't load people on this device."),
+      await screen.findByText("Couldn't load people on this device.", {
+        selector: "[data-people-banner] p",
+      }),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(w.env.calls.map((c) => c.action)).toContain("retryLoad");

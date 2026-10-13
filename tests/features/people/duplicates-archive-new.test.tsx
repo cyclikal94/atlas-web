@@ -101,7 +101,9 @@ describe("possible duplicates (PPL-3)", () => {
     w.setCache([person({ id: P, label: "Mo" })]);
     await w.mount(`/people/${P}/duplicates`);
     expect(
-      await screen.findByText("Checking for duplicates needs a connection."),
+      await screen.findByText("Checking for duplicates needs a connection.", {
+        selector: '[data-duplicates-state="offline"]',
+      }),
     ).toBeInTheDocument();
     expect(w.api.calls).toEqual([]);
   });
@@ -133,7 +135,9 @@ describe("possible duplicates (PPL-3)", () => {
     w.api.next.duplicates.push({ ok: false, kind: "not_found" });
     await w.mount(`/people/${P}/duplicates`);
     expect(
-      await screen.findByText("This person is no longer available"),
+      await screen.findByText("This person is no longer available", {
+        selector: "[data-people-banner] p",
+      }),
     ).toBeInTheDocument();
   });
 });
