@@ -34,7 +34,8 @@
     "docs:tokens": "node scripts/generate-token-docs.mjs",
     "dev:fixture": "vite --mode fixture --host 127.0.0.1",
     "test:e2e:efficient": "pnpm build && pnpm build:fixture && node scripts/run-e2e-efficient.mjs",
-    "test:validation-tools": "node --test scripts/validation/*.test.mjs"
+    "test:validation-tools": "node --test scripts/validation/*.test.mjs",
+    "test:integration-tools": "node --test scripts/integration/*.test.mjs"
   },
   "dependencies": {
     "@atlas/api-types": "file:vendor/atlas-api-types-0.28.0-rc.1.tgz",

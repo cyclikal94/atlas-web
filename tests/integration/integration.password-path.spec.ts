@@ -286,11 +286,15 @@ test.describe("I-03: activate/cancel results", () => {
         ).status,
       );
     expect(statuses.every((s) => s >= 400 && s < 500)).toBe(true);
+    // WEB-08d revision 6: a refusal by the backend's sign-in throttle (429) says nothing about the verifier or the grant. Behind an
+    // exhausted source budget this case once passed on six 429s without reaching either check (review r5 H3).
+    expect(statuses).not.toContain(429);
     // The genuine verifier can no longer redeem it.
     const late = await raw("POST", "/browser-sessions/activate", {
       body: { grant, verifier },
     });
     expect(late.status).toBeGreaterThanOrEqual(400);
+    expect(late.status).not.toBe(429);
     expect(late.setCookie).toEqual([]);
     expect(API).toContain(ORIGIN);
   });

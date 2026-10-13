@@ -17,11 +17,27 @@
 //   replace_response     forward, then answer with `status` and the JSON body `json` (for example an Atlas-formatted error with its `code`) and none of the backend's headers
 //   rewrite_json         forward, then set/delete fields of the JSON body: { set: {...}, delete: [...] }
 //   swap                 with `with: <other rule id>`: hold both, then deliver each to the OTHER's client on release
+//
+// `observe` (optional) is told when a request is forwarded upstream and when the upstream answer (or error) arrives: method, path,
+// status and time only, never a body or a header. The runner uses it to account for the backend's sign-in budget across the whole
+// stack (scripts/integration/admission.mjs); it is not reset by POST /reset, and it changes nothing the proxy does.
 import { createServer, request as httpRequest } from "node:http";
 
-export function createProxy({ upstream, port = 0, controlPort = 0 }) {
+export function createProxy({
+  upstream,
+  port = 0,
+  controlPort = 0,
+  observe = () => undefined,
+}) {
   const target = new URL(upstream);
   const log = [];
+  const tell = (event) => {
+    try {
+      observe({ ...event, at: Date.now() });
+    } catch {
+      // an observer can never change what the proxy does
+    }
+  };
   const rules = [];
   const held = new Map(); // rule id -> [{ deliver() }]
   let seq = 0;
@@ -57,6 +73,7 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
     if (rule) entry.rule = rule.id;
     // `buffered`: the whole request body when it was read ahead of time (`buffer_request`); otherwise it is piped through.
     const forward = (buffered) => {
+      tell({ event: "forwarded", id, method: req.method, path: req.url });
       const upstreamReq = httpRequest(
         {
           host: target.hostname,
@@ -75,6 +92,7 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
               status: upstreamRes.statusCode,
             });
             entry.status = upstreamRes.statusCode;
+            tell({ event: "answered", id, status: upstreamRes.statusCode });
             const body = Buffer.concat(chunks);
             const deliver = (override) => {
               // The client may have given up (its own time-out) long before a buffered request was released.
@@ -168,6 +186,7 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
         },
       );
       upstreamReq.on("error", () => {
+        tell({ event: "upstream_error", id });
         entry.events.push({
           t: Date.now() - entry.at,
           event: "upstream_error",
