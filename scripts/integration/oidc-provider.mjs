@@ -228,33 +228,53 @@ export function createOidcProvider({
   const listen = (server, wanted) =>
     new Promise((resolve, reject) => {
       server.once("error", reject);
-      server.listen(wanted, "127.0.0.1", () => resolve(server.address().port));
+      server.listen(wanted, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve(server.address().port);
+      });
+    });
+  const close = (server) =>
+    new Promise((resolve) => {
+      if (!server.listening) return resolve();
+      server.closeAllConnections?.();
+      server.close(() => resolve());
     });
 
+  // Review r6 (H4a): `stop()` joins a `start()` still under way, so neither listener can appear after it.
+  let stopped = false;
+  let starting = null;
   return {
-    async start() {
-      const issuerPort = await listen(issuerServer, port);
-      const controlPortActual = await listen(controlServer, controlPort);
-      issuer = `http://127.0.0.1:${issuerPort}`;
-      return {
-        issuer,
-        issuerPort,
-        controlPort: controlPortActual,
-        controlUrl: `http://127.0.0.1:${controlPortActual}`,
-        clientId,
-      };
+    start() {
+      starting ??= (async () => {
+        const issuerPort = stopped ? null : await listen(issuerServer, port);
+        const controlPortActual = stopped
+          ? null
+          : await listen(controlServer, controlPort);
+        if (stopped) {
+          await Promise.all([issuerServer, controlServer].map(close));
+          throw new Error("the provider was stopped while it was starting");
+        }
+        issuer = `http://127.0.0.1:${issuerPort}`;
+        return {
+          issuer,
+          issuerPort,
+          controlPort: controlPortActual,
+          controlUrl: `http://127.0.0.1:${controlPortActual}`,
+          clientId,
+        };
+      })();
+      return starting;
     },
     async stop() {
+      stopped = true;
+      await starting?.catch(() => undefined);
       for (const finish of parked.splice(0)) finish();
-      await Promise.all(
-        [issuerServer, controlServer].map(
-          (server) =>
-            new Promise((resolve) => {
-              server.closeAllConnections?.();
-              server.close(() => resolve());
-            }),
-        ),
-      );
+      await Promise.all([issuerServer, controlServer].map(close));
+      return {
+        ok: !issuerServer.listening && !controlServer.listening,
+        listening: [issuerServer, controlServer].filter((s) => s.listening)
+          .length,
+      };
     },
   };
 }

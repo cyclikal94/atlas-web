@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyBudget, judge, schedule } from "./outcome.mjs";
+import {
+  applyBudget,
+  judge,
+  overall,
+  schedule,
+  withCancellation,
+} from "./outcome.mjs";
 
 const at = Date.parse("2026-10-13T12:00:00.000Z");
 const spec = (id, status, project = "integration-chromium") => ({
@@ -307,4 +313,87 @@ test("a passing stack whose sign-in traffic went over the source budget is not a
     applyBudget({ outcome: "passed" }, admissions(44, 2)).outcome,
     "passed",
   );
+});
+
+test("I4: a stop keeps what the stack established; only what the stop itself caused becomes cancelled", () => {
+  const failedReport = {
+    outcome: "failed",
+    reason: "1 failed",
+    counts: { failed: 1, flaky: 0 },
+  };
+  assert.deepEqual(withCancellation(failedReport, "received SIGTERM"), {
+    ...failedReport,
+    cancellation: "received SIGTERM",
+  });
+  const passed = { outcome: "passed", reason: null };
+  assert.equal(withCancellation(passed, "received SIGTERM").outcome, "passed");
+  assert.equal(
+    withCancellation({ outcome: "budget_exceeded" }, "x").outcome,
+    "budget_exceeded",
+  );
+  const interrupted = {
+    outcome: "incomplete",
+    reason: "0 planned case(s) missing, 0 unplanned, 1 interrupted, 0 not run",
+  };
+  assert.deepEqual(withCancellation(interrupted, "received SIGTERM"), {
+    outcome: "cancelled",
+    reason: "stopped: received SIGTERM",
+    cancellation: "received SIGTERM",
+    before_cancellation: interrupted,
+  });
+  // An exit failure with no failed case (Playwright stopped by the signal) is the stop's doing.
+  assert.equal(
+    withCancellation(
+      { outcome: "failed", counts: { failed: 0, flaky: 0 } },
+      "x",
+    ).outcome,
+    "cancelled",
+  );
+  assert.equal(withCancellation(failedReport, null), failedReport);
+});
+
+test("I4: the run's outcome: a failure before a signal stays a failure; a cancellation is never a pass; incomplete is a failure", () => {
+  const rec = (outcome) => ({ outcome });
+  assert.equal(
+    overall([rec("failed"), rec("cancelled"), rec("not_run")], {
+      signalled: "SIGTERM",
+      planned: 3,
+    }),
+    "failed",
+  );
+  assert.equal(
+    overall([rec("passed"), rec("cancelled"), rec("not_run")], {
+      signalled: "SIGTERM",
+      planned: 3,
+    }),
+    "cancelled",
+  );
+  assert.equal(
+    overall([rec("passed"), rec("passed")], {
+      signalled: "SIGINT",
+      planned: 2,
+    }),
+    "cancelled",
+  );
+  assert.equal(
+    overall([rec("passed"), rec("passed")], { planned: 2 }),
+    "passed",
+  );
+  assert.equal(
+    overall([rec("passed")], { planned: 2 }),
+    "failed",
+    "a plan not fully run is not a pass",
+  );
+  for (const outcome of [
+    "cleanup_failed",
+    "evidence_failed",
+    "budget_exceeded",
+    "error",
+    "incomplete",
+  ])
+    assert.equal(
+      overall([rec("passed"), rec(outcome)], { planned: 2 }),
+      "failed",
+      outcome,
+    );
 });

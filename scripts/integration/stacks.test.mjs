@@ -144,11 +144,11 @@ const LEGACY = [
   { suffix: "-labels", args: ["--grep", "I-8d"] },
 ];
 
-test("Playwright's discovery: the full programme gives every case one stack and keeps every earlier selection", () => {
+test("Playwright's discovery: the full programme gives every case one stack and keeps every earlier selection", async () => {
   const dir = mkdtempSync(join(tmpdir(), "atlas-plan-"));
   try {
     const projects = ["integration-chromium"];
-    const p = plan({
+    const p = await plan({
       root,
       browsers: ["chromium"],
       selection: selectStacks({
@@ -197,12 +197,14 @@ test("Playwright's discovery: the full programme gives every case one stack and 
     };
     for (const [i, legacy] of LEGACY.entries()) {
       const old = new Set(
-        discover({
-          root,
-          projects,
-          args: legacy.args,
-          evidence: join(dir, `legacy-${i}`),
-        }).map((x) => x.key),
+        (
+          await discover({
+            root,
+            projects,
+            args: legacy.args,
+            evidence: join(dir, `legacy-${i}`),
+          })
+        ).map((x) => x.key),
       );
       const now = new Set(
         (SPLIT[legacy.suffix] ?? [legacy.suffix]).flatMap((name) => [
@@ -220,7 +222,7 @@ test("Playwright's discovery: the full programme gives every case one stack and 
   }
 });
 
-test("Playwright's discovery: a missing stack, the old catch-all base or an empty narrowed run fails planning", () => {
+test("Playwright's discovery: a missing stack, the old catch-all base or an empty narrowed run fails planning", async () => {
   const dir = mkdtempSync(join(tmpdir(), "atlas-plan-"));
   try {
     const run = (stacksOf, extra = {}) =>
@@ -231,14 +233,16 @@ test("Playwright's discovery: a missing stack, the old catch-all base or an empt
         evidence: join(dir, String(Math.random()).slice(2)),
       });
     // A spec no stack names (here: the labels stack left out) belongs to no stack.
-    const unnamed = run(FULL_STACKS.filter((s) => s.suffix !== "-labels"));
+    const unnamed = await run(
+      FULL_STACKS.filter((s) => s.suffix !== "-labels"),
+    );
     assert.equal(unnamed.ok, false);
     assert.match(
       unnamed.problems.join("\n"),
       /integration\.web08d-labels\.spec\.ts: .*I-8d-1: .* belongs to no stack/,
     );
     // The old catch-all base beside the new stacks selects the pages, password-path, sharing and snapshot cases twice.
-    const catchAll = run([
+    const catchAll = await run([
       { suffix: "", passthrough: LEGACY[0].args },
       ...FULL_STACKS.slice(1),
     ]);
@@ -248,7 +252,7 @@ test("Playwright's discovery: a missing stack, the old catch-all base or an empt
         catchAll.problems.join("\n"),
         new RegExp(`selected by both "base" and "${name}"`),
       );
-    const nothing = plan({
+    const nothing = await plan({
       root,
       browsers: ["chromium"],
       selection: selectStacks({

@@ -163,5 +163,44 @@ export async function schedule({
   return { records, first, passed: first === null && !latched() };
 }
 
+/**
+ * A stack that was stopped (a signal, the runner's own stop) keeps what it had established before (review r6 design assessment, I4):
+ * a pass stays a pass, and a failure the report recorded, a budget excess or a clean-up failure is never turned into a cancellation.
+ * Only an outcome the stop itself caused (an interrupted or missing case, a preparation step that was stopped) becomes `cancelled`,
+ * with what it was beside it.
+ */
+export function withCancellation(record, reason) {
+  if (!reason) return record;
+  const kept =
+    record.outcome === "passed" ||
+    record.outcome === "cancelled" ||
+    record.outcome === "budget_exceeded" ||
+    record.outcome === "cleanup_failed" ||
+    (record.outcome === "failed" &&
+      (record.counts?.failed ?? 0) + (record.counts?.flaky ?? 0) > 0);
+  if (kept) return { ...record, cancellation: reason };
+  return {
+    ...record,
+    outcome: "cancelled",
+    reason: `stopped: ${reason}`,
+    cancellation: reason,
+    before_cancellation: { outcome: record.outcome, reason: record.reason },
+  };
+}
+
+/** The run's outcome: a failure anywhere is a failure (even when a signal came later); otherwise cancelled, or passed. */
+export function overall(records, { signalled = null, planned = 0 } = {}) {
+  if (
+    records.some((r) => !["passed", "not_run", "cancelled"].includes(r.outcome))
+  )
+    return "failed";
+  if (signalled || records.some((r) => r.outcome === "cancelled"))
+    return "cancelled";
+  return records.length === planned &&
+    records.every((r) => r.outcome === "passed")
+    ? "passed"
+    : "failed";
+}
+
 export const describe = (record) =>
   `integration-${record.browser} ${record.stack} ${record.outcome}${record.reason ? ` (${record.reason})` : ""}`;

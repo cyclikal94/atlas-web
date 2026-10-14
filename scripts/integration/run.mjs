@@ -21,11 +21,21 @@
 // as each stack ends, so an interrupted run still says what completed, what failed and what never ran. <evidence>/summary.json is
 // written too when it does not exist yet; an existing file there is left as it is.
 //
-// Loopback listeners on OS-chosen free ports only. Disposable state under a fresh directory in $TMPDIR. Every process this script
-// starts is registered when it is spawned and stopped, with its descendants (Playwright's workers and browsers), when its stack ends
-// or the run is interrupted (scripts/integration/ownership.mjs); the ports are checked to be free again. It touches no existing
+// Loopback listeners on OS-chosen free ports only. Disposable state under a fresh directory in $TMPDIR. It touches no existing
 // service and no real user data.
-import { spawnSync } from "node:child_process";
+//
+// Ownership (review r6, H4). Each stack has one resource scope (scripts/integration/scope.mjs): the disposal of every resource is
+// registered before the resource is created, preparation runs as a tracked producer, and the stack's clean-up first stops and waits
+// for that producer, so a signal that arrives part-way through starting PostgreSQL, a listener or the backend cannot be followed by
+// a resource nobody disposes of. Every process is spawned with an inherited ownership mark and stopped with everything that carries
+// it (scripts/integration/ownership.mjs), every Docker resource is labelled and found again by label
+// (scripts/integration/docker-resources.mjs), and the clean-up is ok only when an independent look finds nothing left: no owned
+// process, no listener, no labelled container, network or volume, no disposable directory, images as the policy says. Every
+// preparation command is an owned, bounded process that ends on a stop. A REAPER process (scripts/integration/reaper.mjs), started
+// first in a process group of its own, holds a journal of what the run owns and finishes the clean-up and the summary if the runner
+// itself is killed before it could (the shared validation driver kills the runner's group two seconds after asking it to stop).
+// Qualification boundaries: scripts/integration/faults.mjs (inactive unless ATLAS_INTEGRATION_FAULTS is set).
+import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -41,14 +51,35 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { audit, createAdmissionRecorder } from "./admission.mjs";
 import { createProxy } from "./delaying-proxy.mjs";
+import {
+  DOCKER_CONTEXT,
+  disposeLabelled,
+  dockerClient,
+  LABEL_INVOCATION,
+  LABEL_STACK,
+} from "./docker-resources.mjs";
+import { createFaults } from "./faults.mjs";
 import { freePort } from "./free-port.mjs";
 import { createOidcProvider } from "./oidc-provider.mjs";
-import { applyBudget, describe, judge, schedule } from "./outcome.mjs";
+import {
+  applyBudget,
+  describe,
+  judge,
+  overall,
+  schedule,
+  withCancellation,
+} from "./outcome.mjs";
 import { Cancelled, createOwner } from "./ownership.mjs";
 import { startPostgresBackend } from "./postgres-backend.mjs";
+import { createScope } from "./scope.mjs";
 import { plan, selectStacks, stackArgs } from "./stacks.mjs";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// This runner's own modules (the reaper, the backend fetch) are beside it; the repository it tests (Playwright, the specs, the
+// fixture build) is two levels up, unless a qualification run of a COPY of these scripts names it (ATLAS_INTEGRATION_TOOLS_ROOT).
+const here = dirname(fileURLToPath(import.meta.url));
+const root = resolve(
+  process.env.ATLAS_INTEGRATION_TOOLS_ROOT ?? resolve(here, "../.."),
+);
 const args = process.argv.slice(2);
 // `--evidence <dir>` keeps a measurement run (pnpm profile:session) from overwriting the integration evidence.
 const evidenceFlag = args.indexOf("--evidence");
@@ -87,11 +118,76 @@ mkdirSync(runDir);
 const browserEvidence =
   process.env.ATLAS_EVIDENCE_DIR ?? join(runDir, "browser");
 
-const owner = createOwner();
+const faults = createFaults({ dir: runDir });
+let released = false;
+let reaperLost = null;
+let reaper = null;
+/** One line of the reaper's journal (what this run owns). A journal that cannot be written is a lost reaper. */
+function journal(message) {
+  if (!reaper || released) return;
+  try {
+    reaper.stdin.write(`${JSON.stringify(message)}\n`);
+  } catch (error) {
+    loseReaper(
+      `the reaper's journal could not be written: ${error?.message ?? error}`,
+    );
+  }
+}
+const owner = createOwner({
+  onMember: ({ pid, started, label }) =>
+    journal({ type: "process", pid, started, label }),
+});
 let current = null; // the stack being prepared, run or cleaned up
 let lastBackend = null;
 let signalled = null;
+let planning = null; // the discovery's abort controller while the run is being planned
 const records = [];
+const evidenceErrors = [];
+
+function loseReaper(reason) {
+  if (reaperLost || released) return;
+  reaperLost = reason;
+  console.error(`\nSTOPPING: ${reason}; nothing more is launched`);
+  owner.stop(reason);
+  planning?.abort(new Cancelled(reason));
+  current?.scope.stop(reason);
+}
+
+// The reaper first, before anything that could need cleaning up: in a group of its own (a group signal to this runner does not
+// reach it), with this runner's stdout/stderr (a caller waiting for them waits for its clean-up too).
+reaper = spawn(
+  process.execPath,
+  [join(here, "reaper.mjs"), runDir, owner.token, String(process.pid)],
+  { detached: true, stdio: ["pipe", "inherit", "inherit"] },
+);
+reaper.stdin.on("error", (error) =>
+  loseReaper(`the reaper's journal failed: ${error?.message ?? error}`),
+);
+reaper.once("error", (error) =>
+  loseReaper(`the reaper could not start: ${error?.message ?? error}`),
+);
+reaper.once("exit", (code, signal) =>
+  loseReaper(
+    `the reaper exited (${signal ?? code}) before the run released it`,
+  ),
+);
+if (reaper.pid) owner.exclude(reaper.pid);
+journal({ type: "hello", invocation: invocation.id, evidence });
+// Who this run is, from its first moment (a run killed before its first summary is still identifiable by its mark).
+writeFileSync(
+  join(runDir, "invocation.json"),
+  `${JSON.stringify({ ...invocation, run_dir: runDir, owner_token: owner.token, reaper_pid: reaper.pid ?? null }, null, 2)}\n`,
+  { flag: "wx" },
+);
+
+const docker = dockerClient((args, options = {}) => {
+  const injected = faults.docker(args);
+  if (injected) return Promise.resolve(injected);
+  return owner.exec("docker", "docker", args, {
+    ...options,
+    env: { ...process.env, DOCKER_CONTEXT },
+  });
+});
 
 const listening = (port) =>
   new Promise((resolveCheck) => {
@@ -103,14 +199,17 @@ const listening = (port) =>
     socket.once("error", () => resolveCheck(false));
   });
 
-async function waitFor(url, label, tries = 80) {
+async function waitFor(url, label, tries, signal) {
   for (let i = 0; i < tries; i += 1) {
-    owner.check();
+    if (signal.aborted)
+      throw new Cancelled(String(signal.reason?.reason ?? "aborted"));
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      });
       if (response.ok || response.status < 500) return;
     } catch {
-      // not yet
+      // not yet (or stopped: looked at above)
     }
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -129,89 +228,82 @@ function capture(handle) {
 }
 
 /**
- * Stop everything one stack owns, once (a signal and the stack's own end share the same promise): Playwright and its descendants
- * first, then the preview and the backend, then the in-process proxy and provider, the containers of a PostgreSQL stack, the
- * disposable directory; then check the ports. Returns what happened, including anything that could not be stopped.
+ * Stop everything one stack owns, once (a signal and the stack's own end share the same promise): the scope stops admission, waits
+ * for preparation to settle and disposes of what was registered, last first (Playwright, the preview, the proxy, the backend or the
+ * containers, the provider, the disposable directory). Then an independent look: no process carrying the run's mark, no listener on
+ * the stack's ports, the directory gone; the containers' own disposal verified its labelled inventory. Returns what happened.
  */
-function cleanupStack(state) {
+function cleanupStack(state, why = "the stack ended") {
   state.cleanup ??= (async () => {
-    const result = { processes: [], errors: [] };
-    for (const label of ["playwright", "preview", "backend"]) {
-      const handle = state.handles[label];
-      if (!handle) continue;
-      try {
-        // Playwright is asked to stop as on Ctrl-C first (it ends its workers and browsers and writes the report of what ran).
-        result.processes.push(
-          await owner.terminate(
-            handle,
-            undefined,
-            label === "playwright" ? { signal: "SIGINT", ms: 10_000 } : null,
-          ),
-        );
-      } catch (error) {
-        result.errors.push(`${label}: ${String(error?.message ?? error)}`);
-      }
+    const closed = await state.scope.close(why);
+    const result = {
+      reason: closed.reason,
+      ports: state.ports,
+      tmp: state.tmp,
+      producers_settled: closed.producers_settled,
+      unsettled_producers: closed.unsettled_producers,
+      steps: closed.steps,
+      late: closed.late,
+      errors: closed.steps
+        .filter((step) => !step.ok)
+        .map((step) => `${step.label}: ${step.error ?? "not verified"}`),
+    };
+    let survivors = [];
+    result.process_inventory = "complete";
+    try {
+      survivors = owner.sweep();
+    } catch (error) {
+      result.process_inventory = "unknown";
+      result.errors.push(`processes: ${String(error?.message ?? error)}`);
     }
-    for (const [label, stop] of [
-      ["proxy", () => state.proxy?.stop()],
-      ["provider", () => state.provider?.stop()],
-    ])
-      await Promise.resolve()
-        .then(stop)
-        .catch((error) =>
-          result.errors.push(`${label}: ${String(error?.message ?? error)}`),
-        );
-    if (state.extraCleanup) {
-      try {
-        result.containers = state.extraCleanup();
-        console.error(
-          `clean-up (containers, network, images added by this run): ${JSON.stringify(result.containers)}`,
-        );
-        if (
-          result.containers.containers_left === undefined ||
-          result.containers.images_added_and_left?.length > 0
-        )
-          result.errors.push("container clean-up left images behind");
-      } catch (error) {
-        result.errors.push(`containers: ${String(error?.message ?? error)}`);
-      }
-    }
-    if (state.tmp) {
-      try {
-        rmSync(state.tmp, { recursive: true, force: true });
-        result.tmp_removed = !existsSync(state.tmp);
-      } catch (error) {
-        result.errors.push(`tmp: ${String(error?.message ?? error)}`);
-      }
-    }
+    result.survivors = survivors;
     const still = [];
     for (const port of state.ports) if (await listening(port)) still.push(port);
     result.listeners_left = still;
-    result.survivors = result.processes.flatMap((p) => p.survivors);
+    result.tmp_removed = state.tmp ? !existsSync(state.tmp) : true;
     result.ok =
+      closed.ok &&
       result.errors.length === 0 &&
+      result.process_inventory === "complete" &&
+      survivors.length === 0 &&
       still.length === 0 &&
-      result.survivors.length === 0;
+      result.tmp_removed;
+    if (!closed.producers_settled)
+      console.error(
+        `WARNING: preparation did not settle (${closed.unsettled_producers.join(", ")})`,
+      );
+    for (const error of result.errors)
+      console.error(`WARNING: clean-up: ${error}`);
     if (still.length > 0)
       console.error(
         `WARNING: a listener remains on port(s) ${still.join(", ")}`,
       );
-    if (result.survivors.length > 0)
+    if (survivors.length > 0)
       console.error(
-        `WARNING: owned process(es) survived clean-up: ${result.survivors.join(", ")}`,
+        `WARNING: owned process(es) survived clean-up: ${survivors.join(", ")}`,
       );
     if (result.ok)
       console.error(
-        `clean-up: no listener remains on ${state.ports.join(", ")}; ${state.tmp} removed`,
+        `clean-up verified: no owned process, no listener on ${state.ports.join(", ") || "(none)"}${state.tmp ? `, ${state.tmp} removed` : ""}`,
       );
     return result;
   })();
   return state.cleanup;
 }
 
-/** Start one stack: accounts, invitations, the backend (or the PostgreSQL container pair), the proxy and the preview. */
-async function prepare(state) {
-  const { stack } = state;
+const removeTmp = (path) => {
+  rmSync(path, { recursive: true, force: true });
+  return { ok: !existsSync(path), path };
+};
+
+/**
+ * Start one stack: accounts, invitations, the backend (or the PostgreSQL container pair), the proxy and the preview. Runs as the
+ * stack scope's producer: each resource's disposal is registered before the resource is created, every wait ends on `signal`.
+ */
+async function prepare(state, signal) {
+  const { stack, scope } = state;
+  const at = (name) => faults.at(name, signal);
+  await at("prepare:start");
   // alice to erin: the earlier specs. frank to quinn: WEB-08b (ordering traces, sign-in surface, Settings, single sign-on), each
   // spec using its own account so no spec depends on another's side effects or on a sign-in throttle another has used up.
   const names = [
@@ -237,6 +329,8 @@ async function prepare(state) {
   state.tmp = mkdtempSync(
     join(process.env.TMPDIR ?? tmpdir(), "atlas-integration-"),
   );
+  scope.defer("tmp", () => removeTmp(state.tmp));
+  journal({ type: "tmp", path: state.tmp });
   const [backendPort, previewPort, proxyPort, controlPort] = [
     await freePort(),
     await freePort(),
@@ -244,6 +338,7 @@ async function prepare(state) {
     await freePort(),
   ];
   state.ports.push(backendPort, previewPort, proxyPort, controlPort);
+  journal({ type: "ports", ports: state.ports });
   const origin = `http://127.0.0.1:${previewPort}`;
   // alice and bob for the read-only and sign-in specs; carol, dave and erin for the specs that change an account (password,
   // logout, retirement), so no spec depends on another spec's side effects. Passwords are generated per run and travel by stdin
@@ -253,37 +348,59 @@ async function prepare(state) {
   let oidc = null;
   if (stack.oidc && !postgres) {
     // The stub provider, on loopback, before the backend: the backend discovers it at the first single-sign-on request.
-    state.provider = createOidcProvider({
+    const provider = createOidcProvider({
       clientId: "atlas-web-integration",
       callbackUrl: `${origin}/api/experimental/v1/oidc/callback`,
     });
-    oidc = await state.provider.start();
+    state.provider = provider;
+    scope.defer("provider", () => provider.stop());
+    oidc = await provider.start();
     state.ports.push(oidc.issuerPort, oidc.controlPort);
-    owner.check();
+    journal({ type: "ports", ports: state.ports });
+    await at("oidc:started");
   }
 
   if (postgres) {
     // OPTIONAL repeat: the released backend CONTAINER image against a disposable PostgreSQL (docs/session.md, "Integration").
+    // Everything it creates carries the stack's labels; its disposal (by label, verified) is registered before the first docker call.
+    journal({ type: "docker" });
+    scope.defer("containers", () =>
+      disposeLabelled(docker, { filter: `${LABEL_STACK}=${state.id}` }),
+    );
     state.backendStartedAt = Date.now();
-    const started = await startPostgresBackend({ backendPort, origin, names });
-    state.extraCleanup = started.stop;
+    const started = await startPostgresBackend({
+      backendPort,
+      origin,
+      names,
+      docker,
+      labels: { [LABEL_INVOCATION]: invocation.id, [LABEL_STACK]: state.id },
+      signal,
+      at,
+      log: (line) => console.error(line),
+    });
     Object.assign(accounts, started.accounts);
     revision = started.describe;
     lastBackend = started.describe;
     console.error(
       `backend container ${started.describe.backend_image} on ${started.describe.postgres_image}`,
     );
-    owner.check();
+    await waitFor(
+      `http://127.0.0.1:${backendPort}/ready`,
+      "backend container",
+      240,
+      signal,
+    );
   } else {
     // 1. The released backend, verified against the release's SHA256SUMS.
-    const fetched = spawnSync(
+    const fetched = await owner.exec(
+      "fetch-backend",
       process.execPath,
-      [join(root, "scripts/integration/fetch-backend.mjs")],
-      { encoding: "utf8" },
+      [join(here, "fetch-backend.mjs")],
+      { signal, timeoutMs: 600_000 },
     );
     if (fetched.status !== 0)
       throw new Error(
-        `fetch-backend failed:\n${fetched.stdout}${fetched.stderr}`,
+        `fetch-backend failed (${fetched.timedOut ? "timed out" : `exit ${fetched.status}`}):\n${fetched.stdout}${fetched.stderr}`,
       );
     const backend = JSON.parse(fetched.stdout.trim().split("\n").at(-1));
     revision = {
@@ -295,16 +412,23 @@ async function prepare(state) {
     console.error(
       `backend ${backend.tag} (${backend.archive}, sha256 ${backend.sha256.slice(0, 12)}…, verified against SHA256SUMS)`,
     );
+    await at("sqlite:fetched");
     const database = `sqlite://${join(state.tmp, "atlas.sqlite")}?mode=rwc`;
 
     // 2. Accounts, made with the backend's own command.
     for (const name of names) {
       const password = randomBytes(16).toString("hex");
-      const made = spawnSync(backend.binary, ["account", name], {
-        input: `${password}\n`,
-        env: { ...process.env, ATLAS_DATABASE_URL: database },
-        encoding: "utf8",
-      });
+      const made = await owner.exec(
+        "account",
+        backend.binary,
+        ["account", name],
+        {
+          input: `${password}\n`,
+          env: { ...process.env, ATLAS_DATABASE_URL: database },
+          signal,
+          timeoutMs: 60_000,
+        },
+      );
       if (made.status !== 0)
         throw new Error(
           `could not create ${name}:\n${made.stdout}${made.stderr}`,
@@ -314,9 +438,10 @@ async function prepare(state) {
 
     // 2b. Standalone signup invitations, made with the backend's own command (the token is printed once).
     for (let i = 0; i < 19; i += 1) {
-      const made = spawnSync(backend.binary, ["invite"], {
+      const made = await owner.exec("invite", backend.binary, ["invite"], {
         env: { ...process.env, ATLAS_DATABASE_URL: database },
-        encoding: "utf8",
+        signal,
+        timeoutMs: 60_000,
       });
       if (made.status !== 0)
         throw new Error(
@@ -324,11 +449,12 @@ async function prepare(state) {
         );
       invitations.push(JSON.parse(made.stdout.trim().split("\n").at(-1)));
     }
-    owner.check();
+    await at("sqlite:accounts");
 
     // 3. The backend. Its sign-in budget's clock starts with the process.
+    scope.check();
     state.backendStartedAt = Date.now();
-    state.handles.backend = owner.spawnOwned("backend", backend.binary, [], {
+    const handle = owner.spawnOwned("backend", backend.binary, [], {
       env: {
         ...process.env,
         ATLAS_DATABASE_URL: database,
@@ -343,31 +469,45 @@ async function prepare(state) {
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const serverLog = capture(state.handles.backend);
-    await waitFor(`http://127.0.0.1:${backendPort}/ready`, "backend").catch(
-      (e) => {
-        if (e instanceof Cancelled) throw e;
-        throw new Error(`${e.message}\n${serverLog().slice(-2000)}`);
-      },
-    );
-  }
-  if (postgres)
+    state.handles.backend = handle;
+    scope.defer("backend", () => owner.terminate(handle));
+    const serverLog = capture(handle);
+    await at("backend:spawned");
     await waitFor(
       `http://127.0.0.1:${backendPort}/ready`,
-      "backend container",
-      240,
+      "backend",
+      80,
+      signal,
+    ).catch((e) => {
+      if (e instanceof Cancelled) throw e;
+      throw new Error(`${e.message}\n${serverLog().slice(-2000)}`);
+    });
+  }
+  if (faults.stubbornChild) {
+    // Qualification only: a child whose shutdown is held (it ignores SIGTERM), so stopping the stack takes longer than a caller waits.
+    scope.check();
+    const stubborn = owner.spawnOwned(
+      "stubborn",
+      process.execPath,
+      ["-e", 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'],
+      { stdio: "ignore" },
     );
+    scope.defer("stubborn", () => owner.terminate(stubborn));
+  }
 
   // 4. The delaying proxy (it accounts for the stack's sign-in traffic), then the preview server whose backend is the proxy.
-  state.proxy = createProxy({
+  const proxy = createProxy({
     upstream: `http://127.0.0.1:${backendPort}`,
     port: proxyPort,
     controlPort,
     observe: state.admissions.observe,
   });
-  const urls = await state.proxy.start();
-  owner.check();
-  state.handles.preview = owner.spawnOwned(
+  state.proxy = proxy;
+  scope.defer("proxy", () => proxy.stop());
+  const urls = await proxy.start();
+  await at("proxy:started");
+  scope.check();
+  const preview = owner.spawnOwned(
     "preview",
     process.execPath,
     [
@@ -387,8 +527,12 @@ async function prepare(state) {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
-  capture(state.handles.preview);
-  await waitFor(`${origin}/`, "preview");
+  state.handles.preview = preview;
+  scope.defer("preview", () => owner.terminate(preview));
+  capture(preview);
+  await at("preview:spawned");
+  await waitFor(`${origin}/`, "preview", 80, signal);
+  await at("preview:ready");
 
   // The specs' own pacing files (tmpdir()) belong to this stack alone, not to whichever stack last had the same port.
   const specTmp = join(state.tmp, "specs");
@@ -419,6 +563,7 @@ async function prepare(state) {
 }
 
 const newState = (browser, stack, index) => ({
+  id: `${invocation.id}-${index}-${browser}`,
   browser,
   stack,
   index,
@@ -427,8 +572,10 @@ const newState = (browser, stack, index) => ({
   handles: {},
   proxy: null,
   provider: null,
-  extraCleanup: null,
   admissions: createAdmissionRecorder(),
+  scope: createScope(`${browser}${stack.suffix || ""}`, {
+    settleMs: faults.spec.settle_ms ?? 90_000,
+  }),
   cleanup: null,
 });
 
@@ -436,12 +583,15 @@ const newState = (browser, stack, index) => ({
 async function launch(browser, stack, index, expected) {
   const state = newState(browser, stack, index);
   current = state;
+  journal({ type: "stack", browser, index, stack: stack.suffix || "base" });
   const label = `${browser}${stack.suffix}`;
   const reportPath = join(runDir, `results-${label}.json`);
   let record;
   try {
-    const env = await prepare(state);
-    owner.check();
+    const env = await state.scope.run("prepare", (signal) =>
+      prepare(state, signal),
+    );
+    state.scope.check();
     if (existsSync(reportPath))
       throw new Error(`refusing to reuse an existing report: ${reportPath}`);
     const launchedAt = Date.now();
@@ -462,8 +612,15 @@ async function launch(browser, stack, index, expected) {
       },
     );
     state.handles.playwright = handle;
-    // Playwright's workers and browsers are remembered while they run, so they are still owned if their parent dies first.
+    // Playwright is asked to stop as on Ctrl-C first (it ends its workers and browsers and writes the report of what ran).
+    state.scope.defer("playwright", () =>
+      owner.terminate(handle, undefined, { signal: "SIGINT", ms: 10_000 }),
+    );
+    // Membership is by mark; this only remembers members whose environment `ps` cannot read (WebKit's launcher shell).
     const watch = setInterval(() => owner.snapshot(handle), 2000);
+    await faults
+      .at("playwright:spawned", state.scope.signal)
+      .catch(() => undefined);
     const exit = await handle.closed;
     clearInterval(watch);
     let report = null;
@@ -491,36 +648,47 @@ async function launch(browser, stack, index, expected) {
       expected: expected.length,
     };
   }
-  // A signal: the stack is cancelled, and what it had come to before is kept beside that (a stack that still finished cleanly keeps
-  // its pass; the run stops after it either way).
-  if (
-    signalled &&
-    record.outcome !== "passed" &&
-    record.outcome !== "cancelled"
-  )
-    record = {
-      ...record,
-      outcome: "cancelled",
-      reason: owner.latched,
-      before_cancellation: { outcome: record.outcome, reason: record.reason },
-    };
-  const requests = state.admissions.requests();
-  record = applyBudget(
-    record,
-    audit(requests, { backendStartedAt: state.backendStartedAt }),
-  );
-  writeFileSync(
-    join(runDir, `admissions-${label}.json`),
-    `${JSON.stringify({ summary: record.admissions, backend_started_at: state.backendStartedAt ?? null, requests }, null, 2)}\n`,
-    { flag: "wx" },
-  );
-  record.cleanup = await cleanupStack(state);
+  // A stop (a signal, a lost reaper) keeps what the stack had established: a recorded failure stays a failure.
+  record = withCancellation(record, owner.latched);
+  // Evidence of the stack's sign-in traffic. Its failure is recorded; it never skips the clean-up below.
+  const stackErrors = [];
+  try {
+    const requests = state.admissions.requests();
+    record = applyBudget(
+      record,
+      audit(requests, { backendStartedAt: state.backendStartedAt }),
+    );
+    faults.write("admissions");
+    writeFileSync(
+      join(runDir, `admissions-${label}.json`),
+      `${JSON.stringify({ summary: record.admissions, backend_started_at: state.backendStartedAt ?? null, requests }, null, 2)}\n`,
+      { flag: "wx" },
+    );
+  } catch (error) {
+    stackErrors.push(`admissions: ${String(error?.message ?? error)}`);
+  }
+  try {
+    record.cleanup = await cleanupStack(state);
+  } catch (error) {
+    record.cleanup = { ok: false, errors: [String(error?.stack ?? error)] };
+  }
+  if (stackErrors.length > 0) {
+    record.evidence_errors = stackErrors;
+    evidenceErrors.push(...stackErrors.map((e) => `${label}: ${e}`));
+  }
   if (record.outcome === "passed" && !record.cleanup.ok)
     record = {
       ...record,
       outcome: "cleanup_failed",
-      reason: "the stack's clean-up left something behind",
+      reason: "the stack's clean-up was not verified",
     };
+  if (record.outcome === "passed" && stackErrors.length > 0)
+    record = {
+      ...record,
+      outcome: "evidence_failed",
+      reason: stackErrors.join("; "),
+    };
+  journal({ type: "stack-end", browser, index });
   current = null;
   return record;
 }
@@ -550,9 +718,14 @@ function summarise(final, extra = {}) {
     (r) => r.outcome !== "passed" && r.outcome !== "not_run",
   );
   return {
-    schema: 2,
+    schema: 3,
     layer,
-    invocation: { ...invocation, run_dir: runDir, finished: final },
+    invocation: {
+      ...invocation,
+      run_dir: runDir,
+      owner_token: owner.token,
+      finished: final,
+    },
     selection: planned
       ? {
           mode: planned.mode,
@@ -574,6 +747,11 @@ function summarise(final, extra = {}) {
     outcome: extra.outcome ?? (final ? "pending" : "running"),
     first_failure: failure ? describe(failure) : null,
     signal: signalled,
+    reaper: { pid: reaper?.pid ?? null, lost: reaperLost },
+    faults: faults.active
+      ? { spec: faults.spec, reached: faults.reached }
+      : null,
+    evidence_errors: evidenceErrors,
     stacks: records,
     engines,
     backend: lastBackend,
@@ -583,6 +761,7 @@ function summarise(final, extra = {}) {
 
 function writeSummary(final, extra) {
   const text = `${JSON.stringify(summarise(final, extra), null, 2)}\n`;
+  faults.write("summary");
   writeFileSync(join(runDir, "summary.json"), text);
   if (final)
     try {
@@ -596,12 +775,24 @@ function writeSummary(final, extra) {
 }
 
 let finishing = null;
-/** The one way out: clean up whatever stack is current, write the final summary, exit. The first caller decides the code. */
+/**
+ * The one way out, unconditional: clean up whatever stack is current, account for every planned stack, write the final summary (a
+ * summary that cannot be written is recorded beside it, the clean-up already happened), release the reaper, exit. The first caller
+ * decides the code; a failure, a clean-up that was not verified or an evidence error never exits 0.
+ */
 function finish(code, extra = {}) {
   finishing ??= (async () => {
     if (current) {
       const state = current;
-      const cleaned = await cleanupStack(state);
+      let cleaned;
+      try {
+        cleaned = await cleanupStack(
+          state,
+          owner.latched ?? "the run is finishing",
+        );
+      } catch (error) {
+        cleaned = { ok: false, errors: [String(error?.stack ?? error)] };
+      }
       if (
         !records.some(
           (r) => r.browser === state.browser && r.index === state.index,
@@ -612,20 +803,87 @@ function finish(code, extra = {}) {
           stack: state.stack.suffix || "base",
           index: state.index,
           outcome: "cancelled",
-          reason: owner.latched ?? "interrupted",
+          reason: `stopped: ${owner.latched ?? "interrupted"}`,
           cleanup: cleaned,
         });
     }
+    // Every planned stack has a record, even when the fallback finaliser ends a run whose schedule never got there.
+    if (planned)
+      for (const browser of browsers)
+        for (const [index, { stack }] of planned.stacks.entries())
+          if (
+            !records.some((r) => r.browser === browser && r.index === index)
+          ) {
+            const first = records.find(
+              (r) => r.outcome !== "passed" && r.outcome !== "not_run",
+            );
+            records.push({
+              browser,
+              stack: stack.suffix || "base",
+              index,
+              outcome: "not_run",
+              reason: `not launched: ${first ? describe(first) : (owner.latched ?? "the run ended first")}`,
+            });
+          }
     const cleanupFailed = records.some((r) => r.cleanup && !r.cleanup.ok);
-    writeSummary(true, {
-      outcome: extra.outcome,
-      cleanup_failed: cleanupFailed,
-      ...extra,
-    });
-    process.exit(code === 0 && cleanupFailed ? 1 : code);
+    const outcome =
+      extra.outcome === "plan_error"
+        ? "plan_error"
+        : planned === null && !signalled && !reaperLost
+          ? (extra.outcome ?? "failed")
+          : overall(records, {
+              signalled: signalled ?? reaperLost,
+              planned: browsers.length * (planned?.stacks.length ?? 0),
+            });
+    let summaryWritten = true;
+    if (!serve)
+      try {
+        writeSummary(true, {
+          ...extra,
+          outcome,
+          cleanup_failed: cleanupFailed,
+        });
+      } catch (error) {
+        summaryWritten = false;
+        evidenceErrors.push(`summary: ${String(error?.message ?? error)}`);
+        console.error(
+          `ERROR: the summary could not be written: ${error?.message ?? error}`,
+        );
+        try {
+          writeFileSync(
+            join(runDir, "summary-error.json"),
+            `${JSON.stringify({ error: String(error?.stack ?? error), outcome, cleanup_failed: cleanupFailed, stacks: records }, null, 2)}\n`,
+          );
+        } catch {
+          // nothing more can be written; the exit code still says it
+        }
+      }
+    // Release the reaper last: it has nothing to finish, and waits for nothing more.
+    released = true;
+    try {
+      reaper?.stdin.end(
+        `${JSON.stringify({ type: "released", ok: !cleanupFailed && summaryWritten })}\n`,
+      );
+    } catch {
+      // already gone: recorded as lost
+    }
+    if (reaper?.exitCode === null && reaper.signalCode === null)
+      await Promise.race([
+        new Promise((r) => reaper.once("exit", r)),
+        new Promise((r) => setTimeout(r, 5000)),
+      ]);
+    const failedRun =
+      cleanupFailed ||
+      !summaryWritten ||
+      evidenceErrors.length > 0 ||
+      reaperLost !== null;
+    process.exit(code === 0 && failedRun ? 1 : code);
   })();
   return finishing;
 }
+
+const signalCode = () =>
+  signalled === "SIGINT" ? 130 : signalled ? 143 : null;
 
 function onSignal(signal) {
   if (signalled) {
@@ -633,29 +891,38 @@ function onSignal(signal) {
     return;
   }
   signalled = signal;
-  const code = signal === "SIGINT" ? 130 : 143;
-  owner.stop(`received ${signal}`);
+  const reason = `received ${signal}`;
+  owner.stop(reason);
+  planning?.abort(new Cancelled(reason));
   console.error(`\n${signal}: stopping; no further stack is launched`);
+  // Stop the current stack now (its preparation is stopped and waited for, then Playwright first); the schedule then records it and
+  // stops. Should the main flow not get there (a preparation step that does not look at the stop), finish on our own, bounded.
+  if (current) void cleanupStack(current, reason);
   if (serve) {
-    void (current ? cleanupStack(current) : Promise.resolve()).finally(() =>
-      process.exit(code),
-    );
+    void finish(signalCode());
     return;
   }
-  // Stop the running stack now (Playwright first); the schedule then records it and stops. Should the main flow not get there
-  // (a preparation step that does not look at the latch), finish on our own after a bounded wait.
-  if (current) void cleanupStack(current);
-  setTimeout(() => void finish(code, { outcome: "cancelled" }), 60_000).unref();
+  setTimeout(
+    () => void finish(signalCode(), { fallback_finaliser: true }),
+    faults.fallbackMs,
+  ).unref();
 }
 process.on("SIGINT", () => onSignal("SIGINT"));
 process.on("SIGTERM", () => onSignal("SIGTERM"));
+
+if (!reaper.pid) {
+  console.error("the reaper could not be started: nothing is run");
+  await finish(1, { outcome: "error", error: reaperLost });
+}
 
 if (serve) {
   // `--serve` starts one stack and never returns: nothing is planned or run.
   const state = newState(browsers[0], selection.stacks[0], 0);
   current = state;
   try {
-    const env = await prepare(state);
+    const env = await state.scope.run("prepare", (signal) =>
+      prepare(state, signal),
+    );
     console.error(
       `serving: preview ${env.ATLAS_INTEGRATION_URL}  proxy control ${env.ATLAS_INTEGRATION_CONTROL}  backend ${env.ATLAS_INTEGRATION_BACKEND}`,
     );
@@ -663,21 +930,25 @@ if (serve) {
     await new Promise(() => undefined);
   } catch (error) {
     console.error(String(error?.stack ?? error));
-    await cleanupStack(state);
-    process.exit(signalled === "SIGINT" ? 130 : signalled ? 143 : 1);
+    await finish(signalCode() ?? 1);
   }
 }
 
 try {
-  planned = plan({
+  planning = new AbortController();
+  planned = await plan({
     root,
     browsers,
     selection,
     evidence: join(runDir, "discovery"),
+    exec: owner.exec,
+    signal: planning.signal,
   });
+  planning = null;
 } catch (error) {
   planned = null;
   console.error(String(error?.stack ?? error));
+  if (error instanceof Cancelled) await finish(signalCode() ?? 1);
   await finish(1, { outcome: "plan_error", plan_error: String(error) });
 }
 writeFileSync(
@@ -742,13 +1013,15 @@ const result = await schedule({
     records.push(record);
     if (record.outcome !== "passed" && record.outcome !== "not_run")
       console.error(`\nSTOPPING: ${describe(record)}`);
-    writeSummary(false);
+    try {
+      writeSummary(false);
+    } catch (error) {
+      // A run whose summary cannot be written launches nothing more (its evidence would not say what ran).
+      const reason = `the summary could not be written: ${String(error?.message ?? error)}`;
+      evidenceErrors.push(reason);
+      if (!owner.latched) console.error(`\nSTOPPING: ${reason}`);
+      owner.stop(reason);
+    }
   },
 });
-const outcome = signalled ? "cancelled" : result.passed ? "passed" : "failed";
-await finish(
-  signalled === "SIGINT" ? 130 : signalled ? 143 : result.passed ? 0 : 1,
-  {
-    outcome,
-  },
-);
+await finish(signalCode() ?? (result.passed && !reaperLost ? 0 : 1));

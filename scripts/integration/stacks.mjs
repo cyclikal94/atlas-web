@@ -6,7 +6,7 @@
 // nothing else resets it (not a new page, context, account, worker or `/reset` of the proxy). The full programme is therefore split
 // into stacks whose traffic fits that budget, and each stack names the spec FILES it runs: a case that no stack names (a new spec
 // file, a renamed title outside a stack's grep) fails planning instead of falling silently into a stack whose budget it would exhaust.
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -151,14 +151,45 @@ export function casesOf(report) {
   return out;
 }
 
+/** A plain child process to completion (the default for `discover`; the runner passes its owned, abortable `exec`). */
+const plainExec = (_label, command, args, { env, cwd } = {}) =>
+  new Promise((resolve) => {
+    const child = spawn(command, args, {
+      env,
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
+    child.once("error", (error) =>
+      resolve({ status: null, stdout, stderr: String(error) }),
+    );
+    child.once("close", (status) => resolve({ status, stdout, stderr }));
+  });
+
 /**
  * Playwright's own discovery of a selection (`test --list --reporter=json`): the same projects, title filters and file filters as
  * the run, so the plan uses Playwright's grep semantics rather than an imitation of them. `evidence` receives the browser-evidence
- * allocation that the configuration makes even for a listing.
+ * allocation that the configuration makes even for a listing. `exec` runs the listing (the runner's is owned and ends on a stop).
  */
-export function discover({ root, projects, args, evidence, env = {} }) {
+export async function discover({
+  root,
+  projects,
+  args,
+  evidence,
+  env = {},
+  exec = plainExec,
+  signal,
+}) {
   mkdirSync(evidence, { recursive: true });
-  const listed = spawnSync(
+  const listed = await exec(
+    "discovery",
     process.execPath,
     [
       join(root, "node_modules/@playwright/test/cli.js"),
@@ -171,8 +202,8 @@ export function discover({ root, projects, args, evidence, env = {} }) {
     ],
     {
       cwd: root,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
+      signal,
+      timeoutMs: 300_000,
       env: {
         ...process.env,
         ...env,
@@ -187,7 +218,7 @@ export function discover({ root, projects, args, evidence, env = {} }) {
     report = JSON.parse(listed.stdout);
   } catch {
     throw new Error(
-      `case discovery failed (exit ${listed.status}): ${listed.stderr.slice(-2000)}${listed.stdout.slice(0, 500)}`,
+      `case discovery failed (exit ${listed.status}): ${String(listed.stderr).slice(-2000)}${String(listed.stdout).slice(0, 500)}`,
     );
   }
   // An empty selection is Playwright's "No tests found" error; it is reported by the plan as the stack that selects nothing.
@@ -243,16 +274,27 @@ export function assign({ full, stacks, perStack }) {
 }
 
 /** Plan an invocation: discover the full inventory and every stack's selection, then assign. Nothing is started. */
-export function plan({ root, browsers, selection, evidence }) {
+export async function plan({
+  root,
+  browsers,
+  selection,
+  evidence,
+  exec,
+  signal,
+}) {
   const projects = browsers.map((b) => `integration-${b}`);
-  const perStack = selection.stacks.map((stack, i) =>
-    discover({
-      root,
-      projects,
-      args: stackArgs(stack),
-      evidence: join(evidence, `stack-${i}`),
-    }),
-  );
+  const perStack = [];
+  for (const [i, stack] of selection.stacks.entries())
+    perStack.push(
+      await discover({
+        root,
+        projects,
+        args: stackArgs(stack),
+        evidence: join(evidence, `stack-${i}`),
+        exec,
+        signal,
+      }),
+    );
   if (selection.mode === "narrowed") {
     const cases = perStack[0];
     return {
@@ -264,11 +306,13 @@ export function plan({ root, browsers, selection, evidence }) {
       full: cases,
     };
   }
-  const full = discover({
+  const full = await discover({
     root,
     projects,
     args: [],
     evidence: join(evidence, "full"),
+    exec,
+    signal,
   });
   return {
     mode: selection.mode,

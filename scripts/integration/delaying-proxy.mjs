@@ -40,6 +40,10 @@ export function createProxy({
   };
   const rules = [];
   const held = new Map(); // rule id -> [{ deliver() }]
+  const upstreams = new Set(); // upstream requests not yet closed
+  const timers = new Set(); // pending `delay` deliveries
+  let stopped = false;
+  let starting = null;
   let seq = 0;
 
   const match = (rule, req) => {
@@ -73,6 +77,14 @@ export function createProxy({
     if (rule) entry.rule = rule.id;
     // `buffered`: the whole request body when it was read ahead of time (`buffer_request`); otherwise it is piped through.
     const forward = (buffered) => {
+      if (stopped) {
+        entry.events.push({
+          t: Date.now() - entry.at,
+          event: "discarded_at_stop",
+        });
+        if (!res.destroyed) res.destroy();
+        return;
+      }
       tell({ event: "forwarded", id, method: req.method, path: req.url });
       const upstreamReq = httpRequest(
         {
@@ -121,8 +133,14 @@ export function createProxy({
             };
             if (!rule) return deliver();
             switch (rule.action) {
-              case "delay":
-                return void setTimeout(() => deliver(), rule.ms ?? 1000);
+              case "delay": {
+                const timer = setTimeout(() => {
+                  timers.delete(timer);
+                  deliver();
+                }, rule.ms ?? 1000);
+                timers.add(timer);
+                return;
+              }
               case "hold": {
                 const list = held.get(rule.id) ?? [];
                 list.push({ deliver: () => deliver(), entry });
@@ -185,6 +203,8 @@ export function createProxy({
           });
         },
       );
+      upstreams.add(upstreamReq);
+      upstreamReq.once("close", () => upstreams.delete(upstreamReq));
       upstreamReq.on("error", () => {
         tell({ event: "upstream_error", id });
         entry.events.push({
@@ -295,29 +315,56 @@ export function createProxy({
     })().catch((error) => json(500, { error: String(error) }));
   });
 
+  // Review r6 (H4a): `stop()` joins a `start()` still under way, so no listener can appear after it; once stopped, nothing more is
+  // forwarded upstream (a held request is discarded, not sent), and every upstream request still open is destroyed.
+  const listen = (server, wanted) =>
+    new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(wanted, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+  const close = (server) =>
+    new Promise((resolve) => {
+      if (!server.listening) return resolve();
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
   return {
-    async start() {
-      await new Promise((resolve) => proxy.listen(port, "127.0.0.1", resolve));
-      await new Promise((resolve) =>
-        control.listen(controlPort, "127.0.0.1", resolve),
-      );
-      return {
-        proxyUrl: `http://127.0.0.1:${proxy.address().port}`,
-        controlUrl: `http://127.0.0.1:${control.address().port}`,
-      };
+    start() {
+      starting ??= (async () => {
+        for (const [server, wanted] of [
+          [proxy, port],
+          [control, controlPort],
+        ]) {
+          if (stopped) break;
+          await listen(server, wanted);
+        }
+        if (stopped) {
+          await Promise.all([proxy, control].map(close));
+          throw new Error("the proxy was stopped while it was starting");
+        }
+        return {
+          proxyUrl: `http://127.0.0.1:${proxy.address().port}`,
+          controlUrl: `http://127.0.0.1:${control.address().port}`,
+        };
+      })();
+      return starting;
     },
     async stop() {
+      stopped = true;
+      await starting?.catch(() => undefined);
       for (const list of held.values())
         for (const item of list) (item.discard ?? item.deliver)();
-      await Promise.all(
-        [proxy, control].map(
-          (s) =>
-            new Promise((resolve) => {
-              s.closeAllConnections?.();
-              s.close(resolve);
-            }),
-        ),
-      );
+      held.clear();
+      for (const timer of timers) clearTimeout(timer);
+      for (const upstreamReq of upstreams) upstreamReq.destroy();
+      await Promise.all([proxy, control].map(close));
+      return {
+        ok: !proxy.listening && !control.listening,
+        listening: [proxy, control].filter((s) => s.listening).length,
+      };
     },
     log,
   };

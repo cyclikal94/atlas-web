@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +14,7 @@ import {
   Cancelled,
   createOwner,
   descendants,
+  membersOf,
   processTable,
 } from "./ownership.mjs";
 
@@ -261,4 +268,415 @@ test("a polite signal lets the owned process finish in order; one that ignores i
     ["SIGINT", "SIGTERM"],
   );
   assert.deepEqual(stopped.survivors, []);
+});
+
+// Review r6 H4b and the design assessment's Q5/Q6: membership that does not depend on seeing the parent tree at the right moment.
+
+/** Run `code` as a node script; `file(name)` is a pid file in `dir`. Every pid written there is SIGKILLed when the test ends. */
+function scripted(t, dir) {
+  t.after(() => {
+    for (const name of readdirSync(dir))
+      if (name.endsWith(".pid"))
+        try {
+          process.kill(
+            Number(readFileSync(join(dir, name), "utf8")),
+            "SIGKILL",
+          );
+        } catch {
+          // already gone
+        }
+  });
+  const pidOf = (name) => {
+    try {
+      return Number(readFileSync(join(dir, `${name}.pid`), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  // A leaf that records its pid, optionally ignores SIGTERM, and runs until killed.
+  const leaf = (name, { ignoreTerm = false } = {}) =>
+    `require("node:fs").writeFileSync(${JSON.stringify(join(dir, `${name}.pid`))}, String(process.pid));
+     ${ignoreTerm ? 'process.on("SIGTERM", () => {});' : ""}
+     setInterval(() => {}, 1000);`;
+  return { pidOf, leaf };
+}
+
+test("H4b: a detached child whose parent exits before any look is still owned, and stopped", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-own-"));
+  const { pidOf, leaf } = scripted(t, dir);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const unrelated = sentinel(t);
+  // No periodic look at all (the runner's two-second one is not needed): the parent exits at once after starting its child.
+  const owner = createOwner({ graceMs: 1000 });
+  const parent = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(leaf("orphan"))}], { stdio: "ignore", detached: true }).unref();
+    process.exit(0);`;
+  const handle = owner.spawnOwned(
+    "early-exit",
+    process.execPath,
+    ["-e", parent],
+    { stdio: "ignore" },
+  );
+  await handle.closed;
+  assert.ok(await until(() => pidOf("orphan")), "the child started");
+  const orphan = pidOf("orphan");
+  assert.equal(isLive(handle.pid), false, "the parent is gone before any look");
+  assert.equal(
+    processTable().find((r) => r.pid === orphan).ppid,
+    1,
+    "the child is no longer below the owned process",
+  );
+  const result = await owner.terminate(handle);
+  assert.equal(isLive(orphan), false, "the orphan was stopped");
+  assert.deepEqual(result.survivors, []);
+  assert.equal(result.inventory, "complete");
+  assert.equal(result.ok, true);
+  assert.ok(result.signalled.some((s) => s.pid === orphan));
+  assert.equal(
+    isLive(unrelated.pid),
+    true,
+    "an unrelated process is never a member",
+  );
+});
+
+test("H4b: the grandchild of a double fork (its parent gone before any look) and the child of an orphan are owned", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-own-"));
+  const { pidOf, leaf } = scripted(t, dir);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const owner = createOwner({ graceMs: 1000 });
+  // owned -> middle (starts `daemon` detached, then exits) ; daemon starts `late` after its own parent is gone.
+  const daemon = `const { spawn } = require("node:child_process");
+    setTimeout(() => spawn(process.execPath, ["-e", ${JSON.stringify(leaf("late"))}], { stdio: "ignore" }), 300);
+    ${leaf("daemon")}`;
+  const middle = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(daemon)}], { stdio: "ignore", detached: true }).unref();
+    process.exit(0);`;
+  const top = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(middle)}], { stdio: "ignore", detached: true }).unref();
+    process.exit(0);`;
+  const handle = owner.spawnOwned(
+    "double-fork",
+    process.execPath,
+    ["-e", top],
+    { stdio: "ignore" },
+  );
+  await handle.closed;
+  assert.ok(await until(() => pidOf("daemon") && pidOf("late")));
+  const [d, l] = [pidOf("daemon"), pidOf("late")];
+  assert.equal(processTable().find((r) => r.pid === d).ppid, 1);
+  const result = await owner.terminate(handle);
+  assert.equal(isLive(d), false);
+  assert.equal(isLive(l), false);
+  assert.deepEqual(result.survivors, []);
+  assert.equal(result.ok, true);
+});
+
+test("Q6: a descendant started during shutdown is owned; a member that ignores SIGTERM is frozen and killed", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-own-"));
+  const { pidOf, leaf } = scripted(t, dir);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const unrelated = sentinel(t);
+  const owner = createOwner({ graceMs: 600, killWaitMs: 1000 });
+  // On SIGTERM it starts a detached child (a birth during shutdown) and carries on.
+  const stubborn = `const { spawn } = require("node:child_process");
+    process.on("SIGTERM", () => {
+      spawn(process.execPath, ["-e", ${JSON.stringify(leaf("born", { ignoreTerm: true }))}], { stdio: "ignore", detached: true }).unref();
+    });
+    ${leaf("stubborn")}`;
+  const handle = owner.spawnOwned(
+    "stubborn",
+    process.execPath,
+    ["-e", stubborn],
+    { stdio: "ignore" },
+  );
+  assert.ok(await until(() => pidOf("stubborn")));
+  const result = await owner.terminate(handle);
+  assert.ok(pidOf("born"), "the shutdown birth happened");
+  assert.equal(
+    isLive(pidOf("born")),
+    false,
+    "the process born during shutdown is gone",
+  );
+  assert.equal(isLive(pidOf("stubborn")), false);
+  assert.equal(result.escalated, true);
+  assert.ok(
+    result.frozen.length > 0,
+    "the remaining members were frozen before they were killed",
+  );
+  assert.deepEqual(result.survivors, []);
+  assert.equal(result.ok, true);
+  assert.equal(isLive(unrelated.pid), true);
+});
+
+test("Q6: a pipe inherited by a descendant that outlives its parent completes only when that descendant is gone", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-own-"));
+  const { pidOf, leaf } = scripted(t, dir);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const owner = createOwner({ graceMs: 1000 });
+  const parent = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(leaf("holder"))}], { stdio: "inherit", detached: true }).unref();
+    setTimeout(() => process.exit(0), 200);`;
+  const handle = owner.spawnOwned("pipe", process.execPath, ["-e", parent], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  handle.child.stdout.resume();
+  handle.child.stderr.resume();
+  assert.ok(await until(() => pidOf("holder")));
+  assert.ok(await until(() => !isLive(handle.pid)), "the direct child exited");
+  assert.equal(
+    handle.exit,
+    null,
+    "its pipes are still held open, so it has not closed",
+  );
+  const result = await owner.terminate(handle);
+  assert.equal(isLive(pidOf("holder")), false);
+  assert.equal(result.pipes_closed, true);
+  assert.notEqual(handle.exit, null);
+  assert.equal(result.ok, true);
+});
+
+test("a descendant whose environment shows no mark is adopted while it is below a member, and remembered", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-own-"));
+  const { pidOf, leaf } = scripted(t, dir);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const owner = createOwner({ graceMs: 1000 });
+  const parent = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(leaf("unmarked"))}], { stdio: "ignore", env: {} });
+    ${leaf("parent")}`;
+  const handle = owner.spawnOwned("adopt", process.execPath, ["-e", parent], {
+    stdio: "ignore",
+  });
+  assert.ok(await until(() => pidOf("unmarked") && pidOf("parent")));
+  const row = processTable().find((r) => r.pid === pidOf("unmarked"));
+  assert.deepEqual(row.marks, [], "it carries no mark");
+  const members = owner.members(handle);
+  assert.equal(
+    members.get(pidOf("unmarked"))?.marked,
+    false,
+    "found through the live tree",
+  );
+  assert.equal(members.get(pidOf("parent"))?.marked, true);
+  const result = await owner.terminate(handle);
+  assert.equal(isLive(pidOf("unmarked")), false);
+  assert.equal(result.ok, true);
+});
+
+test("the known limit (docs/session.md): an unmarked process that left the tree before any look is not attributable; holding a pipe, it is still not reported clean", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-own-"));
+  const { pidOf, leaf } = scripted(t, dir);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const owner = createOwner({ graceMs: 300, killWaitMs: 300 });
+  const parent = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(leaf("stripped"))}], { stdio: ["ignore", "inherit", "inherit"], env: {}, detached: true }).unref();
+    process.exit(0);`;
+  const handle = owner.spawnOwned("strip", process.execPath, ["-e", parent], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  handle.child.stdout.resume();
+  handle.child.stderr.resume();
+  assert.ok(await until(() => pidOf("stripped")));
+  assert.ok(await until(() => !isLive(handle.pid)));
+  const result = await owner.terminate(handle);
+  // This is the boundary the runner documents, not a guarantee it gives: the process is still alive (the test's own clean-up
+  // kills it). No process of the integration programme starts this way (revision 7 qualification, real browsers). Because it
+  // holds the owned child's pipes, the handle is not verified: an unattributable holder is never reported as a clean stop.
+  assert.equal(isLive(pidOf("stripped")), true);
+  assert.equal(result.pipes_closed, false);
+  assert.equal(result.ok, false);
+  assert.equal(owner.owned().includes(handle), true);
+});
+
+test("traversal starts only from members whose identity still matches; a reused root pid adopts nothing", () => {
+  const table = [
+    {
+      pid: 100,
+      ppid: 1,
+      zombie: false,
+      started: "Wed Oct 14 01:00:00 2026",
+      marks: [],
+    }, // reused pid: another process now
+    {
+      pid: 101,
+      ppid: 100,
+      zombie: false,
+      started: "Wed Oct 14 01:00:01 2026",
+      marks: [],
+    }, // ITS child, not ours
+    {
+      pid: 200,
+      ppid: 1,
+      zombie: false,
+      started: "Wed Oct 14 00:00:00 2026",
+      marks: ["aaaaaaaaaaaaaaaa=3"],
+    },
+    {
+      pid: 201,
+      ppid: 200,
+      zombie: false,
+      started: "Wed Oct 14 00:00:01 2026",
+      marks: [],
+    },
+    {
+      pid: 202,
+      ppid: 200,
+      zombie: true,
+      started: "Wed Oct 14 00:00:02 2026",
+      marks: [],
+    },
+    {
+      pid: 300,
+      ppid: 1,
+      zombie: false,
+      started: "Wed Oct 14 00:00:00 2026",
+      marks: ["aaaaaaaaaaaaaaaa=4"],
+    },
+  ];
+  const found = membersOf({
+    table,
+    marks: new Set(["aaaaaaaaaaaaaaaa=3"]),
+    known: new Map([[100, "Tue Oct 13 23:00:00 2026"]]), // the root as it was when it was ours
+    never: new Set(),
+  });
+  assert.deepEqual(
+    [...found.keys()].sort(),
+    [200, 201],
+    "the marked member and its live child only",
+  );
+  assert.equal(found.get(201).marked, false);
+});
+
+test("a process table that cannot be read is an unknown inventory, never an empty survivor list, and the handle stays owned", async () => {
+  let broken = false;
+  const owner = createOwner({
+    graceMs: 200,
+    killWaitMs: 200,
+    table: () => {
+      if (broken) throw new Error("ps failed");
+      return processTable();
+    },
+  });
+  const handle = owner.spawnOwned(
+    "job",
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 300)"],
+    { stdio: "ignore" },
+  );
+  broken = true;
+  const result = await owner.terminate(handle);
+  assert.equal(result.inventory, "unknown");
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("\n"), /ps failed/);
+  assert.equal(owner.owned().includes(handle), true, "not forgotten");
+  assert.throws(() => owner.sweep(), /ps failed/);
+  broken = false;
+  await handle.closed;
+});
+
+test("exec: an owned command's output, its input, a time-out and a stop", async () => {
+  const owner = createOwner();
+  const echoed = await owner.exec(
+    "echo",
+    process.execPath,
+    ["-e", "process.stdin.pipe(process.stdout)"],
+    { input: "in\n" },
+  );
+  assert.equal(echoed.status, 0);
+  assert.equal(echoed.stdout, "in\n");
+  assert.equal(echoed.stopped.ok, true);
+  const slow = await owner.exec(
+    "slow",
+    process.execPath,
+    ["-e", "setInterval(() => {}, 1000)"],
+    { timeoutMs: 300 },
+  );
+  assert.equal(slow.timedOut, true);
+  assert.equal(slow.stopped.ok, true);
+  const controller = new AbortController();
+  const pending = owner.exec(
+    "stoppable",
+    process.execPath,
+    ["-e", "setInterval(() => {}, 1000)"],
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(new Cancelled("a signal")), 200);
+  await assert.rejects(
+    pending,
+    (error) => error instanceof Cancelled && error.stopped.ok === true,
+  );
+  // A creation command is not abortable: it completes, so its creation is never left half-reported.
+  const firm = new AbortController();
+  const creating = owner.exec(
+    "create",
+    process.execPath,
+    ["-e", "setTimeout(() => console.log('made'), 300)"],
+    {
+      signal: firm.signal,
+      abortable: false,
+    },
+  );
+  firm.abort(new Cancelled("a signal"));
+  assert.equal((await creating).stdout, "made\n");
+  owner.stop("latched");
+  await assert.rejects(
+    owner.exec("late", process.execPath, ["-e", ""]),
+    Cancelled,
+  );
+  const cleanup = await owner.exec("cleanup", process.execPath, ["-e", ""], {
+    whenStopped: true,
+  });
+  assert.equal(
+    cleanup.status,
+    0,
+    "a clean-up command still runs after the latch",
+  );
+});
+
+test("Q5: an unmarked member that lost its parent is still traversed: a child it starts afterwards is owned", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-own-"));
+  const { pidOf, leaf } = scripted(t, dir);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const owner = createOwner({ graceMs: 1000 });
+  const go = join(dir, "go");
+  // `outer` has no mark (its environment is empty); it starts `inner` (no mark either) only once the owned parent is gone.
+  const outer = `const { spawn } = require("node:child_process");
+    const fs = require("node:fs");
+    fs.writeFileSync(${JSON.stringify(join(dir, "outer.pid"))}, String(process.pid));
+    const wait = setInterval(() => {
+      if (!fs.existsSync(${JSON.stringify(go)})) return;
+      clearInterval(wait);
+      spawn(process.execPath, ["-e", ${JSON.stringify(leaf("inner"))}], { stdio: "ignore", env: {} });
+    }, 20);
+    setInterval(() => {}, 1000);`;
+  const parent = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(outer)}], { stdio: "ignore", env: {} });
+    ${leaf("parent")}`;
+  const handle = owner.spawnOwned(
+    "orphaned-unmarked",
+    process.execPath,
+    ["-e", parent],
+    { stdio: "ignore" },
+  );
+  assert.ok(await until(() => pidOf("outer") && pidOf("parent")));
+  assert.equal(
+    owner.members(handle).get(pidOf("outer"))?.marked,
+    false,
+    "remembered through the live tree",
+  );
+  process.kill(pidOf("parent"), "SIGKILL");
+  assert.ok(
+    await until(
+      () => processTable().find((r) => r.pid === pidOf("outer"))?.ppid === 1,
+    ),
+    "outer is orphaned",
+  );
+  writeFileSync(go, "");
+  assert.ok(await until(() => pidOf("inner")));
+  const result = await owner.terminate(handle);
+  assert.equal(
+    isLive(pidOf("inner")),
+    false,
+    "found from the remembered, orphaned member",
+  );
+  assert.equal(isLive(pidOf("outer")), false);
+  assert.equal(result.ok, true);
 });
