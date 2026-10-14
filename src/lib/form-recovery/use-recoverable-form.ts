@@ -7,6 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { lineageOf, unreadable } from "./control-state";
 import {
   allowOf,
   allResolved,
@@ -27,7 +28,7 @@ import {
   type Values,
   watch,
 } from "./fields";
-import { restoreSnapshot } from "./guard";
+import { restoreValues } from "./guard";
 import {
   forgetHandoff,
   HANDOFF_PREFIX,
@@ -37,6 +38,7 @@ import {
   pageHandoffs,
 } from "./handoff";
 import {
+  type CopyTarget,
   type DiscardResult,
   type FormRecoveryPort,
   type RecoverableFieldSpec,
@@ -242,13 +244,21 @@ export const isHandoff = (copy: RecoverySnapshot): boolean =>
  */
 export const HANDOFF_CLAIM_WAIT_MS = 2_000;
 
-const sameValues = (a: Values, b: Values): boolean => {
-  const keys = Object.keys(a);
-  return (
-    keys.length === Object.keys(b).length &&
-    keys.every((key) => b[key] === a[key])
+/**
+ * Revision 8 (R16, DA-C): whether `copy` is one of the copies a hand-off's lineage names, by its exact key and the capture named (a copy
+ * named by key alone, written before captures had identities, by its key). Only the hand-off this page holds makes its lineage part of the
+ * form's continuation; equal text never does.
+ */
+const inLineage = (
+  lineage: readonly CopyTarget[],
+  copy: RecoverySnapshot,
+): boolean =>
+  lineage.some(
+    (target) =>
+      target.formContext === copy.formContext &&
+      target.tabInstanceId === copy.tabInstanceId &&
+      (target.capture === null || target.capture === copy.capture),
   );
-};
 
 /** A ticket taken while the mount had no session (revision 3, R10): held by the mount until the mount binds a session of its context. */
 interface Provisional {
@@ -493,29 +503,30 @@ export function useRecoverableForm(
         const { handed, gone, left, own } = found;
         // Holding its lock, read just now: the hand-off is this page's to remove (its source, once restored or chosen).
         if (handed) current.claimed = handed.tabInstanceId;
-        // The ordinary copy the previous page left with exactly the hand-off's values (its twin) is not offered: it holds nothing more.
-        const twin = handed
-          ? gone.find(
-              (copy) =>
-                copy.tabInstanceId !== own &&
-                sameValues(copy.values, handed.values),
-            )
-          : undefined;
+        // Revision 8 (R16; design assessment C3, DA-C): the copies the hand-off's page owed the removal of (its own ordinary copy, holding the
+        // same input, and what it had not cleaned up), named EXACTLY in the hand-off by key and capture, are part of the hand-off and are not
+        // offered on their own; a copy it does not name is another branch, offered whatever text it holds, and an abandoned hand-off is
+        // offered whatever another copy holds. Revision 7 took the first copy with EQUAL TEXT for that predecessor and hid any abandoned
+        // hand-off whose text another copy had.
+        const lineage = handed ? lineageOf(handed) : [];
+        // What the session already owes the removal of (a source taken earlier, a clean-up not landed yet) is its continuation too.
+        const owing = [
+          ...lineage,
+          ...(current.persisted.source?.lineage ?? []),
+          ...current.persisted.debts,
+        ];
+        const ownCopy = gone.filter((copy) => copy.tabInstanceId === own);
         // This page's own copy first (it is newer than anything left to it), then the hand-off, then the gone tabs' copies.
         const candidates = [
-          ...gone.filter((copy) => copy.tabInstanceId === own),
+          ...ownCopy,
           ...(handed ? [handed] : []),
-          ...gone.filter((copy) => copy.tabInstanceId !== own && copy !== twin),
+          ...gone.filter(
+            (copy) => copy.tabInstanceId !== own && !inLineage(owing, copy),
+          ),
         ];
-        // A left hand-off holding what another copy offered holds is not offered twice.
         const offered = (shown: RecoverySnapshot | null) => [
           ...candidates.filter((copy) => copy !== shown),
-          ...left.filter(
-            (copy) =>
-              !candidates.some((other) =>
-                sameValues(other.values, copy.values),
-              ),
-          ),
+          ...left.filter((copy) => !inLineage(owing, copy)),
         ];
         if (mode === "offer") {
           offerOwed.current = false;
@@ -544,30 +555,41 @@ export function useRecoverableForm(
             current.order.next === began &&
             !current.registry.frozen();
           const newest = candidates[0];
-          if (newest && form && untouched) {
+          // Revision 8 (R17): a copy holding state this build cannot read is offered as it is, never restored in part.
+          if (newest && !unreadable(newest) && form && untouched) {
             applySnapshot(fields, form, newest);
             const values = valuesOf(current);
+            const capture = newest.capture ?? null;
             if (newest === handed)
-              // The hand-off left to this page, held by it: its source (with its twin) (R13).
+              // The hand-off left to this page, held by it: its source, with the copies its lineage names (R13; revision 8, R16).
               current.persisted = {
                 ...current.persisted,
                 source: {
                   id: newest.tabInstanceId,
                   context: newest.formContext,
                   values,
+                  capture,
+                  lineage,
+                  at: current.order.next,
                 },
-                twin: twin ? { id: twin.tabInstanceId } : null,
               };
             else if (newest.tabInstanceId === own)
               current.persisted = {
                 ...current.persisted,
-                own: { values, op: 0 },
+                own: { values, op: 0, capture },
                 ownAsked: true,
               };
             else
               current.persisted = {
                 ...current.persisted,
-                source: { id: newest.tabInstanceId, context, values },
+                source: {
+                  id: newest.tabInstanceId,
+                  context,
+                  values,
+                  capture,
+                  lineage: [],
+                  at: current.order.next,
+                },
               };
             setView({ restored: newest, alternatives: offered(newest) });
           } else {
@@ -845,22 +867,14 @@ export function useRecoverableForm(
       if (!fields) return null;
       const before = { ...fields.initial };
       if (form) {
-        restoreSnapshot(
-          form,
-          {
-            formContext,
-            tabInstanceId: "",
-            values: before,
-            savedAt: "",
-          },
-          fields.allow,
-        );
+        // Field states (revision 8, R17): a checkbox back to its initial checked state, every selection back.
+        restoreValues(form, before, fields.allow);
         noteInput(fields);
         sync(fields);
       }
       return before;
     });
-  }, [registry, terminal, formContext]);
+  }, [registry, terminal]);
 
   const restoreAlternative = useCallback(
     (tabInstanceId: string): Promise<AlternativeResult> => {
@@ -878,6 +892,8 @@ export function useRecoverableForm(
         current.attached?.token !== shown.token
       )
         return Promise.resolve("refused");
+      // Revision 8 (R17): a copy holding state this build cannot read is never put into the form in part.
+      if (unreadable(chosen)) return Promise.resolve("refused");
       // Pinned NOW (revision 7, C4): the copy is read again from this database, or not at all.
       const reader = targetOf(current);
       if (!reader) return Promise.resolve("unavailable");
@@ -896,19 +912,28 @@ export function useRecoverableForm(
           registry.frozen() ||
           targetOf(current) === null ||
           current.order.next !== began ||
-          current.fields.input !== beganInput
+          current.fields.input !== beganInput ||
+          unreadable(copy)
         )
           return "refused";
         applySnapshot(current.fields, form, copy);
         const values = valuesOf(current);
         // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
+        // Revision 8 (R16): the hand-off left to this page brings the copies its lineage names, as read just now (whether it was restored at
+        // once or chosen later: one rule); any other copy brings none. What the page already owes (`debts`) stays owed.
         current.persisted = {
           ...current.persisted,
           source:
             !handoff || ours
-              ? { id: tabInstanceId, context: copy.formContext, values }
+              ? {
+                  id: tabInstanceId,
+                  context: copy.formContext,
+                  values,
+                  capture: copy.capture ?? null,
+                  lineage: ours ? lineageOf(copy) : [],
+                  at: current.order.next,
+                }
               : null,
-          twin: null,
         };
         const view = current.view;
         setSessionView(current, {
@@ -976,10 +1001,15 @@ export function useRecoverableForm(
         target
           .discard(chosen.formContext, tabInstanceId)
           .catch((): DiscardResult => "failed");
+      // Outstanding work of the session until it settles (revision 8, design assessment C3): an update's checkpoint waits for it.
       const result =
-        (await (current.tab.whileFree
-          ? current.tab.whileFree(tabInstanceId, remove)
-          : remove())) ?? "failed";
+        (await track(
+          current,
+          (current.tab.whileFree
+            ? current.tab.whileFree(tabInstanceId, remove)
+            : remove()
+          ).catch((): DiscardResult => "failed"),
+        )) ?? "failed";
       if (result === "discarded")
         setSessionView(current, {
           ...current.view,

@@ -1,4 +1,5 @@
-import { isSensitiveField, restoreSnapshot } from "./guard";
+import { accessOf, fieldOf, internalOf, isUnsupported } from "./controls";
+import { restoreValues } from "./guard";
 import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
 
 /**
@@ -30,6 +31,11 @@ import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
  *    copy (it is not admitted, or not shown to be checked) and must not be dropped: the form counts as dirty and its saves fail, so an
  *    update reload stops and offers retry or an explicit discard (Q4), until the field shows it again, the form is submitted or discarded.
  *
+ * WHAT A VALUE IS (revision 8, R17). Every value here is a field's whole STATE as `controls.ts` encodes it (the text of a text field,
+ * unchanged; a checkbox's checked state, a radio group's choice, same-named checkboxes, a multiple select's selections), never only the
+ * control's `.value`; a field this build cannot represent reads `UNSUPPORTED`, is never captured, and is an obligation once edited
+ * (`resolved`). Strings: equal states compare equal, and nothing taken (a capture, a ticket) can be changed afterwards.
+ *
  * Memory only: nothing here is written anywhere.
  */
 export type Values = Record<string, string>;
@@ -45,6 +51,8 @@ export interface FieldState {
   ledger: Values;
   /** The admitted fields shown now, each with the element its value is read from. */
   present: Map<string, Element>;
+  /** Revision 8 (R17): the kind of each present field's state (`FieldAccess.kind`): the same element showing another kind is shown anew. */
+  kinds: Map<string, string>;
   /** What each field starts from when the form is shown again (the mount's values; a field first shown later: its default). */
   initial: Values;
   /** The input revision: moved by every edit. */
@@ -64,34 +72,6 @@ export interface FieldState {
    * after it that succeeds covers it. Unknown: owed until shown again, submitted unchanged or discarded.
    */
   shadowedAt: Map<string, number>;
-}
-
-type Control = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-
-/** The admitted, non-sensitive control named `name` in `form`, or null. */
-export function controlOf(form: HTMLFormElement, name: string): Control | null {
-  const element = form.elements.namedItem(name);
-  if (
-    !(
-      element instanceof HTMLInputElement ||
-      element instanceof HTMLTextAreaElement ||
-      element instanceof HTMLSelectElement
-    )
-  )
-    return null;
-  return isSensitiveField(element) ? null : element;
-}
-
-/** The value a control starts from as written (its default). */
-export function defaultOf(control: Control): string {
-  if (control instanceof HTMLSelectElement) {
-    const options = [...control.options];
-    return (
-      (options.find((option) => option.defaultSelected) ?? options[0])?.value ??
-      ""
-    );
-  }
-  return control.defaultValue;
 }
 
 /** An allow-list in its normal form (each name once, in name order): reordering the same fields is not a change. */
@@ -119,6 +99,7 @@ export function openFields(
     form,
     ledger: {},
     present: new Map(),
+    kinds: new Map(),
     initial: {},
     input: 0,
     edited: new Map(),
@@ -131,11 +112,12 @@ export function openFields(
   const element = form();
   if (element)
     for (const { name } of fields.allow) {
-      const control = controlOf(element, name);
-      if (!control) continue;
-      fields.present.set(name, control);
-      fields.ledger[name] = control.value;
-      fields.initial[name] = control.value;
+      const field = accessOf(element, name);
+      if (!field) continue;
+      fields.present.set(name, field.key);
+      fields.kinds.set(name, field.kind);
+      fields.ledger[name] = field.read();
+      fields.initial[name] = field.read();
     }
   return fields;
 }
@@ -155,31 +137,38 @@ export function sync(fields: FieldState): void {
   for (const name of [...fields.present.keys()])
     if (!names.has(name)) fields.present.delete(name);
   for (const name of names) {
-    const control = controlOf(form, name);
-    if (!control) {
+    const field = accessOf(form, name);
+    if (!field) {
       fields.present.delete(name);
       continue;
     }
-    const shown = control.value;
-    if (fields.present.get(name) === control) {
+    const shown = field.read();
+    if (
+      fields.present.get(name) === field.key &&
+      fields.kinds.get(name) === field.kind
+    ) {
       fields.ledger[name] = shown;
       continue;
     }
-    // Shown again, or for the first time.
-    fields.present.set(name, control);
+    // Shown again, or for the first time (revision 8, R17: or the same element showing another kind of state).
+    fields.present.set(name, field.key);
+    fields.kinds.set(name, field.kind);
     if (fields.initial[name] === undefined)
-      fields.initial[name] = defaultOf(control);
+      fields.initial[name] = field.initial();
     const retained = fields.ledger[name];
     if (retained === undefined || retained === shown) {
       fields.ledger[name] = shown;
       continue;
     }
-    if (shown === defaultOf(control) || shown === fields.initial[name]) {
-      // Untouched: the retained value comes back into the field (the same value: not an edit).
-      control.value = retained;
+    // Untouched: the retained value comes back into the field (the same value: not an edit). Revision 8 (R17): unless the field shown now
+    // cannot show it (another kind of control, an option gone): then it stays owed like a value typed over.
+    if (
+      (shown === field.initial() || shown === fields.initial[name]) &&
+      field.write(retained)
+    )
       continue;
-    }
-    // The person typed something else into it: that is the field's value now, and the retained one is still owed.
+    // The person typed something else into it (or it cannot show the retained state): that is the field's value now, and the retained one
+    // is still owed.
     if (!resolved(fields, name, retained)) {
       fields.shadowed[name] = retained;
       fields.shadowedAt.delete(name);
@@ -196,8 +185,9 @@ export function refresh(fields: FieldState): void {
   const form = fields.form();
   if (!form) return;
   for (const [name, element] of fields.present) {
-    const control = controlOf(form, name);
-    if (control === element) fields.ledger[name] = control.value;
+    const field = accessOf(form, name);
+    if (field?.key === element && fields.kinds.get(name) === field.kind)
+      fields.ledger[name] = field.read();
   }
 }
 
@@ -224,6 +214,13 @@ export function resolved(
   name: string,
   value: string,
 ): boolean {
+  // Revision 8 (R17): a field whose state cannot be represented needs nothing only while it has not been edited since it was shown (or since
+  // a terminal act covered it): an edit of it is input no copy can hold.
+  if (isUnsupported(value)) {
+    const edit = lastEdit(fields, name);
+    const cover = fields.covered.get(name);
+    return edit === 0 || (cover !== undefined && edit <= cover.at);
+  }
   if (value === (fields.initial[name] ?? "")) return true;
   const cover = fields.covered.get(name);
   return (
@@ -240,7 +237,9 @@ export function capturable(fields: FieldState): Values {
   const values: Values = {};
   for (const name of fields.present.keys()) {
     const value = fields.ledger[name];
-    if (names.has(name) && value !== undefined) values[name] = value;
+    // Revision 8 (R17): an unsupported state is never captured (it stays the form's: retained, `retainedOf`).
+    if (names.has(name) && value !== undefined && !isUnsupported(value))
+      values[name] = value;
   }
   return values;
 }
@@ -373,17 +372,25 @@ export function applySnapshot(
   snapshot: RecoverySnapshot,
 ): void {
   sync(fields);
-  restoreSnapshot(form, snapshot, fields.allow);
+  const values = internalOf(snapshot);
+  // Revision 8 (R17): a field that cannot show the copy's state (another kind of control now, an option gone) keeps its own; the copy's
+  // state stays owed (`shadowed`), never dropped.
+  const misfits = new Set(restoreValues(form, values, fields.allow));
   const names: string[] = [];
   for (const { name } of fields.allow) {
-    const value = snapshot.values[name];
+    const value = values[name];
     if (value === undefined) continue;
     names.push(name);
-    if (!fields.present.has(name) && controlOf(form, name) === null)
+    if (!fields.present.has(name) && accessOf(form, name) === null)
       fields.ledger[name] = value;
   }
   noteInput(fields, names);
   sync(fields);
+  for (const name of misfits)
+    if (fields.ledger[name] !== values[name]) {
+      fields.shadowed[name] = values[name] as string;
+      fields.shadowedAt.delete(name);
+    }
 }
 
 /**
@@ -447,9 +454,15 @@ export function adopt(
     if (mine === theirs) continue;
     const shown = from.present.get(name);
     if (mine === from.initial[name]) {
-      // Untouched in the new mount: the session's value comes back into it (a field it does not show keeps it, retained).
-      if (shown && element && controlOf(element, name) === shown)
-        (shown as Control).value = theirs;
+      // Untouched in the new mount: the session's value comes back into it (a field it does not show keeps it, retained). Revision 8 (R17):
+      // a field that cannot show it (another kind of control) keeps its own, and the session's value stays owed.
+      const field = shown && element ? accessOf(element, name) : null;
+      if (!field || field.key !== shown || field.write(theirs)) continue;
+      if (!resolved(into, name, theirs)) {
+        into.shadowed[name] = theirs;
+        into.shadowedAt.delete(name);
+      }
+      into.ledger[name] = mine;
       continue;
     }
     // Changed in the new mount without an event: the new text is the field's, an edit after every other; the session's value stays owed.
@@ -469,6 +482,7 @@ export function adopt(
     }
   for (const [name, value] of from.evented) into.evented.set(name, value);
   into.present = new Map(from.present);
+  into.kinds = new Map(from.kinds);
   into.input = translate(from.input);
   for (const [name, at] of edits) into.edited.set(name, at);
   if (unstamped.length > 0) noteInput(into, unstamped);
@@ -501,21 +515,26 @@ export function watch(
       target.name !== ""
         ? target
         : null;
+    // Only an admitted, non-sensitive field's state is ever read (any other field's event is an edit, as before). Revision 8 (R17): the
+    // FIELD's whole state (a checkbox's checked state, every member of a group), never the target's `.value`.
+    const field =
+      control !== null && admitted(fields).has(control.name)
+        ? fieldOf(element, control.name)
+        : null;
     if (control === null) {
       fields.evented.clear();
       noteInput(fields);
-    } else if (
-      // Only an admitted, non-sensitive field's value is ever read (any other field's event is an edit, as before).
-      !admitted(fields).has(control.name) ||
-      isSensitiveField(control)
-    )
+    } else if (field === null || field === "sensitive")
       noteInput(fields, [control.name]);
-    else if (
-      event.type !== "change" ||
-      fields.evented.get(control.name) !== control.value
-    ) {
-      fields.evented.set(control.name, control.value);
-      noteInput(fields, [control.name]);
+    else {
+      const state = field.read();
+      if (
+        event.type !== "change" ||
+        fields.evented.get(control.name) !== state
+      ) {
+        fields.evented.set(control.name, state);
+        noteInput(fields, [control.name]);
+      }
     }
     sync(fields);
     if (event.type === "reset")

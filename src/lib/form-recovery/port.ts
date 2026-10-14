@@ -14,9 +14,60 @@ export interface RecoverableFieldSpec {
 export interface RecoverySnapshot {
   formContext: string;
   tabInstanceId: string;
+  /** The admitted TEXT fields (text inputs, text areas, single selects), as typed: a value is never decoded as anything else. */
   values: Record<string, string>;
   savedAt: string;
+  /**
+   * WEB-14a revision 8 (R17): the admitted fields whose state is not one text (a checkbox's checked state, a radio group's choice, a
+   * group of same-named checkboxes, a multiple select's selections). Version 1: `entries` maps each field name to its `ControlState`; a
+   * field is in `values` or here, never both. The store keeps the record exactly as given (and digests it as content); only the form's
+   * code reads it (`controls.ts`): a version or an entry it cannot read makes the copy UNREADABLE (offered as it is, never restored in
+   * part, never chosen, never taken as a source). Absent: no such field (every copy written before revision 8).
+   */
+  controls?: Versioned;
+  /**
+   * Revision 8 (R16): the identity of THIS capture, written with it in the same transaction (the form session gives a fresh random token per
+   * capture). A copy read back carries the capture its row holds now: what a conditional discard compares. Absent on a copy written before
+   * revision 8, or by a caller that gives none (such a copy is removed by its key only, by the page that restored it).
+   */
+  capture?: string;
+  /**
+   * Revision 8 (R16): on an update hand-off, its LINEAGE: the copies its page owed the removal of when it wrote it (its own ordinary copy,
+   * the same input, and every clean-up it had not finished), version 1: `entries` is a list of `CopyTarget`, each by exact key and capture.
+   * Written by the page that knew them, never inferred by a reader; kept by the store exactly as given. The page that takes the hand-off
+   * over removes them (each only if it still holds that capture) BEFORE the hand-off, so the hand-off stays the durable record of what is
+   * owed until all of it is settled. Absent, or a record the form's code cannot read (`lineageOf`): nothing is known about its predecessors,
+   * and nothing but the hand-off itself is ever removed for it.
+   */
+  lineage?: Versioned;
 }
+
+/** Revision 8: a record the store keeps exactly as it is given (R16 lineage, R17 control state); only the form's code reads its entries. */
+export interface Versioned {
+  version: number;
+  entries: unknown;
+}
+
+/**
+ * Revision 8 (R16): one copy to remove: where it is stored, its tab (or hand-off) identifier, and the capture it must still hold to be removed
+ * (null: a copy written before captures had identities, removable by its exact key only, and only by the page that restored it).
+ */
+export interface CopyTarget {
+  formContext: string;
+  tabInstanceId: string;
+  capture: string | null;
+}
+
+/**
+ * Revision 8 (R17): the state of an admitted field that is not one text, version 1. `checkbox`: one checkbox, checked or not. `radio`: a
+ * radio group (or one radio), the value of the checked one or null when none is. `checkboxes`: same-named checkboxes, the values of the
+ * checked ones in the order of the page. `multiple`: a multiple select, the values of the selected options in option order (none: `[]`).
+ */
+export type ControlState =
+  | { kind: "checkbox"; checked: boolean }
+  | { kind: "radio"; value: string | null }
+  | { kind: "checkboxes"; checked: readonly string[] }
+  | { kind: "multiple"; selected: readonly string[] };
 
 /**
  * `refused` (WEB-09a, decision D-16) means the account is being signed out: nothing was written, and the form stays open. It is
@@ -47,7 +98,17 @@ export interface FormRecoveryPort {
     formContext: string,
     tabInstanceId: string,
   ): Promise<RecoverySnapshot | null>;
-  discard(formContext: string, tabInstanceId: string): Promise<DiscardResult>;
+  /**
+   * Revision 8 (R16): with `capture`, the copy is removed ONLY if it still holds that capture, decided in the same transaction as the removal
+   * (and before anything of the row is changed): `discarded` then means that capture can no longer be restored (it was removed now, or was
+   * already submitted or discarded, or its own page has since written a newer capture there, which is left as it is). Without `capture`,
+   * whatever the row holds is removed (this page's own copy).
+   */
+  discard(
+    formContext: string,
+    tabInstanceId: string,
+    capture?: string,
+  ): Promise<DiscardResult>;
   /**
    * EVERY copy of the form that can still be restored, newest first (WEB-14a; revision 1, R5: complete, however many discarded or submitted
    * rows the form has, so a bound on one read never hides a copy): one per tab that saved one, so a page that returns after an update can

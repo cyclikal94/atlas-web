@@ -35,6 +35,7 @@ export class MemoryRecoveryAdapter implements FormRecoveryPort {
   async save(snapshot: RecoverySnapshot): Promise<SaveResult> {
     if (this.refuseSaves) return "refused";
     if (this.failSaves) return "failed";
+    // Revision 8 (R16): with the identity of its capture, as the caller gave it (the real store writes it with the row).
     this.store.set(
       this.key(snapshot.formContext, snapshot.tabInstanceId),
       structuredClone(snapshot),
@@ -58,10 +59,15 @@ export class MemoryRecoveryAdapter implements FormRecoveryPort {
   async discard(
     formContext: string,
     tabInstanceId: string,
+    capture?: string,
   ): Promise<DiscardResult> {
     if (this.refuseSaves) return "refused";
     if (this.failDiscards) return "failed";
-    this.store.delete(this.key(formContext, tabInstanceId));
+    const key = this.key(formContext, tabInstanceId);
+    // Revision 8 (R16): a conditional discard removes the copy only while it holds that capture; another capture there is left as it is.
+    if (capture !== undefined && this.store.get(key)?.capture !== capture)
+      return "discarded";
+    this.store.delete(key);
     return "discarded";
   }
 

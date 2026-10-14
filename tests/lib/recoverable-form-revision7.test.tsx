@@ -633,7 +633,13 @@ describe("DA-A (Q9): the tab's reference record is never rewritten from an unkno
     expect(a2.value(OTHER)).toBe("SECOND FORM");
   });
 
-  test("two mounts of one form context: only the context's session is referenced (they never replace each other's reference); the update is certified; the next page restores one and offers the other", async () => {
+  // Adapted in revision 8 (review of 13 October 2026, DA-C; design assessment C3): the original (preserved in
+  // `.agtx/evidence/WEB-14a/revision-8/adapted/original/`) expected the second mount offered ONCE, because revision 7 hid an abandoned
+  // hand-off whenever another offered copy held equal text. Equal text is no identity: the second mount's ordinary copy and its unreferenced
+  // hand-off are two copies, and each stays addressable (neither is named by the hand-off this page took over: the ordinary copy now holds
+  // the second mount's capture, not the one the first mount's hand-off owes). Same intent: one reference, certified, ORIGINAL restored, the
+  // other mount's input offered.
+  test("two mounts of one form context: only the context's session is referenced (they never replace each other's reference); the update is certified; the next page restores one and offers the other (adapted, revision 8)", async () => {
     const world = new World();
     const storage = new TabStorage();
     const a = await world.page("A", storage, [FORM, FORM]).mount();
@@ -647,13 +653,17 @@ describe("DA-A (Q9): the tab's reference record is never rewritten from an unkno
     a.leave();
     const a2 = await world.page("A2", storage).mount();
     const shown = a2.title;
-    expect(
-      [
-        shown,
-        ...(a2.handle?.alternatives ?? []).map((c) => c.values.title),
-      ].sort(),
-    ).toEqual(["SECOND MOUNT", ORIGINAL].sort());
     expect(shown).toBe(ORIGINAL);
+    const offered = (a2.handle?.alternatives ?? []).map((c) => [
+      c.formContext === FORM ? "ordinary" : "handoff",
+      c.values.title,
+    ]);
+    expect(offered.sort()).toEqual(
+      [
+        ["handoff", "SECOND MOUNT"],
+        ["ordinary", "SECOND MOUNT"],
+      ].sort(),
+    );
   });
 
   test("a form's reference dropped from the record after its hand-off (another writer): no longer certified; the next preparation writes it again", async () => {

@@ -1,4 +1,6 @@
 import type { RefObject } from "react";
+import { versioned } from "./control-state";
+import { snapshotParts } from "./controls";
 import {
   adopt,
   allResolved,
@@ -16,15 +18,17 @@ import {
   type Values,
   watch,
 } from "./fields";
-import { buildSnapshot } from "./guard";
+import { buildSnapshot, readAllowed } from "./guard";
 import {
   forgetHandoff,
+  HANDOFF_PREFIX,
   type HandoffStore,
   handoffContext,
   referenced,
   rememberHandoff,
 } from "./handoff";
 import type {
+  CopyTarget,
   DiscardResult,
   FormRecoveryPort,
   RecoverableFieldSpec,
@@ -91,29 +95,36 @@ import type { RecoveryTab } from "./tab-identity";
  *    reappears), and a successful submission covers it (no warning or block for the form's own save). An operation already captured keeps
  *    the schema it was captured with.
  *
+ *
+ *  - WHAT A HAND-OFF OWES IS WRITTEN WITH IT, NEVER GUESSED (revision 8; review of 13 October 2026, R16; design assessment C1-C3). Revision 7
+ *    took the ordinary copy that held the hand-off's TEXT for the page's own predecessor (its "twin") and removed it with the hand-off: an
+ *    unrelated tab's copy holding the same text was removed and the real predecessor came back after an explicit discard. Every capture now
+ *    has an identity (`RecoverySnapshot.capture`), and a page's update hand-off carries its LINEAGE: the exact copies (key and capture) its page
+ *    owed the removal of when it wrote it (its own ordinary copy, holding the same input, and every clean-up it had not finished: `debts`).
+ *    The page that takes the hand-off over removes exactly those, each only if it still holds that capture (`discard(.., capture)`, decided in
+ *    one transaction), and the hand-off itself LAST (`removeCopies`), so until every copy it names is settled the hand-off stays the durable
+ *    record of them. A clean-up that does not land stays owed (`debts`): tried again at the next save or terminal act, and written into the
+ *    next hand-off, so a reload never forgets it. Equal text, an equal time or the order of a list confer nothing.
+ *
  * Memory only: nothing here is written anywhere except through the port.
  */
 export type { Values } from "./fields";
 
-/** The values `allow` admits in `form` now (never a sensitive field: that is the save's strict check). */
+/** The values `allow` admits in `form` now (never a sensitive field: that is the save's strict check), as field states (revision 8, R17). */
 export const readValues = (
   form: HTMLFormElement,
   allow: readonly RecoverableFieldSpec[],
-): Values =>
-  buildSnapshot({
-    form,
-    formContext: "",
-    tabInstanceId: "",
-    allow,
-    strict: false,
-  }).values;
+): Values => readAllowed(form, allow, false);
 
 export { normaliseAllow, schemaKey } from "./fields";
 
 /** What this page believes is durable for the form, and what it owes. */
 export interface Persisted {
-  /** This page's own latest durable copy (its values), and the order of the save that wrote it. */
-  own: { values: Values; op: number } | null;
+  /**
+   * This page's own latest durable copy (its values), the order of the save that wrote it, and (revision 8, R16) the identity of that capture
+   * (null: a copy of this page's own written before captures had one, restored after a remount).
+   */
+  own: { values: Values; op: number; capture: string | null } | null;
   /** Whether this page has ever asked to write a copy under its own identifier (so a discard must reach it). */
   ownAsked: boolean;
   /**
@@ -122,14 +133,29 @@ export interface Persisted {
    * may discard it at any moment (its own save, a submission, a discard), and this page would not know. `context` is where it is stored:
    * the form context, or (revision 6, R13) the form's hand-off context for the hand-off this page took over from the page it replaced.
    */
-  source: { id: string; context: string; values: Values } | null;
-  /** Revision 6 (R13): the order of this page's own copy that its update hand-off holds (`handOff`), or null when it has written none. */
+  /**
+   * Revision 8 (R16): `capture` is the capture of the source as it was READ (removed only while it still holds it; null for a copy written
+   * before captures had identities, removed by its key), `lineage` the copies a hand-off source names (removed with it, before it), and `at`
+   * the session's order when it became the source: only a save asked for after that holds what it restored.
+   */
+  source: {
+    id: string;
+    context: string;
+    values: Values;
+    capture: string | null;
+    lineage: readonly CopyTarget[];
+    at: number;
+  } | null;
+  /**
+   * Revision 6 (R13): the order of this page's own copy that its update hand-off holds (`handOff`), or null when it has written none.
+   */
   handoff: { op: number } | null;
   /**
-   * Revision 6 (R13): with a hand-off as `source`, the ordinary copy the page it replaced left too, holding exactly the same values. It is
-   * removed with the source (it holds nothing the form does not), so an update leaves no stale copy behind.
+   * Revision 8 (R16; replaces revision 6's `twin`, which was chosen by equal text): the copies this page owes the removal of because a save
+   * of its own that holds their input has landed (a source, and the copies a hand-off source named), whose removal has not landed yet. Each
+   * is exact (key and capture). Tried again at every save and terminal act, and written into the next update hand-off (`handOff`).
    */
-  twin: { id: string } | null;
+  debts: readonly CopyTarget[];
   /**
    * The order of the newest discard (a submission, "Discard instead", "Discard and reload anyway") that has not landed, or 0: while it is
    * not 0 copies may come back. Only a discard at least as new clears it, so an older discard landing late never clears a newer debt.
@@ -276,17 +302,16 @@ export async function discardAt(
 ): Promise<DiscardResult> {
   const state = session.persisted;
   const context = session.formContext;
-  // Each copy as [where it is stored, its identifier]: this page's own, the one it was restored from, and its own update hand-off (R13).
-  const copies = new Map<string, [string, string]>();
   const own = session.tab.current();
-  if (own !== null && (state.ownAsked || state.own !== null))
-    copies.set(own, [context, own]);
-  if (state.source !== null)
-    copies.set(state.source.id, [state.source.context, state.source.id]);
-  if (state.twin !== null) copies.set(state.twin.id, [context, state.twin.id]);
   const handoff = session.handoffId;
-  if (handoff !== null) copies.set(handoff, [handoffContext(context), handoff]);
-  if (copies.size === 0) {
+  const ownAsked = own !== null && (state.ownAsked || state.own !== null);
+  // Nothing of this page's for the form (no copy of its own, no source, nothing owed, no hand-off of its own): nothing can come back.
+  if (
+    !ownAsked &&
+    state.source === null &&
+    state.debts.length === 0 &&
+    handoff === null
+  ) {
     if (state.owed <= op) session.persisted = { ...state, owed: 0 };
     return "discarded";
   }
@@ -297,35 +322,139 @@ export async function discardAt(
     };
     return "failed";
   }
-  const results = await Promise.all(
-    [...copies.values()].map(([where, id]) =>
-      target
-        .discard(where, id)
-        .catch((): DiscardResult => "failed")
-        .then((result) => ({ id, result })),
-    ),
-  );
+  // Revision 8 (R16): ordinary copies first (this page's own, its source's or what it owes), then the hand-offs they were owed by, then the
+  // hand-offs that carry the rest (the one taken over, this page's own): a carrier is removed only once everything it names is settled.
+  const stages: Removal[][] = [[], [], []];
+  if (own !== null && ownAsked)
+    stages[0]?.push({
+      formContext: context,
+      tabInstanceId: own,
+      capture: null,
+    });
+  for (const owedCopy of [...(state.source?.lineage ?? []), ...state.debts])
+    stages[isHandoffContext(owedCopy.formContext) ? 1 : 0]?.push(owedCopy);
+  if (state.source !== null)
+    stages[isHandoffContext(state.source.context) ? 2 : 0]?.push(
+      sourceTarget(state.source),
+    );
+  if (handoff !== null)
+    stages[2]?.push({
+      formContext: handoffContext(context),
+      tabInstanceId: handoff,
+      capture: null,
+    });
+  const { settled, outcome } = await removeCopies(target, stages);
   const next = { ...session.persisted };
-  let outcome: DiscardResult = "discarded";
-  for (const { id, result } of results) {
-    if (result === "discarded") {
-      if (id === own && next.own !== null && next.own.op < op) next.own = null;
-      if (next.source?.id === id) next.source = null;
-      if (next.twin?.id === id) next.twin = null;
-      // A hand-off removed (this page's own, or the one it took over) leaves no reference behind (R13).
-      if (id === handoff && session.handoffId === handoff) {
-        session.handoffId = null;
-        next.handoff = null;
-      }
-      if (id === handoff || id === state.source?.id)
-        forgetHandoff(session.handoffs, id);
-    } else outcome = outcome === "refused" ? outcome : result;
+  const gone = (copy: { formContext: string; tabInstanceId: string }) =>
+    settled.has(keyOf(copy));
+  if (
+    own !== null &&
+    gone({ formContext: context, tabInstanceId: own }) &&
+    next.own !== null &&
+    next.own.op < op
+  )
+    next.own = null;
+  if (
+    next.source !== null &&
+    gone(sourceTarget(next.source)) &&
+    next.source.lineage.every(gone)
+  )
+    next.source = null;
+  next.debts = next.debts.filter((copy) => !gone(copy));
+  // A hand-off removed (this page's own, or the one it took over) leaves no reference behind (R13).
+  if (
+    handoff !== null &&
+    gone({ formContext: handoffContext(context), tabInstanceId: handoff }) &&
+    session.handoffId === handoff
+  ) {
+    session.handoffId = null;
+    next.handoff = null;
   }
+  if (
+    handoff !== null &&
+    gone({ formContext: handoffContext(context), tabInstanceId: handoff })
+  )
+    forgetHandoff(session.handoffs, handoff);
+  if (state.source !== null && gone(sourceTarget(state.source)))
+    forgetHandoff(session.handoffs, state.source.id);
   if (outcome === "discarded") {
     if (next.owed <= op) next.owed = 0;
   } else next.owed = Math.max(next.owed, op);
   session.persisted = next;
   return outcome;
+}
+
+/** Revision 8 (R16): a copy to remove (`CopyTarget`; capture null: by its key, this page's own copy or one restored before captures). */
+type Removal = CopyTarget;
+
+const isHandoffContext = (context: string): boolean =>
+  context.startsWith(HANDOFF_PREFIX);
+
+const keyOf = (copy: { formContext: string; tabInstanceId: string }): string =>
+  JSON.stringify([copy.formContext, copy.tabInstanceId]);
+
+/** The session's source, as a copy to remove: only while it holds the capture this page restored. */
+const sourceTarget = (source: NonNullable<Persisted["source"]>): Removal => ({
+  formContext: source.context,
+  tabInstanceId: source.id,
+  capture: source.capture,
+});
+
+/** Whether `copies` names the copy `copy` names (the same key and capture). */
+const names = (copies: readonly CopyTarget[], copy: CopyTarget): boolean =>
+  copies.some(
+    (other) => keyOf(other) === keyOf(copy) && other.capture === copy.capture,
+  );
+
+/** `copies` with each copy once (by key and capture), in order. */
+export const distinctCopies = (copies: readonly CopyTarget[]): CopyTarget[] => {
+  const out: CopyTarget[] = [];
+  for (const copy of copies) if (!names(out, copy)) out.push(copy);
+  return out;
+};
+
+/**
+ * Revision 8 (R16): removes the copies of `stages` through `target`, a stage only once every copy of the stages before it is settled (so a
+ * hand-off that names copies is never removed before them). A copy with a capture is removed only while it holds it (`discard(.., capture)`);
+ * `discarded` settles it. Answers the keys settled and `discarded` only when every copy was; else `refused` (signing out) or `failed`.
+ */
+export async function removeCopies(
+  target: FormRecoveryPort,
+  stages: readonly (readonly Removal[])[],
+): Promise<{ settled: Set<string>; outcome: DiscardResult }> {
+  const settled = new Set<string>();
+  let outcome: DiscardResult = "discarded";
+  for (const stage of stages) {
+    // Per copy, what is asked of it: by its key when anything names it with no capture (this page's own authority over it), else each
+    // capture named (a copy is settled once every one of them is); never the same capture twice.
+    const asked = new Map<string, Removal[]>();
+    for (const copy of stage) {
+      const key = keyOf(copy);
+      const known = asked.get(key) ?? [];
+      if (known.some((other) => other.capture === null)) continue;
+      if (copy.capture === null) asked.set(key, [copy]);
+      else if (!names(known, copy)) asked.set(key, [...known, copy]);
+    }
+    const results = await Promise.all(
+      [...asked.entries()].map(async ([key, copies]) => {
+        let result: DiscardResult = "discarded";
+        // One after the other: each capture is compared with what the row holds after the one before.
+        for (const copy of copies) {
+          const one = await (copy.capture === null
+            ? target.discard(copy.formContext, copy.tabInstanceId)
+            : target.discard(copy.formContext, copy.tabInstanceId, copy.capture)
+          ).catch((): DiscardResult => "failed");
+          if (one !== "discarded") result = result === "refused" ? result : one;
+        }
+        return { key, result };
+      }),
+    );
+    for (const { key, result } of results)
+      if (result === "discarded") settled.add(key);
+      else outcome = outcome === "refused" ? outcome : result;
+    if (outcome !== "discarded") return { settled, outcome };
+  }
+  return { settled, outcome };
 }
 
 /** Saves a copy of what the form holds now (or discards its copies when it is back to its clean values). Never throws. */
@@ -349,15 +478,11 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
     return result === "discarded" ? "saved" : result;
   }
   const form = elementOf(session);
-  let captured: RecoverySnapshot;
+  // The capture as field states (revision 8, R17: a checkbox's checked state, every selection), and its identity (R16).
+  let values: Values;
   if (form) {
     try {
-      captured = buildSnapshot({
-        form,
-        formContext: session.formContext,
-        tabInstanceId: "",
-        allow,
-      });
+      values = readAllowed(form, allow, import.meta.env.DEV);
     } catch {
       return "failed";
     }
@@ -365,13 +490,16 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
     // No mount shows the form: what its last mount left (allow-listed, never a sensitive field), unless that mount had one in its
     // allow-list (the strict guard refuses such a capture, as it would have refused it then).
     if (session.left?.sensitive) return "failed";
-    captured = {
-      formContext: session.formContext,
-      tabInstanceId: "",
-      values: { ...now },
-      savedAt: new Date().toISOString(),
-    };
+    values = { ...now };
   }
+  const capture = crypto.randomUUID();
+  const captured: RecoverySnapshot = {
+    formContext: session.formContext,
+    tabInstanceId: "",
+    ...snapshotParts(values),
+    savedAt: new Date().toISOString(),
+    capture,
+  };
   session.persisted = { ...session.persisted, ownAsked: true };
   let id: string;
   try {
@@ -387,35 +515,63 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
   if (result !== "saved") return result;
   const state = session.persisted;
   // Only a save newer than every terminal act and than the copy already known moves the baseline (a late save never regresses it).
-  if (session.order.lastTerminal < op && (state.own?.op ?? -1) < op)
+  if (session.order.lastTerminal < op && (state.own?.op ?? -1) < op) {
+    // Revision 8 (R16): a source restored BEFORE this capture was asked for is held by it now: it (and the copies a hand-off source names)
+    // become owed removals, exact by key and capture, until their removal lands. A source chosen after the capture is not held by it.
+    const source = state.source;
+    const covered = source !== null && source.id !== id && source.at < op;
     session.persisted = {
       ...state,
-      own: { values: captured.values, op },
+      own: { values, op, capture },
+      source: covered ? null : state.source,
+      debts:
+        covered && source !== null
+          ? distinctCopies([
+              ...state.debts,
+              ...source.lineage,
+              sourceTarget(source),
+            ])
+          : state.debts,
       // This page's own copy is newer than every discard that did not land: nothing unwanted can be restored in its place.
       owed: state.source === null && state.owed < op ? 0 : state.owed,
     };
-  const source = session.persisted.source;
-  if (source !== null && source.id !== id) {
-    const dropped = await target
-      .discard(source.context, source.id)
-      .catch((): DiscardResult => "failed");
-    if (dropped === "discarded") forgetHandoff(session.handoffs, source.id);
-    if (dropped === "discarded" && session.persisted.source?.id === source.id)
-      session.persisted = {
-        ...session.persisted,
-        source: null,
-        owed: session.persisted.owed < op ? 0 : session.persisted.owed,
-      };
   }
-  const twin = session.persisted.twin;
-  if (twin !== null && twin.id !== id) {
-    const dropped = await target
-      .discard(session.formContext, twin.id)
-      .catch((): DiscardResult => "failed");
-    if (dropped === "discarded" && session.persisted.twin?.id === twin.id)
-      session.persisted = { ...session.persisted, twin: null };
-  }
+  await settleDebts(session, target, op);
   return result;
+}
+
+/**
+ * Revision 8 (R16): removes the copies this page owes (`debts`; ordinary copies first, a hand-off once every copy before it is settled), each
+ * only while it holds the capture owed. What lands leaves the debts; what does not stays owed. A landed save is never undone by it.
+ */
+async function settleDebts(
+  session: FormSession,
+  target: FormRecoveryPort,
+  op: number,
+): Promise<void> {
+  const debts = session.persisted.debts;
+  if (debts.length === 0) return;
+  const { settled, outcome } = await removeCopies(target, [
+    debts.filter((copy) => !isHandoffContext(copy.formContext)),
+    debts.filter((copy) => isHandoffContext(copy.formContext)),
+  ]);
+  for (const copy of debts)
+    if (settled.has(keyOf(copy)) && isHandoffContext(copy.formContext))
+      forgetHandoff(session.handoffs, copy.tabInstanceId);
+  const left = session.persisted.debts.filter(
+    (copy) => !settled.has(keyOf(copy)),
+  );
+  session.persisted = {
+    ...session.persisted,
+    debts: left,
+    owed:
+      outcome === "discarded" &&
+      left.length === 0 &&
+      session.persisted.source === null &&
+      session.persisted.owed < op
+        ? 0
+        : session.persisted.owed,
+  };
 }
 
 /**
@@ -432,6 +588,8 @@ export const handedOff = (session: FormSession): boolean => {
   // Revision 7 (DA-A): and the tab's record holds its reference NOW (another form's write cannot have dropped it unseen). Only the form
   // context's own session has a reference (one per form and scope); a second mount's session of the same context hands its copy off
   // unreferenced, so the next page offers it (as an abandoned hand-off) instead of the two replacing each other's reference.
+  // Revision 8 (R16): its lineage holds every copy this page owes: the debts grow only when a save of its own lands, which is a newer copy
+  // than any hand-off written before it.
   return (
     id !== null &&
     (session.persisted.handoff?.op ?? -1) >= own.op &&
@@ -449,9 +607,9 @@ const referencing = (session: FormSession): boolean =>
   session.registry.session(session.formContext) === session;
 
 /**
- * Revision 7 (R6): nothing of this page's for the form can come back after a reload: no copy of its own, no copy it was restored from or
- * its twin, no update hand-off of its own, no discard owed, and its newest operation is a terminal act that landed (a save or a hand-off
- * asked for since, landed or not, may have left a copy). Clean is not enough: a save can make the form clean and then its hand-off fail,
+ * Revision 7 (R6): nothing of this page's for the form can come back after a reload: no copy of its own, no copy it was restored from, no
+ * copy it owes the removal of (revision 8, R16), no update hand-off of its own, no discard owed, and its newest operation is a terminal act
+ * that landed (a save or a hand-off asked for since, landed or not, may have left a copy). Clean is not enough: a save can make the form clean and then its hand-off fail,
  * and the copies that save wrote are exactly what "Discard and reload anyway" must remove. A session of another account's database than
  * the one shown cannot be discarded through it (as `handedOff`).
  */
@@ -463,7 +621,7 @@ export const discarded = (session: FormSession): boolean => {
     state.owed === 0 &&
     state.own === null &&
     state.source === null &&
-    state.twin === null &&
+    state.debts.length === 0 &&
     session.handoffId === null &&
     session.order.lastTerminal === session.order.next &&
     !isDirty(session)
@@ -485,6 +643,21 @@ export async function handOff(session: FormSession): Promise<SaveResult> {
   const asked = session.order.next;
   const overtaken = () => session.order.lastTerminal > asked;
   const { values, op: covers } = own;
+  // Revision 8 (R16): what the next page owes, written WITH the hand-off (never guessed by a reader): this page's own ordinary copy (the
+  // same input), by its exact capture, and every removal this page has not finished. Fixed now, with the capture.
+  const ownId = session.tab.current();
+  const lineage = distinctCopies([
+    ...(ownId === null
+      ? []
+      : [
+          {
+            formContext: session.formContext,
+            tabInstanceId: ownId,
+            capture: own.capture,
+          },
+        ]),
+    ...session.persisted.debts,
+  ]);
   session.handoffId ??= crypto.randomUUID();
   const id = session.handoffId;
   session.handoffs.written.add(id);
@@ -494,8 +667,10 @@ export async function handOff(session: FormSession): Promise<SaveResult> {
     .save({
       formContext: handoffContext(session.formContext),
       tabInstanceId: id,
-      values: { ...values },
+      ...snapshotParts(values),
       savedAt: new Date().toISOString(),
+      capture: crypto.randomUUID(),
+      lineage: versioned(lineage),
     })
     .catch((): SaveResult => "failed");
   if (written !== "saved") return written;
@@ -722,7 +897,7 @@ export function openSession(options: OpenSession): FormSession {
       source: null,
       owed: 0,
       handoff: null,
-      twin: null,
+      debts: [],
     },
     handoffs: options.handoffs,
     handoffId: null,

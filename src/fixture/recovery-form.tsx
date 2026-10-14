@@ -39,8 +39,11 @@ import {
  * touching any lock or the worker. TEST INJECTION (revision 7, R13): with `atlas-fixture-fail-handoff-read` set to "1" in the tab's session
  * storage when the form mounts, the form's FIRST read of an update hand-off (through the real port, pinned) is refused as an unreadable store
  * refuses it, and the flag is removed; every other read, and every write, is the real port's. Without the flag the port is not wrapped.
+ * TEST INJECTION (revision 8, R17): with `atlas-fixture-choices` set to "1" in the tab's session storage when the form mounts, the form
+ * also shows and admits a checkbox ("Pinned") and a multiple select ("Tags"), so a spec can carry choices across a real update.
  */
 const HOLD_KEY = "atlas-fixture-hold-form";
+const CHOICES_KEY = "atlas-fixture-choices";
 const FAIL_READ_KEY = "atlas-fixture-fail-handoff-read";
 
 /** The real port, with its first hand-off read refused (TEST INJECTION, above); one wrapper per port, so a pinned port stays the same. */
@@ -50,7 +53,8 @@ function failingFirstHandoffRead(port: FormRecoveryPort): FormRecoveryPort {
   if (known) return known;
   const wrapped: FormRecoveryPort = {
     save: (snapshot) => port.save(snapshot),
-    discard: (formContext, id) => port.discard(formContext, id),
+    discard: (formContext, id, capture) =>
+      port.discard(formContext, id, capture),
     list: (formContext) => port.list(formContext),
     load: (formContext, id) => {
       if (
@@ -96,12 +100,18 @@ type FixtureScope = {
 
 export function FixtureRecoveryForm() {
   const [key, setKey] = useState(0);
-  const [props, setProps] = useState<FixtureProps>(() => ({
-    formContext: FIXTURE_FORM_CONTEXT,
-    allow: ALLOW,
-    shown: ALLOW,
-    unbound: sessionStorage.getItem(HOLD_KEY) === "1",
-  }));
+  const [props, setProps] = useState<FixtureProps>(() => {
+    const fields =
+      sessionStorage.getItem(CHOICES_KEY) === "1"
+        ? [...ALLOW, "pinned", "tags"]
+        : ALLOW;
+    return {
+      formContext: FIXTURE_FORM_CONTEXT,
+      allow: fields,
+      shown: fields,
+      unbound: sessionStorage.getItem(HOLD_KEY) === "1",
+    };
+  });
   useEffect(() => {
     const scope = window as unknown as FixtureScope;
     scope.__atlasRemountForm = () => setKey((n) => n + 1);
@@ -235,6 +245,22 @@ function FixtureRecoveryFormMount({
           <label className="flex flex-col gap-1">
             Notes
             <textarea name="notes" defaultValue="" />
+          </label>
+        ) : null}
+        {shown.includes("pinned") ? (
+          <label className="flex items-center gap-2">
+            <input name="pinned" type="checkbox" value="yes" />
+            Pinned
+          </label>
+        ) : null}
+        {shown.includes("tags") ? (
+          <label className="flex flex-col gap-1">
+            Tags
+            <select name="tags" multiple defaultValue={["home"]}>
+              <option value="home">Home</option>
+              <option value="work">Work</option>
+              <option value="later">Later</option>
+            </select>
           </label>
         ) : null}
         <label className="flex flex-col gap-1">

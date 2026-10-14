@@ -15609,10 +15609,11 @@ export const UNIT = [
     // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
     // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     // Re-anchored in revision 6 (R13: `discardAt` keys each copy by where it is stored); the defect is unchanged.
+    // Re-anchored in revision 8 (R16: `discardAt` stages exact removals); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "  if (own !== null && (state.ownAsked || state.own !== null))\n    copies.set(own, [context, own]);\n",
+        "  if (own !== null && ownAsked)\n    stages[0]?.push({\n      formContext: context,\n      tabInstanceId: own,\n      capture: null,\n    });\n",
         "",
       ),
   },
@@ -15759,11 +15760,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /whose discard fails/,
     // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 8 (R16: the outcome is combined in `removeCopies`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '    } else outcome = outcome === "refused" ? outcome : result;',
-        "    }",
+        '      if (result === "discarded") settled.add(key);\n      else outcome = outcome === "refused" ? outcome : result;\n',
+        '      if (result === "discarded") settled.add(key);\n',
       ),
   },
   {
@@ -15979,11 +15981,12 @@ export const UNIT = [
     expect: /leaves its input \(memory only\)/,
     // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
     // Re-anchored in revision 4 (adopt no longer puts the session's value into the new mount's untouched field); the defect is unchanged.
+    // Re-anchored in revision 8 (R17: a field is written through its control-state access); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "        (shown as Control).value = theirs;\n",
-        "        void theirs;\n",
+        "      if (!field || field.key !== shown || field.write(theirs)) continue;",
+        "      if (!field || field.key !== shown || true) continue;",
       ),
   },
   {
@@ -16706,10 +16709,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /changed away and back to the sent text after the send/,
     // Re-anchored in revision 4 (the field state's watcher) and revision 5 (the watcher's three edit branches); the defect is unchanged.
+    // Re-anchored in revision 8 (R17: the watcher reads the field's whole state); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    if (control === null) {\n      fields.evented.clear();\n      noteInput(fields);\n    } else if (\n      // Only an admitted, non-sensitive field's value is ever read (any other field's event is an edit, as before).\n      !admitted(fields).has(control.name) ||\n      isSensitiveField(control)\n    )\n      noteInput(fields, [control.name]);\n    else if (\n      event.type !== \"change\" ||\n      fields.evented.get(control.name) !== control.value\n    ) {\n      fields.evented.set(control.name, control.value);\n      noteInput(fields, [control.name]);\n    }\n",
+        '    if (control === null) {\n      fields.evented.clear();\n      noteInput(fields);\n    } else if (field === null || field === "sensitive")\n      noteInput(fields, [control.name]);\n    else {\n      const state = field.read();\n      if (\n        event.type !== "change" ||\n        fields.evented.get(control.name) !== state\n      ) {\n        fields.evented.set(control.name, state);\n        noteInput(fields, [control.name]);\n      }\n    }\n',
         "",
       ),
   },
@@ -16811,11 +16815,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
       /a conditional field hidden\)|re-admitted while still absent|hidden by a child that owns the switch/,
+    // Re-anchored in revision 8 (R17: a field is found through its control-state access); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    if (!control) {\n      fields.present.delete(name);\n      continue;\n    }",
-        "    if (!control) {\n      fields.present.delete(name);\n      delete fields.ledger[name];\n      continue;\n    }",
+        "    if (!field) {\n      fields.present.delete(name);\n      continue;\n    }",
+        "    if (!field) {\n      fields.present.delete(name);\n      delete fields.ledger[name];\n      continue;\n    }",
       ),
   },
   {
@@ -18360,14 +18365,21 @@ export const UNIT = [
     title:
       "WEB-14a revision 5, R13 (assessment: older clean-up clears newer state): a late clean-up of the old restored copy forgets the copy chosen since",
     file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    tests: [
+      "tests/lib/recoverable-form-provenance.test.tsx",
+      "tests/lib/recoverable-form-lineage.test.tsx",
+    ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an older clean-up held across choosing another copy/,
+    // Revision 8: the clean-up now acts on exact debts, never on the current source, so the original case cannot reach the defect; the
+    // same rule (a landed save owes only a source chosen before it was asked for) is caught by the revision-8 case.
+    expect:
+      /an older clean-up held across choosing another copy|a save asked BEFORE another copy is chosen/,
+    // Re-anchored in revision 8 (R16: a landed save holds only a source restored before it was asked for); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '    if (dropped === "discarded" && session.persisted.source?.id === source.id)\n',
-        '    if (dropped === "discarded")\n',
+        "    const covered = source !== null && source.id !== id && source.at < op;",
+        "    const covered = source !== null && source.id !== id;",
       ),
   },
   {
@@ -18378,11 +18390,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /focus leaves the field AFTER the submission/,
+    // Re-anchored in revision 8 (R17: the change rule compares the field's whole state); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '      event.type !== "change" ||\n      fields.evented.get(control.name) !== control.value\n',
-        "      true\n",
+        '        event.type !== "change" ||\n        fields.evented.get(control.name) !== state\n',
+        "        true\n",
       ),
   },
   {
@@ -18403,11 +18416,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /a sensitive or not admitted field's value is never kept/,
+    // Re-anchored in revision 8 (R17: a sensitive or not admitted field has no state access); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      !admitted(fields).has(control.name) ||\n      isSensitiveField(control)\n",
-        "      false\n",
+        '    } else if (field === null || field === "sensitive")\n      noteInput(fields, [control.name]);\n    else {\n      const state = field.read();',
+        '    } else if (false)\n      noteInput(fields, [control.name]);\n    else {\n      const state =\n        field === null || field === "sensitive" ? control.value : field.read();',
       ),
   },
   {
@@ -18573,11 +18587,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /'Discard this copy' is refused/,
+    // Re-anchored in revision 8 (R16/C3: the alternative discard is tracked); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '        (await (current.tab.whileFree\n          ? current.tab.whileFree(tabInstanceId, remove)\n          : remove())) ?? "failed";',
-        '        (await remove()) ?? "failed";',
+        '          (current.tab.whileFree\n            ? current.tab.whileFree(tabInstanceId, remove)\n            : remove()\n          ).catch((): DiscardResult => "failed"),',
+        '          remove().catch((): DiscardResult => "failed"),',
       ),
   },
   {
@@ -18588,10 +18603,11 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /A's own submission after an abandoned reload/,
+    // Re-anchored in revision 8 (R16: `discardAt` stages exact removals); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "  if (handoff !== null) copies.set(handoff, [handoffContext(context), handoff]);\n",
+        "  if (handoff !== null)\n    stages[2]?.push({\n      formContext: handoffContext(context),\n      tabInstanceId: handoff,\n      capture: null,\n    });\n",
         "",
       ),
   },
@@ -18665,12 +18681,8 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /control: A updates; no other tab before A2 reads/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const twin = session.persisted.twin;\n",
-        "  const twin = null as typeof session.persisted.twin;\n",
-      ),
+    // Re-anchored in revision 8 (R16: the predecessor is named by the hand-off's lineage, never by equal text; a landed save owes it); the defect is unchanged.
+    patch: (t) => sub(t, "              ...source.lineage,\n", ""),
   },
   {
     id: "MU-1854",
@@ -18680,11 +18692,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /C saves different input before A2 reads/,
+    // Re-anchored in revision 8 (R16: a source is removed as an exact target); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      .discard(source.context, source.id)",
-        "      .discard(session.formContext, source.id)",
+        "  formContext: source.context,\n  tabInstanceId: source.id,",
+        '  formContext: source.context.replace(HANDOFF_PREFIX, ""),\n  tabInstanceId: source.id,',
       ),
   },
   {
@@ -18785,10 +18798,11 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /own copy was saved \(clean\)|two forms and a kept form/,
+    // Re-anchored in revision 8 (R16: the twin is replaced by exact debts); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    state.owed === 0 &&\n    state.own === null &&\n    state.source === null &&\n    state.twin === null &&\n    session.handoffId === null &&\n    session.order.lastTerminal === session.order.next &&\n    !isDirty(session)",
+        "    state.owed === 0 &&\n    state.own === null &&\n    state.source === null &&\n    state.debts.length === 0 &&\n    session.handoffId === null &&\n    session.order.lastTerminal === session.order.next &&\n    !isDirty(session)",
         "    !isDirty(session)",
       ),
   },
@@ -19070,11 +19084,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /the form changed while the choice read the copy/,
+    // Re-anchored in revision 8 (R17: an unreadable copy is refused in the same check); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "          current.order.next !== began ||\n          current.fields.input !== beganInput\n",
-        "          current.order.next !== began\n",
+        "          current.order.next !== began ||\n          current.fields.input !== beganInput ||\n",
+        "          current.order.next !== began ||\n",
       ),
   },
   {
@@ -19132,6 +19147,375 @@ export const UNIT = [
         t,
         "    referencing(session) &&\n    !rememberHandoff(session.handoffs, {",
         "    !rememberHandoff(session.handoffs, {",
+      ),
+  },
+  {
+    id: "MU-1884",
+    title:
+      "WEB-14a revision 8 (R16): the update hand-off is written with no lineage (its predecessor is named by nothing)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /removes A's copy and the hand-off/,
+    patch: (t) =>
+      sub(
+        t,
+        "      capture: crypto.randomUUID(),\n      lineage: versioned(lineage),\n",
+        "      capture: crypto.randomUUID(),\n      lineage: versioned([]),\n",
+      ),
+  },
+  {
+    id: "MU-1885",
+    title:
+      "WEB-14a revision 8 (R16): the hand-off's predecessor is guessed again: the first gone copy with EQUAL TEXT (revision 7)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT \(equal text\)|REQUIREMENT: (B saved|every copy|three more|the page's own save)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const lineage = handed ? lineageOf(handed) : [];\n",
+        "        const twin = handed\n          ? gone.find(\n              (copy) =>\n                copy.tabInstanceId !== own &&\n                JSON.stringify(copy.values) === JSON.stringify(handed.values),\n            )\n          : undefined;\n        const lineage: CopyTarget[] = twin\n          ? [{ formContext: twin.formContext, tabInstanceId: twin.tabInstanceId, capture: twin.capture ?? null }]\n          : [];\n",
+      ),
+  },
+  {
+    id: "MU-1886",
+    title:
+      "WEB-14a revision 8 (R16): the copies the restored hand-off names are offered on their own",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /is part of it \(not offered on its own\)|Nothing the chain owes|the hand-off is offered \(not A's copy/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const owing = [\n          ...lineage,\n",
+        "        const owing = [\n",
+      ),
+  },
+  {
+    id: "MU-1887",
+    title:
+      "WEB-14a revision 8 (R16, Q2): the hand-off left to this page, chosen later, brings no lineage",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /choosing it then discarding removes|switching to B's copy and back/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  lineage: ours ? lineageOf(copy) : [],",
+        "                  lineage: [],",
+      ),
+  },
+  {
+    id: "MU-1888",
+    title:
+      "WEB-14a revision 8 (R16, Q3): a copy is removed whatever capture it holds now",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /A's copy holds a newer capture of A's/,
+    patch: (t) =>
+      sub(
+        t,
+        "            : target.discard(copy.formContext, copy.tabInstanceId, copy.capture)",
+        "            : target.discard(copy.formContext, copy.tabInstanceId)",
+      ),
+  },
+  {
+    id: "MU-1889",
+    title:
+      "WEB-14a revision 8 (R16, Q4): a hand-off is removed although a copy it names was not (its record of what is owed is lost)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the hand-off is KEPT|whose answer was lost/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (outcome !== "discarded") return { settled, outcome };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1890",
+    title:
+      "WEB-14a revision 8 (R16, Q4): the next update's hand-off does not carry what is still owed",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /writes what is owed into its hand-off/,
+    patch: (t) => sub(t, "    ...session.persisted.debts,\n  ]);", "  ]);"),
+  },
+  {
+    id: "MU-1891",
+    title:
+      "WEB-14a revision 8 (C3): an explicit alternative discard is not outstanding work (an update's checkpoint does not wait for it)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /checkpoint waits for a hand-off discard in progress/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (await track(\n          current,\n",
+        "        (await ((_session: unknown, work: Promise<DiscardResult>) => work)(\n          current,\n",
+      ),
+  },
+  {
+    id: "MU-1892",
+    title:
+      "WEB-14a revision 8 (R16, Q5/DA-C): an abandoned hand-off is hidden when another offered copy holds equal text (revision 7)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT \(equal text\): A updates and never returns/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ...left.filter((copy) => !inLineage(owing, copy)),",
+        "          ...left.filter(\n            (copy) =>\n              !inLineage(owing, copy) &&\n              !candidates.some(\n                (other) =>\n                  JSON.stringify(other.values) === JSON.stringify(copy.values),\n              ),\n          ),",
+      ),
+  },
+  {
+    id: "MU-1893",
+    title:
+      "WEB-14a revision 8 (R16, C2): the conditional removal does not compare the capture",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /holds another capture|holds other content under another capture/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (stored.meta?.capture !== input.expect)",
+        "      if (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-1894",
+    title:
+      "WEB-14a revision 8 (R16, C2): the conditional removal claims the row's writer (moves its order record) before it compares",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no claim of its writer first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (expected !== undefined)\n        return serialised(id, async (): Promise<DiscardResult> => {",
+        "      if (expected !== undefined) {\n        begin(service, formContext, tabInstanceId);\n      }\n      if (expected !== undefined)\n        return serialised(id, async (): Promise<DiscardResult> => {",
+      ),
+  },
+  {
+    id: "MU-1895",
+    title:
+      "WEB-14a revision 8 (R16, Q16): the same content saved again keeps the old capture's identity (a later equal capture is taken for the old one)",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the order record AND the identity move|moves with the same content/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  meta: incoming.meta,",
+        "                  meta: stored.meta,",
+      ),
+  },
+  {
+    id: "MU-1896",
+    title:
+      "WEB-14a revision 8 (R17, Q16): control state is not content (a checked box is the same content as an unchecked one)",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is NOT the same content/,
+    patch: (t) =>
+      sub(
+        t,
+        "  meta?.controls ? { values, controls: meta.controls } : values;",
+        "  values;",
+      ),
+  },
+  {
+    id: "MU-1897",
+    title:
+      "WEB-14a revision 8 (R17, C5): control state this build cannot read is read as no control state",
+    file: "src/lib/form-recovery/control-state.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /makes the copy unreadable/,
+    patch: (t) =>
+      sub(
+        t,
+        "    Object.values(entries).every(isControlState)\n    ? (entries as Record<string, ControlState>)\n    : null;",
+        "    Object.values(entries).every(isControlState)\n    ? (entries as Record<string, ControlState>)\n    : undefined;",
+      ),
+  },
+  {
+    id: "MU-1898",
+    title:
+      "WEB-14a revision 8 (R17): a checkbox is read as its `.value` (revision 7)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT: a checkbox checked/,
+    patch: (t) =>
+      sub(
+        t,
+        '    read: () => encodeState({ kind: "checkbox", checked: box.checked }),',
+        "    read: () => encodeText(box.value),",
+      ),
+  },
+  {
+    id: "MU-1899",
+    title:
+      "WEB-14a revision 8 (R17): a multiple select is read as its `.value` (revision 7)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT: a multiple select/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (first instanceof HTMLSelectElement && first.multiple)\n      return multipleField(first);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1900",
+    title:
+      "WEB-14a revision 8 (R17): a checkbox's state is captured but never shown again (restore omitted)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT: a checkbox checked/,
+    patch: (t) => sub(t, "      box.checked = checked;", "      void checked;"),
+  },
+  {
+    id: "MU-1901",
+    title:
+      "WEB-14a revision 8 (R17): a group's sensitivity is judged by its first member only",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /group with a sensitive member/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (members.some((member) => isSensitiveField(member))) return "sensitive";',
+        '  if (isSensitiveField(members[0] as Element)) return "sensitive";',
+      ),
+  },
+  {
+    id: "MU-1902",
+    title:
+      "WEB-14a revision 8 (R17, C5): a stored text that looks like a state is decoded as one",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /looks like a control state stays literal/,
+    patch: (t) =>
+      sub(
+        t,
+        "    values[name] = encodeText(text);",
+        "    values[name] = text;",
+      ),
+  },
+  {
+    id: "MU-1903",
+    title:
+      "WEB-14a revision 8 (R17, C5): an unsupported state is captured as if it were saved (a silent clean reload)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot represent \(a file input\)|two text inputs of one name/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (names.has(name) && value !== undefined && !isUnsupported(value))",
+        "    if (names.has(name) && value !== undefined)",
+      ),
+  },
+  {
+    id: "MU-1904",
+    title:
+      "WEB-14a revision 8 (R17, C5): an edited unsupported field needs nothing",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot represent \(a file input\)|two text inputs of one name/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (isUnsupported(value)) {\n    const edit = lastEdit(fields, name);\n    const cover = fields.covered.get(name);\n    return edit === 0 || (cover !== undefined && edit <= cover.at);\n  }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1905",
+    title:
+      "WEB-14a revision 8 (R17, Q7): a copy's state that does not fit the field is dropped, not owed",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no longer fits the field/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const name of misfits)\n    if (fields.ledger[name] !== values[name]) {",
+        "  for (const name of misfits)\n    if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-1906",
+    title:
+      "WEB-14a revision 8 (R17, Q7): a retained state the field shown again cannot show is dropped, not owed",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /shown by another kind of control|shown as a checkbox/,
+    patch: (t) =>
+      sub(
+        t,
+        "      field.write(retained)\n    )",
+        "      (field.write(retained) || true)\n    )",
+      ),
+  },
+  {
+    id: "MU-1907",
+    title:
+      "WEB-14a revision 8 (R17, Q7): the same element showing another kind of state is not shown anew",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /shown as a checkbox/,
+    patch: (t) =>
+      sub(
+        t,
+        "      fields.present.get(name) === field.key &&\n      fields.kinds.get(name) === field.kind\n",
+        "      fields.present.get(name) === field.key\n",
+      ),
+  },
+  {
+    id: "MU-1908",
+    title:
+      "WEB-14a revision 8 (R17, C5): a copy holding state this build cannot read is restored in part",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /holding state this build cannot read/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (newest && !unreadable(newest) && form && untouched) {",
+        "          if (newest && form && untouched) {",
       ),
   },
 ];

@@ -15,6 +15,7 @@ import {
 } from "../../src/lib/form-recovery/handoff";
 import { MemoryRecoveryAdapter } from "../../src/lib/form-recovery/memory-adapter";
 import type {
+  DiscardResult,
   FormRecoveryPort,
   RecoverableFieldSpec,
   RecoverySnapshot,
@@ -142,11 +143,33 @@ export class TabStorage {
   }
 }
 
+/** The memory store, recording every discard asked of it (revision 8, R16: which copy, and the capture it was conditional on). */
+export class RecordingStore extends MemoryRecoveryAdapter {
+  readonly discards: Array<{
+    formContext: string;
+    tabInstanceId: string;
+    capture: string | undefined;
+  }> = [];
+  /** Discards of the copies it answers true for fail (the copy stays): one clean-up failing while the others land. */
+  failDiscardOf: (formContext: string, tabInstanceId: string) => boolean = () =>
+    false;
+  override discard(
+    formContext: string,
+    tabInstanceId: string,
+    capture?: string,
+  ): Promise<DiscardResult> {
+    this.discards.push({ formContext, tabInstanceId, capture });
+    if (this.failDiscardOf(formContext, tabInstanceId))
+      return Promise.resolve("failed");
+    return super.discard(formContext, tabInstanceId, capture);
+  }
+}
+
 export class World {
   /** Pages whose ports pin to an account database (`ScopedSpyPort`). */
   scoped = false;
   readonly locks = new Locks();
-  readonly store = new MemoryRecoveryAdapter();
+  readonly store = new RecordingStore();
   private pages = 0;
   page(name: string, storage = new TabStorage(), forms = [FORM]): Page {
     this.pages += 1;
@@ -198,8 +221,11 @@ export class SpyPort implements FormRecoveryPort {
   save(snapshot: RecoverySnapshot): Promise<SaveResult> {
     return this.store.save(snapshot);
   }
-  discard(formContext: string, id: string) {
-    return this.store.discard(formContext, id);
+  discard(formContext: string, id: string, capture?: string) {
+    // Revision 8 (R16): a conditional discard reaches the store as asked.
+    return capture === undefined
+      ? this.store.discard(formContext, id)
+      : this.store.discard(formContext, id, capture);
   }
   async load(formContext: string, id: string) {
     if (formContext.startsWith("atlas-update-handoff:")) {

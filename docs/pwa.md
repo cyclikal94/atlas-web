@@ -80,8 +80,17 @@ takes focus, is announced once, and NEVER reloads on its own:
   hand-off identifier only, never a value). The checkpoint above also requires every form with a copy (a clean one with a copy, and a kept
   session no mount shows, included) to have handed off its current copy; a hand-off or reference that cannot be written is a failed save.
   The next page of the tab takes the hand-off's lock FIRST, then reads it (revision 7, R15: nothing read before the lock is shown), restores
-  it (never submitting it), and removes it (with the old page's identical ordinary copy) once its own copy is saved, or at its own
-  submission or discard. Other tabs never see a hand-off a live page holds and can never remove one by their own saves, submissions or
+  it (never submitting it), and removes it once its own copy is saved, or at its own submission or discard. **Revision 8 (R16): what a
+  hand-off owes is written with it, never guessed.** Every capture has an identity (`RecoverySnapshot.capture`, written with the row), and
+  the hand-off carries its LINEAGE: the exact copies (key and capture) its page owed the removal of (its own ordinary copy, holding the same
+  input, and every clean-up it had not finished). The next page removes exactly those, each only while it still holds that capture (a
+  conditional W9 removal decided in one transaction, `saveFormRecovery` with `expect`), and the hand-off LAST, so until everything it names is
+  settled the hand-off stays the durable record of it; a removal that does not land stays owed (`debts`: tried again at the next save or
+  terminal act, written into the next hand-off, and an explicit discard answers `failed` meanwhile). Revision 7 took the first gone copy
+  holding equal TEXT for that predecessor: an unrelated tab's equal copy was removed and the real predecessor came back after an explicit
+  discard. Equal text, equal times and list order confer nothing; every other copy (an equal one included, and an abandoned hand-off whatever
+  another copy holds) stays offered by its own identity. A hand-off written before revision 8 names nothing: only it is removed for it, and
+  its predecessor stays an ordinary copy, offered. Other tabs never see a hand-off a live page holds and can never remove one by their own saves, submissions or
   discards. A duplicated or opener-copied tab carrying the same reference that cannot take the lock within `HANDOFF_CLAIM_WAIT_MS` (2 s:
   the page holding it lives) neither reads nor shows the hand-off: it falls back to ordinary selection (the owner's decision; revision 6
   showed the hand-off's input there too). A hand-off found resolved already (submitted or discarded) also falls back, and its stale
@@ -108,8 +117,8 @@ takes focus, is announced once, and NEVER reloads on its own:
 - **"Discard and reload anyway" discards (revision 1, R6; revision 7, R6).** It discards the copies of every form of the act, not only the
   dirty ones: a save that failed part of the way (the form's own copy saved, then its hand-off or reference not written) leaves the form
   clean with copies that would come back. The coordinator keeps the act's forms (`participants`, also a form that left the registry since)
-  and every form of the page with a copy, calls each form's own discard (its own copy, the copy it was restored from with its twin, its own
-  hand-off and reference; never another page's), and reloads only when each says nothing of it can come back (`discarded()`), so none comes
+  and every form of the page with a copy, calls each form's own discard (its own copy, the copy it was restored from with the copies its hand-off
+  names (revision 8), its own hand-off and reference; never another page's), and reloads only when each says nothing of it can come back (`discarded()`), so none comes
   back after the reload. A discard that cannot be written says so (`discard_failed`,
   PROPOSED copy: "Couldn't clear the saved copy of your unfinished form. If you reload now, that copy may be restored afterwards. Your form
   is still here. [Try again] [Reload anyway]") and reloads nothing; a refusal while signing out proceeds (the database is deleted with every
@@ -177,6 +186,17 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
 ```
 
 - Only allow-listed fields are captured, never a sensitive one (`guard.ts`: development builds throw, production drops it).
+- **A field is its whole state (revision 8, R17; `controls.ts`).** Every admitted field is read, compared, retained, captured and restored as
+  one canonical state: text inputs, text areas and single selects as their text (stored copies unchanged); a checkbox's checked state, a
+  radio group's choice (or none), same-named checkboxes (the checked values) and a multiple select's selections (none included) as control
+  state, stored versioned in the copy's `controls` (never as text: a stored text that looks like a state stays literal). Revision 7 read only
+  `.value`, so checking a box or adding a selection looked clean and was lost at the reload. A group with any sensitive member is sensitive
+  as a whole. An admitted control that cannot be represented unambiguously (a file input, same-named controls of different kinds, repeated
+  option or member values) is never captured: untouched it needs nothing; once edited the form stays dirty and an update's save fails
+  (retry, or "Discard and reload anyway"), never a silent clean reload. A copy's state that a field can no longer show (another kind of
+  control, an option gone) stays owed in the same way, and a copy holding control state this build cannot read (another version) is offered
+  as it is and never restored in part. An older build reading a copy with control state restores its texts only (no stronger downgrade
+  guarantee is claimed).
 - **Dirty means a reload is not certain to bring back what the form shows (revision 1, R2; revision 4, R3; revision 5, R13):** its values
   differ from this page's own latest durable copy; with no copy of its own, the form is dirty if it was RESTORED from another tab's copy
   (whatever its values), and otherwise if some value is UNFINISHED. A restored copy is shared: every page that restored the same gone tab's

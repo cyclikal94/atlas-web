@@ -52,6 +52,14 @@ export interface FormWrite {
    * with none it is growth). Absent: the write may create one, because the port has admitted it (a save).
    */
   mayCreate?: boolean;
+  /**
+   * WEB-14a revision 8 (R16; design assessment C2): the write REMOVES the capture `expect` another page wrote (a copy restored, an update
+   * hand-off's predecessor). `row` (terminal) replaces the stored row ONLY if it still holds that capture (`meta.capture`), compared in this
+   * transaction BEFORE anything of the row changes (no claim of its writer first), and its generation is issued here as a claim's would be
+   * (`max(counter, stored) + 1`, moving the counter), so no capture of any earlier claim can land over it. No row, or a terminal one:
+   * `resolved`; another capture: `changed`; nothing is written in either, and no row is ever created.
+   */
+  expect?: string;
 }
 
 export type FormWriteResult =
@@ -72,7 +80,13 @@ export type FormWriteResult =
   /** The hold the copy was admitted under has ended (R28): nothing was written; the port admits it again. */
   | { kind: "lease_lapsed" }
   /** The form has no row and the write was not to create one (`mayCreate: false`): nothing was written. */
-  | { kind: "absent" };
+  | { kind: "absent" }
+  /** Revision 8 (`expect`): no row, or a terminal one: that capture cannot be restored. Nothing was written. */
+  | { kind: "resolved" }
+  /** Revision 8 (`expect`): the row holds another capture (its own page wrote a newer one): left exactly as it is. */
+  | { kind: "changed" }
+  /** Revision 8 (`expect`): no unique generation can be issued for the terminal row (as a claim): nothing was written. */
+  | { kind: "no_generation" };
 
 const generationOf = (row: Pick<FormRecoveryRow, "writer_gen">): number =>
   row.writer_gen ?? 0;
@@ -114,6 +128,29 @@ export const saveFormRecovery = singletonPlan<
     if (input.leaseLive !== undefined && !input.leaseLive())
       return { result: { kind: "lease_lapsed" } };
     const incoming = input.row;
+    if (input.expect !== undefined) {
+      if (!stored || stored.terminal) return { result: { kind: "resolved" } };
+      if (stored.meta?.capture !== input.expect)
+        return { result: { kind: "changed" } };
+      // The terminal row's generation is issued by the claim's own decision, in this transaction (one counter for every claim; none where
+      // none is unique), and the counter moves with it.
+      const issued = claimFormWriter.decide({ sync, reads: stored }, {
+        incarnationId: input.incarnationId,
+      } as FormClaim).result;
+      if (issued.kind !== "claimed" || !sync)
+        return { result: { kind: "no_generation" } };
+      return {
+        writes: [
+          w.put("form_recovery", {
+            ...incoming,
+            writer_gen: issued.gen,
+            capture_seq: 0,
+          }),
+        ],
+        sync: { ...sync, form_writer_gen: issued.gen },
+        result: { kind: "saved" },
+      };
+    }
     if (!stored && input.mayCreate === false)
       return { result: { kind: "absent" } };
     if (stored) {
@@ -122,6 +159,11 @@ export const saveFormRecovery = singletonPlan<
       // digest of the unsynced work does not move and an autosave landing between the fence transaction and the recount cannot
       // cause a spurious renewed-consent prompt. When this capture is the later one the ORDER record moves up (and only that), so
       // an earlier capture with other content that is still on its way cannot land above it.
+      //
+      // WEB-14a revision 8 (R16): the capture's identity and an update hand-off's lineage (`meta`) move WITH the order record (this capture is
+      // the later one, so what the row now holds is this capture), and never without it (an earlier capture that arrives late leaves the
+      // later one's identity in place). Its control state is content (in the digest), so equal digests hold equal state. The row's own
+      // content and `saved_at` are kept.
       if (
         !incoming.terminal &&
         !stored.terminal &&
@@ -134,6 +176,7 @@ export const saveFormRecovery = singletonPlan<
                   ...stored,
                   writer_gen: generationOf(incoming),
                   capture_seq: incoming.capture_seq,
+                  meta: incoming.meta,
                 }),
               ],
               result: { kind: "unchanged" },

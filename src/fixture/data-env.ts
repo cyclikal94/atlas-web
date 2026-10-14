@@ -8,8 +8,16 @@ import type {
 } from "../data";
 import { createCommandRegistry } from "../data";
 import { summariseQueue } from "../data/model/queue-summary";
-import { MemoryRecoveryAdapter } from "../lib/form-recovery/memory-adapter";
+import type { FormRecoveryPort } from "../lib/form-recovery/port";
 import type { Identity, Store } from "../session";
+
+const unreachable = () => Promise.reject(new Error("no recovery store"));
+const NO_RECOVERY_STORE: FormRecoveryPort = {
+  save: async () => "failed",
+  discard: async () => "failed",
+  load: unreachable,
+  list: unreachable,
+};
 
 /**
  * FIXTURE ONLY. A hand-built data env driven by the query string, so the sync screens can be rendered in a real engine without a
@@ -295,8 +303,9 @@ export function fixtureData(params: URLSearchParams): FixtureData {
     outbox: () => null,
     service: () => null,
     serviceStore: new Cell(null),
-    formRecovery: new MemoryRecoveryAdapter(),
-    // No database: a form is handed no port (as `serviceStore` says).
+    // No database: a form is handed no port (as `serviceStore` says), so this port is never reached; it answers as a store that cannot be
+    // reached would. WEB-14a revision 8: no in-memory store in the fixture's initial chunk (the fixed fixture ceiling, FB-20261010-08C-14A).
+    formRecovery: NO_RECOVERY_STORE,
     formRecoveryOpen: new Cell(false),
     attachLeader: () => () => undefined,
     attachFollower: () => () => undefined,

@@ -2473,3 +2473,125 @@ test.describe("revision 7, R13: a successor that cannot read the hand-off says s
       await expect(title(peer)).toHaveValue(PEER);
     });
 });
+
+// ---- revision 8 -------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 8 (review of 13 October 2026: R16 `recovery-equal-value-twin-authority`, R17 `recovery-control-state-value-projection`; design
+ * assessment of 13 October 2026, C1-C4, step 6) through the REAL update (generations A to B, production timers and headers, the real store,
+ * locks and session storage). R16: B opens first and saves, and stays open, so A starts independently; A types ORIGINAL and accepts "Save and
+ * reload"; while A2 is held, B saves `bText` (A's text, or other text: the control) LATER than A and closes; A2 restores the hand-off and
+ * its "Discard instead" must remove A's copy and the hand-off, never B's, asserted by row identity. R17: a checkbox and a multiple select
+ * (fixture `atlas-fixture-choices`) carried by the update, with a text-only control. FIXTURE evidence.
+ */
+test.describe("revision 8, R16: an update hand-off removes exactly its own predecessor (actual worker A to B)", () => {
+  for (const same of [false, true])
+    test(`${same ? "" : "control: "}B's later copy holds ${same ? "A's very text" : "other text"}: A2's 'Discard instead' removes A's copy and the hand-off, B's copy stays`, async ({
+      context,
+      generations,
+    }) => {
+      await seedAccount(context, generations);
+      const peer = await openApp(context, generations);
+      await formReady(peer);
+      await title(peer).fill("B FIRST");
+      expect(await flushAll(peer)).toEqual(["saved"]);
+      const ordinaryIds = async () =>
+        (await recoveryRows(context, generations))
+          .filter((row) => !row.terminal && !isHandoffRow(row))
+          .map((row) => row.tab_instance_id)
+          .sort();
+      const [bId] = await ordinaryIds();
+      const first = await openApp(context, generations);
+      await workerActive(first);
+      await reloadQuietly(first);
+      await formReady(first);
+      // B is open: A starts independently.
+      await expect(title(first)).toHaveValue("");
+      await title(first).fill(ORIGINAL);
+      await generations.serve("fixture-b");
+      await checkForUpdate(first);
+      await quiet(first);
+      await mark(first);
+      await holdNextDocument(first);
+      await updateRegion(first)
+        .getByRole("button", { name: "Save and reload", exact: true })
+        .click();
+      await expect.poll(() => build(first).catch(() => null)).toBe("b");
+      await expect.poll(() => marked(first).catch(() => true)).toBe(false);
+      await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-port",
+        "none",
+      );
+      const aId = (await ordinaryIds()).find((id) => id !== bId);
+      expect(aId).toBeDefined();
+      await title(peer).fill(same ? ORIGINAL : "B INDEPENDENT");
+      expect(await flushAll(peer)).toEqual(["saved"]);
+      await peer.close();
+      await releaseNext(first);
+      await bindForm(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+      await first.getByRole("button", { name: "Discard instead" }).click();
+      await expect(title(first)).toHaveValue("");
+      await expect.poll(() => pendingCount(first)).toBe(0);
+      const live = (await recoveryRows(context, generations)).filter(
+        (row) => !row.terminal,
+      );
+      expect(live.filter(isHandoffRow)).toEqual([]);
+      expect(live.map((row) => row.tab_instance_id)).toEqual([bId]);
+      await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+    });
+});
+
+test.describe("revision 8, R17: a checkbox and a multiple select survive the actual worker update (A to B)", () => {
+  const pinned = (page: Page) => page.getByRole("checkbox", { name: "Pinned" });
+  const tags = (page: Page) => page.getByRole("listbox", { name: "Tags" });
+  const chosen = (page: Page) =>
+    tags(page).evaluate((element) =>
+      [...(element as HTMLSelectElement).selectedOptions].map(
+        (option) => option.value,
+      ),
+    );
+  for (const choices of [false, true])
+    test(`${choices ? "" : "control: "}${choices ? "Pinned checked and a second tag selected" : "only the title typed"}: the form is dirty, 'Save and reload' saves it, and B shows the same state (nothing submitted)`, async ({
+      context,
+      generations,
+    }) => {
+      await seedAccount(context, generations);
+      const page = await openApp(context, generations);
+      await workerActive(page);
+      await page.evaluate(() =>
+        sessionStorage.setItem("atlas-fixture-choices", "1"),
+      );
+      await reloadQuietly(page);
+      await formReady(page);
+      await expect(pinned(page)).not.toBeChecked();
+      expect(await chosen(page)).toEqual(["home"]);
+      expect(await dirtyCount(page)).toBe(0);
+      if (choices) {
+        await pinned(page).check();
+        await tags(page).selectOption(["home", "work"]);
+      } else await title(page).fill(ORIGINAL);
+      expect(await dirtyCount(page)).toBe(1);
+      await generations.serve("fixture-b");
+      await checkForUpdate(page);
+      await saveAndReload(page);
+      if (choices) {
+        await expect(pinned(page)).toBeChecked();
+        expect(await chosen(page)).toEqual(["home", "work"]);
+        await expect(title(page)).toHaveValue("");
+      } else {
+        await expect(title(page)).toHaveValue(ORIGINAL);
+        await expect(pinned(page)).not.toBeChecked();
+        expect(await chosen(page)).toEqual(["home"]);
+      }
+      await expect(restoredBanner(page)).toBeVisible();
+      await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+    });
+});
