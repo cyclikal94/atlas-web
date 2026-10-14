@@ -1,4 +1,12 @@
-import { accessOf, fieldOf, internalOf, isUnsupported } from "./controls";
+import {
+  accessOf,
+  type FieldAccess,
+  fieldOf,
+  internalOf,
+  isUnsupported,
+  type Shape,
+  sameShape,
+} from "./controls";
 import { restoreValues } from "./guard";
 import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
 
@@ -15,7 +23,7 @@ import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
  *  - PRESENCE (`present`). The admitted fields shown now, with the element each value is read from. A field that leaves the page keeps its
  *    value (RETAINED); a field that comes back (the same element or a new one) is given its retained value back when it shows what it
  *    started with (untouched); when the person has already typed something else into it, their new text wins and the retained value stays
- *    owed (`shadowed`). Presence is noticed at every read and, for the restore to show at once, by a MutationObserver.
+ *    owed (`owed`). Presence is noticed at every read and, for the restore to show at once, by a MutationObserver.
  *  - EDIT PROVENANCE (`input`, `edited`). Every input/reset event, every change event that reports a value no input event reported, and
  *    every restore the hook makes from a copy, moves the input revision and records which field it changed (all fields when the event names
  *    none). Coming back into a field, or a schema change, is not an edit. A change event that only COMMITS the value the field's last edit
@@ -27,7 +35,7 @@ import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
  *    the form starts from again) or when a terminal act covers exactly that value and the field has not been edited since: a successful
  *    submission covers what it sent (and, by the owner's decision, the hidden values of the state it saved), an explicit discard what the
  *    form showed then. An edit after the act ends the coverage of THAT field, even when the person types the same text again (R3).
- *  - DEBT. A retained value (a field no longer shown or no longer admitted) or a shadowed one that is not resolved cannot be written into a
+ *  - DEBT. A retained value (a field no longer shown or no longer admitted) or an owed one that is not resolved cannot be written into a
  *    copy (it is not admitted, or not shown to be checked) and must not be dropped: the form counts as dirty and its saves fail, so an
  *    update reload stops and offers retry or an explicit discard (Q4), until the field shows it again, the form is submitted or discarded.
  *
@@ -36,9 +44,38 @@ import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
  * control's `.value`; a field this build cannot represent reads `UNSUPPORTED`, is never captured, and is an obligation once edited
  * (`resolved`). Strings: equal states compare equal, and nothing taken (a capture, a ticket) can be changed afterwards.
  *
+ * WHAT A FIELD CAN SHOW (revision 9; review of 14 October 2026, R17; design assessment of 14 October 2026, C1-C4). Revision 8 took the
+ * page's state as the field's value whenever the same element showed the same kind of state. But a select whose selected option is removed,
+ * or a radio group losing its checked member, keeps both, and the browser then shows another state (the first option, no choice) with no
+ * event: the ledger took that for the person's value, the choice was gone, the form looked clean and the update reloaded without it. And a
+ * restore into a field that could not show a copy's choice (an option gone) reported success while the browser showed nothing, so the next
+ * save certified the empty state and removed the copies that held the choice. Now:
+ *
+ *  - Every field shown has a SHAPE (`controls.ts`: its kind, its options' or members' values and elements, its input type and sanitising
+ *    attributes). One rule (`reconcile`) brings a field's ledger up to date, from every reader (a sync, an event, the observer, a capture, a
+ *    dirty check, an adoption): the same element in the same shape is read as it is; another shape is never read over what the field held.
+ *  - A value the field held that its new shape cannot show is OWED (`owed`), never overwritten: the form is dirty, its saves fail (an
+ *    update reload stops with retry or an explicit discard). While the field is not edited after that, the value comes back as soon as the
+ *    field can show it exactly; an edit of the field keeps the person's new value and the owed one stays owed. A field showing an owed value
+ *    again holds it (no longer owed). Several owed values of one field are kept, none replacing another.
+ *  - Every write is exact (`FieldAccess.write`): a restore the field cannot show changes nothing and stays owed (`applySnapshot` returns it).
+ *
  * Memory only: nothing here is written anywhere.
  */
 export type Values = Record<string, string>;
+
+/** Revision 9 (R17): a value the form holds that its field does not show now, and must not lose. */
+export interface Owed {
+  readonly value: string;
+  /** The revision of the edit that produced it, where known: a successful submission sent no earlier, that sent it, covers it. */
+  readonly made?: number;
+  /**
+   * A value the field could not SHOW (its shape changed, a restore it could not take): the field's last edit when it became owed. While the
+   * field is not edited after it, the value comes back into the field as soon as the field can show it. Absent: typed over by the person,
+   * never put back over what they typed.
+   */
+  readonly returns?: number;
+}
 
 export interface FieldState {
   /** The admitted fields, normalised (each name once, in name order): what is read and captured NOW. */
@@ -51,8 +88,10 @@ export interface FieldState {
   ledger: Values;
   /** The admitted fields shown now, each with the element its value is read from. */
   present: Map<string, Element>;
-  /** Revision 8 (R17): the kind of each present field's state (`FieldAccess.kind`): the same element showing another kind is shown anew. */
-  kinds: Map<string, string>;
+  /** Revision 9 (R17): the shape of each present field (`controls.ts`): the same element in another shape is shown anew. */
+  shapes: Map<string, Shape>;
+  /** Revision 9: the input revision at which each present field was last read into the ledger (an edit after it is the person's). */
+  seen: Map<string, number>;
   /** What each field starts from when the form is shown again (the mount's values; a field first shown later: its default). */
   initial: Values;
   /** The input revision: moved by every edit. */
@@ -65,13 +104,17 @@ export interface FieldState {
   evented: Map<string, string>;
   /** The value a terminal act covered for each field, and the revision it covered. */
   covered: Map<string, { value: string; at: number }>;
-  /** Retained values a field that came back no longer shows, because the person typed something else into it. */
-  shadowed: Values;
   /**
-   * The revision of the edit that produced each shadowed value, where it is known (a remount's adoption, revision 5): a submission sent
-   * after it that succeeds covers it. Unknown: owed until shown again, submitted unchanged or discarded.
+   * Revision 9 (R17): values a field shown no longer shows (the person typed something else into it, or it cannot show them), each kept
+   * (`Owed`) until the field holds it again, it comes back, a successful submission covers it, or the form is discarded. Revision 8 kept
+   * one per field (`shadowed`), which a second such value replaced.
    */
-  shadowedAt: Map<string, number>;
+  owed: Map<string, Owed[]>;
+  /**
+   * Revision 9 (R17): what each field shows instead of a value it owes because it could not show it (the browser's state: the first option,
+   * no choice, an empty text), until the person edits the field or an owed value comes back. Never input: not owed when it goes in turn.
+   */
+  fallback: Map<string, string>;
 }
 
 /** An allow-list in its normal form (each name once, in name order): reordering the same fields is not a change. */
@@ -99,15 +142,16 @@ export function openFields(
     form,
     ledger: {},
     present: new Map(),
-    kinds: new Map(),
+    shapes: new Map(),
+    seen: new Map(),
     initial: {},
     input: 0,
     edited: new Map(),
     editedAll: 0,
     evented: new Map(),
     covered: new Map(),
-    shadowed: {},
-    shadowedAt: new Map(),
+    owed: new Map(),
+    fallback: new Map(),
   };
   const element = form();
   if (element)
@@ -115,7 +159,8 @@ export function openFields(
       const field = accessOf(element, name);
       if (!field) continue;
       fields.present.set(name, field.key);
-      fields.kinds.set(name, field.kind);
+      fields.shapes.set(name, field.shape);
+      fields.seen.set(name, 0);
       fields.ledger[name] = field.read();
       fields.initial[name] = field.read();
     }
@@ -125,10 +170,96 @@ export function openFields(
 const admitted = (fields: FieldState): Set<string> =>
   new Set(fields.allow.map((spec) => spec.name));
 
+/** Revision 9 (R17): `name` owes `entry.value` (unless it is resolved, or already owed: then the newer record of it stands). */
+export function owe(fields: FieldState, name: string, entry: Owed): void {
+  if (resolved(fields, name, entry.value)) return;
+  const others = (fields.owed.get(name) ?? []).filter(
+    (known) => known.value !== entry.value,
+  );
+  fields.owed.set(name, [...others, entry]);
+}
+
+/** Revision 9: the values `name` owes, minus those `keep` refuses. */
+function settleOwed(
+  fields: FieldState,
+  name: string,
+  keep: (entry: Owed) => boolean,
+): void {
+  const left = (fields.owed.get(name) ?? []).filter(keep);
+  if (left.length > 0) fields.owed.set(name, left);
+  else fields.owed.delete(name);
+}
+
 /**
- * Brings the ledger up to date with the page: each admitted field still shown is read; a field shown again (or anew) takes its retained
- * value back when it is untouched (it shows what it starts from), or keeps the person's new text while the retained value stays owed; a
- * field no longer shown keeps its value. Never reads a field that is not admitted. Idempotent.
+ * Revision 9 (R17; C1, C3): THE rule by which a shown field's state enters the ledger, from every reader. The same element in the same
+ * shape: what it shows is the field's value. Shown again, anew, or in another shape: what it shows is NOT taken over what the field held.
+ * The held value comes back into the field when the field is untouched (another shape: not edited since it was last read; a field shown
+ * again: it shows what it starts from) and can show it exactly; otherwise the field's state is what it shows and the held value is owed
+ * (to come back later when the person did not type over it). Then an owed value the field can show again, not edited since, comes back,
+ * and an owed value the field holds is no longer owed. Never changes the input revision (a transition is no edit). Idempotent.
+ */
+function reconcile(fields: FieldState, name: string, field: FieldAccess): void {
+  const shown = field.read();
+  const before = fields.present.get(name);
+  const same =
+    before === field.key && sameShape(fields.shapes.get(name), field.shape);
+  const edited = lastEdit(fields, name) > (fields.seen.get(name) ?? 0);
+  fields.present.set(name, field.key);
+  fields.shapes.set(name, field.shape);
+  fields.seen.set(name, fields.input);
+  // Edited since it was last read: what it shows is the person's.
+  if (edited) fields.fallback.delete(name);
+  if (same) fields.ledger[name] = shown;
+  else {
+    // Shown again, for the first time, or in another shape (revision 8: another kind; revision 9: another option or member, another type).
+    if (fields.initial[name] === undefined)
+      fields.initial[name] = field.initial();
+    const held = fields.ledger[name];
+    if (held === undefined || held === shown) fields.ledger[name] = shown;
+    else {
+      const untouched =
+        before === field.key
+          ? !edited
+          : shown === field.initial() || shown === fields.initial[name];
+      // Untouched: the held value comes back into the field (the same value: not an edit), when the field can show it exactly.
+      if (!(untouched && field.write(held))) {
+        // The person typed something else into it, or it cannot show the held value: what it shows is the field's state now, and the held
+        // value is owed (back as soon as it can be shown, unless the person typed over it).
+        const at = lastEdit(fields, name);
+        if (!untouched) owe(fields, name, { value: held });
+        else {
+          // The state the field showed in place of an owed value is not the person's input: it is never owed itself.
+          if (fields.fallback.get(name) !== held)
+            owe(fields, name, { value: held, made: at, returns: at });
+          fields.fallback.set(name, shown);
+        }
+        fields.ledger[name] = shown;
+      }
+    }
+  }
+  // A value owed that the field can show again, and the person has not edited the field since: it comes back (the newest first), whatever
+  // brought the field back to it (another shape, a mount of its own, a restore).
+  const back = [...(fields.owed.get(name) ?? [])]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.returns !== undefined && lastEdit(fields, name) <= entry.returns,
+    );
+  if (
+    back !== undefined &&
+    back.value !== fields.ledger[name] &&
+    field.write(back.value)
+  ) {
+    fields.ledger[name] = back.value;
+    fields.fallback.delete(name);
+  }
+  const holds = fields.ledger[name];
+  settleOwed(fields, name, (entry) => entry.value !== holds);
+}
+
+/**
+ * Brings the ledger up to date with the page (`reconcile`, each admitted field shown); a field no longer shown keeps its value. Never reads a
+ * field that is not admitted. Idempotent.
  */
 export function sync(fields: FieldState): void {
   const form = fields.form();
@@ -142,51 +273,24 @@ export function sync(fields: FieldState): void {
       fields.present.delete(name);
       continue;
     }
-    const shown = field.read();
-    if (
-      fields.present.get(name) === field.key &&
-      fields.kinds.get(name) === field.kind
-    ) {
-      fields.ledger[name] = shown;
-      continue;
-    }
-    // Shown again, or for the first time (revision 8, R17: or the same element showing another kind of state).
-    fields.present.set(name, field.key);
-    fields.kinds.set(name, field.kind);
-    if (fields.initial[name] === undefined)
-      fields.initial[name] = field.initial();
-    const retained = fields.ledger[name];
-    if (retained === undefined || retained === shown) {
-      fields.ledger[name] = shown;
-      continue;
-    }
-    // Untouched: the retained value comes back into the field (the same value: not an edit). Revision 8 (R17): unless the field shown now
-    // cannot show it (another kind of control, an option gone): then it stays owed like a value typed over.
-    if (
-      (shown === field.initial() || shown === fields.initial[name]) &&
-      field.write(retained)
-    )
-      continue;
-    // The person typed something else into it (or it cannot show the retained state): that is the field's value now, and the retained one
-    // is still owed.
-    if (!resolved(fields, name, retained)) {
-      fields.shadowed[name] = retained;
-      fields.shadowedAt.delete(name);
-    }
-    fields.ledger[name] = shown;
+    reconcile(fields, name, field);
   }
 }
 
 /**
- * Reads the admitted fields already followed from the page, and nothing else (no field is restored or newly followed): safe while the hook
- * renders, before a commit removes a field whose value was changed without an event.
+ * Reads the admitted fields already followed from the page, and nothing else (no field is restored or newly followed, nothing is written to
+ * the page): safe while the hook renders, before a commit removes a field whose value was changed without an event. A field in another
+ * shape is left to the next `sync` (revision 9, R17: its state then is not the field's value).
  */
 export function refresh(fields: FieldState): void {
   const form = fields.form();
   if (!form) return;
   for (const [name, element] of fields.present) {
     const field = accessOf(form, name);
-    if (field?.key === element && fields.kinds.get(name) === field.kind)
+    if (
+      field?.key === element &&
+      sameShape(fields.shapes.get(name), field.shape)
+    )
       fields.ledger[name] = field.read();
   }
 }
@@ -250,14 +354,14 @@ export function held(fields: FieldState): Values {
   return { ...fields.ledger };
 }
 
-/** The values the form holds that no copy can hold now: retained (not shown or not admitted) and shadowed. */
+/** The values the form holds that no copy can hold now: retained (not shown or not admitted) and owed (revision 9: every one). */
 export function retainedOf(fields: FieldState): [string, string][] {
   const shown = capturable(fields);
   const out: [string, string][] = [];
   for (const [name, value] of Object.entries(fields.ledger))
     if (!(name in shown)) out.push([name, value]);
-  for (const [name, value] of Object.entries(fields.shadowed))
-    out.push([name, value]);
+  for (const [name, entries] of fields.owed)
+    for (const entry of entries) out.push([name, entry.value]);
   return out;
 }
 
@@ -313,7 +417,7 @@ export function cover(fields: FieldState, values: Values, at: number): void {
 
 /**
  * A submission sent at revision `at` succeeded although the form changed since: it covers the fields that were NOT edited after it and
- * still hold what it sent, and nothing else (revision 4, R3: never an edit made after the send). A shadowed value it sent, produced by an
+ * still hold what it sent, and nothing else (revision 4, R3: never an edit made after the send). An owed value it sent, produced by an
  * edit no later than the send (revision 5: a remount typed over it), is what it submitted: no longer owed.
  */
 export function coverUnedited(
@@ -326,20 +430,26 @@ export function coverUnedited(
   for (const [name, value] of Object.entries(sent)) {
     if (lastEdit(fields, name) <= at && fields.ledger[name] === value)
       unedited[name] = value;
-    const edit = fields.shadowedAt.get(name);
-    if (fields.shadowed[name] === value && edit !== undefined && edit <= at) {
-      delete fields.shadowed[name];
-      fields.shadowedAt.delete(name);
-    }
+    settleOwed(
+      fields,
+      name,
+      (entry) =>
+        !(
+          entry.value === value &&
+          entry.made !== undefined &&
+          entry.made <= at
+        ),
+    );
   }
   cover(fields, unedited, at);
 }
 
-/** An explicit discard: the retained and shadowed values are dropped with the rest of the input (the person's act). */
+/** An explicit discard: the retained and owed values are dropped with the rest of the input (the person's act). */
 export function dropRetained(fields: FieldState): void {
   const shown = capturable(fields);
   fields.ledger = { ...shown };
-  fields.shadowed = {};
+  fields.owed = new Map();
+  fields.fallback = new Map();
 }
 
 /**
@@ -365,16 +475,18 @@ export function setSchema(
 /**
  * Puts a copy into the form (a restore after a reload, or an alternative the person chose): the fields shown take its values, an admitted
  * field not shown keeps its value in the ledger (it comes back when the field is shown), and every field it names counts as edited.
+ * Returns the fields shown that could not take the copy's value (revision 9, R17, C4: the restore is incomplete; their values are owed).
  */
 export function applySnapshot(
   fields: FieldState,
   form: HTMLFormElement,
   snapshot: RecoverySnapshot,
-): void {
+): string[] {
   sync(fields);
   const values = internalOf(snapshot);
   // Revision 8 (R17): a field that cannot show the copy's state (another kind of control now, an option gone) keeps its own; the copy's
-  // state stays owed (`shadowed`), never dropped.
+  // state stays owed, never dropped. Revision 9: every write is exact, so a field that could not show it is known (no false success),
+  // and the value comes back once the field can show it (unless the person types over it first).
   const misfits = new Set(restoreValues(form, values, fields.allow));
   const names: string[] = [];
   for (const { name } of fields.allow) {
@@ -386,11 +498,16 @@ export function applySnapshot(
   }
   noteInput(fields, names);
   sync(fields);
+  const incomplete: string[] = [];
   for (const name of misfits)
     if (fields.ledger[name] !== values[name]) {
-      fields.shadowed[name] = values[name] as string;
-      fields.shadowedAt.delete(name);
+      incomplete.push(name);
+      owe(fields, name, {
+        value: values[name] as string,
+        returns: lastEdit(fields, name),
+      });
     }
+  return incomplete;
 }
 
 /**
@@ -425,6 +542,7 @@ export function adopt(
   const edits = new Map<string, number>();
   const unstamped: string[] = [];
   const covered: [string, string, number][] = [];
+  const unshown: [string, string][] = [];
   for (const [name, mine] of Object.entries(from.ledger)) {
     if (into.initial[name] === undefined && from.initial[name] !== undefined)
       into.initial[name] = from.initial[name];
@@ -435,14 +553,8 @@ export function adopt(
       covered.push([name, mine, translate(cover.at)]);
     if (edit > 0) {
       // Edited in the new mount: the person's value, newer than the session's (even the same text).
-      if (
-        theirs !== undefined &&
-        theirs !== mine &&
-        !resolved(into, name, theirs)
-      ) {
-        into.shadowed[name] = theirs;
-        into.shadowedAt.set(name, lastEdit(into, name));
-      }
+      if (theirs !== undefined && theirs !== mine)
+        owe(into, name, { value: theirs, made: lastEdit(into, name) });
       into.ledger[name] = mine;
       edits.set(name, translate(edit));
       continue;
@@ -455,38 +567,42 @@ export function adopt(
     const shown = from.present.get(name);
     if (mine === from.initial[name]) {
       // Untouched in the new mount: the session's value comes back into it (a field it does not show keeps it, retained). Revision 8 (R17):
-      // a field that cannot show it (another kind of control) keeps its own, and the session's value stays owed.
+      // a field that cannot show it (another kind of control; revision 9: another option or member) keeps its own, and the session's value
+      // stays owed, to come back when the field can show it (below, once the revisions are the session's).
       const field = shown && element ? accessOf(element, name) : null;
       if (!field || field.key !== shown || field.write(theirs)) continue;
-      if (!resolved(into, name, theirs)) {
-        into.shadowed[name] = theirs;
-        into.shadowedAt.delete(name);
-      }
+      unshown.push([name, theirs]);
       into.ledger[name] = mine;
       continue;
     }
     // Changed in the new mount without an event: the new text is the field's, an edit after every other; the session's value stays owed.
-    if (!resolved(into, name, theirs)) {
-      into.shadowed[name] = theirs;
-      into.shadowedAt.set(name, lastEdit(into, name));
-    }
+    owe(into, name, { value: theirs, made: lastEdit(into, name) });
     into.ledger[name] = mine;
     unstamped.push(name);
   }
-  for (const [name, value] of Object.entries(from.shadowed))
-    if (into.shadowed[name] === undefined) {
-      into.shadowed[name] = value;
-      const edit = from.shadowedAt.get(name);
-      if (edit === undefined) into.shadowedAt.delete(name);
-      else into.shadowedAt.set(name, translate(edit));
-    }
+  // What the new mount owed is owed by the session (revision 9: every value, none replacing another), in the session's revisions.
+  for (const [name, entries] of from.owed)
+    for (const entry of entries)
+      owe(into, name, {
+        value: entry.value,
+        ...(entry.made === undefined ? {} : { made: translate(entry.made) }),
+        ...(entry.returns === undefined
+          ? {}
+          : { returns: translate(entry.returns) }),
+      });
   for (const [name, value] of from.evented) into.evented.set(name, value);
+  for (const [name, value] of from.fallback) into.fallback.set(name, value);
   into.present = new Map(from.present);
-  into.kinds = new Map(from.kinds);
+  into.shapes = new Map(from.shapes);
+  into.seen = new Map(
+    [...from.seen].map(([name, at]) => [name, translate(at)]),
+  );
   into.input = translate(from.input);
   for (const [name, at] of edits) into.edited.set(name, at);
   if (unstamped.length > 0) noteInput(into, unstamped);
   for (const [name, value, at] of covered) cover(into, { [name]: value }, at);
+  for (const [name, value] of unshown)
+    owe(into, name, { value, returns: lastEdit(into, name) });
   sync(into);
   return translate;
 }
@@ -550,7 +666,22 @@ export function watch(
       : new MutationObserver(() => {
           if (!stopped) sync(fields);
         });
-  observer?.observe(element, { childList: true, subtree: true });
+  // Revision 9 (R17): an attribute that changes a field's shape (an option's or member's value, a type, a name) is noticed at once too.
+  // Never relied on alone: every read reconciles first (`sync`), whatever the observer has delivered.
+  observer?.observe(element, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: [
+      "name",
+      "type",
+      "value",
+      "multiple",
+      "min",
+      "max",
+      "step",
+    ],
+  });
   return () => {
     stopped = true;
     observer?.disconnect();

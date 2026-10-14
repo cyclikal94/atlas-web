@@ -795,6 +795,7 @@ type FixtureWindow = {
     allow?: string[];
     shown?: string[];
     unbound?: boolean;
+    without?: string[];
   }) => void;
   __atlasFormMounts?: number;
   __atlasSubmitGate?: Promise<unknown>;
@@ -2593,5 +2594,145 @@ test.describe("revision 8, R17: a checkbox and a multiple select survive the act
         "data-submitted",
         "0",
       );
+    });
+});
+
+// ---- revision 9 -------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 9 (review of 14 October 2026, R17 `recovery-control-state-value-projection`, incomplete_fix; design assessment of 14 October 2026,
+ * Q14): the actual worker update (A to B) with a choice the form cannot show. R17-A: only the selected option is removed (the select
+ * stays): the normal update must not reload without it, and once the option is back it is chosen again and carried. R17-B: the page the
+ * update brings cannot show the saved single choice: the restore is reported incomplete, nothing is certified, A's copy and its hand-off
+ * stay until the choice can be shown and is saved. Fixture `atlas-fixture-choices` + `without` (TEST INJECTION, `recovery-form.tsx`).
+ * FIXTURE evidence (generation servers, production timers and headers), not installed-PWA or device evidence.
+ */
+test.describe("revision 9, R17: a choice the form cannot show is never lost across the actual worker update (A to B)", () => {
+  const tags = (page: Page) => page.getByRole("listbox", { name: "Tags" });
+  const priority = (page: Page) =>
+    page.getByRole("combobox", { name: "Priority" });
+  const chosen = (page: Page) =>
+    tags(page).evaluate((element) =>
+      [...(element as HTMLSelectElement).selectedOptions].map(
+        (option) => option.value,
+      ),
+    );
+  const without = (page: Page, values: string[]) =>
+    page.evaluate(
+      (next) =>
+        (window as unknown as FixtureWindow).__atlasFormProps?.({
+          without: next,
+        }),
+      values,
+    );
+  const section = (page: Page) => page.locator("[data-fixture-form]");
+  /** One tab on A with the choices shown, B installed and waiting. */
+  async function choicesWithUpdate(
+    context: BrowserContext,
+    generations: Generations,
+  ): Promise<Page> {
+    await seedAccount(context, generations);
+    const page = await openApp(context, generations);
+    await workerActive(page);
+    await page.evaluate(() =>
+      sessionStorage.setItem("atlas-fixture-choices", "1"),
+    );
+    await reloadQuietly(page);
+    await formReady(page);
+    await generations.serve("fixture-b");
+    await checkForUpdate(page);
+    await expect(
+      updateRegion(page).getByRole("button", { name: "Save and reload" }),
+    ).toBeVisible();
+    return page;
+  }
+
+  for (const removed of ["work", "later"])
+    test(`${removed === "work" ? "" : "control: "}a second tag selected, then the ${removed === "work" ? "SELECTED" : "unselected"} option '${removed}' removed (the select stays): ${removed === "work" ? "'Save and reload' fails and nothing reloads; shown again, it is chosen again and 'Retry save' carries it to B" : "'Save and reload' carries both tags to B"}`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await choicesWithUpdate(context, generations);
+      await tags(page).selectOption(["home", "work"]);
+      await without(page, [removed]);
+      expect(await chosen(page)).toEqual(
+        removed === "work" ? ["home"] : ["home", "work"],
+      );
+      expect(await dirtyCount(page)).toBe(1);
+      if (removed === "work") {
+        await mark(page);
+        await updateRegion(page)
+          .getByRole("button", { name: "Save and reload" })
+          .click();
+        await expect(updateRegion(page).getByText(SAVE_FAILED)).toBeVisible();
+        expect(await marked(page)).toBe(true);
+        expect(await build(page)).toBe("a");
+        await without(page, []);
+        await expect.poll(() => chosen(page)).toEqual(["home", "work"]);
+        expect(await marked(page)).toBe(true);
+        await quiet(page);
+        await updateRegion(page)
+          .getByRole("button", { name: "Retry save" })
+          .click();
+        await reloadedOntoB(page);
+      } else await saveAndReload(page);
+      expect(await chosen(page)).toEqual(["home", "work"]);
+      await expect(restoredBanner(page)).toBeVisible();
+      await expect(section(page)).toHaveAttribute("data-incomplete", "");
+      await expect(section(page)).toHaveAttribute("data-submitted", "0");
+    });
+
+  for (const missing of [true, false])
+    test(`${missing ? "" : "control: "}priority 'high' saved by A; B ${missing ? "WITHOUT the option: the restore is incomplete, B's save fails and A's copy and hand-off stay; the option back: 'high' is chosen, saved, and A's copies are removed" : "with it: restored completely, and B's save removes A's copies"}`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await choicesWithUpdate(context, generations);
+      await priority(page).selectOption("high");
+      expect(await dirtyCount(page)).toBe(1);
+      if (missing)
+        await page.evaluate(() =>
+          sessionStorage.setItem("atlas-fixture-without", '["high"]'),
+        );
+      await saveAndReload(page);
+      await page.evaluate(() =>
+        sessionStorage.removeItem("atlas-fixture-without"),
+      );
+      const fromA = (await recoveryRows(context, generations)).filter(
+        (row) => !row.terminal,
+      );
+      expect(fromA.filter(isHandoffRow)).toHaveLength(1);
+      expect(fromA.filter((row) => !isHandoffRow(row))).toHaveLength(1);
+      if (missing) {
+        await expect(section(page)).toHaveAttribute(
+          "data-incomplete",
+          "priority",
+        );
+        expect(await priority(page).inputValue()).toBe("normal");
+        expect(await dirtyCount(page)).toBe(1);
+        expect(await flushNow(page)).toBe("failed");
+        expect(
+          (await recoveryRows(context, generations))
+            .filter((row) => !row.terminal)
+            .map((row) => row.tab_instance_id)
+            .sort(),
+        ).toEqual(fromA.map((row) => row.tab_instance_id).sort());
+        await without(page, []);
+        await expect.poll(() => priority(page).inputValue()).toBe("high");
+      } else {
+        await expect(section(page)).toHaveAttribute("data-incomplete", "");
+        expect(await priority(page).inputValue()).toBe("high");
+      }
+      expect(await flushNow(page)).toBe("saved");
+      const after = (await recoveryRows(context, generations)).filter(
+        (row) => !row.terminal,
+      );
+      expect(after).toHaveLength(1);
+      expect(isHandoffRow(after[0] as { form_context: string })).toBe(false);
+      for (const row of fromA)
+        expect(after.map((one) => one.tab_instance_id)).not.toContain(
+          row.tab_instance_id,
+        );
+      await expect(section(page)).toHaveAttribute("data-submitted", "0");
     });
 });

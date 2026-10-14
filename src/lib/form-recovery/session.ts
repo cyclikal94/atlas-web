@@ -167,6 +167,11 @@ export interface Persisted {
 export interface SessionView {
   restored: RecoverySnapshot | null;
   alternatives: readonly RecoverySnapshot[];
+  /**
+   * Revision 9 (R17, C4): the fields of `restored` the form could not show when it was restored (an option or member gone, another type):
+   * their values stay owed (the form is dirty and is not saved until they can be shown again, it is submitted or discarded). None: absent.
+   */
+  incomplete?: readonly string[];
 }
 
 /** One mount of the form showing the session. */
@@ -706,7 +711,7 @@ export function terminalAct(
   // A discard drops what the form held, including retained input (revision 3, R11: the person's explicit act); a submission that covers
   // what the form holds covers its retained values too (PRODUCT-DECISIONS-20261011: the hidden values of the state it saved).
   if (kind === "discard") dropRetained(fields);
-  else fields.shadowed = {};
+  else fields.owed = new Map();
   // What the act leaves needs no copy until it is edited again (revision 4, R3).
   if (clean !== null) cover(fields, clean, fields.input);
   session.persisted = {

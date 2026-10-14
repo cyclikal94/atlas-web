@@ -101,7 +101,7 @@ takes focus, is announced once, and NEVER reloads on its own:
   during the reload) is offered to later pages of the form as an alternative they may restore but never remove; only its explicit "Discard
   this copy" (`discardAlternative`) removes it. Choosing an alternative reads it again first (revision 7, DA-B; an abandoned hand-off while
   holding its lock), and shows it only if it is still there and the form has not changed meanwhile: `restoreAlternative` answers
-  `restored`, `gone`, `unavailable` or `refused`.
+  `restored`, `incomplete` (revision 9: shown except fields it cannot show, which stay owed), `gone`, `unavailable` or `refused`.
 - **A read that fails is not an empty answer (revision 7, R13).** `FormRecoveryPort.load`/`list` resolve only with what a read FOUND (null,
   [] included) and reject when the store cannot be read (no store open, an aborted transaction, a closed handle); `readCopy`/`readCopies`
   type them (`found`/`absent`/`listed` vs `unavailable`). A look (all of whose reads go through the port pinned when it begins) that cannot
@@ -197,6 +197,27 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   control, an option gone) stays owed in the same way, and a copy holding control state this build cannot read (another version) is offered
   as it is and never restored in part. An older build reading a copy with control state restores its texts only (no stronger downgrade
   guarantee is claimed).
+- **A field's shape is part of what it holds (revision 9, R17; `controls.ts` `Shape`, `fields.ts` `reconcile`).** Removing only the selected
+  option of a select, or the checked member of a radio or checkbox group (the control and its first member staying), changing an option's or
+  member's value, or an input's type or sanitising attributes, makes the browser show another state without any event. Every reader (an
+  input event, the observer, which now also watches those attributes, a render, a capture, a dirty check, an adoption) reconciles by ONE
+  rule: the same element in the same shape is read as it is; in another shape, what the field held is never replaced by what it now shows.
+  A value the field cannot show is OWED (each one, in a list per field: a second never replaces the first): the form is dirty and an
+  update's save fails (retry, or "Discard and reload anyway"), so the normal update never reloads without it (the reload's own check sees it
+  too, also for a change made while the tab is held). While the person has not edited the field since, the value comes back as soon as the
+  field can show it exactly (B shown again is chosen again); once they choose something else, their choice stays and the owed value stays
+  owed until they choose it again, a successful submission that sent it covers it (PRODUCT-DECISIONS-20261011), or the form is discarded.
+  What a field shows only because it could not show an owed value (the browser's first option, no choice) is never itself taken for input.
+- **Every write is exact (revision 9, R17-B; C2).** `FieldAccess.write` succeeds only if the field reads the state back exactly; otherwise it
+  changes nothing (it is checked first: a single select needs that option, an input's text is tried on a copy of the input so a number, date,
+  range or colour never takes a text its type would change, and a value the browser still shows differently is put back). A restore that a
+  field cannot show is reported: `useRecoverableForm().incomplete` names the fields (`restoreAlternative` answers `incomplete`), their values
+  stay owed (dirty, not saved), and the copies they came from are not removed until a save holds them (A's copy and its update hand-off
+  survive a successor that cannot show A's choice). "Discard instead" leaves a field whose initial state it cannot show as it shows it, and
+  never claims it reset. Validity is not representability: an input keeps text that fails its `pattern` or `required` constraint. Selections
+  keep their order (the options' order): a reordered select is not taken to show the same sequence (owed until its order returns, submitted
+  or discarded). Limitations: the PROPOSED "restored" banner copy is unchanged (a form that names `incomplete` fields should say so; WEB-15
+  copy sign-off), and no state is persisted for input that was never capturable (unchanged policy).
 - **Dirty means a reload is not certain to bring back what the form shows (revision 1, R2; revision 4, R3; revision 5, R13):** its values
   differ from this page's own latest durable copy; with no copy of its own, the form is dirty if it was RESTORED from another tab's copy
   (whatever its values), and otherwise if some value is UNFINISHED. A restored copy is shared: every page that restored the same gone tab's

@@ -41,10 +41,14 @@ import {
  * refuses it, and the flag is removed; every other read, and every write, is the real port's. Without the flag the port is not wrapped.
  * TEST INJECTION (revision 8, R17): with `atlas-fixture-choices` set to "1" in the tab's session storage when the form mounts, the form
  * also shows and admits a checkbox ("Pinned") and a multiple select ("Tags"), so a spec can carry choices across a real update.
+ * TEST INJECTION (revision 9, R17): with choices, also a single select ("Priority"); `without` (option values) leaves those options out of
+ * Tags and Priority, the select itself staying (as a feature form that narrows its options would), from `atlas-fixture-without` (a JSON
+ * array in the tab's session storage, read when the form mounts) or `__atlasFormProps({ without })`.
  */
 const HOLD_KEY = "atlas-fixture-hold-form";
 const CHOICES_KEY = "atlas-fixture-choices";
 const FAIL_READ_KEY = "atlas-fixture-fail-handoff-read";
+const WITHOUT_KEY = "atlas-fixture-without";
 
 /** The real port, with its first hand-off read refused (TEST INJECTION, above); one wrapper per port, so a pinned port stays the same. */
 const injected = new WeakMap<FormRecoveryPort, FormRecoveryPort>();
@@ -83,6 +87,10 @@ function failingFirstHandoffRead(port: FormRecoveryPort): FormRecoveryPort {
   return wrapped;
 }
 export const FIXTURE_FORM_CONTEXT = "fixture-note:/today";
+const OPTIONS = {
+  tags: ["home", "work", "later"],
+  priority: ["low", "normal", "high"],
+};
 const ALLOW = ["title", "notes"];
 
 type FixtureProps = {
@@ -90,6 +98,7 @@ type FixtureProps = {
   allow: readonly string[];
   shown: readonly string[];
   unbound?: boolean;
+  without?: readonly string[];
 };
 type FixtureScope = {
   __atlasRemountForm?: () => void;
@@ -103,13 +112,14 @@ export function FixtureRecoveryForm() {
   const [props, setProps] = useState<FixtureProps>(() => {
     const fields =
       sessionStorage.getItem(CHOICES_KEY) === "1"
-        ? [...ALLOW, "pinned", "tags"]
+        ? [...ALLOW, "pinned", "tags", "priority"]
         : ALLOW;
     return {
       formContext: FIXTURE_FORM_CONTEXT,
       allow: fields,
       shown: fields,
       unbound: sessionStorage.getItem(HOLD_KEY) === "1",
+      without: JSON.parse(sessionStorage.getItem(WITHOUT_KEY) ?? "[]"),
     };
   });
   useEffect(() => {
@@ -130,6 +140,7 @@ function FixtureRecoveryFormMount({
   allow,
   shown,
   unbound,
+  without = [],
 }: FixtureProps) {
   const opened = useFormRecoveryPort();
   const [failRead] = useState(
@@ -164,6 +175,7 @@ function FixtureRecoveryFormMount({
       data-submitted={submitted}
       data-locked={recovery.locked ? "true" : "false"}
       data-form-context={formContext}
+      data-incomplete={recovery.incomplete.join(" ")}
       className="m-4 flex flex-col gap-3"
     >
       {recovery.unavailable ? (
@@ -257,9 +269,29 @@ function FixtureRecoveryFormMount({
           <label className="flex flex-col gap-1">
             Tags
             <select name="tags" multiple defaultValue={["home"]}>
-              <option value="home">Home</option>
-              <option value="work">Work</option>
-              <option value="later">Later</option>
+              {OPTIONS.tags
+                .filter((value) => !without.includes(value))
+                .map((value) => (
+                  <option key={value} value={value}>
+                    {value[0]?.toUpperCase()}
+                    {value.slice(1)}
+                  </option>
+                ))}
+            </select>
+          </label>
+        ) : null}
+        {shown.includes("priority") ? (
+          <label className="flex flex-col gap-1">
+            Priority
+            <select name="priority" defaultValue="normal">
+              {OPTIONS.priority
+                .filter((value) => !without.includes(value))
+                .map((value) => (
+                  <option key={value} value={value}>
+                    {value[0]?.toUpperCase()}
+                    {value.slice(1)}
+                  </option>
+                ))}
             </select>
           </label>
         ) : null}

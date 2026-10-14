@@ -8,6 +8,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { lineageOf, unreadable } from "./control-state";
+import { internalOf } from "./controls";
 import {
   allowOf,
   allResolved,
@@ -174,12 +175,27 @@ export interface SubmissionTicket {
   failed(): void;
 }
 
-/** What `restoreAlternative` did (revision 7, DA-B). */
-export type AlternativeResult = "restored" | "gone" | "unavailable" | "refused";
+/**
+ * What `restoreAlternative` did (revision 7, DA-B). Revision 9 (R17, C4): `incomplete` — shown, except the fields the form cannot show now
+ * (`RecoverableForm.incomplete`): their values stay owed, never replaced by what the form shows instead.
+ */
+export type AlternativeResult =
+  | "restored"
+  | "incomplete"
+  | "gone"
+  | "unavailable"
+  | "refused";
 
 export interface RecoverableForm {
   /** The copy restored at mount (or chosen from the alternatives), or null. */
   restored: RecoverySnapshot | null;
+  /**
+   * Revision 9 (R17, C4): the fields of `restored` the form could not show when it was restored (an option or a member gone, another kind
+   * of control): their values are kept, owed (the form stays dirty; an update reload stops with retry or an explicit discard) and come back
+   * once the field can show them, unless the person changes the field first. Empty when everything was shown: never claim a full restore
+   * otherwise.
+   */
+  incomplete: readonly string[];
   /** Other restorable copies of this form, newest first. */
   alternatives: readonly RecoverySnapshot[];
   /**
@@ -218,6 +234,23 @@ export interface RecoverableForm {
 }
 
 const NO_VIEW: SessionView = { restored: null, alternatives: [] };
+const NONE: readonly string[] = [];
+
+/**
+ * Revision 9 (R17, C4): the values of a copy just restored, as the session records them: what the form shows now for every field that took
+ * the copy's value, and the COPY's own value for every field that could not (never what the form shows instead: that was not restored).
+ */
+const restoredValues = (
+  session: FormSession,
+  copy: RecoverySnapshot,
+  incomplete: readonly string[],
+): Values => {
+  const values = valuesOf(session);
+  const copied = internalOf(copy);
+  for (const name of incomplete)
+    if (copied[name] !== undefined) values[name] = copied[name];
+  return values;
+};
 
 /** What a look read (revision 7): the hand-off held and read just now, the gone tabs' copies, the abandoned hand-offs, this page's id. */
 interface Found {
@@ -557,8 +590,8 @@ export function useRecoverableForm(
           const newest = candidates[0];
           // Revision 8 (R17): a copy holding state this build cannot read is offered as it is, never restored in part.
           if (newest && !unreadable(newest) && form && untouched) {
-            applySnapshot(fields, form, newest);
-            const values = valuesOf(current);
+            const incomplete = applySnapshot(fields, form, newest);
+            const values = restoredValues(current, newest, incomplete);
             const capture = newest.capture ?? null;
             if (newest === handed)
               // The hand-off left to this page, held by it: its source, with the copies its lineage names (R13; revision 8, R16).
@@ -591,7 +624,11 @@ export function useRecoverableForm(
                   at: current.order.next,
                 },
               };
-            setView({ restored: newest, alternatives: offered(newest) });
+            setView({
+              restored: newest,
+              alternatives: offered(newest),
+              ...(incomplete.length > 0 ? { incomplete } : {}),
+            });
           } else {
             const alternatives = offered(null);
             if (alternatives.length > 0)
@@ -763,7 +800,10 @@ export function useRecoverableForm(
         current,
         clean(elementOf(current), current.fields),
       );
-      setSessionView(current, { ...current.view, restored: null });
+      setSessionView(current, {
+        alternatives: current.view.alternatives,
+        restored: null,
+      });
       return result;
     },
     [formRef, origin],
@@ -776,7 +816,10 @@ export function useRecoverableForm(
       const before = current.order.lastTerminal;
       const result = acknowledge(sent);
       if (current.order.lastTerminal !== before)
-        setSessionView(current, { ...current.view, restored: null });
+        setSessionView(current, {
+          alternatives: current.view.alternatives,
+          restored: null,
+        });
       return result;
     },
     [],
@@ -788,7 +831,7 @@ export function useRecoverableForm(
     // No session (no database yet): nothing was ever saved, so nothing can come back; what the form holds is covered.
     const own = mountFields.current;
     if (own) {
-      own.shadowed = {};
+      own.owed = new Map();
       cover(own, held(own), own.input);
     }
     return "discarded";
@@ -840,7 +883,7 @@ export function useRecoverableForm(
             sameHeld(own, held(own), provisional.held);
           if (own && provisional) {
             if (unchanged) {
-              own.shadowed = {};
+              own.owed = new Map();
               cover(own, provisional.held, own.input);
             } else coverUnedited(own, provisional.held, provisional.input);
           }
@@ -868,9 +911,16 @@ export function useRecoverableForm(
       const before = { ...fields.initial };
       if (form) {
         // Field states (revision 8, R17): a checkbox back to its initial checked state, every selection back.
-        restoreValues(form, before, fields.allow);
+        // Revision 9 (R17, C5): a field that cannot show its initial state any more (its default option gone) is not reset, and is never
+        // taken to be: what the discard leaves in it is what it shows (nothing of the person's: they discarded it), not its initial state.
+        const unshown = restoreValues(form, before, fields.allow);
         noteInput(fields);
         sync(fields);
+        for (const name of unshown) {
+          const shown = fields.ledger[name];
+          if (shown === undefined) delete before[name];
+          else before[name] = shown;
+        }
       }
       return before;
     });
@@ -916,8 +966,8 @@ export function useRecoverableForm(
           unreadable(copy)
         )
           return "refused";
-        applySnapshot(current.fields, form, copy);
-        const values = valuesOf(current);
+        const incomplete = applySnapshot(current.fields, form, copy);
+        const values = restoredValues(current, copy, incomplete);
         // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
         // Revision 8 (R16): the hand-off left to this page brings the copies its lineage names, as read just now (whether it was restored at
         // once or chosen later: one rule); any other copy brings none. What the page already owes (`debts`) stays owed.
@@ -944,8 +994,9 @@ export function useRecoverableForm(
               (other) => other.tabInstanceId !== tabInstanceId,
             ),
           ],
+          ...(incomplete.length > 0 ? { incomplete } : {}),
         });
-        return "restored";
+        return incomplete.length > 0 ? "incomplete" : "restored";
       };
       const fresh = async (): Promise<AlternativeResult> => {
         const found = await readCopy(reader, chosen.formContext, tabInstanceId);
@@ -1024,6 +1075,7 @@ export function useRecoverableForm(
 
   return {
     restored: view.restored,
+    incomplete: view.incomplete ?? NONE,
     alternatives: view.alternatives,
     restoreAlternative,
     discardAlternative,

@@ -131,18 +131,44 @@ export function internalOf(
   return values;
 }
 
+/**
+ * WHAT A FIELD CAN SHOW (WEB-14a revision 9; review of 14 October 2026, R17; design assessment C1). The same element and the same kind do
+ * not mean the same field: a select whose selected option is removed, a radio group losing its checked member, an input whose type now
+ * sanitises its text, all keep their first element and their kind, yet the browser then shows ANOTHER state (the first option, no choice,
+ * an empty text) without any input event. A field's shape is everything its state depends on: the kind, the input type and the attributes
+ * that sanitise a text, every option's or member's value, and the very elements (a member or option replaced by another of the same value
+ * holds nothing). Taken when the field is looked up, never a live collection.
+ */
+export interface Shape {
+  readonly text: string;
+  readonly parts: readonly Element[];
+}
+
+/** Whether two shapes are the same (a label's text or a class is no part of one: only what the state depends on). */
+export const sameShape = (a: Shape | undefined, b: Shape): boolean =>
+  a !== undefined &&
+  a.text === b.text &&
+  a.parts.length === b.parts.length &&
+  a.parts.every((part, index) => part === b.parts[index]);
+
 /** One admitted field on a page: the element that identifies it, and its state read, written and as written in the markup (its default). */
 export interface FieldAccess {
-  /** The control, or a group's first member: the same element means the same field still shown. */
+  /** The control, or a group's first member. */
   readonly key: Element;
   /**
    * Which kind of state it holds (`text`, `checkbox`, `radio`, `checkboxes`, `multiple`, `unsupported`). The same element can change kind
    * in place (React keeps an input whose `type` changes): another kind is another field shown.
    */
   readonly kind: string;
+  /** Revision 9 (R17): its shape when it was looked up (`Shape`): another shape is another field shown, whatever element it keeps. */
+  readonly shape: Shape;
   read(): string;
   initial(): string;
-  /** Shows `encoded` in the field; false (nothing changed) when this field cannot show that state (another kind, an option gone). */
+  /**
+   * Shows `encoded` in the field EXACTLY (revision 9, R17; C2): true only when the field reads back `encoded` afterwards. False when it
+   * cannot (another kind, an option or member gone, a text its input type would change, an order its options do not have): then NOTHING of
+   * the field changed (it is checked before it is touched, and put back as it was should the browser show anything else).
+   */
   write(encoded: string): boolean;
 }
 
@@ -162,47 +188,136 @@ const unique = (values: readonly string[]): boolean =>
 const sameList = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((item, index) => item === b[index]);
 
+const shapeOf = (text: unknown[], parts: readonly Element[]): Shape => ({
+  text: JSON.stringify(text),
+  parts: [...parts],
+});
+
 const unsupported = (key: Element): FieldAccess => ({
   key,
   kind: "unsupported",
+  shape: shapeOf(["unsupported"], [key]),
   read: () => UNSUPPORTED,
   initial: () => UNSUPPORTED,
   write: (encoded) => encoded === UNSUPPORTED,
 });
 
-/** Writes a choice into a field of `kind`, or nothing (false) when it is another kind or names a value the field does not have. */
-const stateWriter =
-  <K extends ControlState["kind"]>(
-    kind: K,
-    apply: (state: Extract<ControlState, { kind: K }>) => boolean,
+/**
+ * Revision 9 (R17, C2): writes `encoded` exactly or not at all. `apply` checks first and changes nothing when the field cannot show it
+ * (false); once applied, the field must read back `encoded`, or everything `keep` took before is put back and the write fails.
+ */
+const exactly =
+  (
+    read: () => string,
+    keep: () => () => void,
+    apply: (encoded: string) => boolean,
   ) =>
   (encoded: string): boolean => {
-    const decoded = decode(encoded);
-    if (decoded.kind !== "state" || decoded.state.kind !== kind) return false;
-    return apply(decoded.state as Extract<ControlState, { kind: K }>);
+    const putBack = keep();
+    if (!apply(encoded)) return false;
+    if (read() === encoded) return true;
+    putBack();
+    return false;
   };
 
+/** What a choice holds when it is of `kind`, or null (another kind of state: nothing is written). */
+const stateOf = <K extends ControlState["kind"]>(
+  kind: K,
+  encoded: string,
+): Extract<ControlState, { kind: K }> | null => {
+  const decoded = decode(encoded);
+  return decoded.kind === "state" && decoded.state.kind === kind
+    ? (decoded.state as Extract<ControlState, { kind: K }>)
+    : null;
+};
+
+/** The checked state of `members`, and its putting back. */
+const keepChecked = (members: readonly HTMLInputElement[]) => () => {
+  const checked = members.map((member) => member.checked);
+  return () => {
+    members.forEach((member, index) => {
+      member.checked = checked[index] as boolean;
+    });
+  };
+};
+
+/** The selection of `select`'s options, and its putting back. */
+const keepSelected = (select: HTMLSelectElement) => () => {
+  const options = [...select.options];
+  const selected = options.map((option) => option.selected);
+  return () => {
+    options.forEach((option, index) => {
+      option.selected = selected[index] as boolean;
+    });
+  };
+};
+
+/**
+ * The attributes an input's type sanitises its text by (a range clamps to min/max/step, an email list depends on `multiple`): part of
+ * its shape, so a text it could not keep is never taken for its value.
+ */
+const SANITISING = ["min", "max", "step", "multiple"] as const;
+
 function textField(control: Control): FieldAccess {
+  const select = control instanceof HTMLSelectElement ? control : null;
+  const options = () => (select ? [...select.options] : []);
   return {
     key: control,
     kind: "text",
+    shape: select
+      ? shapeOf(
+          ["select", options().map((option) => option.value)],
+          [select, ...options()],
+        )
+      : control instanceof HTMLInputElement
+        ? shapeOf(
+            [
+              "input",
+              control.type.toLowerCase(),
+              ...SANITISING.map((name) => control.getAttribute(name)),
+            ],
+            [control],
+          )
+        : shapeOf(["textarea"], [control]),
     read: () => encodeText(control.value),
     initial: () => {
-      if (control instanceof HTMLSelectElement) {
-        const options = [...control.options];
+      if (select) {
+        const all = options();
         return encodeText(
-          (options.find((option) => option.defaultSelected) ?? options[0])
-            ?.value ?? "",
+          (all.find((option) => option.defaultSelected) ?? all[0])?.value ?? "",
         );
       }
-      return encodeText(control.defaultValue);
+      return encodeText(
+        (control as HTMLInputElement | HTMLTextAreaElement).defaultValue,
+      );
     },
-    write: (encoded) => {
-      const decoded = decode(encoded);
-      if (decoded.kind !== "text") return false;
-      control.value = decoded.text;
-      return true;
-    },
+    write: exactly(
+      () => encodeText(control.value),
+      select
+        ? keepSelected(select)
+        : () => {
+            const value = control.value;
+            return () => {
+              control.value = value;
+            };
+          },
+      (encoded) => {
+        const decoded = decode(encoded);
+        if (decoded.kind !== "text") return false;
+        const text = decoded.text;
+        // A single select shows a text only as one of its options (R17-B: assigning another leaves NO option selected, and reads "").
+        if (select && !options().some((option) => option.value === text))
+          return false;
+        // An input shows a text only when its type keeps it (a number, a date, a range, a colour sanitise theirs): tried on a copy first.
+        if (control instanceof HTMLInputElement) {
+          const probe = control.cloneNode(false) as HTMLInputElement;
+          probe.value = text;
+          if (probe.value !== text) return false;
+        }
+        control.value = text;
+        return true;
+      },
+    ),
   };
 }
 
@@ -217,22 +332,33 @@ function multipleField(select: HTMLSelectElement): FieldAccess {
         .filter(selected)
         .map((option) => option.value),
     });
+  const read = () =>
+    unique(options().map((option) => option.value))
+      ? state((option) => option.selected)
+      : UNSUPPORTED;
   return {
     key: select,
     kind: "multiple",
-    read: () =>
-      unique(options().map((option) => option.value))
-        ? state((option) => option.selected)
-        : UNSUPPORTED,
+    shape: shapeOf(
+      ["multiple", options().map((option) => option.value)],
+      [select, ...options()],
+    ),
+    read,
     initial: () => state((option) => option.defaultSelected),
-    write: stateWriter("multiple", ({ selected }) => {
-      const all = options();
+    write: exactly(read, keepSelected(select), (encoded) => {
+      const selected = stateOf("multiple", encoded)?.selected;
+      const values = options().map((option) => option.value);
+      // Each value once, every one an option, in the options' order (the order is part of the state: never reinterpreted).
       if (
-        !unique(all.map((option) => option.value)) ||
-        !selected.every((value) => all.some((option) => option.value === value))
+        !selected ||
+        !unique(values) ||
+        !sameList(
+          selected,
+          values.filter((value) => selected.includes(value)),
+        )
       )
         return false;
-      for (const option of all)
+      for (const option of options())
         option.selected = selected.includes(option.value);
       return true;
     }),
@@ -247,14 +373,19 @@ function radioField(members: readonly HTMLInputElement[]): FieldAccess {
       kind: "radio",
       value: members.find(checked)?.value ?? null,
     });
+  const read = () => pick((member) => member.checked);
   return {
     key: members[0] as Element,
     kind: "radio",
-    read: () => pick((member) => member.checked),
+    shape: shapeOf(["radio", values], members),
+    read,
     initial: () => pick((member) => member.defaultChecked),
-    write: stateWriter("radio", ({ value }) => {
-      if (value !== null && !values.includes(value)) return false;
-      for (const member of members) member.checked = member.value === value;
+    write: exactly(read, keepChecked(members), (encoded) => {
+      const state = stateOf("radio", encoded);
+      if (!state || (state.value !== null && !values.includes(state.value)))
+        return false;
+      for (const member of members)
+        member.checked = member.value === state.value;
       return true;
     }),
   };
@@ -268,15 +399,18 @@ function checkboxesField(members: readonly HTMLInputElement[]): FieldAccess {
       kind: "checkboxes",
       checked: members.filter(checked).map((member) => member.value),
     });
+  const read = () => of((member) => member.checked);
   return {
     key: members[0] as Element,
     kind: "checkboxes",
-    read: () => of((member) => member.checked),
+    shape: shapeOf(["checkboxes", values], members),
+    read,
     initial: () => of((member) => member.defaultChecked),
-    write: stateWriter("checkboxes", ({ checked }) => {
-      if (!checked.every((value) => values.includes(value))) return false;
+    write: exactly(read, keepChecked(members), (encoded) => {
+      const checked = stateOf("checkboxes", encoded)?.checked;
       // In page order, each once: anything else is not a state these members can show.
       if (
+        !checked ||
         !sameList(
           checked,
           values.filter((value) => checked.includes(value)),
@@ -291,14 +425,18 @@ function checkboxesField(members: readonly HTMLInputElement[]): FieldAccess {
 }
 
 function checkboxField(box: HTMLInputElement): FieldAccess {
+  const read = () => encodeState({ kind: "checkbox", checked: box.checked });
   return {
     key: box,
     kind: "checkbox",
-    read: () => encodeState({ kind: "checkbox", checked: box.checked }),
+    shape: shapeOf(["checkbox"], [box]),
+    read,
     initial: () =>
       encodeState({ kind: "checkbox", checked: box.defaultChecked }),
-    write: stateWriter("checkbox", ({ checked }) => {
-      box.checked = checked;
+    write: exactly(read, keepChecked([box]), (encoded) => {
+      const state = stateOf("checkbox", encoded);
+      if (!state) return false;
+      box.checked = state.checked;
       return true;
     }),
   };

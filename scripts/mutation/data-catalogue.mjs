@@ -16833,11 +16833,12 @@ export const UNIT = [
     expect:
       /the person typed something else into: their text stays, the held value stays owed/,
     // Re-anchored in revision 5 (sync's shadowing now also clears the value's provenance); the defect is unchanged.
+    // Re-anchored in revision 9 (R17: the owed values are a list per field, `owe`; reconciliation is one rule, `reconcile`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    if (!resolved(fields, name, retained)) {\n      fields.shadowed[name] = retained;\n      fields.shadowedAt.delete(name);\n    }\n",
-        "",
+        "        if (!untouched) owe(fields, name, { value: held });\n",
+        "        if (!untouched) void held;\n",
       ),
   },
   {
@@ -16850,10 +16851,11 @@ export const UNIT = [
     expect:
       /the person's new text stays; the session's unsaved value for the field stays owed/,
     // Re-anchored in revision 5 (the shadowing in adoption's edited branch, which the selected test reaches since revision 5); the defect is unchanged.
+    // Re-anchored in revision 9 (owed values: `owe`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "        into.shadowed[name] = theirs;\n        into.shadowedAt.set(name, lastEdit(into, name));\n",
+        "      if (theirs !== undefined && theirs !== mine)\n        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n",
         "",
       ),
   },
@@ -16917,11 +16919,12 @@ export const UNIT = [
     // Re-anchored in revision 5: an EDITED field the session lacks is now taken in by adoption's edited branch (the old anchor, the
     // never-edited branch, still applied but no longer reached the selected test: it survived driver attempt 2026-10-11T13-51-35.488Z);
     // the defect is unchanged.
+    // Re-anchored in revision 9 (the edited branch now owes through `owe`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "        into.shadowedAt.set(name, lastEdit(into, name));\n      }\n      into.ledger[name] = mine;",
-        "        into.shadowedAt.set(name, lastEdit(into, name));\n      }\n      if (theirs === undefined && !from.present.has(name)) continue;\n      into.ledger[name] = mine;",
+        "        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n      into.ledger[name] = mine;",
+        "        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n      if (theirs === undefined && !from.present.has(name)) continue;\n      into.ledger[name] = mine;",
       ),
   },
   {
@@ -18432,11 +18435,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /the OLD mount's text typed again AFTER its send/,
+    // Re-anchored in revision 9 (R17: the owed values are a list per field, `owe`; reconciliation is one rule, `reconcile`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    if (fields.shadowed[name] === value && edit !== undefined && edit <= at) {\n",
-        "    if (fields.shadowed[name] === value) {\n",
+        "        !(\n          entry.value === value &&\n          entry.made !== undefined &&\n          entry.made <= at\n        ),",
+        "        !(entry.value === value),",
       ),
   },
   {
@@ -18448,11 +18452,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
       /a ticket of the OLD mount answered after the new mount bound, with an edit typed in the new mount/,
+    // Re-anchored in revision 9 (the submission's settling of owed values, `settleOwed`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      delete fields.shadowed[name];\n      fields.shadowedAt.delete(name);\n",
-        "",
+        "    settleOwed(\n      fields,\n      name,\n      (entry) =>\n        !(\n          entry.value === value &&",
+        "    settleOwed(\n      fields,\n      name,\n      (entry) =>\n        true || !(\n          entry.value === value &&",
       ),
   },
   {
@@ -19369,8 +19374,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '    read: () => encodeState({ kind: "checkbox", checked: box.checked }),',
-        "    read: () => encodeText(box.value),",
+        '  const read = () => encodeState({ kind: "checkbox", checked: box.checked });',
+        "  const read = () => encodeText(box.value);",
       ),
   },
   {
@@ -19396,7 +19401,9 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-controls.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /REQUIREMENT: a checkbox checked/,
-    patch: (t) => sub(t, "      box.checked = checked;", "      void checked;"),
+    // Re-anchored in revision 9 (exact writes); the defect is unchanged.
+    patch: (t) =>
+      sub(t, "      box.checked = state.checked;", "      void state.checked;"),
   },
   {
     id: "MU-1901",
@@ -19484,8 +19491,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      field.write(retained)\n    )",
-        "      (field.write(retained) || true)\n    )",
+        "      if (!(untouched && field.write(held))) {",
+        "      if (!(untouched && (field.write(held) || true))) {",
       ),
   },
   {
@@ -19499,8 +19506,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      fields.present.get(name) === field.key &&\n      fields.kinds.get(name) === field.kind\n",
-        "      fields.present.get(name) === field.key\n",
+        "  const same =\n    before === field.key && sameShape(fields.shapes.get(name), field.shape);",
+        "  const same = before === field.key;",
       ),
   },
   {
@@ -19516,6 +19523,206 @@ export const UNIT = [
         t,
         "          if (newest && !unreadable(newest) && form && untouched) {",
         "          if (newest && form && untouched) {",
+      ),
+  },
+  {
+    id: "MU-1909",
+    title:
+      "WEB-14a revision 9 (R17-A, Q3): a render's read of the fields takes a field in another shape as it shows (refresh membership-insensitive)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a render that reads the fields \(refresh\) never takes the reduced state/,
+    patch: (t) =>
+      sub(
+        t,
+        "      field?.key === element &&\n      sameShape(fields.shapes.get(name), field.shape)\n",
+        "      field?.key === element\n",
+      ),
+  },
+  {
+    id: "MU-1910",
+    title:
+      "WEB-14a revision 9 (R17-A, Q2/Q3): reconciliation compares only the element and the kind of state (revision 8): a removed option or member is taken as the person's value",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT (a single select|a multiple select|a radio group|same-named checkboxes): B removed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    before === field.key && sameShape(fields.shapes.get(name), field.shape);",
+        "    before === field.key &&\n    fields.shapes.get(name)?.text.slice(0, 8) === field.shape.text.slice(0, 8);",
+      ),
+  },
+  {
+    id: "MU-1911",
+    title:
+      "WEB-14a revision 9 (R17-B, Q4): a single select's write assigns any text and reports success (revision 8), two sites: no option check, no read-back",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a single select: an option it does not have is not written|REQUIREMENT a single select: the successor without B/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "        if (select && !options().some((option) => option.value === text))\n          return false;\n",
+          "",
+        ),
+        "    if (read() === encoded) return true;",
+        '    if (read() === encoded || read() === "") return true;',
+      ),
+  },
+  {
+    id: "MU-1912",
+    title:
+      "WEB-14a revision 9 (R17, Q4): a write the field does not read back exactly is left in the field (reported failed, the field changed)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a write the browser does not show exactly is put back/,
+    patch: (t) =>
+      sub(t, "    putBack();\n    return false;", "    return false;"),
+  },
+  {
+    id: "MU-1913",
+    title:
+      "WEB-14a revision 9 (R17, Q4): a text is assigned to an input before knowing its type keeps it (not tried on a copy first)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is never assigned to it at all/,
+    patch: (t) =>
+      sub(
+        t,
+        "          probe.value = text;\n          if (probe.value !== text) return false;\n",
+        "          void probe;\n",
+      ),
+  },
+  {
+    id: "MU-1914",
+    title:
+      "WEB-14a revision 9 (R17, Q4): a write reports success without reading the field back",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a write the browser does not show exactly is put back/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read() === encoded) return true;",
+        "    if (read() === encoded || encoded !== null) return true;",
+      ),
+  },
+  {
+    id: "MU-1915",
+    title:
+      "WEB-14a revision 9 (R17-A/B, C3): an owed value never comes back when the field can show it again",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /B shown again comes back chosen|B shown: back, saved/,
+    patch: (t) =>
+      sub(
+        t,
+        "    back.value !== fields.ledger[name] &&\n    field.write(back.value)\n",
+        "    back.value !== fields.ledger[name] &&\n    false\n",
+      ),
+  },
+  {
+    id: "MU-1916",
+    title:
+      "WEB-14a revision 9 (R17, C3/Q6): a field owes one value at a time (revision 8's `shadowed`): a second owed value replaces the first",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /BOTH earlier values stay owed/,
+    patch: (t) =>
+      sub(
+        t,
+        "  fields.owed.set(name, [...others, entry]);",
+        "  fields.owed.set(name, others.length >= 0 ? [entry] : others);",
+      ),
+  },
+  {
+    id: "MU-1917",
+    title:
+      "WEB-14a revision 9 (R17): what a field shows in place of an owed value is owed in turn when it changes (the browser's state taken for input)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an option's VALUE changed in place/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (fields.fallback.get(name) !== held)\n",
+        "          if (fields.fallback.get(name) !== held || held !== null)\n",
+      ),
+  },
+  {
+    id: "MU-1918",
+    title:
+      "WEB-14a revision 9 (R17-B, C4): a restored copy's value the field cannot show is not owed (the restore taken as complete)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the successor without B reports the restore incomplete/,
+    patch: (t) =>
+      sub(
+        t,
+        "      owe(fields, name, {\n        value: values[name] as string,\n        returns: lastEdit(fields, name),\n      });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1919",
+    title:
+      "WEB-14a revision 9 (R17, Q7): an owed value the field shows again (the person chose it) stays owed: the form can never be saved",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /BOTH earlier values stay owed|B does NOT come back over the later edit/,
+    patch: (t) =>
+      sub(
+        t,
+        "  settleOwed(fields, name, (entry) => entry.value !== holds);",
+        "  settleOwed(fields, name, (entry) => entry.value !== holds || true);",
+      ),
+  },
+  {
+    id: "MU-1920",
+    title:
+      "WEB-14a revision 9 (R17, C5): 'Discard instead' claims the initial state of a field that cannot show it (covers the initial value, not what it shows)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard instead' when the initial option is gone/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (shown === undefined) delete before[name];\n          else before[name] = shown;\n",
+        "          void shown;\n",
+      ),
+  },
+  {
+    id: "MU-1921",
+    title:
+      "WEB-14a revision 9 (R17-B, C4): `restoreAlternative` and the restore at mount report a restore the form could not show completely as complete",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the successor without B reports the restore incomplete|answers `incomplete`, never `restored`/,
+    patch: (t) =>
+      sub(
+        t,
+        "    incomplete: view.incomplete ?? NONE,",
+        "    incomplete: NONE,",
       ),
   },
 ];
