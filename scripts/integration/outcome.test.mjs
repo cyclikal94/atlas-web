@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyBudget,
   judge,
+  mergeFacts,
   overall,
   schedule,
   settleStack,
@@ -658,5 +659,80 @@ test("H4c: the run is failed when any record carries a failure fact or the run c
       planned: 1,
     }),
     "failed",
+  );
+});
+
+// ---- review r8 H4d (revision 9): facts accumulate across every settlement and version ---------------------------------------------
+
+test("H4d: a stack settled again (its own end, then the finaliser or the reaper) keeps every fact it had and adds new ones once", () => {
+  const failed = settleStack(
+    { outcome: "passed", reason: null, counts: { passed: 1, failed: 0 } },
+    { evidenceErrors: ["admissions: disk full"] },
+  );
+  assert.equal(failed.outcome, "evidence_failed");
+  const again = settleStack(failed, {
+    stop: "received SIGTERM",
+    cleanup: { ok: false, errors: ["port 1"] },
+    evidenceErrors: ["admissions: disk full"],
+  });
+  assert.deepEqual(
+    again.failures?.map((f) => f.kind),
+    ["evidence", "cleanup"],
+  );
+  const third = settleStack(again, { cleanup: { by: "reaper", ok: true } });
+  assert.deepEqual(
+    third.failures?.map((f) => f.kind),
+    ["evidence", "cleanup"],
+    "a later verified clean-up does not erase the earlier unverified one",
+  );
+  assert.deepEqual(third.earlier_cleanups, [{ ok: false, errors: ["port 1"] }]);
+  assert.deepEqual(third.evidence_errors, ["admissions: disk full"]);
+  assert.equal(
+    overall([{ browser: "chromium", index: 0, ...third }], { planned: 1 }),
+    "failed",
+  );
+});
+
+test("H4d: merging two versions keeps every fact of either; a later label that would hide a failure becomes failed", () => {
+  const earlier = {
+    outcome: "failed",
+    reason: "the report has errors",
+    failure: { kind: "report_errors", reason: "the report has errors" },
+    failures: [{ kind: "report_errors", reason: "the report has errors" }],
+    cleanup: { ok: false },
+  };
+  const later = {
+    outcome: "cancelled",
+    reason: "stopped: x",
+    cleanup: { ok: true },
+  };
+  const merged = mergeFacts(earlier, later);
+  assert.equal(merged.outcome, "failed");
+  assert.deepEqual(merged.before_merge, {
+    outcome: "cancelled",
+    reason: "stopped: x",
+  });
+  assert.deepEqual(merged.failure, earlier.failure);
+  assert.deepEqual(merged.earlier_cleanups, [{ ok: false }]);
+  assert.equal(mergeFacts(null, later), later);
+  // The earlier version's own failure label is kept (not a generic one).
+  const evidence = settleStack(
+    { outcome: "passed", reason: null },
+    { evidenceErrors: ["record: disk full"] },
+  );
+  assert.equal(
+    mergeFacts(evidence, { outcome: "passed", reason: null }).outcome,
+    "evidence_failed",
+  );
+  // Control: two versions without a fact merge to the later one's label.
+  assert.equal(
+    mergeFacts({ outcome: "running" }, { outcome: "passed", reason: null })
+      .outcome,
+    "passed",
+  );
+  assert.equal(
+    mergeFacts({ outcome: "running" }, { outcome: "passed", reason: null })
+      .failures?.length,
+    0,
   );
 });

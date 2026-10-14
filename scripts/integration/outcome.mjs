@@ -206,9 +206,25 @@ export function settleStack(
 ) {
   let out = withCancellation(record, stop);
   if (admissions) out = applyBudget(out, admissions);
-  if (cleanup) out = { ...out, cleanup };
+  if (cleanup) {
+    // Review r8 H4d: a later clean-up observation is added, never a replacement for an earlier one that was not verified.
+    const earlier =
+      record.cleanup && record.cleanup !== cleanup && record.cleanup.ok !== true
+        ? [...(record.earlier_cleanups ?? []), record.cleanup]
+        : record.earlier_cleanups;
+    out = {
+      ...out,
+      cleanup,
+      ...(earlier ? { earlier_cleanups: earlier } : {}),
+    };
+  }
   if (evidenceErrors.length > 0)
-    out = { ...out, evidence_errors: evidenceErrors };
+    out = {
+      ...out,
+      evidence_errors: [
+        ...new Set([...(record.evidence_errors ?? []), ...evidenceErrors]),
+      ],
+    };
   if (cleanup && !cleanup.ok)
     out = promote(
       out,
@@ -223,16 +239,82 @@ export function settleStack(
       evidenceErrors.join("; "),
       "before_settling",
     );
-  const failures = [];
-  const first = failureOf(record);
-  if (first) failures.push(first);
-  if (out.budget_exceeded)
-    failures.push({ kind: "budget", reason: out.budget_exceeded });
-  if (cleanup && !cleanup.ok)
-    failures.push({ kind: "cleanup", reason: "not verified" });
-  for (const reason of evidenceErrors)
-    failures.push({ kind: "evidence", reason });
+  // Review r8 H4d (revision 9): the facts a record already listed are kept (a record settled again, by its own end, the finaliser
+  // or the reaper, accumulates them); new ones are added once.
+  const failures = unionFailures(record.failures, [failureOf(record)]);
+  const add = (fact) => {
+    if (!failures.some((f) => sameFact(f, fact))) failures.push(fact);
+  };
+  if (out.budget_exceeded) add({ kind: "budget", reason: out.budget_exceeded });
+  if (cleanup && !cleanup.ok) add({ kind: "cleanup", reason: "not verified" });
+  for (const reason of evidenceErrors) add({ kind: "evidence", reason });
   return { ...out, failures };
+}
+
+const sameFact = (a, b) => a.kind === b.kind && a.reason === b.reason;
+/** Every fact of the given lists, once each, in order (null entries skipped). */
+function unionFailures(...lists) {
+  const out = [];
+  for (const list of lists)
+    for (const fact of list ?? [])
+      if (fact && !out.some((f) => sameFact(f, fact))) out.push(fact);
+  return out;
+}
+
+/**
+ * Review r8 H4d (revision 9): the one fact merger of two versions of a stack's record (an earlier and a later one: the later's
+ * fields win, by sequence; a field only the earlier has is kept). Every failure fact either established is kept, the first failure established stays the record's `failure`,
+ * an earlier clean-up that was not verified stays beside a later one, and a later label that would hide an established failure
+ * (passed, cancelled, not_run) becomes `failed`, with what it said beside it.
+ */
+export function mergeFacts(earlier, later) {
+  if (!earlier) return later;
+  if (!later) return earlier;
+  const failures = unionFailures(
+    [failureOf(earlier)],
+    earlier.failures,
+    [failureOf(later)],
+    later.failures,
+  );
+  // Nothing the earlier version said is dropped unless the later one says it again (a report path, a launch time, counts).
+  let out = {
+    ...earlier,
+    ...later,
+    failure: earlier.failure ?? later.failure,
+    failures,
+  };
+  if (out.failure === undefined) delete out.failure;
+  const cleanups = [
+    ...(earlier.earlier_cleanups ?? []),
+    ...(earlier.cleanup &&
+    earlier.cleanup.ok !== true &&
+    earlier.cleanup !== later.cleanup
+      ? [earlier.cleanup]
+      : []),
+    ...(later.earlier_cleanups ?? []),
+  ];
+  if (cleanups.length > 0) out.earlier_cleanups = [...new Set(cleanups)];
+  const evidence = [
+    ...new Set([
+      ...(earlier.evidence_errors ?? []),
+      ...(later.evidence_errors ?? []),
+    ]),
+  ];
+  if (evidence.length > 0) out.evidence_errors = evidence;
+  if (earlier.budget_exceeded && !out.budget_exceeded)
+    out.budget_exceeded = earlier.budget_exceeded;
+  const hiding = ["passed", "cancelled", "not_run", "running"];
+  if (failures.length > 0 && hiding.includes(out.outcome))
+    out = {
+      ...out,
+      // The earlier version's own failure label when it had one (`evidence_failed`, `cleanup_failed`, ...), else `failed`.
+      outcome: hiding.includes(earlier.outcome) ? "failed" : earlier.outcome,
+      reason: hiding.includes(earlier.outcome)
+        ? failures[0].reason
+        : (earlier.reason ?? failures[0].reason),
+      before_merge: { outcome: later.outcome, reason: later.reason ?? null },
+    };
+  return out;
 }
 
 /**

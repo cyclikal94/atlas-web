@@ -17,6 +17,16 @@
 // decided, and the obligation exists continuously: in the record until the image is verified gone. A failed or refused removal (an
 // image someone else's container uses, `rmi` failing, an inventory that cannot be read) keeps the record, so the next user of the pin
 // inherits the obligation, and the clean-up is not ok. A user outside this protocol pulling the same pin cannot be told apart.
+//
+// Review r8 DA-1a (revision 9): the lock is the kernel's (`host-lock.mjs`): nothing takes it over, and every docker command issued
+// under it holds it too (the locked descriptor is its extra stdio entry), so a holder that dies mid-command keeps the pin locked
+// until that command has ended. Each transaction notes what it is about to do beside the lock before its first effect; a holder that
+// ends without settling (it died, or an answer was lost: a command that timed out or was killed) leaves that note, and the next
+// holder of the pin first brings the unfinished work to a settled state from fresh reads (a release is decided again exactly as the
+// releaser would have; an acquisition needs nothing, its effects are found by what they are), or refuses to decide anything.
+// A record created under the lock is read back: the record on the daemon, not the one this process meant to create, is the truth.
+// Not covered (no host lock can): a request a dead command had already sent that the daemon completes only after a later holder has
+// looked. That needs coordination by the daemon itself.
 import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,10 +166,94 @@ async function daemonId(docker) {
   return daemons.get(docker);
 }
 
-/** Run `fn` holding this daemon's lock for pin `key`. `lock` passes options to `withHostLock` (tests: bounds, the table reader). */
+/** The lock file of pin `key` on daemon `daemon` (`.exlock`: a revision-8 lock DIRECTORY at `.lock` is another protocol). */
+export const lockPath = (daemon, key) =>
+  join(coordinationDir(), `${daemon}-${key}.exlock`);
+
+/**
+ * A client whose commands hold the pin's lock while they run (the locked descriptor is their fourth stdio entry), and which
+ * remembers whether any answer was lost (a command that timed out, was killed or did not start): the work is then not settled.
+ */
+function lockedClient(docker, held) {
+  const client = dockerClient(
+    async (args, options = {}) => {
+      const r = await docker.run(args, { ...options, hold: held.fd });
+      if (r.status === null || r.status === undefined || r.timedOut)
+        client.ambiguous = true;
+      return r;
+    },
+    { lock: docker.lock },
+  );
+  client.ambiguous = false;
+  return client;
+}
+
+/**
+ * Run `fn(locked, held)` holding this daemon's lock for pin `key`, after settling any work an earlier holder left unfinished. The work
+ * `fn` noted is settled when it returns with every answer known; otherwise (it threw, or an answer was lost) the note stays for the
+ * next holder. `lock` passes options to `withHostLock` (tests: bounds). Returns { value, recovered }.
+ */
 export async function withImageLock(docker, key, fn, options = {}) {
-  const path = join(coordinationDir(), `${await daemonId(docker)}-${key}.lock`);
-  return withHostLock(path, fn, { ...docker.lock, ...options });
+  const path = lockPath(await daemonId(docker), key);
+  return withHostLock(
+    path,
+    async (held) => {
+      let recovered = null;
+      if (held.previous) {
+        const d = lockedClient(docker, held);
+        const unsettled = (why) =>
+          new Error(
+            `the unfinished ${held.previous.op ?? "work"} an earlier holder of ${path} left could not be settled (${why}); nothing was decided`,
+          );
+        try {
+          recovered = await settlePrevious(d, key, held.previous);
+        } catch (error) {
+          throw unsettled(String(error?.message ?? error));
+        }
+        if (d.ambiguous) throw unsettled("an answer was lost");
+      }
+      const d = lockedClient(docker, held);
+      const value = await fn(d, held);
+      if (!d.ambiguous) held.settle();
+      return { value, recovered };
+    },
+    { ...docker.lock, ...options },
+  );
+}
+
+/**
+ * Bring an earlier holder's unfinished work to a settled state, from fresh reads, before anything else is decided. An acquisition's
+ * effects (a record, a lease) are found by what they are: the next decision reads them. A release is decided again as its releaser
+ * would have (the same function), and its lease removed when that decision leaves it holding nothing. Throws when it cannot be done.
+ */
+async function settlePrevious(d, key, previous) {
+  const by = previous.holder ?? null;
+  if (previous.unreadable)
+    throw new Error(
+      `an earlier holder's unfinished work cannot be read (${previous.unreadable}); nothing was decided`,
+    );
+  if (previous.key !== key)
+    throw new Error(
+      `the unfinished work beside this lock is for another pin (${previous.key}); nothing was decided`,
+    );
+  if (previous.op === "acquire")
+    return { op: "acquire", by, step: previous.step, action: "reread" };
+  if (previous.op === "release") {
+    const lease = {
+      name: previous.lease,
+      key,
+      ref: previous.ref,
+      pulled: previous.pulled,
+      generation: previous.generation,
+    };
+    const sink = { removed: { volumes: [] } };
+    const { out, inert } = await decideRelease(d, lease, {}, sink, null);
+    if (inert) await dropLeaseOf(d, lease, out, sink);
+    return { op: "release", by, step: previous.step, ...out };
+  }
+  throw new Error(
+    `an earlier holder left unfinished work of an unknown kind (${previous.op}); nothing was decided`,
+  );
 }
 
 const volumeLabels = async (docker, name) => {
@@ -229,19 +323,25 @@ async function removeVolume(docker, name) {
  */
 export async function acquireImage(docker, { ref, labels, name, signal }) {
   const key = pinKey(ref);
-  const { record, presentBefore, joined } = await withImageLock(
+  const {
+    value: { record, presentBefore, joined },
+    recovered,
+  } = await withImageLock(
     docker,
     key,
-    async () => {
-      const present = await imageId(docker, ref, { signal });
-      let current = await ownerRecord(docker, key);
+    async (d, held) => {
+      const step = (what) =>
+        held.note({ op: "acquire", key, ref, lease: name, step: what });
+      const present = await imageId(d, ref, { signal });
+      let current = await ownerRecord(d, key);
       let joining = current !== null;
       if (current && !current.pulled && present === null) {
         // A record that says "present before" while the image is absent: if nobody holds its generation, it describes nothing now
         // (the image went away without us), so a new generation starts from what is here. If someone does, they use an image that
         // has gone; joining keeps their (non-)obligation, which is the truthful one for their generation.
-        if ((await holdersOf(docker, key, current.generation)).length === 0) {
-          const removed = await removeVolume(docker, current.name);
+        if ((await holdersOf(d, key, current.generation)).length === 0) {
+          step("remove_stale_record");
+          const removed = await removeVolume(d, current.name);
           if (!removed.ok)
             throw new Error(
               `a stale owner record could not be replaced: ${removed.error}`,
@@ -250,8 +350,19 @@ export async function acquireImage(docker, { ref, labels, name, signal }) {
           joining = false;
         }
       }
-      current ??= await createRecord(docker, key, ref, present === null);
-      await docker.must(
+      if (!current) {
+        step("create_record");
+        const made = await createRecord(d, key, ref, present === null);
+        // The record on the daemon is the truth (an earlier holder's creation may have landed first): join whatever it says.
+        current = await ownerRecord(d, key);
+        if (!current?.generation)
+          throw new Error(
+            `the owner record of ${ref} cannot be read back after it was created`,
+          );
+        joining = current.generation !== made.generation;
+      }
+      step("register_lease");
+      await d.must(
         [
           "volume",
           "create",
@@ -287,6 +398,7 @@ export async function acquireImage(docker, { ref, labels, name, signal }) {
     joined,
     id,
     present_before: presentBefore,
+    ...(recovered ? { recovered } : {}),
   };
 }
 
@@ -482,13 +594,30 @@ async function leasesOf(docker, filter) {
   return out;
 }
 
+/** Remove a lease volume; on failure the lease is not released and the result says so (not ok). */
+async function dropLeaseOf(d, lease, out, sink) {
+  const removed = await removeVolume(d, lease.name);
+  if (removed.ok) {
+    sink.removed.volumes.push(lease.name);
+    return true;
+  }
+  out.action = "lease_not_released";
+  out.error = removed.error;
+  out.ok = false;
+  return false;
+}
+
 /**
- * Release one lease. Under the pin's lock: a lease of a settled generation (no record, or a newer one) holds nothing; another holder of
- * the same generation keeps the obligation in the record ("transferred": it is that generation's, and that holder is in it); the last
- * holder settles it: nothing to remove when the generation found the image present, otherwise remove it by exact id (never forced)
- * when no container uses it, verify it is gone, and only then retire the record. Anything short of that keeps the record and is not ok.
+ * The release decision for one lease, under the pin's lock (`d` is the locked client). Used by the releaser and, for a releaser that
+ * did not finish, by the next holder of the pin. A lease of a settled generation (no record, or a newer one) holds nothing; another
+ * holder of the same generation keeps the obligation in the record ("transferred": it is that generation's, and that holder is in
+ * it); the last holder settles it: nothing to remove when the generation found the image present, otherwise remove it by exact id
+ * (never forced) when no container uses it, verify it is gone, and only then retire the record. Anything short of that keeps the
+ * record and is not ok. `step(name)` notes each effect before it is issued. Returns { out, inert } (inert: the lease holds nothing
+ * now and may be removed after the lock is given up).
  */
-async function releaseImage(docker, lease, refs, result) {
+async function decideRelease(d, lease, refs, sink, step) {
+  const note = (name) => step?.(name);
   const out = {
     lease: lease.name,
     ref: lease.ref ?? refs[lease.key] ?? null,
@@ -497,100 +626,122 @@ async function releaseImage(docker, lease, refs, result) {
     action: null,
     ok: false,
   };
-  // When the generation is settled, the lease is inert: it is removed after the lock is given up (a pause there blocks nobody).
-  let inert = false;
-  const dropLease = async () => {
-    const removed = await removeVolume(docker, lease.name);
-    if (removed.ok) {
-      result.removed.volumes.push(lease.name);
-      return true;
-    }
-    out.action = "lease_not_released";
-    out.error = removed.error;
-    out.ok = false;
-    return false;
-  };
-  try {
-    await withImageLock(docker, lease.key, async () => {
-      const record = await ownerRecord(docker, lease.key);
-      if (record === null || record.generation !== lease.generation) {
-        out.action = "generation_settled";
-        out.ok = true;
-        inert = true;
-        return;
-      }
-      out.ref = record.ref ?? out.ref;
-      out.pulled = record.pulled;
-      const others = (
-        await holdersOf(docker, lease.key, record.generation)
-      ).filter((h) => h.name !== lease.name);
-      if (others.length > 0) {
-        out.action = "transferred";
-        out.to = others.map((h) => h.name);
-        out.ok = true;
-        await dropLease();
-        return;
-      }
-      const retire = async (action) => {
-        const removed = await removeVolume(docker, record.name);
-        if (!removed.ok) {
-          out.action = "record_not_retired";
-          out.error = removed.error;
-          await dropLease();
-          out.ok = false;
-          return;
-        }
-        out.action = action;
-        out.ok = true;
-        inert = true;
-      };
-      if (!record.pulled) return retire("kept_present_before");
-      if (!out.ref) {
-        out.action = "unknown_reference";
-        out.obligation = record.name;
-        return;
-      }
-      const id = await imageId(docker, out.ref, { whenStopped: true });
-      out.id = id;
-      if (id === null) return retire("already_absent");
-      const users = lines(
-        await docker.must(
-          ["ps", "-a", "-q", "--no-trunc", "--filter", `ancestor=${id}`],
-          "docker ps (image users)",
-          { whenStopped: true, timeoutMs: 30_000 },
-        ),
-      );
-      if (users.length > 0) {
-        out.action = "retained_in_use";
-        out.users = users;
-        out.obligation = record.name;
-        await dropLease();
-        out.ok = false;
-        return;
-      }
-      const r = await docker.run(["rmi", id], {
-        whenStopped: true,
-        timeoutMs: 120_000,
-      });
-      const after = await imageId(docker, out.ref, { whenStopped: true });
-      if (after !== null) {
-        out.action = "remove_failed";
-        out.error = String(r.stderr ?? "").trim();
-        out.obligation = record.name;
-        await dropLease();
-        out.ok = false;
-        return;
-      }
-      return retire("removed");
-    });
-  } catch (error) {
-    out.action = "unknown";
-    out.error = String(error?.message ?? error);
-    // Undecided: the pin's owner record (if there is one) still holds the obligation; say where it would be.
-    out.obligation = recordName(lease.key);
-    out.ok = false;
-    return out;
+  const record = await ownerRecord(d, lease.key);
+  if (record === null || record.generation !== lease.generation) {
+    out.action = "generation_settled";
+    out.ok = true;
+    return { out, inert: true };
   }
-  if (inert) await dropLease();
+  out.ref = record.ref ?? out.ref;
+  out.pulled = record.pulled;
+  const others = (await holdersOf(d, lease.key, record.generation)).filter(
+    (h) => h.name !== lease.name,
+  );
+  if (others.length > 0) {
+    out.action = "transferred";
+    out.to = others.map((h) => h.name);
+    out.ok = true;
+    note("drop_lease");
+    await dropLeaseOf(d, lease, out, sink);
+    return { out, inert: false };
+  }
+  const retire = async (action) => {
+    note("retire_record");
+    const removed = await removeVolume(d, record.name);
+    if (!removed.ok) {
+      out.action = "record_not_retired";
+      out.error = removed.error;
+      note("drop_lease");
+      await dropLeaseOf(d, lease, out, sink);
+      out.ok = false;
+      return { out, inert: false };
+    }
+    out.action = action;
+    out.ok = true;
+    return { out, inert: true };
+  };
+  if (!record.pulled) return retire("kept_present_before");
+  if (!out.ref) {
+    out.action = "unknown_reference";
+    out.obligation = record.name;
+    return { out, inert: false };
+  }
+  const id = await imageId(d, out.ref, { whenStopped: true });
+  out.id = id;
+  if (id === null) return retire("already_absent");
+  const users = lines(
+    await d.must(
+      ["ps", "-a", "-q", "--no-trunc", "--filter", `ancestor=${id}`],
+      "docker ps (image users)",
+      { whenStopped: true, timeoutMs: 30_000 },
+    ),
+  );
+  if (users.length > 0) {
+    out.action = "retained_in_use";
+    out.users = users;
+    out.obligation = record.name;
+    note("drop_lease");
+    await dropLeaseOf(d, lease, out, sink);
+    out.ok = false;
+    return { out, inert: false };
+  }
+  note("remove_image");
+  const r = await d.run(["rmi", id], {
+    whenStopped: true,
+    timeoutMs: 120_000,
+  });
+  const after = await imageId(d, out.ref, { whenStopped: true });
+  if (after !== null) {
+    out.action = "remove_failed";
+    out.error = String(r.stderr ?? "").trim();
+    out.obligation = record.name;
+    note("drop_lease");
+    await dropLeaseOf(d, lease, out, sink);
+    out.ok = false;
+    return { out, inert: false };
+  }
+  return retire("removed");
+}
+
+/**
+ * Release one lease (`decideRelease`, under the pin's lock, after any unfinished work an earlier holder left there is settled). A
+ * settled generation's leftover lease is removed after the lock is given up (a pause there blocks nobody).
+ */
+async function releaseImage(docker, lease, refs, result) {
+  let out;
+  let inert = false;
+  let recovered = null;
+  try {
+    ({
+      value: { out, inert },
+      recovered,
+    } = await withImageLock(docker, lease.key, (d, held) =>
+      decideRelease(d, lease, refs, result, (step) =>
+        held.note({
+          op: "release",
+          key: lease.key,
+          lease: lease.name,
+          ref: lease.ref ?? refs[lease.key] ?? null,
+          pulled: lease.pulled,
+          generation: lease.generation,
+          step,
+        }),
+      ),
+    ));
+  } catch (error) {
+    // Undecided: the pin's owner record (if there is one) still holds the obligation; say where it would be.
+    return {
+      lease: lease.name,
+      ref: lease.ref ?? refs[lease.key] ?? null,
+      pulled: lease.pulled,
+      generation: lease.generation,
+      action: "unknown",
+      error: String(error?.message ?? error),
+      obligation: recordName(lease.key),
+      ok: false,
+    };
+  }
+  if (recovered) out.recovered = recovered;
+  if (inert) await dropLeaseOf(docker, lease, out, result);
   return out;
 }

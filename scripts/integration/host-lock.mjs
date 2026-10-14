@@ -1,20 +1,44 @@
-// A lock shared by every process on this host that coordinates through the same directory (WEB-08d review r7 DA-1): the runner, its
-// reaper and any other invocation. It is a directory, created complete (with its owner) by an atomic rename, so it never exists
-// without saying who holds it. Only its owner removes it, again by an atomic rename. A lock is taken over only when its owner is
-// PROVEN gone: its pid no longer exists, or that pid now belongs to a process started at another time. Anything less (the table
-// cannot be read, the owner record cannot be read) is not proof, and the waiter keeps waiting until its own bound, then fails:
-// nothing is decided under a lock whose holder may still be acting.
+// A lock shared by every process on this host that coordinates through the same file (WEB-08d review r7 DA-1; review r8 DA-1a): the
+// runner, its reaper and any other invocation.
+//
+// Review r8 DA-1a (revision 9): the lock is the KERNEL's, not a path. Revision 8 moved a dead owner's lock directory aside after proving
+// that owner gone; the path could meanwhile belong to a live replacement, so a stale claimant could move a live lock and let a third
+// process in beside it. Now the lock is an exclusive open-file lock (BSD `flock` semantics, taken atomically by `open(2)` with
+// `O_EXLOCK`) on a file that is never moved, unlinked or recreated. Nothing ever takes a lock over: the kernel gives it up when the
+// last open description of the holder's file is closed, which happens when the holder closes it or when the holder AND every process
+// it handed the descriptor to (`held.fd`, inherited as an extra stdio entry by the commands it issues under the lock) have exited.
+// So a holder's death releases the lock only once nothing it started under the lock is still running, and a live holder is never
+// displaced, whatever any waiter believes about it. A waiter that cannot get the lock keeps waiting until its own bound or its stop.
+//
+// The holder's identity, written into the file, is a diagnostic (a timeout names who holds it); it is never permission for anything.
+//
+// Unfinished work (`held.note`, `held.settle`, `held.previous`): a holder records what it is doing beside the lock (`<lock>.intent`,
+// replaced atomically, only ever written by the holder). A holder that ends without settling it (it died, or an effect's answer was
+// lost) leaves the record, and the NEXT holder is told (`held.previous`), so it can bring that work to a settled state before its own.
+//
+// Supported: macOS (Darwin) and the BSDs, which have `O_EXLOCK`. Elsewhere withHostLock refuses rather than coordinate unsafely.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  closeSync,
+  constants,
+  fsyncSync,
+  ftruncateSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+
+// open(2) `O_EXLOCK` on Darwin and the BSDs (Node does not name it in fs.constants).
+const O_EXLOCK = 0x20;
+export const supported = ["darwin", "freebsd", "openbsd", "netbsd"].includes(
+  process.platform,
+);
 
 export class LockTimeout extends Error {
   constructor(path, holder) {
@@ -44,96 +68,115 @@ export function startedAt(pid) {
 
 let self = null;
 const owner = () => {
-  self ??= {
-    pid: process.pid,
-    started: startedAt(process.pid),
-    host: hostname(),
-  };
+  if (self) return self;
+  let started = null;
+  try {
+    started = startedAt(process.pid);
+  } catch {
+    // a diagnostic only: the lock does not depend on the process table
+  }
+  self = { pid: process.pid, started, host: hostname() };
   return self;
 };
 
-/** Is `holder` (an owner record) proven gone? Never true on doubt. */
-export function provenGone(holder, look = startedAt) {
-  if (!holder || typeof holder.pid !== "number" || !holder.started)
-    return false;
-  if (holder.host !== hostname()) return false;
-  let now;
+/** Who the lock file says holds it (a diagnostic, possibly stale or unreadable: null). */
+export function holderOf(path) {
   try {
-    now = look(holder.pid);
-  } catch {
-    return false;
-  }
-  return now === null || now !== holder.started;
-}
-
-const readOwner = (path) => {
-  try {
-    return JSON.parse(readFileSync(join(path, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return null;
   }
-};
+}
+
+/** The unfinished work an earlier holder left beside the lock, or null. */
+export function intentOf(path) {
+  try {
+    return JSON.parse(readFileSync(`${path}.intent`, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    // A record that exists but cannot be read is unfinished work of an unknown kind, never "nothing".
+    return { unreadable: String(error?.message ?? error) };
+  }
+}
+
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Hold the lock at `path` while `fn()` runs. Waits (polling) up to `timeoutMs`; a `signal` ends the wait with its reason. `look` is the
- * process-table reader (a test seam).
+ * Hold the lock at `path` while `fn(held)` runs. Waits (polling) up to `timeoutMs`; a `signal` ends the wait with its reason, and `fn`
+ * is then never called. `held` is { fd, token, path, previous, note(intent), settle() }: `fd` is the locked descriptor (hand it to a
+ * command as an extra stdio entry and the lock lasts while that command does), `previous` the unfinished work an earlier holder left.
  */
 export async function withHostLock(
   path,
   fn,
-  { signal, timeoutMs = 120_000, pollMs = 50, look = startedAt } = {},
+  { signal, timeoutMs = 120_000, pollMs = 50 } = {},
 ) {
+  if (!supported)
+    throw new Error(
+      `no process-lifetime host lock on ${process.platform} (open(2) O_EXLOCK is needed); nothing was decided`,
+    );
   mkdirSync(dirname(path), { recursive: true });
-  const token = randomBytes(8).toString("hex");
-  const mine = { ...owner(), token };
   const deadline = Date.now() + timeoutMs;
-  let holder = null;
+  let fd = null;
   for (;;) {
     signal?.throwIfAborted();
-    const fresh = `${path}.new-${token}`;
-    mkdirSync(fresh, { recursive: true });
-    writeFileSync(join(fresh, "owner.json"), `${JSON.stringify(mine)}\n`);
     try {
-      renameSync(fresh, path);
+      fd = openSync(
+        path,
+        constants.O_RDWR | constants.O_CREAT | constants.O_NONBLOCK | O_EXLOCK,
+        0o600,
+      );
       break;
     } catch (error) {
-      rmSync(fresh, { recursive: true, force: true });
-      if (!["EEXIST", "ENOTEMPTY"].includes(error?.code)) throw error;
+      if (!["EAGAIN", "EWOULDBLOCK"].includes(error?.code)) throw error;
     }
-    holder = readOwner(path);
-    if (holder && provenGone(holder, look)) {
-      // Take over a dead owner's lock: move it aside (only one taker can), then check it was the one judged dead.
-      const aside = `${path}.stale-${token}`;
-      try {
-        renameSync(path, aside);
-      } catch {
-        continue; // released or taken over meanwhile
-      }
-      const moved = readOwner(aside);
-      if (moved?.token !== holder.token) {
-        // Someone else took it over and a live owner holds it now: put it back. If that fails, two may hold it: refuse.
-        try {
-          renameSync(aside, path);
-        } catch {
-          throw new Error(
-            `the lock ${path} changed hands while a dead owner's lock was being taken over; nothing was decided`,
-          );
-        }
-      } else rmSync(aside, { recursive: true, force: true });
-      continue;
-    }
-    if (Date.now() >= deadline) throw new LockTimeout(path, holder);
+    if (Date.now() >= deadline) throw new LockTimeout(path, holderOf(path));
     await pause(pollMs);
   }
+  const token = randomBytes(8).toString("hex");
+  const intentPath = `${path}.intent`;
+  const held = {
+    fd,
+    token,
+    path,
+    previous: intentOf(path),
+    /** Record (replacing atomically) what this holder is doing, before an effect whose answer could be lost. */
+    note(intent) {
+      const temporary = `${intentPath}.${token}`;
+      const text = `${JSON.stringify({ ...intent, holder: { ...owner(), token }, at: new Date().toISOString() })}\n`;
+      const out = openSync(temporary, "w", 0o600);
+      try {
+        writeSync(out, text);
+        fsyncSync(out);
+      } finally {
+        closeSync(out);
+      }
+      renameSync(temporary, intentPath);
+    },
+    /** The work is settled (including any earlier holder's it took over): nothing is left for the next holder. */
+    settle() {
+      rmSync(intentPath, { force: true });
+    },
+  };
   try {
-    return await fn();
-  } finally {
-    // Only the owner removes it, and only its own: move it aside first, so the path is never an empty directory.
-    if (readOwner(path)?.token === token) {
-      const gone = `${path}.released-${token}`;
-      renameSync(path, gone);
-      rmSync(gone, { recursive: true, force: true });
+    try {
+      ftruncateSync(fd, 0);
+      writeSync(
+        fd,
+        `${JSON.stringify({ ...owner(), token, at: new Date().toISOString() })}\n`,
+        0,
+      );
+    } catch {
+      // the identity is a diagnostic; the lock is held either way
     }
+    return await fn(held);
+  } finally {
+    try {
+      ftruncateSync(fd, 0);
+    } catch {
+      // a diagnostic only
+    }
+    // The kernel releases the lock when the last descriptor of this open file is closed (commands given `fd` hold it too).
+    closeSync(fd);
   }
 }

@@ -302,3 +302,323 @@ test("H4c: a reaper told to clean up while its runner still runs leaves the runn
   process.kill(c.pid("controller"), "SIGKILL");
   await c.closed;
 });
+
+// ---- review r8 H4d (revision 9): the committed stack records are the authority of a take-over ----------------------------------------
+import { chmodSync } from "node:fs";
+import { createStackStore, stackKey } from "./stack-records.mjs";
+
+const at = Date.now();
+const failedReport = (status = "unexpected") => ({
+  stats: { startTime: new Date(at + 500).toISOString() },
+  errors: [],
+  suites: [
+    {
+      title: "a.spec.ts",
+      specs: [
+        {
+          id: "a",
+          title: "a",
+          file: "a.spec.ts",
+          tests: [
+            {
+              projectName: "integration-chromium",
+              status,
+              results: [
+                { status: status === "unexpected" ? "failed" : "passed" },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+});
+const PLAN = {
+  browsers: ["chromium"],
+  stacks: [
+    {
+      stack: "base",
+      cases: [
+        {
+          key: "integration-chromium|a",
+          project: "integration-chromium",
+          file: "a.spec.ts",
+          title: "a",
+        },
+      ],
+    },
+    { stack: "-later", cases: [] },
+  ],
+};
+const REPORT_FAILURE = {
+  outcome: "failed",
+  reason: "the report has errors",
+  report_errors: ["teardown failed"],
+  failure: { kind: "report_errors", reason: "the report has errors" },
+  counts: { passed: 1, failed: 0, flaky: 0 },
+};
+
+/** A reaper whose runner is already gone, given `messages`; resolves with what it left. `prepare(runDir)` writes the run's files. */
+async function reapDead(
+  t,
+  { prepare = () => undefined, messages = [], summary = true } = {},
+) {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4d-"));
+  const runDir = join(dir, "run");
+  mkdirSync(runDir);
+  t.after(() => {
+    try {
+      chmodSync(runDir, 0o755);
+    } catch {
+      // gone
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+  writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN));
+  if (summary)
+    writeFileSync(
+      join(runDir, "summary.json"),
+      JSON.stringify({
+        schema: 3,
+        invocation: { finished: false },
+        outcome: "running",
+        stacks: [],
+      }),
+    );
+  prepare(runDir);
+  const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((r) => gone.once("exit", r));
+  const reaper = spawn(
+    process.execPath,
+    [
+      join(here, "reaper.mjs"),
+      runDir,
+      `ATLAS_TEST_${Date.now()}`,
+      String(gone.pid),
+    ],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  let log = "";
+  reaper.stdout.on("data", (d) => {
+    log += d;
+  });
+  reaper.stderr.on("data", (d) => {
+    log += d;
+  });
+  const closed = new Promise((r) => reaper.once("close", (code) => r(code)));
+  reaper.stdin.end(
+    [{ type: "hello", invocation: "inv-h4d", evidence: dir }, ...messages]
+      .map((m) => `${JSON.stringify(m)}\n`)
+      .join(""),
+  );
+  const code = await closed;
+  const parse = (name) => {
+    try {
+      return JSON.parse(readFileSync(join(runDir, name), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  return {
+    code,
+    log,
+    runDir,
+    summary: parse("summary.json"),
+    reaped: parse("reaper.json"),
+  };
+}
+const stack0 = (summary) =>
+  summary?.stacks?.find((s) => s.browser === "chromium" && s.index === 0);
+const name0 = { browser: "chromium", stack: "base", index: 0 };
+
+test("H4d: a stack-end confirmed by the committed settled record retires the checkpoint; the committed failure is the result", async (t) => {
+  let seq = null;
+  const r = await reapDead(t, {
+    prepare: (runDir) => {
+      const store = createStackStore(runDir);
+      store.commit({ ...name0, outcome: "running" }, "started");
+      store.commit({ ...name0, ...REPORT_FAILURE }, "judged");
+      seq = store.commit(
+        { ...name0, ...REPORT_FAILURE, cleanup: { ok: true } },
+        "settled",
+      ).seq;
+    },
+    messages: [
+      { type: "stack", browser: "chromium", index: 0, stack: "base" },
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 0,
+        seq: 2,
+        record: REPORT_FAILURE,
+      },
+      // The runner was lost after this, before its summary had the stack (the review r8 H4d gap).
+      { type: "stack-end", browser: "chromium", index: 0, seq: 3 },
+    ],
+  });
+  assert.equal(seq, 3);
+  assert.deepEqual(r.reaped?.retired, [
+    { key: stackKey("chromium", 0), seq: 3 },
+  ]);
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.equal(stack0(r.summary)?.outcome, "failed");
+  assert.equal(
+    stack0(r.summary)?.recovered_by,
+    undefined,
+    "complete: not settled again by the reaper",
+  );
+  assert.equal(
+    r.summary?.stacks?.find((q) => q.index === 1)?.outcome,
+    "not_run",
+  );
+});
+
+test("H4d: a stack-end the reaper cannot confirm (the committed record is older) retires nothing; the reaper settles the stack", async (t) => {
+  const r = await reapDead(t, {
+    prepare: (runDir) => {
+      const store = createStackStore(runDir);
+      store.commit({ ...name0, outcome: "running" }, "started");
+      store.commit({ ...name0, ...REPORT_FAILURE }, "judged");
+    },
+    messages: [
+      { type: "stack", browser: "chromium", index: 0, stack: "base" },
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 0,
+        seq: 2,
+        record: REPORT_FAILURE,
+      },
+      { type: "stack-end", browser: "chromium", index: 0, seq: 3 },
+      { type: "stack-end", browser: "chromium", index: 0 },
+    ],
+  });
+  assert.deepEqual(r.reaped?.retired, []);
+  assert.equal(stack0(r.summary)?.outcome, "failed", r.log);
+  assert.equal(stack0(r.summary)?.recovered_by, "reaper");
+  assert.deepEqual(stack0(r.summary)?.cleanup, { by: "reaper", ok: true });
+  assert.equal(r.summary?.outcome, "failed");
+});
+
+test("H4d: a late or repeated stack-end of an earlier stack never clears a later stack's checkpoint", async (t) => {
+  const r = await reapDead(t, {
+    prepare: (runDir) => {
+      const store = createStackStore(runDir);
+      store.commit({ ...name0, outcome: "passed", reason: null }, "judged");
+      store.commit(
+        { ...name0, outcome: "passed", reason: null, cleanup: { ok: true } },
+        "settled",
+      );
+    },
+    messages: [
+      { type: "stack", browser: "chromium", index: 0, stack: "base" },
+      { type: "stack-end", browser: "chromium", index: 0, seq: 2 },
+      { type: "stack", browser: "chromium", index: 1, stack: "-later" },
+      // The later stack's facts reached only the journal (its record could not be written).
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 1,
+        seq: null,
+        record: { ...REPORT_FAILURE, stack: "-later" },
+      },
+      { type: "stack-end", browser: "chromium", index: 0, seq: 2 },
+      { type: "stack-end", browser: "chromium", index: 1 },
+    ],
+  });
+  assert.equal(stack0(r.summary)?.outcome, "passed", r.log);
+  const later = r.summary?.stacks?.find((s) => s.index === 1);
+  assert.equal(later?.outcome, "failed");
+  assert.deepEqual(later?.report_errors, ["teardown failed"]);
+  assert.equal(r.summary?.outcome, "failed");
+});
+
+test("H4d: a stack lost after its launch was committed, before its judgement: its raw report is judged; a failed case stays failed", async (t) => {
+  const launched =
+    (status, write = true) =>
+    (runDir) => {
+      const report = join(runDir, "results-chromium.json");
+      if (write) writeFileSync(report, JSON.stringify(failedReport(status)));
+      const store = createStackStore(runDir);
+      store.commit({ ...name0, outcome: "running", report }, "started");
+      store.commit(
+        { ...name0, outcome: "running", launched_at: at },
+        "launched",
+      );
+    };
+  const journalled = [
+    { type: "stack", browser: "chromium", index: 0, stack: "base" },
+    {
+      type: "judged",
+      browser: "chromium",
+      index: 0,
+      seq: 2,
+      phase: "launched",
+      record: { ...name0, outcome: "running", launched_at: at },
+    },
+  ];
+  const failed = await reapDead(t, {
+    prepare: launched("unexpected"),
+    messages: journalled,
+  });
+  assert.equal(stack0(failed.summary)?.outcome, "failed", failed.log);
+  assert.equal(stack0(failed.summary)?.judged_by, "reaper");
+  assert.equal(stack0(failed.summary)?.failure?.kind, "cases");
+  assert.equal(failed.summary?.outcome, "failed");
+  // Controls: a report whose cases passed is what the stop interrupted (cancelled, never a pass); no report at all is the stop's doing.
+  const passed = await reapDead(t, {
+    prepare: launched("expected"),
+    messages: journalled,
+  });
+  assert.equal(passed.summary?.outcome, "cancelled", passed.log);
+  const none = await reapDead(t, {
+    prepare: launched("expected", false),
+    messages: journalled,
+  });
+  assert.equal(stack0(none.summary)?.outcome, "cancelled", none.log);
+  assert.equal(none.summary?.outcome, "cancelled");
+});
+
+test("H4d: a torn summary, with an earlier stack's failure only in its committed record: the failure survives; the tear is an evidence failure", async (t) => {
+  const r = await reapDead(t, {
+    summary: false,
+    prepare: (runDir) => {
+      writeFileSync(
+        join(runDir, "summary.json"),
+        '{"schema":3,"stacks":[{"brow',
+      );
+      const store = createStackStore(runDir);
+      store.commit(
+        { ...name0, ...REPORT_FAILURE, cleanup: { ok: true } },
+        "settled",
+      );
+    },
+    messages: [
+      { type: "stack", browser: "chromium", index: 1, stack: "-later" },
+    ],
+  });
+  assert.equal(stack0(r.summary)?.outcome, "failed", r.log);
+  assert.equal(
+    r.summary?.stacks?.find((s) => s.index === 1)?.outcome,
+    "cancelled",
+  );
+  assert.equal(r.summary?.outcome, "failed");
+  assert.match(
+    r.summary?.evidence_errors?.join("\n") ?? "",
+    /summary\.json could not be read/,
+  );
+  assert.equal(r.code, 1, "its evidence was not complete");
+  assert.equal(r.reaped?.ok, true, "its clean-up itself was verified");
+});
+
+test("H4d: evidence the reaper cannot write fails it (exit 1) even when its clean-up is verified", async (t) => {
+  const r = await reapDead(t, {
+    prepare: (runDir) => chmodSync(runDir, 0o555),
+    messages: [{ type: "stack", browser: "chromium", index: 0, stack: "base" }],
+  });
+  assert.equal(r.code, 1, r.log);
+  assert.match(r.log, /evidence NOT written/);
+  assert.match(r.log, /clean-up verified/);
+});

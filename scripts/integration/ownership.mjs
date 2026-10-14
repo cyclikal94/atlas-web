@@ -361,6 +361,7 @@ export function createOwner({
       whenStopped = false,
       env,
       cwd,
+      hold,
     } = options;
     if (signal?.aborted && abortable && !whenStopped)
       throw new Cancelled(String(signal.reason?.reason ?? "aborted"));
@@ -368,7 +369,13 @@ export function createOwner({
       env,
       cwd,
       whenStopped,
-      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      // `hold`: a descriptor the command keeps open while it runs (a host lock's: the lock lasts while the command does).
+      stdio: [
+        input === undefined ? "ignore" : "pipe",
+        "pipe",
+        "pipe",
+        ...(hold === undefined ? [] : [hold]),
+      ],
     });
     let stdout = "";
     let stderr = "";

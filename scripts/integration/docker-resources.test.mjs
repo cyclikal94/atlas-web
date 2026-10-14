@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,9 +10,11 @@ import {
   inventory,
   LABEL_INVOCATION,
   LABEL_STACK,
+  lockPath,
   pinKey,
   recordName,
 } from "./docker-resources.mjs";
+import { intentOf } from "./host-lock.mjs";
 import { Cancelled } from "./ownership.mjs";
 import {
   BACKEND_IMAGE,
@@ -108,7 +110,10 @@ function fakeDaemon({ images = {}, fail = () => null } = {}) {
           .join("\n"),
       );
     if (a === "volume" && b === "create") {
-      state.volumes.set(args.at(-1), { labels: labelsOf(args) });
+      // Revision 9 adaptation of the fake: a name that exists is answered as it is, labels unchanged, as the real daemon does
+      // (checked on colima "atlas", 14 October 2026); revision 8's fake replaced the labels.
+      if (!state.volumes.has(args.at(-1)))
+        state.volumes.set(args.at(-1), { labels: labelsOf(args) });
       return ok(args.at(-1));
     }
     if (a === "volume" && b === "inspect") {
@@ -958,4 +963,288 @@ test("DA-1: when the containers cannot be listed, the stack's image release is s
   );
   assert.equal(state.volumes.has(recordName(pinKey(BACKEND_IMAGE))), true);
   assert.equal(state.volumes.has("a-lease"), true);
+});
+
+// ---- review r8 DA-1a (revision 9): unfinished work left beside the lock is settled by the next holder --------------------------------
+
+const LOST = { status: null, stdout: "", stderr: "", timedOut: true };
+/** A client of the same daemon whose matching command's answer is lost (`land`: the daemon did it anyway) or that dies there (`die`). */
+function lossy(docker, when, { land = true, die = false } = {}) {
+  return dockerClient(async (args, options) => {
+    if (!when(args)) return docker.run(args, options);
+    if (die) throw new Error(`the holder died at: docker ${args.join(" ")}`);
+    if (land) await docker.run(args, options);
+    return LOST;
+  });
+}
+const isRecordRemoval = (args) =>
+  args[0] === "volume" &&
+  args[1] === "rm" &&
+  args[2] === recordName(pinKey(BACKEND_IMAGE));
+const noteOf = (state) =>
+  intentOf(lockPath(state.daemon, pinKey(BACKEND_IMAGE)));
+
+test("DA-1a: a release whose removal answer was lost (and that did not happen) leaves its note; the next acquisition finishes it first", async () => {
+  const { state, docker } = fakeDaemon();
+  foreign(state);
+  await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: LABELS,
+    name: "a-lease",
+  });
+  const a = await disposeLabelled(
+    lossy(docker, (args) => args[0] === "rmi", { land: false }),
+    { filter: FILTER },
+  );
+  assert.equal(a.ok, false);
+  assert.equal(a.images[0]?.action, "remove_failed");
+  assert.equal(
+    noteOf(state)?.op,
+    "release",
+    "the answer was lost: the work is not settled",
+  );
+  assert.equal(noteOf(state)?.step, "drop_lease");
+  const b = await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: B,
+    name: "b-lease",
+  });
+  assert.equal(b.recovered?.op, "release");
+  assert.equal(
+    b.recovered?.action,
+    "removed",
+    "the next holder removed what the releaser could not confirm",
+  );
+  assert.equal(b.pulled, true, "a new generation, which pulled again");
+  assert.equal(b.joined, false);
+  assert.equal(noteOf(state), null, "settled");
+  const last = await disposeLabelled(docker, { filter: FILTER_B });
+  assert.equal(last.ok, true, JSON.stringify(last.images));
+  assert.equal(state.images.has(BACKEND_IMAGE), false);
+  assert.equal(state.volumes.has(recordName(pinKey(BACKEND_IMAGE))), false);
+  assert.equal(
+    state.images.get("other:1"),
+    "sha256:other",
+    "unrelated image kept",
+  );
+  assert.equal(
+    state.volumes.has("their-volume"),
+    true,
+    "unrelated volume kept",
+  );
+});
+
+test("DA-1a: a releaser that died after removing the image, before retiring the record: the next holder retires it and removes the lease", async () => {
+  const { state, docker } = fakeDaemon();
+  await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: LABELS,
+    name: "a-lease",
+  });
+  const a = await disposeLabelled(
+    lossy(docker, isRecordRemoval, { die: true }),
+    { filter: FILTER },
+  );
+  assert.equal(a.images[0]?.action, "unknown");
+  assert.equal(a.images[0]?.ok, false);
+  assert.equal(noteOf(state)?.step, "retire_record");
+  assert.equal(
+    state.images.has(BACKEND_IMAGE),
+    false,
+    "the image went before the death",
+  );
+  assert.equal(
+    state.volumes.has(recordName(pinKey(BACKEND_IMAGE))),
+    true,
+    "its record did not",
+  );
+  const b = await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: B,
+    name: "b-lease",
+  });
+  assert.equal(b.recovered?.action, "already_absent");
+  assert.equal(
+    state.volumes.has("a-lease"),
+    false,
+    "the dead releaser's lease holds nothing and is gone",
+  );
+  assert.equal(b.pulled, true);
+  assert.notEqual(b.generation, undefined);
+  const last = await disposeLabelled(docker, { filter: FILTER_B });
+  assert.equal(last.ok, true, JSON.stringify(last.images));
+  assert.equal(state.images.has(BACKEND_IMAGE), false);
+  assert.equal(state.volumes.has(recordName(pinKey(BACKEND_IMAGE))), false);
+});
+
+test("DA-1a: a releaser that died before the removal: the next holder decides it again, and a holder that joined meanwhile is never possible", async () => {
+  const { state, docker } = fakeDaemon();
+  await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: LABELS,
+    name: "a-lease",
+  });
+  const a = await disposeLabelled(
+    lossy(docker, (args) => args[0] === "rmi", { die: true }),
+    { filter: FILTER },
+  );
+  assert.equal(a.images[0]?.action, "unknown");
+  assert.equal(noteOf(state)?.step, "remove_image");
+  assert.equal(state.images.has(BACKEND_IMAGE), true);
+  // The next holder is the dead releaser's own reaper (its disposal by label finds the lease again).
+  const reaper = await disposeLabelled(docker, { filter: FILTER });
+  assert.equal(reaper.ok, true, JSON.stringify(reaper.images));
+  assert.equal(reaper.images[0]?.recovered?.action, "removed");
+  assert.equal(state.images.has(BACKEND_IMAGE), false);
+  assert.equal(state.volumes.has(recordName(pinKey(BACKEND_IMAGE))), false);
+  assert.equal(noteOf(state), null);
+});
+
+test("DA-1a: an acquisition that died after creating the record and before its lease: the next one joins that generation (read back)", async () => {
+  const { state, docker } = fakeDaemon();
+  const isLease = (args) =>
+    args[0] === "volume" && args[1] === "create" && args.at(-1) === "a-lease";
+  await assert.rejects(
+    acquireImage(lossy(docker, isLease, { die: true }), {
+      ref: BACKEND_IMAGE,
+      labels: LABELS,
+      name: "a-lease",
+    }),
+    /died/,
+  );
+  assert.equal(noteOf(state)?.op, "acquire");
+  assert.equal(noteOf(state)?.step, "register_lease");
+  const record = state.volumes.get(recordName(pinKey(BACKEND_IMAGE)));
+  const b = await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: B,
+    name: "b-lease",
+  });
+  assert.equal(b.recovered?.op, "acquire");
+  assert.equal(b.joined, true);
+  assert.equal(b.generation, record.labels["atlas.it.generation"]);
+  assert.equal(b.pulled, true);
+  assert.equal(noteOf(state), null);
+  const last = await disposeLabelled(docker, { filter: FILTER_B });
+  assert.equal(last.images[0]?.action, "removed");
+  assert.equal(state.images.has(BACKEND_IMAGE), false);
+});
+
+test("DA-1a: a record that landed first (an earlier holder's late creation) is the generation every later decision uses", async () => {
+  const { state, docker } = fakeDaemon();
+  const name = recordName(pinKey(BACKEND_IMAGE));
+  const landing = dockerClient(async (args, options) => {
+    if (args[0] === "volume" && args[1] === "create" && args.at(-1) === name)
+      state.volumes.set(name, {
+        labels: {
+          "atlas.it.owner": pinKey(BACKEND_IMAGE),
+          "atlas.it.generation": "landed-first",
+          "atlas.it.pulled": "true",
+          "atlas.it.image": BACKEND_IMAGE,
+        },
+      });
+    return docker.run(args, options);
+  });
+  const a = await acquireImage(landing, {
+    ref: BACKEND_IMAGE,
+    labels: LABELS,
+    name: "a-lease",
+  });
+  assert.equal(a.generation, "landed-first");
+  assert.equal(a.joined, true);
+  assert.equal(
+    state.volumes.get("a-lease")?.labels["atlas.it.generation"],
+    "landed-first",
+  );
+  const done = await disposeLabelled(docker, { filter: FILTER });
+  assert.equal(
+    done.images[0]?.action,
+    "removed",
+    "the lease counts in the generation the record names",
+  );
+  assert.equal(state.images.has(BACKEND_IMAGE), false);
+});
+
+test("DA-1a: unfinished work that cannot be settled (an answer lost again), or a note that cannot be read: nothing is decided", async () => {
+  const { state, docker } = fakeDaemon();
+  await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: LABELS,
+    name: "a-lease",
+  });
+  await disposeLabelled(
+    lossy(docker, (args) => args[0] === "rmi", { die: true }),
+    { filter: FILTER },
+  );
+  const before = noteOf(state);
+  assert.equal(before?.step, "remove_image");
+  const blind = lossy(
+    docker,
+    (args) => args[0] === "image" && args[1] === "inspect",
+    { land: true },
+  );
+  await assert.rejects(
+    acquireImage(blind, { ref: BACKEND_IMAGE, labels: B, name: "b-lease" }),
+    /could not be settled/,
+  );
+  assert.equal(state.volumes.has("b-lease"), false, "nothing registered");
+  assert.deepEqual(noteOf(state), before, "the note stays for the next holder");
+  writeFileSync(
+    `${lockPath(state.daemon, pinKey(BACKEND_IMAGE))}.intent`,
+    "{ torn",
+  );
+  const refused = await disposeLabelled(docker, { filter: FILTER });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.images[0]?.action, "unknown");
+  assert.match(refused.images[0]?.error ?? "", /cannot be read/);
+  assert.equal(
+    state.images.has(BACKEND_IMAGE),
+    true,
+    "nothing removed on an unreadable note",
+  );
+  assert.equal(
+    existsSync(`${lockPath(state.daemon, pinKey(BACKEND_IMAGE))}.intent`),
+    true,
+  );
+});
+
+test("DA-1a: a re-drive whose removal answer is lost (the removal landed) refuses; the next holder then finds the work settled", async () => {
+  const { state, docker } = fakeDaemon();
+  await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: LABELS,
+    name: "a-lease",
+  });
+  await disposeLabelled(
+    lossy(docker, (args) => args[0] === "rmi", { die: true }),
+    { filter: FILTER },
+  );
+  assert.equal(noteOf(state)?.step, "remove_image");
+  // B settles A's release, but the answer to its own removal is lost (the daemon did remove it).
+  await assert.rejects(
+    acquireImage(
+      lossy(docker, (args) => args[0] === "rmi", { land: true }),
+      { ref: BACKEND_IMAGE, labels: B, name: "b-lease" },
+    ),
+    /could not be settled \(an answer was lost\)/,
+  );
+  assert.equal(
+    state.volumes.has("b-lease"),
+    false,
+    "B decided nothing of its own",
+  );
+  assert.equal(noteOf(state)?.step, "remove_image", "A's note stays");
+  assert.equal(state.images.has(BACKEND_IMAGE), false);
+  // The next holder settles it from what is there now: nothing left to remove.
+  const c = await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: B,
+    name: "b-lease",
+  });
+  assert.equal(c.recovered?.op, "release");
+  assert.equal(noteOf(state), null);
+  const last = await disposeLabelled(docker, { filter: FILTER_B });
+  assert.equal(last.ok, true, JSON.stringify(last.images));
+  assert.equal(state.images.has(BACKEND_IMAGE), false);
+  assert.equal(state.volumes.has(recordName(pinKey(BACKEND_IMAGE))), false);
 });

@@ -22,7 +22,9 @@
 //
 // Boundaries: prepare:start, oidc:started, sqlite:fetched, sqlite:accounts, backend:spawned, postgres:*, proxy:started,
 // preview:spawned, preview:ready, playwright:spawned, and stack:judged (revision 8: the stack's report and budget are judged and
-// checkpointed, its clean-up has not begun).
+// checkpointed, its clean-up has not begun). Revision 9 (review r8 H4d): stack:settled (the stack's settled record is committed, the
+// reaper has not been told the stack ended) and stack:ended (the reaper has been told; the run's summary does not have the stack yet).
+// `fail_write` also names a stack record commit: "stack:started", "stack:launched", "stack:judged", "stack:settled".
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cancelled } from "./ownership.mjs";
