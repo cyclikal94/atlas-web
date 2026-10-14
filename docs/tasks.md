@@ -136,8 +136,9 @@ Revision 2 (review of 13 October 2026 and its design assessment) adds:
 25. **Today asks `/daily` again only when committed CONTENT changed (a regression of revisions 0–1, found in revision 2).** It followed
     `page_seq`, which an empty delta page also moves. With the production leader every stamped read changes the session's view, which wakes
     the idle engine; its empty page moved `page_seq`; Today read again 750 ms later: two reads per tab and one sync every ~0.8 s, for ever
-    (E-C13's healthy engine never went quiet; E-C8's follower kept seeing its gate re-read). The generation is now the applied revision
-    (`readCacheRevisionNow`). Tests: `freshness-provenance.test.tsx` (an empty page asks nothing; content asks again; MU-2102), E-C13 and E-C8
+    (E-C13's healthy engine never went quiet; E-C8's follower kept seeing its gate re-read). Two generations now: every committed page
+    (`page_seq`) re-reads the LOCAL rows (cheap, whatever the page carried); only committed content (the applied revision,
+    `readCacheRevisionNow`) asks the SERVER again and decides whether an answer is still current. Tests: `freshness-provenance.test.tsx` (an empty page asks nothing; content asks again; MU-2102), E-C13 and E-C8
     unchanged (MU-2103 natively).
 24. **The destinations' heading is the route's (a regression of revisions 0–1, found in revision 2).** Today and the task list replaced
     placeholders whose level-one heading was always there; the screens then put it inside the cache gate and the lazy chunk, so a gated or

@@ -179,6 +179,18 @@ function candidate(
   );
 }
 
+/** How many times `value` has changed since it was first known (a negative value is "not known yet" and never counts). */
+function useChangeCount(value: number): number {
+  const [count, setCount] = useState(0);
+  const last = useRef<number | null>(null);
+  useEffect(() => {
+    if (value < 0) return;
+    if (last.current !== null && last.current !== value) setCount((n) => n + 1);
+    last.current = value;
+  }, [value]);
+  return count;
+}
+
 export function useTodayView(day: string, zone: string): TodayView {
   const env = useTasksEnv();
   const data = useDataEnv();
@@ -192,23 +204,19 @@ export function useTodayView(day: string, zone: string): TodayView {
   const [error, setError] = useState<DailyError | null>(null);
   const [attempt, setAttempt] = useState(0);
   const key = `${env.identity}\u0000${day}\u0000${zone}`;
-  // The cache's CONTENT generation (revision 2): the applied revision moves only with a page that carries changes. `page_seq` also moves
-  // with an empty delta page, and re-reading `/daily` on each of those looped: the read's own request woke the leader's engine, whose
-  // empty page moved `page_seq` again (found by E-C13: two reads per tab and a sync every 0.8 s, for ever).
+  // Two generations of the cache (revision 2). Every committed page (`page_seq`) re-reads the LOCAL rows: cheap, and right whatever the
+  // page carried. Only committed CONTENT (the applied revision, which an empty delta page does not move) asks the SERVER again: re-reading
+  // `/daily` on every `page_seq` move looped, because the read's own request woke the leader's engine, whose empty page moved `page_seq`
+  // again (found by E-C13: two reads per tab and a sync every 0.8 s, for ever). The position's own first load (loading → ready) is not a
+  // change of the cache, so neither restarts on it.
+  const pageSeq =
+    position.status === "ready" ? (position.value?.pageSeq ?? -1) : -2;
   const cacheRevision =
     position.status === "ready"
       ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))
       : -2;
-  // Committed content moves `cacheRevision`; the position's own first load (loading → ready) is not a change of the cache, so the server
-  // read is not restarted (and its first answer discarded) by it.
-  const [syncTick, setSyncTick] = useState(0);
-  const lastSeq = useRef<number | null>(null);
-  useEffect(() => {
-    if (cacheRevision < 0) return;
-    if (lastSeq.current !== null && lastSeq.current !== cacheRevision)
-      setSyncTick((n) => n + 1);
-    lastSeq.current = cacheRevision;
-  }, [cacheRevision]);
+  const syncTick = useChangeCount(pageSeq);
+  const contentTick = useChangeCount(cacheRevision);
   const ready = position.status;
   const noDatabase = position.status === "unavailable";
 
@@ -392,7 +400,7 @@ export function useTodayView(day: string, zone: string): TodayView {
     env.identity,
     env.online,
     key,
-    syncTick,
+    contentTick,
     attempt,
     clock.epoch,
     restale,
@@ -545,7 +553,7 @@ export function useTodayView(day: string, zone: string): TodayView {
       : null);
 
   // An answer dispatched before the cache position the rows were read at is older than the cache (a page committed meanwhile, or the
-  // database was created after it): ask again, once for each such pair. A committed page also re-reads through `syncTick`; this covers a
+  // database was created after it): ask again, once for each such pair. Committed content also re-reads through `contentTick`; this covers a
   // commit no notification reported before the read (for example the first page that creates the database).
   const behind =
     listed !== null &&
