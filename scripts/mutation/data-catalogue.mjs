@@ -17939,7 +17939,13 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/journal-window.test.tsx"],
     expect: /J3:/,
-    patch: (t) => sub(t, "      ].slice(0, MAX_PAGES),", "      ],"),
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
+    patch: (t) =>
+      sub(
+        t,
+        "            pages: [page, ...now.pages].slice(0, MAX_PAGES),",
+        "            pages: [page, ...now.pages],",
+      ),
   },
   {
     id: "MU-2134",
@@ -17963,11 +17969,16 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/journal-window.test.tsx"],
     expect: /older answer that arrives after a newer one/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14). Neither Back to recent nor a new open begins another authority, so the older answer of the earlier one still publishes.
     patch: (t) =>
       sub(
-        t,
-        "    return mine === ask.current && ownerRef.current === owner ? result : null;",
-        "    return ownerRef.current === owner ? result : null;",
+        sub(
+          t,
+          "    forgetRefusal(env.identity, readKey);\n    life.current += 1;\n",
+          "    forgetRefusal(env.identity, readKey);\n",
+        ),
+        "  const close = () => {\n    life.current += 1;\n",
+        "  const close = () => {\n",
       ),
   },
   {
@@ -17977,11 +17988,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/journal-window.test.tsx"],
     expect: /Fix first checks the rest of the journal/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
     patch: (t) =>
       sub(
         t,
-        "    if (!full || toEnd || journal === null) return openFixOf(entry);",
-        "    return openFixOf(entry);",
+        "    if (!full || toEnd || j === null) return openFixOf(entry, mine);",
+        "    return openFixOf(entry, mine);",
       ),
   },
   {
@@ -18015,15 +18027,19 @@ export const UNIT = [
   {
     id: "MU-2139",
     title:
-      "WEB-10a R10 (rev 4, J4): a refused refresh keeps showing the pages it can no longer see",
+      "WEB-10a R10/R14 (rev 4, J4; rev 5, Q6): a refused journal read (any: a page or a check) keeps showing what can no longer be seen",
     file: "src/features/tasks/detail/EntryHistory.tsx",
-    tests: ["tests/features/tasks/journal-window.test.tsx"],
-    expect: /refused refresh drops the pages/,
+    tests: [
+      "tests/features/tasks/journal-window.test.tsx",
+      "tests/features/tasks/journal-ownership.test.tsx",
+    ],
+    expect: /refused refresh drops the pages|Q6: .*refused/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14). Every read meets a refusal in one place, so this one fault is the suffix check's too (R14).
     patch: (t) =>
       sub(
         t,
-        '    if (kind === "forbidden" || kind === "not_found")',
-        "    if (false as boolean)",
+        '      if (live(by)) revoke();\n      return { kind: "stop" };',
+        '      return { kind: "failed" };',
       ),
   },
   {
@@ -18033,8 +18049,13 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/journal-window.test.tsx"],
     expect: /failed refresh keeps the pages/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
     patch: (t) =>
-      sub(t, '      : { ...keep, error: "failed" };', "      : null;"),
+      sub(
+        t,
+        '          update((now) => ({\n            ...now,\n            tried: version,\n            error: "failed",\n          }));',
+        "          put(null);",
+      ),
   },
   {
     id: "MU-2141",
@@ -18141,6 +18162,238 @@ export const UNIT = [
         t,
         "    if (wasPending.current && !pending) setReload((n) => n + 1);",
         "    if (wasPending.current && !pending) void 0;",
+      ),
+  },
+  {
+    id: "MU-2152",
+    title:
+      "WEB-10a R13 (rev 5, Q1): a check of the rest of the journal opens its fix whatever was chosen since",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q1: /,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      live(by) && sel.current === mine && versionRef.current === version;",
+          "      live(by) && versionRef.current === version;",
+        ),
+        "    if (sel.current !== mine || !mounted.current) return;",
+        "    if (!mounted.current) return;",
+      ),
+  },
+  {
+    id: "MU-2153",
+    title:
+      "WEB-10a R13 (rev 5, Q1): Fix does not take the selection before its check (an older check still owns it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q1: /,
+    patch: (t) =>
+      sub(
+        t,
+        "    const mine = ++sel.current;",
+        "    const mine = sel.current;",
+      ),
+  },
+  {
+    id: "MU-2154",
+    title:
+      "WEB-10a R13 (rev 5, Q2): Cancel does not end a lookup asked after the open fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Cancel of the open fix also ends a lookup/,
+    patch: (t) =>
+      sub(
+        t,
+        "        onCancel={() => {\n          sel.current += 1;\n",
+        "        onCancel={() => {\n",
+      ),
+  },
+  {
+    id: "MU-2155",
+    title:
+      "WEB-10a R13 (rev 5, Q5): a check of the rest of the journal ignores a newer committed version of the stream",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /committed version moves while the lookup is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "      live(by) && sel.current === mine && versionRef.current === version;",
+        "      live(by) && sel.current === mine;",
+      ),
+  },
+  {
+    id: "MU-2157",
+    title:
+      "WEB-10a R14 (rev 5, Q7): a refusal met by a request no longer wanted (a superseded check) is ignored",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /superseded lookup is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (live(by)) revoke();",
+        "      if (live(by) && wanted()) revoke();",
+      ),
+  },
+  {
+    id: "MU-2158",
+    title:
+      "WEB-10a R14 (rev 5, Q7): an answer of an ended authority (before a refusal) still counts",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q7: /,
+    patch: (t) =>
+      sub(
+        t,
+        "    ownerRef.current === by.owner &&\n    life.current === by.life;",
+        "    ownerRef.current === by.owner;",
+      ),
+  },
+  {
+    id: "MU-2159",
+    title:
+      "WEB-10a R14 (rev 5, Q8): a refusal keeps open a fix known only from the refused history (it can be saved)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q8: .*refused while it is open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setScan(null);\n    dropFullOnlyFix();\n    put({",
+        "    setScan(null);\n    put({",
+      ),
+  },
+  {
+    id: "MU-2160",
+    title:
+      "WEB-10a R13 (rev 5, Q8): Back to recent keeps open a fix known only from the full history",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Back to recent closes a full-history fix/,
+    patch: (t) =>
+      sub(t, "    dropFullOnlyFix();\n    put(null);", "    put(null);"),
+  },
+  {
+    id: "MU-2161",
+    title:
+      "WEB-10a R14 (rev 5, Q9): a failure that is not a refusal (uncertain, offline) is taken as one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: [
+      "tests/features/tasks/journal-window.test.tsx",
+      "tests/features/tasks/journal-ownership.test.tsx",
+    ],
+    expect: /check fails \(uncertain\)|failed refresh keeps the pages/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return { kind: result.kind === "closed" ? "closed" : "failed" };',
+        '      return result.kind === "closed"\n        ? { kind: "closed" }\n        : (revoke(), { kind: "stop" });',
+      ),
+  },
+  {
+    id: "MU-2162",
+    title:
+      "WEB-10a C3 (rev 5, Q14): no bound on the journal requests in flight",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /at most 2 journal requests are in flight/,
+    patch: (t) =>
+      sub(
+        t,
+        "    while (g.busy >= IN_FLIGHT)",
+        "    while (g.busy >= IN_FLIGHT + 100)",
+      ),
+  },
+  {
+    id: "MU-2163",
+    title:
+      "WEB-10a C3 (rev 5, Q14): a waiting request is sent although nothing wants it any more",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /waiting check that is no longer wanted/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!wanted()) {\n      g.waiting.shift()?.();\n      return { kind: "stop" };\n    }\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2164",
+    title:
+      "WEB-10a C3 (rev 5, Q9): a page that does not move past its cursor is taken as an answer",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect:
+      /does not move past where it was asked|first page that does not move/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (next !== null && next <= at) return { kind: "failed" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2165",
+    title:
+      "WEB-10a C3 (rev 5, Q14): a refresh assembles a second window behind the one shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /replaces its pages in place/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    let at = j.starts[from] ?? 0;",
+          "    let at = j.starts[from] ?? 0;\n    const staged: Page[] = [];",
+        ),
+        "        const pages = [...now.pages];\n        pages[i] = page;",
+        "        staged[i] = page;\n        const pages =\n          page.next === null || i === count - 1 ? [...staged] : [...now.pages];",
+      ),
+  },
+  {
+    id: "MU-2166",
+    title:
+      "WEB-10a C1 (rev 5, Q15): offline, an entry known only from the full history can be fixed",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q15: .*offline with the full history open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    journal.version === row.progressVersion &&\n    env.online;",
+        "    journal.version === row.progressVersion;",
+      ),
+  },
+  {
+    id: "MU-2167",
+    title:
+      "WEB-10a C1 (rev 5, Q5): an entry known only from a window read at an older version can be fixed",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /while a refresh for a newer version is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "    journal.version === row.progressVersion &&\n    env.online;",
+        "    env.online;",
+      ),
+  },
+  {
+    id: "MU-2168",
+    title:
+      "WEB-10a C1 (rev 5, Q13): an unmounted history goes on with its checks",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /unmounted while a lookup is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const live = (by: Asker) =>\n    mounted.current &&\n",
+        "  const live = (by: Asker) =>\n",
       ),
   },
 ];
@@ -21109,6 +21362,40 @@ export const ENGINE = [
         t,
         "    if (sameBasis(before.basis, after.basis))",
         '    if (after.kind === "ok")',
+      ),
+  },
+  {
+    id: "MU-2169",
+    title:
+      "WEB-10a N-T18: (REAL ENGINE) a check of the rest of the journal opens its fix whatever was chosen since",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T18:.*held=true",
+    expect: /E-T18:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      live(by) && sel.current === mine && versionRef.current === version;",
+          "      live(by) && versionRef.current === version;",
+        ),
+        "    if (sel.current !== mine || !mounted.current) return;",
+        "    if (!mounted.current) return;",
+      ),
+  },
+  {
+    id: "MU-2170",
+    title:
+      "WEB-10a N-T19: (REAL ENGINE) a refused check of the rest of the journal only marks the entry (the full history stays)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T19:.*refused=true",
+    expect: /E-T19:/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (live(by)) revoke();\n      return { kind: "stop" };',
+        '      return { kind: "failed" };',
       ),
   },
 ];

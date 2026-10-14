@@ -2483,3 +2483,187 @@ test.describe("E-T17: another tab commits while the task detail's read is betwee
       expect(states[states.length - 1]).toBe(`${newDay}|new`);
     });
 });
+
+/** A journal of `count` of my quantity entries, paged by `sequence` 200 at a time as the contract's. */
+function journalOf(count: number) {
+  const at = Math.floor(Date.now() / 1000);
+  const id = (n: number) =>
+    `bbbbbbbb-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const entries = Array.from({ length: count }, (_, i) => ({
+    id: id(i + 1),
+    sequence: i + 1,
+    logical_order: i + 1,
+    replaces: null,
+    evidence: { kind: "quantity", amount: String(i + 1) },
+    happened_at: at,
+    recorded_by: ACCOUNT,
+  }));
+  const pageAfter = (after: number) => {
+    const rest = entries.filter((e) => e.sequence > after);
+    const items = rest.slice(0, 200);
+    return JSON.stringify({
+      entries: items,
+      next_after:
+        rest.length > 200 ? (items[items.length - 1]?.sequence ?? null) : null,
+    });
+  };
+  return { id, pageAfter };
+}
+
+test.describe("E-T18: an older correction lookup never replaces a newer editor or its input (A8, A14; R13 of revision 5, Q1)", () => {
+  for (const held of [false, true])
+    test(`held=${held}: entry 1's check of the rest of the journal ${held ? "is held while" : "completes before"} entry 2's fix opens and 987 is typed; once every answer is taken in, entry 2's fix still holds 987`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 42,
+        title: "Journal ownership",
+        goal: {
+          kind: "numeric",
+          minimum: "100000",
+          maximum: null,
+          unit: "cups",
+        },
+      });
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      const journal = journalOf(210);
+      const asked: number[] = [];
+      let heldOnce = false;
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await context.route(
+        `**/api/experimental/v1/progress/${task.progressId}/entries?*`,
+        async (route) => {
+          const after = Number(
+            new URL(route.request().url()).searchParams.get("after"),
+          );
+          asked.push(after);
+          if (held && after === 200 && !heldOnce) {
+            heldOnce = true;
+            await gate;
+          }
+          await route
+            .fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: journal.pageAfter(after),
+            })
+            .catch(() => undefined);
+        },
+      );
+      const history = page.locator("[data-entry-history]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      const input = page.getByLabel("New value (cups)", { exact: true });
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(li(1)).toBeVisible();
+      try {
+        await li(1)
+          .getByRole("button", { name: "Fix this entry", exact: true })
+          .click();
+        if (held) await expect.poll(() => heldOnce).toBe(true);
+        else await expect(li(1).locator("[data-fix-form]")).toBeVisible();
+        await li(2)
+          .getByRole("button", { name: "Fix this entry", exact: true })
+          .click();
+        await expect(li(2).locator("[data-fix-form]")).toBeVisible();
+        await expect(input).toHaveValue("2");
+        await input.fill("987");
+      } finally {
+        release();
+      }
+      // Completion barrier: every journal answer, the held one included, has been taken in by the history (nothing in flight).
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      expect(asked).toEqual([0, 200, 200]);
+      await expect(page.locator("[data-fix-form]")).toHaveCount(1);
+      await expect(li(2).locator("[data-fix-form]")).toHaveCount(1);
+      await expect(input).toHaveValue("987");
+    });
+});
+
+test.describe("E-T19: a refused check of the rest of the journal drops the full history (A8, A13; R14 of revision 5, Q6)", () => {
+  for (const refused of [false, true])
+    test(`refused=${refused}: Fix of an entry outside a window that reaches the end ${refused ? "is refused (a valid Atlas 404): the full history is gone, the refusal is said and Full history is offered again" : "is answered: the fix opens over the full history (control)"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 43,
+        title: "Journal refusal",
+        goal: {
+          kind: "numeric",
+          minimum: "100000",
+          maximum: null,
+          unit: "cups",
+        },
+      });
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      const journal = journalOf(210);
+      const asked: number[] = [];
+      await context.route(
+        `**/api/experimental/v1/progress/${task.progressId}/entries?*`,
+        (route) => {
+          const after = Number(
+            new URL(route.request().url()).searchParams.get("after"),
+          );
+          asked.push(after);
+          return refused && after === 200
+            ? route.fulfill({
+                status: 404,
+                contentType: "application/json",
+                body: JSON.stringify({
+                  code: "not_found",
+                  message: "not found",
+                  request_id: "e-t19",
+                  details: [],
+                }),
+              })
+            : route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: journal.pageAfter(after),
+              });
+        },
+      );
+      const history = page.locator("[data-entry-history]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(li(2)).toBeVisible();
+      await li(5)
+        .getByRole("button", { name: "Fix this entry", exact: true })
+        .click();
+      await expect.poll(() => asked.length).toBe(2);
+      // Completion barrier: the check's answer has been taken in.
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      if (!refused) {
+        await expect(
+          page.getByLabel("New value (cups)", { exact: true }),
+        ).toHaveValue("5");
+        await expect(li(2)).toHaveCount(1);
+        return;
+      }
+      await expect(li(2)).toHaveCount(0);
+      await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+      await expect(
+        history.getByText("This history isn't available to you.", {
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        history.getByRole("button", { name: "Full history", exact: true }),
+      ).toBeVisible();
+      expect(asked).toEqual([0, 200]);
+    });
+});

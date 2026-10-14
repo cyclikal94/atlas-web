@@ -198,17 +198,23 @@ Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its re
     chosen once for the visit and kept while it is still this task's day.
 32. **The open full history is a bounded, owned window (R10, R12, C3).** At most three pages (`MAX_PAGES`, Q9) are retained; the page-start
     cursors visited are kept (numbers), so an earlier page is read again from its own start ("Earlier entries") and a later one by "Load
-    more", each letting go of the page at the other end. Requests carry a number: an older answer never replaces a newer one. The window
+    more", each letting go of the page at the other end. Every request belongs to the history's current authority (decision 36): an answer of
+    an ended one never replaces anything. The window
     follows its stream's committed version (`RowModel.progressVersion`): a new version reads the window's pages again, once per version and
-    online; offline it waits for the connection. A failed refresh keeps the pages, marked stale, with "Try again"; a refusal drops them;
+    online; offline it waits for the connection. A refresh replaces each page in place as its answer arrives (revision 5: never a second window
+    behind the first). A failed refresh keeps the pages, marked stale, with "Try again"; a refusal of any read drops them (decision 36);
     another identity starts over. "Refresh" and "Back to recent entries" are always offered while it is open. Saved entries newer than the
     pages (the stream's recent tail) show until the journal is read again, never fixable.
 33. **Corrections across pages (R10, C3).** A window that reaches the journal's end knows every correction of its entries (a correction is
     appended after what it corrects). Outside it, "Fix this entry" first walks the rest of the journal for a correction of THAT entry, keeping
     only the answer: corrected since, the entry is marked "Corrected" and no fix opens; otherwise the fix opens. There is no automatic walk.
+    An entry known only from the full history is fixable only while the window is current: online, not failed, read at the stream's committed
+    version (revision 5; offline only the recent entries can be fixed, as before).
 34. **The open fix is the history's, not its page's (C3, J5).** The entry, the session, the typed value and its edit count live in the history:
     letting a page go or refreshing it never erases a fix (shown apart while its entry's page is not shown). A fix whose entry has a saved
-    correction since cannot be saved, and says why. Revision 2's session and edit-count rules are kept.
+    correction since cannot be saved, and says why. Revision 2's session and edit-count rules are kept. A fix known only from the full history
+    has that history's authority (revision 5): "Back to recent entries" or a refusal closes it (nothing is saved); what was typed is kept in
+    memory for the same identity and entry and restored when that entry's fix is opened again under a new authority — never persisted or sent.
 35. **One enrolment attempt per change, owned before it is sent (R11, C4).** The attempt (`{key, body, command, phase}`) is taken
     synchronously in page memory per identity and task (`startEnrolment`) before the request: while it is pending, Join/Leave and the consent
     are disabled with "Sending your change…" and a second activation sends nothing; it outlives a same-identity remount and is dropped with the
@@ -217,10 +223,25 @@ Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its re
     one answered while a change is pending never replaces what is shown. A reload starts with no attempt and resends nothing (decided:
     RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, below).
 
+36. **One owner of the journal's state; only the latest Fix opens an editor; a refusal of any read ends the authority (R13, R14; revision 5,
+    design assessment C1–C3).** The history's continuations read its CURRENT journal, never one captured before an await, and check what they
+    were started under: the authority (begun by opening the full history; ended by "Back to recent entries" and by a refusal), the correction
+    selection (taken synchronously by every "Fix this entry" and by Cancel), for a check the stream's committed version, and the mounted
+    lifetime. So an older check of the rest of the journal never opens or retargets an editor over a newer one or its typed value, and stops at
+    its next answer once anything it depends on moved. A valid refusal (403/404/410) of ANY read of the current authority — the first page,
+    Refresh, Load more, Earlier entries or a check, current or superseded — drops the full history, its cursors and check facts at once, and no
+    earlier success restores them; "Full history" is offered again, so only a new explicit read begins another authority. Uncertain, offline
+    and not-sent answers certify nothing (stale pages kept, or "Couldn't check…"); a closed request is abandoned; a page whose cursor does not
+    move is a failed read. At most two journal requests are in flight per view (a further one waits holding numbers only, and is never sent if
+    no longer wanted), so the retained payload is at most the three window pages plus two answers in flight. The number of requests in flight is
+    shown as `data-journal-requests` (for tests: 0 once every answer has been taken in).
+
 Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
 `enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
 follows a committed correction), E-T16 (an enrolment change pressed again while pending) and E-T17 (another tab commits between the detail's
-reads); unit MU-2123…MU-2148 and real-engine MU-2149…MU-2151; MU-2034/2035/2037/2045/2046/2083/2118 re-expressed (same intent).
+reads); unit MU-2123…MU-2148 and real-engine MU-2149…MU-2151; MU-2034/2035/2037/2045/2046/2083/2118 re-expressed (same intent). Revision 5:
+`journal-ownership.test.tsx` (Q1–Q9, Q13–Q15), native E-T18 (an older check never replaces a newer editor) and E-T19 (a refused check drops the
+full history); unit MU-2152…MU-2155, MU-2157…MU-2168 and real-engine MU-2169/MU-2170; MU-2133/2135/2136/2139/2140 re-expressed (same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -234,6 +255,16 @@ Settings-navigation helper (`shownAs`: a click only while no account card is dra
 annotated `settings-clicks`) and its "R5 / HF-1" cases, byte-identical to WEB-08d `e88085b` (its capacity-message wording, a WEB-08d product
 change, is not adopted). This is labelled test setup: the single-click regression is WEB-08c's to correct, WEB-09d verifies the original
 single click before beta and WEB-15 enforces that gate; the adaptation fixes nothing.
+
+**R15 (revision 5): the forced order is established, not assumed.** Diagnosed with read-only probes from tab B (`navigator.locks.query()` and a
+read-only `atlas-auth` transaction): in the WebKit executions that failed the setup, the context-wide hold of "the first `GET /sessions`"
+had caught tab B's OWN device read, so A's read was answered, A retired its lease cleanly and B rightly verified nothing. The cases now hold A's
+own read (a route on page A) and pass three barriers within the original 10 s bounds before the real click: A's held read has a REQUEST lease
+whose lock A holds and B waits for (seen in two consecutive looks); after A's destruction that lease's record remains while its lock is
+released (orphaned); B's check — held and counted only from then on, past B's own boot checks — closes B behind `1e.interrupted_online`. A
+clean-retirement control (A's held read answered while A stays open: B watched the lease, finds it retired, never closes) and two helper
+qualification cases (a card naming another account fails after one click; clicks that never take effect stop at three) are added. The helper,
+its three-click bound, its identity assertion, the 20 s deadline and zero retries are unchanged.
 
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
@@ -278,6 +309,7 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 3: "Couldn't read this device's tasks" with "Atlas couldn't read the tasks saved on this device." or "The tasks saved on this device kept changing while they were read.", "Showing what was last read on this device." and "Try again" (Today, as a section; the detail and the list as a line; the task form as the disabled Save's reason) | `/today` with a failing local read (jsdom `local-coherence.test.tsx`, Q9/Q10/Q17) |
 | Revision 4: the detail and the edit page with a failed local read: "Atlas couldn't read the tasks saved on this device." (or "kept changing") with "Try again"; stale: the same with "Showing what was last read on this device."; the picker's "Couldn't read this task's saved days." with "Try again" | `/tasks/<id>` with a failing local read (jsdom `detail-read-coherence.test.tsx`) |
 | Revision 4: the full history's "Earlier entries", "Load more", "Refresh", "Back to recent entries", "Couldn't refresh the full history. Showing what was last loaded.", "Checking whether this entry was corrected", "Couldn't check whether this entry was corrected since.", "This entry has been corrected since. Fix its correction instead."; a fix whose page is not shown appears above the list as "Fix this entry: {value}" | `/tasks/<id>` → Full history (jsdom `journal-window.test.tsx`, native E-T15) |
+| Revision 5: after "This history isn't available to you." the "Full history" button is offered again; "Back to recent entries" (or a refusal) closes a fix of an entry known only from the full history, and opening that entry's fix again restores what was typed; offline, or while the full history is being read again for a newer version, such an entry offers no "Fix this entry" | `/tasks/<id>` → Full history (jsdom `journal-ownership.test.tsx`, native E-T18/E-T19) |
 | Revision 4: enrolment "Sending your change…" (the disabled reason while a change is pending) and "Try again" beside "Couldn't confirm the change. Try again." | `/tasks/<id>` of a shared task (jsdom `enrolment-attempt.test.tsx`, native E-T16) |
 | Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 
@@ -294,6 +326,10 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
   is read again when the person goes back, and a fix outside a window that reaches the end walks the rest of the journal (one request per
   later page, keeping only the answer). Neither is a remote snapshot: a correction committed after the walk is seen at the next committed
   version (the window is read again). A reverse or snapshot endpoint would be a backend scope decision; none is assumed.
+- **A refusal reaches only the tab that met it (revision 5).** Each tab owns its own open history; a refusal in one tab is not broadcast. Another
+  tab learns of it at its own next read (a newer committed version reads its window again) — no cross-tab access cache is introduced.
+- **Transient journal payload (revision 5).** Retained: at most the three window pages; in flight: at most two answers (pages or checks); a
+  waiting request holds numbers only. Not measured here (WEB-09c owns measurements).
 - **The detail reads more per local commit (revision 4).** Its one certified read includes the picker's first page and every progress stream
   of the day, read again when the composition generation moves (as Today's is); the walk over every saved day runs only until the visit's
   default day is chosen. Not profiled here (WEB-09c owns measurements; F-1's cost of the walk applies).

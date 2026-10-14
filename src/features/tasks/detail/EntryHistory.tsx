@@ -90,17 +90,27 @@ interface Page {
   next: number | null;
 }
 
+/** What a check of the rest of the journal found for an entry, at the stream's committed version it was asked at. */
+interface Check {
+  found: "current" | "replaced" | "failed";
+  version: number | null;
+}
+
 /**
- * The open full history of one stream (revision 4: R10, R12; design assessment C3), owned by `(identity, progress id)`:
+ * The open full history of one stream (revisions 4 and 5: R10, R12, R13, R14; design assessments C3 of revision 4 and C1–C3 of
+ * revision 5), owned by `(identity, progress id)` and by the AUTHORITY it was read under (`life`):
  * - At most `MAX_PAGES` pages are retained (`pages`, contiguous, the first being page `first` of the journal). Only the page-start cursors
  *   visited are kept besides (`starts`: numbers, as the day picker keeps its cursors): an earlier page is read again from its own start
  *   (entries are append-only, so `sequence > start` is the same page), so every page stays reachable without being retained.
- * - `version` is the committed version of the stream the pages were asked at; a newer one makes them stale and they are read again
- *   (`tried` is the version last asked at, so a failure is not retried in a loop: Try again, a newer version or the connection returning).
- * - A refusal drops the pages (they are no longer an authorised answer); a failure keeps them, marked stale, with Try again.
+ * - `version` is the committed version of the stream the whole window was read at (null while a refresh has replaced only some of its
+ *   pages); a newer one makes them stale and they are read again (`tried` is the version last asked at, so a failure is not retried in a
+ *   loop: Try again, a newer version or the connection returning).
+ * - A refusal of ANY read under this authority (a page or a check) ends it: the pages, cursors and check facts are dropped and another
+ *   authority begins only with a new explicit open. A failure keeps the pages, marked stale, with Try again.
  */
 interface Journal {
   owner: string;
+  life: number;
   starts: number[];
   first: number;
   pages: Page[];
@@ -108,7 +118,20 @@ interface Journal {
   tried: number | null;
   error: "failed" | "refused" | null;
   /** What a check of the rest of the journal found for an entry outside a window that reaches its end. */
-  checks: Record<string, "checking" | "current" | "replaced" | "failed">;
+  checks: Record<string, Check>;
+}
+
+/** The answer to one journal request, after the refusal transition: a page, a failure that certifies nothing, an abandoned request, or nothing to do (obsolete, or refused and applied). */
+type Got =
+  | { kind: "page"; page: Page }
+  | { kind: "failed" }
+  | { kind: "closed" }
+  | { kind: "stop" };
+
+/** Who asked: the owner and the authority a request belongs to. */
+interface Asker {
+  owner: string;
+  life: number;
 }
 
 /** The open fix of one entry, held here (not by the page it is shown in): moving, evicting or refreshing a page never erases it. */
@@ -124,12 +147,23 @@ interface OpenFix {
   error: string | null;
 }
 
+/** At most this many journal requests (pages or checks) are in flight per view (design assessment C3); a further one waits, holding numbers only, and is never sent if it is no longer wanted when its turn comes. */
+export const IN_FLIGHT = 2;
+
 /**
  * History (WF-TASK-01): up to eight recent entries with my pending ones layered on and marked, then, online, the FULL history paged by
  * `sequence` (survivors in `logical_order`; replaced ones marked "Corrected"), a bounded window of pages that follows the stream's
  * committed version. "Fix this entry" appends a `record` with `replaces` and a value of the same kind: nothing is deleted. Offline a fix is
- * offered only for an entry among the recent ones. Outside a window that reaches the journal's end, whether an entry was corrected later is
- * not known from the pages: Fix first checks the rest of the journal for that entry (keeping nothing but the answer).
+ * offered only for an entry among the recent ones; an entry known only from the full history is fixable only while its window is current
+ * (online, read at the committed version, not failed). Outside a window that reaches the journal's end, whether an entry was corrected later
+ * is not known from the pages: Fix first checks the rest of the journal for that entry (keeping nothing but the answer).
+ *
+ * The journal's state has one owner (revision 5, R13/R14): every continuation reads the CURRENT journal from `jr`, never one captured
+ * before an await, and checks what it was started under — the authority (`life`: open, Back to recent and refusal begin another; every
+ * page request and check of an ended authority stops at its next answer), the correction selection (`sel`: taken synchronously at every
+ * Fix and Cancel, so only the latest intent can open an editor), for a check the stream's committed version, and the mounted lifetime.
+ * A refusal from any read of the current authority revokes it synchronously. Page requests of one authority never overlap (every page
+ * control is disabled while one is loading, and the refresh on a newer version waits for it), so the latest of them is the only one.
  */
 export function EntryHistory({
   row,
@@ -150,175 +184,290 @@ export function EntryHistory({
   const [state, setJournal] = useState<Journal | null>(null);
   const journal = state?.owner === owner ? state : null;
   const [loading, setLoading] = useState(false);
-  // Every request carries the number it was asked under: an older answer never overwrites a newer one (or a closed journal).
-  const ask = useRef(0);
+  // The current journal, read by every continuation (the state above is its presentation).
+  const jr = useRef<Journal | null>(null);
+  // The authority generation and the correction selection (see above).
+  const life = useRef(0);
+  const sel = useRef(0);
+  const mounted = useRef(true);
+  const gate = useRef<{ busy: number; waiting: Array<() => void> }>({
+    busy: 0,
+    waiting: [],
+  });
+  // How many journal requests are in flight (shown as `data-journal-requests`: 0 once every answer has been taken in).
+  const [requests, setRequests] = useState(0);
   const ownerRef = useRef(owner);
   ownerRef.current = owner;
+  const versionRef = useRef(row.progressVersion);
+  versionRef.current = row.progressVersion;
   const [openFix, setFix] = useState<OpenFix | null>(null);
   const fix = openFix?.owner === owner ? openFix : null;
   const fixRef = useRef(fix);
   fixRef.current = fix;
   const sessions = useRef(0);
+  // A full-history fix closed by a refusal or Back to recent keeps what was typed here (memory only), for the same owner and entry.
+  const parked = useRef<{
+    owner: string;
+    entryId: string;
+    amount: string;
+  } | null>(null);
+  const recentRef = useRef<ReadonlySet<string>>(new Set());
+  // The one check of the rest of the journal shown as running, by the selection that asked for it.
+  const [scan, setScan] = useState<{ entryId: string; sel: number } | null>(
+    null,
+  );
 
-  const read = (after: number) => env.api.readJournal(row.progressId, after);
-  /** The answer, if it is still the current one; refusals are remembered as they arrive (a refusal may remount the screen). */
-  const answered = (
-    mine: number,
-    result: TasksResult<ProgressJournal>,
-  ): TasksResult<ProgressJournal> | null => {
-    noteIfRefused(env.identity, readKey, result);
-    return mine === ask.current && ownerRef.current === owner ? result : null;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const journalNow = () => {
+    const j = jr.current;
+    return j !== null && j.owner === ownerRef.current ? j : null;
   };
-  const failedOrRefused = (
-    kind: string,
-    keep: Journal | null,
-  ): Journal | null => {
-    if (kind === "closed") return keep;
-    if (kind === "forbidden" || kind === "not_found")
-      return {
+  const put = (next: Journal | null) => {
+    jr.current = next;
+    setJournal(next);
+  };
+  /** Changes the current journal (every caller has just found its authority still current, with no await since). */
+  const update = (change: (j: Journal) => Journal) => {
+    const j = journalNow();
+    if (j !== null) put(change(j));
+  };
+  const live = (by: Asker) =>
+    mounted.current &&
+    ownerRef.current === by.owner &&
+    life.current === by.life;
+
+  /** A full-history fix has the journal's authority: it closes with it (what was typed is kept in memory, never sent). */
+  const dropFullOnlyFix = () => {
+    const held = fixRef.current;
+    if (held === null || recentRef.current.has(held.entry.id)) return;
+    if (held.edits > 0)
+      parked.current = {
+        owner: held.owner,
+        entryId: held.entry.id,
+        amount: held.amount,
+      };
+    fixRef.current = null;
+    setFix(null);
+  };
+  /** A refusal of the current authority, whichever request met it: nothing read under it is shown or certifies anything any more. */
+  const revoke = () => {
+    life.current += 1;
+    setLoading(false);
+    setScan(null);
+    dropFullOnlyFix();
+    put({
+      owner: ownerRef.current,
+      life: life.current,
+      starts: [0],
+      first: 0,
+      pages: [],
+      version: null,
+      tried: null,
+      error: "refused",
+      checks: {},
+    });
+  };
+
+  /**
+   * One journal request, within the view's bound. Refusals are remembered as they arrive (a refusal may remount the screen) and an
+   * authoritative one of the current authority is applied HERE, whoever asked and whether or not its answer is still wanted.
+   */
+  const fetchPage = async (
+    at: number,
+    by: Asker,
+    wanted: () => boolean,
+  ): Promise<Got> => {
+    const g = gate.current;
+    while (g.busy >= IN_FLIGHT)
+      await new Promise<void>((resolve) => g.waiting.push(resolve));
+    if (!wanted()) {
+      g.waiting.shift()?.();
+      return { kind: "stop" };
+    }
+    g.busy += 1;
+    setRequests(g.busy);
+    let result: TasksResult<ProgressJournal>;
+    try {
+      result = await env.api.readJournal(row.progressId, at);
+    } finally {
+      g.busy -= 1;
+      if (mounted.current) setRequests(g.busy);
+      g.waiting.shift()?.();
+    }
+    noteIfRefused(env.identity, readKey, result);
+    if (
+      !result.ok &&
+      (result.kind === "forbidden" || result.kind === "not_found")
+    ) {
+      if (live(by)) revoke();
+      return { kind: "stop" };
+    }
+    if (!wanted()) return { kind: "stop" };
+    if (!result.ok)
+      return { kind: result.kind === "closed" ? "closed" : "failed" };
+    const next = result.value.next_after;
+    // A page that does not move past where it was asked from is not an answer (a walk over it would never end).
+    if (next !== null && next <= at) return { kind: "failed" };
+    return {
+      kind: "page",
+      page: { start: at, entries: result.value.entries, next },
+    };
+  };
+
+  const open = async () => {
+    forgetRefusal(env.identity, readKey);
+    life.current += 1;
+    const by = { owner, life: life.current };
+    const version = row.progressVersion;
+    setLoading(true);
+    const got = await fetchPage(0, by, () => live(by));
+    if (got.kind === "stop") return;
+    setLoading(false);
+    if (got.kind === "closed") return;
+    if (got.kind === "failed") {
+      put({
         owner,
+        life: by.life,
         starts: [0],
         first: 0,
         pages: [],
         version: null,
-        tried: null,
-        error: "refused",
+        tried: version,
+        error: "failed",
         checks: {},
-      };
-    return keep === null
-      ? {
-          owner,
-          starts: [0],
-          first: 0,
-          pages: [],
-          version: null,
-          tried: null,
-          error: "failed",
-          checks: {},
-        }
-      : { ...keep, error: "failed" };
-  };
-
-  /** Reads the pages starting at `starts[from]` (`count` of them, or fewer at the journal's end) into a window beginning at `from`. */
-  const load = async (
-    base: Journal | null,
-    from: number,
-    count: number,
-    shape: (
-      pages: Page[],
-      starts: number[],
-    ) => { first: number; pages: Page[] },
-  ) => {
-    const mine = ++ask.current;
-    const version = row.progressVersion;
-    setLoading(true);
-    const starts = [...(base?.starts ?? [0])].slice(0, from + 1);
-    const pages: Page[] = [];
-    let at = starts[from] ?? 0;
-    for (let i = 0; i < count; i += 1) {
-      const result = answered(mine, await read(at));
-      if (result === null) return;
-      if (!result.ok) {
-        setLoading(false);
-        const next = failedOrRefused(result.kind, base);
-        setJournal(next === null ? null : { ...next, tried: version });
-        return;
-      }
-      pages.push({
-        start: at,
-        entries: result.value.entries,
-        next: result.value.next_after,
       });
-      if (result.value.next_after === null) break;
-      at = result.value.next_after;
-      starts[from + i + 1] = at;
+      return;
     }
-    setLoading(false);
-    const window = shape(pages, starts);
-    setJournal({
+    const { page } = got;
+    put({
       owner,
-      starts,
-      first: window.first,
-      pages: window.pages,
+      life: by.life,
+      starts: page.next === null ? [0] : [0, page.next],
+      first: 0,
+      pages: [page],
       version,
       tried: version,
       error: null,
       checks: {},
     });
   };
-
-  const open = () => {
-    forgetRefusal(env.identity, readKey);
-    return load(null, 0, 1, (pages) => ({ first: 0, pages }));
-  };
-  const refresh = (j: Journal) =>
-    load(j, j.first, Math.max(1, j.pages.length), (pages) => ({
-      first: j.first,
-      pages,
-    }));
-  // Load more: the next page; the window's first page is let go beyond `MAX_PAGES`.
-  const more = async (j: Journal) => {
-    const at = j.first + j.pages.length;
-    if (j.starts[at] === undefined) return;
-    const mine = ++ask.current;
+  // Refresh: each page of the window read again from its start, REPLACING its old copy as it arrives (the window never holds more than
+  // its own pages, C3); until the last arrives the window is mixed (`version: null`, nothing in it newly fixable).
+  const refresh = async () => {
+    const j = journalNow();
+    if (j === null || j.pages.length === 0) return;
+    const by = { owner, life: j.life };
+    const version = row.progressVersion;
+    const from = j.first;
+    const count = j.pages.length;
+    let at = j.starts[from] ?? 0;
     setLoading(true);
-    const result = answered(mine, await read(j.starts[at] as number));
-    if (result === null) return;
-    setLoading(false);
-    if (!result.ok) {
-      setJournal(failedOrRefused(result.kind, j));
-      return;
+    for (let i = 0; i < count; i += 1) {
+      const got = await fetchPage(at, by, () => live(by));
+      if (got.kind === "stop") return;
+      if (got.kind !== "page") {
+        setLoading(false);
+        if (got.kind === "failed")
+          update((now) => ({
+            ...now,
+            tried: version,
+            error: "failed",
+          }));
+        return;
+      }
+      const { page } = got;
+      update((now) => {
+        const pages = [...now.pages];
+        pages[i] = page;
+        const starts = now.starts.slice(0, from + i + 1);
+        if (page.next !== null) starts.push(page.next);
+        return {
+          ...now,
+          starts,
+          pages: page.next === null ? pages.slice(0, i + 1) : pages,
+          version: null,
+        };
+      });
+      if (page.next === null) break;
+      at = page.next;
     }
-    const pages = [
-      ...j.pages,
-      {
-        start: j.starts[at] as number,
-        entries: result.value.entries,
-        next: result.value.next_after,
-      },
-    ];
-    const starts = j.starts.slice(0, at + 1);
-    if (result.value.next_after !== null) starts.push(result.value.next_after);
-    const drop = Math.max(0, pages.length - MAX_PAGES);
-    setJournal({
-      ...j,
-      starts,
-      first: j.first + drop,
-      pages: pages.slice(drop),
+    setLoading(false);
+    update((now) => ({
+      ...now,
+      version,
+      tried: version,
       error: null,
+    }));
+  };
+  // Load more: the next page; the window's first page is let go beyond `MAX_PAGES`.
+  const more = async () => {
+    const j = journalNow();
+    if (j === null) return;
+    const at = j.first + j.pages.length;
+    const start = j.starts[at];
+    if (start === undefined) return;
+    const by = { owner, life: j.life };
+    setLoading(true);
+    const got = await fetchPage(start, by, () => live(by));
+    if (got.kind === "stop") return;
+    setLoading(false);
+    if (got.kind === "failed") update((now) => ({ ...now, error: "failed" }));
+    if (got.kind !== "page") return;
+    const { page } = got;
+    update((now) => {
+      if (now.first + now.pages.length !== at) return now;
+      const pages = [...now.pages, page];
+      const starts = now.starts.slice(0, at + 1);
+      if (page.next !== null) starts.push(page.next);
+      const drop = Math.max(0, pages.length - MAX_PAGES);
+      return {
+        ...now,
+        starts,
+        first: now.first + drop,
+        pages: pages.slice(drop),
+        error: null,
+      };
     });
   };
   // Earlier entries: the page before the window, read again from its start; the window's last page is let go beyond `MAX_PAGES`.
-  const earlier = async (j: Journal) => {
+  const earlier = async () => {
+    const j = journalNow();
+    if (j === null) return;
     const at = j.first - 1;
-    if (at < 0) return;
-    const mine = ++ask.current;
+    const start = j.starts[at];
+    if (at < 0 || start === undefined) return;
+    const by = { owner, life: j.life };
     setLoading(true);
-    const result = answered(mine, await read(j.starts[at] as number));
-    if (result === null) return;
+    const got = await fetchPage(start, by, () => live(by));
+    if (got.kind === "stop") return;
     setLoading(false);
-    if (!result.ok) {
-      setJournal(failedOrRefused(result.kind, j));
-      return;
-    }
-    setJournal({
-      ...j,
-      first: at,
-      pages: [
-        {
-          start: j.starts[at] as number,
-          entries: result.value.entries,
-          next: result.value.next_after,
-        },
-        ...j.pages,
-      ].slice(0, MAX_PAGES),
-      error: null,
-    });
+    if (got.kind === "failed") update((now) => ({ ...now, error: "failed" }));
+    if (got.kind !== "page") return;
+    const { page } = got;
+    update((now) =>
+      now.first !== at + 1
+        ? now
+        : {
+            ...now,
+            first: at,
+            pages: [page, ...now.pages].slice(0, MAX_PAGES),
+            error: null,
+          },
+    );
   };
+  // Back to recent entries: this authority ends (every request and check of it with it); a fix known only from it closes.
   const close = () => {
-    ask.current += 1;
+    life.current += 1;
     setLoading(false);
-    setJournal(null);
+    setScan(null);
+    dropFullOnlyFix();
+    put(null);
   };
 
   // A newer committed version of the stream (a new entry, a correction, a reconciled pending one) makes the open pages stale: they are read
@@ -335,7 +484,7 @@ export function EntryHistory({
       journal.tried === row.progressVersion
     )
       return;
-    void refresh(journal);
+    void refresh();
   }, [journal, loading, env.online, row.progressVersion]);
   // The connection came back after a change seen offline: ask once more.
   // biome-ignore lint/correctness/useExhaustiveDependencies: only the connection's return is the reason
@@ -345,39 +494,71 @@ export function EntryHistory({
       journal !== null &&
       journal.version !== row.progressVersion
     )
-      setJournal({ ...journal, tried: null });
+      update((now) => ({ ...now, tried: null }));
   }, [env.online]);
 
-  /** Whether `entryId` is replaced by an entry after the window (a forward walk keeping one answer; each page read is let go at once). */
-  const check = async (
-    j: Journal,
-    entryId: string,
-  ): Promise<"current" | "replaced" | "failed" | null> => {
-    const last = j.pages[j.pages.length - 1];
-    if (last === undefined) return null;
-    const set = (value: "checking" | "current" | "replaced" | "failed") =>
-      setJournal((now) =>
-        now === null || now.owner !== j.owner || now.version !== j.version
-          ? now
-          : { ...now, checks: { ...now.checks, [entryId]: value } },
-      );
-    set("checking");
-    let at = last.next;
-    while (at !== null) {
-      const result = await read(at);
-      noteIfRefused(env.identity, readKey, result);
-      if (!result.ok) {
-        set("failed");
-        return "failed";
+  /** Opens the fix of `entry` for selection `mine` — only if no later Fix or Cancel has happened since (a check that Back to recent, a refusal or a newer version ended never gets here). */
+  const openFixOf = (entry: Shown, mine: number) => {
+    if (sel.current !== mine || !mounted.current) return;
+    sessions.current += 1;
+    const kept =
+      parked.current?.owner === owner && parked.current.entryId === entry.id
+        ? parked.current.amount
+        : null;
+    if (kept !== null) parked.current = null;
+    const next: OpenFix = {
+      owner,
+      entry,
+      session: sessions.current,
+      amount:
+        kept ??
+        (entry.evidence.kind === "quantity" ? entry.evidence.amount : ""),
+      edits: 0,
+      busy: false,
+      error: null,
+    };
+    fixRef.current = next;
+    setFix(next);
+  };
+  /**
+   * Whether `entry` was replaced after the window (a forward walk keeping one answer; each page read is let go at once), then its fix. The
+   * walk stops at its next answer once its selection, authority, owner, mounted lifetime or the stream's committed version has moved.
+   */
+  const checkThenOpen = async (
+    entry: Shown,
+    mine: number,
+    start: number,
+    by: Asker,
+  ) => {
+    const version = versionRef.current;
+    const asked = () =>
+      live(by) && sel.current === mine && versionRef.current === version;
+    const note = (found: Check["found"]) =>
+      update((now) => ({
+        ...now,
+        checks: { ...now.checks, [entry.id]: { found, version } },
+      }));
+    setScan({ entryId: entry.id, sel: mine });
+    try {
+      let at: number | null = start;
+      while (at !== null) {
+        const got = await fetchPage(at, by, asked);
+        if (got.kind === "stop" || got.kind === "closed") return;
+        if (got.kind === "failed") {
+          note("failed");
+          return;
+        }
+        if (got.page.entries.some((e) => e.replaces === entry.id)) {
+          note("replaced");
+          return;
+        }
+        at = got.page.next;
       }
-      if (result.value.entries.some((e) => e.replaces === entryId)) {
-        set("replaced");
-        return "replaced";
-      }
-      at = result.value.next_after;
+      note("current");
+      openFixOf(entry, mine);
+    } finally {
+      if (mounted.current) setScan((s) => (s?.sel === mine ? null : s));
     }
-    set("current");
-    return "current";
   };
 
   const pending = row.drafts
@@ -396,8 +577,8 @@ export function EntryHistory({
     const entries = pages.flatMap((p) => p.entries);
     for (const e of entries)
       if (e.replaces !== null) committedReplaced.add(e.replaces);
-    for (const [id, found] of Object.entries(journal.checks))
-      if (found === "replaced") committedReplaced.add(id);
+    for (const [id, check] of Object.entries(journal.checks))
+      if (check.found === "replaced") committedReplaced.add(id);
     shown = [...entries]
       .sort(
         (a, b) => a.logical_order - b.logical_order || a.sequence - b.sequence,
@@ -454,6 +635,15 @@ export function EntryHistory({
       });
     }
   const recentIds = new Set(recent.map((e) => e.id));
+  recentRef.current = recentIds;
+  // An entry known only from the full history is fixable only while that history is a current answer: online, not failed, and read at
+  // the stream's committed version (an older or mixed window, or one kept from before the connection went, certifies nothing).
+  const fullCurrent =
+    full &&
+    journal !== null &&
+    journal.error === null &&
+    journal.version === row.progressVersion &&
+    env.online;
   const canFix = (entry: Shown) =>
     writable &&
     !entry.pending &&
@@ -461,27 +651,19 @@ export function EntryHistory({
     !entry.replaced &&
     entry.evidence.kind !== "observe" &&
     entry.recordedBy === env.accountId &&
-    (full || recentIds.has(entry.id));
-  const openFixOf = (entry: Shown) => {
-    sessions.current += 1;
-    setFix({
-      owner,
-      entry,
-      session: sessions.current,
-      amount: entry.evidence.kind === "quantity" ? entry.evidence.amount : "",
-      edits: 0,
-      busy: false,
-      error: null,
-    });
-  };
+    (recentIds.has(entry.id) || fullCurrent);
   const askFix = (entry: Shown) => {
+    // Every Fix intent takes the selection FIRST, synchronously: a lookup asked before it can no longer open anything.
+    const mine = ++sel.current;
+    const j = journalNow();
     // Outside a window that reaches the end, the entry may have been corrected on a later page: check that first.
-    if (!full || toEnd || journal === null) return openFixOf(entry);
-    if (journal.checks[entry.id] === "current") return openFixOf(entry);
-    const j = journal;
-    void check(j, entry.id).then((found) => {
-      if (found === "current" && ownerRef.current === j.owner) openFixOf(entry);
-    });
+    if (!full || toEnd || j === null) return openFixOf(entry, mine);
+    const known = j.checks[entry.id];
+    if (known?.found === "current" && known.version === row.progressVersion)
+      return openFixOf(entry, mine);
+    const start = j.pages[j.pages.length - 1]?.next;
+    if (start === undefined || start === null) return openFixOf(entry, mine);
+    void checkThenOpen(entry, mine, start, { owner, life: j.life });
   };
   // The open fix's target is known to have been corrected (a saved correction, not this person's pending one): it cannot be saved.
   const blocked =
@@ -537,7 +719,11 @@ export function EntryHistory({
           )
         }
         onSave={(evidence) => void submit(evidence)}
-        onCancel={() => setFix(null)}
+        onCancel={() => {
+          sel.current += 1;
+          fixRef.current = null;
+          setFix(null);
+        }}
       />
     );
   const fixShown = fix !== null && shown.some((s) => s.id === fix.entry.id);
@@ -546,6 +732,7 @@ export function EntryHistory({
       aria-labelledby={heading}
       className="flex flex-col gap-2"
       data-entry-history=""
+      data-journal-requests={requests}
     >
       <h2 id={heading} className="text-[15px] font-medium text-ink-1">
         {full ? HISTORY_COPY.full : HISTORY_COPY.heading}
@@ -567,7 +754,9 @@ export function EntryHistory({
       ) : (
         <ul className="m-0 flex list-none flex-col gap-1 p-0">
           {shown.map((entry) => {
-            const checking = journal?.checks[entry.id];
+            const checking = scan?.entryId === entry.id;
+            const checkFailed =
+              !checking && journal?.checks[entry.id]?.found === "failed";
             return (
               <li
                 key={entry.id}
@@ -606,7 +795,7 @@ export function EntryHistory({
                   fixForm
                 ) : canFix(entry) ? (
                   <span>
-                    {checking === "checking" ? (
+                    {checking ? (
                       <Button disabled reason={HISTORY_COPY.checking}>
                         {HISTORY_COPY.fix}
                       </Button>
@@ -615,7 +804,7 @@ export function EntryHistory({
                         {HISTORY_COPY.fix}
                       </Button>
                     )}
-                    {checking === "failed" ? (
+                    {checkFailed ? (
                       <span className="text-[12px] text-ink-2">
                         {HISTORY_COPY.checkFailed}
                       </span>
@@ -640,7 +829,8 @@ export function EntryHistory({
             {HISTORY_COPY.fullOffline}
           </span>
         ) : !full ? (
-          journal?.error === "refused" ? null : loading ? (
+          // After a refusal too: only a new explicit read begins another authority (revision 5, R14).
+          loading ? (
             <Button disabled reason={copy.LOADING}>
               {HISTORY_COPY.full}
             </Button>
@@ -654,16 +844,16 @@ export function EntryHistory({
         ) : (
           <>
             {journal.first > 0 ? (
-              <Button onClick={() => void earlier(journal)}>
+              <Button onClick={() => void earlier()}>
                 {HISTORY_COPY.earlier}
               </Button>
             ) : null}
             {last?.next !== null && last?.next !== undefined ? (
-              <Button onClick={() => void more(journal)}>
+              <Button onClick={() => void more()}>
                 {HISTORY_COPY.loadMore}
               </Button>
             ) : null}
-            <Button variant="quiet" onClick={() => void refresh(journal)}>
+            <Button variant="quiet" onClick={() => void refresh()}>
               {journal.error === "failed"
                 ? copy.TRY_AGAIN
                 : HISTORY_COPY.refresh}
