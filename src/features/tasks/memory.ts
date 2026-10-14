@@ -1,3 +1,5 @@
+import type { EnrolCommand } from "./api";
+import { canonicalBody } from "./model/attempt";
 import type { Outcome } from "./model/contract";
 
 /**
@@ -16,9 +18,24 @@ export interface JointAnswer {
   at: number;
 }
 
+/**
+ * The enrolment change of one task this page is sending or could not confirm (revision 4, R11; design assessment C4), per identity: taken
+ * SYNCHRONOUSLY before the request is made, so a second activation while it is `pending` sends nothing (never a second key for the same
+ * change), and kept through a remount of the protected tree. `uncertain` (no definite answer: it may have committed) keeps the exact
+ * command and key: Try again resends them unchanged. A definite answer ends it. Page memory only: a reload starts with none and never
+ * resends anything (the next change is a new attempt, read against the enrolment read again).
+ */
+export interface EnrolmentAttempt {
+  key: string;
+  body: string;
+  command: EnrolCommand;
+  phase: "pending" | "uncertain";
+}
+
 interface IdentityMemory {
   refused: Map<string, "forbidden" | "not_found">;
   joint: Map<string, JointAnswer>;
+  enrolment: Map<string, EnrolmentAttempt>;
 }
 
 const LIMIT = 2_000;
@@ -29,7 +46,7 @@ function memoryOf(identity: string): IdentityMemory {
   if (memory === undefined) {
     // Only the displayed identity is kept: an earlier one's answers are never shown under another (and are dropped here).
     memories.clear();
-    memory = { refused: new Map(), joint: new Map() };
+    memory = { refused: new Map(), joint: new Map(), enrolment: new Map() };
     memories.set(identity, memory);
   }
   return memory;
@@ -93,6 +110,60 @@ export const jointOf = (
   identity: string,
   occurrenceId: string,
 ): JointAnswer | null => memoryOf(identity).joint.get(occurrenceId) ?? null;
+
+const enrolmentListeners = new Set<() => void>();
+const enrolmentChanged = (): void => {
+  for (const listener of [...enrolmentListeners]) listener();
+};
+export function subscribeEnrolment(listener: () => void): () => void {
+  enrolmentListeners.add(listener);
+  return () => enrolmentListeners.delete(listener);
+}
+
+export const enrolmentAttemptOf = (
+  identity: string,
+  taskId: string,
+): EnrolmentAttempt | null => memoryOf(identity).enrolment.get(taskId) ?? null;
+
+/**
+ * Takes the attempt for `command` before anything is sent: null while another one of the task is pending (nothing is sent). The same body
+ * as an uncertain attempt keeps its key; any other body is a new attempt with a new key (it replaces the uncertain one).
+ */
+export function startEnrolment(
+  identity: string,
+  taskId: string,
+  command: EnrolCommand,
+  newKey: () => string,
+): EnrolmentAttempt | null {
+  const memory = memoryOf(identity);
+  const held = memory.enrolment.get(taskId);
+  if (held?.phase === "pending") return null;
+  const body = canonicalBody(command);
+  const attempt: EnrolmentAttempt = {
+    key: held !== undefined && held.body === body ? held.key : newKey(),
+    body,
+    command,
+    phase: "pending",
+  };
+  bounded(memory.enrolment, taskId, attempt);
+  enrolmentChanged();
+  return attempt;
+}
+
+/** The answer to `attempt`: only the attempt still held for the displayed identity is settled (another identity's is gone). */
+export function settleEnrolment(
+  identity: string,
+  taskId: string,
+  attempt: EnrolmentAttempt,
+  outcome: "definite" | "uncertain",
+): void {
+  const memory = memories.get(identity);
+  if (memory === undefined || memory.enrolment.get(taskId) !== attempt) return;
+  if (outcome === "uncertain")
+    memory.enrolment.set(taskId, { ...attempt, phase: "uncertain" });
+  else memory.enrolment.delete(taskId);
+  enrolmentChanged();
+}
 
 /** For tests: forget everything. */
 export function forgetTaskMemory(): void {

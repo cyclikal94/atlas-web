@@ -696,6 +696,9 @@ the current epoch is shown with no request, one persisted for another epoch is n
   `scanResources`/`readResourcesNow` and `readAllOutstandingByKindNow(env, kinds)` / `readAllOutstandingNow(env, ids)` (every page, now; a failed
   page or a cursor that does not advance fails the whole read). `CachePosition` gains `composition`, which a screen follows to read again (a local
   re-read only; it is never a reason to ask the server). `readCacheRevisionNow` remains for callers that need the content revision alone.
+  Revision 4 adds the stage `readResourcePageNow(env, { kind, parentId?, after?, limit? })`: ONE page of `readResourceList`, now, in one
+  transaction (`failed`/`closed`, never an empty page), for a composition that needs a first row or a first page (the task detail's execution
+  and the day picker's first page) inside the same certified read.
 * **`commandKindOf` reads a wrapped command.** The kind of `{ command: { kind } }` (the body of `/task-commands`, `/calendar-commands` and
   `/reminder-commands`) is the inner kind; before, every such draft's header said the endpoint. Byte-identical to WEB-13a's fix.
 * **A projection is taken only for the resource asked about.** `CommandSpec.projectCreate(draft, resourceId)` is told the id; `mergeResource`

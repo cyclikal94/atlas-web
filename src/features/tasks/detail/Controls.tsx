@@ -1,18 +1,21 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useReducer, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import type { CacheRow } from "../../../data";
 import type { TaskActions } from "../actions";
+import type { EnrolCommand } from "../api";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { momentLabel } from "../format";
 import {
+  enrolmentAttemptOf,
   forgetRefusal,
   type JointAnswer,
   noteIfRefused,
-  noteRefusal,
   refusalOf,
+  settleEnrolment,
+  startEnrolment,
+  subscribeEnrolment,
 } from "../memory";
-import { type Attempt, nextAttempt } from "../model/attempt";
 import { type Enrolment, parseProgressState } from "../model/contract";
 import { jointLine } from "../model/row-state";
 import type { RowModel } from "../view";
@@ -51,6 +54,7 @@ export const CONTROLS_COPY = {
   enrolRefused: "This change wasn't accepted. The latest settings are shown.",
   enrolUnavailable: "Your settings for this task aren't available.",
   loading: "Loading your settings",
+  sending: "Sending your change…",
   saved: "Saved.",
 } as const;
 
@@ -271,16 +275,41 @@ export function Participation({
   );
 }
 
+/**
+ * "Your settings" (enrolment, D-10a-7; revision 4, R11): online-only, ONE attempt per body. The attempt is taken synchronously before the
+ * request (`startEnrolment`, page memory): while it is pending Join/Leave and the consent are disabled with a reason, and a repeated
+ * activation sends nothing. An uncertain answer keeps the exact command and key for Try again (never resent on its own). Every answer, and
+ * the end of a pending attempt seen after a remount, reads the enrolment again; a read asked before a change was sent is not shown, and one
+ * answered while a change is pending never replaces what is shown (both may predate the change).
+ */
 function EnrolmentSettings({ taskId }: { taskId: string }) {
   const env = useTasksEnv();
   const heading = useId();
   const readKey = `enrolment:${taskId}`;
   const [enrolment, setEnrolment] = useState<Enrolment | null>(null);
   const [state, setState] = useState<
-    "idle" | "loading" | "unavailable" | "failed" | "refused" | "saved"
+    "idle" | "loading" | "unavailable" | "refused" | "saved"
   >("idle");
-  const [uncertain, setUncertain] = useState<Attempt | null>(null);
   const [reload, setReload] = useState(0);
+  const [, changed] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => subscribeEnrolment(changed), []);
+  const attempt = enrolmentAttemptOf(env.identity, taskId);
+  const pending = attempt?.phase === "pending";
+  // Changes sent by this mount: a read asked before the latest one may predate it.
+  const sent = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // A pending attempt that ended (here or before a remount) is followed by a read.
+  const wasPending = useRef(pending);
+  useEffect(() => {
+    if (wasPending.current && !pending) setReload((n) => n + 1);
+    wasPending.current = pending;
+  }, [pending]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-read after a change or a retry
   useEffect(() => {
     if (!env.online) return;
@@ -289,50 +318,57 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       return;
     }
     let live = true;
-    setState((s) =>
-      s === "saved" || s === "refused" || s === "failed" ? s : "loading",
-    );
+    const asked = sent.current;
+    setState((s) => (s === "saved" || s === "refused" ? s : "loading"));
     void env.api.readEnrolment(taskId).then((result) => {
       noteIfRefused(env.identity, readKey, result);
-      if (!live) return;
+      if (!live || asked !== sent.current) return;
+      // While a change is pending a read may predate it: it never replaces what is shown (a screen mounted meanwhile shows it, disabled).
+      const pendingNow =
+        enrolmentAttemptOf(env.identity, taskId)?.phase === "pending";
       if (result.ok) {
-        setEnrolment(result.value);
+        setEnrolment((shown) =>
+          pendingNow && shown !== null ? shown : result.value,
+        );
         setState((s) => (s === "loading" ? "idle" : s));
-      } else if (result.kind === "forbidden" || result.kind === "not_found") {
-        setState("unavailable");
       } else if (result.kind !== "closed") setState("unavailable");
     });
     return () => {
       live = false;
     };
   }, [env.api, env.online, env.identity, taskId, reload]);
-  const send = async (next: {
-    active: boolean;
-    aggregate_consent: boolean;
-  }) => {
+  const send = async (command: EnrolCommand) => {
+    const mine = startEnrolment(env.identity, taskId, command, env.newId);
+    if (mine === null) return;
+    sent.current += 1;
+    const result = await env.api.enrol(mine.command, mine.key);
+    const definite =
+      result.ok ||
+      (result.kind !== "uncertain" &&
+        result.kind !== "not_sent" &&
+        result.kind !== "closed");
+    settleEnrolment(
+      env.identity,
+      taskId,
+      mine,
+      definite ? "definite" : "uncertain",
+    );
+    if (!mounted.current) return;
+    if (result.ok) setState("saved");
+    else if (definite) setState("refused");
+    else if (result.kind !== "closed") setState("idle");
+  };
+  const change = (next: { active: boolean; aggregate_consent: boolean }) => {
     if (enrolment === null) return;
-    const command = {
-      kind: "enrol" as const,
+    void send({
+      kind: "enrol",
       task_id: taskId,
       expected_version: enrolment.version,
       active: next.active,
       aggregate_consent: next.aggregate_consent,
-    };
-    const attempt = nextAttempt(uncertain, command, env.newId);
-    const result = await env.api.enrol(command, attempt.key);
-    if (result.ok) {
-      setUncertain(null);
-      setState("saved");
-      setReload((n) => n + 1);
-    } else if (result.kind === "uncertain" || result.kind === "not_sent") {
-      setUncertain(attempt);
-      setState("failed");
-    } else if (result.kind !== "closed") {
-      setUncertain(null);
-      setState("refused");
-      setReload((n) => n + 1);
-    }
+    });
   };
+  const uncertain = attempt?.phase === "uncertain" ? attempt : null;
   return (
     <section
       className="flex flex-col gap-2"
@@ -365,19 +401,24 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       ) : (
         <div className="flex flex-col gap-2">
           <span>
-            {env.writable ? (
+            {!env.writable || pending ? (
               <Button
-                onClick={() =>
-                  void send({
-                    active: !enrolment.active,
-                    aggregate_consent: enrolment.aggregate_consent,
-                  })
+                disabled
+                reason={
+                  !env.writable ? copy.NOT_WRITABLE : CONTROLS_COPY.sending
                 }
               >
                 {enrolment.active ? CONTROLS_COPY.leave : CONTROLS_COPY.join}
               </Button>
             ) : (
-              <Button disabled reason={copy.NOT_WRITABLE}>
+              <Button
+                onClick={() =>
+                  change({
+                    active: !enrolment.active,
+                    aggregate_consent: enrolment.aggregate_consent,
+                  })
+                }
+              >
                 {enrolment.active ? CONTROLS_COPY.leave : CONTROLS_COPY.join}
               </Button>
             )}
@@ -386,9 +427,9 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
             <input
               type="checkbox"
               checked={enrolment.aggregate_consent}
-              disabled={!env.writable}
+              disabled={!env.writable || pending}
               onChange={() =>
-                void send({
+                change({
                   active: enrolment.active,
                   aggregate_consent: !enrolment.aggregate_consent,
                 })
@@ -397,10 +438,23 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
             />
             {CONTROLS_COPY.consent}
           </label>
-          {state === "failed" ? (
-            <p className="text-[12.5px] text-conflict-text">
-              {CONTROLS_COPY.enrolFailed}
-            </p>
+          {uncertain !== null ? (
+            <span
+              className="flex flex-wrap items-center gap-2"
+              data-enrolment-uncertain=""
+            >
+              <span className="text-[12.5px] text-conflict-text">
+                {CONTROLS_COPY.enrolFailed}
+              </span>
+              {env.writable ? (
+                <Button
+                  variant="quiet"
+                  onClick={() => void send(uncertain.command)}
+                >
+                  {copy.TRY_AGAIN}
+                </Button>
+              ) : null}
+            </span>
           ) : state === "refused" ? (
             <p className="text-[12.5px] text-ink-2">
               {CONTROLS_COPY.enrolRefused}

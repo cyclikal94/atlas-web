@@ -16777,11 +16777,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/useTaskDetail.ts",
     tests: ["tests/features/tasks/detail-selection.test.tsx"],
     expect: /BEYOND the first page/,
+    // Re-expressed in revision 4 (same intent): the selection is made inside the detail's certified read, against its first page.
     patch: (t) =>
       sub(
         t,
-        "    } else if (belongs(askedRow)) {",
-        "    } else if (\n      belongs(askedRow) &&\n      occurrences.some((o) => o.id === occurrenceParam)\n    ) {",
+        "    if (belongs(asked.value)) {",
+        "    if (\n      belongs(asked.value) &&\n      firstPage?.rows.some((r) => r.base.id === occurrenceParam) === true\n    ) {",
       ),
   },
   {
@@ -16791,11 +16792,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/useTaskDetail.ts",
     tests: ["tests/features/tasks/detail-selection.test.tsx"],
     expect: /not on this device|another task's day/,
+    // Re-expressed in revision 4 (same intent): the fallback would be the first page's last day of the certified read.
     patch: (t) =>
       sub(
         t,
-        '      selection = "unavailable";\n      chosen = null;',
-        '      selection = "default";\n      chosen = todaysId ?? occurrences[occurrences.length - 1]?.id ?? null;',
+        '    } else selection = "unavailable";',
+        "    } else {\n      const last = firstPage?.rows[firstPage.rows.length - 1];\n      chosen = last?.base.id ?? null;\n      chosenRow = last?.merged ?? null;\n    }",
       ),
   },
   {
@@ -16823,11 +16825,16 @@ export const UNIT = [
     file: "src/features/tasks/detail/useTaskDetail.ts",
     tests: ["tests/features/tasks/detail-selection.test.tsx"],
     expect: /latest day by date over EVERY saved day/,
+    // Re-expressed in revision 4 (same intent): the walk stops after its first window and that window's latest is taken.
     patch: (t) =>
       sub(
-        t,
-        "    chosen = latest.id ?? projectedFirst;",
-        "    chosen = occurrences[occurrences.length - 1]?.id ?? projectedFirst;",
+        sub(
+          t,
+          "              best = { id: listed.base.id, date, row: listed.merged };\n          }\n          return undefined;",
+          '              best = { id: listed.base.id, date, row: listed.merged };\n          }\n          return "stop";',
+        ),
+        '      if (end !== "complete") return unread();\n      const found',
+        '      if (end === "closed") return unread();\n      const found',
       ),
   },
   {
@@ -16944,12 +16951,13 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
     expect: /value typed while the save was pending stays in the open fix/,
-    // Re-expressed in revision 2 (same intent): the completion now names its fix session.
+    // Re-expressed in revision 2 (same intent): the completion now names its fix session. Again in revision 4: the open fix is held by
+    // the history (its value and edit count), and its completion compares the edit count there.
     patch: (t) =>
       sub(
         t,
-        "      if ((await onSave(evidence)) && edits.current === submitted)\n        onSaved(session);",
-        "      if (await onSave(evidence)) onSaved(session);",
+        "          : ok && f.edits === submitted\n            ? null",
+        "          : ok\n            ? null",
       ),
   },
   {
@@ -16959,11 +16967,16 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
     expect: /Save waits for the pending one/,
+    // Re-expressed in revision 4 (same intent): the pending save is the held fix's `busy`, refused both by the form and by the history.
     patch: (t) =>
       sub(
-        t,
-        "      {busy ? (\n        <Button disabled reason={copy.SAVING}>\n          {HISTORY_COPY.fixSave}",
-        "      {busy && (false as boolean) ? (\n        <Button disabled reason={copy.SAVING}>\n          {HISTORY_COPY.fixSave}",
+        sub(
+          t,
+          "      ) : fix.busy ? (\n        <Button disabled reason={copy.SAVING}>",
+          "      ) : fix.busy && (false as boolean) ? (\n        <Button disabled reason={copy.SAVING}>",
+        ),
+        "    if (current === null || current.busy) return;",
+        "    if (current === null) return;",
       ),
   },
   {
@@ -17438,11 +17451,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/correction-ownership.test.tsx"],
     expect: /SAME entry|reopened with nothing typed/,
+    // Re-expressed in revision 4 (same intent): the completion closes whatever fix is open, not only its own session.
     patch: (t) =>
       sub(
         t,
-        "                      open !== null && open.session === session ? null : open,",
-        "                      null,",
+        "        f === null || f.session !== session\n          ? f",
+        "        f === null\n          ? f",
       ),
   },
   {
@@ -17762,7 +17776,9 @@ export const UNIT = [
       "WEB-10a R9 (rev 3, Q17): an edit saves while the queue (its write target) could not be read",
     file: "src/features/tasks/form/TaskFormPage.tsx",
     tests: ["tests/features/tasks/local-coherence.test.tsx"],
-    expect: /form: editing while the queue/,
+    // Re-expressed in revision 4 (same intent, same patch): with the queue unreadable AT ENTRY the edit page now shows the detail read's
+    // error (no form); the form's own block is witnessed by the case where the queue becomes unreadable while the form is open.
+    expect: /form: the queue becomes unreadable while the form is open/,
     patch: (t) => sub(t, "    !queueUnread &&\n", ""),
   },
   {
@@ -17772,8 +17788,360 @@ export const UNIT = [
     file: "src/features/tasks/detail/TaskDetail.tsx",
     tests: ["tests/features/tasks/local-coherence.test.tsx"],
     expect: /detail: a failed read/,
+    // Re-expressed in revision 4 (same intent): the detail's whole read is one; its failure with nothing complete is the error state.
     patch: (t) =>
-      sub(t, "row === null && view.rowError !== null ? (", "false ? ("),
+      sub(
+        t,
+        '  if (view.status === "error" && view.readError !== null)',
+        "  if (false as boolean)",
+      ),
+  },
+  // ---- WEB-10a revision 4 (R9-R12; design assessment C1, C3, C4; D1-D9, J1-J5, E1-E4): one mutant per guard --------------------------
+  {
+    id: "MU-2123",
+    title:
+      "WEB-10a R9 (rev 4, D1): a detail read that failed with nothing complete is shown as an absent task",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task.*(detail|edit)$/,
+    patch: (t) =>
+      sub(
+        t,
+        '          ? "loading"\n          : "error"',
+        '          ? "loading"\n          : "absent"',
+      ),
+  },
+  {
+    id: "MU-2124",
+    title:
+      "WEB-10a R9 (rev 4, D2): a walk over the saved days that did not complete is taken as 'no day'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /the walk over every saved day/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (end !== "complete") return unread();\n      const found',
+        "      const found",
+      ),
+  },
+  {
+    id: "MU-2125",
+    title:
+      "WEB-10a R9 (rev 4, D2): a failed read of a day by its id is taken as an absent day ('unavailable', or another default)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D2: .*(the day named in the address|today's day)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read === null) return unread();\n    return { ok: true, value: read.get(id)?.merged ?? null };",
+        "    return { ok: true, value: read?.get(id)?.merged ?? null };",
+      ),
+  },
+  {
+    id: "MU-2126",
+    title:
+      "WEB-10a R9 (rev 4, D3/D4): a stale detail (a failed refresh of a complete read) offers no Try again",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D3\/D4: .*warm/,
+    patch: (t) =>
+      sub(
+        t,
+        "      <span>\n        <Button onClick={retry}>{copy.TRY_AGAIN}</Button>\n      </span>",
+        "      {stale ? null : (\n        <span>\n          <Button onClick={retry}>{copy.TRY_AGAIN}</Button>\n        </span>\n      )}",
+      ),
+  },
+  {
+    id: "MU-2127",
+    title:
+      "WEB-10a R9 (rev 4, D4): Try again does not read the detail again (only a later commit would)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task/,
+    patch: (t) =>
+      sub(
+        t,
+        "    retry: () => setAttempt((n) => n + 1),",
+        "    retry: () => undefined,",
+      ),
+  },
+  {
+    id: "MU-2128",
+    title:
+      "WEB-10a R9 (rev 4, D9): a later page of saved days that could not be read is shown as 'no more days'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /a later page that cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const pickerError =\n    cursors.length > 1 &&",
+        "  const pickerError =\n    (false as boolean) &&",
+      ),
+  },
+  {
+    id: "MU-2129",
+    title:
+      "WEB-10a R9 (rev 4): the default day is chosen again on every read (it moves under the person to a later synced day)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /chosen once for the visit/,
+    patch: (t) =>
+      sub(
+        t,
+        "              pinned:\n                pinned.current?.scope === scope ? pinned.current.id : null,",
+        "              pinned: null,",
+      ),
+  },
+  {
+    id: "MU-2130",
+    title:
+      "WEB-10a R9 (rev 4, D9): a failed page of the day's progress streams is taken as 'nobody else'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /progress streams are read whole/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (end !== "complete") return unread();\n  }\n  return {',
+        "  }\n  return {",
+      ),
+  },
+  {
+    id: "MU-2131",
+    title:
+      "WEB-10a R9 (rev 4, D1): the edit page takes a failed read for an absent task",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task.*edit$/,
+    patch: (t) => sub(t, '  if (view.status === "error") return notice;\n', ""),
+  },
+  {
+    id: "MU-2132",
+    title:
+      "WEB-10a R12 (rev 4, J3): Load more keeps every page (a fourth is retained)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J3:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const drop = Math.max(0, pages.length - MAX_PAGES);",
+        "    const drop = 0;",
+      ),
+  },
+  {
+    id: "MU-2133",
+    title:
+      "WEB-10a R12 (rev 4, J3): Earlier entries keeps every page (a fourth is retained)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J3:/,
+    patch: (t) => sub(t, "      ].slice(0, MAX_PAGES),", "      ],"),
+  },
+  {
+    id: "MU-2134",
+    title:
+      "WEB-10a R10 (rev 4, J1): an open full history is not read again when its stream's committed version changes",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect:
+      /J1: .*(correction committed while it is open|offline, a newer version waits)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.version === row.progressVersion ||",
+        "      (true as boolean) ||",
+      ),
+  },
+  {
+    id: "MU-2135",
+    title:
+      "WEB-10a R10 (rev 4, J2): an older journal answer that arrives after a newer one is shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /older answer that arrives after a newer one/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return mine === ask.current && ownerRef.current === owner ? result : null;",
+        "    return ownerRef.current === owner ? result : null;",
+      ),
+  },
+  {
+    id: "MU-2136",
+    title:
+      "WEB-10a R10/R12 (rev 4, J2): outside a window that reaches the end, Fix opens without checking the rest of the journal",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /Fix first checks the rest of the journal/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!full || toEnd || journal === null) return openFixOf(entry);",
+        "    return openFixOf(entry);",
+      ),
+  },
+  {
+    id: "MU-2137",
+    title:
+      "WEB-10a R12 (rev 4, J5): an open fix whose page is let go is no longer shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J5: .*evicted/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {fix !== null && !fixShown ? (",
+        "      {false as boolean ? (",
+      ),
+  },
+  {
+    id: "MU-2138",
+    title:
+      "WEB-10a R10 (rev 4, J5): a fix whose entry was corrected since (a saved correction) can still be saved",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /corrected since \(a saved correction\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    fix !== null && committedReplaced.has(fix.entry.id)",
+        "    fix !== null && (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-2139",
+    title:
+      "WEB-10a R10 (rev 4, J4): a refused refresh keeps showing the pages it can no longer see",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /refused refresh drops the pages/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (kind === "forbidden" || kind === "not_found")',
+        "    if (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-2140",
+    title:
+      "WEB-10a R10 (rev 4, J4): a failed refresh drops the pages (unknown is shown as the recent entries)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /failed refresh keeps the pages/,
+    patch: (t) =>
+      sub(t, '      : { ...keep, error: "failed" };', "      : null;"),
+  },
+  {
+    id: "MU-2141",
+    title:
+      "WEB-10a R10 (rev 4, J4): a failed refresh is asked again on its own, in a loop",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /failed refresh keeps the pages/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.tried === row.progressVersion\n",
+        "      (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2142",
+    title:
+      "WEB-10a R11 (rev 4, E1): a second activation while an enrolment change is pending takes a new key and is sent",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /E1: /,
+    patch: (t) => sub(t, '  if (held?.phase === "pending") return null;\n', ""),
+  },
+  {
+    id: "MU-2143",
+    title:
+      "WEB-10a R11 (rev 4, E1): Join/Leave stays enabled (with no reason) while a change is pending",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /E1: .*activated twice/,
+    patch: (t) =>
+      sub(
+        t,
+        "            {!env.writable || pending ? (",
+        "            {!env.writable ? (",
+      ),
+  },
+  {
+    id: "MU-2144",
+    title:
+      "WEB-10a R11 (rev 4, E2): Try again builds the change again from the enrolment shown (another body and key)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /Try again resends the same body and key/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  onClick={() => void send(uncertain.command)}",
+        "                  onClick={() =>\n                    void send({\n                      ...uncertain.command,\n                      expected_version: enrolment.version,\n                    })\n                  }",
+      ),
+  },
+  {
+    id: "MU-2145",
+    title:
+      "WEB-10a R11 (rev 4, E2): an uncertain change keeps its body but not its key (a retry is another attempt)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /Try again resends the same body and key/,
+    patch: (t) =>
+      sub(
+        t,
+        "    key: held !== undefined && held.body === body ? held.key : newKey(),",
+        "    key: newKey(),",
+      ),
+  },
+  {
+    id: "MU-2146",
+    title:
+      "WEB-10a R11 (rev 4, E3): an enrolment read answered while a change is pending replaces what is shown",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read answered while a change is pending/,
+    patch: (t) =>
+      sub(
+        t,
+        "          pendingNow && shown !== null ? shown : result.value,",
+        "          result.value,",
+      ),
+  },
+  {
+    id: "MU-2147",
+    title:
+      "WEB-10a R11 (rev 4, E3): an enrolment read asked before a change and answered just after it is shown",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read asked before a change/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!live || asked !== sent.current) return;",
+        "      if (!live) return;",
+      ),
+  },
+  {
+    id: "MU-2148",
+    title:
+      "WEB-10a R11 (rev 4, E1/E3): the end of a pending change is not followed by a read (a remounted screen never learns the result)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /remounted while pending|next change after the answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (wasPending.current && !pending) setReload((n) => n + 1);",
+        "    if (wasPending.current && !pending) void 0;",
+      ),
   },
 ];
 
@@ -20691,6 +21059,56 @@ export const ENGINE = [
         t,
         "export const SCHEMA_VERSION = 3;",
         "export const SCHEMA_VERSION = 2;",
+      ),
+  },
+  // ---- WEB-10a revision 4 (R9, R10, R11; design assessment D7, J1, E1): the real engines -------------------------------------------------
+  {
+    id: "MU-2149",
+    title:
+      "WEB-10a N-T15: (REAL ENGINE) an open full history is not read again when its stream's committed version changes",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T15:.*opened=true",
+    expect: /E-T15:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.version === row.progressVersion ||",
+        "      (true as boolean) ||",
+      ),
+  },
+  {
+    id: "MU-2150",
+    title:
+      "WEB-10a N-T16: (REAL ENGINE) an enrolment change has no owner while it is pending (no refusal of a second attempt, the control stays enabled)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T16:",
+    expect: /E-T16:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    const mine = startEnrolment(env.identity, taskId, command, env.newId);\n    if (mine === null) return;",
+          '    const mine = {\n      key: env.newId(),\n      body: "",\n      command,\n      phase: "pending" as const,\n    };',
+        ),
+        "            {!env.writable || pending ? (",
+        "            {!env.writable ? (",
+      ),
+  },
+  {
+    id: "MU-2151",
+    title:
+      "WEB-10a N-T17: (REAL ENGINE) the task detail's read is certified at its first attempt whatever another tab committed between its stages",
+    file: "src/data/ui/scan.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T17:.*between=true",
+    expect: /E-T17:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        '    if (after.kind === "ok")',
       ),
   },
 ];

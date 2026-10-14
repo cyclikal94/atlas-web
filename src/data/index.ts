@@ -172,6 +172,7 @@ export {
   readCacheRevisionNow,
   readCoherently,
   readLocalBasisNow,
+  readResourcePageNow,
   readResourcesNow,
   type ScanEnd,
   type Stage,

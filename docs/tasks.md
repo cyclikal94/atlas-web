@@ -185,6 +185,48 @@ MU-2104, MU-2106…MU-2118 and real-engine MU-2119…MU-2122. Considered and rej
 writer for the length of a full walk, and the 10,000-occurrence walk already exceeds the diagnostic trigger, F-1), and a generation advanced by
 the plan builders (it cost initial-bundle bytes the fixture budget does not have, and advanced on decisions that wrote nothing).
 
+Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its recurring-finding design assessment C1–C4) adds:
+
+31. **The task detail is one certified read (R9, C1).** The task, its details, the displayed day's selection (the address's day, the visit's
+    default, today's slot or the walk over every saved day), the queue and the outstanding work naming them, the day and my progress rows, the
+    picker's first page and every progress stream of the day are read as ONE composition (`readCoherently`). "This task isn't on this device",
+    "no day" and "This day isn't saved on this device…" are said only by a complete read; a read that failed or kept changing with nothing
+    complete is an error with "Try again" (`data-task-detail="error"`), never absence; with a complete read it stays, marked stale, with "Try
+    again" (`data-detail-row-stale`), which reads everything again. The edit page uses the same read (an error with "Try again"; a stale
+    refresh keeps the open form and what was typed) and reads its write target (the queue) before the form shows. A later page of the day
+    picker is a read of its own, whose failure says so with "Try again" (`data-day-picker-error`) and never "no more days". The default day is
+    chosen once for the visit and kept while it is still this task's day.
+32. **The open full history is a bounded, owned window (R10, R12, C3).** At most three pages (`MAX_PAGES`, Q9) are retained; the page-start
+    cursors visited are kept (numbers), so an earlier page is read again from its own start ("Earlier entries") and a later one by "Load
+    more", each letting go of the page at the other end. Requests carry a number: an older answer never replaces a newer one. The window
+    follows its stream's committed version (`RowModel.progressVersion`): a new version reads the window's pages again, once per version and
+    online; offline it waits for the connection. A failed refresh keeps the pages, marked stale, with "Try again"; a refusal drops them;
+    another identity starts over. "Refresh" and "Back to recent entries" are always offered while it is open. Saved entries newer than the
+    pages (the stream's recent tail) show until the journal is read again, never fixable.
+33. **Corrections across pages (R10, C3).** A window that reaches the journal's end knows every correction of its entries (a correction is
+    appended after what it corrects). Outside it, "Fix this entry" first walks the rest of the journal for a correction of THAT entry, keeping
+    only the answer: corrected since, the entry is marked "Corrected" and no fix opens; otherwise the fix opens. There is no automatic walk.
+34. **The open fix is the history's, not its page's (C3, J5).** The entry, the session, the typed value and its edit count live in the history:
+    letting a page go or refreshing it never erases a fix (shown apart while its entry's page is not shown). A fix whose entry has a saved
+    correction since cannot be saved, and says why. Revision 2's session and edit-count rules are kept.
+35. **One enrolment attempt per change, owned before it is sent (R11, C4).** The attempt (`{key, body, command, phase}`) is taken
+    synchronously in page memory per identity and task (`startEnrolment`) before the request: while it is pending, Join/Leave and the consent
+    are disabled with "Sending your change…" and a second activation sends nothing; it outlives a same-identity remount and is dropped with the
+    identity. An uncertain answer keeps the exact command and key, and "Try again" resends them unchanged; a definite answer ends it and the
+    next change is a new attempt. Every answer is followed by a read of the enrolment; a read asked before a change was sent is not shown, and
+    one answered while a change is pending never replaces what is shown. A reload starts with no attempt and resends nothing (open decision
+    D4-12 below).
+
+Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
+`enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
+follows a committed correction), E-T16 (an enrolment change pressed again while pending) and E-T17 (another tab commits between the detail's
+reads); unit MU-2123…MU-2148 and real-engine MU-2149…MU-2151; MU-2034/2035/2037/2045/2046/2083/2118 re-expressed (same intent).
+
+**Open decision D4-12 (for the product owner, not blocking the correction):** whether A15's "one attempt per body" must survive a hard reload
+or crash with the same key. Today the attempt is page memory: a reload re-reads the enrolment and never resends; the next explicit change is a
+new attempt (the backend's `expected_version` refuses it if the earlier one committed). A durable, identity-bound attempt record would need its
+own retention, clearing and replay rules; none is added here.
+
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -226,6 +268,9 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 2: "The other correction hasn't reached this device yet." (no "Save mine" until the newer version is synced) and "Your saved correction can't be read on this device." | `/tasks/<id>` with a correction in conflict (jsdom `conflict-context.test.tsx`) |
 | Revision 2: while a newer composition is read, Today keeps the last one on screen (marked `data-today-refreshing`, no visible text) | `/today` after a sync page (jsdom `freshness-provenance.test.tsx`) |
 | Revision 3: "Couldn't read this device's tasks" with "Atlas couldn't read the tasks saved on this device." or "The tasks saved on this device kept changing while they were read.", "Showing what was last read on this device." and "Try again" (Today, as a section; the detail and the list as a line; the task form as the disabled Save's reason) | `/today` with a failing local read (jsdom `local-coherence.test.tsx`, Q9/Q10/Q17) |
+| Revision 4: the detail and the edit page with a failed local read: "Atlas couldn't read the tasks saved on this device." (or "kept changing") with "Try again"; stale: the same with "Showing what was last read on this device."; the picker's "Couldn't read this task's saved days." with "Try again" | `/tasks/<id>` with a failing local read (jsdom `detail-read-coherence.test.tsx`) |
+| Revision 4: the full history's "Earlier entries", "Load more", "Refresh", "Back to recent entries", "Couldn't refresh the full history. Showing what was last loaded.", "Checking whether this entry was corrected", "Couldn't check whether this entry was corrected since.", "This entry has been corrected since. Fix its correction instead."; a fix whose page is not shown appears above the list as "Fix this entry: {value}" | `/tasks/<id>` → Full history (jsdom `journal-window.test.tsx`, native E-T15) |
+| Revision 4: enrolment "Sending your change…" (the disabled reason while a change is pending) and "Try again" beside "Couldn't confirm the change. Try again." | `/tasks/<id>` of a shared task (jsdom `enrolment-attempt.test.tsx`, native E-T16) |
 | Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 
 ## Escalation E-1 (material, not blocking WEB-10a)
@@ -236,6 +281,14 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 `materialise`.
 
 ## Limits
+
+- **The journal endpoint has no snapshot or reverse cursor (revision 4).** Pages are read by `sequence` from remembered starts, so an earlier page
+  is read again when the person goes back, and a fix outside a window that reaches the end walks the rest of the journal (one request per
+  later page, keeping only the answer). Neither is a remote snapshot: a correction committed after the walk is seen at the next committed
+  version (the window is read again). A reverse or snapshot endpoint would be a backend scope decision; none is assumed.
+- **The detail reads more per local commit (revision 4).** Its one certified read includes the picker's first page and every progress stream
+  of the day, read again when the composition generation moves (as Today's is); the walk over every saved day runs only until the visit's
+  default day is chosen. Not profiled here (WEB-09c owns measurements; F-1's cost of the walk applies).
 
 - **Paging the saved days by id.** No day index exists (D-10a-2), so the picker's pages are in id order, each shown by date; the latest day
   is found by a walk of every saved day of the task (F-1's cost applies to it).

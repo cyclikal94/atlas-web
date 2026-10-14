@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type CacheRow,
+  type DataEnv,
+  type DraftWithCommand,
+  type ResourcePage,
   readAllOutstandingByKindNow,
   readAllOutstandingNow,
   readCoherently,
+  readResourcePageNow,
   readResourcesNow,
+  type Stage,
   scanResources,
-  useAllOutstanding,
-  useAllOutstandingByKind,
-  useCachedResources,
   useCachePosition,
   useDataEnv,
-  useResourceList,
 } from "../../../data";
 import { useBoundaryClock } from "../clock";
 import { useTasksEnv } from "../env";
@@ -43,24 +44,30 @@ import {
  * marked "Not sent yet"): the task, its details (the definition), a page of the occurrences of it this device holds, the displayed
  * occurrence and my part in it.
  *
+ * ONE CERTIFIED READ (R9, revision 4; design assessment C1): the task, its execution, the displayed day's selection, the queue (every page),
+ * the outstanding work naming them, the day and my progress rows and every progress stream of the day are read as ONE composition
+ * (`readCoherently`), read again when the local composition generation moves or on Try again. So:
+ * - "This task isn't on this device" (`absent`) and "no day" are said only by a COMPLETE read. A read that failed or kept changing, with
+ *   no complete read of the same identity, database, task and address, is `error` (with Try again), never absence; with one it is kept,
+ *   marked stale (`readError`), and Try again reads everything again, the task and the selection included.
+ * - The displayed task, details, day, outstanding work and row always come from the same read: none of them can show another commit.
+ *
  * WHICH DAY IS SHOWN (R1, revision 1): an `occurrence` in the address is resolved BY ITS OWN ID and must be one of this task's (its parent
- * is the task's details, and its task id, when it can be read, is the task's); while it is being read nothing is shown, and when it is not
- * on this device or not this task's the view says so (`selection: "unavailable"`) and offers nothing to record: it never shows, or records
- * against, another day in its place. Without one: today's deterministic slot (or `once`) when this device holds it, else the latest by date
- * of ALL the task's saved days (a bounded walk), never only the first page's.
+ * is the task's details, and its task id, when it can be read, is the task's); when it is not on this device or not this task's the view
+ * says so (`selection: "unavailable"`) and offers nothing to record: it never shows, or records against, another day in its place. Without
+ * one: today's deterministic slot (or `once`) when this device holds it, else the latest by date of ALL the task's saved days (the whole
+ * walk), never only the first page's.
  *
- * The default day is chosen once for the visit (revision 2, assessed against design assessment C3): moving it at midnight while the person
- * is on the page would retarget an open record card or correction (their input belongs to the day they were opened for). The DISPLAYED
- * day's own window is followed by the clock (`now`); the next visit, or the day picker, chooses again.
+ * The default day is chosen once for the visit (revision 2, enforced in revision 4): moving it at midnight, or to a day synced later, while
+ * the person is on the page would retarget an open record card or correction. Later reads keep it while it is still this task's day. The
+ * DISPLAYED day's own window is followed by the clock (`now`); the next visit, or the day picker, chooses again.
  *
- * THE DISPLAYED DAY'S ROW (R9, revision 3; design assessment C3, Q17) is composed from ONE certified read of its inputs (the task, the
- * occurrence and my progress rows, every page of the outstanding task work and of the work naming them; `readCoherently`), read again when
- * the local composition generation moves: never from live reads that may each show a different commit. A read that failed or kept changing
- * keeps the last complete one of the same day (`rowError` says why), or shows the reason with no result: never a result from part of it.
- * The clock schedules the window of that same composition (`effectiveOccurrence`).
+ * The day picker's FIRST page is part of the same read; a later page is a read of its own (it lists days to navigate to; it never chooses the
+ * displayed one): its failure is shown with Try again and never says there are no more days.
  */
 export interface TaskDetailView {
-  status: "loading" | "absent" | "ready";
+  /** `error`: nothing complete has been read for this task here yet (the read failed or kept changing); never absence. */
+  status: "loading" | "absent" | "error" | "ready";
   task: CacheRow | null;
   execution: CacheRow | null;
   definition: TaskDefinition | null;
@@ -72,22 +79,29 @@ export interface TaskDetailView {
     paged: boolean;
     more: boolean;
     previous: boolean;
+    /** The page could not be read whole (`failed`, or `unstable`); `more` is then unknown, not "no more". */
+    error: "failed" | "unstable" | null;
     showMore(): void;
     showPrevious(): void;
+    /** Reads the picker's page again. */
+    retry(): void;
   };
   /** How the displayed day was chosen; `unavailable` and `loading` show no day. */
   selection: "explicit" | "default" | "loading" | "unavailable";
   row: RowModel | null;
   unreadable: boolean;
-  /** The displayed day's inputs could not be read whole (`failed`, or `unstable`: they kept changing); `row` is then the last complete one. */
-  rowError: "failed" | "unstable" | null;
-  /** Reads the displayed day's inputs again (after `rowError`). */
-  retryRow(): void;
+  /**
+   * The last read could not be read whole (`failed`, or `unstable`: it kept changing). With `status: "ready"` what is shown is the last
+   * complete read, stale; with `status: "error"` there is none.
+   */
+  readError: "failed" | "unstable" | null;
+  /** Reads everything again (the task, its details, the day's selection and inputs). */
+  retry(): void;
   /** The task is in the cache (not only projected): sharing and revise need it. */
   synced: boolean;
   outstanding: Outstanding;
   joint: JointAnswer | null;
-  /** My progress ids by occurrence (deterministic), for a correction's side effects: other people's are read from the cache by parent. */
+  /** Every progress stream of the displayed day (read whole, in the same read): a correction's side effects and who counts. */
   progressRows: CacheRow[];
   /**
    * The time the displayed day is evaluated against (R8, revision 2): it moves when the day's window opens or closes, and when the page is
@@ -98,34 +112,248 @@ export interface TaskDetailView {
 
 const progressCache = new Map<string, string>();
 /** My deterministic progress id for an occurrence, computed once (async SHA-1). */
-export function useProgressId(
-  occurrenceId: string | null,
-  me: string,
-): string | null {
-  const key = occurrenceId === null ? null : `${occurrenceId}:${me}`;
-  const [value, setValue] = useState<string | null>(
-    key === null ? null : (progressCache.get(key) ?? null),
+async function progressIdFor(occurrenceId: string, me: string) {
+  const key = `${occurrenceId}:${me}`;
+  const known = progressCache.get(key);
+  if (known !== undefined) return known;
+  const id = await progressIdOf(occurrenceId, me);
+  progressCache.set(key, id);
+  return id;
+}
+
+/** What one certified read of the detail holds. */
+interface DetailInputs {
+  queue: Outstanding;
+  /** The queue and the outstanding work naming the task, its details, the day and my progress (every page of each). */
+  detail: Outstanding;
+  create: DraftWithCommand | null;
+  /** The cached task and execution (with their overlays), or null. */
+  taskBase: CacheRow | null;
+  executionBase: CacheRow | null;
+  executionId: string | null;
+  /** The day picker's first page of saved days. */
+  firstPage: ResourcePage | null;
+  selection: "explicit" | "default" | "unavailable";
+  chosen: string | null;
+  chosenData: OccurrenceData | null;
+  progressId: string | null;
+  /** The chosen day and my progress, cached (with overlays). */
+  rows: Map<string, CacheRow>;
+  /** Every cached progress stream of the chosen day. */
+  others: CacheRow[];
+}
+
+const EMPTY: Outstanding = { drafts: [], attention: [] };
+
+const createOf = (queue: Outstanding, taskId: string) =>
+  queue.drafts.find(
+    (d) => d.kind === "create_task" && d.target_resource_ids[0] === taskId,
+  ) ?? null;
+
+const relevantTo = (queue: Outstanding, ids: ReadonlyArray<string | null>) =>
+  queue.drafts.filter((d) =>
+    ids.some((id) => id !== null && d.index_targets.includes(id)),
   );
-  useEffect(() => {
-    if (key === null || occurrenceId === null) {
-      setValue(null);
-      return;
-    }
-    const known = progressCache.get(key);
-    if (known !== undefined) {
-      setValue(known);
-      return;
-    }
-    let live = true;
-    void progressIdOf(occurrenceId, me).then((id) => {
-      progressCache.set(key, id);
-      if (live) setValue(id);
+
+/**
+ * The detail's inputs, as one stage of a certified read. A failed or interrupted read of any of them fails the stage: nothing here turns a
+ * failure into an absent task, details or day.
+ */
+async function readDetail(
+  data: Pick<DataEnv, "service">,
+  input: {
+    taskId: string;
+    occurrenceParam: string | undefined;
+    pinned: string | null;
+    me: string;
+    now: number;
+  },
+  signal: AbortSignal,
+): Promise<Stage<DetailInputs>> {
+  const { taskId, occurrenceParam } = input;
+  const service = data.service();
+  const unread = (): Stage<never> => ({
+    ok: false,
+    why: signal.aborted
+      ? "aborted"
+      : data.service() === service && service !== null
+        ? "failed"
+        : "closed",
+  });
+  const queue = await readAllOutstandingByKindNow(data, QUEUED_KINDS);
+  if (!queue.ok) return queue;
+  const create = createOf(queue.value, taskId);
+  const task = await readResourcesNow(data, [taskId]);
+  if (task === null) return unread();
+  const executions = await readResourcePageNow(data, {
+    kind: "execution",
+    parentId: taskId,
+    limit: 1,
+  });
+  if (!executions.ok) return executions;
+  const executionBase = executions.value.rows[0]?.merged ?? null;
+  const executionId =
+    executionBase?.id ?? create?.target_resource_ids[1] ?? null;
+  const execution =
+    executionId === null
+      ? null
+      : patched(
+          executionBase,
+          executionId,
+          relevantTo(queue.value, [taskId, executionId]),
+        );
+  const definition =
+    execution === null ? null : parseDefinition(execution.value);
+  let firstPage: ResourcePage | null = null;
+  if (executionId !== null) {
+    const page = await readResourcePageNow(data, {
+      kind: "occurrence",
+      parentId: executionId,
     });
-    return () => {
-      live = false;
-    };
-  }, [key, occurrenceId, me]);
-  return value;
+    if (!page.ok) return page;
+    firstPage = page.value;
+  }
+  const belongs = (row: CacheRow | null): row is CacheRow => {
+    if (row === null || row.kind !== "occurrence") return false;
+    if (executionId === null || row.parent_id !== executionId) return false;
+    const parsed = parseOccurrenceData(row.value);
+    return parsed === null || parsed.task_id === taskId;
+  };
+  // A day by its own id: the projection of this task's queued create, or the cached row.
+  const dayById = async (id: string): Promise<Stage<CacheRow | null>> => {
+    if (create !== null && create.target_resource_ids[2] === id)
+      return { ok: true, value: patched(null, id, [create]) };
+    const read = await readResourcesNow(data, [id]);
+    if (read === null) return unread();
+    return { ok: true, value: read.get(id)?.merged ?? null };
+  };
+
+  let selection: DetailInputs["selection"] = "default";
+  let chosen: string | null = null;
+  let chosenRow: CacheRow | null = null;
+  if (occurrenceParam !== undefined) {
+    const asked = await dayById(occurrenceParam);
+    if (!asked.ok) return asked;
+    if (belongs(asked.value)) {
+      selection = "explicit";
+      chosen = occurrenceParam;
+      chosenRow = asked.value;
+    } else selection = "unavailable";
+  } else if (definition !== null && executionId !== null) {
+    if (input.pinned !== null) {
+      const kept = await dayById(input.pinned);
+      if (!kept.ok) return kept;
+      if (belongs(kept.value)) {
+        chosen = input.pinned;
+        chosenRow = kept.value;
+      }
+    }
+    if (chosen === null) {
+      // Today's slot (or `once`), read by its id; else the latest by date of every saved day.
+      const day = todayIn(definition.schedule.timezone, input.now);
+      const todaysId = await occurrenceIdOf(
+        taskId,
+        definition.schedule.repeat === null ||
+          definition.schedule.repeat.frequency === "after_completion"
+          ? "once"
+          : slotKey(definition.schedule, day),
+      );
+      const todays = await dayById(todaysId);
+      if (!todays.ok) return todays;
+      if (belongs(todays.value)) {
+        chosen = todaysId;
+        chosenRow = todays.value;
+      }
+    }
+    if (chosen === null) {
+      let best: { id: string; date: string; row: CacheRow } | null = null;
+      const end = await scanResources(
+        data,
+        { kind: "occurrence", parentId: executionId },
+        (rows) => {
+          for (const listed of rows) {
+            const date =
+              parseOccurrenceData(listed.merged.value)?.slot.date ??
+              "9999-12-31";
+            if (
+              best === null ||
+              date > best.date ||
+              (date === best.date && listed.base.id > best.id)
+            )
+              best = { id: listed.base.id, date, row: listed.merged };
+          }
+          return undefined;
+        },
+        signal,
+      );
+      if (end !== "complete") return unread();
+      const found = best as { id: string; row: CacheRow } | null;
+      const projected = create?.target_resource_ids[2];
+      if (found !== null) {
+        chosen = found.id;
+        chosenRow = found.row;
+      } else if (create !== null && projected !== undefined) {
+        chosen = projected;
+        chosenRow = patched(null, projected, [create]);
+      }
+    }
+  }
+  if (signal.aborted) return unread();
+
+  const progressId =
+    chosen === null ? null : await progressIdFor(chosen, input.me);
+  const named = await readAllOutstandingNow(data, [
+    taskId,
+    ...(executionId ? [executionId] : []),
+    ...(chosen ? [chosen] : []),
+    ...(progressId ? [progressId] : []),
+  ]);
+  if (!named.ok) return named;
+  const drafts = new Map(queue.value.drafts.map((d) => [d.local_id, d]));
+  const attention = new Map(queue.value.attention.map((d) => [d.local_id, d]));
+  for (const entry of Object.values(named.value)) {
+    for (const d of entry.drafts) drafts.set(d.local_id, d);
+    for (const d of entry.attention) attention.set(d.local_id, d);
+  }
+  const rows = new Map<string, CacheRow>();
+  const others: CacheRow[] = [];
+  if (chosen !== null && progressId !== null) {
+    const read = await readResourcesNow(data, [chosen, progressId]);
+    if (read === null) return unread();
+    for (const [rowId, row] of read) rows.set(rowId, row.merged);
+    const end = await scanResources(
+      data,
+      { kind: "progress", parentId: chosen },
+      (page) => {
+        for (const listed of page) others.push(listed.merged);
+        return undefined;
+      },
+      signal,
+    );
+    if (end !== "complete") return unread();
+  }
+  return {
+    ok: true,
+    value: {
+      queue: queue.value,
+      detail: {
+        drafts: [...drafts.values()],
+        attention: [...attention.values()],
+      },
+      create,
+      taskBase: task.get(taskId)?.merged ?? null,
+      executionBase,
+      executionId,
+      firstPage,
+      selection,
+      chosen,
+      chosenData:
+        chosenRow === null ? null : parseOccurrenceData(chosenRow.value),
+      progressId,
+      rows,
+      others,
+    },
+  };
 }
 
 export function useTaskDetail(
@@ -134,64 +362,102 @@ export function useTaskDetail(
 ): TaskDetailView {
   const env = useTasksEnv();
   const data = useDataEnv();
-  const byKind = useAllOutstandingByKind(QUEUED_KINDS);
-  const all: Outstanding = useMemo(
-    () =>
-      byKind.status === "ready"
-        ? { drafts: byKind.value.drafts, attention: byKind.value.attention }
-        : { drafts: [], attention: [] },
-    [byKind],
+  const position = useCachePosition();
+  // No database on this device: nothing was ever saved or synced here (a read that failed is not that).
+  const noDatabase =
+    position.status === "unavailable" && position.reason === "absent";
+  const composition =
+    position.status === "ready" ? (position.value?.composition ?? -1) : -2;
+  // A complete read belongs to one identity, database incarnation, task and address: another one keeps nothing of it.
+  const scope = `${env.identity}\u0000${data.service()?.incarnationId ?? "-"}\u0000${taskId}\u0000${occurrenceParam ?? ""}`;
+  const pinned = useRef<{ scope: string; id: string } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const read = useScopedRead<DetailInputs>(
+    scope,
+    `${composition}|${attempt}`,
+    (signal) =>
+      readCoherently(
+        data,
+        () =>
+          readDetail(
+            data,
+            {
+              taskId,
+              occurrenceParam,
+              pinned:
+                pinned.current?.scope === scope ? pinned.current.id : null,
+              me: env.accountId,
+              now: env.now(),
+            },
+            signal,
+          ),
+        { signal },
+      ),
+    !noDatabase,
   );
-  const create = all.drafts.find(
-    (d) => d.kind === "create_task" && d.target_resource_ids[0] === taskId,
-  );
-  const cachedTask = useCachedResources([taskId]);
-  const executions = useResourceList({
-    kind: "execution",
-    parentId: taskId,
-    limit: 1,
-  });
-  const cachedExecution =
-    executions.status === "ready"
-      ? (executions.value.rows[0]?.merged ?? null)
-      : null;
-  const executionId =
-    cachedExecution?.id ?? create?.target_resource_ids[1] ?? null;
-  const [cursors, setCursors] = useState<Array<string | null>>([null]);
-  const [paged, setPaged] = useState(false);
-  const occurrenceList = useResourceList({
-    kind: "occurrence",
-    parentId: executionId ?? "-",
-    after: cursors[cursors.length - 1] ?? null,
-  });
-  const taskBase =
-    cachedTask.status === "ready"
-      ? (cachedTask.value[taskId]?.merged ?? null)
-      : null;
-  const relevant = all.drafts.filter((d) =>
-    [taskId, executionId].some(
-      (id) => id !== null && d.index_targets.includes(id),
-    ),
-  );
-  const task = patched(taskBase, taskId, relevant);
+  const inputs = read.complete?.value ?? null;
+  // The visit's default day: the first one a complete read chose, kept while it is this task's.
+  useEffect(() => {
+    if (
+      inputs !== null &&
+      occurrenceParam === undefined &&
+      inputs.chosen !== null
+    )
+      pinned.current = { scope, id: inputs.chosen };
+  }, [inputs, occurrenceParam, scope]);
+  const readError: TaskDetailView["readError"] =
+    read.latest === "failed" || read.latest === "unstable" ? read.latest : null;
+
+  const queue = inputs?.queue ?? EMPTY;
+  const executionId = inputs?.executionId ?? null;
+  const relevant = relevantTo(queue, [taskId, executionId]);
+  const task =
+    inputs === null ? null : patched(inputs.taskBase, taskId, relevant);
   const execution =
-    executionId === null
+    inputs === null || executionId === null
       ? null
-      : patched(cachedExecution, executionId, relevant);
+      : patched(inputs.executionBase, executionId, relevant);
   const definition =
     execution === null ? null : parseDefinition(execution.value);
+  const chosen = inputs?.chosen ?? null;
+  const progressId = inputs?.progressId ?? null;
 
+  // ---- the day picker's page: the first from the detail's read, a later one from a read of its own ---------------------------------------
+  const [cursors, setCursors] = useState<Array<string | null>>([null]);
+  const [paged, setPaged] = useState(false);
+  const [pickerAttempt, setPickerAttempt] = useState(0);
+  const cursor = cursors[cursors.length - 1] ?? null;
+  const picker = useScopedRead(
+    `${scope}\u0000${executionId}\u0000${cursor}`,
+    `${composition}|${pickerAttempt}`,
+    (signal) =>
+      readCoherently(
+        data,
+        () =>
+          readResourcePageNow(data, {
+            kind: "occurrence",
+            parentId: executionId ?? "-",
+            after: cursor,
+          }),
+        { signal },
+      ),
+    !noDatabase && executionId !== null && cursors.length > 1,
+  );
+  const page =
+    cursors.length === 1
+      ? (inputs?.firstPage ?? null)
+      : (picker.complete?.value ?? null);
+  const create = inputs?.create ?? null;
   const occurrences = useMemo(() => {
     const out = new Map<string, OccurrenceData | null>();
-    if (occurrenceList.status === "ready")
-      for (const row of occurrenceList.value.rows)
-        out.set(row.base.id, parseOccurrenceData(row.merged.value));
+    for (const row of page?.rows ?? [])
+      out.set(row.base.id, parseOccurrenceData(row.merged.value));
     const projected = create?.target_resource_ids[2];
     if (
       cursors.length === 1 &&
       projected !== undefined &&
       !out.has(projected) &&
-      create !== undefined
+      create !== null
     ) {
       const row = patched(null, projected, [create]);
       out.set(projected, row === null ? null : parseOccurrenceData(row.value));
@@ -203,232 +469,10 @@ export function useTaskDetail(
         const db = b.data?.slot.date ?? "9999-12-31";
         return da < db ? -1 : da > db ? 1 : a.id < b.id ? -1 : 1;
       });
-  }, [occurrenceList, create, cursors.length]);
+  }, [page, create, cursors.length]);
 
-  // ---- the displayed occurrence (R1, revision 1) ------------------------------------------------------------------------------------
-  // The address's occurrence, by its own id (cached, or the projection of this task's queued create).
-  const asked = useCachedResources(
-    occurrenceParam === undefined ? [] : [occurrenceParam],
-  );
-  const askedRow = useMemo((): CacheRow | null | undefined => {
-    if (occurrenceParam === undefined) return null;
-    if (
-      create !== undefined &&
-      create.target_resource_ids[2] === occurrenceParam
-    )
-      return patched(null, occurrenceParam, [create]);
-    if (asked.status === "loading") return undefined;
-    return asked.status === "ready"
-      ? (asked.value[occurrenceParam]?.merged ?? null)
-      : null;
-  }, [occurrenceParam, asked, create]);
-  const belongs = (row: CacheRow | null | undefined): boolean => {
-    if (row === null || row === undefined || row.kind !== "occurrence")
-      return false;
-    if (executionId === null || row.parent_id !== executionId) return false;
-    const parsed = parseOccurrenceData(row.value);
-    return parsed === null || parsed.task_id === taskId;
-  };
-
-  // Without one: today's slot (or `once`), read by its id; else the latest by date of every saved day.
-  const [todaysId, setTodaysId] = useState<string | null>(null);
-  useEffect(() => {
-    if (definition === null) return;
-    let live = true;
-    const day = todayIn(definition.schedule.timezone, env.now());
-    const key =
-      definition.schedule.repeat === null ||
-      definition.schedule.repeat.frequency === "after_completion"
-        ? "once"
-        : slotKey(definition.schedule, day);
-    void occurrenceIdOf(taskId, key).then((id) => {
-      if (live) setTodaysId(id);
-    });
-    return () => {
-      live = false;
-    };
-  }, [definition, taskId, env]);
-  const todays = useCachedResources(
-    occurrenceParam === undefined && todaysId !== null ? [todaysId] : [],
-  );
-  const todaysHeld =
-    todaysId !== null &&
-    ((create !== undefined && create.target_resource_ids[2] === todaysId) ||
-      (todays.status === "ready" && belongs(todays.value[todaysId]?.merged)));
-  const position = useCachePosition();
-  const pageSeq =
-    position.status === "ready" ? (position.value?.pageSeq ?? -1) : -2;
-  const [latest, setLatest] = useState<{
-    executionId: string;
-    id: string | null;
-    data: OccurrenceData | null;
-  } | null>(null);
-  const wantLatest =
-    occurrenceParam === undefined &&
-    executionId !== null &&
-    definition !== null &&
-    todaysId !== null &&
-    !todaysHeld &&
-    todays.status !== "loading";
-  // biome-ignore lint/correctness/useExhaustiveDependencies: walked again when a sync page commits
-  useEffect(() => {
-    if (!wantLatest || executionId === null) return;
-    const controller = new AbortController();
-    let best: { id: string; date: string; data: OccurrenceData | null } | null =
-      null;
-    void scanResources(
-      data,
-      { kind: "occurrence", parentId: executionId },
-      (rows) => {
-        for (const row of rows) {
-          const parsed = parseOccurrenceData(row.merged.value);
-          const date = parsed?.slot.date ?? "9999-12-31";
-          if (
-            best === null ||
-            date > best.date ||
-            (date === best.date && row.base.id > best.id)
-          )
-            best = { id: row.base.id, date, data: parsed };
-        }
-        return undefined;
-      },
-      controller.signal,
-    ).then((end) => {
-      if (end !== "complete" || controller.signal.aborted) return;
-      const found = best as {
-        id: string;
-        data: OccurrenceData | null;
-      } | null;
-      setLatest({
-        executionId,
-        id: found?.id ?? null,
-        data: found?.data ?? null,
-      });
-    });
-    return () => controller.abort();
-  }, [wantLatest, executionId, data, pageSeq]);
-  const projectedFirst =
-    create?.target_resource_ids[2] !== undefined && occurrences.length > 0
-      ? (create.target_resource_ids[2] as string)
-      : null;
-
-  let selection: TaskDetailView["selection"];
-  let chosen: string | null;
-  if (occurrenceParam !== undefined) {
-    if (
-      askedRow === undefined ||
-      (executionId === null && executions.status === "loading")
-    ) {
-      selection = "loading";
-      chosen = null;
-    } else if (belongs(askedRow)) {
-      selection = "explicit";
-      chosen = occurrenceParam;
-    } else {
-      selection = "unavailable";
-      chosen = null;
-    }
-  } else if (todaysHeld) {
-    selection = "default";
-    chosen = todaysId;
-  } else if (latest !== null && latest.executionId === executionId) {
-    selection = "default";
-    chosen = latest.id ?? projectedFirst;
-  } else if (definition === null || executionId === null) {
-    // Nothing to walk: a task whose details are not here shows no day.
-    selection = "default";
-    chosen = null;
-  } else {
-    selection = "loading";
-    chosen = null;
-  }
-  const progressId = useProgressId(chosen, env.accountId);
-  const ids = [
-    taskId,
-    ...(executionId ? [executionId] : []),
-    ...(chosen ? [chosen] : []),
-    ...(progressId ? [progressId] : []),
-  ];
-  const outstanding = useAllOutstanding(ids);
-  const othersList = useResourceList({
-    kind: "progress",
-    parentId: chosen ?? "-",
-  });
-
-  const detail: Outstanding = useMemo(() => {
-    if (outstanding.status !== "ready") return all;
-    const drafts = new Map(all.drafts.map((d) => [d.local_id, d]));
-    const attention = new Map(all.attention.map((d) => [d.local_id, d]));
-    for (const entry of Object.values(outstanding.value)) {
-      for (const d of entry.drafts) drafts.set(d.local_id, d);
-      for (const d of entry.attention) attention.set(d.local_id, d);
-    }
-    return { drafts: [...drafts.values()], attention: [...attention.values()] };
-  }, [outstanding, all]);
-
+  // ---- the displayed day's row, from the same read ---------------------------------------------------------------------------------------
   const joint = chosen === null ? null : jointOf(env.identity, chosen);
-  // ---- the displayed day's inputs, as one certified read (R9, revision 3) ------------------------------------------------------------
-  const [attempt, setAttempt] = useState(0);
-  const composition =
-    position.status === "ready" ? (position.value?.composition ?? -1) : -2;
-  const rowRead = useScopedRead<{
-    all: Outstanding;
-    detail: Outstanding;
-    rows: Map<string, CacheRow>;
-  }>(
-    `${env.identity}\u0000${taskId}\u0000${chosen}\u0000${progressId}`,
-    `${composition}|${attempt}`,
-    (signal) =>
-      readCoherently(
-        data,
-        async () => {
-          const queue = await readAllOutstandingByKindNow(data, QUEUED_KINDS);
-          if (!queue.ok) return queue;
-          const named = await readAllOutstandingNow(data, ids);
-          if (!named.ok) return named;
-          const read = await readResourcesNow(data, [
-            taskId,
-            ...(chosen ? [chosen] : []),
-            ...(progressId ? [progressId] : []),
-          ]);
-          if (read === null)
-            return {
-              ok: false,
-              why: data.service() === null ? "closed" : "failed",
-            } as const;
-          const drafts = new Map(
-            queue.value.drafts.map((d) => [d.local_id, d]),
-          );
-          const attention = new Map(
-            queue.value.attention.map((d) => [d.local_id, d]),
-          );
-          for (const entry of Object.values(named.value)) {
-            for (const d of entry.drafts) drafts.set(d.local_id, d);
-            for (const d of entry.attention) attention.set(d.local_id, d);
-          }
-          const rows = new Map<string, CacheRow>();
-          for (const [rowId, row] of read) rows.set(rowId, row.merged);
-          return {
-            ok: true,
-            value: {
-              all: queue.value,
-              detail: {
-                drafts: [...drafts.values()],
-                attention: [...attention.values()],
-              },
-              rows,
-            },
-          } as const;
-        },
-        { signal },
-      ),
-    chosen !== null && progressId !== null,
-  );
-  const inputs = rowRead.complete?.value ?? null;
-  const rowError: TaskDetailView["rowError"] =
-    rowRead.latest === "failed" || rowRead.latest === "unstable"
-      ? rowRead.latest
-      : null;
   const rowSources =
     chosen === null || progressId === null || inputs === null
       ? null
@@ -436,7 +480,7 @@ export function useTaskDetail(
           occurrenceId: chosen,
           progressId,
           occurrence: inputs.rows.get(chosen) ?? null,
-          task: inputs.rows.get(taskId) ?? null,
+          task: inputs.taskBase,
           progress: inputs.rows.get(progressId) ?? null,
           joint: null,
           personal: null,
@@ -463,37 +507,26 @@ export function useTaskDetail(
     if (result.kind === "row") row = result.row;
     else if (result.kind === "unreadable") unreadable = true;
   }
-  const loading =
-    cachedTask.status === "loading" || executions.status === "loading";
-  // Until every page of the outstanding work is read no day is composed: a personal result is never computed from part of it (R4). The
-  // row's own inputs are one certified read (above): until it has completed once, the day is loading, unless it failed.
-  const overlayLoading =
-    byKind.status === "loading" || outstanding.status === "loading";
-  const rowLoading = chosen !== null && inputs === null && rowError === null;
   // The picker lists the page's days, and the selected day when it is on another page.
   const listed =
     chosen !== null && !occurrences.some((o) => o.id === chosen)
-      ? [
-          ...occurrences,
-          {
-            id: chosen,
-            data:
-              parseOccurrenceData(
-                (chosen === occurrenceParam
-                  ? askedRow
-                  : chosen === todaysId
-                    ? todays.status === "ready"
-                      ? todays.value[chosen]?.merged
-                      : null
-                    : null
-                )?.value ?? null,
-              ) ?? (chosen === latest?.id ? latest.data : null),
-          },
-        ]
+      ? [...occurrences, { id: chosen, data: inputs?.chosenData ?? null }]
       : occurrences;
-  const page = occurrenceList.status === "ready" ? occurrenceList.value : null;
+  const pickerError =
+    cursors.length > 1 &&
+    (picker.latest === "failed" || picker.latest === "unstable")
+      ? picker.latest
+      : null;
   return {
-    status: loading ? "loading" : task === null ? "absent" : "ready",
+    status: noDatabase
+      ? "absent"
+      : inputs === null
+        ? readError === null
+          ? "loading"
+          : "error"
+        : task === null
+          ? "absent"
+          : "ready",
     task,
     execution,
     definition,
@@ -502,6 +535,7 @@ export function useTaskDetail(
       paged: cursors.length > 1 || paged,
       more: page?.next !== null && page?.next !== undefined,
       previous: cursors.length > 1,
+      error: pickerError,
       showMore: () => {
         const next = page?.next;
         if (!next) return;
@@ -510,20 +544,17 @@ export function useTaskDetail(
       },
       showPrevious: () =>
         setCursors((c) => (c.length > 1 ? c.slice(0, -1) : c)),
+      retry: () => setPickerAttempt((n) => n + 1),
     },
-    selection:
-      (overlayLoading || rowLoading) && chosen !== null ? "loading" : selection,
-    row: overlayLoading ? null : row,
+    selection: inputs === null ? "loading" : inputs.selection,
+    row,
     unreadable,
-    rowError,
-    retryRow: () => setAttempt((n) => n + 1),
-    synced: taskBase !== null,
-    outstanding: detail,
+    readError,
+    retry: () => setAttempt((n) => n + 1),
+    synced: inputs?.taskBase !== null && inputs?.taskBase !== undefined,
+    outstanding: inputs?.detail ?? EMPTY,
     joint,
-    progressRows:
-      othersList.status === "ready"
-        ? othersList.value.rows.map((r) => r.merged)
-        : [],
+    progressRows: inputs?.others ?? [],
     now: clock.now,
   };
 }

@@ -143,6 +143,8 @@ export interface RowModel {
   /** My stream as cached (patched), or null. */
   progress: ProgressState | null;
   progressId: string;
+  /** The committed version of my stream in the cache (no overlay), or null: what an open journal is fresh against (revision 4). */
+  progressVersion: number | null;
   streamPresent: boolean;
   streamPending: boolean;
   personal: PersonalResult;
@@ -383,6 +385,7 @@ export function composeRow(
       archived: taskRow?.archived ?? false,
       progress,
       progressId,
+      progressVersion: sources.progress?.version ?? null,
       streamPresent,
       streamPending,
       personal,

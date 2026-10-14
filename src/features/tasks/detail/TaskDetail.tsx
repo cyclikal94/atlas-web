@@ -36,8 +36,41 @@ export const DETAIL_COPY = {
   showDays: "Show this task's days",
   moreDays: "More saved days",
   previousDays: "Previous saved days",
+  daysFailed: "Couldn't read this task's saved days.",
   sharingLine: "Who can see this is set in Sharing.",
 } as const;
+
+/** The detail could not be read whole (R9, revision 4): what it says, with Try again. Unknown is never "isn't on this device". */
+function ReadError({
+  error,
+  stale,
+  retry,
+}: {
+  error: "failed" | "unstable";
+  stale: boolean;
+  retry(): void;
+}) {
+  return (
+    <div
+      className="flex flex-col gap-2"
+      {...(stale
+        ? { "data-detail-row-stale": error }
+        : { "data-detail-row-error": error })}
+    >
+      <p
+        className={
+          stale ? "text-[12.5px] text-ink-2" : "text-[13px] text-ink-2"
+        }
+      >
+        {error === "unstable" ? copy.LOCAL_UNSTABLE : copy.LOCAL_FAILED}
+        {stale ? ` ${copy.SHOWING_LAST_READ}` : ""}
+      </p>
+      <span>
+        <Button onClick={retry}>{copy.TRY_AGAIN}</Button>
+      </span>
+    </div>
+  );
+}
 
 /** WF-TASK-01: the task detail for one occurrence (not the timer, prerequisite or streak blocks: WEB-10c). */
 export function TaskDetail({
@@ -72,6 +105,12 @@ export function TaskDetail({
       <p aria-busy="true" className="text-[13px] text-ink-2">
         {DETAIL_COPY.loading}
       </p>
+    );
+  if (view.status === "error" && view.readError !== null)
+    return (
+      <div className="flex flex-col gap-3" data-task-detail="error">
+        <ReadError error={view.readError} stale={false} retry={view.retry} />
+      </div>
     );
   if (view.task === null)
     return (
@@ -139,7 +178,10 @@ export function TaskDetail({
             </span>
           ) : null}
           {row ? (
-            <span className="text-[13px] text-ink-2">
+            <span
+              className="text-[13px] text-ink-2"
+              data-detail-day={row.data.slot.date ?? ""}
+            >
               {row.data.slot.date === null
                 ? DETAIL_COPY.undated
                 : longDayLabel(row.data.slot.date)}
@@ -199,10 +241,14 @@ export function TaskDetail({
           />
         </div>
       </div>
+      {view.readError !== null ? (
+        <ReadError error={view.readError} stale retry={view.retry} />
+      ) : null}
       {view.occurrences.length > 1 ||
       view.days.more ||
       view.days.previous ||
-      view.days.paged ? (
+      view.days.paged ||
+      view.days.error !== null ? (
         <div className="flex flex-col gap-1" data-day-picker="">
           <label htmlFor={dayId} className="text-[12px] font-medium text-ink-2">
             {DETAIL_COPY.day}
@@ -230,6 +276,19 @@ export function TaskDetail({
               </option>
             ))}
           </select>
+          {view.days.error !== null ? (
+            <span
+              className="flex flex-wrap items-center gap-2"
+              data-day-picker-error={view.days.error}
+            >
+              <span className="text-[12.5px] text-ink-2">
+                {DETAIL_COPY.daysFailed}
+              </span>
+              <Button variant="quiet" onClick={view.days.retry}>
+                {copy.TRY_AGAIN}
+              </Button>
+            </span>
+          ) : null}
           {view.days.more || view.days.previous ? (
             <span className="flex flex-wrap gap-2">
               {view.days.previous ? (
@@ -264,38 +323,12 @@ export function TaskDetail({
         </div>
       ) : view.unreadable ? (
         <p className="text-[13px] text-ink-2">{copy.UNREADABLE}</p>
-      ) : row === null && view.rowError !== null ? (
-        // Unknown is not "no day" (R9, revision 3): the day's saved inputs could not be read whole.
-        <div
-          className="flex flex-col gap-2"
-          data-detail-row-error={view.rowError}
-        >
-          <p className="text-[13px] text-ink-2">
-            {view.rowError === "unstable"
-              ? copy.LOCAL_UNSTABLE
-              : copy.LOCAL_FAILED}
-          </p>
-          <span>
-            <Button onClick={view.retryRow}>{copy.TRY_AGAIN}</Button>
-          </span>
-        </div>
       ) : row === null ? (
         <p className="text-[13px] text-ink-2" data-no-occurrence="">
           {DETAIL_COPY.noOccurrence}
         </p>
       ) : (
         <>
-          {view.rowError !== null ? (
-            <p
-              className="text-[12.5px] text-ink-2"
-              data-detail-row-stale={view.rowError}
-            >
-              {view.rowError === "unstable"
-                ? copy.LOCAL_UNSTABLE
-                : copy.LOCAL_FAILED}{" "}
-              {copy.SHOWING_LAST_READ}
-            </p>
-          ) : null}
           {correctionConflict ? (
             <section
               data-correction-conflict=""

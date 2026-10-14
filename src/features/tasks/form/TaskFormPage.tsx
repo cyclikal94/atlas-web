@@ -13,12 +13,14 @@ import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type DraftWithCommand,
   type EnqueueRequest,
+  type Loadable,
   useAllOutstandingByKind,
   useDataEnv,
   useSharingDefaults,
 } from "../../../data";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
+import { DETAIL_COPY } from "../detail/TaskDetail";
 import { useTaskDetail } from "../detail/useTaskDetail";
 import { useTasksEnv } from "../env";
 import {
@@ -144,13 +146,41 @@ function NewTask() {
   return <TaskForm initial={initial} mode={{ kind: "new" }} />;
 }
 
+/**
+ * The task being edited, from the detail's certified read (R9, revision 4): a read that failed or kept changing says so with Try again
+ * (never "not available"), a COMPLETE read that holds no task says it is not on this device, and a later failed refresh keeps the form that
+ * is open (with what was typed), saying it is stale.
+ */
 function EditTask({ taskId }: { taskId: string }) {
   const view = useTaskDetail(taskId, undefined);
+  // The edit's write target (a queued create or revise to edit in place) is read before the form shows, so Save is never offered, or
+  // withheld, on a queue that is still loading; the form keeps its own block when it cannot be read.
+  const outstanding = useAllOutstandingByKind(QUEUED_KINDS);
   const env = useTasksEnv();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (view.status === "loading")
+  const notice =
+    view.readError === null ? null : (
+      <div
+        className="flex flex-col gap-2"
+        data-task-edit-error={view.readError}
+      >
+        <p className="text-[13px] text-ink-2">
+          {view.readError === "unstable"
+            ? copy.LOCAL_UNSTABLE
+            : copy.LOCAL_FAILED}
+          {view.status === "ready" ? ` ${copy.SHOWING_LAST_READ}` : ""}
+        </p>
+        <span>
+          <Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>
+        </span>
+      </div>
+    );
+  if (view.status === "loading" || outstanding.status === "loading")
     return <p className="text-[13px] text-ink-2">{copy.LOADING}</p>;
-  if (view.task === null || view.definition === null || view.execution === null)
+  if (view.status === "error") return notice;
+  if (view.task === null)
+    return <p className="text-[13px] text-ink-2">{DETAIL_COPY.absent}</p>;
+  if (view.definition === null || view.execution === null)
     return <p className="text-[13px] text-ink-2">{copy.NO_DATABASE}</p>;
   const initial = fromDefinition(
     view.task.label,
@@ -158,16 +188,20 @@ function EditTask({ taskId }: { taskId: string }) {
     emptyForm(zone, todayIn(zone, env.now())),
   );
   return (
-    <TaskForm
-      initial={initial}
-      mode={{
-        kind: "edit",
-        taskId,
-        executionId: view.execution.id,
-        policyVersion: view.task.policy_version,
-        synced: view.synced,
-      }}
-    />
+    <>
+      {notice}
+      <TaskForm
+        initial={initial}
+        outstanding={outstanding}
+        mode={{
+          kind: "edit",
+          taskId,
+          executionId: view.execution.id,
+          policyVersion: view.task.policy_version,
+          synced: view.synced,
+        }}
+      />
+    </>
   );
 }
 
@@ -240,16 +274,18 @@ const widened = (
 function TaskForm({
   initial,
   mode,
+  outstanding,
 }: {
   initial: TaskFormState;
   mode: FormMode;
+  /** The queue an edit saves into (edit only). */
+  outstanding?: Loadable<{ drafts: DraftWithCommand[] }>;
 }) {
   const env = useTasksEnv();
   const data = useDataEnv();
   const actions = useTaskActions();
   const defaults = useSharingDefaults();
   const navigate = useNavigate();
-  const outstanding = useAllOutstandingByKind(QUEUED_KINDS);
   const [state, setState] = useState<TaskFormState>(initial);
   const revision = useRef(0);
   // Whether this form is still mounted (revision 2): a save that completes after the person left (another form, another task) never
@@ -283,7 +319,8 @@ function TaskForm({
       ...(errors[name] ? { "aria-invalid": true } : {}),
     };
   };
-  const drafts = outstanding.status === "ready" ? outstanding.value.drafts : [];
+  const drafts =
+    outstanding?.status === "ready" ? outstanding.value.drafts : [];
   const editing = mode.kind === "edit";
   const queuedCreate =
     mode.kind === "edit"
@@ -309,12 +346,12 @@ function TaskForm({
   const queueUnread =
     mode.kind === "edit" &&
     !(
-      outstanding.status === "ready" ||
-      (outstanding.status === "unavailable" && outstanding.reason === "absent")
+      outstanding?.status === "ready" ||
+      (outstanding?.status === "unavailable" && outstanding.reason === "absent")
     );
   const queueFailed =
     queueUnread &&
-    outstanding.status === "unavailable" &&
+    outstanding?.status === "unavailable" &&
     outstanding.reason !== "absent";
   const canSave =
     !queueUnread &&

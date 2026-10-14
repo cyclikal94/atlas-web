@@ -4,7 +4,11 @@ import type {
   ResourceId,
   ResourceKind,
 } from "../model/types";
-import { type ListedResource, readResourceList } from "../plans/outbox";
+import {
+  type ListedResource,
+  type ResourcePage,
+  readResourceList,
+} from "../plans/outbox";
 import {
   type LocalBasis,
   type OutstandingByKindPage,
@@ -70,6 +74,42 @@ function readOnce(
     ...(after === null ? {} : { after }),
     ...(options.window === undefined ? {} : { limit: options.window }),
   });
+}
+
+/**
+ * ONE page of the cached resources of one kind (optionally under one parent), with their overlays, read NOW (not live) in one transaction:
+ * a stage of a certified composition (WEB-10a revision 4: a task's first execution, the day picker's page), where a live page could show
+ * another commit than the composition's other reads. `failed` when the read failed, `closed` when there is no open database or it changed.
+ */
+export async function readResourcePageNow(
+  env: Pick<DataEnv, "service">,
+  options: {
+    kind: ResourceKind;
+    parentId?: ResourceId;
+    after?: ResourceId | null;
+    limit?: number;
+  },
+): Promise<Stage<ResourcePage>> {
+  const service = env.service();
+  if (service === null) return { ok: false, why: "closed" };
+  let page: ResourcePage;
+  try {
+    page = await readOnce(
+      service,
+      {
+        kind: options.kind,
+        ...(options.parentId === undefined
+          ? {}
+          : { parentId: options.parentId }),
+        ...(options.limit === undefined ? {} : { window: options.limit }),
+      },
+      options.after ?? null,
+    );
+  } catch {
+    return unread(env, service);
+  }
+  if (env.service() !== service) return { ok: false, why: "closed" };
+  return { ok: true, value: page };
 }
 
 /**

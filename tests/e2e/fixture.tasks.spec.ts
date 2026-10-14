@@ -2149,3 +2149,337 @@ test.describe("E-T14: another tab commits while Today's local read is between it
       expect(states[states.length - 1]).toBe("2|new");
     });
 });
+
+// ---- WEB-10a revision 4 (R9, R10, R11; design assessment C1, C3, C4: J1, E1, D7) ------------------------------------------------------
+
+/** Commits one delta page through the fixture leader of `writer` (the page that holds it). */
+async function commitDelta(
+  writer: Page,
+  net: SyncStub,
+  revision: number,
+  changes: unknown[],
+): Promise<void> {
+  net.script.push(() => ({
+    status: 200,
+    body: JSON.stringify({
+      phase: "delta",
+      batches: [{ revision, changes }],
+      next_cursor: `cursor-r4-${revision}`,
+      has_more: false,
+    }),
+  }));
+  await writer.evaluate(() => window.__atlasData?.nudgeSync());
+}
+
+test.describe("E-T15: the open full history follows its stream's committed version (A8; R10 of revision 4, J1)", () => {
+  for (const opened of [true, false])
+    test(`opened=${opened}: a correction committed through sync is shown as the journal says (opened) or in the recent entries (control)`, async ({
+      context,
+    }) => {
+      const at = Math.floor(Date.now() / 1000);
+      const entry = (n: number) => ({
+        id: `bbbbbbbb-0000-4000-8000-00000000000${n}`,
+        evidence: { kind: "quantity", amount: String(n) },
+        happened_at: at,
+        recorded_by: ACCOUNT,
+      });
+      const first = entry(1);
+      const correction = entry(2);
+      const task = buildTask({
+        n: 40,
+        title: "History",
+        goal: { kind: "numeric", minimum: "10", maximum: null, unit: "cups" },
+      });
+      const progress = (
+        task.upserts as Array<{ resource: Record<string, unknown> }>
+      ).find((u) => u.resource.kind === "progress")?.resource as Record<
+        string,
+        unknown
+      >;
+      Object.assign(progress.value as object, {
+        recent_entries: [first],
+        entry_count: 1,
+      });
+      let journal: unknown[] = [
+        { ...first, sequence: 1, logical_order: 1, replaces: null },
+      ];
+      const asked: string[] = [];
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await context.route(
+        `**/api/experimental/v1/progress/${task.progressId}/entries?*`,
+        (route) => {
+          asked.push(
+            new URL(route.request().url()).searchParams.get("after") ?? "",
+          );
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ entries: journal, next_after: null }),
+          });
+        },
+      );
+      await seedSettled(context);
+      const page = await bootAt(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      );
+      await cacheTasks(page, net, [task]);
+      const shown = (id: string) => page.locator(`[data-entry="${id}"]`);
+      await expect(shown(first.id)).toBeVisible();
+      if (opened) {
+        await page
+          .getByRole("button", { name: "Full history", exact: true })
+          .click();
+        await expect(
+          page.getByRole("heading", { name: "Full history", exact: true }),
+        ).toBeVisible();
+        expect(asked).toEqual(["0"]);
+      }
+      journal = [
+        { ...first, sequence: 1, logical_order: 1, replaces: null },
+        { ...correction, sequence: 2, logical_order: 1, replaces: first.id },
+      ];
+      await commitDelta(page, net, 2, [
+        {
+          kind: "upsert",
+          resource: {
+            ...progress,
+            version: 2,
+            value: {
+              ...(progress.value as object),
+              recent_entries: [first, correction],
+              entry_count: 2,
+            },
+          },
+        },
+      ]);
+      await expect(shown(correction.id)).toBeVisible({ timeout: 10_000 });
+      if (opened) {
+        // From the journal read again after the commit: the correction says what it is and the first entry is marked corrected.
+        await expect(shown(correction.id)).toContainText("Correction");
+        await expect(shown(first.id)).toContainText("Corrected");
+        expect(asked).toEqual(["0", "0"]);
+      } else expect(asked).toEqual([]);
+    });
+});
+
+test.describe("E-T16: an enrolment change pressed again while it is pending sends nothing more (A15; R11 of revision 4, E1)", () => {
+  test("Join twice (a double press, then once more): one request with one key, the control disabled with the reason; the answer settles it", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 41,
+      title: "Shared",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    let enrolment = { version: 1, active: false, aggregate_consent: true };
+    await context.route(
+      `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...enrolment,
+            policy: { grants: [], exclude_accounts: [] },
+          }),
+        }),
+    );
+    const calls: Array<{ key: string | null; body: string | null }> = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await context.route(
+      "**/api/experimental/v1/task-access-commands",
+      async (route) => {
+        calls.push({
+          key: route.request().headers()["idempotency-key"] ?? null,
+          body: route.request().postData(),
+        });
+        await held;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ revision: 2 }),
+        });
+      },
+    );
+    await seedSettled(context);
+    const page = await bootAt(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+    );
+    await cacheTasks(page, net, [task]);
+    const settings = page.locator("[data-enrolment]");
+    const join = settings.getByRole("button", {
+      name: "Join this task",
+      exact: true,
+    });
+    try {
+      await expect(join).toBeEnabled();
+      await join.dblclick();
+      await expect.poll(() => calls.length).toBe(1);
+      await expect(join).toBeDisabled();
+      await expect(settings).toContainText("Sending your change…");
+      await expect(
+        settings.getByRole("checkbox", {
+          name: "Count me in the shared total",
+        }),
+      ).toBeDisabled();
+      // Once more, through the page itself: a disabled control dispatches nothing, and the owner refuses a second attempt anyway.
+      await page.evaluate(() =>
+        document
+          .querySelector<HTMLButtonElement>("[data-enrolment] button")
+          ?.click(),
+      );
+      await page.waitForTimeout(0);
+      expect(calls).toHaveLength(1);
+    } finally {
+      enrolment = { version: 2, active: true, aggregate_consent: true };
+      release();
+    }
+    await expect(
+      settings.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]?.body ?? "{}").command).toMatchObject({
+      kind: "enrol",
+      expected_version: 1,
+      active: true,
+    });
+  });
+});
+
+test.describe("E-T17: another tab commits while the task detail's read is between its stages (A1, A18; R9 of revision 4, D7)", () => {
+  for (const between of [true, false])
+    test(`between=${between}: tab A never shows the new title with the old day (or the reverse); it ends on what B committed`, async ({
+      context,
+    }) => {
+      const a = buildTask({ n: 42, title: "Cups" });
+      const b = buildTask({ n: 43, title: "Plants" });
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      const writer = await bootAt(context, "/tasks");
+      await cacheTasks(writer, net, [a]);
+      const page = await context.newPage();
+      await page.addInitScript(holdRelatedReadInit);
+      await page.goto(
+        `/__session?route=${encodeURIComponent(`/tasks/${a.taskId}?occurrence=${a.occurrenceId}`)}`,
+      );
+      await page.waitForFunction(
+        () => window.__atlasFixture?.session?.booted !== undefined,
+      );
+      await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      const oldDay = String((a.data.slot as { date: string }).date);
+      await expect(page.locator("[data-detail-day]")).toHaveAttribute(
+        "data-detail-day",
+        oldDay,
+      );
+      await untilTreeSettled(page);
+      await untilTreeSettled(writer);
+      await startLeader(writer);
+      await waitForState(writer, "idle");
+      await page.evaluate(() => {
+        const w = window as unknown as { __states: string[] };
+        const note = () => {
+          const day = document
+            .querySelector<HTMLElement>("[data-detail-day]")
+            ?.getAttribute("data-detail-day");
+          const title = document.querySelector("h1")?.textContent ?? "";
+          const next =
+            day === undefined || day === null
+              ? "none"
+              : `${day}|${title.includes("Renamed") ? "new" : "old"}`;
+          if (w.__states[w.__states.length - 1] !== next) w.__states.push(next);
+        };
+        note();
+        new MutationObserver(note).observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          characterData: true,
+        });
+      });
+      const newDay = "2001-02-03";
+      const renamed = (
+        a.upserts as Array<{ resource: Record<string, unknown> }>
+      )
+        .filter(
+          (u) => u.resource.kind === "task" || u.resource.kind === "occurrence",
+        )
+        .map((u) => ({
+          kind: "upsert",
+          resource: {
+            ...u.resource,
+            version: 2,
+            ...(u.resource.kind === "task" ? { label: "Renamed" } : {}),
+            ...(u.resource.kind === "occurrence"
+              ? {
+                  value: {
+                    ...(u.resource.value as Record<string, unknown>),
+                    slot: {
+                      ...(u.resource.value as { slot: object }).slot,
+                      date: newDay,
+                    },
+                  },
+                }
+              : {}),
+          },
+        }));
+      await page.evaluate(() => {
+        (window as unknown as { __holdRelated: boolean }).__holdRelated = true;
+      });
+      // An unrelated commit makes tab A read its detail again; one of its reads by id is held.
+      await commitDelta(writer, net, 2, b.upserts);
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __heldRelated: unknown[] }).__heldRelated
+                .length,
+          ),
+        )
+        .toBe(1);
+      if (between) {
+        await commitDelta(writer, net, 3, renamed);
+        await expect
+          .poll(() =>
+            writer.evaluate(
+              async (acct) =>
+                (
+                  (await window.__atlasData?.syncState(acct)) as {
+                    applied_revision?: number;
+                  } | null
+                )?.applied_revision,
+              ACCOUNT,
+            ),
+          )
+          .toBe(3);
+      }
+      await page.evaluate(() => {
+        const w = window as unknown as { __heldRelated: Array<() => void> };
+        for (const release of w.__heldRelated.splice(0)) release();
+      });
+      if (!between) await commitDelta(writer, net, 3, renamed);
+      await expect(page.locator("[data-detail-day]")).toHaveAttribute(
+        "data-detail-day",
+        newDay,
+        { timeout: 10_000 },
+      );
+      await expect(page.locator("h1")).toContainText("Renamed");
+      const states = await page.evaluate(
+        () => (window as unknown as { __states: string[] }).__states,
+      );
+      expect(states).not.toContain(`${oldDay}|new`);
+      expect(states).not.toContain(`${newDay}|old`);
+      expect(states[states.length - 1]).toBe(`${newDay}|new`);
+    });
+});

@@ -1,9 +1,18 @@
-import { act, cleanup, fireEvent } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
 import type { CacheRow } from "../../../src/data";
 import { StoreFailure } from "../../../src/data/store/port";
 import type { TasksResult } from "../../../src/features/tasks/api";
+import * as copy from "../../../src/features/tasks/copy";
 import { forgetAllCorrections } from "../../../src/features/tasks/detail/CorrectionDialog";
+import { DETAIL_COPY } from "../../../src/features/tasks/detail/TaskDetail";
+import { FORM_COPY } from "../../../src/features/tasks/form/TaskFormPage";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import { createTask, record } from "../../../src/features/tasks/model/commands";
 import type {
@@ -1028,6 +1037,10 @@ describe("Q17: the detail, the task list and the task form never take a failed r
       },
     );
 
+  // LABELLED ADAPTATION (revision 4, R9 / design assessment C1): the edit's entry now reads the task through the detail's certified read,
+  // which reads the queue (a queued create is the task); with the queue unreadable AT ENTRY that read fails and the page says so with Try
+  // again, so there is no form and no Save at all. Original intent kept: nothing can be saved and the page says why (the same text). The
+  // form's own block (the queue becoming unreadable while the form is open) is the next case, so MU-2117 keeps a witness.
   test(
     "form: editing while the queue cannot be read saves nothing and says why",
     SLOW,
@@ -1049,8 +1062,69 @@ describe("Q17: the detail, the task list and the task form never take a failed r
           params: { taskId: task.taskId },
         });
       });
+      await t.until(
+        () => document.querySelector("[data-task-edit-error]") !== null,
+      );
       await t.settle();
       remove();
+      const save = [...document.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("Save"),
+      );
+      expect(save === undefined || save.disabled).toBe(true);
+      expect(document.body.textContent).toContain(
+        "Atlas couldn't read the tasks saved on this device.",
+      );
+      expect(
+        within(
+          document.querySelector("[data-task-edit-error]") as HTMLElement,
+        ).queryByRole("button", { name: copy.TRY_AGAIN }),
+      ).not.toBeNull();
+      expect(document.body.textContent).not.toContain(DETAIL_COPY.absent);
+    },
+  );
+
+  test(
+    "form: the queue becomes unreadable while the form is open: Save is withheld and says why; the typed name stays",
+    SLOW,
+    async () => {
+      const task = await savedTask();
+      const t = await mountTasks({
+        path: "/today",
+        rows: task.rows,
+        env: { online: false },
+      });
+      await t.commitSync([]);
+      await act(async () => {
+        await t.router.navigate({
+          to: "/tasks/$taskId/edit",
+          params: { taskId: task.taskId },
+        });
+      });
+      await t.until(
+        () => document.querySelector('[data-task-form="edit"]') !== null,
+      );
+      const name = () =>
+        screen.getByLabelText(FORM_COPY.name) as HTMLInputElement;
+      fireEvent.change(name(), { target: { value: "Typed, not saved" } });
+      const remove = t.world.idb.inject({
+        match: (tx) => tx.label === "data.readOutstandingByKind",
+        mode: "error",
+      });
+      await t.commitSync([
+        {
+          ...(task.rows[0] as CacheRow),
+          label: "Synced meanwhile",
+          version: 2,
+        },
+      ]);
+      await t.until(
+        () => document.querySelector("[data-task-edit-error]") !== null,
+      );
+      await t.settle();
+      remove();
+      // The form stays (a stale read keeps what is open), with what was typed; its Save is withheld because its write target is unknown.
+      expect(document.querySelector('[data-task-form="edit"]')).not.toBeNull();
+      expect(name().value).toBe("Typed, not saved");
       const save = [...document.querySelectorAll("button")].find((b) =>
         b.textContent?.includes("Save"),
       );
