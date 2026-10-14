@@ -4,7 +4,9 @@ import {
   fieldOf,
   internalOf,
   isUnsupported,
+  membersOf,
   OPAQUE,
+  ownerOf,
   type Shape,
   sameShape,
 } from "./controls";
@@ -688,48 +690,90 @@ export function adopt(
 
 const INPUT_EVENTS = ["input", "change", "reset"] as const;
 
+/** The attributes that change a field's shape (an option's or member's value, a type, a name) or which form a control belongs to. */
+const SHAPING = [
+  "name",
+  "type",
+  "value",
+  "multiple",
+  "min",
+  "max",
+  "step",
+  "form",
+  "id",
+];
+/** What a structural change can concern: a control, an option, a form (or something holding one). */
+const CONCERNING = "input,select,textarea,option,form";
+
 /**
  * Follows the fields of `element` while a mount shows them: every input/reset event is an edit of the field it names (every field for a
  * reset, or an event that names none) and is read at once, in the capture phase, before any handler of the page can remove the field; a
  * change event is an edit only when the field shows another value than at its last edit event (revision 5: otherwise it only commits that
  * edit); a reset is read again after the browser has reset the form (its event comes first: revision 10, what each field shows then is
  * the reset's edit); a field added or removed is noticed at once. Returns the stop.
+ *
+ * THE WHOLE MEMBERSHIP, NOT THE SUBTREE (revision 11; review of 14 October 2026, R18; design assessment of 14 October 2026, C1-C2, I1-I3).
+ * Revision 10 listened on the form and observed its subtree, yet read every member `form.elements` names, a control outside the form that
+ * belongs to it by its `form` attribute included: what the person typed into such a control never reached the ledger, so removing it left
+ * the form clean (an update reloaded without it), and an edit away and back left an older submission's ticket looking current (its copy was
+ * discarded). Now events are taken in the capture phase at the ROOT the form is in (the document; also the form itself, should it not be in
+ * one: each event once), before any target or application handler, and each is an edit of this form only when it is: a control is this
+ * form's when the form owns it (`ownerOf`), wherever it is, and its fields are those whose members (`membersOf`, by name or id) include it;
+ * a control another form owns is never this form's input, even inside it; a reset is this form's own. Structural and association changes
+ * are observed at the root too (only records that can concern a control or a form are followed). The observer is never relied on alone:
+ * every read reconciles first (`sync`).
  */
 export function watch(
   fields: FieldState,
   element: HTMLFormElement,
 ): () => void {
   let stopped = false;
+  /** An event reaches both the root and the form: taken once. */
+  const taken = new WeakSet<Event>();
   const onInput = (event: Event): void => {
+    if (stopped || taken.has(event)) return;
+    taken.add(event);
+    bind();
     const target = event.target;
-    const control =
-      event.type !== "reset" &&
-      (target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement) &&
-      target.name !== ""
-        ? target
-        : null;
-    // Only an admitted, non-sensitive field's state is ever read (any other field's event is an edit, as before). Revision 8 (R17): the
-    // FIELD's whole state (a checkbox's checked state, every member of a group), never the target's `.value`.
-    const field =
-      control !== null && admitted(fields).has(control.name)
-        ? fieldOf(element, control.name)
-        : null;
-    if (control === null) {
+    const control = event.type === "reset" ? null : ownerOf(target);
+    if (event.type === "reset" ? target !== element : control !== element) {
+      // Not this form's control: an edit of this form only when it is nothing a form owns, inside the form (as before revision 11).
+      if (
+        control !== null ||
+        !(target instanceof Node && element.contains(target))
+      )
+        return;
+    }
+    // The admitted fields the target is a member of. Only an admitted, non-sensitive field's state is ever read (any other field's event is
+    // an edit, as before). Revision 8 (R17): the FIELD's whole state (a checkbox's checked state, every member of a group).
+    const names =
+      control === element
+        ? fields.allow
+            .map((spec) => spec.name)
+            .filter((name) =>
+              membersOf(element, name).includes(target as Element),
+            )
+        : [];
+    const named = control === element ? (target as HTMLInputElement).name : "";
+    if (names.length === 0 && named === "") {
       fields.evented.clear();
       noteInput(fields);
-    } else if (field === null || field === "sensitive")
-      noteInput(fields, [control.name]);
+    } else if (names.length === 0) noteInput(fields, [named]);
     else {
-      const state = field.read();
-      if (
-        event.type !== "change" ||
-        fields.evented.get(control.name) !== state
-      ) {
-        fields.evented.set(control.name, state);
-        noteInput(fields, [control.name]);
+      const edits: string[] = [];
+      for (const name of names) {
+        const field = fieldOf(element, name);
+        if (field === null || field === "sensitive") {
+          edits.push(name);
+          continue;
+        }
+        const state = field.read();
+        if (event.type !== "change" || fields.evented.get(name) !== state) {
+          fields.evented.set(name, state);
+          edits.push(name);
+        }
       }
+      if (edits.length > 0) noteInput(fields, edits);
     }
     sync(fields);
     if (event.type === "reset") {
@@ -742,34 +786,55 @@ export function watch(
       }, 0);
     }
   };
-  for (const type of INPUT_EVENTS)
-    element.addEventListener(type, onInput, true);
+  const concerns = (node: Node): boolean =>
+    node === element ||
+    element.contains(node) ||
+    (node instanceof Element &&
+      (node.matches(CONCERNING) || node.querySelector(CONCERNING) !== null));
   const observer =
     typeof MutationObserver === "undefined"
       ? null
-      : new MutationObserver(() => {
-          if (!stopped) sync(fields);
+      : new MutationObserver((records) => {
+          if (stopped) return;
+          bind();
+          if (
+            records.some(
+              (record) =>
+                concerns(record.target) ||
+                [...record.addedNodes, ...record.removedNodes].some(concerns),
+            )
+          )
+            sync(fields);
         });
-  // Revision 9 (R17): an attribute that changes a field's shape (an option's or member's value, a type, a name) is noticed at once too.
-  // Never relied on alone: every read reconciles first (`sync`), whatever the observer has delivered.
-  observer?.observe(element, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: [
-      "name",
-      "type",
-      "value",
-      "multiple",
-      "min",
-      "max",
-      "step",
-    ],
-  });
+  let root: Node | null = null;
+  /** Listens and observes at the root the form is in now (the form itself: listened to and observed whatever its root). */
+  const bind = (): void => {
+    const now = element.getRootNode();
+    if (now === root) return;
+    if (root !== null && root !== element)
+      for (const type of INPUT_EVENTS)
+        root.removeEventListener(type, onInput, true);
+    root = now;
+    if (root !== element)
+      for (const type of INPUT_EVENTS)
+        root.addEventListener(type, onInput, true);
+    observer?.disconnect();
+    observer?.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: SHAPING,
+    });
+  };
+  for (const type of INPUT_EVENTS)
+    element.addEventListener(type, onInput, true);
+  bind();
   return () => {
     stopped = true;
     observer?.disconnect();
-    for (const type of INPUT_EVENTS)
+    for (const type of INPUT_EVENTS) {
       element.removeEventListener(type, onInput, true);
+      root?.removeEventListener(type, onInput, true);
+    }
   };
 }

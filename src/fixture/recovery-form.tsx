@@ -48,6 +48,9 @@ import {
  * form also shows and admits a number field ("Count"), so a spec can carry an unfinished number entry into a real update; with
  * `atlas-fixture-admit` (a JSON array of field names) set when the form mounts, only those fields are admitted AND shown, as a feature form
  * whose conditional fields start hidden would (`__atlasFormProps` shows the others again).
+ * TEST INJECTION (revision 11, R18): with `atlas-fixture-external` set to "1" in the tab's session storage when the form mounts, the form
+ * also admits a text field ("Place") shown OUTSIDE the form element and associated with it by its `form` attribute, as a feature form whose
+ * layout puts a field beside the form would.
  */
 const HOLD_KEY = "atlas-fixture-hold-form";
 const CHOICES_KEY = "atlas-fixture-choices";
@@ -55,6 +58,8 @@ const FAIL_READ_KEY = "atlas-fixture-fail-handoff-read";
 const WITHOUT_KEY = "atlas-fixture-without";
 const NUMBER_KEY = "atlas-fixture-number";
 const ADMIT_KEY = "atlas-fixture-admit";
+const EXTERNAL_KEY = "atlas-fixture-external";
+const FORM_ID = "fixture-note-form";
 
 /** The real port, with its first hand-off read refused (TEST INJECTION, above); one wrapper per port, so a pinned port stays the same. */
 const injected = new WeakMap<FormRecoveryPort, FormRecoveryPort>();
@@ -122,6 +127,7 @@ export function FixtureRecoveryForm() {
         ? ["pinned", "tags", "priority"]
         : []),
       ...(sessionStorage.getItem(NUMBER_KEY) === "1" ? ["count"] : []),
+      ...(sessionStorage.getItem(EXTERNAL_KEY) === "1" ? ["place"] : []),
     ];
     const admit: unknown = JSON.parse(
       sessionStorage.getItem(ADMIT_KEY) ?? "null",
@@ -246,6 +252,7 @@ function FixtureRecoveryFormMount({
       ) : null}
       <form
         ref={form}
+        id={FORM_ID}
         aria-label="Fixture note"
         onSubmit={(event) => {
           event.preventDefault();
@@ -324,6 +331,12 @@ function FixtureRecoveryFormMount({
           <Button type="submit">Save note</Button>
         </div>
       </form>
+      {shown.includes("place") ? (
+        <label className="flex flex-col gap-1">
+          Place
+          <input name="place" form={FORM_ID} defaultValue="" />
+        </label>
+      ) : null}
     </section>
   );
 }

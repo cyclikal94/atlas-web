@@ -464,19 +464,33 @@ const inputType = (element: Element): string | null =>
   element instanceof HTMLInputElement ? element.type.toLowerCase() : null;
 
 /**
- * The admitted field `name` of `form`: what `form.elements.namedItem(name)` names (one control, or every control of that name), as one
- * field. Null: nothing of that name, or something that is not a control (a fieldset, a button, an output: nothing a person types into, as
- * before). `sensitive`: one of its members is sensitive, so nothing of it is read.
+ * THE MEMBERS OF A FIELD (WEB-14a revision 11; review of 14 October 2026, R18; design assessment of 14 October 2026, C1, I1). Every element
+ * `form.elements.namedItem(name)` names, by name or by id, WHEREVER it is in the page: a control outside the form that belongs to it by its
+ * `form` attribute is a member like one inside it (and one inside it that belongs to another form is not). Revision 10 read such a control
+ * (`fieldOf`) but followed its edits and held it still only inside the form's subtree, so its input, and every later edit of it, went
+ * unseen. Reads (`fieldOf`), edit events (`fields.watch`) and holds (`session.holdElement`) now take a field's members from here alone.
+ */
+export function membersOf(form: HTMLFormElement, name: string): Element[] {
+  const item = form.elements.namedItem(name);
+  if (item === null) return [];
+  return item instanceof Element
+    ? [item]
+    : Array.from(item as ArrayLike<Element>).filter(
+        (member): member is Element => member instanceof Element,
+      );
+}
+
+/** Revision 11 (R18): the form a control of the page belongs to (its form owner), or null when it is no control or belongs to none. */
+export const ownerOf = (target: EventTarget | null): HTMLFormElement | null =>
+  isControl(target) ? target.form : null;
+
+/**
+ * The admitted field `name` of `form`: what `form.elements.namedItem(name)` names (one control, or every control of that name: its members,
+ * `membersOf`), as one field. Null: nothing of that name, or something that is not a control (a fieldset, a button, an output: nothing a
+ * person types into, as before). `sensitive`: one of its members is sensitive, so nothing of it is read.
  */
 export function fieldOf(form: HTMLFormElement, name: string): FieldLookup {
-  const item = form.elements.namedItem(name);
-  if (item === null) return null;
-  const members: Element[] =
-    item instanceof Element
-      ? [item]
-      : Array.from(item as ArrayLike<Element>).filter(
-          (member): member is Element => member instanceof Element,
-        );
+  const members = membersOf(form, name);
   if (members.length === 0) return null;
   if (members.some((member) => isSensitiveField(member))) return "sensitive";
   const [first] = members as [Element, ...Element[]];

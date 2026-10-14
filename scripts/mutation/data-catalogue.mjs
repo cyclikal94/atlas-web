@@ -16720,10 +16720,16 @@ export const UNIT = [
     expect: /changed away and back to the sent text after the send/,
     // Re-anchored in revision 4 (the field state's watcher) and revision 5 (the watcher's three edit branches); the defect is unchanged.
     // Re-anchored in revision 8 (R17: the watcher reads the field's whole state); the defect is unchanged.
+    // Re-anchored in revision 11 (R18: the watcher maps an event to the admitted fields whose members include its target, and stamps them
+    // once): no branch stamps the input revision any more; the defect is unchanged.
     patch: (t) =>
       sub(
-        t,
-        '    if (control === null) {\n      fields.evented.clear();\n      noteInput(fields);\n    } else if (field === null || field === "sensitive")\n      noteInput(fields, [control.name]);\n    else {\n      const state = field.read();\n      if (\n        event.type !== "change" ||\n        fields.evented.get(control.name) !== state\n      ) {\n        fields.evented.set(control.name, state);\n        noteInput(fields, [control.name]);\n      }\n    }\n',
+        sub(
+          t,
+          "      fields.evented.clear();\n      noteInput(fields);\n    } else if (names.length === 0) noteInput(fields, [named]);\n",
+          "      fields.evented.clear();\n    } else if (names.length === 0) {\n    }\n",
+        ),
+        "      if (edits.length > 0) noteInput(fields, edits);\n",
         "",
       ),
   },
@@ -18408,12 +18414,13 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /focus leaves the field AFTER the submission/,
-    // Re-anchored in revision 8 (R17: the change rule compares the field's whole state); the defect is unchanged.
+    // Re-anchored in revision 8 (R17: the change rule compares the field's whole state) and revision 11 (R18: per admitted field the target
+    // is a member of); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '        event.type !== "change" ||\n        fields.evented.get(control.name) !== state\n',
-        "        true\n",
+        '        if (event.type !== "change" || fields.evented.get(name) !== state) {',
+        "        if (true as boolean) {",
       ),
   },
   {
@@ -18424,22 +18431,36 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /input events always count, even with the same text/,
-    patch: (t) => sub(t, '      event.type !== "change" ||\n', ""),
+    // Re-anchored in revision 11 (R18: per admitted field the target is a member of); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '        if (event.type !== "change" || fields.evented.get(name) !== state) {',
+        "        if (fields.evented.get(name) !== state) {",
+      ),
   },
   {
     id: "MU-1835",
     title:
       "WEB-14a revision 5 (privacy): the change rule keeps the value of a sensitive or not admitted field",
     file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    tests: [
+      "tests/lib/recoverable-form-provenance.test.tsx",
+      "tests/lib/recoverable-form-membership.test.tsx",
+    ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a sensitive or not admitted field's value is never kept/,
-    // Re-anchored in revision 8 (R17: a sensitive or not admitted field has no state access); the defect is unchanged.
+    // Revision 11 re-expression (R18): a not admitted field is never looked up any more (an event maps only to the ADMITTED fields whose
+    // members include its target), so the old not-admitted branch is gone and its original case cannot reach the change rule; the remaining
+    // branch, an admitted field with a sensitive member, is the membership suite's case. The original case is kept in the list.
+    expect:
+      /a sensitive or not admitted field's value is never kept|its value is never read nor kept/,
+    // Re-anchored in revision 8 (R17: a sensitive or not admitted field has no state access) and revision 11 (R18: per admitted field the
+    // target is a member of; a not admitted field is never looked up); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        '    } else if (field === null || field === "sensitive")\n      noteInput(fields, [control.name]);\n    else {\n      const state = field.read();',
-        '    } else if (false)\n      noteInput(fields, [control.name]);\n    else {\n      const state =\n        field === null || field === "sensitive" ? control.value : field.read();',
+        '        if (field === null || field === "sensitive") {\n          edits.push(name);\n          continue;\n        }\n        const state = field.read();',
+        '        const state =\n          field === null || field === "sensitive"\n            ? (target as HTMLInputElement).value\n            : field.read();',
       ),
   },
   {
@@ -20067,6 +20088,181 @@ export const UNIT = [
       /in an initially empty number field|already there when the form first reads it|a script sets 7 without an event/,
     patch: (t) =>
       sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
+  },
+  {
+    id: "MU-1943",
+    title:
+      "WEB-14a revision 11 (R18, C2/I1): edits are listened to on the form only (an associated control outside it goes unseen)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-membership.test.tsx",
+      "tests/pwa/coordinator-membership.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT \(sibling\): typed UNFINISHED|REQUIREMENT \(sibling\): FIRST saved|REQUIREMENT \(activation\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (root !== element)\n      for (const type of INPUT_EVENTS)\n        root.addEventListener(type, onInput, true);",
+        "    if (root !== element && (false as boolean))\n      for (const type of INPUT_EVENTS)\n        root.addEventListener(type, onInput, true);",
+      ),
+  },
+  {
+    id: "MU-1944",
+    title:
+      "WEB-14a revision 11 (R18, C1): an event is mapped to a field by its target's name only (a member found by its id goes unseen)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    // A name-only mapping still stamps an unnamed member's event as an edit of every field and reads the field, so retention alone cannot
+    // tell; the commit rule can (a change only committing what the member reported is then a new edit).
+    expect: /a member found by its id: the focus change committing/,
+    patch: (t) =>
+      sub(
+        t,
+        "              membersOf(element, name).includes(target as Element),",
+        "              name === (target as HTMLInputElement).name,",
+      ),
+  },
+  {
+    id: "MU-1945",
+    title:
+      "WEB-14a revision 11 (R18, C1): a control inside the form that belongs to another form is taken for this form's input",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /belongs to ANOTHER form is not this form's input/,
+    patch: (t) =>
+      sub(
+        t,
+        "        control !== null ||\n        !(target instanceof Node && element.contains(target))",
+        "        !(target instanceof Node && element.contains(target))",
+      ),
+  },
+  {
+    id: "MU-1946",
+    title:
+      "WEB-14a revision 11 (R18, C2/I2): another form's reset is taken for this form's edit",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another form's reset is not this form's edit/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (event.type === "reset" ? target !== element : control !== element) {',
+        '    if (event.type === "reset" ? (false as boolean) : control !== element) {',
+      ),
+  },
+  {
+    id: "MU-1947",
+    title:
+      "WEB-14a revision 11 (R18, C2/I5): an event reaching both the root and the form is taken twice (duplicate edit stamps)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /one input event moves the input revision by exactly one/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (stopped || taken.has(event)) return;",
+        "    if (stopped) return;",
+      ),
+  },
+  {
+    id: "MU-1948",
+    title:
+      "WEB-14a revision 11 (R18, C2): structural changes are observed in the form's subtree only (an associated member shown again is not restored)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /sibling member removed, then a new untouched one shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "    observer?.observe(root, {\n      childList: true,",
+        "    observer?.observe(element, {\n      childList: true,",
+      ),
+  },
+  {
+    id: "MU-1949",
+    title:
+      "WEB-14a revision 11 (R18, C3/I6): a freeze holds the form's subtree only (an associated control outside it stays usable)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-membership.test.tsx",
+      "tests/pwa/coordinator-membership.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the associated member is held \(inert\) with the form|is held with the form until the act ends|the provisional mount \(no port yet\) holds/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!form.contains(member) && !releases.has(member))",
+        "      if (!form.contains(member) && !releases.has(member) && (false as boolean))",
+      ),
+  },
+  {
+    id: "MU-1950",
+    title:
+      "WEB-14a revision 11 (R18, C3/I6): a hold is certified without checking it still holds every member",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a render that takes a member's inert away while held/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return [...releases.keys()].every((element) =>\n      element.hasAttribute("inert"),\n    );',
+        "    return true;",
+      ),
+  },
+  {
+    id: "MU-1951",
+    title:
+      "WEB-14a revision 11 (R18, C3/I7): the registry takes a hold for held without asking it (in the reload's own step)",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: [
+      "tests/lib/recoverable-form-membership.test.tsx",
+      "tests/pwa/coordinator-membership.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a render that takes a member's inert away while held|is held with the form until the act ends|is held before the registry certifies/,
+    patch: (t) =>
+      sub(t, "            holds &&= release?.holds?.() !== false;\n", ""),
+  },
+  {
+    id: "MU-1952",
+    title:
+      "WEB-14a revision 11 (R18, C3/I7): a bound session's freeze says it holds the form whatever its hold says",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a render that takes a member's inert away while held/,
+    patch: (t) =>
+      sub(
+        t,
+        "          (elementHolds.get(session)?.holds() ?? false)),",
+        "          (elementHolds.get(session) !== undefined)),",
+      ),
+  },
+  {
+    id: "MU-1953",
+    title:
+      "WEB-14a revision 11 (review-webkit-inert-text-delivery): a held field keeps its focus (WebKit, and Firefox for a field made inert itself, deliver late keys)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a focused member loses focus as the hold starts/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (focused instanceof HTMLElement && element.contains(focused))\n    focused.blur();",
+        "  if (focused instanceof HTMLElement && element.contains(focused) && (false as boolean))\n    focused.blur();",
+      ),
   },
 ];
 

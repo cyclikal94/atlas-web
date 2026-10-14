@@ -2930,3 +2930,129 @@ test.describe("revision 10, R17 and R11: what the form cannot account for is nev
       await expect(section(page)).toHaveAttribute("data-submitted", "0");
     });
 });
+
+// ---- revision 11 ------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 11 (review of 14 October 2026, R18 `recovery-form-associated-control-boundary`; design assessment of 14 October 2026, C5 step 5,
+ * Q1/Q10/Q11): the actual worker update (A to B) with an admitted field shown OUTSIDE the form element and associated with it by its `form`
+ * attribute ("Place", fixture `atlas-fixture-external`, TEST INJECTION in `recovery-form.tsx`; native preconditions asserted: its form owner
+ * and `namedItem` membership, outside the form). Typed and left, it is carried to B (control). Typed and then removed from the page directly
+ * (the review's conditional removal: no render of the form, no read of it in between), "Save and reload" fails and nothing reloads; the
+ * form mounted again shows it untouched, and "Retry save" carries it to B, or "Discard and reload anyway" drops it. A second tab holding it
+ * is never reloaded by the first tab's update and keeps it as an obligation. FIXTURE evidence (generation servers, production timers and
+ * headers), not installed-PWA or device evidence.
+ */
+test.describe("revision 11, R18: a field associated from outside the form is the form's across the actual worker update (A to B)", () => {
+  const place = (page: Page) => page.getByRole("textbox", { name: "Place" });
+  const section = (page: Page) => page.locator("[data-fixture-form]");
+  const withPlace = async (page: Page) => {
+    await page.evaluate(() =>
+      sessionStorage.setItem("atlas-fixture-external", "1"),
+    );
+    await reloadQuietly(page);
+    await formReady(page);
+  };
+  const association = (page: Page) =>
+    place(page).evaluate((element) => {
+      const input = element as HTMLInputElement;
+      const form = input.form;
+      return {
+        owner: form?.getAttribute("aria-label") ?? null,
+        member: form?.elements.namedItem("place") === input,
+        descendant: form?.contains(input) ?? null,
+        value: input.value,
+      };
+    });
+  const removePlace = (page: Page) =>
+    place(page).evaluate((element) => element.remove());
+  const remount = (page: Page) =>
+    page.evaluate(() =>
+      (window as unknown as FixtureWindow).__atlasRemountForm?.(),
+    );
+
+  test("control: Place typed and left: 'Save and reload' carries it to B, restored", async ({
+    context,
+    generations,
+  }) => {
+    const page = await oneTabWithUpdate(context, generations);
+    await withPlace(page);
+    await place(page).fill("BESIDE THE FORM");
+    expect(await association(page)).toEqual({
+      owner: "Fixture note",
+      member: true,
+      descendant: false,
+      value: "BESIDE THE FORM",
+    });
+    expect(await dirtyCount(page)).toBe(1);
+    await saveAndReload(page);
+    await expect(place(page)).toHaveValue("BESIDE THE FORM");
+    await expect(restoredBanner(page)).toBeVisible();
+    await expect(section(page)).toHaveAttribute("data-submitted", "0");
+  });
+
+  for (const then of ["Retry save", "Discard and reload anyway"] as const)
+    test(`Place typed, then removed from the page directly: 'Save and reload' fails and nothing reloads; the form mounted again shows it untouched; '${then}' ${then === "Retry save" ? "carries it to B" : "reloads without it"}`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await oneTabWithUpdate(context, generations);
+      await withPlace(page);
+      await place(page).fill("UNFINISHED PLACE");
+      expect(await association(page)).toMatchObject({
+        member: true,
+        descendant: false,
+      });
+      await removePlace(page);
+      await expect(place(page)).toHaveCount(0);
+      expect(await dirtyCount(page)).toBe(1);
+      await mark(page);
+      await quiet(page);
+      await updateRegion(page)
+        .getByRole("button", { name: "Save and reload" })
+        .click();
+      await expect(updateRegion(page).getByText(SAVE_FAILED)).toBeVisible();
+      expect(await marked(page)).toBe(true);
+      expect(await build(page)).toBe("a");
+      expect(
+        (await recoveryRows(context, generations)).filter(
+          (row) => !row.terminal && "place" in row.fields,
+        ),
+      ).toEqual([]);
+      await remount(page);
+      await expect(place(page)).toHaveValue("UNFINISHED PLACE");
+      await quiet(page);
+      await updateRegion(page).getByRole("button", { name: then }).click();
+      await reloadedOntoB(page);
+      await expect(place(page)).toHaveValue(
+        then === "Retry save" ? "UNFINISHED PLACE" : "",
+      );
+      await expect(section(page)).toHaveAttribute("data-submitted", "0");
+    });
+
+  test("a second tab holds Place typed then removed; the first tab's update reloads only the first; the second keeps it as an obligation (dirty, no copy of it, no reload)", async ({
+    context,
+    generations,
+  }) => {
+    const [first, second] = await twoTabsWithUpdate(context, generations);
+    await withPlace(second);
+    await expect(
+      updateRegion(second).getByRole("button", { name: "Save and reload" }),
+    ).toBeVisible();
+    await place(second).fill("SECOND TAB PLACE");
+    await removePlace(second);
+    expect(await dirtyCount(second)).toBe(1);
+    await title(first).fill(ORIGINAL);
+    await mark(second);
+    await saveAndReload(first);
+    await expect(title(first)).toHaveValue(ORIGINAL);
+    expect(await marked(second)).toBe(true);
+    expect(await build(second)).toBe("a");
+    expect(await dirtyCount(second)).toBe(1);
+    expect(
+      (await recoveryRows(context, generations)).filter(
+        (row) => !row.terminal && "place" in row.fields,
+      ),
+    ).toEqual([]);
+  });
+});

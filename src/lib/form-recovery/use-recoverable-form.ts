@@ -111,7 +111,9 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  *
  * WHILE THIS TAB PREPARES AN UPDATE RELOAD (revision 2, R3). From "Save and reload" until the page reloads (or the reload is abandoned),
  * `locked` is true: the form is held still (`inert`), and `restoreAlternative`, `discard` and `submitting` refuse (they would change the
- * form after its last save). Controls outside the form must be disabled with `locked`. A submission SENT before (a `submitting` ticket
+ * form after its last save). A control outside the form that belongs to it by its `form` attribute is a member of the form: followed and
+ * held with it (revision 11, R18); any other control outside the form that changes it must be disabled with `locked`. Focus leaves a held
+ * field first (its `change` commits the last edit). A submission SENT before (a `submitting` ticket
  * not yet settled) is waited for: its success discards the copies before the reload, so the submitted input never comes back. A caller
  * that only calls `onSubmitted()` after the fact cannot be waited for (use `submitting`).
  *

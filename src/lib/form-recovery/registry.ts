@@ -23,8 +23,8 @@ export interface RecoverableFormHandle {
   flush(): Promise<SaveResult>;
   /** "Discard and reload anyway": the form's copies are discarded; `discarded` only when none can come back. Never throws. */
   discard?(): Promise<DiscardResult>;
-  /** Holds the form still (no input); returns the release. */
-  freeze?(): () => void;
+  /** Holds the form still (no input); returns the release (revision 11: with `holds`, `HeldRelease`, where it can say). */
+  freeze?(): HeldRelease;
   /** Revision 2: settles when every operation of the form outstanding NOW (a save, a discard, a submission) has settled; null when none is. */
   settled?(): Promise<void> | null;
   /**
@@ -45,6 +45,12 @@ export interface RecoverableFormHandle {
   retryRecovery?(): Promise<boolean>;
 }
 
+/**
+ * Revision 11 (R18; design assessment C3, I6): a hold's release, and whether it still holds every member of its form NOW (asked in the
+ * same step as an update reload; a control that came to belong to the form meanwhile is held first). False: never taken for held.
+ */
+export type HeldRelease = (() => void) & { holds?: () => boolean };
+
 /** What the registry keeps of a form session (`session.ts`) for the page's life: its form context and the account database it is bound to. */
 export interface PageFormSession {
   readonly formContext: string;
@@ -64,7 +70,10 @@ export interface RecoverableFormRegistry {
   freeze(): () => void;
   /** Revision 2 (R3): a freeze is in force; recovery actions that would change a form are refused. */
   frozen(): boolean;
-  /** Revision 2 (R3): registered forms a freeze in force could not hold still (no `freeze`, or it threw). */
+  /**
+   * Revision 2 (R3): registered forms a freeze in force could not hold still (no `freeze`, or it threw; revision 11: or its hold says it does
+   * not hold every member of the form now).
+   */
   unheld(): number;
   /** Revision 2: how many forms have operations outstanding now. */
   pending(): number;
@@ -84,13 +93,13 @@ export function createRecoverableFormRegistry(): RecoverableFormRegistry {
   const handles = new Set<RecoverableFormHandle>();
   const listeners = new Set<() => void>();
   /** The releases of the forms each freeze in force holds (null: the form could not be held still). */
-  const freezes = new Set<Map<RecoverableFormHandle, (() => void) | null>>();
+  const freezes = new Set<Map<RecoverableFormHandle, HeldRelease | null>>();
   const sessions = new Map<string, PageFormSession>();
   const notify = (): void => {
     for (const listener of [...listeners]) listener();
   };
   const hold = (
-    held: Map<RecoverableFormHandle, (() => void) | null>,
+    held: Map<RecoverableFormHandle, HeldRelease | null>,
     handle: RecoverableFormHandle,
   ): void => {
     if (held.has(handle)) return;
@@ -144,7 +153,7 @@ export function createRecoverableFormRegistry(): RecoverableFormRegistry {
       };
     },
     freeze() {
-      const held = new Map<RecoverableFormHandle, (() => void) | null>();
+      const held = new Map<RecoverableFormHandle, HeldRelease | null>();
       freezes.add(held);
       for (const handle of handles) hold(held, handle);
       notify();
@@ -165,11 +174,19 @@ export function createRecoverableFormRegistry(): RecoverableFormRegistry {
     unheld() {
       let count = 0;
       for (const handle of handles)
-        for (const held of freezes)
-          if (held.get(handle) === null) {
+        for (const held of freezes) {
+          const release = held.get(handle);
+          let holds = release !== null;
+          try {
+            holds &&= release?.holds?.() !== false;
+          } catch {
+            holds = false;
+          }
+          if (!holds) {
             count += 1;
             break;
           }
+        }
       return count;
     },
     pending: () => outstanding().length,

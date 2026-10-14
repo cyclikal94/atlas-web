@@ -38,6 +38,7 @@ import type {
   SaveResult,
 } from "./port";
 import type {
+  HeldRelease,
   PageFormSession,
   RecoverableFormHandle,
   RecoverableFormRegistry,
@@ -821,37 +822,97 @@ export function setSessionView(session: FormSession, view: SessionView): void {
 
 /** Per element: how many holds, and its own `inert` / `aria-busy` before the first, put back after the last. */
 const holds = new WeakMap<
-  HTMLFormElement,
+  Element,
   { count: number; inert: boolean; busy: string | null }
 >();
 
-/** Holds the element still (`inert`: no focus, no click, no typing in it; `aria-busy`); returns the release (idempotent). */
-export function holdElement(form: HTMLFormElement): () => void {
-  const held = holds.get(form) ?? {
+/**
+ * Holds one element still (`inert`; `aria-busy` too when `busy`); returns the release (idempotent).
+ *
+ * FOCUS LEAVES FIRST (revision 11; review of 14 October 2026, `review-webkit-inert-text-delivery`). Made inert while it has focus, a text
+ * field went on taking keys: in WebKit (it even reported focus on the body), and in Firefox for a field made inert itself (until its focus
+ * moved at a later update). The focused element is blurred first, in the element or the element itself (as Chromium and Firefox do for an
+ * inert one: `change` commits its last edit, which is no new edit, `fields.watch`; then `blur`), so no key reaches it while it is held.
+ */
+function holdOne(element: Element, busy: boolean): () => void {
+  const focused = element.ownerDocument.activeElement;
+  if (focused instanceof HTMLElement && element.contains(focused))
+    focused.blur();
+  const held = holds.get(element) ?? {
     count: 0,
-    inert: form.hasAttribute("inert"),
-    busy: form.getAttribute("aria-busy"),
+    inert: element.hasAttribute("inert"),
+    busy: element.getAttribute("aria-busy"),
   };
   held.count += 1;
-  holds.set(form, held);
+  holds.set(element, held);
   // The attribute, which every supported engine reflects (jsdom has no `inert` property).
-  form.setAttribute("inert", "");
-  form.setAttribute("aria-busy", "true");
+  element.setAttribute("inert", "");
+  if (busy) element.setAttribute("aria-busy", "true");
   let released = false;
   return () => {
     if (released) return;
     released = true;
     held.count -= 1;
     if (held.count > 0) return;
-    holds.delete(form);
-    if (!held.inert) form.removeAttribute("inert");
-    if (held.busy === null) form.removeAttribute("aria-busy");
-    else form.setAttribute("aria-busy", held.busy);
+    holds.delete(element);
+    if (!held.inert) element.removeAttribute("inert");
+    if (held.busy === null) element.removeAttribute("aria-busy");
+    else element.setAttribute("aria-busy", held.busy);
   };
 }
 
+/** A hold's release, and whether it holds every member of its form still NOW (`HeldRelease`). */
+export type Hold = (() => void) & { holds: () => boolean };
+
+/**
+ * Holds the form still (`inert`: no focus, no click, no typing in it; `aria-busy`); returns the release (idempotent).
+ *
+ * EVERY MEMBER, NOT THE SUBTREE (revision 11; review of 14 October 2026, R18; design assessment of 14 October 2026, C3, I6). Revision 10 made
+ * only the form inert, so a control outside it that belongs to it by its `form` attribute (one its fields read) took typing all through an
+ * update. Each such control (`form.elements`, wherever it is) is held too, by its own `inert` only (never its container, never another
+ * form's control); one that comes to belong to the form while it is held is held as soon as that is noticed (an observer at the form's root)
+ * and, at the latest, when the hold is asked whether it holds the form (`holds`: the registry asks in the same step as an update reload).
+ * `holds` is false once anything it set is gone (a render that took `inert` away): never taken for held. Each element's own `inert` and
+ * `aria-busy` come back after its last hold.
+ */
+export function holdElement(form: HTMLFormElement): Hold {
+  const releases = new Map<Element, () => void>([[form, holdOne(form, true)]]);
+  let released = false;
+  const check = (): boolean => {
+    if (released) return false;
+    for (const member of Array.from(form.elements))
+      if (!form.contains(member) && !releases.has(member))
+        releases.set(member, holdOne(member, false));
+    return [...releases.keys()].every((element) =>
+      element.hasAttribute("inert"),
+    );
+  };
+  check();
+  const observer =
+    typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver(() => {
+          check();
+        });
+  observer?.observe(form.getRootNode(), {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["form", "id"],
+  });
+  return Object.assign(
+    () => {
+      if (released) return;
+      released = true;
+      observer?.disconnect();
+      for (const release of releases.values()) release();
+    },
+    { holds: check },
+  );
+}
+
 /** The release of the hold on the attached element, while the session is frozen. */
-const elementHolds = new WeakMap<FormSession, () => void>();
+const elementHolds = new WeakMap<FormSession, Hold>();
 
 const holdAttached = (session: FormSession): void => {
   const form = elementOf(session);
@@ -863,16 +924,25 @@ const releaseAttached = (session: FormSession): void => {
   elementHolds.delete(session);
 };
 
-function freezeSession(session: FormSession): () => void {
+function freezeSession(session: FormSession): HeldRelease {
   session.frozen += 1;
   holdAttached(session);
   let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    session.frozen -= 1;
-    if (session.frozen === 0) releaseAttached(session);
-  };
+  return Object.assign(
+    () => {
+      if (released) return;
+      released = true;
+      session.frozen -= 1;
+      if (session.frozen === 0) releaseAttached(session);
+    },
+    {
+      // Revision 11 (R18): no mount shows the form (nothing to hold), or the attached mount's hold holds every member of it now.
+      holds: () =>
+        !released &&
+        (elementOf(session) === null ||
+          (elementHolds.get(session)?.holds() ?? false)),
+    },
+  );
 }
 
 // ---- lifetime -------------------------------------------------------------------------------------------------------------------------
