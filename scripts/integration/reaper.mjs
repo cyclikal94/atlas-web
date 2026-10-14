@@ -25,6 +25,7 @@ import {
   dockerClient,
   LABEL_INVOCATION,
 } from "./docker-resources.mjs";
+import { overall, settleStack } from "./outcome.mjs";
 import { membersOf, processTable, stopMembers } from "./ownership.mjs";
 
 const [runDir, token, runnerPidText] = process.argv.slice(2);
@@ -48,6 +49,7 @@ const journal = {
   ports: new Set(),
   known: new Map(),
   current: null,
+  judged: null,
   evidence: null,
 };
 let released = null;
@@ -68,9 +70,14 @@ lines.on("line", (line) => {
   else if (m.type === "tmp") journal.tmp.add(m.path);
   else if (m.type === "ports") for (const p of m.ports) journal.ports.add(p);
   else if (m.type === "process") journal.known.set(m.pid, m.started);
-  else if (m.type === "stack") journal.current = m;
-  else if (m.type === "stack-end") journal.current = null;
-  else if (m.type === "released") released = m;
+  else if (m.type === "stack") {
+    journal.current = m;
+    journal.judged = null;
+  } else if (m.type === "judged") journal.judged = m;
+  else if (m.type === "stack-end") {
+    journal.current = null;
+    journal.judged = null;
+  } else if (m.type === "released") released = m;
 });
 lines.on("close", () => {
   if (released) process.exit(0);
@@ -140,11 +147,15 @@ function takeOver(why) {
     }, DEADLINE_MS);
     hardStop.unref();
     // 1. The runner itself is gone (a closed journal with a live runner is recorded, and the clean-up still goes on).
+    result.runner_alive = true;
     for (let i = 0; i < 50; i += 1) {
       try {
-        if (!processTable().some((r) => r.pid === runnerPid && !r.zombie))
+        if (!processTable().some((r) => r.pid === runnerPid && !r.zombie)) {
+          result.runner_alive = false;
           break;
+        }
       } catch {
+        result.runner_alive = null; // unknown
         break;
       }
       await pause(100);
@@ -237,9 +248,19 @@ function finish(result) {
   process.exit(result.ok ? 0 : 1);
 }
 
-/** The runner's summary, completed as the runner would have: never a pass, every planned stack accounted for. */
+/**
+ * The runner's summary, completed as the runner would have (review r7 H4c: with the same reducer): never a pass, every planned stack
+ * accounted for, and what the current stack had established (its journalled checkpoint) kept through this take-over. A runner that
+ * may still be running owns its summary: it is not rewritten (`reaper.json` says what this process did).
+ */
 function completeSummary(result) {
   const path = join(runDir, "summary.json");
+  if (result.runner_alive !== false) {
+    say(
+      `the runner may still be running (pid ${runnerPid}); its summary is left to it`,
+    );
+    return;
+  }
   let summary = null;
   try {
     summary = JSON.parse(readFileSync(path, "utf8"));
@@ -257,7 +278,14 @@ function completeSummary(result) {
   }
   if (summary.invocation?.finished) {
     summary.reaper = { ok: result.ok, file: join(runDir, "reaper.json") };
-    if (!result.ok) summary.cleanup_failed = true;
+    if (!result.ok) {
+      // A clean-up this process could not verify is a failure of the run, whatever the runner had concluded before it died.
+      summary.cleanup_failed = true;
+      if (summary.outcome !== "failed" && summary.outcome !== "plan_error") {
+        summary.outcome_before_reaper = summary.outcome;
+        summary.outcome = "failed";
+      }
+    }
     writeFileSync(path, `${JSON.stringify(summary, null, 2)}\n`);
     return;
   }
@@ -265,15 +293,22 @@ function completeSummary(result) {
   const has = (browser, index) =>
     records.some((r) => r.browser === browser && r.index === index);
   const current = journal.current;
-  if (current && !has(current.browser, current.index))
+  if (current && !has(current.browser, current.index)) {
+    const judged =
+      journal.judged?.browser === current.browser &&
+      journal.judged?.index === current.index
+        ? journal.judged.record
+        : null;
     records.push({
       browser: current.browser,
       stack: current.stack,
       index: current.index,
-      outcome: "cancelled",
-      reason: `stopped: ${result.reason}`,
-      cleanup: { by: "reaper", ok: result.ok },
+      ...settleStack(
+        judged ?? { outcome: "cancelled", reason: `stopped: ${result.reason}` },
+        { stop: result.reason, cleanup: { by: "reaper", ok: result.ok } },
+      ),
     });
+  }
   let planned = null;
   try {
     planned = JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8"));
@@ -290,12 +325,18 @@ function completeSummary(result) {
           outcome: "not_run",
           reason: `not launched: the runner ended (${result.reason})`,
         });
-  const failure = records.find(
-    (r) => !["passed", "not_run", "cancelled"].includes(r.outcome),
-  );
+  const outcome = overall(records, {
+    signalled: result.reason,
+    planned: records.length,
+    failures: [
+      ...(summary.evidence_errors ?? []),
+      ...(result.ok ? [] : ["the reaper's clean-up was not verified"]),
+    ],
+  });
   Object.assign(summary, {
     invocation: { ...summary.invocation, finished: true },
-    outcome: failure ? "failed" : "cancelled",
+    // The controller was lost, so the run is never a pass.
+    outcome: outcome === "passed" ? "cancelled" : outcome,
     controller_lost: true,
     stacks: records,
     cleanup_failed: !result.ok || Boolean(summary.cleanup_failed),

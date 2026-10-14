@@ -16,6 +16,13 @@
 //   stubborn_child  start, in each stack, one more owned process that ignores SIGTERM (a child whose shutdown is held);
 //                "detached" puts it in a process group of its own, as Playwright starts browsers
 //   fallback_ms  the runner's fallback finaliser delay after a signal (default 150 s)
+//   report_error add one error to the report Playwright wrote, as its own global-error entry, before the runner judges it (review r7
+//                H4c: a report whose cases all passed but that records an error, established before a later stop)
+//   budget_over  report the stack's audited sign-in traffic as over the source budget (an injected fact, marked `injected`)
+//
+// Boundaries: prepare:start, oidc:started, sqlite:fetched, sqlite:accounts, backend:spawned, postgres:*, proxy:started,
+// preview:spawned, preview:ready, playwright:spawned, and stack:judged (revision 8: the stack's report and budget are judged and
+// checkpointed, its clean-up has not begun).
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cancelled } from "./ownership.mjs";
@@ -57,6 +64,30 @@ export function createFaults({
           await new Promise((r) => setTimeout(r, 50));
         }
       }
+    },
+    /** The report as the runner reads it, with an injected global error when `report_error` is set. */
+    report(report) {
+      if (!spec.report_error || !report) return report;
+      return {
+        ...report,
+        errors: [
+          ...(report.errors ?? []),
+          {
+            message:
+              "injected report error (ATLAS_INTEGRATION_FAULTS report_error)",
+          },
+        ],
+      };
+    },
+    /** The audited admissions, reported over the source budget when `budget_over` is set. */
+    admissions(summary) {
+      if (!spec.budget_over) return summary;
+      return {
+        ...summary,
+        within_limit: false,
+        sliding_peak_60s: summary.limit + 1,
+        injected: "budget_over",
+      };
     },
     write(kind) {
       if (failWrite.has(kind))

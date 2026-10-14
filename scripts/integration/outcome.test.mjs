@@ -5,6 +5,7 @@ import {
   judge,
   overall,
   schedule,
+  settleStack,
   withCancellation,
 } from "./outcome.mjs";
 
@@ -302,8 +303,11 @@ test("a passing stack whose sign-in traffic went over the source budget is not a
   assert.equal(over.outcome, "budget_exceeded");
   assert.match(over.reason, /126 source uses within 60 s .* 6 answered 429/);
   // A failure keeps its own outcome; the budget is recorded beside it.
+  // Adapted, labelled (review r7 H4c, revision 8): the hand-made record now carries the counts every failed-case record from
+  // `judge` has. A `failed` label with no failure fact is what a stop may have caused (an exit with nothing failed in the report),
+  // and an excess outranks that, as it outranks a cancellation; the intent (a failed case keeps its outcome) is unchanged.
   const failed = applyBudget(
-    { outcome: "failed", reason: "1 failed" },
+    { outcome: "failed", reason: "1 failed", counts: { failed: 1, flaky: 0 } },
     admissions(126, 6),
   );
   assert.equal(failed.outcome, "failed");
@@ -396,4 +400,263 @@ test("I4: the run's outcome: a failure before a signal stays a failure; a cancel
       "failed",
       outcome,
     );
+});
+
+// ---- review r7 H4c (revision 8): an established failure survives every later stop, audit, clean-up and finaliser ---------------
+const oneCase = expected("probe");
+const reportOf = (status, result, errors = []) => ({
+  ...report([
+    {
+      id: "probe",
+      title: "probe",
+      file: "a.spec.ts",
+      tests: [
+        {
+          projectName: "integration-chromium",
+          status,
+          results: [{ status: result }],
+        },
+      ],
+    },
+  ]),
+  errors,
+});
+const judged = (r, exit, stop) =>
+  judge({ expected: oneCase, report: r, exit, launchedAt: at, stop });
+const SIGTERM = "received SIGTERM";
+const within = admissions(40);
+const over = admissions(121, 1);
+const verified = { ok: true };
+const unverified = { ok: false, errors: ["a container is left"] };
+/** The run as the runner sees it: the stack settled with a later stop, then the run's outcome after a signal. */
+const run = (record, extra = {}) => {
+  const settled = settleStack(record, {
+    stop: SIGTERM,
+    cleanup: verified,
+    ...extra,
+  });
+  return {
+    settled,
+    overall: overall([settled], { signalled: "SIGTERM", planned: 1 }),
+  };
+};
+
+test("H4c control: a failed case stays failed through a later stop", () => {
+  const { settled, overall: o } = run(
+    judged(reportOf("unexpected", "failed"), { code: 1 }, null),
+  );
+  assert.equal(settled.outcome, "failed");
+  assert.equal(settled.cancellation, SIGTERM);
+  assert.deepEqual(
+    settled.failures?.map((f) => f.kind),
+    ["cases"],
+  );
+  assert.equal(o, "failed");
+});
+
+test("H4c control: a case interrupted by the stop is cancelled, and so is the run", () => {
+  const { settled, overall: o } = run(
+    judged(reportOf("skipped", "interrupted"), { code: 130 }, SIGTERM),
+  );
+  assert.equal(settled.outcome, "cancelled");
+  assert.equal(settled.before_cancellation?.outcome, "incomplete");
+  assert.deepEqual(settled.failures, []);
+  assert.equal(o, "cancelled");
+});
+
+test("H4c: every case passed but the report has an error; a later stop leaves it failed (the reviewer's case)", () => {
+  const r = judged(
+    reportOf("expected", "passed", [
+      { message: "Independent teardown error recorded before cancellation" },
+    ]),
+    { code: 1 },
+    null,
+  );
+  assert.equal(r.outcome, "failed");
+  assert.deepEqual(r.failure, {
+    kind: "report_errors",
+    reason: "the report has errors",
+  });
+  for (const stop of [null, SIGTERM]) {
+    // Attached directly, or through the reducer, the stop changes nothing.
+    assert.equal(withCancellation(r, stop ?? SIGTERM).outcome, "failed");
+    const { settled, overall: o } = run(r);
+    assert.equal(settled.outcome, "failed");
+    assert.deepEqual(settled.report_errors, [
+      "Independent teardown error recorded before cancellation",
+    ]);
+    assert.equal(o, "failed");
+  }
+  // Even when the stop came before Playwright ended, an error the report recorded is not the stop's to explain away.
+  const afterStop = judged(
+    reportOf("expected", "passed", [{ message: "teardown" }]),
+    { code: 130 },
+    SIGTERM,
+  );
+  assert.equal(run(afterStop).overall, "failed");
+});
+
+test("H4c: a preparation error raised before the stop stays an error; one raised after it is the stop's", () => {
+  const before = {
+    outcome: "error",
+    reason: "the backend did not become ready",
+    failure: {
+      kind: "preparation_error",
+      reason: "the backend did not become ready",
+    },
+  };
+  const { settled, overall: o } = run(before);
+  assert.equal(settled.outcome, "error");
+  assert.equal(settled.cancellation, SIGTERM);
+  assert.equal(o, "failed");
+  const after = { outcome: "error", reason: "docker run exited 143" };
+  const stopped = run(after);
+  assert.equal(stopped.settled.outcome, "cancelled");
+  assert.equal(
+    stopped.settled.before_cancellation?.reason,
+    "docker run exited 143",
+  );
+  assert.equal(stopped.overall, "cancelled");
+});
+
+test("H4c: a missing report or a failing exit with no stop before it is a failure; after a stop it is a cancellation", () => {
+  const missing = judge({
+    expected: oneCase,
+    report: null,
+    readError: "ENOENT",
+    exit: { code: 1 },
+    launchedAt: at,
+    stop: null,
+  });
+  assert.equal(missing.failure?.kind, "report_missing");
+  assert.equal(run(missing).settled.outcome, "incomplete");
+  assert.equal(run(missing).overall, "failed");
+  const stoppedMissing = judge({
+    expected: oneCase,
+    report: null,
+    readError: "ENOENT",
+    exit: { signal: "SIGINT" },
+    launchedAt: at,
+    stop: SIGTERM,
+  });
+  assert.equal(run(stoppedMissing).settled.outcome, "cancelled");
+  const exitOnly = judged(reportOf("expected", "passed"), { code: 1 }, null);
+  assert.equal(exitOnly.failure?.kind, "exit");
+  assert.equal(run(exitOnly).overall, "failed");
+  assert.equal(
+    run(judged(reportOf("expected", "passed"), { code: 130 }, SIGTERM)).overall,
+    "cancelled",
+  );
+  const stale = judge({
+    expected: oneCase,
+    report: report([], new Date(at - 60_000).toISOString()),
+    exit: clean,
+    launchedAt: at,
+    stop: null,
+  });
+  assert.equal(stale.failure?.kind, "report_stale");
+  assert.equal(run(stale).overall, "failed");
+});
+
+test("H4c: a budget excess, an unverified clean-up or an evidence error outranks a cancellation and a pass", () => {
+  const interrupted = judged(
+    reportOf("skipped", "interrupted"),
+    { code: 130 },
+    SIGTERM,
+  );
+  const budget = run(interrupted, { admissions: over });
+  assert.equal(budget.settled.outcome, "budget_exceeded");
+  assert.equal(budget.settled.cancellation, SIGTERM);
+  assert.equal(budget.settled.before_budget?.outcome, "cancelled");
+  assert.equal(budget.overall, "failed");
+  const cleanup = run(interrupted, { cleanup: unverified });
+  assert.equal(cleanup.settled.outcome, "cleanup_failed");
+  assert.equal(cleanup.settled.before_settling?.outcome, "cancelled");
+  assert.equal(cleanup.overall, "failed");
+  const evidence = run(interrupted, { evidenceErrors: ["admissions: EACCES"] });
+  assert.equal(evidence.settled.outcome, "evidence_failed");
+  assert.equal(evidence.overall, "failed");
+  const passed = judged(reportOf("expected", "passed"), clean, null);
+  assert.equal(run(passed, { admissions: within }).settled.outcome, "passed");
+  assert.equal(
+    run(passed, { cleanup: unverified }).settled.outcome,
+    "cleanup_failed",
+  );
+  // A failure keeps its outcome and its first cause; the later facts are listed beside it.
+  const failed = run(
+    judged(reportOf("unexpected", "failed"), { code: 1 }, null),
+    {
+      admissions: over,
+      cleanup: unverified,
+      evidenceErrors: ["admissions: EACCES"],
+    },
+  );
+  assert.equal(failed.settled.outcome, "failed");
+  assert.equal(failed.settled.reason, "1 failed");
+  assert.deepEqual(
+    failed.settled.failures?.map((f) => f.kind),
+    ["cases", "budget", "cleanup", "evidence"],
+  );
+});
+
+test("H4c: the order the stop is attached in does not change the outcome", () => {
+  for (const [r, extra] of [
+    [
+      judged(
+        reportOf("expected", "passed", [{ message: "x" }]),
+        { code: 1 },
+        null,
+      ),
+      {},
+    ],
+    [
+      judged(reportOf("skipped", "interrupted"), { code: 130 }, SIGTERM),
+      { admissions: over },
+    ],
+    [
+      judged(reportOf("expected", "passed"), clean, null),
+      { cleanup: unverified },
+    ],
+  ]) {
+    const early = settleStack(withCancellation(r, SIGTERM), {
+      cleanup: verified,
+      ...extra,
+    });
+    const late = settleStack(settleStack(r, { cleanup: verified, ...extra }), {
+      stop: SIGTERM,
+      cleanup: extra.cleanup ?? verified,
+    });
+    assert.equal(early.outcome, late.outcome);
+  }
+});
+
+test("H4c: the run is failed when any record carries a failure fact or the run could not write its evidence", () => {
+  assert.equal(
+    overall([{ outcome: "cancelled", budget_exceeded: "121 within 60 s" }], {
+      signalled: "SIGTERM",
+      planned: 1,
+    }),
+    "failed",
+  );
+  assert.equal(
+    overall([{ outcome: "cancelled", cleanup: { ok: false } }], {
+      signalled: "SIGTERM",
+      planned: 1,
+    }),
+    "failed",
+  );
+  assert.equal(
+    overall([{ outcome: "passed" }], {
+      planned: 1,
+      failures: ["summary: EACCES"],
+    }),
+    "failed",
+  );
+  assert.equal(
+    overall([{ outcome: "cancelled", report_errors: ["teardown"] }], {
+      signalled: "SIGTERM",
+      planned: 1,
+    }),
+    "failed",
+  );
 });

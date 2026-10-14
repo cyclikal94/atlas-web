@@ -18,7 +18,9 @@ import {
   NAME_PROBLEM,
   NAME_REFUSED,
   NAME_REMOVED,
+  NAME_REMOVED_NEWER_KEPT,
   NAME_SAVED,
+  NAME_SAVED_NEWER_KEPT,
   NAME_THIS_DEVICE_TITLE,
   NAME_UNCONFIRMED,
   REMOVE_NAME,
@@ -36,7 +38,7 @@ type Phase =
   /** The typed value breaks the name rules: nothing was sent. */
   | { kind: "invalid"; text: string }
   /** A definite answer that changed nothing, or one whose effect is unknown; the list was read again where that helps. */
-  | { kind: "message"; text: string; gone?: boolean };
+  | { kind: "message"; text: string; gone?: boolean; kept?: boolean };
 
 /**
  * D-8d-09/10: naming a listed device (BE-Q25 `PUT`/`DELETE /devices/{id}/name`). The typed text is sent exactly as typed: it is
@@ -48,6 +50,10 @@ type Phase =
  * interaction is current (not dismissed or replaced, the identity unchanged) is another attempt made or the outcome shown. The
  * request carries the interaction's `withdraw`, so one dismissed before it was issued is never sent. (This supersedes the plan's
  * D-8d-10 "a result after the dialog has gone changes nothing": it shows nothing; the lists still reconcile.)
+ *
+ * Review R6 (revision 8): a submission owns only the draft it submitted. Every accepted edit moves `revision` on, and a submission
+ * keeps the revision it was taken from. A completed save or removal closes the dialog only if the draft is still that one;
+ * otherwise the newer text stays in the field, unsent, with its focus, and the person is told what the earlier request did.
  */
 export function NameDeviceDialog({
   device,
@@ -66,6 +72,8 @@ export function NameDeviceDialog({
   const [value, setValue] = useState(display.named ? display.title : "");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const inflight = useRef(false);
+  /** The draft's revision: moved on synchronously by every accepted edit, so an edit away and back is still a later draft. */
+  const revision = useRef(0);
   const field = useRef<HTMLInputElement>(null);
   const formId = useId();
   const problemId = useId();
@@ -74,6 +82,7 @@ export function NameDeviceDialog({
   const send = async (name: string | null) => {
     if (inflight.current || !isOnlineNow() || !interaction.current()) return;
     inflight.current = true;
+    const submitted = revision.current;
     setPhase({ kind: "busy" });
     const result: Result<"named" | "cleared" | "gone"> | null = await untilSent(
       () =>
@@ -94,8 +103,20 @@ export function NameDeviceDialog({
         announcer.announce(NAME_GONE, "assertive");
         return;
       }
-      announcer.announce(result.value === "named" ? NAME_SAVED : NAME_REMOVED);
-      onClose();
+      if (revision.current === submitted) {
+        announcer.announce(
+          result.value === "named" ? NAME_SAVED : NAME_REMOVED,
+        );
+        onClose();
+        return;
+      }
+      // A later edit is not this request's to discard: keep it, unsent, and say what the earlier request did.
+      const text =
+        result.value === "named"
+          ? NAME_SAVED_NEWER_KEPT
+          : NAME_REMOVED_NEWER_KEPT;
+      setPhase({ kind: "message", text, kept: true });
+      announcer.announce(text);
       return;
     }
     // The session ended (the neutral state takes over) or the answer belongs to an identity that is no longer settled: say nothing.
@@ -205,6 +226,7 @@ export function NameDeviceDialog({
               : describedId
           }
           onChange={(event) => {
+            revision.current += 1;
             setValue(event.target.value);
             if (phase.kind === "invalid") setPhase({ kind: "idle" });
           }}
@@ -218,7 +240,11 @@ export function NameDeviceDialog({
           </p>
         ) : null}
         {phase.kind === "message" ? (
-          <p data-refusal="" className="text-ink-2">
+          <p
+            data-refusal={phase.kept ? undefined : ""}
+            data-name-kept={phase.kept ? "" : undefined}
+            className="text-ink-2"
+          >
             {phase.text}
           </p>
         ) : null}

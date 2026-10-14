@@ -62,11 +62,11 @@ import { createFaults } from "./faults.mjs";
 import { freePort } from "./free-port.mjs";
 import { createOidcProvider } from "./oidc-provider.mjs";
 import {
-  applyBudget,
   describe,
   judge,
   overall,
   schedule,
+  settleStack,
   withCancellation,
 } from "./outcome.mjs";
 import { Cancelled, createOwner } from "./ownership.mjs";
@@ -138,6 +138,20 @@ const owner = createOwner({
     journal({ type: "process", pid, started, label }),
 });
 let current = null; // the stack being prepared, run or cleaned up
+/**
+ * Review r7 H4c: what a stack has established is kept where every finaliser finds it before its clean-up starts: on the stack's state
+ * (the runner's own finaliser) and in the reaper's journal (a runner killed during the clean-up). The facts, not the raw report.
+ */
+function checkpoint(state, record) {
+  const { error: _stack, admissions: _admissions, ...facts } = record;
+  state.judged = facts;
+  journal({
+    type: "judged",
+    browser: state.browser,
+    index: state.index,
+    record: facts,
+  });
+}
 let lastBackend = null;
 let signalled = null;
 let planning = null; // the discovery's abort controller while the run is being planned
@@ -623,11 +637,13 @@ async function launch(browser, stack, index, expected) {
       .at("playwright:spawned", state.scope.signal)
       .catch(() => undefined);
     const exit = await handle.closed;
+    // Review r7 H4c: whether a stop came before Playwright ended decides who caused an incomplete report.
+    const stopAtExit = owner.latched;
     clearInterval(watch);
     let report = null;
     let readError = null;
     try {
-      report = JSON.parse(readFileSync(reportPath, "utf8"));
+      report = faults.report(JSON.parse(readFileSync(reportPath, "utf8")));
     } catch (error) {
       readError = String(error?.message ?? error);
     }
@@ -638,57 +654,60 @@ async function launch(browser, stack, index, expected) {
         readError,
         exit: { ...exit, spawnError: handle.spawnError },
         launchedAt,
+        stop: stopAtExit ?? null,
       }),
       report: reportPath,
     };
   } catch (error) {
+    const reason = String(error?.message ?? error);
     record = {
       outcome: error instanceof Cancelled ? "cancelled" : "error",
-      reason: String(error?.message ?? error),
+      reason,
       error: String(error?.stack ?? error),
       expected: expected.length,
+      // Review r7 H4c: an error raised before any stop is a failure of its own; one raised after a stop may be the stop's doing.
+      ...(error instanceof Cancelled || owner.latched
+        ? {}
+        : { failure: { kind: "preparation_error", reason } }),
     };
   }
   // A stop (a signal, a lost reaper) keeps what the stack had established: a recorded failure stays a failure.
   record = withCancellation(record, owner.latched);
+  checkpoint(state, record);
   // Evidence of the stack's sign-in traffic. Its failure is recorded; it never skips the clean-up below.
   const stackErrors = [];
+  let admissions = null;
   try {
     const requests = state.admissions.requests();
-    record = applyBudget(
-      record,
+    admissions = faults.admissions(
       audit(requests, { backendStartedAt: state.backendStartedAt }),
     );
+    record = settleStack(record, { admissions });
+    checkpoint(state, record);
     faults.write("admissions");
     writeFileSync(
       join(runDir, `admissions-${label}.json`),
-      `${JSON.stringify({ summary: record.admissions, backend_started_at: state.backendStartedAt ?? null, requests }, null, 2)}\n`,
+      `${JSON.stringify({ summary: admissions, backend_started_at: state.backendStartedAt ?? null, requests }, null, 2)}\n`,
       { flag: "wx" },
     );
   } catch (error) {
     stackErrors.push(`admissions: ${String(error?.message ?? error)}`);
   }
+  await faults.at("stack:judged", state.scope.signal).catch(() => undefined);
+  let cleanup;
   try {
-    record.cleanup = await cleanupStack(state);
+    cleanup = await cleanupStack(state);
   } catch (error) {
-    record.cleanup = { ok: false, errors: [String(error?.stack ?? error)] };
+    cleanup = { ok: false, errors: [String(error?.stack ?? error)] };
   }
-  if (stackErrors.length > 0) {
-    record.evidence_errors = stackErrors;
+  if (stackErrors.length > 0)
     evidenceErrors.push(...stackErrors.map((e) => `${label}: ${e}`));
-  }
-  if (record.outcome === "passed" && !record.cleanup.ok)
-    record = {
-      ...record,
-      outcome: "cleanup_failed",
-      reason: "the stack's clean-up was not verified",
-    };
-  if (record.outcome === "passed" && stackErrors.length > 0)
-    record = {
-      ...record,
-      outcome: "evidence_failed",
-      reason: stackErrors.join("; "),
-    };
+  // The one reducer (shared with the finaliser and the reaper): the stop, clean-up and evidence are added to what was established.
+  record = settleStack(record, {
+    stop: owner.latched,
+    cleanup,
+    evidenceErrors: stackErrors,
+  });
   journal({ type: "stack-end", browser, index });
   current = null;
   return record;
@@ -798,15 +817,23 @@ function finish(code, extra = {}) {
         !records.some(
           (r) => r.browser === state.browser && r.index === state.index,
         )
-      )
+      ) {
+        // The same reducer as the stack's own end: what the stack had established (its checkpoint) is kept; without one, the
+        // stop caused what is known.
+        const stop = owner.latched ?? "interrupted";
         records.push({
           browser: state.browser,
           stack: state.stack.suffix || "base",
           index: state.index,
-          outcome: "cancelled",
-          reason: `stopped: ${owner.latched ?? "interrupted"}`,
-          cleanup: cleaned,
+          ...settleStack(
+            state.judged ?? {
+              outcome: "cancelled",
+              reason: `stopped: ${stop}`,
+            },
+            { stop, cleanup: cleaned },
+          ),
         });
+      }
     }
     // Every planned stack has a record, even when the fallback finaliser ends a run whose schedule never got there.
     if (planned)
@@ -835,6 +862,7 @@ function finish(code, extra = {}) {
           : overall(records, {
               signalled: signalled ?? reaperLost,
               planned: browsers.length * (planned?.stacks.length ?? 0),
+              failures: evidenceErrors,
             });
     let summaryWritten = true;
     if (!serve)

@@ -17434,6 +17434,27 @@ export const UNIT = [
     expect: /a change made elsewhere appears after the tab is visible again/,
     patch: (t) => sub(t, "  useReturnRefresh(refresh);\n", ""),
   },
+  {
+    id: "MU-1683",
+    title:
+      "WEB-08d review R6 (revision 8): a completed naming request closes the dialog whatever was typed since it was submitted",
+    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
+    tests: ["tests/features/settings/name-draft-ownership.test.tsx"],
+    expect:
+      /completes after a later edit keeps the dialog|an edit away and back is still a later draft|a not_sent retry keeps the submitted payload/,
+    patch: (t) =>
+      sub(t, "      if (revision.current === submitted) {\n", "      {\n"),
+  },
+  {
+    id: "MU-1684",
+    title:
+      "WEB-08d review R6 (revision 8): an accepted edit does not move the draft's revision on",
+    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
+    tests: ["tests/features/settings/name-draft-ownership.test.tsx"],
+    expect:
+      /completes after a later edit keeps the dialog|an edit away and back is still a later draft|a not_sent retry keeps the submitted payload/,
+    patch: (t) => sub(t, "            revision.current += 1;\n", ""),
+  },
 ];
 
 /**

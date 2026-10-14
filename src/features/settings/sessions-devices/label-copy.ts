@@ -84,6 +84,11 @@ export const NAME_PROBLEM = {
 } as const; // [P]
 export const NAME_SAVED = "Name saved."; // [P]
 export const NAME_REMOVED = "Name removed."; // [P]
+/** [P] review R6: the earlier request finished while the person was typing; what they typed since stays in the field, unsent. */
+export const NAME_SAVED_NEWER_KEPT =
+  "The earlier name was saved. What you've typed since hasn't been saved yet."; // [P]
+export const NAME_REMOVED_NEWER_KEPT =
+  "The name was removed. What you've typed since hasn't been saved yet."; // [P]
 export const NAME_GONE =
   "That device isn't listed any more, so its name wasn't changed."; // [P]
 export const NAME_REFUSED =

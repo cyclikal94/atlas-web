@@ -351,6 +351,72 @@ test.describe("L-4 naming", () => {
     }
   });
 
+  // Review R6 (revision 8): a request owns only the draft it submitted. The fixture's `?name=slow` answer waits on a page timer; the
+  // page clock is paused before Save, so the later edit is certainly accepted before the answer (no race with the 1.5 s delay, and
+  // no product timer is shortened: the clock is run through the whole delay).
+  for (const action of ["save", "remove"] as const)
+    for (const later of [false, true])
+      test(`R6: ${action === "save" ? "Save name" : "Remove name"} that completes ${
+        later
+          ? "after a later edit keeps the dialog, the newer text and its focus"
+          : "with no later edit closes the dialog (control)"
+      }`, async ({ page }) => {
+        await page.clock.install();
+        await page.goto("/settings/sessions?name=slow");
+        await ready(page);
+        const row = rows(page, "device").nth(action === "save" ? 2 : 1);
+        await row.getByRole("button", { name: /^(Re)?[Nn]ame / }).click();
+        const field = dialog(page).getByLabel("Device name");
+        if (action === "save") await field.fill("Submitted name");
+        await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+        await dialog(page)
+          .getByRole("button", {
+            name: action === "save" ? "Save name" : "Remove name",
+          })
+          .click();
+        await expect(
+          dialog(page).getByRole("button", { name: "Save name" }),
+        ).toBeDisabled();
+        if (later) await field.fill("Newer unsaved name");
+        await page.clock.runFor(1_500);
+        await page.clock.resume();
+        // The earlier request's effect reaches the list either way.
+        if (action === "save")
+          await expect(row.locator("bdi[data-device-name]")).toHaveText(
+            "Submitted name",
+          );
+        else await expect(row.locator("bdi")).toHaveCount(0);
+        if (!later) {
+          await expect(live(page)).toHaveText(
+            action === "save" ? "Name saved." : "Name removed.",
+          );
+          await expect(dialog(page)).toHaveCount(0);
+          return;
+        }
+        const kept =
+          action === "save"
+            ? "The earlier name was saved. What you've typed since hasn't been saved yet."
+            : "The name was removed. What you've typed since hasn't been saved yet.";
+        await expect(live(page)).toHaveText(kept);
+        await expect(dialog(page)).toHaveCount(1);
+        await expect(dialog(page).locator("[data-name-kept]")).toHaveText(kept);
+        await expect(field).toHaveValue("Newer unsaved name");
+        await expect(field).toBeFocused();
+        await expect(
+          dialog(page).getByRole("button", { name: "Save name" }),
+        ).toBeEnabled();
+        expect((await runAxe(page, "[role=dialog]")).map((v) => v.id)).toEqual(
+          [],
+        );
+        // A deliberate second save sends the newer text.
+        await dialog(page).getByRole("button", { name: "Save name" }).click();
+        await expect(live(page)).toHaveText("Name saved.");
+        await expect(dialog(page)).toHaveCount(0);
+        await expect(row.locator("bdi[data-device-name]")).toHaveText(
+          "Newer unsaved name",
+        );
+      });
+
   test("real offline: Name and Rename are disabled with the reason; with the dialog open, Save is too", async ({
     page,
   }) => {
