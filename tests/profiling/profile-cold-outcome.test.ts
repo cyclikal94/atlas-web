@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -19,6 +20,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * Revision 11 (review 11's R2 follow-up; design assessment DA-L1/DA-H1): the live schedules now trace the step ends the production engine
  * traces (revision 10's published idle or stop WITHOUT its `data.sync_next` is kept as an incomplete control), and the cases M1-M9 of
  * the design assessment relate the live witness's terminal state to the step end that completes it.
+ *
+ * Revision 12 (review 12's R2 follow-up; design assessment DA-C1, DA-H1, Q1/Q2): the cold schedules carry the production commit payload
+ * (`kind: "applied"` with the page plan's `value`; revision 10/11's positive cold schedules omitted it), the served body is a real page
+ * whose cache effects are written out by hand below (never derived by the rules under test), the harness answers the cache read the run
+ * makes afterwards, and the cases R12-C1..C12 cover the measured attempt that wrote nothing (lease_lapsed, not_ready, a missing or unknown
+ * value, a dropped or unestablished admission), the committed `has_more` continuation, a committed page that ends refused, and the effects.
  */
 
 type State = { kind: string; [key: string]: unknown };
@@ -34,8 +41,14 @@ interface Harness {
   engineEpochs: Array<{ generation: number; run: number; trace: number }>;
   engineTrace: string[];
   engineState(): State | null;
+  /** The cache read the cold run makes after its observation (revision 12). */
+  rows(account: string, store: string): Promise<object[]>;
+  syncState(account: string): Promise<{ cursor: string } | null>;
 }
 let harness: Harness;
+/** The cache rows the modelled database holds: a committed measured page writes the served page's rows (`commit`). */
+let cacheRows: object[] = [];
+let cacheFault: string | null = null;
 let clock = 0;
 let generation = 0;
 let current: State | null = null;
@@ -56,9 +69,79 @@ const trace = (event: string, data?: unknown) => {
     `${clock}ms ${event} ${data === undefined ? "" : JSON.stringify(data)}`,
   );
 };
-const BODY = "x".repeat(1_000);
-const commit = (bytes = BODY.length, kind = "applied") =>
-  trace("data.sync_commit", { bytes, scan_ms: 4, commit_ms: 28, kind });
+// The served page (revision 12): two batches, a repeated upsert, a removal and a re-creation, so its effects are neither its change count
+// nor its first writes. Written out by hand below.
+const A = "00000000-0000-4000-8000-00000000000a";
+const B = "00000000-0000-4000-8000-00000000000b";
+const C = "00000000-0000-4000-8000-00000000000c";
+const resource = (id: string, version: number) => ({
+  id,
+  kind: "field",
+  parent_id: null,
+  label: "x",
+  value: { kind: "text", text: "t" },
+  version,
+  can_edit: true,
+  policy_version: 1,
+  archived: false,
+});
+const BODY = JSON.stringify({
+  phase: "delta",
+  batches: [
+    {
+      revision: 1,
+      changes: [
+        { kind: "upsert", resource: resource(A, 1) },
+        { kind: "upsert", resource: resource(B, 1) },
+        { kind: "upsert", resource: resource(C, 1) },
+      ],
+    },
+    {
+      revision: 2,
+      changes: [
+        { kind: "upsert", resource: resource(A, 2) },
+        { kind: "remove", id: C },
+        { kind: "upsert", resource: resource(C, 1) },
+      ],
+    },
+  ],
+  next_cursor: "c-1",
+  has_more: false,
+});
+// (The last change re-creates C after its removal; the expectation is therefore A@2, B@1, C@1: three rows from six changes.)
+const ROWS = [resource(A, 2), resource(B, 1), resource(C, 1)];
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+const EXPECTED = {
+  rows: 3,
+  entries_sha256: sha([`${A}@2`, `${B}@1`, `${C}@1`].join("\n")),
+};
+const EFFECTS = { method: "cache-rows/1", ...EXPECTED };
+/** A commit as the production engine traces it: an applied one carries its plan's `value` (pass null to omit it, as old fixtures did). */
+const commit = (
+  bytes = BODY.length,
+  kind = "applied",
+  value: string | null = "committed",
+) => {
+  trace("data.sync_commit", {
+    bytes,
+    scan_ms: 4,
+    commit_ms: 28,
+    kind,
+    ...(kind === "applied" && value !== null ? { value } : {}),
+  });
+  // The modelled database: a committed served page leaves its rows.
+  if (kind === "applied" && value === "committed" && bytes === BODY.length)
+    cacheRows = ROWS.map((r) => ({ ...r, kind_date: null }));
+};
+/** A follow-up page (the stub's empty one) as the engine traces it: applied, committed, no rows. */
+const emptyCommit = () =>
+  trace("data.sync_commit", {
+    bytes: 80,
+    scan_ms: 0.5,
+    commit_ms: 1.5,
+    kind: "applied",
+    value: "committed",
+  });
 
 beforeEach(() => {
   clock = 0;
@@ -70,7 +153,14 @@ beforeEach(() => {
     engineEpochs: [],
     engineTrace: [],
     engineState: () => current,
+    rows: async () => {
+      if (cacheFault) throw new Error(cacheFault);
+      return cacheRows;
+    },
+    syncState: async () => ({ cursor: "c-1" }),
   };
+  cacheRows = [];
+  cacheFault = null;
   (window as unknown as { __atlasData: Harness }).__atlasData = harness;
 });
 
@@ -92,7 +182,15 @@ const defined = <T>(value: T | null | undefined): T => {
 };
 const mark = () => defined(observationMark());
 const observed = (m: ReturnType<typeof mark>) => defined(observeColdOutcome(m));
-const served = (requests = 1) => ({ bytes: BODY.length, requests });
+const served = (
+  requests = 1,
+  effects: unknown = EFFECTS,
+): import("../e2e/profile-cold-outcome").Served => ({
+  bytes: BODY.length,
+  requests,
+  effects: effects as never,
+  expectedEffects: EXPECTED,
+});
 /** An engine start: a new generation (the harness's `beginEpoch`), then the start's own `waiting/cache_not_valid` before its first tick. */
 const begin = () => {
   generation += 1;
@@ -205,6 +303,7 @@ describe("observeColdOutcome (the page function) and classifyColdOutcome", () =>
       scan_ms: 0,
       commit_ms: 1,
       kind: "applied",
+      value: "committed",
     });
     endStep(idle);
     const o = observed(m);
@@ -332,6 +431,7 @@ describe("observeColdOutcome (the page function) and classifyColdOutcome", () =>
         scan_ms: 0,
         commit_ms: 1,
         kind: "applied",
+        value: "committed",
       });
       publish({ kind: "running", catchingUp: i % 2 !== 0 });
     }
@@ -379,7 +479,12 @@ describe("observeColdOutcome (the page function) and classifyColdOutcome", () =>
     const m = mark();
     start();
     requestStep();
-    trace("data.sync_commit", { scan_ms: 4, commit_ms: 28, kind: "applied" });
+    trace("data.sync_commit", {
+      scan_ms: 4,
+      commit_ms: 28,
+      kind: "applied",
+      value: "committed",
+    });
     endStep(idle);
     expect(classifyColdOutcome(observed(m), served()).problems).toEqual([
       "the first commit after the request does not record its bytes",
@@ -443,6 +548,263 @@ describe("observeColdOutcome (the page function) and classifyColdOutcome", () =>
       "observation identity: the page was replaced (a reload) while observing",
     );
   });
+});
+
+// ---- revision 12 (review 12's R2 follow-up; design assessment DA-C1, Q1/Q2): the measured attempt and what it wrote -----------------
+const lapsedRetryToIdle = () => {
+  // Production (sync-engine.ts): the measured page's every admission round lapsed, so the outcome traced is applied/lease_lapsed; the step
+  // returns `dropped("unverified")` WITHOUT publishing (the state stays running) and the loop traces its end recording running; the paced
+  // retry asks again, the stub answers its empty page, which commits, and the engine publishes idle.
+  start();
+  requestStep();
+  commit(BODY.length, "applied", "lease_lapsed");
+  trace("data.sync_next", { when: "after", state: "running" });
+};
+const retryEmptyToIdle = () => {
+  trace("data.sync_tick", { why: "timer", coalesced: false });
+  emptyCommit();
+  endStep(idle);
+};
+
+it("case R12-C1 (review 12): a measured lease_lapsed attempt ends the observation at its own running end; the retry's empty idle can never stand for it", () => {
+  const m = mark();
+  lapsedRetryToIdle();
+  // Complete at the attempt's own end (an assertion, so an observer that waits on is caught as one).
+  expect(observeColdOutcome(m)).not.toBeNull();
+  const o = observed(m);
+  expect(o.method).toBe("engine-state-log/3");
+  expect(o.step_end).toMatchObject({
+    event: "data.sync_next",
+    recorded: "running",
+  });
+  expect(o.terminal.state.kind).toBe("running");
+  // The retry and its idle come later: the observation already made is unchanged.
+  retryEmptyToIdle();
+  expect(observeColdOutcome(m)).toEqual(o);
+  const c = classifyColdOutcome(o, served(2));
+  expect(c.outcome).toBe("error");
+  // (The engine published nothing after the request: its running end rests on the request's own publication.)
+  expect(c.problems).toEqual([
+    "the measured page was not written (value lease_lapsed) and the engine asked again: a later response cannot stand for it",
+    "no state was published after the request before its end (the terminal is the request itself)",
+  ]);
+});
+
+it("case R12-C2 (review 12's diagnostic, labelled corrected counterpart): the revision-11 witness of that schedule (walked on to the retry's idle) is an error, not an admission", () => {
+  const m = mark();
+  lapsedRetryToIdle();
+  retryEmptyToIdle();
+  const o = observed(m);
+  // The witness revision 11's observer made of the same history: every event to the retry's idle end, its terminal the idle.
+  const walked = clone(o);
+  const end = harness.engineTrace.length - 1;
+  walked.events = harness.engineTrace
+    .map((line, trace) => ({ line, trace }))
+    .filter(({ line }) =>
+      ["data.sync_commit", "data.sync_next", "data.sync_step_failed"].includes(
+        line.split(" ")[1] ?? "",
+      ),
+    )
+    .map(({ line, trace }) => ({
+      trace,
+      event: line.split(" ")[1] ?? "",
+      payload: JSON.parse(line.slice(line.indexOf("{"))),
+    }));
+  const last = harness.engineStates.length - 1;
+  walked.published = harness.engineStates.map((e, index) => ({
+    index,
+    generation: e.generation,
+    at: e.at,
+    trace: e.trace,
+    state: e.state,
+  }));
+  walked.terminal = {
+    index: last,
+    at: walked.published[last]?.at ?? 0,
+    trace: walked.published[last]?.trace ?? 0,
+    state: idle,
+  };
+  walked.step_end = { trace: end, event: "data.sync_next", recorded: "idle" };
+  walked.commits = walked.events
+    .filter((e) => e.event === "data.sync_commit")
+    .map((e) => e.payload ?? {});
+  const c = classifyColdOutcome(walked, served(2));
+  expect(c.outcome).toBe("error");
+  expect(c.problems).toContain(
+    "the measured page was not written (value lease_lapsed) and the engine asked again: a later response cannot stand for it",
+  );
+});
+
+it("control R12-C3: an internal lapse of an admission round followed by a committed round within the same request (one committed line) is admitted", () => {
+  const m = mark();
+  start();
+  requestStep();
+  // admitAndCommit retries a lapsed round inside the step and traces only the final outcome.
+  commit(BODY.length, "applied", "committed");
+  endStep(idle);
+  expect(classifyColdOutcome(observed(m), served())).toEqual({
+    outcome: "admitted",
+    detail: JSON.stringify(idle),
+    problems: [],
+  });
+});
+
+it("control R12-C4: a committed has_more measured page continues to the stub's committed empty page and idle; the measured page's figures are kept", () => {
+  const m = mark();
+  start();
+  requestStep();
+  commit();
+  trace("data.sync_next", { when: "now", state: "running" });
+  expect(observeColdOutcome(m)).toBeNull();
+  trace("data.sync_tick", { why: "now", coalesced: false });
+  emptyCommit();
+  endStep(idle);
+  const o = observed(m);
+  expect(o.commits.map((c) => [c.bytes, c.value])).toEqual([
+    [BODY.length, "committed"],
+    [80, "committed"],
+  ]);
+  expect(classifyColdOutcome(o, served(2)).outcome).toBe("admitted");
+});
+
+it("control R12-C5: applied/not_ready, published waiting for a valid cache, is a genuine refusal with its diagnostic commit kept", () => {
+  const m = mark();
+  start();
+  requestStep();
+  commit(BODY.length, "applied", "not_ready");
+  endStep({ kind: "waiting", reason: "cache_not_valid" }, "event");
+  const o = observed(m);
+  expect(o.commits[0]?.value).toBe("not_ready");
+  expect(classifyColdOutcome(o, served()).outcome).toBe("refused");
+});
+
+it("case R12-C6: not_ready, a missing value or an unknown value paired with a claimed idle is an error naming what the commit wrote", () => {
+  for (const [value, says] of [
+    ["not_ready", "value not_ready"],
+    [null, "value missing"],
+    ["written", "value written"],
+  ] as const) {
+    const m = mark();
+    begin();
+    publish({ kind: "waiting", reason: "cache_not_valid" });
+    requestStep();
+    commit(BODY.length, "applied", value);
+    endStep(idle);
+    expect(classifyColdOutcome(observed(m), served()).problems).toEqual([
+      `idle, but the served page's commit wrote no page (${says})`,
+    ]);
+  }
+});
+
+it("case R12-C7: a dropped measured commit or an unestablished admission (no commit) that asked again ends the observation with no verdict", () => {
+  const m = mark();
+  start();
+  requestStep();
+  trace("data.sync_commit", {
+    bytes: BODY.length,
+    scan_ms: 4,
+    commit_ms: 28,
+    kind: "dropped",
+    reason: "position",
+  });
+  trace("data.sync_next", { when: "now", state: "running" });
+  expect(observeColdOutcome(m)).not.toBeNull();
+  const dropped = observed(m);
+  retryEmptyToIdle();
+  expect(classifyColdOutcome(dropped, served(2)).problems[0]).toBe(
+    "the measured page was not written (a dropped commit) and the engine asked again: a later response cannot stand for it",
+  );
+  const m2 = mark();
+  begin();
+  publish({ kind: "waiting", reason: "cache_not_valid" });
+  requestStep();
+  trace("data.sync_next", { when: "after", state: "running" });
+  expect(observeColdOutcome(m2)).not.toBeNull();
+  const none = observed(m2);
+  retryEmptyToIdle();
+  expect(classifyColdOutcome(none, served(2)).problems[0]).toBe(
+    "the measured page was not written (no commit) and the engine asked again: a later response cannot stand for it",
+  );
+});
+
+it("case R12-C8: a committed measured page whose own step ended in a refusal is a contradiction; a refusal after its continuation stays a refusal", () => {
+  const m = mark();
+  start();
+  requestStep();
+  commit();
+  endStep({ kind: "stopped", cause: "storage_full" }, "event");
+  expect(classifyColdOutcome(observed(m), served()).problems).toEqual([
+    "the served page was committed, but its step ended stopped: a committed page ends idle or running",
+  ]);
+  const m2 = mark();
+  begin();
+  publish({ kind: "waiting", reason: "cache_not_valid" });
+  requestStep();
+  commit();
+  trace("data.sync_next", { when: "now", state: "running" });
+  trace("data.sync_tick", { why: "now", coalesced: false });
+  endStep({ kind: "stopped", cause: "storage_full" }, "event");
+  expect(classifyColdOutcome(observed(m2), served(2))).toEqual({
+    outcome: "refused",
+    detail: JSON.stringify({ kind: "stopped", cause: "storage_full" }),
+    problems: [],
+  });
+});
+
+it("control R12-C9: a failed step after a committed page ends in its local_storage stop and is refused (the commit retained)", () => {
+  const m = mark();
+  start();
+  requestStep();
+  commit();
+  trace("data.sync_step_failed");
+  publish({ kind: "stopped", cause: "local_storage" });
+  const o = observed(m);
+  expect(o.commits[0]?.value).toBe("committed");
+  expect(classifyColdOutcome(o, served()).outcome).toBe("refused");
+});
+
+it("case R12-C10: a committed idle run whose cache is not the served page's (zero rows, change count instead of surviving rows, another version), or unread, is an error", () => {
+  const m = mark();
+  start();
+  requestStep();
+  commit();
+  endStep(idle);
+  const o = observed(m);
+  const say = (effects: unknown) =>
+    classifyColdOutcome(o, served(1, effects)).problems;
+  expect(say({ ...EFFECTS, rows: 0, entries_sha256: sha("") })).toEqual([
+    "the cache holds 0 rows; the served page leaves 3",
+  ]);
+  // Six changes are not six rows (W4's 800 changes leave 80).
+  expect(say({ ...EFFECTS, rows: 6 })).toEqual([
+    "the cache holds 6 rows; the served page leaves 3",
+  ]);
+  // A@1 survived instead of A@2: the last write did not win.
+  expect(
+    say({
+      ...EFFECTS,
+      entries_sha256: sha([`${A}@1`, `${B}@1`, `${C}@1`].join("\n")),
+    }),
+  ).toEqual(["the cache's rows are not the ones the served page leaves"]);
+  expect(say(null)).toEqual(["the cache the run left was not recorded"]);
+  // A refusal is never judged by its effects.
+  expect(
+    classifyColdOutcome(o, { ...served(1, null), expectedEffects: null })
+      .outcome,
+  ).toBe("error");
+});
+
+it("case R12-C11: a witness of the revision-11 method (engine-state-log/2) is no longer evidence", () => {
+  const m = mark();
+  start();
+  requestStep();
+  commit();
+  endStep(idle);
+  const old = clone(observed(m)) as ColdObservation;
+  (old as { method: string }).method = "engine-state-log/2";
+  expect(classifyColdOutcome(old, served()).problems).toEqual([
+    "observation method engine-state-log/2 is not engine-state-log/3",
+  ]);
 });
 
 describe("observeLiveOutcome and classifyLiveOutcome", () => {
@@ -1027,6 +1389,7 @@ describe("observeLiveOutcome and classifyLiveOutcome", () => {
 let schedule: Array<() => void> = [];
 const net = { script: [] as unknown[], requests: [] as unknown[] };
 vi.mock("../e2e/data-sync-helpers", () => ({
+  ACCOUNT: "00000000-0000-4000-8000-0000000000ac",
   stubNetwork: async () => net,
   seedSettled: async () => undefined,
   bootSession: async () => page,
@@ -1134,13 +1497,7 @@ describe("oneColdRun (actual helper, deterministic schedules)", () => {
         net.requests.push({});
         trace("data.sync_tick", { why: "now", coalesced: false });
       },
-      () =>
-        trace("data.sync_commit", {
-          bytes: 80,
-          scan_ms: 0.5,
-          commit_ms: 1.5,
-          kind: "applied",
-        }),
+      () => emptyCommit(),
       () => endStep(idle),
     ];
     const r = await run();
@@ -1209,6 +1566,67 @@ describe("oneColdRun (actual helper, deterministic schedules)", () => {
     expect(unusableRuns([r])).toEqual([
       expect.stringMatching(/^cold run 1: error \(.*observation identity/),
     ]);
+  });
+
+  it("control R12-R1: a healthy run records the cache it left (cache-rows/1) and the cursor, and the served page's effects admit it", async () => {
+    schedule = [asked, () => commit(), () => endStep(idle)];
+    const r = await run();
+    expect(r.outcome).toBe("admitted");
+    expect(r.effects).toEqual(EFFECTS);
+    expect(r.cursor_after).toBe("c-1");
+  });
+
+  it("case R12-R2 (review 12): the measured lease_lapsed attempt, retried into the stub's empty page and idle, is an error run, which the stage barrier names", async () => {
+    schedule = [
+      asked,
+      () => commit(BODY.length, "applied", "lease_lapsed"),
+      () => trace("data.sync_next", { when: "after", state: "running" }),
+      () => {
+        net.requests.push({});
+        trace("data.sync_tick", { why: "timer", coalesced: false });
+      },
+      () => emptyCommit(),
+      () => endStep(idle),
+    ];
+    const r = await run();
+    expect(r.outcome).toBe("error");
+    expect(r.detail).toMatch(
+      /^the measured page was not written \(value lease_lapsed\) and the engine asked again/,
+    );
+    expect(r.observation?.terminal.state.kind).toBe("running");
+    expect(r.effects).toEqual({
+      method: "cache-rows/1",
+      rows: 0,
+      entries_sha256: sha(""),
+    });
+    expect(unusableRuns([r])).toHaveLength(1);
+  });
+
+  it("case R12-R3: an idle run whose cache cannot be read afterwards is an error run (never an admission), its reason in the detail", async () => {
+    schedule = [asked, () => commit(), () => endStep(idle)];
+    cacheFault = "the store is closed";
+    const r = await run();
+    expect(r.outcome).toBe("error");
+    expect(r.effects).toBeNull();
+    expect(r.detail).toMatch(/effects not read: Error: the store is closed/);
+  });
+
+  it("control R12-R4: a committed has_more page continued by the stub's empty page is admitted with the measured page's figures and effects", async () => {
+    schedule = [
+      asked,
+      () => commit(),
+      () => trace("data.sync_next", { when: "now", state: "running" }),
+      () => {
+        net.requests.push({});
+        trace("data.sync_tick", { why: "now", coalesced: false });
+      },
+      () => emptyCommit(),
+      () => endStep(idle),
+    ];
+    const r = await run();
+    expect(r.outcome).toBe("admitted");
+    expect([r.scan_ms, r.commit_ms]).toEqual([4, 28]);
+    expect(r.effects).toEqual(EFFECTS);
   });
 
   it("case (revision 10, DA-1): a first commit of other bytes than the served body is an error run", async () => {

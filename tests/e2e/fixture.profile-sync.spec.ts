@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import type { Page } from "@playwright/test";
+import { tracePayload } from "../../scripts/lib/profile-outcome-rules.mjs";
 import {
   allWorkloads,
   denseChecklistPage,
@@ -21,7 +22,7 @@ import {
   waitForState,
 } from "./data-sync-helpers";
 import { expect, test } from "./helpers";
-import { commitsOf, oneColdRun, unusableRuns } from "./profile-cold-run";
+import { oneColdRun, unusableRuns } from "./profile-cold-run";
 import {
   beginCollection,
   browserMemory,
@@ -34,6 +35,13 @@ import {
   sleep,
   writeEvidence,
 } from "./profile-helpers";
+import {
+  P2_SAMPLE_METHOD,
+  type P2Sample,
+  type P2Support,
+  p2SampleProblems,
+  selectP2Sample,
+} from "./profile-samples";
 
 /**
  * WEB-09a profiling, fixture layer (plan 7.2): P-2, P-3, P-5, P-11 and P-Q in real Chromium, Firefox and WebKit through the production
@@ -124,6 +132,7 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
   const supportsLong = await observeLongTasks(page);
   await startLeader(page);
   await waitForState(page, "idle");
+  const p2Samples: Record<string, P2Sample[]> = {};
   for (const shape of SHAPES) {
     if (QUICK > 0) {
       shape.samples = Math.min(shape.samples, QUICK);
@@ -133,6 +142,7 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
     const scan: number[] = [];
     const commit: number[] = [];
     const long: number[] = [];
+    const samples: P2Sample[] = [];
     let bytes = 0;
     for (let i = 0; i < shape.warmup + shape.samples; i += 1) {
       const body = shape.body(i);
@@ -161,14 +171,30 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
         .toBe(true);
       const elapsed = Date.now() - started;
       if (i < shape.warmup) continue;
-      const trace = await page.evaluate(
-        (n) => (window.__atlasData?.engineTrace ?? []).slice(n),
-        before,
-      );
-      const last = commitsOf(trace).at(-1);
+      // Revision 12 (review 12, design assessment DA-M1): the sample's scan and commit times are those of ITS page: the first commit after
+      // the sample's trace start, of the bytes it served, applied and committed, and ended by its idle step end. (Revision 11 took the
+      // LAST commit of a later read: after a lapsed hold, the engine's retry of an empty page supplied them.) Anything else fails the
+      // sample; no sample is dropped or replaced.
+      const found = await page.waitForFunction(selectP2Sample, before, {
+        timeout: 30_000,
+        polling: 5,
+      });
+      const support = (await found.jsonValue()) as P2Support;
+      expect(
+        p2SampleProblems(support, bytes),
+        `P-2 ${shape.name} sample ${i}: the sample's own page`,
+      ).toEqual([]);
+      const measured = tracePayload(support.commit.line);
       wall.push(elapsed);
-      if (last?.scan_ms !== undefined) scan.push(last.scan_ms);
-      if (last?.commit_ms !== undefined) commit.push(last.commit_ms);
+      scan.push(Number(measured?.scan_ms));
+      commit.push(Number(measured?.commit_ms));
+      samples.push({
+        index: i,
+        from: before,
+        commit: support.commit.trace,
+        end: support.end.trace,
+        bytes,
+      });
       long.push(
         await page.evaluate(() =>
           (window as unknown as { __long: number[] }).__long.reduce(
@@ -186,6 +212,7 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
       method:
         "wall = nudge to idle through the stubbed network (includes the stub's own transfer); scan and commit are the engine's own monotonic timings",
     };
+    p2Samples[shape.name] = samples;
     record(`P-2 ${shape.name} wall_ms`, engine, wall, extra);
     record(`P-2 ${shape.name} scan_ms`, engine, scan, extra);
     record(`P-2 ${shape.name} commit_ms`, engine, commit, extra);
@@ -205,6 +232,11 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
   );
   mkdirSync(`${PROFILE_OUT}/raw`, { recursive: true });
   writeFileSync(`${PROFILE_OUT}/raw/P-2.trace.${engine}.txt`, trace.join("\n"));
+  // Each recorded sample's operation in that trace (revision 12): the contract re-derives the scan and commit series from it.
+  writeFileSync(
+    `${PROFILE_OUT}/raw/P-2.samples.${engine}.json`,
+    `${JSON.stringify({ method: P2_SAMPLE_METHOD, engine, shapes: p2Samples }, null, 2)}\n`,
+  );
 });
 
 // ---- P-3: durability ------------------------------------------------------------------------------------------------------------------

@@ -1,5 +1,14 @@
-import type { Browser, BrowserContext } from "@playwright/test";
+import { createHash } from "node:crypto";
+import type { Browser, BrowserContext, Page } from "@playwright/test";
 import {
+  EFFECTS_METHOD,
+  effectsText,
+  entriesOfPage,
+  entriesOfRows,
+  type RecordedEffects,
+} from "../../scripts/lib/profile-effects.mjs";
+import {
+  ACCOUNT,
   bootSession,
   seedSettled,
   startLeader,
@@ -33,6 +42,53 @@ export const commitsOf = (trace: string[]): Commit[] =>
       }
     });
 
+const sha256 = (text: string) =>
+  createHash("sha256").update(text, "utf8").digest("hex");
+
+/** What a served body leaves in a new, empty cache (`cache-rows/1`), derived from the served bytes; null for a body that is not a page. */
+export function expectedEffectsOf(
+  body: string | Buffer,
+): { rows: number; entries_sha256: string } | null {
+  const { entries } = entriesOfPage(
+    typeof body === "string" ? body : body.toString("utf8"),
+  );
+  return entries
+    ? { rows: entries.length, entries_sha256: sha256(effectsText(entries)) }
+    : null;
+}
+
+/**
+ * The cache the run left (revision 12), read after the observation and outside every measured window: the stub serves the measured body
+ * once and an empty page to every later request, so nothing but the measured page (and its empty continuation) can have changed it.
+ */
+async function readEffects(
+  page: Page,
+): Promise<{ effects: RecordedEffects; cursor: string | null }> {
+  const read = await page.evaluate(async (account) => {
+    const data = window.__atlasData;
+    if (!data) throw new Error("no data harness");
+    const rows = (await data.rows(account, "cache")) as Array<{
+      id?: unknown;
+      version?: unknown;
+    }>;
+    const sync = (await data.syncState(account)) as { cursor?: unknown } | null;
+    return {
+      rows: rows.map((row) => ({ id: row.id, version: row.version })),
+      cursor: typeof sync?.cursor === "string" ? sync.cursor : null,
+    };
+  }, ACCOUNT);
+  const { entries, problem } = entriesOfRows(read.rows);
+  if (!entries) throw new Error(`the cache the run left: ${problem}`);
+  return {
+    effects: {
+      method: EFFECTS_METHOD,
+      rows: entries.length,
+      entries_sha256: sha256(effectsText(entries)),
+    },
+    cursor: read.cursor,
+  };
+}
+
 /**
  * One COLD application of a `/sync` page body through the production path (fetchFor, the real stamped wrapper; the scanner; the
  * validator; the page commit) in a new browser context, the network a Playwright route stub that answers the next `/sync` with `body`.
@@ -55,12 +111,22 @@ export const commitsOf = (trace: string[]): Commit[] =>
  * Revision 10 (review 10 R2 follow-up): the observation is a witness bound to this page instance and the one engine start after the mark
  * (a reload or a second start while observing is an `error` run, never a verdict), classified by the shared rules against the bytes this
  * function served and the stub's count.
+ *
+ * Revision 12 (review 12's R2 follow-up; design assessment DA-C1): the witness is `engine-state-log/3` (a measured attempt that wrote
+ * nothing and asked again completes it as no verdict), and after every measurement the run reads the cache it left (`effects`, with the
+ * sync cursor): an admission requires the measured page committed AND those effects equal to what the served bytes leave in the new,
+ * empty database (`expectedEffectsOf`). A failed read of the effects leaves an observation unclassifiable as an admission (an `error`).
  */
 export async function oneColdRun(
   browser: Browser,
   baseURL: string | undefined,
   engine: string,
   body: string | Buffer,
+  /**
+   * FIXTURE FAULT INJECTION for the outcome controls only (revision 12; labelled, never used by the programme): the next n cache
+   * reservations of the measured page report their hold already ended (src/fixture/data-harness/main.ts `__fixtureLapseReservations`).
+   */
+  faults: { lapseReservations?: number } = {},
 ) {
   let context: BrowserContext | null = null;
   const memory = browserMemory();
@@ -74,6 +140,10 @@ export async function oneColdRun(
   let heapAfter: number | null = null;
   let commit: Commit | undefined;
   let observation: ColdObservation | null = null;
+  let effects: RecordedEffects | null = null;
+  let effectsError: string | null = null;
+  let cursorAfter: string | null = null;
+  const expectedEffects = expectedEffectsOf(body);
   /** Read only after a time-out: what the engine published until then (never an outcome). */
   let published: string[] | null = null;
   const bytes =
@@ -88,6 +158,12 @@ export async function oneColdRun(
     heapBaseline = await heap.used();
     await memory.baseline();
     // Where this run's states and trace begin (taken before the sampling window opens, so the window is as it was).
+    if (faults.lapseReservations)
+      await page.evaluate((n) => {
+        (
+          globalThis as { __fixtureLapseReservations?: number }
+        ).__fixtureLapseReservations = n;
+      }, faults.lapseReservations);
     const marked = await page.evaluate(observationMark);
     if (!marked) throw new Error("no data harness on the measured page");
     const mark: ObservationMark = marked;
@@ -118,11 +194,31 @@ export async function oneColdRun(
     heapAfter = await heap.used();
     await sleep(200);
     await memory.after();
+    if (observation)
+      try {
+        const read = await readEffects(page);
+        effects = read.effects;
+        cursorAfter = read.cursor;
+      } catch (error) {
+        effectsError = String(error).slice(0, 200);
+      }
     requests = net.requests.length;
     if (observation) {
-      const classified = classifyColdOutcome(observation, { bytes, requests });
+      const classified = classifyColdOutcome(observation, {
+        bytes,
+        requests,
+        effects,
+        expectedEffects,
+      });
       outcome = classified.outcome;
-      detail = classified.detail;
+      // (The detail of a verdict is exactly the observed terminal state; a read failure is reported beside an `error` only.)
+      detail =
+        effectsError && classified.outcome === "error"
+          ? `${classified.detail}; effects not read: ${effectsError}`.slice(
+              0,
+              400,
+            )
+          : classified.detail;
       commit = observation.commits[0];
     } else if (outcome === "timeout")
       // (Not after an identity error: the page or engine read now is no longer the observed one.)
@@ -148,6 +244,9 @@ export async function oneColdRun(
     detail,
     // The one observation the outcome was classified from (null: none was made; `published` then says what the engine showed).
     observation,
+    // The cache the run left (`cache-rows/1`) and the sync cursor, read after the measurements (null: not read; see `detail`).
+    effects,
+    cursor_after: cursorAfter,
     ...(published ? { published_until_timeout: published } : {}),
     elapsed_ms: elapsed,
     scan_ms: commit?.scan_ms ?? null,

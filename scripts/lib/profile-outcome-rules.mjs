@@ -26,8 +26,21 @@
 //     raw line of every step event inside its boundary, derives the end that completes it and the publication that end rests on
 //     (`liveTerminalRelation`), and binds that slice to the trace file read from the same page;
 //   * a device engine run's detail is the state it ended in and must show its outcome; its first commit (schema 3) is the served body's.
+//
+// Review 12 found the cold and device rules admitted a measured commit that wrote no page: `kind: "applied"` is the TRANSACTION's result,
+// and the page plan's own result (`value`) can be `not_ready` or `lease_lapsed`, which write nothing (src/data/plans/commit-page.ts). After
+// a lapsed hold the engine asks again without publishing anything (it stays `running`), so the cold observer walked past the measured
+// attempt's end as if it were a `has_more` continuation, and the stub's later empty page committed and published idle. Revision 12
+// (design assessment DA-C1/DA-D1, invariants 1 to 5): a commit wrote its page only when it is applied AND committed (`pageCommitted`,
+// shared by the cold, live and device rules); the measured attempt is the step that made the first request after the mark, and only a
+// committed measured page may continue past a `running` end (`engine-state-log/3`); an attempt that wrote nothing and asked again ends
+// the observation with no verdict, so no later response can stand for it; and an admitted run's durable effects (the cache it left,
+// `cache-rows/1`, scripts/lib/profile-effects.mjs) must be the ones the served page leaves. Device results are schema 4: each engine run
+// carries the same observation and its effects.
 
-export const COLD_METHOD = "engine-state-log/2";
+import { effectsProblems } from "./profile-effects.mjs";
+
+export const COLD_METHOD = "engine-state-log/3";
 export const LIVE_METHOD = "live-dense-commit/3";
 /** The state kinds that are the engine's verdict that a page was not applied (the device protocol's set, profile-page.ts). */
 export const REFUSED_STATES = ["stopped", "backing_off", "paused"];
@@ -44,6 +57,19 @@ const isObj = (x) => typeof x === "object" && x !== null && !Array.isArray(x);
 const isCount = (x) => Number.isInteger(x) && x >= 0;
 const isTime = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
 const isText = (x) => typeof x === "string" && x.length > 0;
+/**
+ * Whether a traced commit wrote its page: the transaction applied (`kind`) AND the page plan committed (`value`). `not_ready`,
+ * `lease_lapsed`, a missing or unknown value, a dropped or failed transaction wrote nothing; a missing value never defaults to committed.
+ */
+export const pageCommitted = (commit) =>
+  isObj(commit) && commit.kind === "applied" && commit.value === "committed";
+/** Why a measured commit did not write its page, for a problem message. */
+const notWritten = (commit) =>
+  !isObj(commit)
+    ? "no commit"
+    : commit.kind !== "applied"
+      ? `a ${String(commit.kind)} commit`
+      : `value ${String(commit.value ?? "missing")}`;
 /** JSON with sorted keys: two representations of one value are the same only if this text is. */
 const canonical = (x) =>
   JSON.stringify(x, (_key, value) =>
@@ -147,8 +173,24 @@ function epochProblems(o) {
  * A cold observation as evidence of one verdict on the served page. `servedBytes` is the byte length of what the caller served (the
  * generated workload, or the verified captured W2 page), `requests` the stub's count. Returns the verdict the end state shows (`shows`),
  * every problem, and the first commit after the request (the measured page's, or null).
+ *
+ * Revision 12: `effects` is the cache the run left (`cache-rows/1`, recorded after the observation) and `expectedEffects` what the served
+ * page leaves in the run's new, empty database (derived by the CALLER from the served bytes, never from the run's record); an admission
+ * requires them to agree as well as the measured page's commit to have written it (`pageCommitted`). `effectsExempt` (a reason, or null)
+ * is the caller's explicit statement that this record's effects are judged elsewhere: a negative control (its admission fails the control
+ * whatever it wrote) or a W2 run whose capture is itself invalid (that defect is the capture cell's finding). It never makes an admission
+ * valid on its own: every other relation is still required.
  */
-export function coldObservationRules(o, { servedBytes, requests }) {
+export function coldObservationRules(
+  o,
+  {
+    servedBytes,
+    requests,
+    effects = null,
+    expectedEffects = null,
+    effectsExempt = null,
+  },
+) {
   const none = (problems) => ({ shows: null, problems, first: null });
   if (!isObj(o)) return none(["no observation was retained"]);
   if (o.method !== COLD_METHOD)
@@ -216,15 +258,45 @@ export function coldObservationRules(o, { servedBytes, requests }) {
   )
     problems.push("the recorded request is not the first running published");
 
-  // Its end: the first failed step, or the first step end not still running, at or after the request.
-  const end = events.find(
-    (e) =>
-      e.trace >= request.trace &&
-      (e.event === "data.sync_step_failed" ||
-        (e.event === "data.sync_next" && e.payload?.state !== "running")),
-  );
+  // The measured attempt: the request's own step, ended by the first step end after it; its commit is the first before that end.
+  const isEnd = (e) =>
+    e.event === "data.sync_step_failed" || e.event === "data.sync_next";
+  const attemptEnd = events.find((e) => e.trace >= request.trace && isEnd(e));
+  if (!attemptEnd)
+    return none([...problems, "the request step's end is not retained"]);
+  const measuredEvent =
+    events.find(
+      (e) =>
+        e.event === "data.sync_commit" &&
+        e.trace >= request.trace &&
+        e.trace < attemptEnd.trace,
+    ) ?? null;
+  const written = pageCommitted(measuredEvent?.payload);
+  // Revision 12 (review 12 R2): only a WRITTEN measured page continues past a `running` end (`has_more`: the engine asks for the next page
+  // at once). A measured attempt that wrote nothing and ended `running` (a lapsed hold asks again without publishing anything) ends the
+  // observation: the measured page was not applied, and no later response can stand for it.
+  const continued =
+    attemptEnd.event === "data.sync_next" &&
+    attemptEnd.payload?.state === "running" &&
+    written;
+  const end = continued
+    ? events.find(
+        (e) =>
+          e.trace > attemptEnd.trace &&
+          (e.event === "data.sync_step_failed" ||
+            (e.event === "data.sync_next" && e.payload?.state !== "running")),
+      )
+    : attemptEnd;
   if (!end)
     return none([...problems, "the request step's end is not retained"]);
+  if (
+    attemptEnd.event === "data.sync_next" &&
+    attemptEnd.payload?.state === "running" &&
+    !written
+  )
+    problems.push(
+      `the measured page was not written (${notWritten(measuredEvent?.payload)}) and the engine asked again: a later response cannot stand for it`,
+    );
   if (events.at(-1) !== end)
     problems.push("step events after the request step's end are retained");
   const failed = end.event === "data.sync_step_failed";
@@ -316,11 +388,20 @@ export function coldObservationRules(o, { servedBytes, requests }) {
   if (verdict === "admitted") {
     if (first?.kind !== "applied")
       problems.push("idle without the served page's applied commit");
+    else if (!pageCommitted(first))
+      problems.push(
+        `idle, but the served page's commit wrote no page (${notWritten(first)})`,
+      );
     else if (!(firstEvent.trace < terminal.trace))
       problems.push(
         "the idle state was published before the served page's commit",
       );
-  }
+    else if (typeof effectsExempt !== "string" || effectsExempt.length === 0)
+      problems.push(...effectsProblems(effects, expectedEffects));
+  } else if (verdict === "refused" && !failed && end === attemptEnd && written)
+    problems.push(
+      `the served page was committed, but its step ended ${terminal.state.kind}: a committed page ends idle or running`,
+    );
   if (!(isCount(requests) && requests >= 1))
     problems.push("no /sync request reached the stub");
   if (!isCount(servedBytes) || servedBytes === 0)
@@ -604,7 +685,7 @@ export function liveObservationRules(
   if (relation.shows === "admitted") {
     if (derived?.payload.kind !== "applied")
       problems.push("the dense commit was not applied");
-    else if (derived.payload.value !== "committed")
+    else if (!pageCommitted(derived.payload))
       problems.push(
         `the dense commit wrote no page (${String(derived.payload.value)})`,
       );
@@ -614,11 +695,20 @@ export function liveObservationRules(
 }
 
 /**
- * A device run's outcome corroboration (schema 3): an engine run's detail is the JSON state it ended in and must show its outcome, and its
+ * A device run's outcome corroboration. Schema 3: an engine run's detail is the JSON state it ended in and must show its outcome, and its
  * first commit (`first_commit`) is the served body's, with the figures the run reports. W5 (processing only) and killed attempts have
- * none. Errors and time-outs keep whatever they have. Returns the problems, each naming the field.
+ * none. Errors and time-outs keep whatever they have. Schema 4 (revision 12, review 12 R2, design assessment DA-D1): an admitted or
+ * refused engine run carries the ONE observation it was classified from (`engine-state-log/3`, made by the page from its own state log
+ * and trace, src/fixture/data-harness/profile-observation.ts) and the cache it left (`effects`, read after its engine was stopped); the
+ * cold rules judge that observation against the run's served bytes and request count, the recorded outcome, detail, first commit and
+ * figures must be the observation's, an admission needs the measured page written (`pageCommitted`) and the effects the served page
+ * leaves (`expectedEffects`, derived by the caller from the verified bytes), and `changes_written` is the effects' row count. Returns the
+ * problems, each naming the field.
  */
-export function deviceRunOutcomeProblems(run) {
+export function deviceRunOutcomeProblems(
+  run,
+  { expectedEffects = null, effectsExempt = null } = {},
+) {
   const problems = [];
   if (!("first_commit" in run))
     return ["first_commit is neither a commit nor an explicit null"];
@@ -626,12 +716,25 @@ export function deviceRunOutcomeProblems(run) {
   if (!(fc === null || isObj(fc)))
     return ["first_commit is neither a commit nor an explicit null"];
   const processingOnly = String(run.workload).startsWith("W5-");
+  if (
+    !("observation" in run) ||
+    !(run.observation === null || isObj(run.observation))
+  )
+    problems.push("observation is neither an observation nor an explicit null");
+  if (!("effects" in run) || !(run.effects === null || isObj(run.effects)))
+    problems.push("effects is neither a record nor an explicit null");
   if (run.outcome === "killed" || processingOnly) {
     if (fc !== null)
       problems.push(
         processingOnly
           ? "W5 is the processing path only: no commit"
           : "a killed attempt cannot have committed anything",
+      );
+    if (run.observation != null)
+      problems.push(
+        processingOnly
+          ? "W5 is the processing path only: no engine observation"
+          : "a killed attempt cannot have observed anything",
       );
     return problems;
   }
@@ -668,10 +771,42 @@ export function deviceRunOutcomeProblems(run) {
       problems.push(
         "an admitted engine run without the served body's applied commit",
       );
-    else
+    else {
+      if (!pageCommitted(fc))
+        problems.push(
+          `an admitted engine run whose served body's commit wrote no page (${notWritten(fc)})`,
+        );
       for (const key of ["scan_ms", "commit_ms"])
         if (run[key] !== fc[key])
           problems.push(`${key} is not the served body's commit's`);
+    }
   }
+  // Schema 4: the observation the outcome was classified from, judged by the cold rules, and the effects.
+  const o = run.observation;
+  if (!isObj(o))
+    return [
+      ...problems,
+      `an ${run.outcome} engine run without the observation it was classified from`,
+    ];
+  const judged = coldObservationRules(o, {
+    servedBytes: run.bytes,
+    requests: run.request_count,
+    effects: run.effects,
+    expectedEffects,
+    effectsExempt,
+  });
+  problems.push(...judged.problems);
+  if (judged.shows !== run.outcome)
+    problems.push(
+      `recorded ${run.outcome}, but its observation shows ${judged.shows ?? "no verdict"}`,
+    );
+  if (!sameValue(state, o.terminal?.state ?? null))
+    problems.push("the detail is not the observed terminal state");
+  if (!sameValue(fc, judged.first))
+    problems.push("first_commit is not the observation's measured commit");
+  if (isObj(run.effects) && run.changes_written !== run.effects.rows)
+    problems.push(
+      "changes_written is not the row count of the cache the run left",
+    );
   return problems;
 }

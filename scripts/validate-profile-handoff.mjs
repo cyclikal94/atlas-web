@@ -81,11 +81,13 @@ if (!file) {
 // hash is accepted only for a capture the hand-over CERTIFIES (revision 4, review 4 R2, design assessment A5): see certifiedW2.
 let w2Hashes = null;
 let w2Uncertified = new Map();
+let w2Bytes = new Map();
 if (w2HashesFile)
   try {
     const certification = certifiedW2(w2HashesFile);
     w2Hashes = certification.certified;
     w2Uncertified = certification.uncertified;
+    w2Bytes = certification.bytes;
     for (const message of certification.notes)
       console.error(`WARNING ${message}`);
   } catch (error) {
@@ -103,6 +105,7 @@ const checked = checkDeviceResults(data, {
   recorded: RECORDED,
   w2Hashes,
   w2Uncertified,
+  w2Bytes,
 });
 for (const message of checked.errors) console.error(`ERROR   ${message}`);
 for (const message of checked.failed_controls)
@@ -138,6 +141,8 @@ function certifiedW2(file) {
   const certified = new Set();
   const uncertified = new Map();
   const notes = [];
+  // Schema 4: the certified captures' bytes, so an admitted W2 run's effects can be derived from what it was served.
+  const bytes = new Map();
   const handoff =
     basename(dirname(at)) === "fixtures" ? dirname(dirname(at)) : null;
   const valuesPath = handoff ? join(handoff, "evidence", "values.jsonl") : "";
@@ -146,7 +151,7 @@ function certifiedW2(file) {
     notes.push(why);
     for (const hash of Object.values(listed ?? {}))
       if (typeof hash === "string") uncertified.set(hash, why);
-    return { certified, uncertified, notes };
+    return { certified, uncertified, notes, bytes };
   }
   const values = readFileSync(valuesPath, "utf8")
     .split("\n")
@@ -191,14 +196,16 @@ function certifiedW2(file) {
           }).problems,
         );
     }
-    if (problems.length === 0) certified.add(hash);
-    else {
+    if (problems.length === 0) {
+      certified.add(hash);
+      bytes.set(hash, readFileSync(join(handoff, "fixtures", name)));
+    } else {
       const why = `${name} is NOT a certified W2 capture: ${problems.join("; ")}`;
       if (typeof hash === "string") uncertified.set(hash, why);
       if (!m || m[2] === "1") notes.push(why);
     }
   }
-  return { certified, uncertified, notes };
+  return { certified, uncertified, notes, bytes };
 }
 
 /**

@@ -310,11 +310,11 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 6; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 7; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 6);
-  assert.equal(device.DEVICE_SCHEMA, 3);
+  assert.equal(evidence.CONTRACT_VERSION, 7);
+  assert.equal(device.DEVICE_SCHEMA, 4);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
   const outcomes = r.cells.filter((c) => c.kind === "outcome");
@@ -841,7 +841,7 @@ test("case (DA-1, invariant 1): a second engine start, another page instance, a 
   );
   assert.match(
     reasons(cell(r, P11("webkit", "W4", 4))),
-    /observation method engine-state-log\/1 is not engine-state-log\/2/,
+    /observation method engine-state-log\/1 is not engine-state-log\/3/,
   );
 });
 
@@ -1410,13 +1410,16 @@ test("case (M8, M9): a trace that continues after the boundary (a later poll, a 
 const deviceFile = (dir, engine = "webkit") =>
   join(dir, `device-page/results.${engine}.json`);
 const checkDevice = (dir, data, engine = "webkit") => {
-  const h = createHash("sha256")
-    .update(readFileSync(join(dir, `w2/W2-captured.${engine}.limit-1.json`)))
-    .digest("hex");
+  const bytes = readFileSync(
+    join(dir, `w2/W2-captured.${engine}.limit-1.json`),
+  );
+  const h = createHash("sha256").update(bytes).digest("hex");
   return device.checkDeviceResults(data, {
     recorded: hashes,
     w2Hashes: new Set([h]),
     w2Expected: h,
+    // Schema 4 (revision 12): the capture's bytes, from which an admitted W2 run's effects are derived.
+    w2Bytes: new Map([[h, bytes]]),
   });
 };
 const runOf = (data, workload, run = 1) =>
@@ -1433,10 +1436,17 @@ test("case (DA-3): device engine runs whose end state, first commit or figures c
     change(data);
     return checkDevice(dir, data).errors;
   };
+  // ADAPTED (revision 12, schema 4; labelled): each edit below changes ONE representation of the run, and schema 4 retains a second one
+  // (the observation the outcome was classified from), so the same edit is also reported as disagreeing with that observation. The
+  // first error is still the original assertion; any other must be one of those named disagreements, never an unrelated fault.
+  const OBSERVATION_DISAGREEMENT =
+    /: (the detail is not the observed terminal state|first_commit is not the observation's measured commit|recorded \w+, but its observation shows .*)$/;
   const one = (change, pattern) => {
     const errors = errorsOf(change);
-    assert.equal(errors.length, 1, errors.join(" | "));
+    assert.ok(errors.length >= 1, "no error");
     assert.match(errors[0], pattern);
+    for (const other of errors.slice(1))
+      assert.match(other, OBSERVATION_DISAGREEMENT, errors.join(" | "));
   };
   one((d) => {
     runOf(d, "W1").detail = JSON.stringify({
@@ -1476,10 +1486,14 @@ test("case (DA-3): device engine runs whose end state, first commit or figures c
   // Legitimate: a refusal waiting for a valid cache; an error and a time-out with their own text; a killed attempt with nothing.
   assert.deepEqual(
     errorsOf((d) => {
-      runOf(d, w7).detail = JSON.stringify({
-        kind: "waiting",
-        reason: "cache_not_valid",
-      });
+      // (Schema 4: the refusal's observation ends in the same state as its detail.)
+      const waiting = { kind: "waiting", reason: "cache_not_valid" };
+      runOf(d, w7).detail = JSON.stringify(waiting);
+      const o = runOf(d, w7).observation;
+      o.terminal.state = waiting;
+      o.published[2].state = waiting;
+      o.events.at(-1).payload.state = "waiting";
+      o.step_end.recorded = "waiting";
       Object.assign(runOf(d, "W6", 2), {
         outcome: "error",
         detail: "the run threw: synthetic",
@@ -1506,18 +1520,22 @@ test("case (DA-3): device engine runs whose end state, first commit or figures c
         heap_after_bytes: null,
         heap_baseline_bytes: null,
         first_commit: null,
+        observation: null,
+        effects: null,
       });
     }),
     [],
   );
-  // A schema-2 file is history, never read as current evidence.
-  const old = errorsOf((d) => {
-    d.schema = 2;
-  });
-  assert.match(
-    old.join(" | "),
-    /schema must be 3 \(schema 2 is a historical record/,
-  );
+  // Schema-2 and schema-3 files are history, never read as current evidence.
+  for (const schema of [2, 3]) {
+    const old = errorsOf((d) => {
+      d.schema = schema;
+    });
+    assert.match(
+      old.join(" | "),
+      new RegExp(`schema must be 4 \\(schema ${schema} is a historical record`),
+    );
+  }
 });
 
 test("case (DA-3): one contradicted device engine outcome in the package makes its device cells invalid, withholds support and is refused by both validator modes", (t) => {
@@ -1559,8 +1577,8 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 
 // ---- versions -----------------------------------------------------------------------------------------------------------------------
 
-test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9) and 5 (revision 10) are not evidence of version 6", (t) => {
-  for (const version of [3, 4, 5]) {
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10) and 6 (revision 11) are not evidence of version 7", (t) => {
+  for (const version of [3, 4, 5, 6]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1573,8 +1591,227 @@ test("case: stages recorded under contract versions 3 (review 9's Air request), 
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 6`),
+          .includes(`recorded under contract ${version}, not 7`),
       ),
     );
   }
+});
+
+// ---- revision 12 (review 12, design assessment DA-M1/DA-M2, Q3): each timed sample is its own operation ---------------------------------
+//
+// Each case changes ONE association and rebinds every other representation as a writer would have written it (the raw series, its
+// summary and hash), so only the association can refuse it. The complete programme (first control above) resolves these cells ok.
+
+const sha = (text) => createHash("sha256").update(text).digest("hex");
+const measurementRows = (dir) =>
+  readFileSync(join(dir, "measurements.jsonl"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l));
+/** Rewrites a series as `record()` would have written it: its samples, raw file, summary and the raw file's hash together. */
+const rewriteSeries = (dir, name, engine, change) => {
+  const rows = measurementRows(dir);
+  const row = rows.find((r) => r.name === name && r.engine === engine);
+  assert.ok(row, `no series ${name}`);
+  const raw = readJson(join(dir, row.raw));
+  raw.samples = change(raw.samples);
+  const text = `${JSON.stringify(raw)}\n`;
+  writeFileSync(join(dir, row.raw), text);
+  const s = [...raw.samples].sort((a, b) => a - b);
+  const q = (p) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
+  Object.assign(row, {
+    n: raw.samples.length,
+    min: +s[0].toFixed(3),
+    p50: +q(0.5).toFixed(3),
+    p95: +q(0.95).toFixed(3),
+    p99: +q(0.99).toFixed(3),
+    max: +s.at(-1).toFixed(3),
+    raw_sha256: sha(text),
+  });
+  writeFileSync(
+    join(dir, "measurements.jsonl"),
+    `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`,
+  );
+};
+const p2Trace = (dir, engine) => join(dir, `raw/P-2.trace.${engine}.txt`);
+const p2Support = (dir, engine) => join(dir, `raw/P-2.samples.${engine}.json`);
+const P2_SCAN = "P-2 dense-100 scan_ms";
+const P2_COMMIT = "P-2 dense-100 commit_ms";
+/** The invalid cells of a resolution (ok and unavailable are satisfied). */
+const unsatisfied = (r) =>
+  r.cells
+    .filter((c) => !["ok", "unavailable"].includes(c.status))
+    .map((c) => c.id)
+    .sort();
+
+test("case R12-M1 (DA-M1): a P-2 sample whose own commit wrote no page (a lapsed hold, its step ending running) is invalid in both series, and the package withholds support", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const support = readJson(p2Support(dir, "webkit"));
+  const e = support.shapes["dense-100"][0];
+  const lines = readFileSync(p2Trace(dir, "webkit"), "utf8").split("\n");
+  const commit = payloadOf(lines[e.commit]);
+  lines[e.commit] =
+    `${lines[e.commit].split(" ")[0]} data.sync_commit ${JSON.stringify({ ...commit, value: "lease_lapsed" })}`;
+  lines[e.end] =
+    `${lines[e.end].split(" ")[0]} data.sync_next ${JSON.stringify({ when: "after", state: "running" })}`;
+  writeFileSync(p2Trace(dir, "webkit"), lines.join("\n"));
+  const r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), [
+    `${P2_COMMIT}[webkit]`,
+    `${P2_SCAN}[webkit]`,
+  ]);
+  assert.match(
+    reasons(cell(r, `${P2_SCAN}[webkit]`)),
+    /sample 0: its commit wrote no page/,
+  );
+  assert.equal(r.complete, false);
+  refusedEndToEnd(dir);
+});
+
+test("case R12-M2 (DA-M1): revision 11's selection (a sample's figures taken from a LATER commit, its support moved there and its series rebound) is invalid", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const support = readJson(p2Support(dir, "webkit"));
+  const [first, second] = support.shapes["dense-100"];
+  const lines = readFileSync(p2Trace(dir, "webkit"), "utf8").split("\n");
+  const later = payloadOf(lines[second.commit]);
+  // Sample 0 now cites sample 1's commit and end, and its series values are that commit's.
+  first.commit = second.commit;
+  first.end = second.end;
+  support.shapes["dense-100"].splice(1, 1, {
+    ...second,
+    from: second.end + 1,
+    commit: second.end + 2,
+    end: second.end + 3,
+  });
+  writeFileSync(
+    p2Support(dir, "webkit"),
+    `${JSON.stringify(support, null, 2)}\n`,
+  );
+  rewriteSeries(dir, P2_SCAN, "webkit", (s) => [later.scan_ms, ...s.slice(1)]);
+  const r = contract.resolveEvidence(dir);
+  assert.match(
+    reasons(cell(r, `${P2_SCAN}[webkit]`)),
+    /sample 0: its commit is not the first after the sample began/,
+  );
+  assert.equal(r.complete, false);
+});
+
+test("case R12-M3 (DA-M1): two samples' scan times swapped (summary and hash recomputed) are invalid; the other series is untouched", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  rewriteSeries(dir, P2_SCAN, "chromium", (s) => [s[1], s[0], ...s.slice(2)]);
+  const r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), [`${P2_SCAN}[chromium]`]);
+  assert.match(
+    reasons(cell(r, `${P2_SCAN}[chromium]`)),
+    /sample 0: [\d.]+ is not its commit's scan_ms/,
+  );
+});
+
+test("case R12-M4 (DA-M2): a P-4 sync sample paired with ANOTHER sample's request (segments recomputed from it), or with no retained support, is invalid; a request-latency sample needs no written page", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const file = join(dir, "samples/P-4.sync.firefox.json");
+  const support = readJson(file);
+  const [a, b] = support.samples;
+  a.request = { ...b.request };
+  writeFileSync(file, `${JSON.stringify(support, null, 2)}\n`);
+  const tick = Number(a.tick.line.split("ms")[0]);
+  const commit = Number(a.commit.line.split("ms")[0]);
+  const r0 = a.request;
+  const set = (seg, v) =>
+    rewriteSeries(dir, `P-4 sync page ${seg}`, "firefox", (s) => [
+      v,
+      ...s.slice(1),
+    ]);
+  set("pre_issue_ms", r0.requestStart - tick);
+  set("request_ms", r0.responseEnd - r0.requestStart);
+  set("post_response_ms", commit - r0.responseEnd);
+  rewriteSeries(
+    dir,
+    "P-10 sync page request_ms (unthrottled loopback)",
+    "firefox",
+    (s) => [r0.responseEnd - r0.requestStart, ...s.slice(1)],
+  );
+  const r = contract.resolveEvidence(dir);
+  for (const name of [
+    "P-4 sync page pre_issue_ms",
+    "P-4 sync page request_ms",
+    "P-4 sync page post_response_ms",
+    "P-4 sync page total_ms",
+    "P-10 sync page request_ms (unthrottled loopback)",
+  ])
+    assert.match(
+      reasons(cell(r, `${name}[firefox]`)),
+      /sample 0: its request is not inside its step/,
+      name,
+    );
+  assert.equal(r.complete, false);
+  refusedEndToEnd(dir);
+  // The support removed: the throttled series has nothing to rest on.
+  const dir2 = scratch(t);
+  writeComplete(dir2);
+  rmSync(join(dir2, "samples/P-10.sync.webkit.json"));
+  const r2 = contract.resolveEvidence(dir2);
+  assert.deepEqual(unsatisfied(r2), [
+    "P-10 sync page duration_ms (proxy delay 250 ms)[webkit]",
+  ]);
+  assert.match(
+    reasons(
+      cell(r2, "P-10 sync page duration_ms (proxy delay 250 ms)[webkit]"),
+    ),
+    /its per-sample support \(samples\/P-10\.sync\.webkit\.json\) is missing or malformed/,
+  );
+  // A latency sample whose commit lapsed is still ONE operation: no written page is required of it.
+  const dir3 = scratch(t);
+  writeComplete(dir3);
+  editJson(join(dir3, "samples/P-4.sync.chromium.json"), (v) => {
+    const c = v.samples[0].commit;
+    c.line = `${c.line.split(" ")[0]} data.sync_commit ${JSON.stringify({ kind: "applied", value: "lease_lapsed" })}`;
+  });
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(dir3)), []);
+});
+
+test("case R12-E1 (invariant 5): an admitted cold run whose recorded cache is not the served page's (W4's 800 changes as 800 rows; a W2 run that left nothing) is invalid; a negative control is not judged by its effects", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  editCold(dir, "firefox", "W4", 3, (run) => {
+    run.effects = { ...run.effects, rows: 800 };
+  });
+  editCold(dir, "chromium", "W2", 2, (run) => {
+    run.effects = {
+      method: "cache-rows/1",
+      rows: 0,
+      entries_sha256: sha(""),
+    };
+  });
+  const r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), [
+    "P-11 W4 cold run 3[firefox]",
+    "P-W2 W2 cold run 2[chromium]",
+  ]);
+  assert.match(
+    reasons(cell(r, "P-11 W4 cold run 3[firefox]")),
+    /the cache holds 800 rows; the served page leaves 80/,
+  );
+  assert.match(
+    reasons(cell(r, "P-W2 W2 cold run 2[chromium]")),
+    /the cache holds 0 rows; the served page leaves 200/,
+  );
+  refusedEndToEnd(dir);
+});
+
+test("case R12-E2 (invariant 5): an admitted device W2 run that left nothing is refused with the engine's file; its capture being valid, no exemption applies", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const data = readJson(deviceFile(dir));
+  const w2 = runOf(data, "W2", 2);
+  w2.effects = { method: "cache-rows/1", rows: 0, entries_sha256: sha("") };
+  w2.changes_written = 0;
+  const errors = checkDevice(dir, data).errors;
+  assert.deepEqual(errors, [
+    "runs[6] (W2 run 2): the cache holds 0 rows; the served page leaves 200",
+  ]);
 });

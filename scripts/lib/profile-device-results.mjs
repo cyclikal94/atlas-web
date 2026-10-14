@@ -23,9 +23,48 @@
 // revision 10) are historical: refused here, never rewritten. The rules are shared with the cold-run classifier and the contract
 // (scripts/lib/profile-outcome-rules.mjs).
 
-import { deviceRunOutcomeProblems } from "./profile-outcome-rules.mjs";
+//
+// Schema 4 (WEB-09c revision 12, review 12 R2, design assessment DA-D1): schema 3 accepted a run whose first commit was applied but
+// wrote no page (`lease_lapsed`, `not_ready`) and whose later empty page published idle. Every engine run now carries the observation it
+// was classified from (`engine-state-log/3`) and the cache it left (`effects`); the shared rules judge the observation against the run's
+// bytes and requests, an admission needs the measured page committed, and its effects must be what the VERIFIED served bytes leave in
+// the run's new, empty database, derived here from the regenerated workload or the certified W2 capture (never from the file). Schema-3
+// files are historical: refused here, never rewritten.
 
-export const DEVICE_SCHEMA = 3;
+import { createHash } from "node:crypto";
+import { effectsText, entriesOfPage } from "./profile-effects.mjs";
+import { deviceRunOutcomeProblems } from "./profile-outcome-rules.mjs";
+import { VALID } from "./profile-workloads.mjs";
+
+/** What a served body leaves in a new, empty cache (`cache-rows/1`), or null when it is not a page. */
+export function expectedEffectsOfBody(body) {
+  const text =
+    typeof body === "string" ? body : Buffer.from(body).toString("utf8");
+  const { entries } = entriesOfPage(text);
+  return entries
+    ? {
+        rows: entries.length,
+        entries_sha256: createHash("sha256")
+          .update(effectsText(entries), "utf8")
+          .digest("hex"),
+      }
+    : null;
+}
+
+/**
+ * The expected effects of a generated workload by name, or null: only the valid engine workloads (W1, W3, W4, W6) are admitted evidence
+ * with effects (W5 is processing only, a W7 control's admission fails it whatever it wrote). Each is regenerated once, on first use: the
+ * bytes the recorded hashes pin.
+ */
+const generated = new Map();
+export function effectsOfWorkload(name) {
+  if (!Object.hasOwn(VALID, name)) return null;
+  if (!generated.has(name))
+    generated.set(name, expectedEffectsOfBody(VALID[name]()));
+  return generated.get(name);
+}
+
+export const DEVICE_SCHEMA = 4;
 export const MUST_HAVE_RUNS = ["W1", "W2", "W3", "W4", "W6"];
 export const REQUIRED_COLD_RUNS = 5;
 export const OUTCOMES = ["admitted", "refused", "error", "timeout", "killed"];
@@ -132,7 +171,9 @@ function payloadProblems(run, bytesOf) {
 
 /**
  * Checks one results file. `recorded` is scripts/lib/profile-workload-hashes.json; `w2Hashes` the hand-over's CERTIFIED W2 hashes (a Set)
- * or null; `w2Uncertified` the listed hashes that were not certified, with why (revision 4); `w2Expected`, when given, is the one capture
+ * or null; `w2Bytes` the certified captures' bytes by SHA-256 (schema 4: an admitted W2 run's effects are derived from them, so a W2
+ * admission cannot be accepted without them; `w2EffectsExempt`, a reason, when the caller has found the capture itself invalid, which then
+ * stays that capture's finding); `w2Uncertified` the listed hashes that were not certified, with why (revision 4); `w2Expected`, when given, is the one capture
  * this protocol must have run (the desktop stage knows which engine's capture it picked).
  *
  * Returns `errors` (the file is malformed, inconsistent or names other bytes), `failed_controls` (a W7 control that was not refused),
@@ -140,7 +181,14 @@ function payloadProblems(run, bytesOf) {
  */
 export function checkDeviceResults(
   data,
-  { recorded, w2Hashes = null, w2Expected = null, w2Uncertified = new Map() },
+  {
+    recorded,
+    w2Hashes = null,
+    w2Expected = null,
+    w2Uncertified = new Map(),
+    w2Bytes = new Map(),
+    w2EffectsExempt = null,
+  },
 ) {
   const errors = [];
   const warnings = [];
@@ -320,9 +368,24 @@ export function checkDeviceResults(
     }
     if (typeof run.user_agent !== "string")
       errors.push(`${where}: user_agent is missing`);
+    // The effects the run's served bytes leave: the regenerated workload's, or the certified capture's (`w2Bytes`, by SHA-256).
+    const expectedEffects = isW2
+      ? w2Bytes.has(run.sha256)
+        ? expectedEffectsOfBody(w2Bytes.get(run.sha256))
+        : null
+      : effectsOfWorkload(run.workload);
     for (const problem of [
       ...payloadProblems(run, bytesOf.get(run.workload) ?? null),
-      ...deviceRunOutcomeProblems(run),
+      ...deviceRunOutcomeProblems(run, {
+        expectedEffects,
+        // A negative control's admission fails its control whatever it wrote (counted above): its effects are not the evidence.
+        effectsExempt:
+          expected === "refused"
+            ? "a negative control: an admission fails the control"
+            : isW2
+              ? w2EffectsExempt
+              : null,
+      }),
     ])
       errors.push(`${where}: ${problem}`);
     const planned = plan[i];

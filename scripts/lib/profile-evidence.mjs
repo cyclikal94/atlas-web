@@ -62,9 +62,16 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * incomplete and stays history, unchanged. Version 6 (WEB-09c revision 11, review 11's R2 follow-up): the live witness is
  * `live-dense-commit/3`, retaining every publication and step-event line inside its boundary so that its terminal state is corroborated
  * by the step end that completes it, bound to the trace file and the page it was read from (`trace_page`); version 5 evidence (no Air
- * request was recorded under it) resolves incomplete and stays history, unchanged.
+ * request was recorded under it) resolves incomplete and stays history, unchanged. Version 7 (WEB-09c revision 12, review 12's R2 follow-up,
+ * design assessment DA-C1/DA-D1/DA-M1/DA-M2): a measured commit is a written page only when applied AND committed; the cold witness is
+ * `engine-state-log/3` (a measured attempt that wrote nothing and asked again completes it as no verdict); every cold run and device engine
+ * run records the cache it left (`effects`, `cache-rows/1`), which an admission must match against its served bytes; device results are
+ * schema 4 (each engine run carries its observation and effects); and the P-2 scan/commit series and the P-4/P-10 sync segments are each
+ * bound to their own operation by retained per-sample support (`raw/P-2.samples.<engine>.json`, `samples/P-4.sync.<engine>.json`,
+ * `samples/P-10.sync.<engine>.json`); version 6 evidence (no Air request was recorded under it) resolves incomplete and stays history,
+ * unchanged.
  */
-export const CONTRACT_VERSION = 6;
+export const CONTRACT_VERSION = 7;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [
@@ -117,7 +124,7 @@ export const STAGE_OUTPUTS = {
   fixture: ["raw", "memory", "fixture-build.json"],
   shell: ["shell"],
   contention: ["contention"],
-  integration: ["integration-run", "w2"],
+  integration: ["integration-run", "w2", "samples"],
   device: ["device-page"],
   handoff: ["handoff"],
 };

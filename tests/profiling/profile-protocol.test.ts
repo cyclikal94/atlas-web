@@ -52,6 +52,8 @@ const PLAN = [
   { name: "W2", run: 1 },
   { name: "W7-truncated", run: 1 },
 ];
+// An OWNERSHIP-ONLY fixture (revision 12, design assessment DA-H1): these cases test the envelope's reservation, persistence and recovery,
+// never whether an outcome is evidence; the semantic admission of a run is tested in validator.test.ts and profile-device-run.test.ts.
 const result = (name: string, run: number, outcome = "admitted"): ProfileRun =>
   ({ workload: name, run, outcome }) as unknown as ProfileRun;
 const killed = (name: string, run: number) => result(name, run, "killed");
@@ -135,7 +137,7 @@ describe("the device page's protocol state", () => {
     ]);
     expect(decide(read(s), "tab-a").action).toBe("terminal");
     expect(exportResults(e)).toMatchObject({
-      schema: 3,
+      schema: 4,
       protocol_id: "p-1",
       planned_runs: 3,
     });
@@ -259,23 +261,26 @@ describe("the device page's protocol state", () => {
     s.setItem(PROTOCOL_KEY, JSON.stringify({ schema: 1, runs: [] }));
     expect(read(s)).toMatchObject({
       state: "corrupt",
-      error: "not a schema-3 protocol envelope",
+      error: "not a schema-4 protocol envelope",
     });
     // Revision 10: a whole schema-2 envelope (stored before first commits were recorded) is history: unusable, left byte for byte.
-    const started = store();
-    start(started);
-    const old = JSON.stringify({
-      ...JSON.parse(started.getItem(PROTOCOL_KEY) as string),
-      schema: 2,
-    });
-    s.setItem(PROTOCOL_KEY, old);
-    expect(read(s)).toMatchObject({
-      state: "corrupt",
-      error: "not a schema-3 protocol envelope",
-    });
-    expect(decide(read(s), "tab-a").action).toBe("corrupt");
-    expect(start(s).ok).toBe(false);
-    expect(s.getItem(PROTOCOL_KEY)).toBe(old);
+    // Revision 12: so is a whole schema-3 one (stored before observations and effects); its attempts are never spliced into schema 4.
+    for (const schema of [2, 3]) {
+      const started = store();
+      start(started);
+      const old = JSON.stringify({
+        ...JSON.parse(started.getItem(PROTOCOL_KEY) as string),
+        schema,
+      });
+      s.setItem(PROTOCOL_KEY, old);
+      expect(read(s)).toMatchObject({
+        state: "corrupt",
+        error: "not a schema-4 protocol envelope",
+      });
+      expect(decide(read(s), "tab-a").action).toBe("corrupt");
+      expect(start(s).ok).toBe(false);
+      expect(s.getItem(PROTOCOL_KEY)).toBe(old);
+    }
   });
 
   it("case: a completed collection is never started over; only an explicit clear (allowed then) makes room", () => {
@@ -433,7 +438,7 @@ describe("the device page's protocol state", () => {
     );
   });
 
-  it("case: a structurally inconsistent schema-3 envelope is corrupt: nothing runs, nothing is started over it", () => {
+  it("case: a structurally inconsistent schema-4 envelope is corrupt: nothing runs, nothing is started over it", () => {
     const s = store();
     start(s);
     attempt(s, "tab-a");
@@ -479,7 +484,7 @@ describe("the device page's protocol state", () => {
       const r = read(s);
       expect(r, what).toMatchObject({
         state: "corrupt",
-        error: expect.stringContaining("inconsistent schema-3 envelope"),
+        error: expect.stringContaining("inconsistent schema-4 envelope"),
       });
       expect(decide(r, "tab-a").action, what).toBe("corrupt");
     }

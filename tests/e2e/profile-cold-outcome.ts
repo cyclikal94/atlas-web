@@ -24,9 +24,18 @@
  * completes it. `live-dense-commit/3` retains every publication since the mark and every step event of the epoch before its boundary (raw
  * lines), and the rules derive the end, its publication and the dense commit from that slice and bind it to the trace file of the page.
  *
+ * Revision 12 (review 12's R2 follow-up; design assessment DA-C1/DA-D1): `kind: "applied"` is the transaction's result; the page was
+ * written only when its plan also `committed`. The measured attempt ends at its OWN step end: only a written page continues past a
+ * `running` end (`has_more`); an attempt that wrote nothing and asked again (a lapsed hold) completes the observation as no verdict, so the
+ * stub's later empty page can never supply its idle (`engine-state-log/3`). The cold observer is shared with the device page
+ * (src/fixture/data-harness/profile-observation.ts), and an admission also needs the cache the run left to be the one the served page
+ * leaves (`effects`, scripts/lib/profile-effects.mjs).
+ *
  * `observeColdOutcome` and `observeLiveOutcome` run IN THE PAGE (Playwright serialises them): they must not refer to anything outside
  * their own bodies.
  */
+
+import type { RecordedEffects } from "../../scripts/lib/profile-effects.mjs";
 import {
   COLD_METHOD,
   coldObservationRules,
@@ -34,6 +43,11 @@ import {
   liveObservationRules,
   REFUSED_STATES as RULES_REFUSED_STATES,
 } from "../../scripts/lib/profile-outcome-rules.mjs";
+import {
+  type ObservationMark,
+  observationMark,
+  observeColdOutcome,
+} from "../../src/fixture/data-harness/profile-observation";
 
 /** The state kinds that are the engine's verdict that a page was not applied (the device-page protocol's set, `profile-page.ts`). */
 export const REFUSED_STATES = RULES_REFUSED_STATES;
@@ -72,13 +86,7 @@ export interface EngineEpochEntry {
   run?: number;
   trace: number;
 }
-/** Where an observation begins: the page instance, and the lengths of its state log and trace and its engine starts so far. */
-export interface ObservationMark {
-  page: string;
-  states: number;
-  trace: number;
-  generation: number;
-}
+export type { ObservationMark };
 export interface ColdObservation {
   method: typeof COLD_METHOD;
   page: string;
@@ -115,148 +123,11 @@ interface ObservedHarness {
   engineState(): ObservedState | null;
 }
 
-/** In the page: where this observation begins (taken before the engine is started). */
-export function observationMark(): ObservationMark | null {
-  const data = (window as unknown as { __atlasData?: ObservedHarness })
-    .__atlasData;
-  if (!data) return null;
-  return {
-    page: data.page,
-    states: data.engineStates.length,
-    trace: data.engineTrace.length,
-    generation: data.engineEpochs.at(-1)?.generation ?? 0,
-  };
-}
-
-/** In the page: the witness once the measured request's step has ended, or null (Playwright polls again). */
-export function observeColdOutcome(
-  mark: ObservationMark,
-): ColdObservation | null {
-  const data = (window as unknown as { __atlasData?: ObservedHarness })
-    .__atlasData;
-  if (!data) return null;
-  // No observation survives a reload or completes with a later engine's states: both end the attempt (an error, never a verdict).
-  if (data.page !== mark.page)
-    throw new Error(
-      "observation identity: the page was replaced (a reload) while observing",
-    );
-  const epochs = data.engineEpochs
-    .filter((e) => e.generation > mark.generation)
-    .map((e) => ({ generation: e.generation, run: e.run, trace: e.trace }));
-  if (epochs.length > 1)
-    throw new Error(
-      "observation identity: the engine was started again while observing",
-    );
-  const epoch = epochs[0];
-  if (!epoch) return null;
-  const all = data.engineStates.slice(mark.states).map((e, index) => ({
-    index,
-    generation: e.generation,
-    at: e.at,
-    trace: e.trace,
-    state: e.state,
-  }));
-  if (all.some((e) => e.generation !== epoch.generation))
-    throw new Error(
-      "observation identity: another engine published while observing",
-    );
-  const trace = data.engineTrace;
-  const begin = all.findIndex((e) => e.state.kind === "running");
-  if (begin < 0) return null;
-  const request = all[begin];
-  if (!request) return null;
-  const payload = (line: string): Record<string, unknown> | null => {
-    const at = line.indexOf("{");
-    if (at < 0) return null;
-    try {
-      const value = JSON.parse(line.slice(at)) as unknown;
-      return typeof value === "object" &&
-        value !== null &&
-        !Array.isArray(value)
-        ? (value as Record<string, unknown>)
-        : null;
-    } catch {
-      return null;
-    }
-  };
-  const eventOf = (line: string): string | null => {
-    const parts = line.split(" ");
-    const name = parts[1] ?? "";
-    return name === "data.sync_commit" ||
-      name === "data.sync_next" ||
-      name === "data.sync_step_failed"
-      ? name
-      : null;
-  };
-  for (let t = request.trace; t < trace.length; t += 1) {
-    const line = trace[t] ?? "";
-    const event = eventOf(line);
-    if (event !== "data.sync_next" && event !== "data.sync_step_failed")
-      continue;
-    const failed = event === "data.sync_step_failed";
-    const recorded = failed ? null : payload(line)?.state;
-    // A page with has_more: the engine asks again at once; the operation continues.
-    if (recorded === "running") continue;
-    let end = -1;
-    for (let i = begin + 1; i < all.length; i += 1) {
-      const entry = all[i];
-      if (!entry) continue;
-      // After a failed step the engine publishes its stop after the trace line; otherwise the step's state was published before it.
-      if (failed ? entry.trace > t : entry.trace <= t) {
-        end = i;
-        if (failed) break;
-      }
-    }
-    // A failed step's stop is not published yet: polled again. A normal end with nothing published since the request is returned with
-    // the request itself as its terminal, and the rules refuse it as the contradiction it is.
-    if (end < 0) {
-      if (failed) return null;
-      end = begin;
-    }
-    const terminal = all[end];
-    if (!terminal) return null;
-    const events: Array<{
-      trace: number;
-      event: string;
-      payload: Record<string, unknown> | null;
-    }> = [];
-    for (let c = mark.trace; c <= t; c += 1) {
-      const kept = trace[c] ?? "";
-      const name = eventOf(kept);
-      if (name) events.push({ trace: c, event: name, payload: payload(kept) });
-    }
-    return {
-      method: "engine-state-log/2",
-      page: data.page,
-      mark,
-      generation: epoch.generation,
-      epochs,
-      published: all.slice(0, end + 1),
-      events,
-      request: { index: begin, at: request.at, trace: request.trace },
-      terminal: {
-        index: end,
-        at: terminal.at,
-        trace: terminal.trace,
-        state: terminal.state,
-      },
-      step_end: {
-        trace: t,
-        event,
-        recorded: typeof recorded === "string" ? recorded : null,
-      },
-      commits: events
-        .filter(
-          (e) =>
-            e.event === "data.sync_commit" &&
-            e.trace >= request.trace &&
-            e.trace < t,
-        )
-        .map((e) => (e.payload ?? {}) as ObservedCommit),
-    };
-  }
-  return null;
-}
+/**
+ * In the page: where this observation begins, and the cold witness once the measured attempt has ended (revision 12: one fixture-safe
+ * module, so the device page makes the same observation; see src/fixture/data-harness/profile-observation.ts).
+ */
+export { observationMark, observeColdOutcome };
 
 /** What the page served for the measured request, as the test (not the page) knows it. */
 export interface Served {
@@ -264,6 +135,12 @@ export interface Served {
   bytes: number;
   /** `/sync` requests the stub answered by the time of classification. */
   requests: number;
+  /**
+   * Revision 12: the cache the run left (`cache-rows/1`, read after the observation) and what the served page leaves in the run's new,
+   * empty database (derived by the test from the bytes it served); an admission requires them to agree.
+   */
+  effects: RecordedEffects | null;
+  expectedEffects: { rows: number; entries_sha256: string } | null;
 }
 
 export interface ColdOutcome {
@@ -282,6 +159,8 @@ export function observationProblems(
   return coldObservationRules(observation, {
     servedBytes: served.bytes,
     requests: served.requests,
+    effects: served.effects,
+    expectedEffects: served.expectedEffects,
   }).problems;
 }
 
@@ -293,6 +172,8 @@ export function classifyColdOutcome(
   const { shows, problems } = coldObservationRules(observation, {
     servedBytes: served.bytes,
     requests: served.requests,
+    effects: served.effects,
+    expectedEffects: served.expectedEffects,
   });
   const shown = JSON.stringify(observation?.terminal?.state ?? null).slice(
     0,

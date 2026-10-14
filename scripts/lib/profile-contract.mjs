@@ -28,6 +28,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   checkDeviceResults,
+  effectsOfWorkload,
+  expectedEffectsOfBody,
   expectedOutcome,
   OUTCOMES,
   protocolWorkloads,
@@ -50,12 +52,16 @@ import {
   coldObservationRules,
   commitsOfTrace,
   liveObservationRules,
+  pageCommitted,
+  traceEvent,
+  tracePayload,
 } from "./profile-outcome-rules.mjs";
 import {
   observeW2Capture,
   sameTargetProblems,
   W2_SEED,
 } from "./profile-w2-capture.mjs";
+import { denseChecklistPage, ordinaryPage } from "./profile-workloads.mjs";
 
 export { CONTRACT_VERSION };
 export const CELL_STATUSES = [
@@ -1138,6 +1144,20 @@ function crossChecks(ev, cell, samples, row) {
       ? []
       : [`its samples are not the per-run ${m[3]} of ${path}, in run order`];
   }
+  m = /^P-2 (\S+) (scan_ms|commit_ms)$/.exec(name);
+  if (m) return p2SupportProblems(ev, engine, m[1], m[2], samples, row);
+  m =
+    /^(?:P-4 sync page (pre_issue_ms|request_ms|post_response_ms|total_ms)|P-10 sync page (request_ms) \(unthrottled loopback\)|P-10 sync page (duration_ms) \(proxy delay 250 ms\))$/.exec(
+      name,
+    );
+  if (m) {
+    const segment = m[1] ?? m[2] ?? m[3];
+    const file = m[3]
+      ? `samples/P-10.sync.${engine}.json`
+      : `samples/P-4.sync.${engine}.json`;
+    const problems = syncSupportProblems(ev, file, segment, samples, row);
+    if (problems.length || name !== "P-4 sync page total_ms") return problems;
+  }
   if (name === "P-4 sync page total_ms") {
     const parts = ["pre_issue_ms", "request_ms", "post_response_ms"].map((s) =>
       rawSamples(ev, `P-4 sync page ${s}`, engine),
@@ -1174,6 +1194,171 @@ function crossChecks(ev, cell, samples, row) {
     )
       ? []
       : ["a total is shorter than the segments inside it"];
+  }
+  return [];
+}
+
+/** The served byte length of P-2 sample `index` (warm-ups included) of a shape: the writer's own generator, regenerated here. */
+const P2_BYTES = new Map();
+function p2Bytes(shape, index) {
+  const key = shape.startsWith("dense-") ? shape : `${shape}#${index}`;
+  if (!P2_BYTES.has(key)) {
+    const dense = /^dense-(\d+)/.exec(shape);
+    const ordinary = /^ordinary-(\d+)$/.exec(shape);
+    const body = dense
+      ? denseChecklistPage(Number(dense[1]))
+      : ordinary
+        ? ordinaryPage(Number(ordinary[1]), index)
+        : null;
+    P2_BYTES.set(key, body === null ? null : Buffer.byteLength(body));
+  }
+  return P2_BYTES.get(key);
+}
+
+/**
+ * P-2's scan and commit series against their per-sample operations (revision 12, review 12, design assessment DA-M1; contract version 7).
+ * `raw/P-2.samples.<engine>.json` names each recorded sample's trace start, commit and step end in `raw/P-2.trace.<engine>.txt`; the
+ * commit must be the FIRST after its start, of the sample's served bytes (regenerated here), applied and committed, followed by an idle
+ * step end, the samples in order without overlap, and the series value that commit's own timing. A later commit (the retry of an empty
+ * page after a lapsed hold) can never supply a sample.
+ */
+function p2SupportProblems(ev, engine, shape, metric, samples, row) {
+  const key = `p2support:${engine}`;
+  if (!ev[key]) {
+    const support = ev.readJson(`raw/P-2.samples.${engine}.json`);
+    const tracePath = `raw/P-2.trace.${engine}.txt`;
+    ev[key] = {
+      support,
+      lines: ev.exists(tracePath)
+        ? ev.bytes(tracePath).toString("utf8").split("\n")
+        : null,
+    };
+  }
+  const { support, lines } = ev[key];
+  if (!support.present || support.error || !isObj(support.value))
+    return ["its per-sample support (raw/P-2.samples) is missing or malformed"];
+  if (support.value.method !== "p2-sample/1" || support.value.engine !== engine)
+    return ["its per-sample support is not this engine's p2-sample/1"];
+  if (!lines) return ["its trace (raw/P-2.trace) is missing"];
+  const entries = support.value.shapes?.[shape];
+  if (!Array.isArray(entries) || entries.length !== samples.length)
+    return ["its per-sample support does not name one operation per sample"];
+  const warmup = row?.warmup;
+  for (const [k, e] of entries.entries()) {
+    const where = `sample ${k}`;
+    if (
+      !isObj(e) ||
+      !isCount(e.from) ||
+      !isCount(e.commit) ||
+      !isCount(e.end) ||
+      !(e.from <= e.commit && e.commit < e.end)
+    )
+      return [`${where}: its support is malformed`];
+    if (!isCount(warmup) || e.index !== warmup + k)
+      return [`${where}: its support is not the sample after the warm-ups`];
+    if (k > 0 && !(e.from > entries[k - 1].end))
+      return [`${where}: it overlaps the previous sample's operation`];
+    const commits = [];
+    for (let t = e.from; t <= e.commit; t += 1)
+      if (traceEvent(lines[t]) === "data.sync_commit") commits.push(t);
+    if (commits[0] !== e.commit)
+      return [`${where}: its commit is not the first after the sample began`];
+    const commit = tracePayload(lines[e.commit]);
+    if (!pageCommitted(commit)) return [`${where}: its commit wrote no page`];
+    const bytes = p2Bytes(shape, e.index);
+    if (commit.bytes !== bytes || e.bytes !== bytes)
+      return [
+        `${where}: its commit is ${commit.bytes} bytes, not the served ${bytes}`,
+      ];
+    for (let t = e.commit + 1; t < e.end; t += 1)
+      if (
+        ["data.sync_next", "data.sync_step_failed"].includes(
+          traceEvent(lines[t]),
+        )
+      )
+        return [`${where}: its step end is not the first after its commit`];
+    if (
+      traceEvent(lines[e.end]) !== "data.sync_next" ||
+      tracePayload(lines[e.end])?.state !== "idle"
+    )
+      return [`${where}: its step did not end idle`];
+    if (samples[k] !== commit[metric])
+      return [
+        `${where}: ${samples[k]} is not its commit's ${metric} (${commit[metric]})`,
+      ];
+  }
+  return [];
+}
+
+/**
+ * A P-4/P-10 sync series against its per-sample operations (revision 12, design assessment DA-M2; contract version 7): each sample's
+ * first non-coalesced step start, the first commit after it, the step end after that, and the ONE `/sync` request inside [start,
+ * commit] (1 ms trace rounding), from `samples/P-4.sync.<engine>.json` or `samples/P-10.sync.<engine>.json`; the series value is
+ * recomputed from that support. Latency does not require a written page.
+ */
+function syncSupportProblems(ev, file, segment, samples, row) {
+  const entry = ev.readJson(file);
+  if (!entry.present || entry.error || !isObj(entry.value))
+    return [`its per-sample support (${file}) is missing or malformed`];
+  const v = entry.value;
+  if (v.method !== "sync-request-sample/1" || !Array.isArray(v.samples))
+    return [`${file} is not sync-request-sample/1`];
+  if (v.samples.length !== samples.length)
+    return ["its per-sample support does not name one operation per sample"];
+  const warmup = isCount(row?.warmup) ? row.warmup : 0;
+  if (v.warmup !== warmup) return [`${file} records another warm-up count`];
+  const at = (line) =>
+    Number(/^(-?\d+)ms /.exec(String(line))?.[1] ?? Number.NaN);
+  for (const [k, e] of v.samples.entries()) {
+    const where = `sample ${k}`;
+    if (
+      !isObj(e) ||
+      e.index !== warmup + k ||
+      !isObj(e.tick) ||
+      !isObj(e.commit) ||
+      !isObj(e.end) ||
+      !isObj(e.request)
+    )
+      return [`${where}: its support is malformed`];
+    if (k > 0 && !(e.tick.trace > v.samples[k - 1].end?.trace))
+      return [`${where}: it overlaps the previous sample's operation`];
+    if (
+      traceEvent(e.tick.line) !== "data.sync_tick" ||
+      tracePayload(e.tick.line)?.coalesced !== false
+    )
+      return [`${where}: its start is not a step start`];
+    if (
+      traceEvent(e.commit.line) !== "data.sync_commit" ||
+      !(e.commit.trace > e.tick.trace)
+    )
+      return [`${where}: its commit is not after its step start`];
+    if (
+      !["data.sync_next", "data.sync_step_failed"].includes(
+        traceEvent(e.end.line),
+      ) ||
+      !(e.end.trace > e.commit.trace)
+    )
+      return [`${where}: its step end is not after its commit`];
+    const r = e.request;
+    const tick = at(e.tick.line);
+    const commit = at(e.commit.line);
+    if (
+      ![r.startTime, r.requestStart, r.responseEnd].every(Number.isFinite) ||
+      !(r.startTime >= tick - 1 && r.responseEnd <= commit + 1) ||
+      !(r.startTime <= r.requestStart && r.requestStart <= r.responseEnd)
+    )
+      return [`${where}: its request is not inside its step`];
+    const value = {
+      pre_issue_ms: r.requestStart - tick,
+      request_ms: r.responseEnd - r.requestStart,
+      post_response_ms: commit - r.responseEnd,
+      total_ms: commit - tick,
+      duration_ms: r.responseEnd - r.startTime,
+    }[segment];
+    if (!(Math.abs(value - samples[k]) <= 1e-6 * Math.max(1, Math.abs(value))))
+      return [
+        `${where}: ${samples[k]} is not its operation's ${segment} (${value})`,
+      ];
   }
   return [];
 }
@@ -2055,7 +2240,42 @@ function runsSource(ev, cell) {
     identity.push(
       `the row records ${rows[0].bytes} served bytes; ${served.what} is ${served.bytes}`,
     );
-  return { run, identity, servedBytes: served.bytes ?? null };
+  return {
+    run,
+    identity,
+    servedBytes: served.bytes ?? null,
+    expectedEffects: servedEffectsOf(ev, cell),
+  };
+}
+
+/**
+ * What a cold run's served bytes leave in its new, empty cache (revision 12, review 12 R2, invariant 5), from the same independent
+ * sources as `servedBytesOf`: the regenerated workload a P-11 cell names, or the engine's limit-1 W2 capture file (certified by its
+ * capture cell). Null when unknown: an admission then cannot be corroborated.
+ */
+function servedEffectsOf(ev, cell) {
+  if (cell.control)
+    return {
+      exempt:
+        "a negative control: an admission fails the control whatever it wrote",
+    };
+  if (cell.source === "p11")
+    return { expected: effectsOfWorkload(cell.workload) };
+  const path = `w2/W2-captured.${cell.engine}.limit-1.json`;
+  // As for the served bytes (`capturedLimit1`): a defect of the capture stays the capture cell's finding (the programme is incomplete
+  // either way), so a W2 run's effects are judged against a capture that is itself a valid W2 capture.
+  if (!ev.exists(path)) return { expected: null };
+  const capture = captureContent(ev, cell.engine, 1);
+  if (
+    !capture.row ||
+    capture.problems.length > 0 ||
+    !(capture.observed?.problems.length === 0)
+  )
+    return {
+      exempt:
+        "the limit-1 capture is not a valid W2 capture: its defect is the capture cell's finding",
+    };
+  return { expected: expectedEffectsOfBody(ev.bytes(path)) };
 }
 
 /**
@@ -2102,9 +2322,12 @@ function capturedLimit1(ev, engine) {
  * commits recomputed from them and equal to the claims, in the engine's order (a normal end records the published state; a failed step
  * ends in the stop published after it); the first commit after the request of the SERVED bytes (`servedBytes`: the recorded workload or
  * the captured W2 file, never the row's own figure), with its timings; idle only with that commit applied and traced before it. Then the
- * record: its outcome is the one shown, its detail the observed terminal state and an admitted run's figures the first commit's.
+ * record: its outcome is the one shown, its detail the observed terminal state and an admitted run's figures the first commit's. Revision 12
+ * (review 12 R2, contract version 7): the witness is `engine-state-log/3` (a measured attempt that wrote nothing ends it with no verdict),
+ * an admission needs the measured page committed, and the run's recorded `effects` must be what its served bytes leave in a new, empty
+ * cache (`expectedEffects`, from the regenerated workload or the capture file, never from the run).
  */
-function coldObservationProblems(run, servedBytes) {
+function coldObservationProblems(run, servedBytes, servedEffects) {
   if (!["admitted", "refused"].includes(run.outcome)) return [];
   const o = run.observation;
   if (!isObj(o))
@@ -2114,6 +2337,9 @@ function coldObservationProblems(run, servedBytes) {
   const { shows, problems, first } = coldObservationRules(o, {
     servedBytes,
     requests: run.requests,
+    effects: run.effects ?? null,
+    expectedEffects: servedEffects?.expected ?? null,
+    effectsExempt: servedEffects?.exempt ?? null,
   });
   const state = o.terminal?.state;
   if (shows !== run.outcome)
@@ -2200,7 +2426,13 @@ function resolveOutcome(ev, cell) {
       for (const key of ["scan_ms", "commit_ms"])
         if (!isNonNeg(run[key]))
           problems.push(`an admitted run without its engine ${key}`);
-    problems.push(...coldObservationProblems(run, source.servedBytes));
+    problems.push(
+      ...coldObservationProblems(
+        run,
+        source.servedBytes,
+        source.expectedEffects,
+      ),
+    );
   } else {
     if (
       run.outcome === "admitted" &&
@@ -2433,10 +2665,22 @@ function deviceCheck(ev, engine) {
   else {
     const capture = `w2/W2-captured.${engine}.limit-1.json`;
     const w2 = ev.exists(capture) ? sha256(ev.bytes(capture)) : null;
+    // Schema 4: the W2 runs' expected effects come from this engine's capture bytes, when that capture is itself valid (otherwise its
+    // defect stays the capture cell's finding, as for the cold runs).
+    const content = w2 ? captureContent(ev, engine, 1) : null;
+    const captureValid =
+      content?.row &&
+      content.problems.length === 0 &&
+      content.observed?.problems.length === 0;
     const checked = checkDeviceResults(entry.value, {
       recorded: RECORDED,
       w2Hashes: new Set(w2 ? [w2] : []),
       w2Expected: w2,
+      w2Bytes: new Map(w2 && captureValid ? [[w2, ev.bytes(capture)]] : []),
+      w2EffectsExempt:
+        w2 && !captureValid
+          ? "the limit-1 capture is not a valid W2 capture: its defect is the capture cell's finding"
+          : null,
     });
     const binder = rowsNamed(ev.values, "P-11 device page", engine);
     const invalid = [...checked.errors];

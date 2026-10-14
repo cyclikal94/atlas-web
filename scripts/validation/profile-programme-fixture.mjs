@@ -26,6 +26,13 @@
 // production engine traces (and the tick between pages), applied commits carry the plan's result kind, and the live witness retains its
 // publications and step-event lines (`live-dense-commit/3`) with the page its trace was read from.
 //
+// Revision 12 (review 12's R2 follow-up, design assessment DA-H1/DA-M1/DA-M2; contract version 7): cold witnesses are
+// `engine-state-log/3`; every cold run and device engine run records the cache it left (`effects`: the rows that survive the served body
+// applied in order to an empty cache, derived here by this file's own walk of the workload or capture, never an invented count; W4's 800
+// changes leave 80); device results are schema 4 (each engine run's witness and effects); and P-2's scan/commit series and the P-4/P-10
+// sync segments carry per-sample support (a real-shaped trace and `raw/P-2.samples.<engine>.json`; `samples/P-4.sync.<engine>.json`,
+// `samples/P-10.sync.<engine>.json`) from which the series are computed the way the writers compute them.
+//
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
 // thing and expect the exact cell the contract must name.
@@ -33,12 +40,63 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  allWorkloads,
+  denseChecklistPage,
+  ordinaryPage,
+} from "../lib/profile-workloads.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const recorded = JSON.parse(
   readFileSync(join(here, "../lib/profile-workload-hashes.json"), "utf8"),
 );
 const sha = (x) => createHash("sha256").update(x).digest("hex");
+/** The cache a served body leaves in an empty database (`cache-rows/1`): this file's own walk (upsert replaces, remove deletes, in order). */
+export function survivorsOf(text) {
+  const rows = new Map();
+  for (const batch of JSON.parse(text).batches)
+    for (const c of batch.changes)
+      if (c.kind === "upsert") rows.set(c.resource.id, c.resource.version);
+      else rows.delete(c.id);
+  const entries = [...rows].map(([id, v]) => `${id}@${v}`).sort();
+  return {
+    method: "cache-rows/1",
+    rows: entries.length,
+    entries_sha256: sha(entries.join("\n")),
+  };
+}
+export const NOTHING_WRITTEN = {
+  method: "cache-rows/1",
+  rows: 0,
+  entries_sha256: sha(""),
+};
+let workloadEffects = null;
+/** The effects of each valid generated workload (regenerated once per process). */
+const effectsOfWorkload = (name) => {
+  workloadEffects ??= new Map(
+    allWorkloads()
+      .filter((w) => !w.name.startsWith("W7-") && !w.name.startsWith("W5-"))
+      .map((w) => [w.name, survivorsOf(w.body)]),
+  );
+  return workloadEffects.get(name);
+};
+const P2_BYTES = new Map();
+/** P-2's served byte length of sample `index` (warm-ups included), from the writer's own generator. */
+const p2Bytes = (shape, index) => {
+  const key = shape.startsWith("dense-") ? shape : `${shape}#${index}`;
+  if (!P2_BYTES.has(key)) {
+    const n = Number(/^\w+-(\d+)/.exec(shape)?.[1]);
+    P2_BYTES.set(
+      key,
+      Buffer.byteLength(
+        shape.startsWith("dense-")
+          ? denseChecklistPage(n)
+          : ordinaryPage(n, index),
+      ),
+    );
+  }
+  return P2_BYTES.get(key);
+};
 export const ENGINES = ["chromium", "firefox", "webkit"];
 const STAGE_ORDER = [
   "bundle",
@@ -367,7 +425,13 @@ export function writeProgramme(
    * shared rules): the page instance and its one engine start since the mark; the start's own waiting, the request's running and the end
    * state, each with its trace position; the commit traced before the idle it leads to; the step end recording the published state.
    */
-  const coldRun = (engine, key, bytes, outcome = "admitted") => {
+  const coldRun = (
+    engine,
+    key,
+    bytes,
+    outcome = "admitted",
+    effects = null,
+  ) => {
     const s = seeded(key);
     const rss = rssOf(engine, key);
     const heap =
@@ -427,7 +491,7 @@ export function writeProgramme(
       outcome,
       detail: JSON.stringify(state),
       observation: {
-        method: "engine-state-log/2",
+        method: "engine-state-log/3",
         page,
         mark,
         generation: 1,
@@ -439,6 +503,9 @@ export function writeProgramme(
         step_end: { trace: end, event: "data.sync_next", recorded: state.kind },
         commits: commit ? [commit] : [],
       },
+      // The cache the run left (revision 12): the served body's survivors when admitted, nothing when refused.
+      effects: admitted ? effects : NOTHING_WRITTEN,
+      cursor_after: admitted ? "synthetic-cursor" : "cursor-0",
       elapsed_ms: 1_000 + (s % 900),
       scan_ms: commit?.scan_ms ?? null,
       commit_ms: commit?.commit_ms ?? null,
@@ -541,20 +608,70 @@ export function writeProgramme(
 
   for (const engine of ENGINES) {
     // ---- fixture: P-2, P-3, P-5, P-11, P-Q, P-Q2 ----
-    for (const [shape, n] of [
-      ["ordinary-100", 300],
-      ["ordinary-200", 300],
-      ["ordinary-400", 300],
-      ["ordinary-800", 300],
-      ["dense-100", 60],
-      ["dense-200", 40],
-      ["dense-400", 25],
-      ["dense-800-W1", 15],
+    // P-2 (revision 12, DA-M1): the page's engine trace as the harness writes it (per sample a tick, the sample's commit of its served
+    // bytes, applied and committed, and its idle end), warm-ups included, and each recorded sample's operation in it.
+    const p2Trace = [];
+    const p2Shapes = {};
+    let ms = 1_000;
+    const traced = (event, data) => {
+      ms += 3;
+      p2Trace.push(
+        `${ms}ms ${event} ${data === undefined ? "" : JSON.stringify(data)}`,
+      );
+    };
+    for (const [shape, n, warmup] of [
+      ["ordinary-100", 300, 20],
+      ["ordinary-200", 300, 20],
+      ["ordinary-400", 300, 20],
+      ["ordinary-800", 300, 20],
+      ["dense-100", 60, 5],
+      ["dense-200", 40, 5],
+      ["dense-400", 25, 3],
+      ["dense-800-W1", 15, 3],
     ]) {
-      for (const metric of ["wall_ms", "scan_ms", "commit_ms"]) {
-        const name = `P-2 ${shape} ${metric}`;
-        series("fixture", engine, "P-2:", name, distinct(name, engine, n));
+      const scan = distinct(`P-2 ${shape} scan_ms`, engine, n);
+      const commitMs = distinct(`P-2 ${shape} commit_ms`, engine, n);
+      const support = [];
+      for (let i = 0; i < warmup + n; i += 1) {
+        const from = p2Trace.length;
+        traced("data.sync_tick", { why: "now", coalesced: false });
+        const k = i - warmup;
+        traced("data.sync_commit", {
+          bytes: p2Bytes(shape, i),
+          scan_ms: k >= 0 ? scan[k] : 1,
+          commit_ms: k >= 0 ? commitMs[k] : 2,
+          kind: "applied",
+          value: "committed",
+        });
+        traced("data.sync_next", { when: "after", state: "idle" });
+        if (k >= 0)
+          support.push({
+            index: i,
+            from,
+            commit: from + 1,
+            end: from + 2,
+            bytes: p2Bytes(shape, i),
+          });
       }
+      p2Shapes[shape] = support;
+      const extra = { shape, warmup };
+      series(
+        "fixture",
+        engine,
+        "P-2:",
+        `P-2 ${shape} wall_ms`,
+        distinct(`P-2 ${shape} wall_ms`, engine, n),
+        extra,
+      );
+      series("fixture", engine, "P-2:", `P-2 ${shape} scan_ms`, scan, extra);
+      series(
+        "fixture",
+        engine,
+        "P-2:",
+        `P-2 ${shape} commit_ms`,
+        commitMs,
+        extra,
+      );
       const longTasks = `P-2 ${shape} long_task_ms_per_page`;
       if (engine === "chromium")
         series(
@@ -570,7 +687,12 @@ export function writeProgramme(
           reason: "this engine has no longtask observer",
         });
     }
-    put(`raw/P-2.trace.${engine}.txt`, "0ms data.sync_commit {}\n");
+    put(`raw/P-2.trace.${engine}.txt`, p2Trace.join("\n"));
+    json(`raw/P-2.samples.${engine}.json`, {
+      method: "p2-sample/1",
+      engine,
+      shapes: p2Shapes,
+    });
     for (const kind of ["draft", "fence", "form_recovery"])
       for (const d of ["strict", "default"]) {
         const name = `P-3 ${kind} ${d} write_ms`;
@@ -622,6 +744,8 @@ export function writeProgramme(
             engine,
             `P-11|${engine}|${workload}|${run}`,
             servedBytes(workload),
+            "admitted",
+            effectsOfWorkload(workload),
           ),
         ),
       });
@@ -1166,16 +1290,77 @@ export function writeProgramme(
 
     // ---- integration: P-4, P-10, P-W2, W2-limits ----
     const syncTitle = "P-4: what the page does around ONE sync page";
-    const pre = distinct("P-4 sync page pre_issue_ms", engine, 300, 1);
-    const syncRequest = distinct("P-4 sync page request_ms", engine, 300, 3);
-    const post = distinct("P-4 sync page post_response_ms", engine, 300, 20);
-    series("integration", engine, syncTitle, "P-4 sync page pre_issue_ms", pre);
+    // Revision 12 (DA-M2): each sample is one operation, its support as the writer records it (the step start, its commit and end lines,
+    // and the one /sync ResourceTiming entry between them); the segments are computed from it the way the writer computes them.
+    const syncSamples = (count, warmup, label, request0) => {
+      const out = [];
+      let at = 5_000;
+      let line = 40;
+      for (let k = 0; k < count; k += 1) {
+        at += 97 + (k % 7);
+        const tick = at;
+        const request = {
+          startTime: tick + 0.25 + (k % 3) * 0.1,
+          requestStart: tick + 0.5 + (k % 5) * 0.2,
+          responseEnd:
+            tick +
+            0.5 +
+            (k % 5) * 0.2 +
+            request0 +
+            (seeded(`${label}|${engine}|${k}`) % 400) / 100,
+        };
+        const commit = Math.ceil(request.responseEnd) + 1 + (k % 4);
+        out.push({
+          index: warmup + k,
+          tick: {
+            trace: line,
+            line: `${tick}ms data.sync_tick ${JSON.stringify({ why: "now", coalesced: false })}`,
+          },
+          commit: {
+            trace: line + 1,
+            line: `${commit}ms data.sync_commit ${JSON.stringify({ kind: "applied", value: "committed" })}`,
+          },
+          end: {
+            trace: line + 2,
+            line: `${commit}ms data.sync_next ${JSON.stringify({ when: "after", state: "idle" })}`,
+          },
+          request,
+          sync_entries: 1,
+        });
+        line += 5;
+        at = commit;
+      }
+      return out;
+    };
+    const msOf = (l) => Number(/^(-?\d+)ms /.exec(l)[1]);
+    const p4 = syncSamples(300, 20, "P-4", 3);
+    const pre = p4.map((e) => e.request.requestStart - msOf(e.tick.line));
+    const syncRequest = p4.map(
+      (e) => e.request.responseEnd - e.request.requestStart,
+    );
+    const post = p4.map((e) => msOf(e.commit.line) - e.request.responseEnd);
+    json(`samples/P-4.sync.${engine}.json`, {
+      method: "sync-request-sample/1",
+      engine,
+      warmup: 20,
+      samples: p4,
+    });
+    const p4Extra = { warmup: 20 };
+    series(
+      "integration",
+      engine,
+      syncTitle,
+      "P-4 sync page pre_issue_ms",
+      pre,
+      p4Extra,
+    );
     series(
       "integration",
       engine,
       syncTitle,
       "P-4 sync page request_ms",
       syncRequest,
+      p4Extra,
     );
     series(
       "integration",
@@ -1183,13 +1368,15 @@ export function writeProgramme(
       syncTitle,
       "P-4 sync page post_response_ms",
       post,
+      p4Extra,
     );
     series(
       "integration",
       engine,
       syncTitle,
       "P-4 sync page total_ms",
-      pre.map((x, i) => x + syncRequest[i] + post[i]),
+      p4.map((e) => msOf(e.commit.line) - msOf(e.tick.line)),
+      p4Extra,
     );
     series(
       "integration",
@@ -1197,7 +1384,7 @@ export function writeProgramme(
       syncTitle,
       "P-10 sync page request_ms (unthrottled loopback)",
       syncRequest,
-      { stampedRequestTimeoutMs: 30_000 },
+      { ...p4Extra, stampedRequestTimeoutMs: 30_000 },
     );
     const draftTitle = "P-4: what the page does around ONE draft submission";
     const segments = Object.fromEntries(
@@ -1225,12 +1412,19 @@ export function writeProgramme(
       segments.request_ms,
       { stampedRequestTimeoutMs: 30_000 },
     );
+    const p10 = syncSamples(100, 0, "P-10", 250);
+    json(`samples/P-10.sync.${engine}.json`, {
+      method: "sync-request-sample/1",
+      engine,
+      warmup: 0,
+      samples: p10,
+    });
     series(
       "integration",
       engine,
       "P-10:",
       "P-10 sync page duration_ms (proxy delay 250 ms)",
-      distinct("P-10 delayed", engine, 100, 255),
+      p10.map((e) => e.request.responseEnd - e.request.startTime),
     );
     value("integration", engine, "W2:", "backend", {
       health: {
@@ -1263,6 +1457,8 @@ export function writeProgramme(
       engine,
       `P-W2|${engine}|live`,
       Buffer.byteLength(w2Body),
+      "admitted",
+      survivorsOf(w2Body),
     );
     // Revision 10 (DA-2, DA-4): the live page's engine trace as the harness writes it, and the witness of its first dense commit (an
     // earlier small page, then the dense one, the idle published after it), every commit kind recorded. Revision 11 (review 11's R2
@@ -1349,7 +1545,13 @@ export function writeProgramme(
       label: "synthetic",
     };
     const w2Runs = [1, 2, 3, 4, 5].map((run) =>
-      coldRun(engine, `P-W2|${engine}|${run}`, Buffer.byteLength(w2Body)),
+      coldRun(
+        engine,
+        `P-W2|${engine}|${run}`,
+        Buffer.byteLength(w2Body),
+        "admitted",
+        survivorsOf(w2Body),
+      ),
     );
     json(`w2/P-W2.${engine}.json`, {
       engine,
@@ -1508,6 +1710,86 @@ export function writeProgramme(
             : outcome === "refused"
               ? JSON.stringify({ kind: "backing_off", since: 1_000 + i })
               : `synthetic attempt ${i + 1}`;
+      // Schema 4 (revision 12): the engine run's own witness (`engine-state-log/3`, the production publication/trace order: the start's
+      // waiting, the request's running, [the served body's commit,] the end state and its step end) and the cache it left.
+      const firstCommit =
+        !processing && outcome === "admitted"
+          ? {
+              bytes,
+              scan_ms: scanMs,
+              commit_ms: commitMs,
+              kind: "applied",
+              value: "committed",
+            }
+          : null;
+      const endState = engineRun && !processing ? JSON.parse(detail) : null;
+      const mark = {
+        page: `synthetic-device-page-${engine}`,
+        states: 3 * i,
+        trace: 4 * i,
+        generation: i,
+      };
+      const t0 = mark.trace;
+      const endTrace = t0 + 1 + (firstCommit ? 1 : 0);
+      const observation =
+        engineRun && !processing
+          ? {
+              method: "engine-state-log/3",
+              page: mark.page,
+              mark,
+              generation: i + 1,
+              epochs: [{ generation: i + 1, run: i + 1, trace: t0 }],
+              published: [
+                { kind: "waiting", reason: "cache_not_valid" },
+                { kind: "running", catchingUp: true },
+                endState,
+              ].map((state, index) => ({
+                index,
+                generation: i + 1,
+                at: 1_000 * i + 10 * index,
+                trace: index === 0 ? t0 : index === 1 ? t0 + 1 : endTrace,
+                state,
+              })),
+              events: [
+                ...(firstCommit
+                  ? [
+                      {
+                        trace: t0 + 1,
+                        event: "data.sync_commit",
+                        payload: firstCommit,
+                      },
+                    ]
+                  : []),
+                {
+                  trace: endTrace,
+                  event: "data.sync_next",
+                  payload: { when: "after", state: endState.kind },
+                },
+              ],
+              request: { index: 1, at: 1_000 * i + 10, trace: t0 + 1 },
+              terminal: {
+                index: 2,
+                at: 1_000 * i + 20,
+                trace: endTrace,
+                state: endState,
+              },
+              step_end: {
+                trace: endTrace,
+                event: "data.sync_next",
+                recorded: endState.kind,
+              },
+              commits: firstCommit ? [firstCommit] : [],
+            }
+          : null;
+      const effects =
+        !engineRun || processing
+          ? null
+          : outcome === "admitted" && !control
+            ? name === "W2"
+              ? survivorsOf(w2Body)
+              : effectsOfWorkload(name)
+            : NOTHING_WRITTEN;
+      const limitN = Number(/^W5-limit-(\d+)$/.exec(name)?.[1] ?? 0);
       return {
         protocol_id: protocolId,
         workload: name,
@@ -1530,28 +1812,26 @@ export function writeProgramme(
         commit_ms: commitMs,
         request_count: processing || !engineRun ? 0 : 1,
         limit: processing || !engineRun ? null : 1,
-        changes_written: outcome === "admitted" ? 100 + i : null,
+        // An engine run's final cache rows (its effects'); W5's decoded count (its limit's 100 changes per batch).
+        changes_written: processing
+          ? outcome === "admitted"
+            ? limitN * 100
+            : null
+          : (effects?.rows ?? null),
         cursor_after: processing || !engineRun ? null : "after",
         heap_baseline_bytes: engine === "chromium" ? 9e6 + i : null,
         heap_peak_bytes: engine === "chromium" ? 2e7 + i : null,
         heap_after_bytes: engine === "chromium" ? 1e7 + i : null,
-        first_commit:
-          !processing && outcome === "admitted"
-            ? {
-                bytes,
-                scan_ms: scanMs,
-                commit_ms: commitMs,
-                kind: "applied",
-                value: "committed",
-              }
-            : null,
+        first_commit: firstCommit,
+        observation,
+        effects,
         user_agent: `synthetic ${engine}`,
         at: t("device", 20 + i),
       };
     });
     const results = `${JSON.stringify(
       {
-        schema: 3,
+        schema: 4,
         kind: "protocol",
         protocol_id: protocolId,
         workload_version: recorded.version,
@@ -1609,7 +1889,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 6,
+      contract_version: 7,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

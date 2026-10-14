@@ -27,6 +27,13 @@ import {
   sampler,
   writeEvidence,
 } from "../e2e/profile-helpers";
+import {
+  readSyncSample,
+  SYNC_SAMPLE_METHOD,
+  type SyncSampleRead,
+  syncSample,
+  syncSegments,
+} from "../e2e/profile-samples";
 import { readSyncBytes } from "../e2e/profile-sync-read";
 import {
   API as API_URL,
@@ -126,6 +133,7 @@ test("P-4: what the page does around ONE sync page, against the real backend", a
   const request: number[] = [];
   const postResponse: number[] = [];
   const total: number[] = [];
+  const p4Support: Array<Record<string, unknown>> = [];
   for (let i = 0; i < WARMUP + SAMPLES; i += 1) {
     // The page's resource-timing buffer holds 250 entries and then DROPS new ones, which would make "the last /sync" a stale entry.
     await page.evaluate(() => performance.clearResourceTimings());
@@ -147,21 +155,27 @@ test("P-4: what the page does around ONE sync page, against the real backend", a
       )
       .toBe(true);
     if (i < WARMUP) continue;
-    const lines = (
-      await page.evaluate(
-        (n) => (window.__atlasData?.engineTrace ?? []).slice(n),
-        before,
-      )
-    ).map(parse);
-    const tick = lines.find((l) => l.event === "data.sync_tick");
-    const commit = lines.find((l) => l.event === "data.sync_commit");
-    const res = await lastResource(page, "/sync");
-    if (!tick || !commit || !res) continue;
-    preIssue.push(res.requestStart - tick.at);
-    request.push(res.responseEnd - res.requestStart);
-    postResponse.push(commit.at - res.responseEnd);
-    total.push(commit.at - tick.at);
+    const read = (await (
+      await page.waitForFunction(readSyncSample, before, {
+        timeout: 30_000,
+        polling: 5,
+      })
+    ).jsonValue()) as SyncSampleRead;
+    const { support, problem } = syncSample(read);
+    expect(problem, `P-4 sync sample ${i}: one operation`).toBeNull();
+    if (!support) continue;
+    const segments = syncSegments(support);
+    preIssue.push(segments.pre_issue_ms);
+    request.push(segments.request_ms);
+    postResponse.push(segments.post_response_ms);
+    total.push(segments.total_ms);
+    p4Support.push({ index: i, ...support });
   }
+  mkdirSync(`${PROFILE_OUT}/samples`, { recursive: true });
+  writeFileSync(
+    `${PROFILE_OUT}/samples/P-4.sync.${engine}.json`,
+    `${JSON.stringify({ method: SYNC_SAMPLE_METHOD, engine, warmup: WARMUP, samples: p4Support }, null, 2)}\n`,
+  );
   const extra = {
     warmup: WARMUP,
     method:
@@ -290,6 +304,7 @@ test("P-10: request durations under a throttled loopback (a proxy-injected 250 m
       ms: 250,
     });
   const sync: number[] = [];
+  const p10Support: Array<Record<string, unknown>> = [];
   for (let i = 0; i < 100; i += 1) {
     // The page's resource-timing buffer holds 250 entries and then DROPS new ones, which would make "the last /sync" a stale entry.
     await page.evaluate(() => performance.clearResourceTimings());
@@ -310,9 +325,23 @@ test("P-10: request durations under a throttled loopback (a proxy-injected 250 m
         { timeout: 30_000, intervals: [10, 25, 50] },
       )
       .toBe(true);
-    const res = await lastResource(page, "/sync");
-    if (res) sync.push(res.responseEnd - res.startTime);
+    const read = (await (
+      await page.waitForFunction(readSyncSample, before, {
+        timeout: 30_000,
+        polling: 10,
+      })
+    ).jsonValue()) as SyncSampleRead;
+    const { support, problem } = syncSample(read);
+    expect(problem, `P-10 sync sample ${i}: one operation`).toBeNull();
+    if (!support) continue;
+    sync.push(syncSegments(support).duration_ms);
+    p10Support.push({ index: i, ...support });
   }
+  mkdirSync(`${PROFILE_OUT}/samples`, { recursive: true });
+  writeFileSync(
+    `${PROFILE_OUT}/samples/P-10.sync.${engine}.json`,
+    `${JSON.stringify({ method: SYNC_SAMPLE_METHOD, engine, warmup: 0, samples: p10Support }, null, 2)}\n`,
+  );
   record("P-10 sync page duration_ms (proxy delay 250 ms)", engine, sync, {
     stampedRequestTimeoutMs: 30_000,
     method:

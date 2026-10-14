@@ -109,6 +109,13 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > observation: replacing only the idle step end in the retained trace by a stopped, failed or running end, every commit unchanged, still resolved as an
 > admission and supported the desktop decision (synthetic diagnostics; no Air programme ran on revision 10). Revision 11 corroborates the live terminal state
 > with the step end that completes the observation (contract version 6, below); no measurement was taken under version 5, and no figure here changes.
+>
+> **Status after review 12 (revision 12, 13 October 2026).** Review 12 found that cold and device admission accepted a measured commit that wrote no page:
+> `kind: "applied"` is the transaction's result, and the page plan's own result can be `not_ready` or `lease_lapsed`. After a lapsed hold the engine asks
+> again without publishing anything, so the stub's later empty page committed and published idle, and that idle was taken as the measured workload's
+> admission; P-2 took the retry's timings, and P-4/P-10 could pair a step with another request (synthetic diagnostics and a source assessment; no Air
+> programme ran on revision 11). Revision 12 binds every admission and timed sample to its own operation (contract version 7, below); no measurement was
+> taken under version 6, and no figure here changes.
 
 ## Read this first
 
@@ -503,7 +510,8 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
   the bound and the limits ladder have their recorded forms; the live application and the cold outcomes agree with their copies;
 * P-4: each sync-page total is the sum of its segments (a draft total at least theirs); the shell's medians and every derived figure follow from its runs;
 * the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures
-  (schema 3: and an engine run's end state and first commit corroborate its outcome);
+  (schema 4: an engine run carries the observation its outcome was classified from and the cache it left, both judged as a cold run's are);
+* P-2's scan and commit series, and the P-4/P-10 sync segments, are recomputed from their per-sample support (contract version 7, below);
 * every row lies in the lines its stage sealed; malformed nested evidence is a named finding of its cell, never a crash or an empty success.
 
 From revision 9 (review 9 R2; contract version 4) every admitted or refused P-11 and P-W2 cold run carries the one observation it was classified from
@@ -534,9 +542,30 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   file's at their positions, no step event inside the boundary may be missing, and the trace must have been read from the observation's page instance
   (`trace_page`). Lines after the boundary (a later poll, a failure, another start) neither change nor repair the verdict. An applied dense commit must
   have written its page (`value: "committed"`).
-* **Device results are schema 3.** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
+* **A measured page is admitted only if it was written (revision 12; contract version 7).** A commit wrote its page only when the transaction applied
+  AND the page plan committed (`value: "committed"`); `not_ready`, `lease_lapsed`, a missing or unknown value, a dropped or failed transaction wrote
+  nothing, and a missing value is never read as committed. The cold witness (`engine-state-log/3`) follows the MEASURED attempt: the step that made the first
+  request ends at its own step end, and only a written page continues past a `running` end (`has_more`); an attempt that wrote nothing and asked again
+  completes the observation as no verdict (`error`), so no later response can stand for it. An internal admission round that lapsed before a committed
+  round is one committed commit and stays valid. A committed measured page whose own step ended in a refusal is a contradiction; a refusal after its
+  continuation stays a refusal.
+* **What an admission left is corroborated (revision 12).** Every cold run and device engine run records the cache it left once its measurements are taken
+  (`effects`, `cache-rows/1`: the row count and the SHA-256 of the sorted `id@version` of every cache row; a device run reads it after stopping its engine).
+  The reader derives what the served bytes leave in the run's new, empty database (applied in order: an upsert replaces, a remove deletes, the last write
+  wins) from the regenerated workload or the certified W2 capture, never from the record, and an admission must match it. W4's 800 changes leave 80 rows.
+  `changes_written` keeps its meaning (the final row count) and must equal the effects' count. A negative control's admission fails the control whatever it
+  wrote, and a W2 run whose capture is itself invalid leaves that defect to the capture cell (the programme is incomplete either way).
+* **Each timed sample is one operation (revision 12).** P-2: a sample's scan and commit times are those of the FIRST commit after its start, of its served
+  bytes, written, and ended idle; anything else fails the sample (none is dropped or replaced). `raw/P-2.samples.<engine>.json` names each sample's trace
+  start, commit and end in `raw/P-2.trace.<engine>.txt`, and the contract recomputes both series from them. P-4/P-10 (sync): one page evaluation after the
+  step's end reads the trace and the `/sync` ResourceTiming entries; the step start is the first non-coalesced `data.sync_tick`, the commit the first after
+  it, and the request the ONE `/sync` entry between them (1 ms trace rounding). A latency sample does not need a written page. The support
+  (`samples/P-4.sync.<engine>.json`, `samples/P-10.sync.<engine>.json`) is retained and the segments are recomputed from it.
+* **Device results are schema 4 (revision 12; schema 3 below is its predecessor).** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
-  admitted run's figures must equal; W5 and killed attempts carry none. Schema-2 files and stored envelopes are history: read as unusable, never upgraded.
+  admitted run's figures must equal; W5 and killed attempts carry none. Schema 4 adds the run's own observation (made by the page with the same cold
+  observer, `src/fixture/data-harness/profile-observation.ts`, and classified with the shared rules BEFORE the result is stored) and its effects.
+  Schema-2 and schema-3 files and stored envelopes are history: read as unusable, never upgraded or spliced into a schema-4 protocol.
 
 ## What the released backend does (read from its source at the pinned commit, then measured)
 

@@ -24,7 +24,9 @@
  * A results file is the envelope's runs with its identity (schema 2): one `protocol_id` on every run, every (workload, run) once.
  * Schema 3 (WEB-09c revision 10, design assessment DA-3): every run also carries its first commit (`ProfileRun.first_commit`), so the
  * validator can corroborate an engine run's outcome. A stored schema-2 envelope is left as it is (read as unusable, its raw text kept for
- * the operator to copy or clear), never upgraded or relabelled.
+ * the operator to copy or clear), never upgraded or relabelled. Schema 4 (WEB-09c revision 12, review 12 R2, design assessment DA-D1):
+ * every engine run also carries the observation it was classified from and the cache it left (`ProfileRun.observation`, `effects`); a
+ * stored schema-3 envelope is likewise kept as it is, unusable for a schema-4 protocol, and its attempts are never spliced into one.
  *
  * Revision 4 (review 4 R5, design assessment B1-B6): BOTH collections have a recovery lifecycle. `recoveryTarget` resolves which stored
  * collection an operator's action is for (an explicit target, or the only one that needs it; never a fixed protocol-first choice);
@@ -39,7 +41,7 @@ import type { ProfileRun } from "./profile-page";
 export const PROTOCOL_KEY = "atlas-profile-protocol";
 export const MANUAL_KEY = "atlas-profile-manual";
 export const OWNER_KEY = "atlas-profile-owner";
-export const SCHEMA = 3;
+export const SCHEMA = 4;
 
 /** The parts of `Storage` the protocol uses (localStorage, sessionStorage, or a test's own). */
 export interface KeyValue {

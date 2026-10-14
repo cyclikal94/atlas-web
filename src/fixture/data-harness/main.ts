@@ -1194,6 +1194,24 @@ const heldQuota = (guard: QuotaGuard): QuotaGuard => ({
     if (hold) await hold;
     return verdict;
   },
+  // FIXTURE FAULT INJECTION (WEB-09c revision 12, review 12 R2; labelled): an init script that sets `__fixtureLapseReservations` to n makes
+  // the next n cache reservations report their hold already ended (`live()` false), so the engine's own admission rounds lapse exactly as
+  // a hold that expires before the commit begins does. Three lapses exhaust a page's rounds (the engine traces applied/lease_lapsed and
+  // asks again); one lapse is retried within the same request. Production composes the guard unchanged.
+  reserve: async (kind, estimatedBytes) => {
+    const reservation = await guard.reserve(kind, estimatedBytes);
+    const g = globalThis as { __fixtureLapseReservations?: number };
+    if (kind !== "cache" || !((g.__fixtureLapseReservations ?? 0) > 0))
+      return reservation;
+    g.__fixtureLapseReservations = (g.__fixtureLapseReservations ?? 0) - 1;
+    // (The real hold is never asked: a `false` answer begins nothing, and its settlement releases it.)
+    return {
+      verdict: reservation.verdict,
+      unestablished: reservation.unestablished,
+      live: () => false,
+      settle: (outcome) => reservation.settle(outcome),
+    };
+  },
 });
 
 /** Builds and starts the production sync engine with the harness's fixture-only leadership (no token). */

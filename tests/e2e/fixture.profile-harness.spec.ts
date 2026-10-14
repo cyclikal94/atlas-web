@@ -277,7 +277,7 @@ test("case: an attempt left reserved by a killed page is recorded once, as kille
       localStorage.setItem(
         "atlas-profile-protocol",
         JSON.stringify({
-          schema: 3,
+          schema: 4,
           kind: "protocol",
           protocol_id: "seeded",
           owner,
@@ -631,7 +631,12 @@ async function pickOn(page: Page, buffer: Buffer, name = NAME) {
     buffer,
   });
 }
-/** A run record as the page stores one (the earlier attempts of a seeded protocol). */
+/**
+ * A run record as the page stores one (the earlier attempts of a seeded protocol). An OWNERSHIP-ONLY seed (revision 12, design assessment
+ * DA-H1): these cases test reservation, take-over and recovery, never whether the record is admission evidence (that is
+ * tests/profiling/validator.test.ts and profile-device-run.test.ts); its commit nevertheless carries the plan's value, as the engine
+ * traces it, and schema 4's observation and effects are explicit nulls.
+ */
 const storedRun = (workload: string, run: number, protocolId: string) => ({
   protocol_id: protocolId,
   workload,
@@ -654,7 +659,15 @@ const storedRun = (workload: string, run: number, protocolId: string) => ({
   heap_baseline_bytes: null,
   heap_peak_bytes: null,
   heap_after_bytes: null,
-  first_commit: { kind: "applied", bytes: 1, scan_ms: 1, commit_ms: 1 },
+  first_commit: {
+    kind: "applied",
+    value: "committed",
+    bytes: 1,
+    scan_ms: 1,
+    commit_ms: 1,
+  },
+  observation: null,
+  effects: null,
   user_agent: "seeded",
   at: "t0",
 });
@@ -667,7 +680,7 @@ const seedProtocol = (
     localStorage.setItem(
       "atlas-profile-protocol",
       JSON.stringify({
-        schema: 3,
+        schema: 4,
         kind: "protocol",
         workload_version: 1,
         created_at: "t0",
@@ -1227,7 +1240,7 @@ const seedManual = (page: Page, envelope: Record<string, unknown>) =>
     localStorage.setItem(
       "atlas-profile-manual",
       JSON.stringify({
-        schema: 3,
+        schema: 4,
         kind: "manual",
         workload_version: 1,
         plan: [],
@@ -1733,6 +1746,8 @@ test("case (Q-F2): a held attempt whose collection moved A to B and back to A be
         heap_peak_bytes: null,
         heap_after_bytes: null,
         first_commit: null,
+        observation: null,
+        effects: null,
         user_agent: "test",
         at: "t8",
         protocol_id: e.protocol_id,
@@ -1893,4 +1908,53 @@ test("case (Q-F4): a refused capture write keeps the previous capture, a read-ba
   );
   expect(await stored(page)).toEqual(left);
   expect(errors).toEqual([]);
+});
+
+test("case (revision 12, review 12 R2, DA-D1): a run whose measured page lapsed in every admission round is stored as an error with an untouched cache; one lapse retried within the request is admitted, W4 leaving its 80 rows, not 800", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  for (const [lapses, outcome] of [
+    [3, "error"],
+    [1, "admitted"],
+  ] as const) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    // LABELLED FIXTURE FAULT INJECTION (src/fixture/data-harness/main.ts `__fixtureLapseReservations`): the run's cache reservations
+    // report their hold already ended, exactly as a hold that expires before the commit begins.
+    await page.addInitScript((n) => {
+      (
+        globalThis as { __fixtureLapseReservations?: number }
+      ).__fixtureLapseReservations = n;
+    }, lapses);
+    const errors = await instrument(page);
+    await page.goto("/profile-harness?w=W4&run=1");
+    await expect(statusOf(page)).toContainText("W4 run 1:", {
+      timeout: 120_000,
+    });
+    const run = (await manualOf(page))?.runs[0] as unknown as Record<
+      string,
+      unknown
+    > & {
+      observation: { commits: Array<Record<string, unknown>> } | null;
+      effects: { rows: number } | null;
+    };
+    expect(run.outcome, String(run.detail)).toBe(outcome);
+    expect(run.observation?.commits[0]).toMatchObject({
+      kind: "applied",
+      value: lapses === 3 ? "lease_lapsed" : "committed",
+    });
+    if (lapses === 3) {
+      expect(String(run.detail)).toMatch(
+        /^the measured page was not written \(value lease_lapsed\) and the engine asked again/,
+      );
+      expect(run.effects?.rows).toBe(0);
+      expect(run.changes_written).toBe(0);
+    } else {
+      expect(run.effects?.rows).toBe(80);
+      expect(run.changes_written).toBe(80);
+    }
+    expect(errors).toEqual([]);
+    await context.close();
+  }
 });

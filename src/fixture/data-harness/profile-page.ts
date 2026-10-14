@@ -1,3 +1,11 @@
+import {
+  EFFECTS_METHOD,
+  effectsText,
+  entriesOfPage,
+  entriesOfRows,
+  type RecordedEffects,
+} from "../../../scripts/lib/profile-effects.mjs";
+import { coldObservationRules } from "../../../scripts/lib/profile-outcome-rules.mjs";
 import hashes from "../../../scripts/lib/profile-workload-hashes.json";
 import {
   allWorkloads,
@@ -22,6 +30,12 @@ import {
   sha256Bytes,
   W2,
 } from "./profile-capture";
+import {
+  type ColdWitness,
+  type ObservationMark,
+  observationMark,
+  observeColdOutcome,
+} from "./profile-observation";
 import {
   type Attempt,
   admission,
@@ -87,6 +101,12 @@ import {
  * runs an attempt its reservation already recorded; a picked capture is resolved against every collection that pins one; the results,
  * a manual collection's diagnostic export and a raw snapshot are copied for the chosen collection (and shown in a box when the clipboard
  * refuses); clear is scoped to the chosen collection; and a run's engine is stopped whatever its observation afterwards throws.
+ *
+ * Revision 12 (review 12 R2, design assessment DA-D1): an engine run's outcome is no longer the state that happened to be current once
+ * it left `running` (a lapsed hold leaves the engine `running` and the transport's later empty page then committed and published idle,
+ * which was recorded as the measured workload's admission). The run observes its own state log and trace with the shared cold observer,
+ * stops its engine, reads the cache it left once, and classifies the observation with the shared rules before the result is stored
+ * (schema 4: the observation and the effects travel with the run).
  */
 const RUNS = 5;
 const VALID_ENGINE_RUNS = ["W1", "W3", "W4", "W6"];
@@ -122,6 +142,14 @@ export interface ProfileRun {
    * validator requires an admitted run's to be the served bytes, applied, with the run's own scan and commit figures.
    */
   first_commit: FirstCommit | null;
+  /**
+   * Schema 4 (WEB-09c revision 12, review 12 R2, design assessment DA-D1): the ONE observation an engine run was classified from
+   * (`engine-state-log/3`, null for W5, a killed or unread attempt, or a time-out), and the cache the run left once its engine was
+   * stopped (`cache-rows/1`: row count and digest of the sorted `id@version`; null when it was not read). `changes_written` is that row
+   * count (an engine run) or the decoded count (W5).
+   */
+  observation: ColdWitness | null;
+  effects: RecordedEffects | null;
   user_agent: string;
   at: string;
 }
@@ -203,9 +231,12 @@ type RunBase = Omit<
   | "heap_after_bytes"
   | "heap_peak_bytes"
   | "first_commit"
+  | "observation"
+  | "effects"
 >;
 
-async function runEngine(
+/** One cold engine run of `bytes` (exported for its deterministic tests, tests/profiling/profile-device-run.test.ts). */
+export async function runEngine(
   data: DataHarness,
   bytes: Uint8Array,
   expected: ProfileRun["expected"],
@@ -239,12 +270,17 @@ async function runEngine(
       }),
     );
   };
+  // Revision 12 (review 12 R2, DA-D1): the run's outcome is ONE observation of this page's own state log and trace, made by the shared
+  // cold observer (profile-observation.ts) from a mark taken before the engine starts; it is classified by the shared rules after the
+  // cache it left is read, never derived from whichever state happens to be current.
+  const mark = observationMark(data);
   const started = performance.now();
-  const trace0 = data.engineTrace.length;
+  let observation: ColdWitness | null = null;
   let outcome: ProfileRun["outcome"] = "error";
   let detail = "";
   const measured = await withHeapPeak(async () => {
     try {
+      if (!mark) throw new Error("no data harness log to observe");
       await data.startSyncLocal(account, {
         transport,
         seedCursor: "cursor-0",
@@ -253,22 +289,9 @@ async function runEngine(
       });
       const deadline = performance.now() + 180_000;
       for (;;) {
-        const state = data.engineState();
-        if (state && state.kind !== "running" && requests >= 1) {
-          detail = JSON.stringify(state);
-          outcome =
-            state.kind === "idle"
-              ? "admitted"
-              : // The page was not applied: refused outright (stopped, waiting for a valid cache) or counted as a failed read and backed off.
-                // Waiting for the session or the network is no verdict on the page (revision 10: the rule the validator applies).
-                state.kind === "stopped" ||
-                  (state.kind === "waiting" &&
-                    (state as { reason?: unknown }).reason ===
-                      "cache_not_valid") ||
-                  state.kind === "backing_off" ||
-                  state.kind === "paused"
-                ? "refused"
-                : "error";
+        const found = observeColdOutcome(mark, data);
+        if (found) {
+          observation = found;
           return;
         }
         if (performance.now() > deadline) {
@@ -283,63 +306,112 @@ async function runEngine(
     }
   });
   const elapsed = performance.now() - started;
-  // The engine is stopped before this attempt settles, whatever the observation below throws (revision 4, B6/N-1): a run that ends in an
-  // error never leaves its engine running into a clean-up, a deletion or the next collection.
+  // The owned engine is quiesced before the cache is read (design assessment step 3), and stopped before this attempt settles whatever
+  // the reads below throw (revision 4, B6/N-1): a run never leaves its engine running into a clean-up, a deletion or the next collection.
+  data.stopSync();
   try {
-    return await observeRun(data, account, trace0, base, {
+    return await observeRun(data, account, bytes, base, {
       expected,
       outcome,
       detail,
+      observation,
       elapsed,
       requests,
       limit,
       peak: measured.peak,
+      mark,
     });
   } finally {
     data.stopSync();
   }
 }
 
-/** What a finished run observed after its engine settled; the caller stops the engine whatever this throws. */
+/**
+ * What a finished run observed, after its engine was stopped: the cache it left (`effects`, `cache-rows/1`) and the cursor, read once, and
+ * the outcome its observation shows under the shared rules (an admission needs the measured page committed and the effects the served
+ * bytes leave in this run's new, empty database). A run whose page or engine changed while it was read is an `error`. The caller stops
+ * the engine whatever this throws.
+ */
 async function observeRun(
   data: DataHarness,
   account: string,
-  trace0: number,
+  bytes: Uint8Array,
   base: RunBase,
   run: {
     expected: ProfileRun["expected"];
     outcome: ProfileRun["outcome"];
     detail: string;
+    observation: ColdWitness | null;
     elapsed: number;
     requests: number;
     limit: number | null;
     peak: number | null;
+    mark: ObservationMark | null;
   },
 ): Promise<ProfileRun> {
-  const { expected, outcome, detail, elapsed, requests, limit } = run;
+  const { expected, observation, elapsed, requests, limit } = run;
+  let { outcome, detail } = run;
   const sync = (await data.syncState(account)) as {
     cursor?: string | null;
   } | null;
-  let changes: number | null = null;
+  let effects: RecordedEffects | null = null;
+  let effectsError: string | null = null;
   try {
-    changes = (await data.rows(account, "cache")).length;
-  } catch {
-    changes = null;
+    const { entries, problem } = entriesOfRows(
+      await data.rows(account, "cache"),
+    );
+    if (!entries) throw new Error(problem ?? "unreadable rows");
+    effects = {
+      method: EFFECTS_METHOD,
+      rows: entries.length,
+      entries_sha256: await sha256Bytes(
+        new TextEncoder().encode(effectsText(entries)),
+      ),
+    };
+  } catch (error) {
+    effectsError = String(error).slice(0, 160);
   }
-  const commits = data.engineTrace
-    .slice(trace0)
-    .filter((line) => line.includes("data.sync_commit"))
-    .map((line) => {
-      const at = line.indexOf("{");
-      try {
-        return at < 0 ? {} : JSON.parse(line.slice(at));
-      } catch {
-        return {};
-      }
-    }) as FirstCommit[];
-  const first = commits[0];
-  data.stopSync();
   const after = heap();
+  const first = (observation?.commits[0] as FirstCommit | undefined) ?? null;
+  if (observation) {
+    const served = entriesOfPage(new TextDecoder().decode(bytes)).entries;
+    const judged = coldObservationRules(observation, {
+      servedBytes: bytes.length,
+      requests,
+      effects,
+      expectedEffects: served
+        ? {
+            rows: served.length,
+            entries_sha256: await sha256Bytes(
+              new TextEncoder().encode(effectsText(served)),
+            ),
+          }
+        : null,
+    });
+    const shown = JSON.stringify(observation.terminal.state);
+    // The page and the engine must still be the observed ones once the reads are done (no reload, no other start).
+    const moved =
+      data.page !== observation.page ||
+      (data.engineEpochs.at(-1)?.generation ?? 0) !== observation.generation;
+    const problems = [
+      ...(moved
+        ? ["the page or its engine changed while the run's effects were read"]
+        : []),
+      ...judged.problems,
+      ...(effectsError ? [`effects not read: ${effectsError}`] : []),
+    ];
+    if (problems.length || judged.shows === null) {
+      outcome = "error";
+      detail =
+        `${(problems.length ? problems : ["no verdict"]).join("; ")}; ${shown}`.slice(
+          0,
+          600,
+        );
+    } else {
+      outcome = judged.shows;
+      detail = shown;
+    }
+  }
   return {
     ...base,
     expected,
@@ -350,11 +422,13 @@ async function observeRun(
     commit_ms: first?.commit_ms ?? null,
     request_count: requests,
     limit,
-    changes_written: changes,
+    changes_written: effects?.rows ?? null,
     cursor_after: sync?.cursor ?? null,
     heap_peak_bytes: run.peak,
     heap_after_bytes: after,
-    first_commit: first ?? null,
+    first_commit: first,
+    observation,
+    effects,
   };
 }
 
@@ -407,6 +481,8 @@ function runProcessing(bytes: Uint8Array, base: RunBase): ProfileRun {
     heap_peak_bytes: peak,
     heap_after_bytes: heap(),
     first_commit: null,
+    observation: null,
+    effects: null,
   };
 }
 
@@ -455,6 +531,8 @@ async function runCapture(
       heap_peak_bytes: null,
       heap_after_bytes: null,
       first_commit: null,
+      observation: null,
+      effects: null,
     };
   return runEngine(data, loaded.bytes, "admitted", {
     ...base,
@@ -557,6 +635,8 @@ function killedRun(
     heap_peak_bytes: null,
     heap_after_bytes: null,
     first_commit: null,
+    observation: null,
+    effects: null,
     user_agent: navigator.userAgent,
     at: new Date().toISOString(),
   };

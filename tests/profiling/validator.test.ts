@@ -5,11 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import hashes from "../../scripts/lib/profile-workload-hashes.json";
+import { allWorkloads } from "../../scripts/lib/profile-workloads.mjs";
 
 /**
  * scripts/validate-profile-handoff.mjs: what it accepts and what it refuses (each rule fails on its own). Schema 2 (WEB-09c revision 2,
  * design assessment DA-1): one protocol identity, every (workload, run) once, distinct runs counted, expectations from the workload
  * contract, and a W7 control fulfilled only when refused.
+ *
+ * Schema 4 (WEB-09c revision 12, review 12 R2, design assessment DA-D1/DA-H1): every engine run carries the observation it was classified
+ * from and the cache it left. The positive fixtures are now production-shaped (revision 10's applied commits omitted the plan's `value`,
+ * and `changes_written: 100` was an invented count): each run's witness is built here in the engine's publication/trace order, and its
+ * effects are the surviving rows of the served body, derived below by this test's own walk of the workload (never by the rules).
  */
 const dir = mkdtempSync(join(tmpdir(), "atlas-validate-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -107,8 +113,89 @@ const hash = (name: string) =>
 // protocol's attempts in plan order (W2 after W1) with a planned count and a terminal state that agree with them.
 const bytesOf = (name: string) =>
   name === "W2"
-    ? 1_234
+    ? Buffer.byteLength(CAPTURED)
     : (hashes.workloads.find((w) => w.name === name)?.bytes as number);
+/** The rows a body leaves in an empty cache, by this test's own walk (upsert replaces, remove deletes, in order). */
+const survivors = (text: string) => {
+  const rows = new Map<string, number>();
+  for (const batch of JSON.parse(text).batches)
+    for (const c of batch.changes)
+      if (c.kind === "upsert") rows.set(c.resource.id, c.resource.version);
+      else rows.delete(c.id);
+  const entries = [...rows].map(([id, v]) => `${id}@${v}`).sort();
+  return {
+    method: "cache-rows/1",
+    rows: entries.length,
+    entries_sha256: shaOf(entries.join("\n")),
+  };
+};
+const BODIES = new Map(allWorkloads().map((w) => [w.name, w.body]));
+const effectsOf = (name: string) =>
+  survivors(name === "W2" ? CAPTURED : (BODIES.get(name) as string));
+const NOTHING = {
+  method: "cache-rows/1",
+  rows: 0,
+  entries_sha256: shaOf(""),
+};
+/**
+ * The observation a device engine run makes (`engine-state-log/3`), in the production order: the start publishes waiting, the step traces
+ * its tick and publishes running, traces its commit (if any), publishes the state it ends in, and the loop traces the end recording it.
+ */
+const witness = (
+  end: Record<string, unknown>,
+  commit: Record<string, unknown> | null,
+) => {
+  const mark = { page: "device-page", states: 4, trace: 9, generation: 2 };
+  const t = mark.trace;
+  const published = [
+    { kind: "waiting", reason: "cache_not_valid" },
+    { kind: "running", catchingUp: true },
+    end,
+  ].map((state, index) => ({
+    index,
+    generation: 3,
+    at: 10 + index,
+    trace: t + Math.min(index, 1) + (index === 2 && commit ? 1 : 0),
+    state,
+  }));
+  const endTrace = t + 1 + (commit ? 1 : 0);
+  const events = [
+    ...(commit
+      ? [{ trace: t + 1, event: "data.sync_commit", payload: commit }]
+      : []),
+    {
+      trace: endTrace,
+      event: "data.sync_next",
+      payload: { when: "after", state: end.kind },
+    },
+  ];
+  return {
+    method: "engine-state-log/3",
+    page: mark.page,
+    mark,
+    generation: 3,
+    epochs: [{ generation: 3, run: 1, trace: t }],
+    published,
+    events,
+    request: { index: 1, at: 11, trace: t + 1 },
+    terminal: {
+      index: 2,
+      at: 12,
+      trace: published[2]?.trace,
+      state: end,
+    },
+    step_end: { trace: endTrace, event: "data.sync_next", recorded: end.kind },
+    commits: commit ? [commit] : [],
+  };
+};
+/** The served body's commit as the engine traces it: applied, and the plan's own result (`value`) committed. */
+const committed = (workload: string) => ({
+  kind: "applied",
+  value: "committed",
+  bytes: bytesOf(workload),
+  scan_ms: 3,
+  commit_ms: 20,
+});
 const run = (
   workload: string,
   n: number,
@@ -140,21 +227,20 @@ const run = (
     commit_ms: control || processing ? null : 20,
     request_count: processing ? 0 : 1,
     limit: processing ? null : 1,
-    changes_written: control ? null : 100,
+    // W5 records its decoded count; an engine run the row count of the cache it left (a refused control's is empty).
+    changes_written: processing ? 100 : control ? 0 : effectsOf(workload).rows,
     cursor_after: processing ? null : "after",
     heap_baseline_bytes: null,
     heap_peak_bytes: null,
     heap_after_bytes: null,
     // The first commit after the request: the served body's, with the run's own figures (null for W5 and a refused control here).
-    first_commit:
-      control || processing
-        ? null
-        : {
-            kind: "applied",
-            bytes: bytesOf(workload),
-            scan_ms: 3,
-            commit_ms: 20,
-          },
+    first_commit: control || processing ? null : committed(workload),
+    observation: processing
+      ? null
+      : control
+        ? witness({ kind: "backing_off", since: 1 }, null)
+        : witness({ kind: "idle" }, committed(workload)),
+    effects: processing ? null : control ? NOTHING : effectsOf(workload),
     user_agent: "test",
     at: "2026-10-10T00:00:00.000Z",
     ...extra,
@@ -172,7 +258,7 @@ const planOf = (withW2: boolean) =>
 const complete = () => {
   const runs = planOf(true);
   return {
-    schema: 3,
+    schema: 4,
     kind: "protocol",
     protocol_id: "protocol-1",
     w2sha256: W2_SHA as string | null,
@@ -207,7 +293,10 @@ function validate(
   return { status: out.status, text: `${out.stdout}${out.stderr}` };
 }
 
-describe("validate-profile-handoff", () => {
+// Revision 12 (labelled harness adaptation): every case spawns the validator one or more times, and schema 4 derives each run's expected
+// effects from the regenerated workloads, so a case can outlast vitest's 5 s default on a loaded machine; the cases' own assertions and
+// the validator's behaviour are unchanged.
+describe("validate-profile-handoff", { timeout: 60_000 }, () => {
   it("accepts a complete, consistent file (W2 included, verified against the hand-over's W2 hashes)", () => {
     const out = validate(complete());
     expect(out.status, out.text).toBe(0);
@@ -315,13 +404,15 @@ describe("validate-profile-handoff", () => {
     const historical = { ...complete(), schema: 1 };
     const out = validate(historical);
     expect(out.status).toBe(1);
-    expect(out.text).toContain("schema must be 3");
-    // Revision 10: schema 2 (before corroborated engine outcomes) is history too.
-    const schema2 = validate({ ...complete(), schema: 2 });
-    expect(schema2.status).toBe(1);
-    expect(schema2.text).toContain(
-      "schema must be 3 (schema 2 is a historical record",
-    );
+    expect(out.text).toContain("schema must be 4");
+    // Revision 10: schema 2 (before corroborated engine outcomes) is history too; revision 12: so is schema 3.
+    for (const schema of [2, 3]) {
+      const old = validate({ ...complete(), schema });
+      expect(old.status).toBe(1);
+      expect(old.text).toContain(
+        `schema must be 4 (schema ${schema} is a historical record`,
+      );
+    }
   });
   it("a W2 run, killed ones included, is of the protocol's capture", () => {
     const data = complete();
@@ -347,6 +438,81 @@ describe("validate-profile-handoff", () => {
     const allowed = validate(data, ["--allow-partial"]);
     expect(allowed.status).toBe(2);
     expect(allowed.text).toContain("W1: 2 distinct cold run(s)");
+  });
+  it("revision 12 (review 12 R2): a device run whose measured commit wrote no page, with the empty retry's idle claimed as its admission, is refused in both modes", () => {
+    for (const value of ["lease_lapsed", "not_ready"]) {
+      const data = complete();
+      const w1 = data.runs.find((r) => r.workload === "W1") as Record<
+        string,
+        unknown
+      >;
+      const lapsed = { ...committed("W1"), value };
+      // The schedule the review reproduced: two requests, the first commit lapsed, nothing written, idle claimed.
+      Object.assign(w1, {
+        request_count: 2,
+        first_commit: lapsed,
+        changes_written: 0,
+        effects: NOTHING,
+        observation: witness({ kind: "idle" }, lapsed),
+      });
+      for (const flags of [[], ["--allow-partial"]]) {
+        const out = validate(data, flags);
+        expect(out.status, `${value} ${flags}`).toBe(1);
+        expect(out.text).toContain(
+          `an admitted engine run whose served body's commit wrote no page (value ${value})`,
+        );
+        expect(out.text).toContain(
+          `idle, but the served page's commit wrote no page (value ${value})`,
+        );
+      }
+    }
+  });
+  it("revision 12 (DA-D1, invariant 5): a committed admission whose cache is not the served body's (none, W4's 800 changes as rows) or has no observation is refused", () => {
+    const data = complete();
+    const w1 = data.runs.find((r) => r.workload === "W1") as Record<
+      string,
+      unknown
+    >;
+    Object.assign(w1, { effects: NOTHING, changes_written: 0 });
+    const none = validate(data);
+    expect(none.status).toBe(1);
+    expect(none.text).toContain(
+      `the cache holds 0 rows; the served page leaves ${effectsOf("W1").rows}`,
+    );
+    const w4 = complete();
+    const run4 = w4.runs.find((r) => r.workload === "W4") as Record<
+      string,
+      unknown
+    >;
+    expect(effectsOf("W4").rows).toBe(80);
+    Object.assign(run4, {
+      effects: { ...effectsOf("W4"), rows: 800 },
+      changes_written: 800,
+    });
+    const counted = validate(w4);
+    expect(counted.status).toBe(1);
+    expect(counted.text).toContain(
+      "the cache holds 800 rows; the served page leaves 80",
+    );
+    const blind = complete();
+    const run1 = blind.runs.find((r) => r.workload === "W3") as Record<
+      string,
+      unknown
+    >;
+    run1.observation = null;
+    expect(validate(blind).text).toContain(
+      "an admitted engine run without the observation it was classified from",
+    );
+    // changes_written must be the effects' row count (its meaning is the final cache rows, never the change count).
+    const mislabelled = complete();
+    const w3 = mislabelled.runs.find((r) => r.workload === "W3") as Record<
+      string,
+      unknown
+    >;
+    w3.changes_written = 5;
+    expect(validate(mislabelled).text).toContain(
+      "changes_written is not the row count of the cache the run left",
+    );
   });
   it("refuses a run the page did not verify, a non-secure context and a stale workload version", () => {
     const unverified = complete();
