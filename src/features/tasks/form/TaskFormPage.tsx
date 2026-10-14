@@ -304,10 +304,23 @@ function TaskForm({
             d.target_resource_ids[0] === mode.taskId,
         )
       : undefined;
+  // An edit saves into the queued create or revise when there is one, so it needs the whole queue read: until then (or when it could not be
+  // read) the target is unknown and nothing is saved (R9, revision 3; Q17: never a stale write target).
+  const queueUnread =
+    mode.kind === "edit" &&
+    !(
+      outstanding.status === "ready" ||
+      (outstanding.status === "unavailable" && outstanding.reason === "absent")
+    );
+  const queueFailed =
+    queueUnread &&
+    outstanding.status === "unavailable" &&
+    outstanding.reason !== "absent";
   const canSave =
-    mode.kind === "new" ||
-    queuedCreate !== undefined ||
-    (mode.synced && mode.policyVersion !== undefined);
+    !queueUnread &&
+    (mode.kind === "new" ||
+      queuedCreate !== undefined ||
+      (mode.synced && mode.policyVersion !== undefined));
   const defaultsSummary =
     defaults.record === null
       ? FORM_COPY.sharingDefaultsUnknown
@@ -804,7 +817,10 @@ function TaskForm({
             {FORM_COPY.save}
           </Button>
         ) : !canSave ? (
-          <Button disabled reason={FORM_COPY.wait}>
+          <Button
+            disabled
+            reason={queueFailed ? copy.LOCAL_FAILED : FORM_COPY.wait}
+          >
             {FORM_COPY.save}
           </Button>
         ) : busy ? (

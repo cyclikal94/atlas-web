@@ -63,6 +63,13 @@ export const ERROR_TITLE = "Couldn't load this day";
 export const ERROR_BODY = "Atlas couldn't get this day's list from the server.";
 export const KEPT_CHANGING = "The list kept changing while loading.";
 export const SHOWING_DEVICE = "Showing what's on this device.";
+/** Revision 3 (R9): this device's own saved tasks could not be read whole. Provisional copy (docs/tasks.md checkpoint list). */
+export const LOCAL_ERROR_TITLE = "Couldn't read this device's tasks";
+export const LOCAL_FAILED =
+  "Atlas couldn't read the tasks saved on this device.";
+export const LOCAL_UNSTABLE =
+  "The tasks saved on this device kept changing while they were read.";
+export const SHOWING_LAST_READ = "Showing what was last read on this device.";
 export const TRY_AGAIN = "Try again";
 export const REQUEST_ID = (id: string) => `Request ID: ${id}`;
 export const PENDING_TASKS =

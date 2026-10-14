@@ -41,6 +41,16 @@ export function TaskList({ selected }: { selected?: string }) {
         )
       : [];
   const ids = new Set(rows.map((r) => r.id));
+  // A read that failed is not an empty list, and saved changes that could not be read are not "none" (R9, revision 3; Q17). No database
+  // on this device (`absent`) is a genuinely empty list.
+  const failed = [page, outstanding].some(
+    (read) => read.status === "unavailable" && read.reason !== "absent",
+  );
+  const known = [page, outstanding].every(
+    (read) =>
+      read.status === "ready" ||
+      (read.status === "unavailable" && read.reason === "absent"),
+  );
   const shown = [
     ...(cursors.length === 1 ? creates.filter((c) => !ids.has(c.id)) : []),
     ...rows,
@@ -74,8 +84,15 @@ export function TaskList({ selected }: { selected?: string }) {
         />
         {LIST_COPY.showArchived}
       </label>
+      {failed ? (
+        <p className="text-[13px] text-ink-2" data-task-list-error="">
+          {copy.LOCAL_FAILED}
+        </p>
+      ) : null}
       {shown.length === 0 ? (
-        <p className="text-[13px] text-ink-2">{LIST_COPY.none}</p>
+        known ? (
+          <p className="text-[13px] text-ink-2">{LIST_COPY.none}</p>
+        ) : null
       ) : (
         <List className="flex flex-col gap-1">
           {shown.map((row) => {

@@ -1,3 +1,4 @@
+import { compositionOf } from "../model/composition";
 import { DATA_CONFIG } from "../model/config";
 import { applyOverlay, type Overlay } from "../model/overlay";
 import type {
@@ -398,6 +399,8 @@ export interface CachePosition {
   pageSeq: number;
   appliedRevision: number | null;
   lastSyncedAt: IsoInstant | null;
+  /** The local composition generation (`model/composition.ts`): moves with every change of what a screen composes from. */
+  composition: number;
 }
 
 export const readCachePosition = readPlan<
@@ -415,5 +418,39 @@ export const readCachePosition = readPlan<
           pageSeq: sync.page_seq,
           appliedRevision: sync.applied_revision,
           lastSyncedAt: sync.last_synced_at,
+          composition: compositionOf(sync),
+        },
+});
+
+/**
+ * The basis a composition is read on (WEB-10a revision 3): the database's incarnation, its local composition generation, the cache's
+ * status and recovery generation, and its content revision. Read before and after a composition's reads, an unchanged basis proves that
+ * nothing the composition reads was written between them (`model/composition.ts`); `null` when the database has no singleton.
+ */
+export interface LocalBasis {
+  incarnationId: string;
+  composition: number;
+  cacheStatus: string;
+  recoveryGeneration: number;
+  appliedRevision: number | null;
+}
+
+export const readLocalBasis = readPlan<
+  { incarnationId: string },
+  null,
+  LocalBasis | null
+>({
+  name: "data.readLocalBasis",
+  scope: [],
+  read: async () => null,
+  decide: ({ sync }) =>
+    sync === undefined
+      ? null
+      : {
+          incarnationId: sync.incarnation_id,
+          composition: compositionOf(sync),
+          cacheStatus: sync.cache_status,
+          recoveryGeneration: sync.recovery_generation,
+          appliedRevision: sync.applied_revision,
         },
 });

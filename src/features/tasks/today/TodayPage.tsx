@@ -209,6 +209,31 @@ export function TodayPage({
           </span>
         </section>
       ) : null}
+      {view.localError !== null ? (
+        <section
+          data-today-local-error={view.localError}
+          aria-labelledby={`${filterName}-local-error`}
+          className="flex max-w-[620px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+        >
+          <h2
+            id={`${filterName}-local-error`}
+            className="text-[14px] font-medium text-ink-1"
+          >
+            {copy.LOCAL_ERROR_TITLE}
+          </h2>
+          <p className="text-[13px] text-ink-2">
+            {view.localError === "unstable"
+              ? copy.LOCAL_UNSTABLE
+              : copy.LOCAL_FAILED}
+          </p>
+          {view.stale ? (
+            <p className="text-[12.5px] text-ink-2">{copy.SHOWING_LAST_READ}</p>
+          ) : null}
+          <span>
+            <Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>
+          </span>
+        </section>
+      ) : null}
       {view.loading ? (
         <div
           aria-busy="true"
@@ -221,7 +246,8 @@ export function TodayPage({
           ))}
         </div>
       ) : shown.length === 0 && view.unreadable.length === 0 ? (
-        view.error === null || all.length > 0 ? (
+        // Unknown is not empty: a day whose saved tasks could not be read says so above, never "nothing due" (R9, revision 3).
+        view.localError === null && (view.error === null || all.length > 0) ? (
           <p className="text-[13.5px] text-ink-2" data-today-empty="">
             {copy.EMPTY(filter)}
           </p>
@@ -230,6 +256,7 @@ export function TodayPage({
         <div
           className="flex flex-col gap-5"
           data-today-refreshing={view.refreshing ? "" : undefined}
+          data-today-stale={view.stale ? "" : undefined}
         >
           {GROUP_ORDER.filter((g) => groups.has(g)).map((group) => (
             <section

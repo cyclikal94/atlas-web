@@ -91,6 +91,9 @@ async function conflicted(
   await t.until(
     () => document.querySelector("[data-correction-conflict]") !== null,
   );
+  // Harness readiness (revision 3, labelled): the section now shows as soon as the day's certified row is read, which can be before the
+  // live read of the submitted command has settled; let it settle before the assertions (they are unchanged).
+  await t.settle();
   return { t, task, submitted };
 }
 const section = () =>

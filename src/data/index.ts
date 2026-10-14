@@ -119,6 +119,7 @@ export type {
 // ---- outstanding work, reads by id and the whole-kind walk (WEB-10a) ------------------------------------------------------------------
 export type {
   CachePosition,
+  LocalBasis,
   OutstandingByKindPage,
   OutstandingCursor,
   OutstandingForResource,
@@ -165,8 +166,14 @@ export {
   useSyncStatusModel,
 } from "./ui/react";
 export {
+  type LocalRead,
+  readAllOutstandingByKindNow,
+  readAllOutstandingNow,
   readCacheRevisionNow,
+  readCoherently,
+  readLocalBasisNow,
   readResourcesNow,
   type ScanEnd,
+  type Stage,
   scanResources,
 } from "./ui/scan";

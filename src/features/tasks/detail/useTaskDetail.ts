@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   type CacheRow,
+  readAllOutstandingByKindNow,
+  readAllOutstandingNow,
+  readCoherently,
+  readResourcesNow,
   scanResources,
   useAllOutstanding,
   useAllOutstandingByKind,
@@ -11,6 +15,7 @@ import {
 } from "../../../data";
 import { useBoundaryClock } from "../clock";
 import { useTasksEnv } from "../env";
+import { useScopedRead } from "../local-read";
 import { type JointAnswer, jointOf } from "../memory";
 import { QUEUED_KINDS } from "../model/commands";
 import {
@@ -27,7 +32,7 @@ import {
 import { todayIn } from "../model/time";
 import {
   composeRow,
-  draftsNaming,
+  effectiveOccurrence,
   type Outstanding,
   patched,
   type RowModel,
@@ -47,6 +52,12 @@ import {
  * The default day is chosen once for the visit (revision 2, assessed against design assessment C3): moving it at midnight while the person
  * is on the page would retarget an open record card or correction (their input belongs to the day they were opened for). The DISPLAYED
  * day's own window is followed by the clock (`now`); the next visit, or the day picker, chooses again.
+ *
+ * THE DISPLAYED DAY'S ROW (R9, revision 3; design assessment C3, Q17) is composed from ONE certified read of its inputs (the task, the
+ * occurrence and my progress rows, every page of the outstanding task work and of the work naming them; `readCoherently`), read again when
+ * the local composition generation moves: never from live reads that may each show a different commit. A read that failed or kept changing
+ * keeps the last complete one of the same day (`rowError` says why), or shows the reason with no result: never a result from part of it.
+ * The clock schedules the window of that same composition (`effectiveOccurrence`).
  */
 export interface TaskDetailView {
   status: "loading" | "absent" | "ready";
@@ -68,6 +79,10 @@ export interface TaskDetailView {
   selection: "explicit" | "default" | "loading" | "unavailable";
   row: RowModel | null;
   unreadable: boolean;
+  /** The displayed day's inputs could not be read whole (`failed`, or `unstable`: they kept changing); `row` is then the last complete one. */
+  rowError: "failed" | "unstable" | null;
+  /** Reads the displayed day's inputs again (after `rowError`). */
+  retryRow(): void;
   /** The task is in the cache (not only projected): sharing and revise need it. */
   synced: boolean;
   outstanding: Outstanding;
@@ -335,8 +350,6 @@ export function useTaskDetail(
     ...(progressId ? [progressId] : []),
   ];
   const outstanding = useAllOutstanding(ids);
-  const occurrenceCached = useCachedResources(chosen ? [chosen] : []);
-  const progressCached = useCachedResources(progressId ? [progressId] : []);
   const othersList = useResourceList({
     kind: "progress",
     parentId: chosen ?? "-",
@@ -354,41 +367,96 @@ export function useTaskDetail(
   }, [outstanding, all]);
 
   const joint = chosen === null ? null : jointOf(env.identity, chosen);
-  const occurrenceRow =
-    chosen !== null && occurrenceCached.status === "ready"
-      ? (occurrenceCached.value[chosen]?.merged ?? null)
+  // ---- the displayed day's inputs, as one certified read (R9, revision 3) ------------------------------------------------------------
+  const [attempt, setAttempt] = useState(0);
+  const composition =
+    position.status === "ready" ? (position.value?.composition ?? -1) : -2;
+  const rowRead = useScopedRead<{
+    all: Outstanding;
+    detail: Outstanding;
+    rows: Map<string, CacheRow>;
+  }>(
+    `${env.identity}\u0000${taskId}\u0000${chosen}\u0000${progressId}`,
+    `${composition}|${attempt}`,
+    (signal) =>
+      readCoherently(
+        data,
+        async () => {
+          const queue = await readAllOutstandingByKindNow(data, QUEUED_KINDS);
+          if (!queue.ok) return queue;
+          const named = await readAllOutstandingNow(data, ids);
+          if (!named.ok) return named;
+          const read = await readResourcesNow(data, [
+            taskId,
+            ...(chosen ? [chosen] : []),
+            ...(progressId ? [progressId] : []),
+          ]);
+          if (read === null)
+            return {
+              ok: false,
+              why: data.service() === null ? "closed" : "failed",
+            } as const;
+          const drafts = new Map(
+            queue.value.drafts.map((d) => [d.local_id, d]),
+          );
+          const attention = new Map(
+            queue.value.attention.map((d) => [d.local_id, d]),
+          );
+          for (const entry of Object.values(named.value)) {
+            for (const d of entry.drafts) drafts.set(d.local_id, d);
+            for (const d of entry.attention) attention.set(d.local_id, d);
+          }
+          const rows = new Map<string, CacheRow>();
+          for (const [rowId, row] of read) rows.set(rowId, row.merged);
+          return {
+            ok: true,
+            value: {
+              all: queue.value,
+              detail: {
+                drafts: [...drafts.values()],
+                attention: [...attention.values()],
+              },
+              rows,
+            },
+          } as const;
+        },
+        { signal },
+      ),
+    chosen !== null && progressId !== null,
+  );
+  const inputs = rowRead.complete?.value ?? null;
+  const rowError: TaskDetailView["rowError"] =
+    rowRead.latest === "failed" || rowRead.latest === "unstable"
+      ? rowRead.latest
       : null;
-  // The displayed day's window as it will be composed (its queued correction applied): the clock wakes at its boundaries (R8, revision 2).
-  const shownWindow =
-    chosen === null
+  const rowSources =
+    chosen === null || progressId === null || inputs === null
       ? null
-      : parseOccurrenceData(
-          patched(occurrenceRow, chosen, draftsNaming(detail, [chosen]))
-            ?.value ?? null,
-        );
+      : {
+          occurrenceId: chosen,
+          progressId,
+          occurrence: inputs.rows.get(chosen) ?? null,
+          task: inputs.rows.get(taskId) ?? null,
+          progress: inputs.rows.get(progressId) ?? null,
+          joint: null,
+          personal: null,
+          answer: null,
+        };
+  // The displayed day's window as it will be composed (its queued correction applied): the clock wakes at its boundaries (R8).
+  const shownWindow =
+    rowSources === null || inputs === null
+      ? null
+      : effectiveOccurrence(rowSources, inputs.detail).data;
   const clock = useBoundaryClock(
     env.now,
     shownWindow === null ? [] : [shownWindow],
   );
   let row: RowModel | null = null;
   let unreadable = false;
-  if (chosen !== null && progressId !== null) {
-    const progressRow =
-      progressCached.status === "ready"
-        ? (progressCached.value[progressId]?.merged ?? null)
-        : null;
+  if (rowSources !== null && inputs !== null) {
     const result = composeRow(
-      {
-        occurrenceId: chosen,
-        progressId,
-        occurrence: occurrenceRow,
-        task: taskBase,
-        progress: progressRow,
-        joint: null,
-        personal: null,
-        answer: null,
-      },
-      detail,
+      rowSources,
+      inputs.detail,
       env.accountId,
       clock.now,
     );
@@ -397,9 +465,11 @@ export function useTaskDetail(
   }
   const loading =
     cachedTask.status === "loading" || executions.status === "loading";
-  // Until every page of the outstanding work is read no day is composed: a personal result is never computed from part of it (R4).
+  // Until every page of the outstanding work is read no day is composed: a personal result is never computed from part of it (R4). The
+  // row's own inputs are one certified read (above): until it has completed once, the day is loading, unless it failed.
   const overlayLoading =
     byKind.status === "loading" || outstanding.status === "loading";
+  const rowLoading = chosen !== null && inputs === null && rowError === null;
   // The picker lists the page's days, and the selected day when it is on another page.
   const listed =
     chosen !== null && !occurrences.some((o) => o.id === chosen)
@@ -442,14 +512,11 @@ export function useTaskDetail(
         setCursors((c) => (c.length > 1 ? c.slice(0, -1) : c)),
     },
     selection:
-      (overlayLoading ||
-        occurrenceCached.status === "loading" ||
-        progressCached.status === "loading") &&
-      chosen !== null
-        ? "loading"
-        : selection,
+      (overlayLoading || rowLoading) && chosen !== null ? "loading" : selection,
     row: overlayLoading ? null : row,
     unreadable,
+    rowError,
+    retryRow: () => setAttempt((n) => n + 1),
     synced: taskBase !== null,
     outstanding: detail,
     joint,

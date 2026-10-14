@@ -264,12 +264,38 @@ export function TaskDetail({
         </div>
       ) : view.unreadable ? (
         <p className="text-[13px] text-ink-2">{copy.UNREADABLE}</p>
+      ) : row === null && view.rowError !== null ? (
+        // Unknown is not "no day" (R9, revision 3): the day's saved inputs could not be read whole.
+        <div
+          className="flex flex-col gap-2"
+          data-detail-row-error={view.rowError}
+        >
+          <p className="text-[13px] text-ink-2">
+            {view.rowError === "unstable"
+              ? copy.LOCAL_UNSTABLE
+              : copy.LOCAL_FAILED}
+          </p>
+          <span>
+            <Button onClick={view.retryRow}>{copy.TRY_AGAIN}</Button>
+          </span>
+        </div>
       ) : row === null ? (
         <p className="text-[13px] text-ink-2" data-no-occurrence="">
           {DETAIL_COPY.noOccurrence}
         </p>
       ) : (
         <>
+          {view.rowError !== null ? (
+            <p
+              className="text-[12.5px] text-ink-2"
+              data-detail-row-stale={view.rowError}
+            >
+              {view.rowError === "unstable"
+                ? copy.LOCAL_UNSTABLE
+                : copy.LOCAL_FAILED}{" "}
+              {copy.SHOWING_LAST_READ}
+            </p>
+          ) : null}
           {correctionConflict ? (
             <section
               data-correction-conflict=""

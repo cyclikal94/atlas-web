@@ -34,13 +34,17 @@ import { projectCreateTask } from "./register";
  * WHOLE-INPUT FRESHNESS (R2, revision 2; design assessment C1). The structure of the row (definition, window, participants, `can_edit`,
  * version) and its derived fields (my outcome, `actionable`) are chosen separately:
  * - Structure: the committed cache row, unless the daily item is AHEAD of it: a newer version, or the same version read after the cache's
- *   last commit, or a row the cache does not hold yet (the delta has not delivered it) and that this view never held (an old answer cannot
- *   bring back a row the cache removed). A committed correction therefore always defeats an older daily item, and a permission the cache
- *   committed after the read began defeats the item's `can_edit`.
- * - Derived fields: the server's only while no cache page was committed since the read was DISPATCHED, no window boundary of the row has
- *   passed since it was dispatched (delivery time is not evaluation time: a slow answer is not renewed by arriving late), and the server's
- *   item is of the version the structure is. Otherwise my result is the personal reapplication of ARCH §3.3c over the saved summary, with its
- *   finalisation. The joint result is never computed here.
+ *   last commit, or a row the cache does not hold yet while the answer is CURRENT (no content committed since its dispatch: the delta has not
+ *   delivered it). An answer that is not current never supplies a row the cache lacks, which may have been removed since (revision 3,
+ *   design assessment C1: not having seen a row is no evidence that it was never removed); it is asked again. A committed correction
+ *   therefore always defeats an older daily item, and a permission the cache committed after the read began defeats the item's `can_edit`.
+ * - Derived fields: the server's only while no cache page was committed since the read was DISPATCHED, the device clock has not gone back
+ *   since then (`sameClock`), no window boundary of the row lies between the dispatch and now in either direction (delivery time is not
+ *   evaluation time: a slow answer is not renewed by arriving late), and the server's item is of the version the structure is. Otherwise my
+ *   result is the personal reapplication of ARCH §3.3c over the saved summary, with its finalisation. The joint result is never computed here.
+ * - Structure is resolved ONCE (`effectiveOccurrence`): the committed or daily row, then the outstanding drafts' projection and display
+ *   patches. Composition and the screen's clock use the same result, so a window a queued create or correction gives is scheduled exactly as
+ *   it is shown (R8, revision 3).
  */
 export interface Outstanding {
   drafts: readonly DraftWithCommand[];
@@ -61,21 +65,21 @@ export interface RowSources {
   answer?: AnswerBasis | null;
 }
 
-/** The provenance of a `/daily` answer as one row sees it (R2, revision 2). */
+/** The provenance of a `/daily` answer as one row sees it (R2, revisions 2 and 3). */
 export interface AnswerBasis {
   /** When the accepted page chains were DISPATCHED (ms, the earlier of the two scopes): the answer describes no later instant for certain. */
   requestedAt: number;
-  /** No cache page is known to have been committed between the read's dispatch and the cache rows given with it. */
+  /** No content is known to have been committed between the read's dispatch and the cache rows given with it. */
   current: boolean;
-  /** This view has never held the occurrence in its cache: a daily item the cache lacks is ahead of the delta, not a removed row. */
-  neverCached: boolean;
+  /** The device clock has not gone back since the read was dispatched (the screen clock's generation is the one captured then). */
+  sameClock: boolean;
 }
 
 /**
  * Whether the server's derived fields for a row can still describe it now (R2): they were evaluated no earlier than the read was dispatched,
- * so a window that opened or closed since then (`opens_at`/`closes_at` in `(requestedAt, now]`) makes them stale, however late the answer
- * was delivered. My result is then the personal reapplication over the saved summary, finalised when the window has closed, until a newer
- * answer (dispatched after the boundary) arrives.
+ * so a window that opened or closed between then and now makes them stale, however late the answer was delivered. In EITHER direction
+ * (revision 3): a clock that went back before a boundary the answer was evaluated after is not covered either. My result is then the
+ * personal reapplication over the saved summary, finalised when the window has closed, until a newer answer arrives.
  */
 export function answerCovers(
   data: Pick<OccurrenceData, "opens_at" | "closes_at">,
@@ -83,12 +87,10 @@ export function answerCovers(
   nowMs: number,
 ): boolean {
   if (requestedAt === null) return false;
+  const from = Math.min(requestedAt, nowMs);
+  const to = Math.max(requestedAt, nowMs);
   for (const boundary of [data.opens_at, data.closes_at])
-    if (
-      boundary !== null &&
-      requestedAt < boundary * 1000 &&
-      boundary * 1000 <= nowMs
-    )
+    if (boundary !== null && from < boundary * 1000 && boundary * 1000 <= to)
       return false;
   return true;
 }
@@ -109,8 +111,8 @@ function dailyRow(item: OccurrenceView, cached: CacheRow | null): CacheRow {
 }
 
 /**
- * The row's structure (R2, revision 2): the daily item only when it is ahead of the committed cache (see the module comment); `null` when
- * neither can be used (a daily-only row whose answer predates a commit, of an occurrence this view once held: it may have been removed).
+ * The row's structure (R2, revisions 2 and 3): the daily item only when it is ahead of the committed cache (see the module comment); `null`
+ * when neither can be used (a daily-only row whose answer is not current: it may have been removed since).
  */
 export function structureOf(
   cached: CacheRow | null,
@@ -120,7 +122,7 @@ export function structureOf(
   if (item === null || basis === null) return { row: cached, from: "cache" };
   const ahead =
     cached === null
-      ? basis.current || basis.neverCached
+      ? basis.current
       : item.version > cached.version ||
         (item.version === cached.version && basis.current);
   return ahead
@@ -227,6 +229,49 @@ function markOf(drafts: readonly DraftWithCommand[]): PendingMark | null {
   return "waiting";
 }
 
+/** One occurrence's effective structure: the drafts that name it and the row they leave (see `effectiveOccurrence`). */
+export interface Effective {
+  drafts: DraftWithCommand[];
+  from: "cache" | "daily";
+  /** The occurrence row as shown (committed or daily structure, then the drafts' projection and patches), or null. */
+  row: CacheRow | null;
+  /** Its parsed data, or null (no row, or a row that does not parse). */
+  data: OccurrenceData | null;
+}
+
+/**
+ * The structure of one occurrence as a screen shows it, resolved ONCE (R8, revision 3; design assessment C2): the committed row or the
+ * daily item ahead of it (`structureOf`), then, in queue order, the projection of an outstanding create and the display patches of every
+ * draft naming the occurrence, its progress stream or its task. `composeRow` composes from it and the screen's clock schedules the windows it
+ * gives, so a queued create or correction is woken for at exactly the boundaries it is shown with.
+ */
+export function effectiveOccurrence(
+  sources: Pick<
+    RowSources,
+    "occurrenceId" | "progressId" | "occurrence" | "task" | "joint" | "answer"
+  >,
+  outstanding: Outstanding,
+): Effective {
+  const { occurrenceId, progressId } = sources;
+  const drafts = draftsNaming(outstanding, [
+    occurrenceId,
+    progressId,
+    ...(sources.task ? [sources.task.id] : []),
+  ]);
+  const structure = structureOf(
+    sources.occurrence,
+    sources.joint,
+    sources.answer ?? null,
+  );
+  const row = patched(structure.row, occurrenceId, drafts);
+  return {
+    drafts,
+    from: structure.from,
+    row,
+    data: row === null ? null : parseOccurrenceData(row.value),
+  };
+}
+
 export function composeRow(
   sources: RowSources,
   outstanding: Outstanding,
@@ -234,16 +279,11 @@ export function composeRow(
   nowMs: number,
 ): RowResult {
   const { occurrenceId, progressId } = sources;
-  const drafts = draftsNaming(outstanding, [
-    occurrenceId,
-    progressId,
-    ...(sources.task ? [sources.task.id] : []),
-  ]);
   const basis = sources.answer ?? null;
-  const structure = structureOf(sources.occurrence, sources.joint, basis);
-  const occurrenceRow = patched(structure.row, occurrenceId, drafts);
+  const effective = effectiveOccurrence(sources, outstanding);
+  const { drafts, data } = effective;
+  const occurrenceRow = effective.row;
   if (occurrenceRow === null) return { kind: "absent", id: occurrenceId };
-  const data = parseOccurrenceData(occurrenceRow.value);
   if (data === null) return { kind: "unreadable", id: occurrenceId };
   const version = occurrenceRow.version;
   const taskDrafts = sources.task
@@ -298,7 +338,9 @@ export function composeRow(
   });
   let source: RowModel["source"] = "local";
   const answerCurrent =
-    basis?.current === true && answerCovers(data, basis.requestedAt, nowMs);
+    basis?.current === true &&
+    basis.sameClock &&
+    answerCovers(data, basis.requestedAt, nowMs);
   if (drafts.length === 0 && answerCurrent) {
     if (sources.personal !== null && sources.personal.version === version) {
       outcome = sources.personal.outcome;
@@ -353,7 +395,7 @@ export function composeRow(
       attention,
       drafts,
       source,
-      structureFrom: structure.from,
+      structureFrom: effective.from,
       listed:
         answerCurrent && (sources.joint !== null || sources.personal !== null),
       joint: sources.joint,

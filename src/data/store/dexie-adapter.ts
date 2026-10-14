@@ -1,4 +1,5 @@
 import Dexie, { liveQuery, type Table, type Transaction } from "dexie";
+import { advanceComposition, advancesComposition } from "../model/composition";
 import { commandKindOf } from "../model/outbox";
 import {
   accountDatabaseName,
@@ -6,6 +7,7 @@ import {
   DEXIE_SCHEMA_V1,
   KEY_PATHS,
   SCHEMA_VERSION,
+  SPLIT_BODIES_VERSION,
   type StoreName,
 } from "../model/schema";
 import { initialSyncState } from "../model/sync-state";
@@ -170,24 +172,36 @@ function makeReader(db: TableSource): Reader {
   };
 }
 
-function makeSink(db: TableSource): WriteSink {
+/** `written` collects the stores a write actually reached (an empty bulk write reaches none): the composition generation's input. */
+function makeSink(db: TableSource, written: Set<StoreName>): WriteSink {
   return {
     async put(store, row) {
+      written.add(store);
       await tableOf(db, store).put(row as object);
     },
     async delete(store, key) {
+      written.add(store);
       await tableOf(db, store).delete(key as never);
     },
     async bulkPut(store, rows) {
-      if (rows.length > 0) await tableOf(db, store).bulkPut(rows as object[]);
+      if (rows.length === 0) return;
+      written.add(store);
+      await tableOf(db, store).bulkPut(rows as object[]);
     },
     async bulkDelete(store, keys) {
-      if (keys.length > 0) await tableOf(db, store).bulkDelete(keys as never[]);
+      if (keys.length === 0) return;
+      written.add(store);
+      await tableOf(db, store).bulkDelete(keys as never[]);
     },
   };
 }
 
-async function applyWrite(db: TableSource, write: Write): Promise<void> {
+async function applyWrite(
+  db: TableSource,
+  write: Write,
+  written: Set<StoreName>,
+): Promise<void> {
+  written.add(write.store);
   const table = tableOf(db, write.store);
   switch (write.op) {
     case "put":
@@ -289,16 +303,26 @@ class DexieAccountStore implements AccountStore {
           if (decision.writes.length > 0) throw new StoreFailure("error");
           return decision.result;
         }
-        for (const write of decision.writes) await applyWrite(trans, write);
-        if (plan.apply)
-          return await plan.apply(
-            makeSink(trans),
-            decision,
-            reads,
-            input,
-            makeReader(trans),
-          );
-        return decision.result;
+        const written = new Set<StoreName>();
+        for (const write of decision.writes)
+          await applyWrite(trans, write, written);
+        const result = plan.apply
+          ? await plan.apply(
+              makeSink(trans, written),
+              decision,
+              reads,
+              input,
+              makeReader(trans),
+            )
+          : decision.result;
+        // The local composition generation (`model/composition.ts`, WEB-10a revision 3): advanced in THIS transaction when it wrote a
+        // store a screen composes from, after every write of the plan, so it commits, or rolls back, with them.
+        if (advancesComposition(written, plan.scope)) {
+          const sync = tableOf(trans, "sync_state");
+          const row = (await sync.get("singleton")) as SyncStateRow | undefined;
+          if (row !== undefined) await sync.put(advanceComposition(row));
+        }
+        return result;
       });
       // The transaction's own rejection, when `abort` already reported it, is not an unhandled one.
       running.catch(() => undefined);
@@ -441,9 +465,12 @@ export function createDexieOpener(deps: DexieOpenerDeps): EngineOpener {
           chromeTransactionDurability: durability,
         });
         db.version(1).stores({ ...DEXIE_SCHEMA_V1 });
-        db.version(SCHEMA_VERSION)
+        db.version(SPLIT_BODIES_VERSION)
           .stores({ ...DEXIE_SCHEMA })
           .upgrade(moveDraftCommands);
+        // Version 3 (WEB-10a revision 3) changes no store: it is the barrier that closes every connection of an older build, which
+        // writes without advancing the composition generation (`model/composition.ts`).
+        db.version(SCHEMA_VERSION).stores({ ...DEXIE_SCHEMA });
         db.on("populate", (tx: Transaction) => {
           // Runs inside the versionchange transaction that CREATES the database. A refusal aborts it: the engine discards the new
           // database, so an open that was not allowed to create can never leave one behind (E-W2). The caller's `permit` is the

@@ -11,6 +11,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * - When the windows change (new data), a boundary that already passed is handled at once (a late answer can arrive after it).
  * - `epoch` moves only when a boundary was crossed or the clock went BACKWARDS: what a screen derived from the server for an earlier instant
  *   must then be asked again. Production durations are never shortened; tests drive the injected `read` or real short windows.
+ * - `generation` moves only when the clock went BACKWARDS (a discontinuity: R2, revision 3; design assessment C1). It is readable at once
+ *   (`generationNow`), so an answer can carry the generation it was DISPATCHED in and be refused, at publication and at every composition,
+ *   once the clock has moved back since: comparing instants alone cannot see a clock that went back and returned to the same time.
  */
 export interface BoundaryWindow {
   opens_at: number | null;
@@ -22,6 +25,10 @@ export interface BoundaryClock {
   now: number;
   /** Moves when a boundary was crossed or the clock moved back. */
   epoch: number;
+  /** Moves when the clock moved back (the generation of `now`). */
+  generation: number;
+  /** The generation as of the last sample, read synchronously (an answer captures it at dispatch and compares it at publication). */
+  generationNow(): number;
   /** Samples the clock now (for example when an answer is published) and returns the new time. */
   revalidate(): number;
 }
@@ -53,19 +60,38 @@ export function useBoundaryClock(
 ): BoundaryClock {
   const boundaries = boundariesOf(windows);
   const key = boundaries.join(",");
-  const [state, setState] = useState(() => ({ now: read(), epoch: 0 }));
+  // The sampled state lives in a ref, so a sample and the generation it moved are known at once; the state only renders it.
+  const sampled = useRef<{
+    now: number;
+    epoch: number;
+    generation: number;
+  } | null>(null);
+  if (sampled.current === null)
+    sampled.current = { now: read(), epoch: 0, generation: 0 };
+  const [state, setState] = useState(sampled.current);
   const latest = useRef({ read, boundaries });
   latest.current = { read, boundaries };
   const revalidate = useCallback((): number => {
     const t = latest.current.read();
-    setState((prev) => {
-      if (t === prev.now) return prev;
-      const moved =
-        t < prev.now || crossedBetween(latest.current.boundaries, prev.now, t);
-      return { now: t, epoch: moved ? prev.epoch + 1 : prev.epoch };
-    });
+    const prev = sampled.current as NonNullable<typeof sampled.current>;
+    if (t === prev.now) return t;
+    const back = t < prev.now;
+    const moved =
+      back || crossedBetween(latest.current.boundaries, prev.now, t);
+    const next = {
+      now: t,
+      epoch: moved ? prev.epoch + 1 : prev.epoch,
+      generation: back ? prev.generation + 1 : prev.generation,
+    };
+    sampled.current = next;
+    setState(next);
     return t;
   }, []);
+  const generationNow = useCallback(
+    (): number =>
+      (sampled.current as NonNullable<typeof sampled.current>).generation,
+    [],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-armed when the set of boundaries changes (`key`)
   useEffect(() => {
     // New data may carry a boundary that has already passed: evaluate at once.
@@ -100,5 +126,11 @@ export function useBoundaryClock(
       window.removeEventListener("pageshow", resume);
     };
   }, [key, revalidate]);
-  return { now: state.now, epoch: state.epoch, revalidate };
+  return {
+    now: state.now,
+    epoch: state.epoch,
+    generation: state.generation,
+    generationNow,
+    revalidate,
+  };
 }

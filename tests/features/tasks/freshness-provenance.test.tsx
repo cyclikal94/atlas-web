@@ -130,7 +130,7 @@ const item = (over: Partial<OccurrenceView>): OccurrenceView => ({
 const basis = (over: Partial<AnswerBasis> = {}): AnswerBasis => ({
   requestedAt: 1_000,
   current: true,
-  neverCached: false,
+  sameClock: true,
   ...over,
 });
 
@@ -148,7 +148,7 @@ describe("structureOf: a row's structure is the daily item's only when it is ahe
       structureOf(
         cachedRow({ version: 3 }),
         item({ version: 2 }),
-        basis({ current: false, neverCached: true }),
+        basis({ current: false }),
       ).from,
     ).toBe("cache");
   });
@@ -162,15 +162,13 @@ describe("structureOf: a row's structure is the daily item's only when it is ahe
     ).toBe(false);
   });
 
-  test("a daily item the cache lacks: ahead of the delta when current or never held here; never brought back once the cache held it", () => {
+  // Adapted (revision 3, design assessment C1, labelled): the old middle assertion took a NOT-current daily-only item as structure when
+  // this view had "never held" the row; not having seen a row is no evidence that it was never removed, so it is now withheld until a
+  // current answer. The first and last assertions are unchanged.
+  test("a daily item the cache lacks: ahead of the delta when current; never taken from an answer that is not current (adapted, revision 3)", () => {
     expect(structureOf(null, item({}), basis()).from).toBe("daily");
     expect(
-      structureOf(null, item({}), basis({ current: false, neverCached: true }))
-        .from,
-    ).toBe("daily");
-    expect(
-      structureOf(null, item({}), basis({ current: false, neverCached: false }))
-        .row,
+      structureOf(null, item({}), basis({ current: false })).row,
     ).toBeNull();
   });
 
@@ -313,7 +311,7 @@ describe("composeRow: the server's personal fields need a current, covering answ
         progress: task.rows[3] ?? null,
         joint: answer(),
         personal: answer(),
-        answer: basis({ requestedAt: Date.now(), neverCached: true }),
+        answer: basis({ requestedAt: Date.now() }),
       },
       {
         drafts: [
@@ -717,8 +715,12 @@ describe("Today: an old answer never brings back a row the cache removed (F6)", 
     },
   );
 
+  // Adapted (revision 3, design assessment C1, labelled). The original control expected the daily-only row to stay, from the answer
+  // that predates the commit, because this view had never held it; that exception is removed (not having seen a row is no evidence that
+  // it was never removed). The row is now withheld while only that answer exists, and the control's purpose is kept by its second half:
+  // a CURRENT answer brings a row the delta has not delivered back, with its structure from that answer.
   test(
-    "control: a listed occurrence the delta has not delivered yet stays across an unrelated committed page",
+    "control: a listed occurrence the delta has not delivered yet is withheld across an unrelated committed page, then shown again by a current answer (adapted, revision 3)",
     SLOW,
     async () => {
       const { task, answer } = await provisionalTask(600);
@@ -738,9 +740,15 @@ describe("Today: an old answer never brings back a row the cache removed (F6)", 
       await t.commitSync([other.rows[0] as CacheRow]);
       await waitReal(1_200);
       await t.settle();
-      expect(row(task.occurrenceId)).not.toBeNull();
+      expect(daily.held.length).toBeGreaterThan(0);
+      expect(row(task.occurrenceId)).toBeNull();
+      daily.answerWith(() => pageOf([answer()]));
+      for (const held of daily.held.splice(0)) held.resolve(pageOf([answer()]));
+      await untilLong(
+        t,
+        () => row(task.occurrenceId)?.dataset.source === "server",
+      );
       expect(row(task.occurrenceId)?.dataset.structure).toBe("daily");
-      expect(row(task.occurrenceId)?.dataset.source).toBe("local");
     },
   );
 });
