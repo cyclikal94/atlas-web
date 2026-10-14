@@ -490,7 +490,8 @@ async function prepare(state, signal) {
       "stubborn",
       process.execPath,
       ["-e", 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'],
-      { stdio: "ignore" },
+      // "detached": in a process group of its own, as Playwright starts browsers (a caller's group signal does not reach it).
+      { stdio: "ignore", detached: faults.spec.stubborn_child === "detached" },
     );
     scope.defer("stubborn", () => owner.terminate(stubborn));
   }

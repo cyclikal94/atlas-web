@@ -13,7 +13,8 @@
 //   fail         throw an injected error at the named boundary (a preparation error)
 //   fail_write   make the named evidence write throw ("admissions", "summary")
 //   docker_fail  answer the named docker commands ("rm", "network rm", "volume rm", "ps") with a failure, without running them
-//   stubborn_child  start, in each stack, one more owned process that ignores SIGTERM (a child whose shutdown is held)
+//   stubborn_child  start, in each stack, one more owned process that ignores SIGTERM (a child whose shutdown is held);
+//                "detached" puts it in a process group of its own, as Playwright starts browsers
 //   fallback_ms  the runner's fallback finaliser delay after a signal (default 150 s)
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
