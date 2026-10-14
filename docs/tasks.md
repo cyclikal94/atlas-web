@@ -214,18 +214,26 @@ Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its re
     are disabled with "Sending your change…" and a second activation sends nothing; it outlives a same-identity remount and is dropped with the
     identity. An uncertain answer keeps the exact command and key, and "Try again" resends them unchanged; a definite answer ends it and the
     next change is a new attempt. Every answer is followed by a read of the enrolment; a read asked before a change was sent is not shown, and
-    one answered while a change is pending never replaces what is shown. A reload starts with no attempt and resends nothing (open decision
-    D4-12 below).
+    one answered while a change is pending never replaces what is shown. A reload starts with no attempt and resends nothing (decided:
+    RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, below).
 
 Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
 `enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
 follows a committed correction), E-T16 (an enrolment change pressed again while pending) and E-T17 (another tab commits between the detail's
 reads); unit MU-2123…MU-2148 and real-engine MU-2149…MU-2151; MU-2034/2035/2037/2045/2046/2083/2118 re-expressed (same intent).
 
-**Open decision D4-12 (for the product owner, not blocking the correction):** whether A15's "one attempt per body" must survive a hard reload
-or crash with the same key. Today the attempt is page memory: a reload re-reads the enrolment and never resends; the next explicit change is a
-new attempt (the backend's `expected_version` refuses it if the earlier one committed). A durable, identity-bound attempt record would need its
-own retention, clearing and replay rules; none is added here.
+**Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
+require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
+Join/Leave/consent command is never resent, never said to have failed, and a newly keyed change is never labelled a retry of it. A failed or
+unavailable read offers no change and resends nothing ("Try again" reads again); once the read succeeds the person may make a fresh, explicit
+change under the normal identity and `expected_version` checks. Within the page's lifetime, including same-identity remounts of the protected
+tree, the exact body and key are kept for an uncertain retry (decision 35). Covered by `enrolment-attempt.test.tsx` E4 and E4b.
+
+**HF-1 setup adaptation (RECOVERY-NAVIGATION-ENROLMENT-20261014 D3).** `tests/e2e/production.auth-flows.spec.ts` uses WEB-08d's bounded
+Settings-navigation helper (`shownAs`: a click only while no account card is drawn, at most three, within the original 20 s deadline,
+annotated `settings-clicks`) and its "R5 / HF-1" cases, byte-identical to WEB-08d `e88085b` (its capacity-message wording, a WEB-08d product
+change, is not adopted). This is labelled test setup: the single-click regression is WEB-08c's to correct, WEB-09d verifies the original
+single click before beta and WEB-15 enforces that gate; the adaptation fixes nothing.
 
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
