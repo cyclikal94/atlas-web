@@ -15889,12 +15889,8 @@ export const UNIT = [
     tests: ["tests/pwa/update-banner.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /announced once through the neutral live region/,
-    patch: (t) =>
-      sub(
-        t,
-        "  useAnnounceOnce(text, (message) => neutralLiveRegion.announce(message));",
-        "  useAnnounceOnce(text, () => undefined);",
-      ),
+    // Re-anchored in revision 12 (R19 rewrote the neutral announcement effect): the same mutation, the neutral banner announces nothing.
+    patch: (t) => sub(t, "    neutralLiveRegion.announce(text);\n", ""),
   },
   {
     id: "MU-1794",
@@ -20263,6 +20259,176 @@ export const UNIT = [
         "  if (focused instanceof HTMLElement && element.contains(focused))\n    focused.blur();",
         "  if (focused instanceof HTMLElement && element.contains(focused) && (false as boolean))\n    focused.blur();",
       ),
+  },
+  {
+    id: "MU-1954",
+    title:
+      "WEB-14a revision 12 (R19, C2/I3): the neutral root draws no failure (revision 11: a failed save or discard had no choices there)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-surfaces.test.tsx",
+      "tests/pwa/update-neutral-root.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT: 'Reload here' on the neutral root fails|save failed on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const notice = noticeOf(state, "neutral");',
+        '  const shown = noticeOf(state, "neutral");\n  const notice = shown?.failure ? null : shown;',
+      ),
+  },
+  {
+    id: "MU-1955",
+    title:
+      "WEB-14a revision 12 (R19, I3/I4): 'Retry save' asks for a fresh acceptance instead of continuing the failed act",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /save failed on the (shell|neutral root): 'Retry save' asks retrySave/,
+    patch: (t) =>
+      sub(
+        t,
+        '  label: "Retry save",\n  act: "retrySave",',
+        '  label: "Retry save",\n  act: "accept",',
+      ),
+  },
+  {
+    id: "MU-1956",
+    title:
+      "WEB-14a revision 12 (R19, I3/I5): 'Discard and reload anyway' reloads anyway (no discard)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-surfaces.test.tsx",
+      "tests/pwa/update-neutral-root.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /save (failed|refused) on the (shell|neutral root): .*'Discard and reload anyway' asks discardAndReload|REQUIREMENT: on the neutral root only 'Discard and reload anyway'/,
+    patch: (t) =>
+      sub(
+        t,
+        '  label: "Discard and reload anyway",\n  act: "discardAndReload",',
+        '  label: "Discard and reload anyway",\n  act: "reloadAnyway",',
+      ),
+  },
+  {
+    id: "MU-1957",
+    title:
+      "WEB-14a revision 12 (R19, I3): the neutral discard failure no longer warns that the copy may be restored",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /discard failed on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        "Try again, or reload knowing that copy may be restored afterwards.",
+        "Try again, or reload.",
+      ),
+  },
+  {
+    id: "MU-1958",
+    title:
+      "WEB-14a revision 12 (R19, C3/I8): a failure is not announced on the neutral root, and 'Saving…' stays in its region",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-surfaces.test.tsx",
+      "tests/pwa/update-neutral-root.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /'Saving…' is replaced by the failure|REQUIREMENT: 'Saving…' on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!text) return;\n    neutralLiveRegion.announce(text);\n    return () => neutralLiveRegion.clear();",
+        "    if (!text || notice?.failure) return;\n    neutralLiveRegion.announce(text);",
+      ),
+  },
+  {
+    id: "MU-1959",
+    title:
+      "WEB-14a revision 12 (R19, I2): the neutral root uses the shell's wording (the form is still here)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /(save failed|save refused|discard failed) on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const neutral = surface === "neutral";',
+        "  const neutral = false;",
+      ),
+  },
+  {
+    id: "MU-1960",
+    title:
+      "WEB-14a revision 12 (R19, I4; oracle: the R6 test of a form that left the registry): 'Retry save' and 'Discard and reload anyway' start a new act (the forms it saved are forgotten)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is discarded, even after it left the registry/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (fresh) participants = new Set();\n",
+        "    participants = new Set();\n",
+      ),
+  },
+  {
+    id: "MU-1961",
+    title:
+      "WEB-14a revision 12 (R19, I8): a message that went (dismissed) stays in the neutral region",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /when there is nothing left to say/,
+    patch: (t) => sub(t, "    return () => neutralLiveRegion.clear();\n", ""),
+  },
+  {
+    id: "MU-1962",
+    title:
+      "WEB-14a revision 12 (R19, C1): the shell's failure buttons ask each other's action",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /save failed on the shell: 'Retry save' asks retrySave/,
+    patch: (t) =>
+      sub(
+        t,
+        '{ kind: "save-failed", onRetry: first, onDiscardAndReload: second }',
+        '{ kind: "save-failed", onRetry: second, onDiscardAndReload: first }',
+      ),
+  },
+  {
+    id: "MU-1963",
+    title:
+      "WEB-14a revision 12 (C5, R18 family): a form out of the page reads its outside member as removed (revision 11: its input owed, no save could take it)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT \(sibling\): typed UNFINISHED, the page unmounted/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (away && readOutside(fields, form, name)) continue;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1964",
+    title:
+      "WEB-14a revision 12 (C5, R18 family): a form IN the page keeps an outside member it no longer has (a removal is never read)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /CONTROL \(sibling\): the member removed and read while the form is still in the page|CONTROL \(sibling\)|REQUIREMENT \(sibling\): typed UNFINISHED, the control removed/,
+    patch: (t) =>
+      sub(t, "  const away = !form.isConnected;", "  const away = true;"),
   },
 ];
 

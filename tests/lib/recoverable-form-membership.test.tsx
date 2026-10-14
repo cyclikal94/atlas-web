@@ -831,3 +831,54 @@ describe("R18 (Q8): a freeze holds every member, and only them", () => {
       expect(outcome).toBe("discarded");
     });
 });
+
+// ---- Revision 12: the whole mount goes, the form and its associated member with it ---------------------------------------------------
+
+/**
+ * WEB-14a revision 12 (found qualifying R19, design assessment C5: an external member plus a failure across the protected-to-neutral
+ * transition; the R18 family). A session gate or a route change unmounts the form AND a control associated with it from outside: once out
+ * of the page, the form no longer owns that control (`form=` association needs both in the page), and revision 11 read the field as
+ * removed, owing what was typed, so no save could take it (an update stopped with "could not save" for good). A form out of the page now
+ * shows what it showed when it went. The boundary is unchanged: a member removed and read while the form is still in the page stays owed.
+ */
+describe("Revision 12 (C5): the whole mount goes, the form and its associated member with it", () => {
+  for (const place of PLACES)
+    test(`${place === "sibling" ? "REQUIREMENT" : "CONTROL"} (${place}): typed UNFINISHED, the page unmounted: the session saves it exactly`, async () => {
+      const world = new World();
+      const page = mountPage(world, "A", amountIn(place));
+      await ready(page);
+      type(byId("amount"), "UNFINISHED");
+      expect(preconditions(page, "amount", place)).toEqual({
+        owner: true,
+        member: true,
+        descendant: place === "descendant",
+        place,
+      });
+      const form = page.form();
+      page.view.unmount();
+      // The browser's own fact: out of the page, the form still names its descendant, and no longer the control beside it.
+      expect(form.isConnected).toBe(false);
+      expect(named(form, "amount")).toHaveLength(place === "sibling" ? 0 : 1);
+      expect(page.registry.dirty()).toHaveLength(1);
+      expect(await flush(page.registry)).toEqual(["saved"]);
+      expect(await rows(world)).toEqual([
+        expect.objectContaining({ values: { amount: "UNFINISHED" } }),
+      ]);
+      expect(page.registry.dirty()).toHaveLength(0);
+    });
+
+  for (const place of PLACES)
+    test(`CONTROL (${place}): the member removed and read while the form is still in the page, then the page unmounted: still owed, the save fails`, async () => {
+      const world = new World();
+      const page = mountPage(world, "A", amountIn(place));
+      await ready(page);
+      type(byId("amount"), "UNFINISHED");
+      act(() => byId("amount").remove());
+      // A read of the form while it is in the page: the member is gone from it.
+      expect(page.registry.dirty()).toHaveLength(1);
+      page.view.unmount();
+      expect(page.registry.dirty()).toHaveLength(1);
+      expect(await flush(page.registry)).toEqual(["failed"]);
+      expect(await rows(world)).toEqual([]);
+    });
+});

@@ -9,9 +9,10 @@ import { useSyncExternalStore } from "react";
  *  - `available`: a newer version is installed and waiting; no tab has accepted it.
  *  - `updated_elsewhere`: another tab accepted a newer version, which is now active; this tab still runs the older one.
  *  - `saving`: this tab is saving its unfinished forms before it reloads (Q4).
- *  - `save_failed`: a save failed (`refused`: the account is being signed out); the form stays open, and the update stays pending.
+ *  - `save_failed`: a save failed (`refused`: the account is being signed out); the form stays open (though a session gate may hide or
+ *    unmount the shell meanwhile: the neutral root then offers the same choices, revision 12, R19), and the update stays pending.
  *  - `discard_failed`: "Discard and reload anyway" could not discard a saved copy of a form (revision 1, R6): it may come back after a reload,
- *    so nothing reloads until the person retries or chooses to reload anyway.
+ *    so nothing reloads until the person retries or chooses to reload anyway (on whichever surface is shown).
  *  - `reloading`: this tab is reloading onto the newer version.
  *  - `data_superseded`: another tab's newer version upgraded this account's local database, which this tab no longer reads or writes.
  *

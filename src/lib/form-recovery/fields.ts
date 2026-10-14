@@ -302,8 +302,30 @@ function reconcile(fields: FieldState, name: string, field: FieldAccess): void {
 }
 
 /**
+ * Revision 12 (found qualifying R19; the R18 family): whether `name` was last read from an element outside `form` (a control associated with
+ * it by `form=`, or a group or select with such a part).
+ */
+const readOutside = (
+  fields: FieldState,
+  form: HTMLFormElement,
+  name: string,
+): boolean => {
+  const key = fields.present.get(name);
+  if (key === undefined) return false;
+  return [key, ...(fields.shapes.get(name)?.parts ?? [])].some(
+    (element) => !form.contains(element),
+  );
+};
+
+/**
  * Brings the ledger up to date with the page (`reconcile`, each admitted field shown); a field no longer shown keeps its value. Never reads a
  * field that is not admitted. Idempotent.
+ *
+ * Revision 12: a form OUT OF THE PAGE (its mount removed, the page around it with it: a route left, a session gate unmounting the shell)
+ * shows what it showed when it went. Its descendants are still read from it; a control associated with it from outside (`form=`) is no
+ * longer associated (that needs both in the page), so a field last read from one is not read again and keeps what it showed then, instead of
+ * counting as removed and owing its input (which no save could then take). A member removed while the form was in the page was already
+ * read as removed by then (every input event and DOM change reads the form).
  */
 export function sync(fields: FieldState): void {
   const form = fields.form();
@@ -311,7 +333,9 @@ export function sync(fields: FieldState): void {
   const names = admitted(fields);
   for (const name of [...fields.present.keys()])
     if (!names.has(name)) fields.present.delete(name);
+  const away = !form.isConnected;
   for (const name of names) {
+    if (away && readOutside(fields, form, name)) continue;
     const field = accessOf(form, name);
     if (!field) {
       fields.present.delete(name);
