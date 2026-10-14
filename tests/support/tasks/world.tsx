@@ -315,6 +315,15 @@ export interface Mounted {
     removed?: string[],
     options?: { empty?: boolean },
   ): Promise<void>;
+  /**
+   * The same commit with no `act` and no settling (revision 3): for a test that lands a page BETWEEN two reads of a screen (from inside an
+   * interception of the store). Resolves with whether the page was committed.
+   */
+  commitNow(
+    rows: CacheRow[],
+    removed?: string[],
+    options?: { empty?: boolean },
+  ): Promise<boolean>;
 }
 
 export async function mountTasks(options: {
@@ -423,6 +432,23 @@ export async function mountTasks(options: {
     rerender: (env) => view.rerender(tree(env)),
     unmount: () => view.unmount(),
     commitSync: async (rows, removed = [], options = {}) => {
+      let committed = false;
+      await act(async () => {
+        committed = await commitNow(rows, removed, options);
+      });
+      if (!committed) throw new Error("commitSync: the page was not committed");
+      await settle();
+    },
+    commitNow: (rows, removed = [], options = {}) =>
+      commitNow(rows, removed, options),
+  };
+
+  async function commitNow(
+    rows: CacheRow[],
+    removed: string[],
+    options: { empty?: boolean },
+  ): Promise<boolean> {
+    {
       const service = data.service();
       if (service === null) throw new Error("commitSync: no open service");
       const before = world.idb.peek(NAME, "sync_state", "singleton") as
@@ -473,32 +499,25 @@ export async function mountTasks(options: {
       );
       const scan = scanSyncPage(bytes);
       if (!scan.ok) throw new Error(`commitSync: ${scan.reason}`);
-      let outcome: unknown;
-      await act(async () => {
-        outcome = await service.commit(commitPage, {
-          captured: service.capture(1, {
-            requestSeq: s.request_seq,
-            ownershipToken: s.owner?.ownership_token ?? null,
-            recoveryGeneration: s.recovery_generation,
-            expectedPosition: s.cursor,
-          }),
-          bytes,
-          scan,
-          now: new Date().toISOString(),
-          decode: {
-            validators: createValueValidators(),
-            derivers: createKeyDerivers(),
-          },
-        });
+      await service.commit(commitPage, {
+        captured: service.capture(1, {
+          requestSeq: s.request_seq,
+          ownershipToken: s.owner?.ownership_token ?? null,
+          recoveryGeneration: s.recovery_generation,
+          expectedPosition: s.cursor,
+        }),
+        bytes,
+        scan,
+        now: new Date().toISOString(),
+        decode: {
+          validators: createValueValidators(),
+          derivers: createKeyDerivers(),
+        },
       });
       const committed = world.idb.peek(NAME, "sync_state", "singleton") as
         | SyncStateRow
         | undefined;
-      if (committed === undefined || committed.page_seq === s.page_seq)
-        throw new Error(
-          `commitSync: the page was not committed (${JSON.stringify(outcome)})`,
-        );
-      await settle();
-    },
-  };
+      return committed !== undefined && committed.page_seq !== s.page_seq;
+    }
+  }
 }

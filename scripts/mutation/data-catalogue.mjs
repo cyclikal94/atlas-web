@@ -16863,6 +16863,7 @@ export const UNIT = [
     title:
       "WEB-10a R2: my result from /daily still applies after a sync page committed since its read began",
     // Re-expressed in revision 2 (same intent): the cache generation is now the answer's `current` basis, checked in `composeRow`.
+    // Re-expressed in revision 3 (same intent): the condition now also names the clock generation (`sameClock`), kept by this patch.
     file: "src/features/tasks/view.ts",
     tests: [
       "tests/features/tasks/today-freshness.test.tsx",
@@ -16873,8 +16874,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    basis?.current === true && answerCovers(data, basis.requestedAt, nowMs);",
-        "    basis !== null && answerCovers(data, basis.requestedAt, nowMs);",
+        "    basis?.current === true &&\n    basis.sameClock &&",
+        "    basis !== null &&\n    basis.sameClock &&",
       ),
   },
   {
@@ -16882,14 +16883,15 @@ export const UNIT = [
     title:
       "WEB-10a R2: my result from /daily still applies after a window boundary passed since it was answered",
     // Re-expressed in revision 2 (same intent): the boundary is now measured from the read's dispatch (`requestedAt`).
+    // Re-expressed in revision 3 (same intent): the coverage is the last term of the condition.
     file: "src/features/tasks/view.ts",
     tests: ["tests/features/tasks/today-freshness.test.tsx"],
     expect: /window closes before the re-read answers/,
     patch: (t) =>
       sub(
         t,
-        "    basis?.current === true && answerCovers(data, basis.requestedAt, nowMs);",
-        "    basis?.current === true && basis.requestedAt !== null;",
+        "    answerCovers(data, basis.requestedAt, nowMs);",
+        "    basis.requestedAt !== null;",
       ),
   },
   {
@@ -16899,8 +16901,8 @@ export const UNIT = [
     file: "src/features/tasks/view.ts",
     tests: ["tests/features/tasks/today-freshness.test.tsx"],
     expect: /answerCovers/,
-    patch: (t) =>
-      sub(t, "      boundary * 1000 <= nowMs", "      boundary * 1000 < nowMs"),
+    // Re-expressed in revision 3 (same intent): the interval is now between the dispatch and now in either direction (`from`, `to`).
+    patch: (t) => sub(t, "boundary * 1000 <= to)", "boundary * 1000 < to)"),
   },
   {
     id: "MU-2043",
@@ -17202,10 +17204,15 @@ export const UNIT = [
     title:
       "WEB-10a R2 (rev 2): an old answer brings back an occurrence the cache once held and removed",
     file: "src/features/tasks/view.ts",
-    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
-    expect: /never brought back|removed by a committed page/,
-    patch: (t) =>
-      sub(t, "      ? basis.current || basis.neverCached", "      ? true"),
+    // Re-expressed in revision 3 (same intent, wider): the `neverCached` exception is gone; a row the cache lacks takes the daily structure
+    // only from a CURRENT answer, so the patch accepts any answer (the removed row comes back, and so does one removed before this view
+    // first looked: Q14).
+    tests: [
+      "tests/features/tasks/freshness-provenance.test.tsx",
+      "tests/features/tasks/local-coherence.test.tsx",
+    ],
+    expect: /never brought back|removed by a committed page|Q14/,
+    patch: (t) => sub(t, "      ? basis.current\n", "      ? true\n"),
   },
   {
     id: "MU-2067",
@@ -17308,10 +17315,11 @@ export const UNIT = [
     tests: ["tests/features/tasks/boundary-clock.test.tsx"],
     expect: /BACKWARDS/,
     patch: (t) =>
+      // Re-expressed in revision 3 (same intent): the backwards test is now named (`back`), which also moves the clock generation.
       sub(
         t,
-        "        t < prev.now || crossedBetween(latest.current.boundaries, prev.now, t);",
-        "        crossedBetween(latest.current.boundaries, prev.now, t);",
+        "      back || crossedBetween(latest.current.boundaries, prev.now, t);",
+        "      crossedBetween(latest.current.boundaries, prev.now, t);",
       ),
   },
   {
@@ -17347,10 +17355,11 @@ export const UNIT = [
     tests: ["tests/features/tasks/boundary-clock.test.tsx"],
     expect: /queued correction gives/,
     patch: (t) =>
+      // Re-expressed in revision 3 (same intent): the window is the effective structure of the certified inputs (`effectiveOccurrence`).
       sub(
         t,
-        "          patched(occurrenceRow, chosen, draftsNaming(detail, [chosen]))",
-        "          patched(occurrenceRow, chosen, [])",
+        "      : effectiveOccurrence(rowSources, inputs.detail).data;",
+        "      : effectiveOccurrence(rowSources, { drafts: [], attention: [] }).data;",
       ),
   },
   {
@@ -17594,6 +17603,177 @@ export const UNIT = [
         "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
         "      ? (position.value?.pageSeq ?? -1)",
       ),
+  },
+  // ---- WEB-10a revision 3 (R2, R8, R9; design assessment C1-C3): one isolated mutant per guard ---------------------------------------
+  {
+    id: "MU-2104",
+    title:
+      "WEB-10a R2 (rev 3): the server's fields apply although the clock went back since the read was asked (no clock-generation check)",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q1|Q2/,
+    patch: (t) => sub(t, "    basis.sameClock &&\n", ""),
+  },
+  {
+    id: "MU-2106",
+    title:
+      "WEB-10a R2 (rev 3): a clock that went back does not move the clock generation",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q1|Q2/,
+    patch: (t) =>
+      sub(
+        t,
+        "      generation: back ? prev.generation + 1 : prev.generation,",
+        "      generation: prev.generation,",
+      ),
+  },
+  {
+    id: "MU-2107",
+    title:
+      "WEB-10a R8 (rev 3): Today schedules the committed windows only, not those its outstanding creates and corrections give",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q4|Q5/,
+    patch: (t) =>
+      sub(
+        t,
+        "        snapshot.outstanding,\n      );\n      if (effective.data) out.push(effective.data);",
+        "        NOTHING,\n      );\n      if (effective.data) out.push(effective.data);",
+      ),
+  },
+  {
+    id: "MU-2108",
+    title:
+      "WEB-10a R9 (rev 3): the last of the bounded attempts is certified although it spanned a commit",
+    file: "src/data/ui/scan.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        "    if (sameBasis(before.basis, after.basis) || attempt === 2)",
+      ),
+  },
+  {
+    id: "MU-2109",
+    title:
+      "WEB-10a R9 (rev 3): the certificate ignores the local composition generation (compares the other fields only)",
+    file: "src/data/ui/scan.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q7|Q8|Q9|Q12/,
+    patch: (t) => sub(t, "  a.composition === b.composition &&\n", ""),
+  },
+  {
+    id: "MU-2110",
+    title:
+      "WEB-10a R9 (rev 3): a day whose saved tasks could not be read says 'nothing due'",
+    file: "src/features/tasks/today/TodayPage.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q10/,
+    patch: (t) =>
+      sub(
+        t,
+        "view.localError === null && (view.error === null || all.length > 0) ? (",
+        "(view.error === null || all.length > 0) ? (",
+      ),
+  },
+  {
+    id: "MU-2111",
+    title:
+      "WEB-10a R9 (rev 3): a walk that failed part-way is composed as if it had seen everything",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q10/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (walked !== "complete")',
+        '  if (walked !== "complete" && walked !== "closed")',
+      ),
+  },
+  {
+    id: "MU-2112",
+    title:
+      "WEB-10a R9 (rev 3): the store never advances the local composition generation",
+    file: "src/data/model/composition.ts",
+    tests: [
+      "tests/data/composition-generation.test.ts",
+      "tests/features/tasks/local-coherence.test.tsx",
+    ],
+    expect: /Q12|Q15|Q7|Q8|Q9/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (!scope.includes("sync_state")) return false;',
+        "  return false;",
+      ),
+  },
+  {
+    id: "MU-2113",
+    title:
+      "WEB-10a R9 (rev 3): the generation is advanced by a transaction that wrote no composition store (any write counts)",
+    file: "src/data/model/composition.ts",
+    tests: ["tests/data/composition-generation.test.ts"],
+    expect: /Q12/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const store of written) if (COMPOSITION_STORES.has(store)) return true;",
+        "  for (const _store of written) return true;",
+      ),
+  },
+  {
+    id: "MU-2114",
+    title:
+      "WEB-10a R9 (rev 3): a stale day freezes its rows (composed again only when data changes, not with the time)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9b/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [snapshot, listed, env.accountId, now, day, zone, clock.generation]);",
+        "  }, [snapshot, listed, env.accountId, day, zone, clock.generation]);",
+      ),
+  },
+  {
+    id: "MU-2115",
+    title:
+      "WEB-10a R9 (rev 3): a trigger that arrives while a read is in progress is dropped (the last change is not read)",
+    file: "src/features/tasks/local-read.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9/,
+    patch: (t) => sub(t, "      current.again = true;\n", ""),
+  },
+  {
+    id: "MU-2116",
+    title:
+      "WEB-10a R9 (rev 3, Q17): the task list says 'No tasks' when its read failed",
+    file: "src/features/tasks/detail/TaskList.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /list: a failed read/,
+    patch: (t) => sub(t, "        known ? (", "        true ? ("),
+  },
+  {
+    id: "MU-2117",
+    title:
+      "WEB-10a R9 (rev 3, Q17): an edit saves while the queue (its write target) could not be read",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /form: editing while the queue/,
+    patch: (t) => sub(t, "    !queueUnread &&\n", ""),
+  },
+  {
+    id: "MU-2118",
+    title:
+      "WEB-10a R9 (rev 3, Q17): the detail says 'no day' when the day's inputs could not be read",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /detail: a failed read/,
+    patch: (t) =>
+      sub(t, "row === null && view.rowError !== null ? (", "false ? ("),
   },
 ];
 
@@ -20450,6 +20630,67 @@ export const ENGINE = [
         t,
         "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
         "      ? (position.value?.pageSeq ?? -1)",
+      ),
+  },
+  // ---- WEB-10a revision 3 (R8, R9; design assessment C2, C3, Q13, Q19): the real engines ----------------------------------------------
+  {
+    id: "MU-2119",
+    title:
+      "WEB-10a N-T14: (REAL ENGINE) a local read is certified at its first attempt whatever was committed between its stages",
+    file: "src/data/ui/scan.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T14:.*between=true",
+    expect: /E-T14:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        '    if (after.kind === "ok")',
+      ),
+  },
+  {
+    id: "MU-2120",
+    title:
+      "WEB-10a N-T15: (REAL ENGINE) Today schedules the committed windows only, not the one an outstanding create gives",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9f:.*today:",
+    expect: /E-T9f:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        snapshot.outstanding,\n      );\n      if (effective.data) out.push(effective.data);",
+        "        NOTHING,\n      );\n      if (effective.data) out.push(effective.data);",
+      ),
+  },
+  {
+    id: "MU-2121",
+    title:
+      "WEB-10a N-CG1: (REAL ENGINE) the Dexie adapter never advances the local composition generation",
+    file: "src/data/store/dexie-adapter.ts",
+    spec: "tests/e2e/fixture.data-composition.spec.ts",
+    grep: "E-CG1:",
+    expect: /E-CG1:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (advancesComposition(written, plan.scope)) {",
+        "        if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-2122",
+    title:
+      "WEB-10a N-CG2: (REAL ENGINE) the schema stays at version 2: an older build's connection is never closed and it can still open",
+    file: "src/data/model/schema.ts",
+    spec: "tests/e2e/fixture.data-composition.spec.ts",
+    grep: "E-CG2:",
+    expect: /E-CG2:/,
+    patch: (t) =>
+      sub(
+        t,
+        "export const SCHEMA_VERSION = 3;",
+        "export const SCHEMA_VERSION = 2;",
       ),
   },
 ];

@@ -15,8 +15,11 @@ import {
   pageText,
   type SyncStub,
   seedSettled,
+  startLeader,
   startOutbox,
   stubNetwork,
+  untilTreeSettled,
+  waitForState,
 } from "./data-sync-helpers";
 import { runAxe } from "./helpers";
 import {
@@ -1883,4 +1886,266 @@ test.describe("E-T7e: the conflict choices after a reload (A14; DA-N1 of revisio
     });
     expect(net.commands[1]?.key).not.toBe(net.commands[0]?.key);
   });
+});
+
+test.describe("E-T9f: an occurrence created offline is followed to its close on Today (A4, A9, A15; R8 of revision 3)", () => {
+  // The review's native diagnostic of 14 October 2026 (`.agtx/evidence/web10a-review-3/native-corrected.spec.ts`), kept as a case: a
+  // one-off maximum-5 task created and recorded on OFFLINE (both saves stay queued), shown on an explicit day; ONLY the wall clock is set
+  // to five seconds before the day's canonical close, and native timers and the five seconds run for real. The time zone is Africa/Abidjan
+  // (UTC+0, offered by every engine's zone list). Today must reach Done with nothing but time; the detail is the control.
+  for (const surface of ["today", "detail"] as const)
+    test(`${surface}: On track five seconds before the close, Done after it, with no event`, async ({
+      context,
+      page,
+    }) => {
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      await page.goto(`/__session?route=${encodeURIComponent("/tasks/new")}`);
+      await page.waitForFunction(
+        () => window.__atlasFixture?.session?.booted !== undefined,
+      );
+      await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      await page.waitForFunction(() => window.__atlasData !== undefined);
+      await cacheTasks(page, net, []);
+      await page
+        .getByRole("button", { name: "Start from scratch instead" })
+        .click();
+      await expect(
+        page.getByRole("radio", { name: "Use my defaults (only you)" }),
+      ).toBeVisible();
+      await goOfflineAtBoundary(page);
+      const today = todayUtc();
+      await page.getByLabel("Name", { exact: true }).fill("Projected close");
+      await page.getByRole("radio", { name: "Only me", exact: true }).check();
+      await page.getByRole("radio", { name: "An amount", exact: true }).check();
+      await page.getByLabel("At most", { exact: true }).fill("5");
+      await page.getByLabel("Unit", { exact: true }).fill("cups");
+      await page
+        .getByLabel("Time zone", { exact: true })
+        .selectOption("Africa/Abidjan");
+      await page.getByLabel("Starting", { exact: true }).fill(today);
+      await page.getByLabel("Repeats", { exact: true }).selectOption("none");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await page.getByLabel("Amount (cups)", { exact: true }).fill("2");
+      await page
+        .locator("[data-record-card]")
+        .getByRole("button", { name: "Record", exact: true })
+        .click();
+      // Both saves stay queued: the day exists on this device only as their projection.
+      await expect.poll(async () => (await draftsOf(page)).length).toBe(2);
+      const detail = new URL(page.url()).pathname + new URL(page.url()).search;
+      const close = Date.parse(`${today}T00:00:00Z`) + 86_400_000;
+      await page.clock.setSystemTime(close - 5_000);
+      await page.evaluate(() => {
+        history.pushState(null, "", "/tasks");
+        dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await page.evaluate(
+        (to) => {
+          history.pushState(null, "", to);
+          dispatchEvent(new PopStateEvent("popstate"));
+        },
+        surface === "today" ? `/today?day=${today}&tz=UTC` : detail,
+      );
+      const pill = page.locator(
+        surface === "today" ? "[data-today-row]" : "[data-detail-pill]",
+      );
+      const attribute = surface === "today" ? "data-pill" : "data-detail-pill";
+      await expect(pill).toHaveAttribute(attribute, "on_track");
+      expect(await page.evaluate(() => Date.now())).toBeLessThan(close);
+      // Nothing happens on the page but time.
+      await page.waitForFunction((end) => Date.now() >= end, close + 500);
+      await expect(pill).toHaveAttribute(attribute, "done", { timeout: 1_000 });
+      expect((await draftsOf(page)).map((d) => d.status)).toEqual([
+        "queued",
+        "queued",
+      ]);
+    });
+});
+
+/**
+ * Holds the COMPLETION of the first read-only transaction that reads cached rows BY ID (`get` on `cache`: the related read of Today's local
+ * snapshot, never its walk, which reads by index) once `__holdRelated` is set: its rows were read, its result waits. Installed before the
+ * page loads (Dexie assigns `oncomplete` per transaction). Another tab can commit while it is held: the engine has finished the read.
+ */
+const holdRelatedReadInit = (): void => {
+  const desc = Object.getOwnPropertyDescriptor(
+    IDBTransaction.prototype,
+    "oncomplete",
+  );
+  const get = desc?.get;
+  const set = desc?.set;
+  if (get === undefined || set === undefined) return;
+  const w = window as unknown as {
+    __holdRelated?: boolean;
+    __heldRelated?: Array<() => void>;
+    __states?: string[];
+  };
+  w.__heldRelated = [];
+  w.__states = [];
+  const byId = new WeakSet<IDBTransaction>();
+  const storeGet = IDBObjectStore.prototype.get;
+  IDBObjectStore.prototype.get = function (
+    this: IDBObjectStore,
+    ...args: Parameters<IDBObjectStore["get"]>
+  ) {
+    if (this.name === "cache" && this.transaction.mode === "readonly")
+      byId.add(this.transaction);
+    return storeGet.apply(this, args);
+  };
+  Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
+    configurable: true,
+    enumerable: desc?.enumerable ?? true,
+    get() {
+      return get.call(this);
+    },
+    set(fn: unknown) {
+      const tx = this as IDBTransaction;
+      if (typeof fn !== "function" || tx.mode !== "readonly") {
+        set.call(this, fn);
+        return;
+      }
+      set.call(this, function (this: IDBTransaction, event: Event) {
+        if (w.__holdRelated === true && byId.has(tx)) {
+          w.__holdRelated = false;
+          w.__heldRelated?.push(() => fn.call(tx, event));
+          return;
+        }
+        return fn.call(tx, event);
+      });
+    },
+  });
+};
+
+test.describe("E-T14: another tab commits while Today's local read is between its stages (A1, A18; R9 of revision 3, Q13)", () => {
+  for (const between of [true, false])
+    test(`between=${between}: tab A never shows the old occurrence with the new title (or the reverse); it ends on what B committed`, async ({
+      context,
+    }) => {
+      const a = buildTask({ n: 30, title: "Cups" });
+      const b = buildTask({ n: 31, title: "Plants" });
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      // Tab B: the fixture leader that commits every page of this account.
+      const writer = await bootAt(context, "/tasks");
+      await cacheTasks(writer, net, [a]);
+      // Tab A: Today, a follower over the same database, its related read held on request.
+      const page = await context.newPage();
+      await page.addInitScript(holdRelatedReadInit);
+      await page.goto(`/__session?route=${encodeURIComponent(todayRoute())}`);
+      await page.waitForFunction(
+        () => window.__atlasFixture?.session?.booted !== undefined,
+      );
+      await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+        "data-version",
+        "1",
+      );
+      // Tab A's boot remounts tab B's protected tree, which closes B's registry (and the harness leader's store with it, WEB-09a): once
+      // both trees are settled B's leader is started again over the same database.
+      await untilTreeSettled(page);
+      await untilTreeSettled(writer);
+      await startLeader(writer);
+      await waitForState(writer, "idle");
+      // Every state tab A shows of the row, from now on (no act here: the engine renders every publication).
+      await page.evaluate((id) => {
+        const w = window as unknown as { __states: string[] };
+        const note = () => {
+          const el = document.querySelector<HTMLElement>(
+            `[data-today-row="${id}"]`,
+          );
+          const next =
+            el === null
+              ? "none"
+              : `${el.dataset.version}|${el.textContent?.includes("Renamed") ? "new" : "old"}`;
+          if (w.__states[w.__states.length - 1] !== next) w.__states.push(next);
+        };
+        note();
+        new MutationObserver(note).observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          characterData: true,
+        });
+      }, a.occurrenceId);
+      const commit = async (revision: number, changes: unknown[]) => {
+        net.script.push(() => ({
+          status: 200,
+          body: JSON.stringify({
+            phase: "delta",
+            batches: [{ revision, changes }],
+            next_cursor: `cursor-${revision}`,
+            has_more: false,
+          }),
+        }));
+        await writer.evaluate(() => window.__atlasData?.nudgeSync());
+      };
+      const renamed = (
+        a.upserts as Array<{ resource: Record<string, unknown> }>
+      )
+        .filter(
+          (u) => u.resource.kind === "task" || u.resource.kind === "occurrence",
+        )
+        .map((u) => ({
+          kind: "upsert",
+          resource: {
+            ...u.resource,
+            version: 2,
+            ...(u.resource.kind === "task" ? { label: "Renamed" } : {}),
+          },
+        }));
+      await page.evaluate(() => {
+        (window as unknown as { __holdRelated: boolean }).__holdRelated = true;
+      });
+      // An unrelated commit makes tab A read its day again; its related read is held.
+      await commit(2, b.upserts);
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __heldRelated: unknown[] }).__heldRelated
+                .length,
+          ),
+        )
+        .toBe(1);
+      if (between) {
+        // While A's related read is held: B commits the occurrence's version 2 and the task's new title in ONE page.
+        await commit(3, renamed);
+        await expect
+          .poll(() =>
+            writer.evaluate(
+              async (acct) =>
+                (
+                  (await window.__atlasData?.syncState(acct)) as {
+                    applied_revision?: number;
+                  } | null
+                )?.applied_revision,
+              ACCOUNT,
+            ),
+          )
+          .toBe(3);
+      }
+      await page.evaluate(() => {
+        const w = window as unknown as { __heldRelated: Array<() => void> };
+        for (const release of w.__heldRelated.splice(0)) release();
+      });
+      if (!between) await commit(3, renamed);
+      await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+        "data-version",
+        "2",
+        { timeout: 10_000 },
+      );
+      await expect(rowOf(page, a.occurrenceId)).toContainText("Renamed");
+      const states = await page.evaluate(
+        () => (window as unknown as { __states: string[] }).__states,
+      );
+      expect(states).not.toContain("1|new");
+      expect(states).not.toContain("2|old");
+      expect(states[states.length - 1]).toBe("2|new");
+    });
 });
