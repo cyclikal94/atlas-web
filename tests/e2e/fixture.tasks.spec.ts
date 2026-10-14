@@ -1260,9 +1260,12 @@ async function tabTo(
     trail.push(f.name || f.tag);
     if (want(f)) return f;
   }
-  throw new Error(
+  // An assertion, not a thrown error: a control missing from the tab order is the defect this traversal exists to show.
+  expect(
+    false,
     `${label} was not reached by ${options.shift ? "Shift+Tab" : "Tab"}: ${trail.join(" → ")}`,
-  );
+  ).toBe(true);
+  throw new Error("unreachable");
 }
 /** A meaningful stop: visibly focused, on screen and not covered by anything. */
 function seen(f: Focus, what: string): void {
@@ -1860,9 +1863,12 @@ test.describe("E-T7e: the conflict choices after a reload (A14; DA-N1 of revisio
     await page.waitForFunction(() => window.__atlasData !== undefined);
     const block = page.locator("[data-correction-conflict]");
     await expect(block).toContainText("Someone else corrected this day first");
-    await block
-      .getByRole("button", { name: "Save mine on the current version" })
-      .click();
+    // Asserted before it is pressed: a choice missing after the reload is the defect, reported as such (not as a click that times out).
+    const saveMine = block.getByRole("button", {
+      name: "Save mine on the current version",
+    });
+    await expect(saveMine).toBeVisible({ timeout: 10_000 });
+    await saveMine.click();
     await expect(block).toHaveCount(0);
     await send(page);
     await expect.poll(() => net.commands.length).toBe(2);
