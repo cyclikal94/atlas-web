@@ -390,6 +390,14 @@ export function withCancellation(record, reason) {
  * The run's outcome: a failure anywhere is a failure (even when a signal came later), and so is a record that carries a failure fact
  * whatever its label, or a run-level failure (`failures`: evidence that could not be written); otherwise cancelled, or passed.
  */
+/**
+ * Review r10 H4f (revision 11): was any clean-up of this stack not verified? A later clean-up that succeeded keeps an earlier one that
+ * did not beside it (`earlier_cleanups`, settleStack/mergeFacts), and that earlier failure still counts.
+ */
+export const cleanupFailed = (record) =>
+  (record.cleanup ? record.cleanup.ok !== true : false) ||
+  (record.earlier_cleanups ?? []).some((c) => c?.ok !== true);
+
 export function overall(
   records,
   { signalled = null, planned = 0, failures = [] } = {},
@@ -402,7 +410,7 @@ export function overall(
         failureOf(r) !== null ||
         (r.failures?.length ?? 0) > 0 ||
         Boolean(r.budget_exceeded) ||
-        (r.cleanup ? r.cleanup.ok !== true : false),
+        cleanupFailed(r),
     )
   )
     return "failed";

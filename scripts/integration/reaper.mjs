@@ -30,6 +30,14 @@
 // process knows; otherwise it is reconciled like any other (its outcome and its projection recomputed). Run-level evidence failures
 // are journalled (`run-error`) and the runner's `summary-error.json` contributes its stacks too.
 //
+// Review r10 H4f (revision 11): revision 10 read a file that could not be read or parsed as if it were absent (`null`), so its
+// terminal shortcut kept a finished summary as a pass beside a `summary-error.json` it could not read. Every run file is now read as
+// absent, present or unreadable (evidence-inputs.mjs) before anything is decided; only absence is absence. Whether the finished summary
+// covers the stacks decides only whether stacks must be recovered: BOTH that path and the reconciliation go through one run-level
+// reduction (`render`), which takes every evidence failure known (the summary's, summary-error.json's, the journal's, and this
+// process's own reads, commits and writes, a damaged journal line included) and an established failure or clean-up failure is never
+// relabelled as less. A failure found after the summary was written (its parent copy, reaper.json) publishes it once more.
+//
 //   node scripts/integration/reaper.mjs <run dir> <token> <runner pid>      (journal on stdin; started by run.mjs, never by hand)
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -42,7 +50,9 @@ import {
   dockerClient,
   LABEL_INVOCATION,
 } from "./docker-resources.mjs";
+import { readEvidence, SHAPES } from "./evidence-inputs.mjs";
 import {
+  cleanupFailed,
   judge,
   mergeFacts,
   overall,
@@ -88,9 +98,24 @@ const journal = {
   checkpoints: new Map(),
   acknowledged: [],
   runErrors: [],
+  // Review r10 H4f (revision 11): non-empty lines that are not a journal message (torn, not JSON, not an object with a type): what they
+  // said is unknown, which is an evidence failure of a take-over, never "nothing was said".
+  damaged: [],
   handover: null,
   evidence: null,
 };
+const isMessage = (m) =>
+  m !== null &&
+  typeof m === "object" &&
+  !Array.isArray(m) &&
+  typeof m.type === "string" &&
+  (!["stack", "judged", "stack-end"].includes(m.type) ||
+    (typeof m.browser === "string" && Number.isInteger(m.index))) &&
+  (m.type !== "judged" ||
+    (m.record !== null &&
+      typeof m.record === "object" &&
+      !Array.isArray(m.record))) &&
+  (m.type !== "run-error" || typeof m.reason === "string");
 let released = null;
 let taking = null;
 /** Does the runner's committed record of (browser, index) show it settled at sequence `seq` or later? (Recorded, never acted on.) */
@@ -107,10 +132,15 @@ const committedSettled = (browser, index, seq) => {
 
 const lines = createInterface({ input: process.stdin });
 lines.on("line", (line) => {
+  if (line.trim() === "") return;
   let m;
   try {
     m = JSON.parse(line);
   } catch {
+    m = undefined;
+  }
+  if (!isMessage(m)) {
+    journal.damaged.push(line.slice(0, 200));
     return;
   }
   if (m.type === "hello") {
@@ -341,23 +371,74 @@ let finished = false;
 function finish(result) {
   if (finished) return;
   finished = true;
-  // Review r8 H4d: evidence that cannot be written is a failure of this process of its own, whatever its clean-up did.
+  // Review r8 H4d: evidence that cannot be written is a failure of this process of its own, whatever its clean-up did. Review r10 H4f
+  // (revision 11): each output carries every evidence failure known when it is written; a failure found after an output was written
+  // (the parent copy, reaper.json, the other output) publishes that output once more. Bounded: no output is written more than twice,
+  // and stderr and the exit code are the last channel.
   const evidenceErrors = [];
+  let draft = null;
   try {
-    completeSummary(result, evidenceErrors);
+    draft = completeSummary(result, evidenceErrors);
   } catch (error) {
     evidenceErrors.push(`summary.json: ${String(error?.message ?? error)}`);
   }
-  result.evidence_errors = evidenceErrors;
   result.acknowledged = journal.acknowledged;
-  try {
-    publishAtomically(
-      join(runDir, "reaper.json"),
-      `${JSON.stringify(result, null, 2)}\n`,
-    );
-  } catch (error) {
-    evidenceErrors.push(`reaper.json: ${String(error?.message ?? error)}`);
+  if (journal.damaged.length > 0) result.journal_damaged = journal.damaged;
+  // Whether the runner's finished summary covered every stack (only the release was lost), so no stack was recovered.
+  if (draft) result.summary_covered = draft.complete;
+  // How many evidence failures the output written last covers (null: never written).
+  const covering = { summary: null, reaper: null };
+  const publishSummary = () => {
+    const known = evidenceErrors.length;
+    let text = null;
+    try {
+      text = `${JSON.stringify(draft.render(evidenceErrors.slice(0, known)), null, 2)}\n`;
+      publishAtomically(join(runDir, "summary.json"), text);
+      covering.summary = known;
+      return text;
+    } catch (error) {
+      evidenceErrors.push(`summary.json: ${String(error?.message ?? error)}`);
+      return null;
+    }
+  };
+  const publishReaper = () => {
+    const known = evidenceErrors.length;
+    result.evidence_errors = evidenceErrors.slice(0, known);
+    try {
+      publishAtomically(
+        join(runDir, "reaper.json"),
+        `${JSON.stringify(result, null, 2)}\n`,
+      );
+      covering.reaper = known;
+    } catch (error) {
+      evidenceErrors.push(`reaper.json: ${String(error?.message ?? error)}`);
+    }
+  };
+  if (draft) {
+    const text = publishSummary();
+    // The parent folder's copy is a convenience (the first run's summary is kept there; this run's is in its own folder): an existing
+    // one is left as it is; any other failure to write it is an evidence failure, not "it already exists".
+    if (text !== null && journal.evidence)
+      try {
+        writeFileSync(join(journal.evidence, "summary.json"), text, {
+          flag: "wx",
+        });
+      } catch (error) {
+        if (error?.code !== "EEXIST")
+          evidenceErrors.push(
+            `the parent summary.json copy could not be written: ${String(error?.message ?? error)}`,
+          );
+      }
   }
+  publishReaper();
+  if (
+    draft &&
+    covering.summary !== null &&
+    covering.summary < evidenceErrors.length
+  )
+    publishSummary();
+  if (covering.reaper !== null && covering.reaper < evidenceErrors.length)
+    publishReaper();
   for (const error of evidenceErrors) say(`evidence NOT written: ${error}`);
   say(
     `clean-up ${result.ok ? "verified" : "NOT verified"}${evidenceErrors.length > 0 ? "; its evidence was NOT completely written" : ""} (${join(runDir, "reaper.json")})`,
@@ -425,81 +506,100 @@ function recoverStack(base, cp, planned, result) {
   });
 }
 
-/** A JSON file of the run, or null when absent; one that cannot be read is added to `evidenceErrors` (as `what`) and is null too. */
-function readRunFile(name, what, evidenceErrors) {
-  try {
-    return JSON.parse(readFileSync(join(runDir, name), "utf8"));
-  } catch (error) {
-    if (error?.code !== "ENOENT")
-      evidenceErrors.push(
-        `${what} could not be read: ${String(error?.message ?? error)}`,
-      );
-    return null;
-  }
-}
+/** The outcomes a runner's terminal summary concludes with. */
+const TERMINAL = ["passed", "failed", "cancelled", "plan_error"];
+/** Outcomes that are established failures: a recovery never relabels them as anything less. */
+const FAILED = ["failed", "plan_error"];
+const unique = (xs) => [...new Set(xs)];
+const firstLine = (text) => String(text ?? "unknown").split("\n")[0];
 
 /**
  * The runner's summary, completed as the runner would have (review r7 H4c: with the same reducer; review r8 H4d: from the committed
  * stack records): never a pass, every planned stack accounted for, and every fact any stack committed or journalled kept through this
- * take-over. A runner that may still be running owns its summary: it is not rewritten (`reaper.json` says what this process did).
+ * take-over. A runner that may still be running owns its summary: it is not rewritten (`reaper.json` says what this process did), and
+ * null is returned.
  *
  * Review r9 H4e (revision 10): every source is read before anything is decided: the summary, the committed records, the runner's
- * `summary-error.json` (its error and its stacks), the checkpoints and the journalled run-level errors. A finished summary is kept as
- * it is only when it is the runner's quiescent terminal summary and covers all of them (only the release was lost); anything else is
- * reconciled, and its outcome, first failure and engine counts are computed again from the reconciled records.
+ * `summary-error.json` (its error and its stacks), the checkpoints and the journalled run-level errors. A finished summary covers its
+ * stacks only when it is the runner's quiescent terminal summary and covers all of them (only the release was lost); otherwise they
+ * are reconciled, and outcome, first failure and engine counts are computed again from the reconciled records.
+ *
+ * Review r10 H4f (revision 11): each file is read as absent, present or unreadable (a read, parse or shape failure), and every
+ * unreadable one is an evidence failure; a summary-error.json in ANY state means the runner could not publish its summary. A plan that
+ * cannot be read, or that is missing although the summary records a selection, leaves the planned stacks unknown (`plan_unknown`):
+ * no empty plan, no invented `not_run` entries; a run lost before it planned (no plan, no selection) still plans nothing. Covering
+ * decides only whether stacks are recovered. What is returned is a draft whose `render(errors)` is the ONE run-level reduction of both
+ * paths: every evidence failure (the summary's, summary-error.json's, the journal's and `errors`, this process's own, which `finish`
+ * passes as they are when the summary is written), the clean-up of the run and of every record, and an outcome that never goes below
+ * an established failure.
  */
 function completeSummary(result, evidenceErrors) {
-  const path = join(runDir, "summary.json");
   if (result.runner_alive !== false) {
     say(
       `the runner may still be running (pid ${runnerPid}); its summary is left to it`,
     );
-    return;
+    return null;
   }
-  let summary = readRunFile(
+  // 1. Every source, each absent, present or unreadable; nothing is decided before all of them are read.
+  const read = (name, what, shape) =>
+    readEvidence(join(runDir, name), { what, shape });
+  const summaryIn = read(
     "summary.json",
     "the runner's summary.json",
-    evidenceErrors,
+    SHAPES.summary,
   );
-  if (summary === null) {
-    // No summary yet, or one that cannot be read (an evidence failure, recorded above): start from who the runner was.
-    let invocation = { run_dir: runDir };
-    try {
-      invocation = JSON.parse(
-        readFileSync(join(runDir, "invocation.json"), "utf8"),
-      );
-    } catch {
-      // not even that was written
-    }
-    summary = { schema: 3, invocation, stacks: [] };
-  }
-  const { records: durable, errors: unreadable } = readStackRecords(runDir);
-  for (const e of unreadable)
-    evidenceErrors.push(`a stack record could not be read: ${e}`);
-  // The runner could not write its summary (it then ends without releasing this process): that is an evidence failure of the run, and
-  // the stacks it could not publish are evidence too.
-  const failed = readRunFile(
+  const invocationIn = read(
+    "invocation.json",
+    "the runner's invocation.json",
+    SHAPES.invocation,
+  );
+  const failedIn = read(
     "summary-error.json",
     "the runner's summary-error.json",
-    evidenceErrors,
+    SHAPES.summaryError,
   );
-  if (failed !== null)
+  const planIn = read("plan.json", "the run's plan.json", SHAPES.plan);
+  const { records: durable, errors: unreadable } = readStackRecords(runDir);
+  for (const input of [summaryIn, invocationIn, failedIn, planIn])
+    if (input.state === "unreadable") evidenceErrors.push(input.error);
+  for (const e of unreadable)
+    evidenceErrors.push(`a stack record could not be read: ${e}`);
+  if (journal.damaged.length > 0)
     evidenceErrors.push(
-      `the runner could not write its summary: ${String(failed.error ?? "unknown").split("\n")[0]}`,
+      `${journal.damaged.length} journal line(s) could not be read, so what they said is unknown (the first: ${JSON.stringify(journal.damaged[0])})`,
     );
-  let planned = null;
-  try {
-    planned = JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8"));
-  } catch {
-    // no plan was written: nothing was planned
+  // The runner writes summary-error.json only when it could not publish its summary: that is an evidence failure of the run, whether
+  // or not the file can be read, and the stacks it could not publish are evidence too.
+  const failed = failedIn.state === "present" ? failedIn.value : null;
+  if (failedIn.state !== "absent")
+    evidenceErrors.push(
+      `the runner could not write its summary: ${failed ? firstLine(failed.error) : "its summary-error.json cannot be read"}`,
+    );
+  // No usable summary yet (none, or one that cannot be read: an evidence failure, recorded above): start from who the runner was.
+  const summary =
+    summaryIn.state === "present"
+      ? summaryIn.value
+      : {
+          schema: 3,
+          invocation:
+            invocationIn.state === "present"
+              ? invocationIn.value
+              : { run_dir: runDir },
+          stacks: [],
+        };
+  const planned = planIn.state === "present" ? planIn.value : null;
+  let planUnknown = planIn.state === "unreadable";
+  if (planIn.state === "absent" && summary.selection) {
+    planUnknown = true;
+    evidenceErrors.push(
+      "the run's plan.json is missing although its summary records a selection: its planned stacks are unknown",
+    );
   }
-  const runErrors = [
-    ...new Set([
-      ...(summary.evidence_errors ?? []),
-      ...(failed?.evidence_errors ?? []),
-      ...journal.runErrors,
-    ]),
-  ];
+  const runErrors = unique([
+    ...(summary.evidence_errors ?? []),
+    ...(failed?.evidence_errors ?? []),
+    ...journal.runErrors,
+  ]);
   // The summary's records, then every committed record and every record of summary-error.json, joined by observation.
   const byKey = new Map();
   const put = (r) => {
@@ -512,12 +612,17 @@ function completeSummary(result, evidenceErrors) {
     put(r);
     projected.set(stackKey(r.browser, r.index), r);
   }
-  // Is the finished summary the runner's quiescent terminal summary, covering everything known here? Then only the release was lost.
+  // 2. Does the finished summary cover the stacks? Only the runner's quiescent terminal summary with nothing newer or unknown beside it:
+  // every record readable and covered, every checkpoint covered, no summary-error.json in any state (the stacks of one that cannot be
+  // read are unknown), no damaged journal line, no journalled error it lacks. Then only the release was lost and no stack is recovered.
   const complete =
+    summaryIn.state === "present" &&
     summary.invocation?.finished === true &&
     summary.terminal?.quiescent === true &&
+    TERMINAL.includes(summary.outcome) &&
     unreadable.length === 0 &&
-    failed === null &&
+    failedIn.state === "absent" &&
+    journal.damaged.length === 0 &&
     journal.runErrors.every((e) =>
       (summary.evidence_errors ?? []).includes(e),
     ) &&
@@ -525,124 +630,121 @@ function completeSummary(result, evidenceErrors) {
     [...journal.checkpoints].every(([key, cp]) =>
       covers(projected.get(key), cp.facts),
     );
-  if (complete) {
-    summary.reaper = { ok: result.ok, file: join(runDir, "reaper.json") };
-    if (!result.ok) {
-      // A clean-up this process could not verify is a failure of the run, whatever the runner had concluded before it died.
-      summary.cleanup_failed = true;
-      if (summary.outcome !== "failed" && summary.outcome !== "plan_error") {
-        summary.outcome_before_reaper = summary.outcome;
-        summary.outcome = "failed";
+  let records = summary.stacks ?? [];
+  let candidate = summary.outcome;
+  if (!complete) {
+    for (const r of durable.values()) put(r);
+    for (const r of failed?.stacks ?? []) put(r);
+    const store = createStackStore(runDir);
+    const keys = new Set([
+      ...journal.checkpoints.keys(),
+      ...[...durable.values()]
+        .filter((r) => r.phase !== "settled")
+        .map((r) => r.key),
+    ]);
+    for (const key of keys) {
+      const cp = journal.checkpoints.get(key) ?? null;
+      const record = durable.get(key) ?? null;
+      // Complete only when committed after its own clean-up AND covering everything observed of the stack.
+      if (record?.phase === "settled" && covers(record, cp?.facts ?? null))
+        continue;
+      const recovered = recoverStack(
+        joinVersions(record, cp?.facts ?? null),
+        cp,
+        planned,
+        result,
+      );
+      // The recovered version is a new observation, covering every one it joined.
+      const obs =
+        Math.max(
+          observation(record),
+          cp?.obs ?? -1,
+          observation(byKey.get(key)),
+        ) + 1;
+      let committed = { ...recovered, obs };
+      try {
+        committed = store.commit(
+          {
+            ...recovered,
+            obs,
+            browser: cp?.browser ?? record?.browser,
+            index: cp?.index ?? record?.index,
+            stack: cp?.stack ?? record?.stack,
+            recovered_by: "reaper",
+          },
+          "settled",
+        );
+      } catch (error) {
+        evidenceErrors.push(
+          `the recovered record of ${key} could not be committed: ${String(error?.message ?? error)}`,
+        );
       }
+      byKey.set(key, joinVersions(byKey.get(key), committed));
     }
-    publishAtomically(path, `${JSON.stringify(summary, null, 2)}\n`);
-    return;
-  }
-  for (const r of durable.values()) put(r);
-  for (const r of failed?.stacks ?? []) put(r);
-  const store = createStackStore(runDir);
-  const keys = new Set([
-    ...journal.checkpoints.keys(),
-    ...[...durable.values()]
-      .filter((r) => r.phase !== "settled")
-      .map((r) => r.key),
-  ]);
-  for (const key of keys) {
-    const cp = journal.checkpoints.get(key) ?? null;
-    const record = durable.get(key) ?? null;
-    // Complete only when committed after its own clean-up AND covering everything observed of the stack.
-    if (record?.phase === "settled" && covers(record, cp?.facts ?? null))
-      continue;
-    const recovered = recoverStack(
-      joinVersions(record, cp?.facts ?? null),
-      cp,
-      planned,
-      result,
+    records = [...byKey.values()];
+    const has = (browser, index) =>
+      records.some((r) => r.browser === browser && r.index === index);
+    for (const browser of planned?.browsers ?? [])
+      for (const [index, { stack }] of (planned?.stacks ?? []).entries())
+        if (!has(browser, index))
+          records.push({
+            browser,
+            stack,
+            index,
+            outcome: "not_run",
+            reason: `not launched: the runner ended (${result.reason})`,
+          });
+    records.sort(
+      (a, b) =>
+        (planned?.browsers ?? []).indexOf(a.browser) -
+          (planned?.browsers ?? []).indexOf(b.browser) || a.index - b.index,
     );
-    // The recovered version is a new observation, covering every one it joined.
-    const obs =
-      Math.max(
-        observation(record),
-        cp?.obs ?? -1,
-        observation(byKey.get(key)),
-      ) + 1;
-    let committed = { ...recovered, obs };
-    try {
-      committed = store.commit(
-        {
-          ...recovered,
-          obs,
-          browser: cp?.browser ?? record?.browser,
-          index: cp?.index ?? record?.index,
-          stack: cp?.stack ?? record?.stack,
-          recovered_by: "reaper",
-        },
-        "settled",
-      );
-    } catch (error) {
-      evidenceErrors.push(
-        `the recovered record of ${key} could not be committed: ${String(error?.message ?? error)}`,
-      );
-    }
-    byKey.set(key, joinVersions(byKey.get(key), committed));
+    // The controller was lost before a terminal summary that covers everything, so the stacks never make a pass.
+    const stacksOutcome = overall(records, {
+      signalled: result.reason,
+      planned: records.length,
+    });
+    candidate = stacksOutcome === "passed" ? "cancelled" : stacksOutcome;
   }
-  const records = [...byKey.values()];
-  const has = (browser, index) =>
-    records.some((r) => r.browser === browser && r.index === index);
-  for (const browser of planned?.browsers ?? [])
-    for (const [index, { stack }] of (planned?.stacks ?? []).entries())
-      if (!has(browser, index))
-        records.push({
-          browser,
-          stack,
-          index,
-          outcome: "not_run",
-          reason: `not launched: the runner ended (${result.reason})`,
-        });
-  records.sort(
-    (a, b) =>
-      (planned?.browsers ?? []).indexOf(a.browser) -
-        (planned?.browsers ?? []).indexOf(b.browser) || a.index - b.index,
-  );
-  const outcome = overall(records, {
-    signalled: result.reason,
-    planned: records.length,
-    failures: [
-      ...runErrors,
-      ...evidenceErrors,
-      ...(result.ok ? [] : ["the reaper's clean-up was not verified"]),
-    ],
-  });
-  const finishedBefore = summary.invocation?.finished === true;
-  // The controller was lost before a terminal summary that covers everything, so the run is never a pass.
-  const reconciled = outcome === "passed" ? "cancelled" : outcome;
-  Object.assign(summary, {
-    invocation: { ...summary.invocation, finished: true },
-    ...(finishedBefore && summary.outcome !== reconciled
-      ? { outcome_before_reaper: summary.outcome }
-      : {}),
-    outcome: reconciled,
-    ...project(records, {
-      browsers: planned?.browsers ?? [
-        ...new Set(records.map((r) => r.browser)),
-      ],
-      planned: planned?.stacks?.length,
-    }),
-    controller_lost: true,
-    ...(finishedBefore ? { reconciled_after_finish: true } : {}),
-    stacks: records,
-    evidence_errors: [...new Set([...runErrors, ...evidenceErrors])],
-    cleanup_failed: !result.ok || Boolean(summary.cleanup_failed),
-    reaper: { ok: result.ok, file: join(runDir, "reaper.json") },
-  });
-  const text = `${JSON.stringify(summary, null, 2)}\n`;
-  publishAtomically(path, text);
-  if (journal.evidence)
-    try {
-      writeFileSync(join(journal.evidence, "summary.json"), text, {
-        flag: "wx",
-      });
-    } catch {
-      // an existing parent summary is left as it is
-    }
+  const finishedBefore =
+    summaryIn.state === "present" && summary.invocation?.finished === true;
+  // 3. The one run-level reduction, for both paths.
+  const render = (errors) => {
+    const failures = unique([...runErrors, ...errors]);
+    const cleanupNotVerified =
+      !result.ok ||
+      summary.cleanup_failed === true ||
+      records.some(cleanupFailed);
+    const outcome = FAILED.includes(summary.outcome)
+      ? summary.outcome
+      : failures.length > 0 || cleanupNotVerified
+        ? "failed"
+        : candidate;
+    return {
+      ...summary,
+      ...(complete
+        ? {}
+        : {
+            invocation: { ...summary.invocation, finished: true },
+            ...project(records, {
+              browsers: planned?.browsers ?? [
+                ...new Set(records.map((r) => r.browser)),
+              ],
+              planned: planned?.stacks?.length,
+            }),
+            controller_lost: true,
+            ...(finishedBefore ? { reconciled_after_finish: true } : {}),
+            stacks: records,
+          }),
+      ...(finishedBefore && summary.outcome !== outcome
+        ? { outcome_before_reaper: summary.outcome }
+        : {}),
+      outcome,
+      ...(planUnknown ? { plan_unknown: true } : {}),
+      evidence_errors: failures,
+      cleanup_failed: cleanupNotVerified,
+      reaper: { ok: result.ok, file: join(runDir, "reaper.json") },
+    };
+  };
+  return { complete, render };
 }

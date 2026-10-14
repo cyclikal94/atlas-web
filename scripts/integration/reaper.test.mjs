@@ -361,7 +361,13 @@ const REPORT_FAILURE = {
 /** A reaper whose runner is already gone, given `messages`; resolves with what it left. `prepare(runDir)` writes the run's files. */
 async function reapDead(
   t,
-  { prepare = () => undefined, messages = [], summary = true } = {},
+  {
+    prepare = () => undefined,
+    messages = [],
+    summary = true,
+    evidence = null,
+    raw = [],
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4d-"));
   const runDir = join(dir, "run");
@@ -388,6 +394,14 @@ async function reapDead(
   prepare(runDir);
   // Revision 10: `messages` may be computed by the preparation (the journal of commits it made).
   const sent = typeof messages === "function" ? messages() : messages;
+  return reapIn(runDir, { messages: sent, evidence: evidence ?? dir, raw });
+}
+/**
+ * Revision 11: a reaper whose runner is already gone, over an EXISTING run directory (a second recovery of the same run), given
+ * `messages` (and `raw` journal lines after them, sent as they are); `evidence` is the parent folder the hello names.
+ */
+async function reapIn(runDir, { messages = [], evidence, raw = [] }) {
+  const sent = messages;
   const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
   await new Promise((r) => gone.once("exit", r));
   const reaper = spawn(
@@ -411,9 +425,9 @@ async function reapDead(
   });
   const closed = new Promise((r) => reaper.once("close", (code) => r(code)));
   reaper.stdin.end(
-    [{ type: "hello", invocation: "inv-h4d", evidence: dir }, ...sent]
+    [{ type: "hello", invocation: "inv-h4d", evidence }, ...sent]
       .map((m) => `${JSON.stringify(m)}\n`)
-      .join(""),
+      .join("") + raw.map((line) => `${line}\n`).join(""),
   );
   const code = await closed;
   const parse = (name) => {
@@ -909,7 +923,7 @@ const PLAN0 = {
 };
 async function reapFinished(
   t,
-  { summary, prepare = () => undefined, messages = [] },
+  { summary, prepare = () => undefined, messages = [], ...rest },
 ) {
   return reapDead(t, {
     summary: false,
@@ -919,6 +933,7 @@ async function reapFinished(
       prepare(runDir);
     },
     messages,
+    ...rest,
   });
 }
 const settled0 = {
@@ -1113,4 +1128,459 @@ test("H4e: a newer message that does not repeat an older one's failure never rem
   assert.equal(s?.outcome, "failed", r.log);
   assert.deepEqual(s?.report_errors, ["teardown failed"]);
   assert.equal(r.summary?.outcome, "failed");
+});
+
+// ---- review r10 H4f (revision 11): absent, readable and unreadable evidence, and one run-level reduction ------------------------------
+import { cleanupFailed } from "./outcome.mjs";
+
+const UNFINISHED = (stacks) => ({
+  schema: 3,
+  invocation: { finished: false },
+  outcome: "running",
+  stacks,
+});
+const MARKERS = {
+  absent: null,
+  readable: (record) => JSON.stringify({ error: "EIO", stacks: [record] }),
+  truncated: () => '{"error":',
+};
+/** One cell: a settled, passing stack committed by the real store; a terminal or unfinished summary of it; the marker in one state. */
+async function markerCell(t, { terminal, marker, extra = {} }) {
+  let journalled = [];
+  const r = await reapDead(t, {
+    summary: false,
+    prepare: (runDir) => {
+      writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN0));
+      const record = createStackStore(runDir).commit(
+        { ...name0, ...PASSED_SETTLED, obs: 1 },
+        "settled",
+      );
+      writeFileSync(
+        join(runDir, "summary.json"),
+        JSON.stringify(
+          terminal ? finishedSummary([record]) : UNFINISHED([record]),
+        ),
+      );
+      if (MARKERS[marker])
+        writeFileSync(
+          join(runDir, "summary-error.json"),
+          MARKERS[marker](record),
+        );
+      journalled = [
+        STACK0,
+        {
+          type: "judged",
+          browser: "chromium",
+          index: 0,
+          seq: record.seq,
+          obs: 1,
+          record,
+        },
+        END0(record.seq),
+      ];
+    },
+    messages: () => journalled,
+    ...extra,
+  });
+  return r;
+}
+
+for (const terminal of [true, false])
+  for (const marker of ["absent", "readable", "truncated"])
+    test(`H4f: a ${terminal ? "finished, quiescent terminal" : "unfinished"} summary with summary-error.json ${marker}`, async (t) => {
+      const r = await markerCell(t, { terminal, marker });
+      const errors = (r.summary?.evidence_errors ?? []).join("\n");
+      assert.equal(r.reaped?.ok, true, r.log);
+      if (marker === "absent") {
+        // Controls: only the release was lost (kept as it is), or an interruption with nothing established (cancelled).
+        assert.equal(r.summary?.outcome, terminal ? "passed" : "cancelled");
+        assert.deepEqual(r.summary?.evidence_errors, []);
+        assert.equal(r.reaped?.summary_covered, terminal);
+        assert.equal(r.code, 0);
+        return;
+      }
+      assert.equal(r.summary?.outcome, "failed", r.log);
+      assert.equal(
+        r.summary?.outcome_before_reaper,
+        terminal ? "passed" : undefined,
+      );
+      assert.equal(r.reaped?.summary_covered, false);
+      assert.equal(r.code, 1, "the reaper's evidence names a failure");
+      if (marker === "readable")
+        assert.match(errors, /the runner could not write its summary: EIO/);
+      else {
+        // The read failure AND the fact the marker's presence establishes (the runner could not publish its summary).
+        assert.match(
+          errors,
+          /the runner's summary-error\.json could not be read: /,
+        );
+        assert.match(
+          errors,
+          /the runner could not write its summary: its summary-error\.json cannot be read/,
+        );
+        assert.match(
+          (r.reaped?.evidence_errors ?? []).join("\n"),
+          /summary-error\.json could not be read/,
+        );
+      }
+      assert.equal(
+        stack0(r.summary)?.outcome,
+        "passed",
+        "no case failure invented",
+      );
+    });
+
+test("H4f: a read failure that is not 'not found' (a directory where summary-error.json should be) fails a terminal summary", async (t) => {
+  const r = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    prepare: (runDir) => mkdirSync(join(runDir, "summary-error.json")),
+    messages: [
+      STACK0,
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 0,
+        seq: 1,
+        obs: 1,
+        record: settled0,
+      },
+    ],
+  });
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /summary-error\.json could not be read: .*EISDIR/,
+  );
+});
+
+test("H4f: a marker of another shape (null) is unreadable evidence, never absent", async (t) => {
+  const r = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    prepare: (runDir) =>
+      writeFileSync(join(runDir, "summary-error.json"), "null"),
+  });
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /summary-error\.json is not valid evidence: it is not a JSON object/,
+  );
+});
+
+test("H4f: a summary of another shape is an evidence failure; the committed records are recovered", async (t) => {
+  const r = await reapDead(t, {
+    summary: false,
+    prepare: (runDir) => {
+      writeFileSync(
+        join(runDir, "summary.json"),
+        JSON.stringify({ stacks: {} }),
+      );
+      createStackStore(runDir).commit(
+        { ...name0, ...REPORT_FAILURE, cleanup: { ok: true }, obs: 1 },
+        "settled",
+      );
+    },
+  });
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.equal(stack0(r.summary)?.outcome, "failed");
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /summary\.json is not valid evidence: `stacks` is not a list/,
+  );
+});
+
+test("H4f: a plan that cannot be read leaves the planned stacks unknown (no empty plan, no invented not_run) and fails the run", async (t) => {
+  for (const text of [
+    '{"browsers":["chrom',
+    '{"browsers":"chromium","stacks":[]}',
+  ]) {
+    const r = await reapDead(t, {
+      prepare: (runDir) => writeFileSync(join(runDir, "plan.json"), text),
+      messages: [STACK0],
+    });
+    assert.equal(r.summary?.outcome, "failed", r.log);
+    assert.equal(r.summary?.plan_unknown, true);
+    assert.match(
+      (r.summary?.evidence_errors ?? []).join("\n"),
+      /the run's plan\.json (could not be read|is not valid evidence)/,
+    );
+    assert.equal(
+      (r.summary?.stacks ?? []).some((s) => s.outcome === "not_run"),
+      false,
+      "no not_run entry is invented for an unknown plan",
+    );
+    assert.equal(stack0(r.summary)?.outcome, "cancelled");
+  }
+});
+
+test("H4f: a plan missing although the summary records a selection is unknown; a run lost before planning plans nothing (control)", async (t) => {
+  const missing = await reapDead(t, {
+    summary: false,
+    prepare: (runDir) => {
+      rmSync(join(runDir, "plan.json"));
+      writeFileSync(
+        join(runDir, "summary.json"),
+        JSON.stringify({
+          ...UNFINISHED([]),
+          selection: { mode: "full", ok: true },
+        }),
+      );
+    },
+    messages: [STACK0],
+  });
+  assert.equal(missing.summary?.outcome, "failed", missing.log);
+  assert.equal(missing.summary?.plan_unknown, true);
+  assert.match(
+    (missing.summary?.evidence_errors ?? []).join("\n"),
+    /plan\.json is missing although its summary records a selection/,
+  );
+  // Control: lost before anything was planned or summarised (no plan, no summary, its invocation only).
+  const early = await reapDead(t, {
+    summary: false,
+    prepare: (runDir) => {
+      rmSync(join(runDir, "plan.json"));
+      writeFileSync(
+        join(runDir, "invocation.json"),
+        JSON.stringify({ id: "inv-early", browsers: ["chromium"] }),
+      );
+    },
+  });
+  assert.equal(early.summary?.outcome, "cancelled", early.log);
+  assert.deepEqual(early.summary?.evidence_errors, []);
+  assert.equal(early.summary?.plan_unknown, undefined);
+  assert.equal(early.summary?.invocation?.id, "inv-early");
+  assert.deepEqual(early.summary?.stacks, []);
+  assert.equal(early.code, 0);
+});
+
+test("H4f: an invocation.json that cannot be read is an evidence failure, not 'nothing was written'", async (t) => {
+  const r = await reapDead(t, {
+    summary: false,
+    prepare: (runDir) => {
+      rmSync(join(runDir, "plan.json"));
+      writeFileSync(join(runDir, "invocation.json"), '{"id":"inv');
+    },
+  });
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /invocation\.json could not be read/,
+  );
+});
+
+test("H4f: a stack record file holding no record (null) is an evidence failure, never skipped", async (t) => {
+  const r = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    prepare: (runDir) => {
+      mkdirSync(join(runDir, "stacks"));
+      writeFileSync(join(runDir, "stacks", "chromium-1.json"), "null");
+    },
+  });
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /a stack record could not be read: chromium-1\.json: it is not a stack record/,
+  );
+});
+
+test("H4f: damaged journal lines (torn, not an object, a message without its fields) are an evidence failure and never stop the reaper", async (t) => {
+  const r = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    messages: [
+      STACK0,
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 0,
+        seq: 1,
+        obs: 1,
+        record: settled0,
+      },
+    ],
+    raw: [
+      "null",
+      '{"type":"judged","browser":"chromium","index":0,"record":nu',
+      '{"type":"judged","browser":"chromium"}',
+    ],
+  });
+  assert.equal(r.reaped?.ok, true, r.log);
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.equal(r.reaped?.journal_damaged?.length, 3);
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /3 journal line\(s\) could not be read/,
+  );
+});
+
+test("H4f: established failures are monotone: a finished failed summary with a run-level error and an earlier clean-up failure stays so after a clean take-over, and again on a second recovery", async (t) => {
+  const failedStack = {
+    ...settled0,
+    outcome: "cleanup_failed",
+    cleanup: { ok: false, errors: ["container left"] },
+  };
+  for (const terminal of [true, false]) {
+    const summary = terminal
+      ? finishedSummary([failedStack], {
+          outcome: "failed",
+          cleanup_failed: true,
+          evidence_errors: ["admissions: EIO"],
+          first_failure: "integration-chromium base cleanup_failed",
+        })
+      : {
+          ...UNFINISHED([failedStack]),
+          evidence_errors: ["admissions: EIO"],
+        };
+    const messages = [
+      STACK0,
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 0,
+        seq: 1,
+        obs: 1,
+        record: failedStack,
+      },
+    ];
+    const r = await reapFinished(t, { summary, messages });
+    const check = (x, label) => {
+      assert.equal(x.reaped?.ok, true, `${label}: ${x.log}`);
+      assert.equal(x.summary?.outcome, "failed", `${label}: ${x.log}`);
+      assert.equal(x.summary?.cleanup_failed, true, label);
+      assert.ok(
+        (x.summary?.evidence_errors ?? []).includes("admissions: EIO"),
+        label,
+      );
+      // The earlier unverified clean-up is kept: as the stack's clean-up, or beside a later verified one (earlier_cleanups).
+      assert.equal(cleanupFailed(stack0(x.summary) ?? {}), true, label);
+      assert.ok(
+        [
+          stack0(x.summary)?.cleanup,
+          ...(stack0(x.summary)?.earlier_cleanups ?? []),
+        ].some((c) => c?.ok === false && c.errors?.includes("container left")),
+        label,
+      );
+      assert.match(
+        x.summary?.first_failure ?? "",
+        /chromium base cleanup_failed/,
+        label,
+      );
+    };
+    check(r, `terminal=${terminal}`);
+    // A second recovery of the same run reads what the first wrote: nothing established is lost.
+    const again = await reapIn(r.runDir, { messages, evidence: r.runDir });
+    check(again, `terminal=${terminal}, second recovery`);
+  }
+});
+
+test("H4f: a finished plan_error is never relabelled by a reconciliation (control: the same summary covered stays plan_error too)", async (t) => {
+  for (const quiescent of [false, true]) {
+    const r = await reapFinished(t, {
+      summary: finishedSummary([], {
+        outcome: "plan_error",
+        plan_error: "discovery failed",
+        terminal: { quiescent, observations: 0 },
+      }),
+    });
+    assert.equal(r.summary?.outcome, "plan_error", r.log);
+    assert.equal(r.summary?.outcome_before_reaper, undefined);
+    assert.equal(r.reaped?.summary_covered, quiescent);
+  }
+});
+
+test("H4f: a failure found after the summary was written (reaper.json cannot be written) publishes the summary once more: never a pass", async (t) => {
+  const r = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    prepare: (runDir) => mkdirSync(join(runDir, "reaper.json")),
+    messages: [
+      STACK0,
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 0,
+        seq: 1,
+        obs: 1,
+        record: settled0,
+      },
+    ],
+  });
+  assert.equal(r.code, 1, r.log);
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.equal(r.summary?.outcome_before_reaper, "passed");
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /^reaper\.json: /m,
+  );
+  assert.match(r.log, /evidence NOT written: reaper\.json: /);
+});
+
+test("H4f: the parent copy: one that exists is left as it is (control); any other failure to write it fails the run", async (t) => {
+  const messages = [
+    STACK0,
+    {
+      type: "judged",
+      browser: "chromium",
+      index: 0,
+      seq: 1,
+      obs: 1,
+      record: settled0,
+    },
+  ];
+  const parent = mkdtempSync(join(tmpdir(), "atlas-reaper-parent-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  writeFileSync(join(parent, "summary.json"), "an earlier run's summary\n");
+  const kept = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    messages,
+    evidence: parent,
+  });
+  assert.equal(kept.summary?.outcome, "passed", kept.log);
+  assert.equal(kept.code, 0);
+  assert.equal(
+    readFileSync(join(parent, "summary.json"), "utf8"),
+    "an earlier run's summary\n",
+  );
+  // A parent "folder" that is a file: ENOTDIR, not EEXIST.
+  const notFolder = join(parent, "not-a-folder");
+  writeFileSync(notFolder, "");
+  const failed = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    messages,
+    evidence: notFolder,
+  });
+  assert.equal(failed.code, 1, failed.log);
+  assert.equal(failed.summary?.outcome, "failed", failed.log);
+  assert.match(
+    (failed.summary?.evidence_errors ?? []).join("\n"),
+    /the parent summary\.json copy could not be written: .*ENOTDIR/,
+  );
+  assert.match(
+    (failed.reaped?.evidence_errors ?? []).join("\n"),
+    /parent summary\.json copy/,
+  );
+});
+
+test("H4f: a covered terminal summary still takes every read failure of this process (a torn plan.json): failed, plan unknown", async (t) => {
+  const r = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    prepare: (runDir) =>
+      writeFileSync(join(runDir, "plan.json"), '{"browsers":["chro'),
+    messages: [
+      STACK0,
+      {
+        type: "judged",
+        browser: "chromium",
+        index: 0,
+        seq: 1,
+        obs: 1,
+        record: settled0,
+      },
+    ],
+  });
+  assert.equal(r.reaped?.summary_covered, true, r.log);
+  assert.equal(r.summary?.outcome, "failed", r.log);
+  assert.equal(r.summary?.outcome_before_reaper, "passed");
+  assert.equal(r.summary?.plan_unknown, true);
+  assert.match(
+    (r.summary?.evidence_errors ?? []).join("\n"),
+    /the run's plan\.json could not be read/,
+  );
 });

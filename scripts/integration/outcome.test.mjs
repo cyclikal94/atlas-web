@@ -772,3 +772,37 @@ test("H4e: the projection (first failure, engine counts, completeness) is comput
   assert.equal(passed.first_failure, null);
   assert.equal(passed.engines.chromium.complete, true);
 });
+
+// ---- review r10 H4f (revision 11): an earlier unverified clean-up counts after a later one succeeded --------------------------------
+import { cleanupFailed as cleanupNotVerified } from "./outcome.mjs";
+
+test("H4f: a stack settled again with a verified clean-up keeps the earlier unverified one, and the run counts it", () => {
+  const first = settleStack(
+    { browser: "chromium", stack: "base", index: 0, outcome: "passed" },
+    { cleanup: { ok: false, errors: ["container left"] } },
+  );
+  const again = settleStack(first, {
+    stop: "the reaper received SIGTERM",
+    cleanup: { by: "reaper", ok: true },
+  });
+  assert.equal(again.cleanup.ok, true);
+  assert.equal(again.earlier_cleanups?.[0]?.ok, false);
+  assert.equal(cleanupNotVerified(again), true);
+  // Even a record whose label and facts were lost on the way keeps failing the run by its earlier clean-up alone.
+  const bare = {
+    browser: "chromium",
+    stack: "base",
+    index: 0,
+    outcome: "passed",
+    cleanup: { ok: true },
+    earlier_cleanups: [{ ok: false }],
+  };
+  assert.equal(overall([bare], { planned: 1 }), "failed");
+  // Controls.
+  assert.equal(cleanupNotVerified({ cleanup: { ok: true } }), false);
+  assert.equal(cleanupNotVerified({ outcome: "not_run" }), false);
+  assert.equal(
+    overall([{ ...bare, earlier_cleanups: undefined }], { planned: 1 }),
+    "passed",
+  );
+});

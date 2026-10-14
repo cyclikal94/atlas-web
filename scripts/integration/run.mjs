@@ -42,6 +42,12 @@
 // it settles the current stack, then joins the run's own work (the schedule) before it publishes the terminal summary and releases the
 // reaper last. Work it cannot join within its bound is not declared finished: the journal ends WITHOUT a release and the reaper,
 // after this process has gone, reconciles every record, checkpoint and summary.
+//
+// Review r10 H4f (revision 11): every file the reaper may read as evidence is published whole: invocation.json and plan.json exclusively
+// and atomically, summary-error.json atomically. The parent folder's copy of the final summary is written separately from the run's
+// own summary; a failure to write it (other than "it already exists") is an evidence failure found AFTER the summary was published, so
+// the summary is concluded and published once more with it (never a pass); only when that cannot be published either is
+// summary-error.json written and the reaper left to reconcile.
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -69,6 +75,7 @@ import { createFaults } from "./faults.mjs";
 import { freePort } from "./free-port.mjs";
 import { createOidcProvider } from "./oidc-provider.mjs";
 import {
+  cleanupFailed,
   describe,
   judge,
   overall,
@@ -85,6 +92,7 @@ import {
   createStackStore,
   joinVersions,
   publishAtomically,
+  publishExclusively,
 } from "./stack-records.mjs";
 import { plan, selectStacks, stackArgs } from "./stacks.mjs";
 
@@ -145,6 +153,9 @@ let reaper = null;
 /** One line of the reaper's journal (what this run owns). A journal that cannot be written is a lost reaper. */
 function journal(message) {
   if (!reaper || released) return;
+  // Qualification (revision 11): a journal message that never reaches the reaper (the pipe is not acknowledged; a runner killed
+  // before it is flushed loses it). Inactive unless ATLAS_INTEGRATION_FAULTS names its type in `lose_journal`.
+  if (faults.loseJournal(message.type)) return;
   try {
     reaper.stdin.write(`${JSON.stringify(message)}\n`);
   } catch (error) {
@@ -262,10 +273,9 @@ reaper.once("exit", (code, signal) =>
 if (reaper.pid) owner.exclude(reaper.pid);
 journal({ type: "hello", invocation: invocation.id, evidence });
 // Who this run is, from its first moment (a run killed before its first summary is still identifiable by its mark).
-writeFileSync(
+publishExclusively(
   join(runDir, "invocation.json"),
   `${JSON.stringify({ ...invocation, run_dir: runDir, owner_token: owner.token, reaper_pid: reaper.pid ?? null }, null, 2)}\n`,
-  { flag: "wx" },
 );
 
 const docker = dockerClient((args, options = {}) => {
@@ -871,17 +881,30 @@ function writeSummary(final, extra) {
   const text = `${JSON.stringify(summarise(final, extra), null, 2)}\n`;
   // Review r8 H4d (revision 9): replaced atomically: a reader sees the previous complete summary or this one, never a part.
   publishAtomically(join(runDir, "summary.json"), text, {
-    fail: () => faults.write("summary"),
+    fail: () => {
+      faults.write("summary");
+      if (final) faults.write("summary-final");
+    },
   });
-  if (final)
-    try {
-      writeFileSync(join(evidence, "summary.json"), text, { flag: "wx" });
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      console.error(
-        `${join(evidence, "summary.json")} already exists and is left as it is; this run's summary is ${join(runDir, "summary.json")}`,
-      );
-    }
+  return text;
+}
+/**
+ * Review r10 H4f (revision 11): the parent folder's copy of the final summary (a convenience: the first run's is kept there). Null when
+ * it was written or already exists; otherwise the evidence failure.
+ */
+function copySummary(text) {
+  try {
+    faults.write("summary-copy");
+    writeFileSync(join(evidence, "summary.json"), text, { flag: "wx" });
+    return null;
+  } catch (error) {
+    if (error?.code !== "EEXIST")
+      return `the parent summary.json copy could not be written: ${String(error?.message ?? error)}`;
+    console.error(
+      `${join(evidence, "summary.json")} already exists and is left as it is; this run's summary is ${join(runDir, "summary.json")}`,
+    );
+    return null;
+  }
 }
 
 let finishing = null;
@@ -981,7 +1004,8 @@ function finish(code, extra = {}) {
         }
         if (latest) putRecord(latest);
       }
-      const cleanupFailed = records.some((r) => r.cleanup && !r.cleanup.ok);
+      // Review r10 H4f (revision 11): an earlier unverified clean-up of a stack counts even after a later one succeeded.
+      const cleanupNotVerified = records.some(cleanupFailed);
       const outcome =
         extra.outcome === "plan_error"
           ? "plan_error"
@@ -992,19 +1016,29 @@ function finish(code, extra = {}) {
                 planned: browsers.length * (planned?.stacks.length ?? 0),
                 failures: evidenceErrors,
               });
-      return { cleanupFailed, outcome };
+      return { cleanupFailed: cleanupNotVerified, outcome };
     };
-    const publish = () => {
+    const publish = async () => {
       const frontier = observed;
-      const { cleanupFailed, outcome } = conclude();
+      let { cleanupFailed, outcome } = conclude();
       if (serve) return { cleanupFailed, written: true, frontier };
+      const terminalSummary = () => ({
+        ...extra,
+        outcome,
+        cleanup_failed: cleanupFailed,
+        terminal: { quiescent, observations: frontier },
+      });
       try {
-        writeSummary(true, {
-          ...extra,
-          outcome,
-          cleanup_failed: cleanupFailed,
-          terminal: { quiescent, observations: frontier },
-        });
+        const text = writeSummary(true, terminalSummary());
+        // Review r10 H4f (revision 11): a copy that cannot be written is found after the summary was published: concluded again with
+        // it (an evidence failure: never a pass) and published once more.
+        const copyFailure = copySummary(text);
+        if (copyFailure !== null) {
+          runError(copyFailure);
+          console.error(`ERROR: ${copyFailure}`);
+          ({ cleanupFailed, outcome } = conclude());
+          writeSummary(true, terminalSummary());
+        }
         return { cleanupFailed, written: true, frontier };
       } catch (error) {
         const reason = `summary: ${String(error?.message ?? error)}`;
@@ -1012,18 +1046,24 @@ function finish(code, extra = {}) {
         console.error(
           `ERROR: the summary could not be written: ${error?.message ?? error}`,
         );
+        ({ cleanupFailed, outcome } = conclude());
         try {
-          writeFileSync(
+          // Review r10 H4f (revision 11): published whole (the reaper reads one it cannot parse as a failure, never as absent).
+          publishAtomically(
             join(runDir, "summary-error.json"),
             `${JSON.stringify({ error: String(error?.stack ?? error), outcome, cleanup_failed: cleanupFailed, evidence_errors: evidenceErrors, stacks: records }, null, 2)}\n`,
+            { fail: () => faults.write("summary-error") },
           );
         } catch {
-          // nothing more can be written; the exit code still says it
+          // nothing more can be written; the journalled run error and the exit code still say it
         }
+        // Qualification boundary (revision 11): the summary could not be published and summary-error.json was attempted; the journal
+        // has not ended.
+        await faults.at("finish:marker", runStop.signal).catch(() => undefined);
         return { cleanupFailed, written: false, frontier };
       }
     };
-    let result = publish();
+    let result = await publish();
     if (result.written && quiescent) {
       // Release the reaper last: the run's work has ended, so it has nothing to finish and waits for nothing more.
       released = true;
@@ -1043,7 +1083,7 @@ function finish(code, extra = {}) {
       if (observed !== result.frontier) {
         const reason = `${observed - result.frontier} stack observation(s) came after the terminal summary was published`;
         if (!evidenceErrors.includes(reason)) evidenceErrors.push(reason);
-        result = publish();
+        result = await publish();
       }
     } else {
       // Review r8 H4d: a summary that could not be written is not "nothing left to finish"; review r9 H4e: nor is work that could not be
@@ -1146,7 +1186,7 @@ try {
   if (error instanceof Cancelled) await finish(signalCode() ?? 1);
   await finish(1, { outcome: "plan_error", plan_error: String(error) });
 }
-writeFileSync(
+publishExclusively(
   join(runDir, "plan.json"),
   `${JSON.stringify(
     {
@@ -1170,7 +1210,6 @@ writeFileSync(
     null,
     2,
   )}\n`,
-  { flag: "wx" },
 );
 if (!planned.ok) {
   for (const problem of planned.problems) console.error(`plan: ${problem}`);

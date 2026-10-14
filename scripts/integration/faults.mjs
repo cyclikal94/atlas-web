@@ -31,6 +31,15 @@
 // r9 H4e): stack:cleaned (the stack's clean-up has ended; its own end has not committed the settled record) and finish:settled (the
 // terminal procedure has settled the current stack and has not joined the run's work). Both wait on the run-level stop, so after a
 // signal only `hold_deaf` holds them.
+//
+// Revision 11 (review r10 H4f): the writes "summary-final" (a final summary only, counted apart from the partial ones, so
+// `fail_write_nth: { "summary-final": [2] }` fails only the second final publication), "summary-copy" (the parent folder's copy of the
+// final summary) and "summary-error" (the runner's fallback marker); and the boundary finish:marker (the summary could not be published
+// and summary-error.json was attempted; the journal has not ended).
+//
+//   lose_journal  (revision 11) journal messages of the named types ("run-error") are not sent to the reaper, each recorded as reached
+//                 (`journal:lost:<type>`): the runner's journal is not acknowledged, so a runner killed before the pipe was flushed
+//                 loses what it last journalled, and the reaper must decide from what it can read
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cancelled } from "./ownership.mjs";
@@ -49,6 +58,7 @@ export function createFaults({
   const failWrite = list("fail_write");
   const dockerFail = list("docker_fail");
   const nth = spec.fail_write_nth ?? {};
+  const lostJournal = list("lose_journal");
   const attempts = new Map();
   const reached = [];
   const folder = join(dir, "faults");
@@ -74,6 +84,12 @@ export function createFaults({
           await new Promise((r) => setTimeout(r, 50));
         }
       }
+    },
+    /** Is a journal message of `type` lost on its way to the reaper (`lose_journal`)? Recorded as reached when it is. */
+    loseJournal(type) {
+      if (!lostJournal.has(type)) return false;
+      reached.push({ name: `journal:lost:${type}`, at: Date.now() });
+      return true;
     },
     /** The report as the runner reads it, with an injected global error when `report_error` is set. */
     report(report) {

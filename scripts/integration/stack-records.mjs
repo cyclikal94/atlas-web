@@ -23,6 +23,7 @@ import { randomBytes } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -135,14 +136,47 @@ export function publishAtomically(path, text, { fail = null } = {}) {
   }
 }
 
-/** One stack's committed record, or null when there is none; `{ unreadable }` when a file exists but cannot be read. */
-export function readStackRecord(path) {
+/**
+ * Write `text` to `path` as `publishAtomically` does, but only when `path` does not exist yet (EEXIST otherwise): the complete sibling is
+ * LINKED to its name, which fails when the name is taken, then the sibling is removed. Review r10 H4f (revision 11): the run's
+ * write-once files (invocation.json, plan.json) a reader takes as evidence are never seen in part.
+ */
+export function publishExclusively(path, text) {
+  const temporary = `${path}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(temporary, text, { flag: "wx" });
+    const out = openSync(temporary, "r");
+    try {
+      fsyncSync(out);
+    } finally {
+      closeSync(out);
+    }
+    linkSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+/**
+ * One stack's committed record, or null when there is none; `{ unreadable }` when a file exists but cannot be read. Review r10 H4f
+ * (revision 11): or when what it holds is not a record (`null`, a list, a value without its key): that is not "no record".
+ */
+export function readStackRecord(path) {
+  let record;
+  try {
+    record = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     return { unreadable: String(error?.message ?? error) };
   }
+  if (
+    record === null ||
+    typeof record !== "object" ||
+    Array.isArray(record) ||
+    typeof record.key !== "string"
+  )
+    return { unreadable: "it is not a stack record" };
+  return record;
 }
 
 /** Every committed stack record of the run: { records: Map(key -> record), errors: [unreadable record: why] }. */
@@ -160,7 +194,7 @@ export function readStackRecords(runDir) {
     if (!name.endsWith(".json")) continue; // a sibling still being written is not a record
     const record = readStackRecord(join(stacksDir(runDir), name));
     if (record?.unreadable) errors.push(`${name}: ${record.unreadable}`);
-    else if (record?.key) records.set(record.key, record);
+    else if (record) records.set(record.key, record);
   }
   return { records, errors };
 }
