@@ -41,6 +41,12 @@ export interface RecordSummary {
   fences: Record<string, number>;
   tx: number;
 }
+/**
+ * The verified username the fixture network answers for the signed-in account (`data-leader-helpers.ts`, `/me`): the account marker of
+ * every production-session fixture case (LR, E-R, E-B), so that each consumer checks the same vocabulary (WEB-08c revision 4, DA-H1).
+ */
+export const FIXTURE_ACCOUNT_MARKERS: readonly string[] = ["alice"];
+
 export interface OracleOptions {
   /**
    * Account-specific text (usernames, cached content). None of it may be in the document while NO account is authorised: the neutral
@@ -51,11 +57,12 @@ export interface OracleOptions {
 }
 
 interface PageReport {
-  type: "enrolled" | "violation" | "boundary";
+  type: "enrolled" | "violation" | "boundary" | "incomplete";
   page: number;
   url?: string;
   violation?: OracleViolation;
   boundary?: { seq: number; account: string | null; kind: string };
+  detail?: string;
 }
 
 /** The in-page part. Self-contained: it is serialised into the init script. */
@@ -85,10 +92,18 @@ function oracleScript(config: { markers: string[] }): void {
       // The binding is gone (the page is closing): the in-page log keeps it.
     }
   };
+  /** A limit of the recorder that was reached: the page's qualification is INCOMPLETE (never a clean result). */
+  const limits: string[] = [];
+  const incomplete = (what: string) => {
+    if (limits.includes(what)) return;
+    limits.push(what);
+    report({ type: "incomplete", detail: what });
+  };
   const push = (entry: Record<string, unknown>) => {
     seq += 1;
     const item = { seq, t: performance.now(), ...entry };
     if (log.length < 20_000) log.push(item);
+    else incomplete("log over 20000 entries");
     return item;
   };
   const authorised = (): string | null => {
@@ -118,16 +133,113 @@ function oracleScript(config: { markers: string[] }): void {
       });
     }
   };
-  const textOf = (node: Node): string =>
-    node.nodeType === Node.TEXT_NODE
-      ? (node.textContent ?? "")
-      : node instanceof Element
-        ? `${node.textContent ?? ""} ${node.getAttribute("aria-label") ?? ""}`
-        : "";
-  const checkMarkers = (text: string, where: string) => {
+  /**
+   * WEB-08c revision 4 (R5 of the review of 14 October 2026; design assessment P1, S13/S14): what a node EXPOSES to a reader or to
+   * assistive technology is its text AND its name-bearing attributes. Every one of them is watched, on every element of the document,
+   * and judged on each value WRITTEN, reconstructed per target from the records (an attribute: the next record's old value for the same
+   * element and attribute; a text node: the next record's old value for the same node), so a value set and reset in one task is seen.
+   */
+  const NAMED = [
+    "aria-label",
+    "aria-description",
+    "aria-roledescription",
+    "aria-valuetext",
+    "aria-placeholder",
+    "aria-labelledby",
+    "aria-describedby",
+    "title",
+    "alt",
+    "placeholder",
+    "value",
+    "label",
+  ];
+  const GATES = ["inert", "aria-hidden"];
+  /** The text an attribute value exposes: an id reference names the text of the elements it refers to. */
+  const attributeText = (name: string, value: string | null): string => {
+    if (value === null) return "";
+    if (name !== "aria-labelledby" && name !== "aria-describedby") return value;
+    return value
+      .split(/\s+/)
+      .map((id) => (id ? document.getElementById(id) : null))
+      .map((el) =>
+        el
+          ? `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""}`
+          : "",
+      )
+      .join(" ");
+  };
+  /** A node's text and the name-bearing attributes of it and of every element under it. */
+  const exposedText = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+    if (!(node instanceof Element)) return "";
+    const parts = [node.textContent ?? ""];
+    const elements = [node, ...node.querySelectorAll("*")];
+    for (const el of elements.slice(0, 5_000))
+      for (const name of NAMED)
+        if (
+          el.hasAttribute(name) &&
+          // HF-14: a value the person entered into this field is not judged (below).
+          !(name === "value" && entered.get(el) === el.getAttribute(name))
+        )
+          parts.push(attributeText(name, el.getAttribute(name)));
+    if (elements.length > 5_000) incomplete("subtree over 5000 elements");
+    return parts.join(" ");
+  };
+  /**
+   * Nodes INSERTED while no exposure episode was open (and everything under them then). Their earlier values are as prohibited as their
+   * later ones: an old value of one of their records, or the text of one that is removed again, is judged too. (A node that was present
+   * during an authorised episode is not: its unmount under the gate is legitimate.)
+   */
+  /**
+   * WEB-08c revision 4 (HF-14): what the PERSON entered into a form field is not something the application disclosed. React mirrors a
+   * controlled input's value into its `value` attribute, so a username typed into the sign-in form while another account is fenced was
+   * reported as a marker (I-L13 R1/R2 in three engines: "kate", "liam", "nora", each the test's own typing). The value of every `input`
+   * event is recorded per element (capture phase, before the framework mirrors it), and a `value` attribute written EQUAL to what the person
+   * entered in that element is not judged. Any other value write (a prefill with no input event, another field's value) still is.
+   */
+  const entered = new WeakMap<Node, string>();
+  document.addEventListener(
+    "input",
+    (event) => {
+      const target = event.target as { value?: unknown } | null;
+      if (target && typeof target.value === "string")
+        entered.set(target as unknown as Node, target.value);
+    },
+    true,
+  );
+  const insertedClosed = new WeakSet<Node>();
+  /** The inserted subtree a node came with: one exposure of that subtree is reported once, whichever of its records shows it. */
+  const insertedWith = new WeakMap<Node, Node>();
+  const enrolClosed = (node: Node) => {
+    insertedClosed.add(node);
+    insertedWith.set(node, node);
+    const walker = document.createTreeWalker(node);
+    let count = 0;
+    while (walker.nextNode() && count < 20_000) {
+      insertedClosed.add(walker.currentNode);
+      insertedWith.set(walker.currentNode, node);
+      count += 1;
+    }
+    if (count >= 20_000) incomplete("inserted subtree over 20000 nodes");
+  };
+  /** The markers already reported for a node: one exposure is one violation, however many of its records show it. */
+  const reportedOn = new WeakMap<Node, Set<string>>();
+  const checkMarkers = (text: string, where: string, from: Node) => {
     if (episode !== null) return;
-    for (const word of config.markers)
-      if (text.includes(word)) violate("marker", `${where}: "${word}"`);
+    const node = insertedWith.get(from) ?? from;
+    for (const word of config.markers) {
+      if (!text.includes(word)) continue;
+      {
+        let seen = reportedOn.get(node);
+        if (!seen) {
+          seen = new Set();
+          reportedOn.set(node, seen);
+        }
+        if (seen.has(word)) continue;
+        seen.add(word);
+      }
+      violate("marker", `${where}: "${word}"`);
+    }
   };
   const NEUTRAL_TITLES = new Set([
     "",
@@ -137,11 +249,32 @@ function oracleScript(config: { markers: string[] }): void {
     "Sign in · Atlas",
     "Join · Atlas",
   ]);
-  /** Judged on the value WRITTEN (a title set and reset in one task is two writes), never on the title as it is now. */
-  const checkTitle = (title: string) => {
+  /**
+   * Judged on the value WRITTEN (a title set and reset in one task is two writes), never on the title as it is now. A value of one
+   * title text node is reported once, however many of its records show it.
+   */
+  const titlesOn = new WeakMap<Node, Set<string>>();
+  const checkTitle = (title: string, from?: Node) => {
     push({ op: "title", title });
-    if (!NEUTRAL_TITLES.has(title.trim()) && episode === null)
-      violate("title", `title "${title}"`);
+    if (NEUTRAL_TITLES.has(title.trim()) || episode !== null) return;
+    if (from) {
+      const node = insertedWith.get(from) ?? from;
+      let seen = titlesOn.get(node);
+      if (!seen) {
+        seen = new Set();
+        titlesOn.set(node, seen);
+      }
+      if (seen.has(title)) return;
+      seen.add(title);
+    }
+    violate("title", `title "${title}"`);
+  };
+  /** Whether a record is the setter's own change of the <title> element (already judged on the value written). */
+  const titleRecord = (r: MutationRecord): boolean => {
+    const target = r.target as Node;
+    if (target.nodeName === "TITLE" || target.parentNode?.nodeName === "TITLE")
+      return true;
+    return [...r.addedNodes].some((node) => node.nodeName === "TITLE");
   };
   const titleDescriptor = Object.getOwnPropertyDescriptor(
     Document.prototype,
@@ -155,40 +288,86 @@ function oracleScript(config: { markers: string[] }): void {
         drain();
         checkTitle(String(value));
         setTitle.call(this, value);
-        // The setter's own change of the <title> element is already judged.
-        observer.takeRecords();
+        // The setter's own change of the <title> element is already judged; every OTHER record is handled (none is discarded unseen).
+        handle(observer.takeRecords().filter((r) => !titleRecord(r)));
       },
     });
   }
+  const inTitle = (node: Node) =>
+    node.nodeName === "TITLE" || node.parentNode?.nodeName === "TITLE";
   const handle = (records: MutationRecord[]) => {
     const root = rootOf();
-    // The value an attribute record SET is the next record's old value for the same attribute (records keep every change, in
-    // order); only the last one's is the attribute as it is now. Reading the current value instead would hide a change undone in
-    // the same task.
+    // The value a record SET is the next record's old value for the same TARGET (and attribute); only the last record's is the value as
+    // it is now. Reading the current value instead hides a change undone in the same task (attributes: revision 3; text: revision 4).
     const setTo = new Map<MutationRecord, string | null>();
-    const later = new Map<string, MutationRecord>();
+    const laterAttr = new Map<Node, Map<string, MutationRecord>>();
+    const laterText = new Map<Node, MutationRecord>();
     for (let index = records.length - 1; index >= 0; index -= 1) {
       const r = records[index] as MutationRecord;
-      if (r.type !== "attributes" || r.target !== root) continue;
-      const name = r.attributeName ?? "";
-      const next = later.get(name);
-      setTo.set(r, next ? next.oldValue : (root?.getAttribute(name) ?? null));
-      later.set(name, r);
+      const target = r.target as Node;
+      if (r.type === "attributes") {
+        const key = `${r.attributeNamespace ?? ""}|${r.attributeName ?? ""}`;
+        let byName = laterAttr.get(target);
+        if (!byName) {
+          byName = new Map();
+          laterAttr.set(target, byName);
+        }
+        const next = byName.get(key);
+        const current =
+          target instanceof Element
+            ? r.attributeNamespace
+              ? target.getAttributeNS(
+                  r.attributeNamespace,
+                  r.attributeName ?? "",
+                )
+              : target.getAttribute(r.attributeName ?? "")
+            : null;
+        setTo.set(r, next ? next.oldValue : current);
+        byName.set(key, r);
+      } else if (r.type === "characterData") {
+        const next = laterText.get(target);
+        setTo.set(r, next ? next.oldValue : (target.textContent ?? ""));
+        laterText.set(target, r);
+      }
     }
     for (const r of records) {
       const target = r.target as Node;
       const inRoot =
         root !== null && (target === root || root.contains(target));
-      if (r.type === "attributes" && target === root) {
+      const where = inRoot ? "protected-root" : "document";
+      if (r.type === "attributes") {
+        const name = r.attributeName ?? "";
         const now = setTo.get(r) ?? null;
-        push({ op: "attr", name: r.attributeName, old: r.oldValue, now });
-        if (now === null && r.oldValue !== null) {
-          if (r.attributeName === "inert" || r.attributeName === "aria-hidden")
-            exposure("lift", `${r.attributeName} removed`);
-        } else if (now !== null && r.attributeName === "inert") {
-          // A gate: the episode of the account ends (a lift must be authorised again).
-          if (episode !== null) push({ op: "episode.close", reason: "gate" });
-          episode = null;
+        if (target === root && GATES.includes(name)) {
+          push({ op: "attr", name, old: r.oldValue, now });
+          // A lift: `inert` removed; `aria-hidden` removed or made "false" (both expose the tree to assistive technology).
+          const lifted =
+            name === "inert"
+              ? now === null && r.oldValue !== null
+              : (now === null || now === "false") &&
+                r.oldValue !== null &&
+                r.oldValue !== "false";
+          if (lifted)
+            exposure(
+              "lift",
+              `${name} ${now === null ? "removed" : `set to "${now}"`}`,
+            );
+          else if (now !== null && name === "inert") {
+            // A gate: the episode of the account ends (a lift must be authorised again).
+            if (episode !== null) push({ op: "episode.close", reason: "gate" });
+            episode = null;
+          }
+        } else if (NAMED.includes(name)) {
+          // HF-14: the person's own entry into this field, mirrored by the framework, is not a disclosure.
+          if (name === "value" && now !== null && entered.get(target) === now)
+            continue;
+          checkMarkers(attributeText(name, now), `${where} [${name}]`, target);
+          if (insertedClosed.has(target))
+            checkMarkers(
+              attributeText(name, r.oldValue),
+              `${where} [${name}] (earlier)`,
+              target,
+            );
         }
       } else if (r.type === "childList") {
         // A tree is mounted by inserting its root container DIRECTLY into #protected-root (and portals stay inside the tree, lint R3).
@@ -206,19 +385,35 @@ function oracleScript(config: { markers: string[] }): void {
             episode = null;
           }
         }
-        for (const node of r.addedNodes)
-          checkMarkers(textOf(node), inRoot ? "protected-root" : "document");
-        // The parser's own static <title> (the document is still loading) is the build's, not a write by the application.
-        if (target.nodeName === "TITLE" && document.readyState !== "loading")
-          for (const node of r.addedNodes) checkTitle(node.textContent ?? "");
+        for (const node of r.addedNodes) {
+          if (episode === null) enrolClosed(node);
+          // The parser's own static <title> (the document is still loading) is the build's, not a write by the application.
+          if (inTitle(node) || target.nodeName === "TITLE") {
+            if (document.readyState !== "loading")
+              checkTitle(node.textContent ?? "");
+          } else if (episode === null)
+            checkMarkers(exposedText(node), where, node);
+        }
+        // A node inserted while closed and removed again (in this task or later) was in the document: what it showed then is judged.
+        if (episode === null)
+          for (const node of r.removedNodes)
+            if (
+              insertedClosed.has(node) &&
+              !inTitle(node) &&
+              target.nodeName !== "TITLE"
+            )
+              checkMarkers(exposedText(node), `${where} (removed)`, node);
       } else if (r.type === "characterData") {
-        const parent = target.parentNode;
-        if (parent?.nodeName === "TITLE") checkTitle(target.textContent ?? "");
-        else
-          checkMarkers(
-            target.textContent ?? "",
-            inRoot ? "protected-root" : "document",
-          );
+        const now = setTo.get(r) ?? "";
+        if (inTitle(target)) {
+          checkTitle(now, target);
+          if (insertedClosed.has(target) && r.oldValue !== null)
+            checkTitle(r.oldValue, target);
+        } else {
+          checkMarkers(now, where, target);
+          if (insertedClosed.has(target) && r.oldValue !== null)
+            checkMarkers(r.oldValue, `${where} (earlier)`, target);
+        }
       }
     }
   };
@@ -229,9 +424,10 @@ function oracleScript(config: { markers: string[] }): void {
       subtree: true,
       childList: true,
       characterData: true,
+      characterDataOldValue: true,
       attributes: true,
       attributeOldValue: true,
-      attributeFilter: ["inert", "aria-hidden"],
+      attributeFilter: [...GATES, ...NAMED],
     });
   arm();
 
@@ -359,6 +555,11 @@ function oracleScript(config: { markers: string[] }): void {
       push({ op: "mark", label });
     },
     state: () => ({ record, episode }),
+    /** Drains every pending record and answers what this document holds (the final acknowledgement of `assertClean`). */
+    flush: () => {
+      drain();
+      return { page: pageId, violations: [...violations], limits: [...limits] };
+    },
   };
   push({ op: "enrolled", readyState: document.readyState });
   report({ type: "enrolled", url: location.href });
@@ -371,31 +572,64 @@ export interface DisplayOracle {
   mark(page: Page, label: string): Promise<void>;
   /** The page's own ordered log (diagnostic). */
   log(page: Page): Promise<Array<Record<string, unknown>>>;
-  /** Every page of the context enrolled before its application ran, and no page reported a violation. */
+  /**
+   * Every DOCUMENT the context loaded enrolled before its application ran, every open document can be inspected and acknowledges what
+   * it holds, no recorder limit was reached, and no document (open or closed) reported a violation.
+   */
   assertClean(message?: string): Promise<void>;
   /**
-   * Enrolment of the CURRENT document of every open page of the context (asked in the page itself: a page's first `about:blank`
-   * document enrolling says nothing about the document it navigated to), and how many documents reported enrolment in all, closed
-   * pages included.
+   * The coverage of the oracle (WEB-08c revision 4, DA-H1/S16): `missing` lists every document that did not enrol (an open page whose
+   * CURRENT document is not enrolled, asked in the page itself; a page that loaded more documents than enrolled from it, closed pages
+   * included) and every open document that could not be inspected (unknown is never enrolled). `incomplete` lists recorder limits.
    */
-  coverage(): Promise<{ open: number; enrolled: number; missing: string[] }>;
+  coverage(): Promise<{
+    open: number;
+    enrolled: number;
+    loaded: number;
+    missing: string[];
+    incomplete: string[];
+  }>;
+  /** The marker vocabulary this installation checks (a caller's evidence states it). */
+  readonly markers: readonly string[];
 }
 
 export async function installDisplayOracle(
   context: BrowserContext,
   options: OracleOptions = {},
 ): Promise<DisplayOracle> {
-  const reports: PageReport[] = [];
+  const reports: Array<PageReport & { from: Page | null }> = [];
+  const markers = [...(options.markers ?? [])];
   await context.exposeBinding(
     "__displayOracleReport",
-    (_source, payload: PageReport) => {
-      reports.push(payload);
+    (source, payload: PageReport) => {
+      // Only a page's MAIN frame is an application document (the app has no frames; a frame's report still counts as a violation).
+      const main = source.frame === source.page?.mainFrame();
+      reports.push({ ...payload, from: main ? source.page : null });
     },
   );
   // Each document draws its own id in the page (one init script serves every page of the context).
-  await context.addInitScript(oracleScript, {
-    markers: options.markers ?? [],
-  });
+  await context.addInitScript(oracleScript, { markers });
+  /**
+   * Every document a page LOADED (its main frame's `domcontentloaded`), by page: each must have enrolled. A document that loaded and was
+   * replaced or closed before it could be asked is still accounted for here.
+   */
+  const loaded = new Map<Page, string[]>();
+  const watch = (page: Page) => {
+    if (loaded.has(page)) return;
+    loaded.set(page, []);
+    page.on("domcontentloaded", () => {
+      const url = page.url();
+      if (url !== "about:blank") loaded.get(page)?.push(url);
+    });
+  };
+  for (const page of context.pages()) watch(page);
+  context.on("page", watch);
+  type Flushed = {
+    page: number;
+    violations: OracleViolation[];
+    limits: string[];
+  } | null;
+  const flushed: Flushed[] = [];
   const violations = () =>
     reports
       .filter((r) => r.type === "violation" && r.violation)
@@ -403,6 +637,7 @@ export async function installDisplayOracle(
   return {
     violations,
     assertClean,
+    markers,
     async mark(page, label) {
       await page.evaluate(
         (l) =>
@@ -426,32 +661,91 @@ export async function installDisplayOracle(
     },
     coverage,
   };
+  /** Asks the page's current document to drain and acknowledge; `undefined` when it cannot be inspected (after a few tries). */
+  async function flush(page: Page): Promise<Flushed | "closed" | undefined> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (page.isClosed()) return "closed";
+      try {
+        return await page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __displayOracle?: { flush(): Flushed };
+              }
+            ).__displayOracle?.flush() ?? null,
+        );
+      } catch {
+        // A navigation replaced the document while it was asked: ask the new one.
+        await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      }
+    }
+    return page.isClosed() ? "closed" : undefined;
+  }
   async function coverage() {
     const missing: string[] = [];
+    const incomplete: string[] = [];
     const pages = context.pages().filter((page) => !page.isClosed());
+    flushed.length = 0;
+    /** Pages whose CURRENT document is already reported missing (its load is not counted twice below). */
+    const reported = new Set<Page>();
     for (const page of pages) {
       if (page.url() === "about:blank") continue;
-      const enrolled = await page
-        .evaluate(
-          () =>
-            (window as unknown as { __displayOracle?: unknown })
-              .__displayOracle !== undefined,
-        )
-        .catch(() => null);
-      // A page that closed meanwhile is not judged here; its reports stand.
-      if (enrolled === false) missing.push(page.url());
+      const answer = await flush(page);
+      if (answer === "closed") continue;
+      if (answer === undefined) {
+        missing.push(`${page.url()} (uninspectable)`);
+        reported.add(page);
+      } else if (answer === null) {
+        missing.push(page.url());
+        reported.add(page);
+      } else {
+        flushed.push(answer);
+        for (const limit of answer.limits)
+          incomplete.push(`${page.url()}: ${limit}`);
+      }
     }
+    // Every loaded document of every page (closed ones too) must have enrolled from that page.
+    for (const [page, urls] of loaded) {
+      // A page's initial `about:blank` document enrols too, and is not one of the documents it LOADED (revision 3 found it hiding one).
+      const enrolledHere = reports.filter(
+        (r) =>
+          r.type === "enrolled" &&
+          r.from === page &&
+          r.url !== undefined &&
+          r.url !== "about:blank",
+      ).length;
+      const deficit = urls.length - enrolledHere - (reported.has(page) ? 1 : 0);
+      if (deficit > 0)
+        missing.push(
+          `${deficit} more of ${urls.length} documents of a page (${urls.at(-1) ?? ""}) did not enrol`,
+        );
+    }
+    for (const r of reports)
+      if (r.type === "incomplete")
+        incomplete.push(`page ${r.page}: ${r.detail ?? ""}`);
     return {
       open: pages.length,
       enrolled: reports.filter((r) => r.type === "enrolled").length,
-      missing,
+      loaded: [...loaded.values()].reduce((n, urls) => n + urls.length, 0),
+      missing: [...new Set(missing)],
+      incomplete: [...new Set(incomplete)],
     };
   }
   async function assertClean(message?: string) {
-    const { missing } = await coverage();
+    const { missing, incomplete } = await coverage();
     expect(missing, `${message ?? ""} pages that escaped the oracle`).toEqual(
       [],
     );
-    expect(violations(), `${message ?? ""} early display`).toEqual([]);
+    expect(
+      incomplete,
+      `${message ?? ""} recorder limits reached (incomplete)`,
+    ).toEqual([]);
+    // What each open document holds is acknowledged: a violation whose report was not delivered (yet) is still counted.
+    const all = new Map<string, OracleViolation>();
+    for (const v of violations()) all.set(`${v.page}:${v.seq}`, v);
+    for (const answer of flushed)
+      for (const v of answer?.violations ?? [])
+        all.set(`${v.page}:${v.seq}`, v);
+    expect([...all.values()], `${message ?? ""} early display`).toEqual([]);
   }
 }

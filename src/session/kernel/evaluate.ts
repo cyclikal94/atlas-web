@@ -206,6 +206,22 @@ async function evaluateOnce(k: Kernel, reason: string): Promise<void> {
     k.memory.unresolvedKnownFor = null;
   }
 
+  // WEB-08c revision 4 (R9): a recovery report is applicable only to the identity it was made for, and only while the account has a fence
+  // entry at all. Withdrawn here, at this successful read, before anything is derived from it: a report of another identity or of a
+  // recovery that is over (its fence cleared) can never keep this page on state 2 or 3. A new recovery of the account reports afresh.
+  // (`recoveryFor` is read only while a report is held.)
+  const reportedFor = k.memory.recoveryFor;
+  if (
+    k.neutral.recovery &&
+    !(
+      reportedFor &&
+      reportedFor.account === settled?.account_id &&
+      reportedFor.epoch === settled.epoch &&
+      record.fences[reportedFor.account]?.length
+    )
+  )
+    k.neutral = { ...k.neutral, recovery: null };
+
   k.hooks.onRecord(records);
 
   const env = { online: k.ports.page.isOnline() };

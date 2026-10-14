@@ -28,7 +28,7 @@ export interface SessionConfig {
   displayReadStallMs: number;
   /** Every stamped request; also the give-up interval of a deferred cover. */
   stampedRequestTimeoutMs: number;
-  /** Resume verification and the displaying page's scan. */
+  /** Resume verification and the scan of a displaying page (and of a visible page on recovery state 2 or 3: WEB-08c revision 4, R9). */
   resumeVerificationMinIntervalMs: number;
   scanIntervalMs: number;
   /** Show `1e.waiting` after this long waiting for another window. */

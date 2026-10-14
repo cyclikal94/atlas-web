@@ -16055,15 +16055,15 @@ export const UNIT = [
   {
     id: "MU-1246",
     title:
-      "WEB-09b R2: the leading page ignores a follower's request to retry updates",
+      "WEB-09b R2: the leading page ignores a follower's request to retry updates (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/retry-routing.test.ts"],
     expect: /a FOLLOWER's retry is applied by the leading page/,
     patch: (t) =>
       sub(
         t,
-        "            retryHere({ account: message.account, epoch: message.epoch });",
-        "            void message;",
+        "            retryHere({\n              account: message.account,\n              epoch: message.epoch,\n",
+        "            void ({\n              account: message.account,\n              epoch: message.epoch,\n",
       ),
   },
   {
@@ -16972,21 +16972,21 @@ export const UNIT = [
   {
     id: "MU-8C-RR1",
     title:
-      "WEB-08c revision 3 (R5, S9): the leading page does not announce its recovery report (a follower keeps showing 'Catching up' after the recovery stopped)",
+      "WEB-08c revision 3 (R5, S9): the leading page does not announce its recovery report (a follower keeps showing 'Catching up' after the recovery stopped) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect: /adopts the leader's 'failed' report/,
     patch: (t) =>
       sub(
         t,
-        '      deps.channel.post({ type: "recovery_state", ...announced });\n',
-        "      void announced;\n",
+        "        failure,\n      };\n      postStatus();\n",
+        "        failure,\n      };\n",
       ),
   },
   {
     id: "MU-8C-RR2",
     title:
-      "WEB-08c revision 3 (R5, S9): a hint for another identity replaces the page's kept report (and withdraws its card 3)",
+      "WEB-08c revision 3 (R5, S9): a hint for another identity replaces the page's kept report (and withdraws its card 3) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect:
@@ -16994,84 +16994,276 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      identity.account_id !== message.account ||\n      identity.epoch !== message.epoch\n    )\n      return;\n    hinted = {",
-        "      false\n    )\n      return;\n    hinted = {",
+        "      identity.account_id !== message.account ||\n      identity.epoch !== message.epoch\n    )\n      return;\n    const kept = ownStatus();",
+        "      false\n    )\n      return;\n    const kept = ownStatus();",
       ),
   },
   {
     id: "MU-8C-RR3",
     title:
-      "WEB-08c revision 3 (R5, S9): the leading page applies another page's recovery report instead of showing its own job's",
+      "WEB-08c revision 3 (R5, S9): the leading page applies another page's recovery report instead of showing its own job's (both leader guards: adoption and application) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect: /the leading page never adopts/,
     patch: (t) =>
       sub(
-        t,
-        "  const applyHinted = (): void => {\n    if (leading()) return;\n",
-        "  const applyHinted = (): void => {\n",
+        sub(
+          t,
+          "  ): void => {\n    if (leading()) return;\n    const identity = deps.identity.get();\n",
+          "  ): void => {\n    const identity = deps.identity.get();\n",
+        ),
+        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
+        "    if (!showingRecoveryCard() || !visible()) return;\n",
       ),
   },
   {
     id: "MU-8C-RR4",
     title:
-      "WEB-08c revision 3 (R5, S9): a page that starts after the report never asks for the standing one",
+      "WEB-08c revision 3 (R5, S9): a page that starts after the report never asks for the standing one (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect: /opened AFTER the report/,
     patch: (t) =>
       sub(
         t,
-        '    asked = key;\n    deps.channel.post({\n      type: "recovery_state_query",\n',
-        '    asked = key;\n    void ({\n      type: "recovery_state_query",\n',
+        '    deps.channel.post({\n      type: "recovery_state_query",\n',
+        '    void ({\n      type: "recovery_state_query",\n',
       ),
   },
   {
     id: "MU-8C-RR5",
     title:
-      "WEB-08c revision 3 (R5, S9): the leading page does not answer a query for its standing report",
+      "WEB-08c revision 3 (R5, S9): the leading page does not answer a query for its standing report (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect: /opened AFTER the report/,
     patch: (t) =>
       sub(
         t,
-        '              deps.channel.post({ type: "recovery_state", ...standing });\n',
-        "              void standing;\n",
+        "              };\n            postStatus();\n            return;\n",
+        "              };\n            return;\n",
       ),
   },
   {
     id: "MU-8C-RR6",
     title:
-      "WEB-08c revision 3 (R5, S9): a page whose identity changed keeps the report kept for the previous identity",
+      "WEB-08c revision 3 (R5, S9): a page whose identity changed keeps the report kept for the previous identity (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect: /identity changes drops the adopted report/,
     patch: (t) =>
       sub(
         t,
-        "      kept !== null &&\n      identity !== null &&\n      kept.account === identity.account_id &&\n      kept.epoch === identity.epoch\n",
-        "      kept !== null &&\n      identity !== null\n",
+        "    return kept !== null &&\n      identity !== null &&\n      kept.account === identity.account_id &&\n      kept.epoch === identity.epoch\n",
+        "    return kept !== null &&\n      identity !== null\n",
       ),
   },
   {
     id: "MU-8C-RR7",
     title:
-      "WEB-08c revision 3 (R5, S9): a page is given a report that changes nothing it shows (every hint re-evaluates it)",
+      "WEB-08c revision 3 (R5, S9): a page is given a report that changes nothing it shows (every hint re-evaluates it) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect: /is NOT re-evaluated by a report that changes nothing/,
-    patch: (t) => sub(t, "    if (next === applied) return;\n", ""),
+    patch: (t) =>
+      sub(
+        t,
+        "    if (failed === showsFailed) return;\n    const phase = failed",
+        "    const phase = failed",
+      ),
   },
   {
     id: "MU-8C-RR8",
     title:
-      "WEB-08c revision 3 (R5, S9; the T22 (i) regression): a page that is not showing the recovery card is given a report (a hint wakes a gated or hidden page)",
+      "WEB-08c revision 3 (R5, S9; the T22 (i) regression): a page that is not showing the recovery card is given a report (a hint wakes a gated or hidden page) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
     file: "src/data/leader/leader.ts",
     tests: ["tests/data/recovery-report-routing.test.ts"],
     expect: /T22 \(i\): a page that is NOT showing the recovery card/,
     patch: (t) =>
-      sub(t, "    if (next !== null && !showingRecoveryCard()) return;\n", ""),
+      sub(
+        t,
+        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
+        "    if (leading() || !visible()) return;\n",
+      ),
+  },
+  {
+    id: "MU-8C-R9a",
+    title:
+      "WEB-08c revision 4 (R9): the session never withdraws a held recovery report at its record read (another identity's report, or one held after the fence was cleared, stays)",
+    file: "src/session/kernel/evaluate.ts",
+    tests: ["tests/session/recovery-api.test.ts"],
+    expect:
+      /a report scoped to ANOTHER identity shows nothing|a report made while the account has NO fence is withdrawn/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (\n    k.neutral.recovery &&\n    !(",
+        "  if (\n    (false as boolean) &&\n    !(",
+      ),
+  },
+  {
+    id: "MU-8C-R9b",
+    title:
+      "WEB-08c revision 4 (R9): a recovery report names state 2 or 3 with no fence at all (the WEB-08a fallback that stranded the follower)",
+    file: "src/session/model/neutral-state.ts",
+    tests: ["tests/session/model/neutral-state.test.ts"],
+    expect: /the catch-up states/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (memory.waitingOnOtherWindow) return "1e.waiting";\n',
+        '  if (memory.waitingOnOtherWindow) return "1e.waiting";\n  if (memory.recovery === "catching_up") return "2";\n  if (memory.recovery === "failed") return "3";\n',
+      ),
+  },
+  {
+    id: "MU-8C-R9c",
+    title:
+      "WEB-08c revision 4 (R9, S3): the scan reads only a displaying page (a visible page on recovery state 2 or 3 waits for a hint that was lost)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/recovery-api.test.ts"],
+    expect: /S3: every hint to the follower is LOST too/,
+    patch: (t) =>
+      sub(
+        t,
+        '(view.kind === "neutral" && /^[23]$/.test(view.state))',
+        '(view.kind === "neutral" && (false as boolean))',
+      ),
+  },
+  {
+    id: "MU-8C-R9d",
+    title:
+      "WEB-08c revision 4 (R9, S8): the scan reads a hidden page too (a recovery-card scan wakes a hidden page)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/recovery-api.test.ts"],
+    expect: /a HIDDEN page on state 3 reads nothing on its own/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (\n          ports.page.isVisible() &&\n",
+        "        if (\n          (true as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-8C-R9e",
+    title:
+      "WEB-08c revision 4 (R9, S2): a follower asks for the leader's report ONCE per card (a lost report or answer is never repaired)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /S2 \(lost report\)|S2 \(lost question, then lost answer\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        followStatus(Math.min(delay * 2, STATUS_ASK_MAX_MS));\n",
+        "        void delay;\n",
+      ),
+  },
+  {
+    id: "MU-8C-R9f",
+    title:
+      "WEB-08c revision 4 (R9, S4): reports of one producer are not ordered (a late 'none' replaces its newer 'failed')",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /S4: a late report of the SAME producer/,
+    patch: (t) =>
+      sub(t, "      message.seq <= kept.seq\n", "      (false as boolean)\n"),
+  },
+  {
+    id: "MU-8C-R9g",
+    title:
+      "WEB-08c revision 4 (R9, S11): the leading page applies a follower's retry whatever failure it was pressed against (a spent retry resets the current stop)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /S11: a follower's retry names the failure it saw/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (\n      target.failure !== undefined &&\n",
+        "    if (\n      (false as boolean) &&\n      target.failure !== undefined &&\n",
+      ),
+  },
+  {
+    id: "MU-8C-R9h",
+    title:
+      "WEB-08c revision 4 (R9, S8): a hidden follower is given the kept report (a hint wakes a hidden page)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /S8: a HIDDEN follower neither asks nor is given a report/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
+        "    if (leading() || !showingRecoveryCard()) return;\n",
+      ),
+  },
+  {
+    id: "MU-8C-R9i",
+    title:
+      "WEB-08c revision 4 (R9): the leading page answers a question only when it has a failure or progress to report (revision 3: 'none' was never answered)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /the leader answers a question with 'none' too/,
+    patch: (t) =>
+      sub(
+        t,
+        '              announced === null ||\n              announced.account !== message.account ||\n              announced.epoch !== message.epoch\n            )\n              announced = {\n                account: message.account,\n                epoch: message.epoch,\n                phase: "none",\n                failure: null,\n              };\n',
+        '              announced === null ||\n              announced.phase === "none" ||\n              announced.account !== message.account ||\n              announced.epoch !== message.epoch\n            )\n              return;\n',
+      ),
+  },
+  {
+    id: "MU-8C-Q1",
+    title:
+      "WEB-08c revision 4 (DA-N1): a wake (a notification that changes connectivity, the view or the identity object) re-enters a recovery quota stop",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /S9: quota once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (quotaHeld()) return;\n    void tick();\n",
+        "    void tick();\n",
+      ),
+  },
+  {
+    id: "MU-8C-Q2",
+    title:
+      "WEB-08c revision 4 (DA-N1): connectivity returning re-enters a recovery quota stop",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /S9: quota once|D2 \(accepted limit\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "              if (alive(b) && !quotaHeld()) {\n",
+        "              if (alive(b)) {\n",
+      ),
+  },
+  {
+    id: "MU-8C-Q3",
+    title:
+      "WEB-08c revision 4 (DA-N1, S7): a recovery quota stop is not recorded in the write-failure marker (a reload or a takeover retries it)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /S9: quota once|S7\/S6: the stop survives a reload/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const recorded = recordStop(\n      deps.markers,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
+        '    const recorded = recordStop(\n      undefined,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
+      ),
+  },
+  {
+    id: "MU-8C-Q4",
+    title:
+      "WEB-08c revision 4 (DA-N1): 'Try again' does not retire a recovery quota stop's marker (the person's act cannot end it)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /S9: quota once|S7\/S6: the stop survives a reload/,
+    patch: (t) =>
+      sub(
+        t,
+        '              current.cause === "storage_full") &&\n',
+        "              (false as boolean)) &&\n",
+      ),
   },
 ];
 
@@ -19805,7 +19997,7 @@ export const ENGINE = [
   {
     id: "MU-1306",
     title:
-      "WEB-08c revision 3 (R5, T24 D, K-3): (REAL ENGINE) the leading page does not announce its recovery report (a follower never shows state 3)",
+      "WEB-08c revision 3 (R5, T24 D, K-3): (REAL ENGINE) the leading page publishes no recovery report (a follower never shows state 3). Revision 4: a report is announced AND answered to questions, so the mutant silences both (the announcement alone was equivalent: a follower that opens later asks; pool request-18efefc5e2a04a89829c, survived)",
     file: "src/data/leader/leader.ts",
     spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
     grep: "LR-6 T24 D",
@@ -19813,8 +20005,8 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        '      deps.channel.post({ type: "recovery_state", ...announced });\n',
-        "      void announced;\n",
+        "    if (standing === null) return;\n",
+        "    if (standing === null || (true as boolean)) return;\n",
       ),
   },
   {
@@ -19864,6 +20056,51 @@ export const ENGINE = [
         ),
         "      if (deferred && moved) return;\n",
         "",
+      ),
+  },
+  {
+    id: "MU-1314",
+    title:
+      "WEB-08c revision 4 (R9, S2): (REAL ENGINE) a follower asks for the leader's report ONCE per card (its paced question never re-arms, so neither time nor its own evaluations ask again; the timer-only form was equivalent natively: pool request-18efefc5e2a04a89829c, survived)",
+    file: "src/data/leader/leader.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-12 S2",
+    expect: /LR-12 S2/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (asking?.key !== key) return;\n        asking = null;\n        followStatus(Math.min(delay * 2, STATUS_ASK_MAX_MS));\n",
+        "        void delay;\n",
+      ),
+  },
+  {
+    id: "MU-1315",
+    title:
+      "WEB-08c revision 4 (R9, S3): (REAL ENGINE) the scan reads only a displaying page (a visible follower on a recovery card never learns the completion when every hint is lost)",
+    file: "src/session/session.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-13 S3",
+    expect: /LR-13 S3/,
+    patch: (t) =>
+      sub(
+        t,
+        '(view.kind === "neutral" && /^[23]$/.test(view.state))',
+        '(view.kind === "neutral" && (false as boolean))',
+      ),
+  },
+  {
+    id: "MU-1316",
+    title:
+      "WEB-08c revision 4 (DA-N1, S7): (REAL ENGINE) a recovery quota stop is not recorded in the write-failure marker (a reload retries it)",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-15 S7",
+    expect: /LR-15 S7/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const recorded = recordStop(\n      deps.markers,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
+        '    const recorded = recordStop(\n      undefined,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
       ),
   },
 ];

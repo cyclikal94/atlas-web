@@ -31,7 +31,11 @@ import {
   untilSync,
 } from "./data-leader-helpers";
 import { upsert, uuid } from "./data-sync-helpers";
-import { type DisplayOracle, installDisplayOracle } from "./display-oracle";
+import {
+  type DisplayOracle,
+  FIXTURE_ACCOUNT_MARKERS,
+  installDisplayOracle,
+} from "./display-oracle";
 import { expect, test } from "./helpers";
 
 /**
@@ -67,7 +71,7 @@ import { expect, test } from "./helpers";
  *   LR-10 G: a second re-authentication while the recovery's first read is in flight: the old epoch's answer is dropped and writes
  *         nothing; the new epoch makes its own catch-up before the clear.
  */
-const MARKERS = ["alice"];
+const MARKERS = [...FIXTURE_ACCOUNT_MARKERS];
 const KEPT = "00000000-0000-4000-8000-000000000040";
 const FORM = {
   form_context: "task-editor:new",
@@ -774,5 +778,372 @@ test.describe("T24 composed over the production leader with the continuous displ
     ).toBe(true);
     expect((await syncStateOf(page))?.cursor).toBe("delta-1");
     await replaysOnceAfter(net);
+  });
+});
+
+/**
+ * WEB-08c revision 4 (R9 of the review of 14 October 2026; design assessment Q3, S1/S2/S3/S7/S9; DA-N1; RECOVERY-NAVIGATION-ENROLMENT-
+ * 20261014 D2): the recovery status over the production session and leader, real IndexedDB, Web Locks and BroadcastChannel, with named
+ * message losses and quota faults. Every loss and fault is COUNTED in the page that suffers it, so a pass cannot come from a fault that
+ * never happened. Completion is the page's own record read; a status message only chooses between states 2 and 3.
+ *
+ *   LR-11 S1 (the review's reproduction): the leader's completion report ("none") is LOST; the follower displays from its own record read.
+ *         Its healthy control: the same schedule with nothing lost.
+ *   LR-12 S2: the follower already shows "Catching up" when the leader's "failed" is LOST: it keeps asking and shows state 3 and Try again.
+ *   LR-13 S3: EVERY recovery report and EVERY auth hint of the leader is lost: the follower still displays after the completion, by the
+ *         scan of a visible page on a recovery card (one scan interval).
+ *   LR-14 S9 (DA-N1): a quota stop; offline/online, visibility and time send nothing; the explicit Try again fetches the page once.
+ *   LR-15 S7: a quota stop survives a RELOAD (the page's stop is in the write-failure marker): nothing is asked until Try again.
+ *   LR-16 D2 (accepted limit): the marker write is REFUSED: no automatic retry in the surviving page; a reload permits ONE attempt, which
+ *         stops again while quota persists.
+ */
+const CARD3 = "Couldn't finish catching up";
+/** NAMED FAULT (test-only): the first `n` `put`s into `cache` of THIS document throw a QuotaExceededError inside their transaction. */
+const armQuota = (page: Page, n = 1) =>
+  page.evaluate((count) => {
+    const w = window as unknown as {
+      __quota?: { armed: number; hits: number };
+    };
+    w.__quota = { armed: count, hits: 0 };
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      this: IDBObjectStore,
+      ...args: Parameters<IDBObjectStore["put"]>
+    ) {
+      const fault = w.__quota;
+      if (fault && this.name === "cache" && fault.armed > 0) {
+        fault.armed -= 1;
+        fault.hits += 1;
+        throw new DOMException("injected quota", "QuotaExceededError");
+      }
+      return put.apply(this, args);
+    } as IDBObjectStore["put"];
+  }, n);
+const quotaHits = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { __quota?: { hits: number } }).__quota?.hits ?? 0,
+  );
+/**
+ * NAMED FAULT (test-only): messages THIS page posts on a BroadcastChannel are LOST when they match: `channel` (name), and for `atlas-sync`
+ * the message `type` and `phase`. `max` bounds how many are lost (default: all). Every post and every loss is counted in the page.
+ */
+type Loss = { channel: string; type?: string; phase?: string; max?: number };
+const loseMessages = (page: Page, losses: Loss[]) =>
+  page.evaluate((rules) => {
+    const w = window as unknown as {
+      __lost?: { rules: Loss[]; lost: number[]; posted: number };
+    };
+    w.__lost = { rules, lost: rules.map(() => 0), posted: 0 };
+    const post = BroadcastChannel.prototype.postMessage;
+    BroadcastChannel.prototype.postMessage = function (
+      this: BroadcastChannel,
+      message: unknown,
+    ) {
+      const state = w.__lost;
+      if (state) {
+        state.posted += 1;
+        const m = message as { type?: string; phase?: string };
+        const index = state.rules.findIndex(
+          (r, i) =>
+            r.channel === this.name &&
+            (r.type === undefined || r.type === m.type) &&
+            (r.phase === undefined || r.phase === m.phase) &&
+            (r.max === undefined || (state.lost[i] ?? 0) < r.max),
+        );
+        if (index >= 0) {
+          state.lost[index] = (state.lost[index] ?? 0) + 1;
+          return;
+        }
+      }
+      return post.call(this, message);
+    };
+  }, losses);
+const lostCounts = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { __lost?: { lost: number[] } }).__lost?.lost ?? [],
+  );
+const syncPaths = (net: LeaderNet) => net.calls.map((c) => [c.page, c.cursor]);
+const quotaMarkers = (page: Page) =>
+  page.evaluate(() =>
+    Object.keys(localStorage).filter(
+      (key) =>
+        key.startsWith("atlas-write-failing:") &&
+        key.includes(":page:delta-0#"),
+    ),
+  );
+
+test.describe("R9 and DA-N1 over the production leader: lost status messages and quota stops (WEB-08c revision 4)", () => {
+  for (const lose of [false, true])
+    test(`LR-11 S1 ${lose ? "the leader's completion report is LOST: the follower displays from its own record read" : "control: nothing lost, both pages display"}`, async ({
+      context,
+    }) => {
+      const net = await fencedWithCursor(context);
+      net.answer = (call) =>
+        call.cursor === "delta-0"
+          ? deltaPage([upsert(7, { n: 7 }), upsert(8, { n: 8 })], "delta-1")
+          : deltaPage([], call.cursor ?? "x");
+      const one = await leaderPageAfter(context, net, "one", (page) =>
+        armQuota(page),
+      );
+      expect(
+        (
+          await untilLeader(one, (v) =>
+            JSON.stringify(v.job).includes("storage_full"),
+          )
+        ).job,
+      ).toMatchObject({ kind: "stopped", cause: "storage_full" });
+      expect(await quotaHits(one)).toBe(1);
+      const two = await leaderPage(context, net, "two");
+      await expect(two.getByRole("heading", { name: CARD3 })).toBeVisible({
+        timeout: 15_000,
+      });
+      if (lose)
+        await loseMessages(one, [
+          { channel: "atlas-sync", type: "recovery_state", phase: "none" },
+        ]);
+      await two.getByRole("button", { name: "Try again", exact: true }).click();
+      await displayed(one, 30_000);
+      expect(await fencesOf(one)).toEqual([]);
+      if (lose) expect((await lostCounts(one))[0]).toBeGreaterThan(0);
+      // The original review assertion: the follower is displayed within 15 s of the leader.
+      await displayed(two, 15_000);
+      expect(await fencesOf(two)).toEqual([]);
+    });
+
+  test("LR-12 S2: the follower already shows 'Catching up' when the leader's 'failed' is LOST: it keeps asking and shows state 3; its Try again recovers both", async ({
+    context,
+  }) => {
+    // The follower's paced question (1 s doubling to 30 s) or the scan interval (30 s) is part of the schedule.
+    test.setTimeout(120_000);
+    const net = await fencedWithCursor(context);
+    const hold = held();
+    net.answer = async (call) => {
+      if (call.cursor !== "delta-0") return deltaPage([], call.cursor ?? "x");
+      await hold.promise;
+      return deltaPage([upsert(7, { n: 7 })], "delta-1");
+    };
+    const one = await leaderPageAfter(context, net, "one", (page) =>
+      armQuota(page),
+    );
+    await expect.poll(() => net.calls.length, { timeout: 15_000 }).toBe(1);
+    const two = await leaderPage(context, net, "two");
+    await expect(two.getByRole("heading", { name: "Catching up" })).toBeVisible(
+      {
+        timeout: 15_000,
+      },
+    );
+    // Only the leader's FIRST "failed" (its announcement) is lost; later answers are delivered.
+    await loseMessages(one, [
+      {
+        channel: "atlas-sync",
+        type: "recovery_state",
+        phase: "failed",
+        max: 1,
+      },
+    ]);
+    hold.release();
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(await quotaHits(one)).toBe(1);
+    expect(await lostCounts(one)).toEqual([1]);
+    // The follower learns it by asking again (paced, 1 s doubling to 30 s), never by a reload or a new identity.
+    await expect(two.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 40_000,
+    });
+    await two.getByRole("button", { name: "Try again", exact: true }).click();
+    await displayed(one, 30_000);
+    await displayed(two, 30_000);
+    expect(syncPaths(net).slice(0, 2)).toEqual([
+      ["one", "delta-0"],
+      ["one", "delta-0"],
+    ]);
+  });
+
+  test("LR-13 S3: every recovery report and every auth hint of the leader is LOST: after the completion the visible follower still displays, by its own scan", async ({
+    context,
+  }) => {
+    // The follower's paced question (1 s doubling to 30 s) or the scan interval (30 s) is part of the schedule.
+    test.setTimeout(120_000);
+    const net = await fencedWithCursor(context);
+    net.answer = (call) =>
+      call.cursor === "delta-0"
+        ? deltaPage([upsert(7, { n: 7 })], "delta-1")
+        : deltaPage([], call.cursor ?? "x");
+    const one = await leaderPageAfter(context, net, "one", (page) =>
+      armQuota(page),
+    );
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    const two = await leaderPage(context, net, "two");
+    await expect(two.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    await loseMessages(one, [
+      { channel: "atlas-sync", type: "recovery_state" },
+      { channel: "atlas-auth-hints" },
+    ]);
+    // The leading page's own Try again: it recovers and displays; nothing it says reaches the follower.
+    await one.getByRole("button", { name: "Try again", exact: true }).click();
+    await displayed(one, 30_000);
+    const lost = await lostCounts(one);
+    expect(lost[0], "recovery reports lost").toBeGreaterThan(0);
+    expect(lost[1], "auth hints lost").toBeGreaterThan(0);
+    // One scan interval (30 s) and the display read bound it.
+    await displayed(two, 40_000);
+    expect(await fencesOf(two)).toEqual([]);
+  });
+
+  test("LR-14 S9 (DA-N1): a quota stop; offline then online, visibility changes and time send nothing; the explicit Try again fetches the whole page once from the same position", async ({
+    context,
+  }) => {
+    const net = await fencedWithCursor(context);
+    net.answer = (call) =>
+      call.cursor === "delta-0"
+        ? deltaPage([upsert(7, { n: 7 })], "delta-1")
+        : deltaPage([], call.cursor ?? "x");
+    const one = await leaderPageAfter(context, net, "one", (page) =>
+      armQuota(page),
+    );
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    const baseline = await retainedWork(one);
+    expect(await quotaHits(one)).toBe(1);
+    expect(await quotaMarkers(one)).toHaveLength(1);
+    await goOffline(one);
+    await one.waitForTimeout(300);
+    await goOnline(one);
+    await one.evaluate(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await one.waitForTimeout(3_000);
+    expect(syncPaths(net)).toEqual([["one", "delta-0"]]);
+    expect(await exposed(one)).toEqual(HIDDEN);
+    expect((await syncStateOf(one))?.cursor).toBe("delta-0");
+    expect(await retainedWork(one)).toBe(baseline);
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible();
+    await one.getByRole("button", { name: "Try again", exact: true }).click();
+    await displayed(one, 30_000);
+    expect(syncPaths(net).slice(0, 2)).toEqual([
+      ["one", "delta-0"],
+      ["one", "delta-0"],
+    ]);
+    expect(await quotaMarkers(one)).toEqual([]);
+    expect(await cacheIds(one)).toEqual([KEPT, uuid(7)].sort());
+  });
+
+  test("LR-15 S7: a quota stop survives a RELOAD of the tab (its marker): the reloaded page asks nothing until Try again, which recovers", async ({
+    context,
+  }) => {
+    const net = await fencedWithCursor(context);
+    net.answer = (call) =>
+      call.cursor === "delta-0"
+        ? deltaPage([upsert(7, { n: 7 })], "delta-1")
+        : deltaPage([], call.cursor ?? "x");
+    const one = await leaderPageAfter(context, net, "one", (page) =>
+      armQuota(page),
+    );
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(await quotaMarkers(one)).toHaveLength(1);
+    // A reload: a NEW document of the same tab (the harness's own URL; the page's location is now its route).
+    await leaderPage(context, net, "one", one);
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    await one.waitForTimeout(3_000);
+    expect(syncPaths(net)).toEqual([["one", "delta-0"]]);
+    expect(await exposed(one)).toEqual(HIDDEN);
+    await one.getByRole("button", { name: "Try again", exact: true }).click();
+    await displayed(one, 30_000);
+    expect(syncPaths(net).slice(0, 2)).toEqual([
+      ["one", "delta-0"],
+      ["one", "delta-0"],
+    ]);
+    expect(await quotaMarkers(one)).toEqual([]);
+  });
+
+  test("LR-16 D2 (accepted limit): the stop marker is REFUSED: the surviving page does not retry; a reload permits ONE attempt, which stops again while quota persists", async ({
+    context,
+  }) => {
+    const net = await fencedWithCursor(context);
+    net.answer = (call) =>
+      call.cursor === "delta-0"
+        ? deltaPage([upsert(7, { n: 7 })], "delta-1")
+        : deltaPage([], call.cursor ?? "x");
+    const one = await context.newPage();
+    // In EVERY document of this page: one quota fault, and `localStorage` refuses the write-failure marker (counted).
+    await one.addInitScript(() => {
+      const w = window as unknown as {
+        __quota?: { armed: number; hits: number };
+        __markerRefused?: number;
+      };
+      w.__quota = { armed: 1, hits: 0 };
+      w.__markerRefused = 0;
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (
+        this: IDBObjectStore,
+        ...args: Parameters<IDBObjectStore["put"]>
+      ) {
+        const fault = w.__quota;
+        if (fault && this.name === "cache" && fault.armed > 0) {
+          fault.armed -= 1;
+          fault.hits += 1;
+          throw new DOMException("injected quota", "QuotaExceededError");
+        }
+        return put.apply(this, args);
+      } as IDBObjectStore["put"];
+      const setItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key.startsWith("atlas-write-failing:")) {
+          w.__markerRefused = (w.__markerRefused ?? 0) + 1;
+          throw new DOMException("injected refusal", "QuotaExceededError");
+        }
+        return setItem.call(this, key, value);
+      };
+    });
+    await leaderPage(context, net, "one", one);
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(await quotaHits(one)).toBe(1);
+    expect(
+      await one.evaluate(
+        () =>
+          (window as unknown as { __markerRefused?: number }).__markerRefused,
+      ),
+    ).toBeGreaterThan(0);
+    expect(await quotaMarkers(one)).toEqual([]);
+    expect((await leaderOf(one)).job).toMatchObject({
+      kind: "stopped",
+      cause: "storage_full",
+      memoryOnly: true,
+    });
+    await goOffline(one);
+    await goOnline(one);
+    await one.waitForTimeout(3_000);
+    expect(syncPaths(net)).toEqual([["one", "delta-0"]]);
+    // The accepted limit: the reloaded page cannot know the stop; it makes ONE attempt, which fails on quota again and stops.
+    await leaderPage(context, net, "one", one);
+    await expect(one.getByRole("heading", { name: CARD3 })).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(await quotaHits(one)).toBe(1);
+    await goOffline(one);
+    await goOnline(one);
+    await one.waitForTimeout(3_000);
+    expect(syncPaths(net)).toEqual([
+      ["one", "delta-0"],
+      ["one", "delta-0"],
+    ]);
+    expect(await exposed(one)).toEqual(HIDDEN);
+    expect((await syncStateOf(one))?.cursor).toBe("delta-0");
+    expect(await cacheIds(one)).toEqual([KEPT]);
   });
 });

@@ -32,7 +32,11 @@ import {
   untilSync,
 } from "./data-leader-helpers";
 import { upsert, uuid } from "./data-sync-helpers";
-import { type DisplayOracle, installDisplayOracle } from "./display-oracle";
+import {
+  type DisplayOracle,
+  FIXTURE_ACCOUNT_MARKERS,
+  installDisplayOracle,
+} from "./display-oracle";
 import { expect, test } from "./helpers";
 
 /**
@@ -58,7 +62,10 @@ import { expect, test } from "./helpers";
 // enrolled before its application ran. The cases' own assertions are unchanged; this adds a check over the whole run.
 let displayOracle: DisplayOracle | null = null;
 test.beforeEach(async ({ context }) => {
-  displayOracle = await installDisplayOracle(context);
+  // WEB-08c revision 4 (DA-H1): with the account's verified name as its marker, as every production-session fixture caller has.
+  displayOracle = await installDisplayOracle(context, {
+    markers: [...FIXTURE_ACCOUNT_MARKERS],
+  });
 });
 test.afterEach(async ({ context }, testInfo) => {
   const oracle = displayOracle;

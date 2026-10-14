@@ -317,9 +317,17 @@ export function createSessionWithKernel(
           if (k.view.get().kind === "displaying") resumeVerification();
         }),
       );
+      // WEB-08c revision 4 (R9 of the review of 14 October 2026; design assessment P3, invariant 4): a visible page that shows recovery
+      // state 2 or 3 is scanned too, so the recovery's completion (its fence cleared) is learned from the page's OWN record read within
+      // one scan interval even when every hint is lost. A read only: display still needs the exposure protocol; a hidden page reads nothing.
       const scan = () => {
         if (k.disposed) return;
-        if (k.memory.display.kind === "displaying" && ports.page.isVisible())
+        const view = k.view.get();
+        if (
+          ports.page.isVisible() &&
+          (k.memory.display.kind === "displaying" ||
+            (view.kind === "neutral" && /^[23]$/.test(view.state)))
+        )
           void evaluate(k, "scan");
         ports.clock.setTimeout(scan, config.scanIntervalMs);
       };

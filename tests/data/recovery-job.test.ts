@@ -1429,3 +1429,179 @@ describe("WEB-08c K-2, R3 of the review of 11 October 2026: a gate that ended BE
     expect(w.requests).toEqual([]);
   });
 });
+
+/**
+ * WEB-08c revision 4 (DA-N1 of the design assessment of 14 October 2026, S9; WEB08C-T24D-QUOTA-20261014; RECOVERY-NAVIGATION-ENROLMENT-20261014
+ * D2): a recovery page that cannot be committed for want of space stops at once and is retried ONLY by "Try again". Connectivity returning,
+ * a wake of the job (the session's notifications, visibility) and time are no retry; the page's stop is recorded in the account's
+ * write-failure marker, so a reload or a takeover (a new job over the same database) finds it at the capture gate and sends nothing. A
+ * marker that cannot be written is a stop of this tab's memory: no loop here; a reload permits one fresh attempt (the accepted limit).
+ */
+describe("DA-N1: a recovery quota stop is left only by Try again", () => {
+  async function fencedAt(cursor: string) {
+    const w = await recoveryWorld({
+      cursor,
+      phase: "delta",
+      cacheStatus: "valid",
+      displayed: false,
+    });
+    w.put("cache", [cacheRow({ id: uuid(40) })]);
+    return w;
+  }
+  const pageMarkers = (w: RecoveryWorld) =>
+    w.markerStorage
+      .keys()
+      .filter(
+        (key) =>
+          key.startsWith("atlas-write-failing:") &&
+          key.includes(":page:delta-0#"),
+      );
+  const reports = (w: RecoveryWorld) =>
+    w.calls
+      .filter((c) => c.call === "report")
+      .map((c) => (c as { phase: string | null }).phase);
+  const quotaOnce = (w: RecoveryWorld, times = 1) =>
+    w.env.idb.inject({
+      match: (tx) => tx.label === "data.commitPage",
+      mode: { kind: "throw_on_write", n: 1, as: "quota" },
+      times,
+    });
+
+  test("S9: quota once; online, wakes and time send nothing; one Try again fetches the whole page again from the same cursor and finishes", async () => {
+    const w = await fencedAt("delta-0");
+    quotaOnce(w);
+    w.script.push(w.page_(delta([41])), w.page_(delta([41])));
+    await w.bindJob();
+    await w.settle();
+    expect(w.state()).toMatchObject({ kind: "stopped", cause: "storage_full" });
+    expect(w.state()).not.toHaveProperty("memoryOnly");
+    expect(w.requests.map((r) => r.url.searchParams.get("cursor"))).toEqual([
+      "delta-0",
+    ]);
+    expect(pageMarkers(w)).toHaveLength(1);
+    expect(ids(w)).toEqual([uuid(40)]);
+    expect(w.sync().cursor).toBe("delta-0");
+    expect(reports(w).at(-1)).toBe("failed");
+    // Connectivity "returns", the session notifies (view, identity, visibility), time passes: nothing is asked again.
+    w.online = false;
+    w.fire();
+    await w.settle();
+    w.goOnline();
+    await w.settle();
+    w.fire();
+    w.view.set({ kind: "neutral", state: "3" as never });
+    await w.advance(10 * 60_000);
+    expect(w.requests).toHaveLength(1);
+    expect(w.state()).toMatchObject({ kind: "stopped", cause: "storage_full" });
+    expect(w.calls.filter((c) => c.call === "finish")).toHaveLength(0);
+    // The person's act: the whole page again, from the same saved position; the marker is retired and the recovery finishes.
+    w.job.retryNow();
+    await w.settle();
+    expect(w.requests.map((r) => r.url.searchParams.get("cursor"))).toEqual([
+      "delta-0",
+      "delta-0",
+    ]);
+    expect(ids(w)).toEqual([uuid(40), uuid(41)]);
+    expect(pageMarkers(w)).toHaveLength(0);
+    expect(w.calls.filter((c) => c.call === "finish")).toHaveLength(1);
+    expect(reports(w).at(-1)).toBeNull();
+  });
+
+  test("S7/S6: the stop survives a reload or takeover (a new job over the same database finds the marker and sends nothing); Try again there retries", async () => {
+    const w = await fencedAt("delta-0");
+    quotaOnce(w);
+    w.script.push(w.page_(delta([41])), w.page_(delta([41])));
+    await w.bindJob();
+    await w.settle();
+    expect(pageMarkers(w)).toHaveLength(1);
+    await w.reload();
+    await w.advance(10 * 60_000);
+    w.goOnline();
+    await w.advance(60_000);
+    expect(w.requests).toHaveLength(1);
+    expect(w.state()).toMatchObject({
+      kind: "stopped",
+      cause: "local_storage",
+    });
+    expect(reports(w).at(-1)).toBe("failed");
+    w.job.retryNow();
+    await w.settle();
+    expect(w.requests).toHaveLength(2);
+    expect(ids(w)).toEqual([uuid(40), uuid(41)]);
+    expect(pageMarkers(w)).toHaveLength(0);
+    expect(w.calls.filter((c) => c.call === "finish")).toHaveLength(1);
+  });
+
+  test("D2 (accepted limit): a marker that cannot be written leaves a stop of this tab's memory: no automatic retry here; a reload permits ONE attempt, which stops again while quota persists", async () => {
+    const w = await fencedAt("delta-0");
+    quotaOnce(w, 2);
+    w.markerStorage.failWrites = true;
+    w.script.push(
+      w.page_(delta([41])),
+      w.page_(delta([41])),
+      w.page_(delta([41])),
+    );
+    await w.bindJob();
+    await w.settle();
+    expect(w.state()).toMatchObject({
+      kind: "stopped",
+      cause: "storage_full",
+      memoryOnly: true,
+    });
+    w.goOnline();
+    w.fire();
+    await w.advance(10 * 60_000);
+    expect(w.requests).toHaveLength(1);
+    await w.reload();
+    await w.advance(10 * 60_000);
+    w.goOnline();
+    await w.advance(10 * 60_000);
+    // One fresh attempt after the reload, which fails on quota again and stops (no loop); nothing of the page was committed.
+    expect(w.requests).toHaveLength(2);
+    expect(w.state()).toMatchObject({ kind: "stopped", cause: "storage_full" });
+    expect(ids(w)).toEqual([uuid(40)]);
+    expect(w.sync().cursor).toBe("delta-0");
+  });
+
+  test("control (E-R4): a DataError of the same page keeps its three automatic whole-page attempts, then stops", async () => {
+    const w = await fencedAt("delta-0");
+    w.env.idb.inject({
+      match: (tx) => tx.label === "data.commitPage",
+      mode: { kind: "throw_on_write", n: 1, as: "error" },
+      times: 3,
+    });
+    w.script.push(
+      w.page_(delta([41])),
+      w.page_(delta([41])),
+      w.page_(delta([41])),
+    );
+    await w.bindJob();
+    await w.advance(10 * 60_000);
+    expect(w.requests).toHaveLength(3);
+    expect(w.state()).toMatchObject({
+      kind: "stopped",
+      cause: "local_storage",
+    });
+  });
+
+  test("the guard's refusal BEFORE a request (no space for the page) is not re-entered by online either; Try again asks again", async () => {
+    const w = await fencedAt("delta-0");
+    w.freeBytes = 1024;
+    w.script.push(w.page_(delta([41])));
+    await w.bindJob();
+    await w.settle();
+    expect(w.state()).toMatchObject({ kind: "stopped", cause: "storage_full" });
+    expect(w.requests).toHaveLength(0);
+    const begins = w.calls.filter((c) => c.call === "begin").length;
+    w.freeBytes = 500 * 1024 * 1024;
+    w.goOnline();
+    w.fire();
+    await w.advance(10 * 60_000);
+    expect(w.requests).toHaveLength(0);
+    expect(w.calls.filter((c) => c.call === "begin")).toHaveLength(begins);
+    w.job.retryNow();
+    await w.settle();
+    expect(w.requests).toHaveLength(1);
+    expect(ids(w)).toEqual([uuid(40), uuid(41)]);
+  });
+});

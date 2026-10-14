@@ -110,6 +110,11 @@ export class PageMemory {
   mountedAccount: AccountId | null = null;
   /** Where this page last decided a foreign lease was unresolved, so the flag is re-derived after a new settlement. */
   unresolvedKnownFor: { account: AccountId; epoch: Epoch } | null = null;
+  /**
+   * WEB-08c revision 4 (R9): the (account, epoch) the recovery report in `neutral.recovery` was made for. A report never outlives it:
+   * `evaluate` withdraws it when the settled identity differs, or when the account has no fence entry at all (the recovery is over).
+   */
+  recoveryFor?: { account: AccountId; epoch: Epoch } | null;
   activitySeq = 0;
   /** Numbers the release checks of this page (`checkAtTheRecord`), so the trace can pair a check with its release. */
   responseChecks = 0;

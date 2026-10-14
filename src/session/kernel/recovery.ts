@@ -144,8 +144,18 @@ export class RecoveryService implements Recovery {
     }
   }
 
-  report(phase: "catching_up" | "failed" | null): void {
-    this.k.neutral = { ...this.k.neutral, recovery: phase };
-    void this.k.hooks.evaluate("recovery_report");
+  report(
+    phase: "catching_up" | "failed" | null,
+    scope?: { readonly account: AccountId; readonly epoch: number },
+  ): void {
+    const { k } = this;
+    const settled = k.memory.settled;
+    // A report while nothing is settled names no identity, so it shows nothing.
+    k.memory.recoveryFor =
+      phase &&
+      (scope ??
+        (settled && { account: settled.account, epoch: settled.epoch }));
+    k.neutral = { ...k.neutral, recovery: k.memory.recoveryFor ? phase : null };
+    void k.hooks.evaluate("recovery_report");
   }
 }

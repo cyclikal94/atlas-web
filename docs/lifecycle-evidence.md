@@ -94,6 +94,25 @@ application boots to the end of the case. It is T24's "`#protected-root` is neve
 than at the end. It runs in every case below, in every case of `fixture.data-recovery.spec.ts` and `fixture.data-leader.spec.ts` (an added
 end-of-case check; their own assertions are unchanged), and in I-L13 R1/R2, I-L14 and I-L15.
 
+**Revision 4 (R5 of the review of 14 October 2026; design assessment P1, DA-H1, S13-S16).** The revision-3 observer saw only `inert`/`aria-hidden` and
+read a text node at its final value, so an existing control's accessible name and a text set and reset in one task went unseen (the review's two probes).
+It now watches every name-bearing attribute (`aria-label`, `aria-description`, `aria-roledescription`, `aria-valuetext`, `aria-placeholder`,
+`aria-labelledby`/`aria-describedby` resolved to their targets' text, `title`, `alt`, `placeholder`, `value`, `label`) on every element, keeps
+character-data old values, and judges EVERY value written, reconstructed per target (attribute: element + namespace + name; text: node); a node inserted
+while no episode is open is judged on its earlier values and again when it is removed; nested insertions are judged on their whole subtree; a direct
+write to the `<title>` text node is judged on the value written; `aria-hidden="false"` is a lift; the title setter no longer discards other records.
+Coverage counts every DOCUMENT each page loaded (closed and replaced ones too) against its enrolments, asks every open document to drain and acknowledge
+what it holds, and treats an uninspectable document or a reached recorder limit as incomplete, never clean. What the PERSON enters into a form field is not a disclosure (HF-14: the first form of this revision reported the
+usernames the I-L13 journeys type into the sign-in form while the other account is fenced, because React mirrors a controlled input's value into its
+`value` attribute): the value of each `input` event is recorded per element and a `value` written equal to it is not judged; a value the page writes
+without the person's input still is (qualified both ways; mutant OR-8). Every production-session fixture caller
+checks the account's verified name (`FIXTURE_ACCOUNT_MARKERS`): LR, and now E-R/E-B too. Qualified in three engines (`fixture.lifecycle-oracle.spec.ts`
+"Q1 (revision 4)": persistent and transient accessible names, transient text, replaced text, nested attribute-only marker, insert-change-remove,
+per-target attribute and text, title text node, `aria-hidden="false"`, an aborted `atlas-auth` write that authorises nothing, the consumer vocabulary, a
+replaced unenrolled document, a closed page's violation, and a healthy control of safe writes), with eight harness mutants OR-1 to OR-8 (each caught
+in three engines, with its unmutated control) and the revision-3 product mutant rebuilt on this source (AB-1: reported). The review's own probes pass
+unchanged. An injected DOM value is a conservative proxy: it does not prove a person perceived it, and none of this is manual assistive-technology evidence.
+
 **Retained work** is compared WHOLE (drafts, command bodies, pending effects, unfinished forms; canonical JSON) at every boundary before the display;
 replay is allowed only after it (T24 E).
 
@@ -107,6 +126,7 @@ replay is allowed only after it (T24 E).
 | C3 `finish` NOT_ELIGIBLE | **LR-4** | After the final data commit, while `finish` waits for its lock, another tab records a current-epoch entry: `finish` answers `not_eligible`, both entries stay, nothing is shown or sent | — |
 | C3 (RERUN) | **LR-5** | The entry added is of the OLDER epoch above the captured `s`: `finish` answers `rerun`, keeps it, a second catch-up clears both | — |
 | D failed page commit | **E-R4** (DataError ×3, state 3, the visible "Try again", under the oracle); **LR-6** (quota) | LR-6, per **WEB08C-T24D-QUOTA-20261014**: an injected `QuotaExceededError` on the page's second row: none of the page is durable (one transaction), the cursor stays, the fence stands, `storage_full` and state 3 at once, no automatic retry; a FOLLOWER page shows state 3 too and its "Try again" makes the leader ask for the whole page again, which applies; then the clear and the display | Decision WEB08C-T24D-QUOTA-20261014 (`atlas-orchestrator/delivery/handoffs/web08c-t24d-quota-20261014.md`, SHA-256 `b96141c4…3430`; authority `approval/WEB-08c-T24D-quota-20261014.json`, `211fce9d…5ffbb`) replaces the quota-specific automatic-retry wording only. The follower's state 3 needed the revision-3 correction K-3 (`docs/data-handover.md`) |
+| D, follower and quota stop (revision 4) | **LR-11** to **LR-16** | LR-11 (the review's R9 schedule and its control): the leader's completion report is LOST, the follower displays from its own read; LR-12: the follower's "failed" is lost while it shows "Catching up", it keeps asking and shows state 3 and Try again; LR-13: every recovery report and auth hint of the leader is lost, the visible follower displays by its scan; LR-14 (DA-N1): offline/online, visibility and time send nothing after a quota stop, Try again fetches the page once from the same position; LR-15: the stop survives a reload of the tab (its marker); LR-16 (accepted limit D2): a refused marker gives a memory-only stop, no retry in the surviving page, ONE attempt after a reload, which stops again | Per WEB08C-T24D-QUOTA-20261014 and RECOVERY-NAVIGATION-ENROLMENT-20261014 (D1/D2) |
 | E retained drafts | every LR case; E-R11; I-L12/I-L12b/I-L12c, I-L13 R1/R2, I-L14, I-L15 | Whole retained work byte-identical until the display; recovery sends no write and no ordinary request | — |
 | F crash between commit and clear; failed t5 | **LR-7** (offline reopening); E-R6 (online reopening); E-R7 (lock timeout), E-R7b (aborted release transaction) | LR-7: the page closes after the data commit and before the clear; the next page boots OFFLINE: the fence stands, nothing is ASKED (counted before the stub's offline refusal) or shown; online, the recovery reads from the committed position and clears at once | — |
 | G second re-authentication | **LR-10** (the old epoch's read in flight); E-R7/E-R7b (after a failed `finish`); LR-3's epoch 3 (after a recovery-time 401) | LR-10: the epoch-2 answer, released after the epoch-3 settlement, is dropped and writes nothing; the new epoch reads from the saved position, catches up and clears | — |
