@@ -679,6 +679,23 @@ the current epoch is shown with no request, one persisted for another epoch is n
   read that spans committed content (a live query or a hint can arrive after the reads). Not `page_seq`, which an empty delta page also moves:
   a view that re-reads the server on every `page_seq` change loops (its own request wakes the leader's engine, whose empty page moves it again). `useDraftWithCommand(localId)` (revision 2, `ui/outstanding.tsx`) watches ONE draft with its stored command
   (`readDraftWithCommand`), for a slice's conflict choices that must work from the durable operation (a reload, another tab).
+* **The local composition generation and certified reads (WEB-10a revision 3, R9).** `sync_state.composition_seq` (optional, absent = 0;
+  `model/composition.ts`) is advanced by the STORE, in the same transaction, whenever a transaction wrote `cache`, `pending_effects`, `drafts` or
+  `draft_commands` and its plan's scope holds `sync_state` (every registered writer's does): the Dexie adapter's `run` and the double share the
+  rule (`advancesComposition`, `advanceComposition`), after the plan's own writes, so a dropped, refused or aborted transaction advances nothing
+  and no writer can leave it out. Writers of `sync_state` alone, of `cache_staging`, and an empty bulk write do not advance it; an empty sync page
+  that reconciles nothing does not either (its streamed writes reach no composition store). **Schema version 3** changes no store: it is the
+  barrier against an older build, which writes without advancing the generation (opening version 3 delivers `versionchange` to the older
+  build's connections, whose adapter latches `upgrade_pending` and closes them; an older build cannot open version 3; `SPLIT_BODIES_VERSION` = 2
+  keeps the version-1 upgrade). **Reads** (`plans/outstanding-reads.ts`, `ui/scan.ts`): `readLocalBasis` (one transaction of the singleton:
+  incarnation, generation, cache status, recovery generation, content revision) and `readLocalBasisNow(env)`; `readCoherently(env, stages, {
+  attempts = 3, signal })` reads the basis before and after the caller's stages and answers `complete` (with the value and the basis) only when
+  both are the same: IndexedDB runs transactions over overlapping scopes in creation order, every writer's scope holds `sync_state`, and each
+  stage finishes before the next begins, so an unchanged basis proves nothing the stages read was written between them, in any page. Otherwise
+  `unstable` (every attempt spanned a commit), `failed` (a read failed: never an empty answer), `closed` or `aborted`. Stages: the existing
+  `scanResources`/`readResourcesNow` and `readAllOutstandingByKindNow(env, kinds)` / `readAllOutstandingNow(env, ids)` (every page, now; a failed
+  page or a cursor that does not advance fails the whole read). `CachePosition` gains `composition`, which a screen follows to read again (a local
+  re-read only; it is never a reason to ask the server). `readCacheRevisionNow` remains for callers that need the content revision alone.
 * **`commandKindOf` reads a wrapped command.** The kind of `{ command: { kind } }` (the body of `/task-commands`, `/calendar-commands` and
   `/reminder-commands`) is the inner kind; before, every such draft's header said the endpoint. Byte-identical to WEB-13a's fix.
 * **A projection is taken only for the resource asked about.** `CommandSpec.projectCreate(draft, resourceId)` is told the id; `mergeResource`

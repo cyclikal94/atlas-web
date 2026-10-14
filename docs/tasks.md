@@ -109,7 +109,8 @@ Revision 2 (review of 13 October 2026 and its design assessment) adds:
     row passed since dispatch (delivery never renews an answer), and the server's item is of the structure's version; otherwise it is the
     personal reapplication with its finalisation. The server's membership of the day applies only while its answer for the row is current. An
     answer already stale when it arrives is asked for again once (its re-read is dispatched after the boundary). Joint results stay the server's.
-20. **Coherent composition (C2).** Today composes from the occurrence, task and progress rows of ONE related read (the durable position is read
+    (Revision 3: the "never held" exception is withdrawn, decision 29; the clock's generation and symmetric coverage are added, decision 28.)
+20. **Coherent composition (C2; superseded by decisions 26 and 27 in revision 3).** Today composes from the occurrence, task and progress rows of ONE related read (the durable position is read
     before and after; a read that spans a commit is read again, at most three times), for the current candidate ids; otherwise it keeps the last
     coherent composition and marks the list `data-today-refreshing`. The walk only discovers candidates. The queue key includes each draft's
     `command_digest`, so a queued edit under the same id and status re-walks. A pending entry the synced stream already lists is not counted
@@ -146,6 +147,43 @@ Revision 2 (review of 13 October 2026 and its design assessment) adds:
     route-focus case). Both routes now render their heading outside the gate and the lazy screen; `CacheGate` takes an optional `heading` that a
     gated task page shows (its own heading is part of the hidden content). Tests: `route-headings.test.tsx` (MU-2091…MU-2094); the shell and
     sync-screen specs.
+
+Revision 3 (review of 14 October 2026, findings R2, R8 and R9, and its recurring-finding design assessment C1–C3) adds:
+
+26. **A durable local composition generation (R9, C3).** `sync_state.composition_seq` (`data/model/composition.ts`) is advanced by the STORE (the
+    Dexie adapter and the test double, one shared rule) in the same transaction as every write to `cache`, `pending_effects`, `drafts` or
+    `draft_commands`, after the plan's writes, so every writer is covered by construction and a refused or aborted transaction advances
+    nothing. Schema version 3 (no store change) is the barrier against an older build that would write without advancing it: opening it closes
+    an older build's connections (`upgrade_pending`), and an older build cannot open it. The certificate a screen reads (`readLocalBasis`: the
+    incarnation, the generation, the cache status and recovery generation, the content revision) before and after its reads proves that nothing
+    it read was written in between, in this tab or another (`readCoherently`, three attempts). It supersedes decision 20's single related read
+    bracketed by the content revision, which a queue write, a receipt or reconciliation after recovery did not move.
+27. **Honest publication (R9).** Today reads everything the day needs as one certified snapshot: every page of the outstanding task work, the
+    walk that discovers the candidates, then their related rows (the occurrence, its task and my progress). Only a complete snapshot is shown. A
+    read that failed (`failed`) or kept changing on every attempt (`unstable`) is never an empty day: the last complete snapshot of the same
+    identity, day and zone stays, marked stale (`data-today-stale`), with a notice and "Try again"; without one the notice shows alone. Rows
+    are composed from the retained snapshot with the CURRENT time, so a stale day still finalises at its close. A new snapshot is read when the
+    generation moves (any local commit, an empty sync page included: only a local re-read); the server is asked again only for committed
+    content, the clock or a retry (decision 25 stands). The detail composes its day's row from a certified read of its own inputs (`rowError`
+    says why when it cannot); the task list says when its read failed instead of "No tasks here yet."; the task form saves no edit while the
+    queue (its write target) is unread.
+28. **The clock's own generation (R2, C1).** `useBoundaryClock` moves a synchronous generation when the device clock goes BACKWARDS. A `/daily`
+    answer records the generation it was asked in; its derived fields apply only while it is still the clock's (a clock that went back and
+    returned to the same time is caught), and an answer asked before a backward step is not taken as the joint result's "as of". Coverage is
+    symmetric: a boundary between the dispatch and now, in either direction, makes the server's fields stale. Structure is chosen separately.
+29. **No structure from an answer that is not current (R2, C1).** A daily item supplies the structure of a row the cache lacks only while its
+    answer is current against the snapshot (no content committed since its dispatch). The revision 2 exception for a row "this view never
+    held" is gone: not having seen a row is no evidence that it was never removed. The row is withheld until a current answer (asked once).
+30. **One effective structure for composition and the clock (R8, C2).** `effectiveOccurrence` (view.ts) resolves the committed or daily row and
+    then the outstanding drafts' projection and display patches; `composeRow` and Today's clock windows both use it, for every candidate: walked,
+    listed, projected by an outstanding create, or named by an outstanding draft (a queued correction can bring an occurrence into the day). A day
+    created offline is therefore woken at its opening and closing with no other event.
+
+Tests: `tests/data/composition-generation.test.ts` (the writers), `tests/features/tasks/local-coherence.test.tsx` (the composed screens with real
+commits and failures placed between their reads), native E-T9f, E-T14 (another tab commits between Today's reads) and E-CG1/E-CG2; unit
+MU-2104, MU-2106…MU-2118 and real-engine MU-2119…MU-2122. Considered and rejected: one read transaction for the whole walk (it would hold every
+writer for the length of a full walk, and the 10,000-occurrence walk already exceeds the diagnostic trigger, F-1), and a generation advanced by
+the plan builders (it cost initial-bundle bytes the fixture budget does not have, and advanced on decisions that wrote nothing).
 
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
@@ -187,6 +225,7 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 1: a correction or fix saved while the person kept editing stays open with the newer value (the announcement says the earlier one was saved) | `/tasks/<id>` → Correct this day (jsdom `save-acknowledgement.test.tsx`) |
 | Revision 2: "The other correction hasn't reached this device yet." (no "Save mine" until the newer version is synced) and "Your saved correction can't be read on this device." | `/tasks/<id>` with a correction in conflict (jsdom `conflict-context.test.tsx`) |
 | Revision 2: while a newer composition is read, Today keeps the last one on screen (marked `data-today-refreshing`, no visible text) | `/today` after a sync page (jsdom `freshness-provenance.test.tsx`) |
+| Revision 3: "Couldn't read this device's tasks" with "Atlas couldn't read the tasks saved on this device." or "The tasks saved on this device kept changing while they were read.", "Showing what was last read on this device." and "Try again" (Today, as a section; the detail and the list as a line; the task form as the disabled Save's reason) | `/today` with a failing local read (jsdom `local-coherence.test.tsx`, Q9/Q10/Q17) |
 | Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 
 ## Escalation E-1 (material, not blocking WEB-10a)
