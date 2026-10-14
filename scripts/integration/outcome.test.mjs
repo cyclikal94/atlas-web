@@ -5,6 +5,7 @@ import {
   judge,
   mergeFacts,
   overall,
+  project,
   schedule,
   settleStack,
   withCancellation,
@@ -735,4 +736,39 @@ test("H4d: merging two versions keeps every fact of either; a later label that w
       .failures?.length,
     0,
   );
+});
+
+test("H4e: the projection (first failure, engine counts, completeness) is computed from the records it is given", () => {
+  const records = [
+    {
+      browser: "chromium",
+      stack: "base",
+      index: 0,
+      outcome: "passed",
+      counts: { passed: 2, failed: 0 },
+    },
+    {
+      browser: "chromium",
+      stack: "-labels",
+      index: 1,
+      outcome: "evidence_failed",
+      reason: "x",
+      counts: { passed: 1 },
+    },
+    { browser: "firefox", stack: "base", index: 0, outcome: "not_run" },
+  ];
+  const p = project(records, { browsers: ["chromium", "firefox"], planned: 2 });
+  assert.equal(
+    p.first_failure,
+    "integration-chromium -labels evidence_failed (x)",
+  );
+  assert.equal(p.engines.chromium.counts.passed, 3);
+  assert.equal(p.engines.chromium.complete, false);
+  assert.equal(p.engines.firefox.complete, false);
+  const passed = project(records.slice(0, 1), {
+    browsers: ["chromium"],
+    planned: 1,
+  });
+  assert.equal(passed.first_failure, null);
+  assert.equal(passed.engines.chromium.complete, true);
 });

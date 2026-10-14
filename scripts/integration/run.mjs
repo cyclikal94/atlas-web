@@ -35,6 +35,13 @@
 // first in a process group of its own, holds a journal of what the run owns and finishes the clean-up and the summary if the runner
 // itself is killed before it could (the shared validation driver kills the runner's group two seconds after asking it to stop).
 // Qualification boundaries: scripts/integration/faults.mjs (inactive unless ATLAS_INTEGRATION_FAULTS is set).
+//
+// Review r9 H4e (revision 10): every commit of a stack's facts is an observation with an ordinal of its own, whether or not its write
+// succeeds, and each one carries every earlier observation of the stack (stack-records.mjs `commitObservation`); run-level evidence
+// failures are journalled as they happen. The run has ONE terminal procedure (`finish`): once it begins, no partial summary is written;
+// it settles the current stack, then joins the run's own work (the schedule) before it publishes the terminal summary and releases the
+// reaper last. Work it cannot join within its bound is not declared finished: the journal ends WITHOUT a release and the reaper,
+// after this process has gone, reconciles every record, checkpoint and summary.
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -64,8 +71,8 @@ import { createOidcProvider } from "./oidc-provider.mjs";
 import {
   describe,
   judge,
-  mergeFacts,
   overall,
+  project,
   schedule,
   settleStack,
   withCancellation,
@@ -73,7 +80,12 @@ import {
 import { Cancelled, createOwner } from "./ownership.mjs";
 import { startPostgresBackend } from "./postgres-backend.mjs";
 import { createScope } from "./scope.mjs";
-import { createStackStore, publishAtomically } from "./stack-records.mjs";
+import {
+  commitObservation,
+  createStackStore,
+  joinVersions,
+  publishAtomically,
+} from "./stack-records.mjs";
 import { plan, selectStacks, stackArgs } from "./stacks.mjs";
 
 // This runner's own modules (the reaper, the backend fetch) are beside it; the repository it tests (Playwright, the specs, the
@@ -152,63 +164,72 @@ let current = null; // the stack being prepared, run or cleaned up
  * (the runner's own finaliser) and announced to the reaper with its sequence number (the journal is a notification, and a copy of
  * the facts for a record that could not be written). A record that cannot be written stops the run, nothing more is launched, and
  * the stack keeps that as an evidence failure; the reaper then keeps the journalled facts. Returns the committed record.
+ *
+ * Review r9 H4e (revision 10): each call is an observation (`obs`, increasing across the run whether or not the write succeeds). The
+ * stack's overlay (`state.judged`: everything observed, committed or not) is merged into what the caller establishes, so a caller
+ * holding an older copy (the stack's own end after the finaliser settled it) cannot drop a fact, and a later successful write carries
+ * an earlier failed one.
  */
 function commitStack(state, record, phase) {
+  observed += 1;
   const full = {
     browser: state.browser,
     stack: state.stack.suffix || "base",
     index: state.index,
     ...record,
   };
-  let committed;
-  try {
-    committed = stackStore.commit(full, phase);
-  } catch (error) {
-    const reason = `the record of integration-${state.browser} ${full.stack} could not be committed (${phase}): ${String(error?.message ?? error)}`;
-    if (!evidenceErrors.includes(reason)) evidenceErrors.push(reason);
-    if (!owner.latched) console.error(`\nSTOPPING: ${reason}`);
-    owner.stop(reason);
-    committed = {
-      ...mergeFacts(
-        state.judged,
-        settleStack(full, { evidenceErrors: [reason] }),
-      ),
-      phase,
-      seq: null,
-    };
+  const result = commitObservation({
+    store: stackStore,
+    known: state.judged,
+    record: full,
+    phase,
+    obs: observed,
+    describe: (error) =>
+      `the record of integration-${state.browser} ${full.stack} could not be committed (${phase}): ${String(error?.message ?? error)}`,
+  });
+  if (!result.committed) {
+    runError(result.reason);
+    if (!owner.latched) console.error(`\nSTOPPING: ${result.reason}`);
+    owner.stop(result.reason);
   }
-  state.judged = committed;
-  const { error: _stack, admissions: _admissions, ...facts } = committed;
+  state.judged = result.record;
+  const { error: _stack, admissions: _admissions, ...facts } = result.record;
   journal({
     type: "judged",
     browser: state.browser,
     index: state.index,
-    seq: committed.seq,
-    phase: committed.phase,
+    seq: result.record.seq,
+    obs: result.record.obs,
+    phase: result.record.phase,
     record: facts,
   });
-  return committed;
+  return result.record;
 }
-/** The order of a stack's versions: a version whose commit failed (`seq: null`) came after every committed one. */
-const versionOf = (r) =>
-  r.seq === null ? Number.POSITIVE_INFINITY : (r.seq ?? 0);
-/** A stack's record in `records`, merged with any version already there (by sequence): one record per stack, facts kept. */
+/** A stack's record in `records`, joined with any version already there (by observation): one record per stack, facts kept. */
 function putRecord(record) {
   const at = records.findIndex(
     (r) => r.browser === record.browser && r.index === record.index,
   );
   if (at < 0) records.push(record);
-  else
-    records[at] =
-      versionOf(records[at]) > versionOf(record)
-        ? mergeFacts(record, records[at])
-        : mergeFacts(records[at], record);
+  else records[at] = joinVersions(records[at], record);
+}
+/** Review r9 H4e: a run-level evidence failure, kept once and journalled at once (the reaper keeps it if this process is lost). */
+function runError(reason) {
+  if (evidenceErrors.includes(reason)) return;
+  evidenceErrors.push(reason);
+  journal({ type: "run-error", reason });
 }
 let lastBackend = null;
 let signalled = null;
 let planning = null; // the discovery's abort controller while the run is being planned
 const records = [];
 const evidenceErrors = [];
+// Review r9 H4e: the run's observations so far (every stack commit attempt), every stack launched (its overlay), the schedule (the
+// run's own work, joined before the terminal summary) and whether the terminal procedure has begun (no partial summary after it).
+let observed = 0;
+const launched = [];
+let running = null;
+let terminal = false;
 
 function loseReaper(reason) {
   if (reaperLost || released) return;
@@ -651,6 +672,7 @@ const newState = (browser, stack, index) => ({
 async function launch(browser, stack, index, expected) {
   const state = newState(browser, stack, index);
   current = state;
+  launched.push(state);
   journal({ type: "stack", browser, index, stack: stack.suffix || "base" });
   const label = `${browser}${stack.suffix}`;
   const reportPath = join(runDir, `results-${label}.json`);
@@ -762,7 +784,7 @@ async function launch(browser, stack, index, expected) {
     );
   } catch (error) {
     const reason = `admissions: ${String(error?.message ?? error)}`;
-    evidenceErrors.push(`${label}: ${reason}`);
+    runError(`${label}: ${reason}`);
     record = commitStack(
       state,
       settleStack(record, { evidenceErrors: [reason] }),
@@ -776,6 +798,8 @@ async function launch(browser, stack, index, expected) {
   } catch (error) {
     cleanup = { ok: false, errors: [String(error?.stack ?? error)] };
   }
+  // Qualification boundary (revision 10): the stack's clean-up has ended; its own end has not committed the settled record.
+  await faults.at("stack:cleaned", runStop.signal).catch(() => undefined);
   // The one reducer (shared with the finaliser and the reaper): the stop and clean-up are added to what was established, and the
   // complete record is committed BEFORE the reaper is told the stack ended (with the committed sequence: it retires only that).
   record = commitStack(
@@ -797,24 +821,10 @@ const layer = postgres
 
 let planned = null;
 function summarise(final, extra = {}) {
-  const engines = {};
-  for (const browser of browsers) {
-    const mine = records.filter((r) => r.browser === browser);
-    const merged = { passed: 0, failed: 0, skipped: 0, flaky: 0, not_run: 0 };
-    for (const r of mine)
-      for (const [k, n] of Object.entries(r.counts ?? {}))
-        merged[k] = (merged[k] ?? 0) + n;
-    engines[browser] = {
-      // Counts are of judged reports only; `complete` says whether they cover the whole plan for this browser.
-      complete:
-        mine.length === (planned?.stacks.length ?? -1) &&
-        mine.every((r) => r.outcome === "passed"),
-      counts: merged,
-    };
-  }
-  const failure = records.find(
-    (r) => r.outcome !== "passed" && r.outcome !== "not_run",
-  );
+  const { first_failure, engines } = project(records, {
+    browsers,
+    planned: planned?.stacks.length,
+  });
   return {
     schema: 3,
     layer,
@@ -843,7 +853,7 @@ function summarise(final, extra = {}) {
         }
       : null,
     outcome: extra.outcome ?? (final ? "pending" : "running"),
-    first_failure: failure ? describe(failure) : null,
+    first_failure,
     signal: signalled,
     reaper: { pid: reaper?.pid ?? null, lost: reaperLost },
     faults: faults.active
@@ -875,13 +885,39 @@ function writeSummary(final, extra) {
 }
 
 let finishing = null;
+// Review r9 H4e: how long the terminal procedure waits for the run's own work (the schedule finishing its current stack) to end.
+const JOIN_MS = faults.spec.join_ms ?? 15_000;
+/** Has `work` ended within JOIN_MS? (No work: nothing to join.) */
+async function joined(work) {
+  if (!work) return true;
+  let timer;
+  const ended = await Promise.race([
+    work.then(
+      () => true,
+      () => true,
+    ),
+    new Promise((resolveJoin) => {
+      timer = setTimeout(() => resolveJoin(false), JOIN_MS);
+    }),
+  ]);
+  clearTimeout(timer);
+  return ended;
+}
 /**
  * The one way out, unconditional: clean up whatever stack is current, account for every planned stack, write the final summary (a
  * summary that cannot be written is recorded beside it, the clean-up already happened), release the reaper, exit. The first caller
  * decides the code; a failure, a clean-up that was not verified or an evidence error never exits 0.
+ *
+ * Review r9 H4e (revision 10): the ONE terminal procedure. From its first moment no partial summary is written (`terminal`). It settles
+ * the current stack (the same reducer, through the same overlay, as the stack's own end), then joins the run's own work (the schedule,
+ * which may still be ending that stack) within JOIN_MS, and only then concludes from every committed record and every stack's overlay,
+ * publishes the terminal summary (`terminal`: whether the run was quiescent, and the observations it covers) and releases the reaper
+ * LAST. Work it could not join is not declared finished: the journal ends WITHOUT a release and the reaper reconciles every record,
+ * checkpoint and summary once this process has gone (which ends that work too).
  */
 function finish(code, extra = {}) {
   finishing ??= (async () => {
+    terminal = true;
     if (current) {
       const state = current;
       let cleaned;
@@ -910,6 +946,9 @@ function finish(code, extra = {}) {
         ),
       );
     }
+    // Qualification boundary (revision 10): the finaliser has settled the current stack; the run's work has not been joined.
+    await faults.at("finish:settled", runStop.signal).catch(() => undefined);
+    const quiescent = await joined(running);
     // Every planned stack has a record, even when the fallback finaliser ends a run whose schedule never got there.
     if (planned)
       for (const browser of browsers)
@@ -928,18 +967,19 @@ function finish(code, extra = {}) {
               reason: `not launched: ${first ? describe(first) : (owner.latched ?? "the run ended first")}`,
             });
           }
-    // Review r8 H4d (revision 9): the summary is a projection of the committed stack records; a record committed after it was built
-    // (the stack's own end, still running beside this finaliser) is merged in and the summary published again.
+    // Review r8 H4d (revision 9): the summary is a projection of the committed stack records. Review r9 H4e (revision 10): and of every
+    // stack's overlay (a fact whose write failed is in no committed record), joined by observation.
     const conclude = () => {
+      for (const state of launched) if (state.judged) putRecord(state.judged);
       for (const r of [...records]) {
         let latest = null;
         try {
-          latest = r.key ? stackStore.latest(r.browser, r.index) : null;
+          // Every stack entry (an overlay whose first write failed has no `key`); a stack never launched has no file.
+          latest = stackStore.latest(r.browser, r.index);
         } catch (error) {
-          const reason = String(error?.message ?? error);
-          if (!evidenceErrors.includes(reason)) evidenceErrors.push(reason);
+          runError(String(error?.message ?? error));
         }
-        if (latest && versionOf(latest) > versionOf(r)) putRecord(latest);
+        if (latest) putRecord(latest);
       }
       const cleanupFailed = records.some((r) => r.cleanup && !r.cleanup.ok);
       const outcome =
@@ -955,36 +995,37 @@ function finish(code, extra = {}) {
       return { cleanupFailed, outcome };
     };
     const publish = () => {
+      const frontier = observed;
       const { cleanupFailed, outcome } = conclude();
-      if (serve) return { cleanupFailed, written: true };
+      if (serve) return { cleanupFailed, written: true, frontier };
       try {
         writeSummary(true, {
           ...extra,
           outcome,
           cleanup_failed: cleanupFailed,
+          terminal: { quiescent, observations: frontier },
         });
-        return { cleanupFailed, written: true };
+        return { cleanupFailed, written: true, frontier };
       } catch (error) {
         const reason = `summary: ${String(error?.message ?? error)}`;
-        if (!evidenceErrors.includes(reason)) evidenceErrors.push(reason);
+        runError(reason);
         console.error(
           `ERROR: the summary could not be written: ${error?.message ?? error}`,
         );
         try {
           writeFileSync(
             join(runDir, "summary-error.json"),
-            `${JSON.stringify({ error: String(error?.stack ?? error), outcome, cleanup_failed: cleanupFailed, stacks: records }, null, 2)}\n`,
+            `${JSON.stringify({ error: String(error?.stack ?? error), outcome, cleanup_failed: cleanupFailed, evidence_errors: evidenceErrors, stacks: records }, null, 2)}\n`,
           );
         } catch {
           // nothing more can be written; the exit code still says it
         }
-        return { cleanupFailed, written: false };
+        return { cleanupFailed, written: false, frontier };
       }
     };
-    const published = stackStore.version;
     let result = publish();
-    if (result.written) {
-      // Release the reaper last: it has nothing to finish, and waits for nothing more.
+    if (result.written && quiescent) {
+      // Release the reaper last: the run's work has ended, so it has nothing to finish and waits for nothing more.
       released = true;
       try {
         reaper?.stdin.end(
@@ -998,10 +1039,25 @@ function finish(code, extra = {}) {
           new Promise((r) => reaper.once("exit", r)),
           new Promise((r) => setTimeout(r, 5000)),
         ]);
-      if (stackStore.version !== published) result = publish();
+      // Nothing can observe after the join. Should anything have, the terminal summary did not cover it: a failure, published again.
+      if (observed !== result.frontier) {
+        const reason = `${observed - result.frontier} stack observation(s) came after the terminal summary was published`;
+        if (!evidenceErrors.includes(reason)) evidenceErrors.push(reason);
+        result = publish();
+      }
     } else {
-      // Review r8 H4d: a summary that could not be written is not "nothing left to finish": the journal ends WITHOUT a release,
-      // so the reaper completes the summary from the committed records (or records why it could not), once this process is gone.
+      // Review r8 H4d: a summary that could not be written is not "nothing left to finish"; review r9 H4e: nor is work that could not be
+      // joined. The journal ends WITHOUT a release, so the reaper reconciles the summary with the committed records and its
+      // checkpoints (or records why it could not) once this process is gone.
+      if (!quiescent) {
+        console.error(
+          `ERROR: the run's own work did not end within ${JOIN_MS} ms of its terminal summary; the reaper reconciles its evidence`,
+        );
+        journal({
+          type: "handover",
+          reason: "the runner's own work could not be joined",
+        });
+      }
       released = true;
       try {
         reaper?.stdin.end();
@@ -1012,6 +1068,7 @@ function finish(code, extra = {}) {
     const failedRun =
       result.cleanupFailed ||
       !result.written ||
+      !quiescent ||
       evidenceErrors.length > 0 ||
       reaperLost !== null;
     process.exit(code === 0 && failedRun ? 1 : code);
@@ -1130,7 +1187,7 @@ if (!planned.ok) {
   await finish(1, { outcome: "plan_error" });
 }
 
-const result = await schedule({
+running = schedule({
   browsers,
   stacks: planned.stacks.map(({ stack }) => stack),
   latched: () => owner.latched,
@@ -1151,15 +1208,18 @@ const result = await schedule({
     putRecord(record);
     if (record.outcome !== "passed" && record.outcome !== "not_run")
       console.error(`\nSTOPPING: ${describe(record)}`);
+    // Review r9 H4e: once the terminal procedure has begun, only it publishes (a partial summary would replace the terminal one).
+    if (terminal) return;
     try {
       writeSummary(false);
     } catch (error) {
       // A run whose summary cannot be written launches nothing more (its evidence would not say what ran).
       const reason = `the summary could not be written: ${String(error?.message ?? error)}`;
-      evidenceErrors.push(reason);
+      runError(reason);
       if (!owner.latched) console.error(`\nSTOPPING: ${reason}`);
       owner.stop(reason);
     }
   },
 });
+const result = await running;
 await finish(signalCode() ?? (result.passed && !reaperLost ? 0 : 1));

@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  commitObservation,
+  covers,
   createStackStore,
+  joinVersions,
   publishAtomically,
   readStackRecords,
   stackFile,
@@ -131,4 +134,111 @@ test("a record that cannot be written is not committed (throws, the previous ver
   assert.equal(errors.length, 1);
   assert.match(errors[0], /webkit-0\.json/);
   assert.equal(existsSync(stacksDir(run)), true);
+});
+
+// ---- review r9 H4e (revision 10): observations, coverage and the overlay ---------------------------------------------------------------
+const name = { browser: "chromium", stack: "base", index: 0 };
+const evidence = (r) =>
+  (r?.failures ?? []).filter((f) => f.kind === "evidence").map((f) => f.reason);
+
+test("H4e: a failed write is an observation of its own: overlay kept with its ordinal, seq null, the last committed sequence and the phase never moved back", () => {
+  let refuse = false;
+  const store = createStackStore(runDir(), {
+    fail: () => {
+      if (refuse) throw new Error("disk full");
+    },
+  });
+  const observe = (known, record, phase, obs) =>
+    commitObservation({
+      store,
+      known,
+      record: { ...name, ...record },
+      phase,
+      obs,
+      describe: (error) =>
+        `could not be committed (${phase}): ${error.message}`,
+    });
+  const a = observe(
+    null,
+    { outcome: "passed", reason: null, cleanup: { ok: true } },
+    "settled",
+    1,
+  );
+  assert.equal(a.committed, true);
+  assert.equal(a.record.seq, 1);
+  assert.equal(a.record.obs, 1);
+  refuse = true;
+  const b = observe(a.record, { outcome: "passed", reason: null }, "judged", 2);
+  assert.equal(b.committed, false);
+  assert.equal(b.record.seq, null);
+  assert.equal(b.record.committed_seq, 1);
+  assert.equal(b.record.obs, 2);
+  assert.equal(b.record.phase, "settled", "never back to judged");
+  assert.equal(b.record.outcome, "evidence_failed");
+  assert.deepEqual(evidence(b.record), [
+    "could not be committed (judged): disk full",
+  ]);
+  assert.equal(
+    store.latest("chromium", 0).seq,
+    1,
+    "nothing claimed as committed",
+  );
+  // A later successful write from a caller holding only the first version still carries the failure (the overlay is merged in).
+  refuse = false;
+  const c = observe(
+    b.record,
+    { outcome: "passed", reason: null, cleanup: { ok: true } },
+    "settled",
+    3,
+  );
+  assert.equal(c.committed, true);
+  assert.equal(c.record.seq, 2);
+  assert.equal(c.record.obs, 3);
+  assert.equal(c.record.committed_seq, undefined);
+  assert.equal(c.record.outcome, "evidence_failed");
+  assert.deepEqual(evidence(c.record), [
+    "could not be committed (judged): disk full",
+  ]);
+  assert.ok(
+    covers(c.record, b.record),
+    "the later version covers the failed observation",
+  );
+  assert.ok(!covers(a.record, b.record), "the earlier one does not");
+});
+
+test("H4e: coverage needs an explicit ordinal; joins order by ordinal, keep every fact and never revert newer fields", () => {
+  assert.equal(covers(null, null), true, "nothing observed");
+  assert.equal(covers(null, { obs: 1 }), false);
+  assert.equal(covers({ obs: 2 }, { obs: 2 }), true);
+  assert.equal(covers({ obs: 1 }, { obs: 2 }), false);
+  assert.equal(
+    covers({ seq: 5 }, { seq: 1 }),
+    false,
+    "no ordinal: not covered",
+  );
+  assert.equal(covers({ obs: 3, unreadable: "x" }, { obs: 1 }), false);
+  const older = {
+    ...name,
+    obs: 1,
+    outcome: "failed",
+    reason: "the report has errors",
+    failure: { kind: "report_errors", reason: "the report has errors" },
+    report_errors: ["teardown"],
+  };
+  const newer = {
+    ...name,
+    obs: 2,
+    outcome: "passed",
+    reason: "newer",
+    counts: { passed: 1 },
+  };
+  for (const joined of [
+    joinVersions(older, newer),
+    joinVersions(newer, older),
+  ]) {
+    assert.equal(joined.obs, 2);
+    assert.deepEqual(joined.counts, { passed: 1 }, "the newer fields");
+    assert.deepEqual(joined.report_errors, ["teardown"], "the older facts");
+    assert.equal(joined.outcome, "failed", "a pass never hides the failure");
+  }
 });

@@ -12,6 +12,9 @@
 //                <name>.release: the runner's own fallback finaliser then has to finish the run
 //   fail         throw an injected error at the named boundary (a preparation error)
 //   fail_write   make the named evidence write throw ("admissions", "summary")
+//   fail_write_nth  { "<write>": [n, ...] }: make only the n-th attempt of the named write throw, counted across the run (revision 10,
+//                review r9 H4e: "the first settled write of a stack succeeds, the second fails"); each failure is recorded as reached
+//   join_ms      how long the runner's terminal procedure waits for the run's own work to end (default 15 s)
 //   docker_fail  answer the named docker commands ("rm", "network rm", "volume rm", "ps") with a failure, without running them
 //   stubborn_child  start, in each stack, one more owned process that ignores SIGTERM (a child whose shutdown is held);
 //                "detached" puts it in a process group of its own, as Playwright starts browsers
@@ -24,7 +27,10 @@
 // preview:spawned, preview:ready, playwright:spawned, and stack:judged (revision 8: the stack's report and budget are judged and
 // checkpointed, its clean-up has not begun). Revision 9 (review r8 H4d): stack:settled (the stack's settled record is committed, the
 // reaper has not been told the stack ended) and stack:ended (the reaper has been told; the run's summary does not have the stack yet).
-// `fail_write` also names a stack record commit: "stack:started", "stack:launched", "stack:judged", "stack:settled".
+// `fail_write` also names a stack record commit: "stack:started", "stack:launched", "stack:judged", "stack:settled". Revision 10 (review
+// r9 H4e): stack:cleaned (the stack's clean-up has ended; its own end has not committed the settled record) and finish:settled (the
+// terminal procedure has settled the current stack and has not joined the run's work). Both wait on the run-level stop, so after a
+// signal only `hold_deaf` holds them.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cancelled } from "./ownership.mjs";
@@ -42,6 +48,8 @@ export function createFaults({
   const fail = list("fail");
   const failWrite = list("fail_write");
   const dockerFail = list("docker_fail");
+  const nth = spec.fail_write_nth ?? {};
+  const attempts = new Map();
   const reached = [];
   const folder = join(dir, "faults");
 
@@ -92,8 +100,19 @@ export function createFaults({
       };
     },
     write(kind) {
+      const n = (attempts.get(kind) ?? 0) + 1;
+      attempts.set(kind, n);
       if (failWrite.has(kind))
         throw new Error(`injected failure writing the ${kind} evidence`);
+      if ((nth[kind] ?? []).includes(n)) {
+        const name = `write:${kind}#${n}`;
+        reached.push({ name, at: Date.now() });
+        mkdirSync(folder, { recursive: true });
+        writeFileSync(join(folder, `${file(name)}.failed`), `${Date.now()}\n`);
+        throw new Error(
+          `injected failure writing the ${kind} evidence (attempt ${n})`,
+        );
+      }
     },
     /** A docker command named by its sub-command ("rm") or its first two words ("network rm", "volume ls"). */
     docker(args) {

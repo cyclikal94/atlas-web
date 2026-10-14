@@ -414,5 +414,32 @@ export function overall(
     : "failed";
 }
 
+/**
+ * Review r9 H4e (revision 10): what a summary derives from its stack records (the first record that is not a pass, each engine's
+ * counts and whether they cover its whole plan), computed the same way by the runner and by the reaper after it merged its evidence,
+ * so a reconciled summary never keeps the projection of an older one.
+ */
+export function project(records, { browsers, planned }) {
+  const engines = {};
+  for (const browser of browsers) {
+    const mine = records.filter((r) => r.browser === browser);
+    const merged = { passed: 0, failed: 0, skipped: 0, flaky: 0, not_run: 0 };
+    for (const r of mine)
+      for (const [k, n] of Object.entries(r.counts ?? {}))
+        merged[k] = (merged[k] ?? 0) + n;
+    engines[browser] = {
+      // Counts are of judged reports only; `complete` says whether they cover the whole plan for this browser.
+      complete:
+        mine.length === (planned ?? -1) &&
+        mine.every((r) => r.outcome === "passed"),
+      counts: merged,
+    };
+  }
+  const failure = records.find(
+    (r) => r.outcome !== "passed" && r.outcome !== "not_run",
+  );
+  return { first_failure: failure ? describe(failure) : null, engines };
+}
+
 export const describe = (record) =>
   `integration-${record.browser} ${record.stack} ${record.outcome}${record.reason ? ` (${record.reason})` : ""}`;

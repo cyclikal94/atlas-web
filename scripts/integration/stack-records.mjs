@@ -9,6 +9,16 @@
 // with the one before it by the one fact merger (`mergeFacts`), so a fact once committed is never lost by a later version. The
 // summary is a projection of these records; the reaper's journal only says which version was committed. Every writer (the stack's
 // own end, the runner's finaliser, the reaper) uses this module.
+//
+// Review r9 H4e (revision 10): an OBSERVATION is different from a committed version. Every attempt to commit a stack's facts is an
+// observation with an identity of its own (`obs`, the runner's ordinal of its attempts, increasing whether or not the write
+// succeeds); `seq` only counts the successful replacements of the file. A write that fails is still an observation: its facts (and
+// the evidence failure of the write itself) are kept as the stack's overlay, journalled with that ordinal, and merged into every
+// later attempt, so a durable version with ordinal n covers every observation of its stack up to n. The order of two versions of a
+// stack, and whether a durable version covers what was observed, are decided here and nowhere else (`observation`, `joinVersions`,
+// `covers`): revision 9's runner ordered a failed write after every committed one while its reaper read the same `seq: null` as 0, kept
+// an older sequence beside newer facts and deleted a checkpoint on an older acknowledgement, so an older settled record hid a newer
+// failure.
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -22,7 +32,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { mergeFacts } from "./outcome.mjs";
+import { mergeFacts, settleStack } from "./outcome.mjs";
 
 export const stackKey = (browser, index) => `${browser}-${index}`;
 export const stacksDir = (runDir) => join(runDir, "stacks");
@@ -31,6 +41,76 @@ export const stackFile = (runDir, browser, index) =>
 
 /** The phases of a stack's record, in order. A record is complete (`settled`) only after its clean-up. */
 export const PHASES = ["started", "launched", "judged", "settled"];
+
+/** The observation ordinal of a version of a stack's record (-1 for one that has none: a `not_run` entry, an older runner's). */
+export const observation = (record) =>
+  Number.isInteger(record?.obs) ? record.obs : -1;
+
+/**
+ * Two versions of one stack's record, joined: the newer observation's fields win, every failure fact and earlier clean-up of either is
+ * kept (`mergeFacts`). Equal ordinals (two readings of the same version, or versions without one) take `b` as the later.
+ */
+export function joinVersions(a, b) {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return observation(b) >= observation(a) ? mergeFacts(a, b) : mergeFacts(b, a);
+}
+
+/**
+ * Does the durable version `durable` cover the observation `observed` (everything that version of the stack had seen)? Only an
+ * explicit ordinal proves it: a version without one covers nothing but "nothing observed" (null).
+ */
+export function covers(durable, observed) {
+  if (!observed) return true;
+  if (!durable || durable.unreadable) return false;
+  const seen = observation(observed);
+  return seen >= 0 && observation(durable) >= seen;
+}
+
+/**
+ * Review r9 H4e (revision 10): one observation of a stack, committed. `known` is the stack's overlay (everything observed so far,
+ * committed or not); `record` what the caller establishes now (possibly built on an older local copy). The overlay and `record` are
+ * merged (the new observation's fields win, no fact of either is lost) and committed with ordinal `obs`. A write that fails returns the
+ * same merged facts as the new overlay, with the write's own evidence failure added (`describe(error)`), `seq: null`, the last
+ * committed sequence beside it and the phase never moved back. Returns { committed, record, reason }.
+ */
+export function commitObservation({
+  store,
+  known,
+  record,
+  phase,
+  obs,
+  describe,
+}) {
+  const input = mergeFacts(known ?? null, { ...record, obs });
+  try {
+    return {
+      committed: true,
+      record: store.commit(input, phase),
+      reason: null,
+    };
+  } catch (error) {
+    const reason = describe(error);
+    const at = Math.max(
+      PHASES.indexOf(phase),
+      PHASES.indexOf(known?.phase ?? "started"),
+    );
+    return {
+      committed: false,
+      reason,
+      record: {
+        ...settleStack(input, { evidenceErrors: [reason] }),
+        phase: PHASES[at],
+        seq: null,
+        committed_seq:
+          typeof known?.seq === "number"
+            ? known.seq
+            : (known?.committed_seq ?? null),
+        obs,
+      },
+    };
+  }
+}
 
 /**
  * Write `text` to `path` so a reader sees the old file or the new one, never a part: a fresh sibling is written, flushed and renamed
@@ -129,6 +209,8 @@ export function createStackStore(runDir, { fail = () => undefined } = {}) {
         phase: PHASES[at],
         seq: (before?.seq ?? 0) + 1,
         committed_at: new Date().toISOString(),
+        // A committed version is not an overlay: the sequence an earlier failed write kept beside its facts does not describe it.
+        committed_seq: undefined,
       };
       publishAtomically(
         stackFile(runDir, browser, index),

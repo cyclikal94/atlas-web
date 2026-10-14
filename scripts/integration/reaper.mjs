@@ -21,6 +21,15 @@
 // judgement was not is judged from its raw report (only what the report independently proves); an unreadable record or summary is
 // an evidence failure, never a smaller run. Its own evidence that cannot be written fails it (exit 1) whatever its clean-up did.
 //
+// Review r9 H4e (revision 10): a checkpoint is never retired. Revision 9 deleted a stack's checkpoint on an acknowledgement of an older
+// committed version and compared a failed write's `seq: null` as 0, so an older settled record hid a newer failure whose write had
+// failed. Now each checkpoint accumulates every journalled observation of its stack for the whole run (joined by observation ordinal,
+// stack-records.mjs), a `stack-end` is only recorded (`acknowledged`), and on a take-over a durable record is complete only when it
+// COVERS the checkpoint (its ordinal is at least the newest observed); otherwise the stack is recovered from both. A summary the runner
+// marked finished is kept as it is only when it says the run was quiescent and covers every record, checkpoint and run-level error this
+// process knows; otherwise it is reconciled like any other (its outcome and its projection recomputed). Run-level evidence failures
+// are journalled (`run-error`) and the runner's `summary-error.json` contributes its stacks too.
+//
 //   node scripts/integration/reaper.mjs <run dir> <token> <runner pid>      (journal on stdin; started by run.mjs, never by hand)
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -37,12 +46,16 @@ import {
   judge,
   mergeFacts,
   overall,
+  project,
   settleStack,
   withCancellation,
 } from "./outcome.mjs";
 import { membersOf, processTable, stopMembers } from "./ownership.mjs";
 import {
+  covers,
   createStackStore,
+  joinVersions,
+  observation,
   publishAtomically,
   readStackRecord,
   readStackRecords,
@@ -70,14 +83,17 @@ const journal = {
   tmp: new Set(),
   ports: new Set(),
   known: new Map(),
-  // Review r8 H4d: one checkpoint per stack (key -> { browser, index, stack, judged, seq }), retired only against its committed record.
+  // Review r8 H4d: one checkpoint per stack. Review r9 H4e: key -> { browser, index, stack, facts, obs }, every observation of the stack
+  // joined, kept for the whole run (an acknowledgement is recorded, never a reason to forget what was observed).
   checkpoints: new Map(),
-  retired: [],
+  acknowledged: [],
+  runErrors: [],
+  handover: null,
   evidence: null,
 };
 let released = null;
 let taking = null;
-/** Does the runner's committed record of (browser, index) show it settled at sequence `seq` or later? */
+/** Does the runner's committed record of (browser, index) show it settled at sequence `seq` or later? (Recorded, never acted on.) */
 const committedSettled = (browser, index, seq) => {
   if (typeof seq !== "number") return false;
   const record = readStackRecord(stackFile(runDir, browser, index));
@@ -111,8 +127,8 @@ lines.on("line", (line) => {
         browser: m.browser,
         index: m.index,
         stack: m.stack,
-        judged: null,
-        seq: null,
+        facts: null,
+        obs: -1,
       });
   } else if (m.type === "judged") {
     const key = stackKey(m.browser, m.index);
@@ -120,26 +136,28 @@ lines.on("line", (line) => {
       browser: m.browser,
       index: m.index,
       stack: m.record?.stack ?? null,
-      judged: null,
-      seq: null,
+      facts: null,
+      obs: -1,
     };
-    // A late or repeated message never replaces a newer checkpoint; an unsequenced one (an older runner) is taken as it comes.
-    if (
-      cp.seq === null ||
-      m.seq === undefined ||
-      m.seq === null ||
-      m.seq >= cp.seq
-    ) {
-      cp.judged = mergeFacts(cp.judged, m.record);
-      cp.seq = m.seq ?? cp.seq;
-    }
+    // Every observation is joined by its ordinal: a late or repeated one adds what it knew and never reverts newer fields; one without
+    // an ordinal (an older runner) is taken in the order it came.
+    const facts = {
+      ...m.record,
+      ...(Number.isInteger(m.obs) ? { obs: m.obs } : {}),
+    };
+    cp.facts = joinVersions(cp.facts, facts);
+    cp.obs = Math.max(cp.obs, observation(facts));
     journal.checkpoints.set(key, cp);
   } else if (m.type === "stack-end") {
-    const key = stackKey(m.browser, m.index);
-    if (committedSettled(m.browser, m.index, m.seq)) {
-      journal.checkpoints.delete(key);
-      journal.retired.push({ key, seq: m.seq });
-    }
+    journal.acknowledged.push({
+      key: stackKey(m.browser, m.index),
+      seq: m.seq ?? null,
+      confirmed: committedSettled(m.browser, m.index, m.seq),
+    });
+  } else if (m.type === "run-error") {
+    if (!journal.runErrors.includes(m.reason)) journal.runErrors.push(m.reason);
+  } else if (m.type === "handover") {
+    journal.handover = m.reason ?? "handed over";
   } else if (m.type === "released") released = m;
 });
 lines.on("close", () => {
@@ -223,6 +241,7 @@ function takeOver(why) {
       reason: why,
       at: new Date().toISOString(),
       runner_pid: runnerPid,
+      ...(journal.handover ? { handover: journal.handover } : {}),
     };
     say(`${why}; finishing the clean-up`);
     const hardStop = setTimeout(() => {
@@ -330,7 +349,7 @@ function finish(result) {
     evidenceErrors.push(`summary.json: ${String(error?.message ?? error)}`);
   }
   result.evidence_errors = evidenceErrors;
-  result.retired = journal.retired;
+  result.acknowledged = journal.acknowledged;
   try {
     publishAtomically(
       join(runDir, "reaper.json"),
@@ -356,18 +375,12 @@ function plannedCases(planned, browser, index) {
 }
 
 /**
- * The record of a stack the runner did not finish, from what was committed or journalled (whichever is newer, merged): settled by
- * the same reducer, with the take-over as its stop and this process's clean-up. A stack whose launch was committed but whose
- * judgement was not is judged from its raw report first, with the stop latched (so only what the report proves independently is a
- * failure: a failed case, an error in the report).
+ * The record of a stack the runner did not finish, from what was committed and journalled (`base`: both joined by observation):
+ * settled by the same reducer, with the take-over as its stop and this process's clean-up. A stack whose launch was committed but
+ * whose judgement was not is judged from its raw report first, with the stop latched (so only what the report proves independently is
+ * a failure: a failed case, an error in the report).
  */
-function recoverStack(cp, durable, planned, result) {
-  let base = durable;
-  if (cp?.judged)
-    base =
-      (cp.seq ?? Number.POSITIVE_INFINITY) > (durable?.seq ?? 0)
-        ? mergeFacts(durable, cp.judged)
-        : mergeFacts(cp.judged, durable);
+function recoverStack(base, cp, planned, result) {
   // Started or launched, never judged: what the raw report proves on its own is all that is known.
   if (base?.outcome === "running") {
     const launched = base.launched_at ?? null;
@@ -412,10 +425,28 @@ function recoverStack(cp, durable, planned, result) {
   });
 }
 
+/** A JSON file of the run, or null when absent; one that cannot be read is added to `evidenceErrors` (as `what`) and is null too. */
+function readRunFile(name, what, evidenceErrors) {
+  try {
+    return JSON.parse(readFileSync(join(runDir, name), "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      evidenceErrors.push(
+        `${what} could not be read: ${String(error?.message ?? error)}`,
+      );
+    return null;
+  }
+}
+
 /**
  * The runner's summary, completed as the runner would have (review r7 H4c: with the same reducer; review r8 H4d: from the committed
  * stack records): never a pass, every planned stack accounted for, and every fact any stack committed or journalled kept through this
  * take-over. A runner that may still be running owns its summary: it is not rewritten (`reaper.json` says what this process did).
+ *
+ * Review r9 H4e (revision 10): every source is read before anything is decided: the summary, the committed records, the runner's
+ * `summary-error.json` (its error and its stacks), the checkpoints and the journalled run-level errors. A finished summary is kept as
+ * it is only when it is the runner's quiescent terminal summary and covers all of them (only the release was lost); anything else is
+ * reconciled, and its outcome, first failure and engine counts are computed again from the reconciled records.
  */
 function completeSummary(result, evidenceErrors) {
   const path = join(runDir, "summary.json");
@@ -425,15 +456,13 @@ function completeSummary(result, evidenceErrors) {
     );
     return;
   }
-  let summary = null;
-  try {
-    summary = JSON.parse(readFileSync(path, "utf8"));
-  } catch (error) {
-    // No summary yet, or one that cannot be read: start from who the runner was. An unreadable one is an evidence failure.
-    if (error?.code !== "ENOENT")
-      evidenceErrors.push(
-        `the runner's summary.json could not be read: ${String(error?.message ?? error)}`,
-      );
+  let summary = readRunFile(
+    "summary.json",
+    "the runner's summary.json",
+    evidenceErrors,
+  );
+  if (summary === null) {
+    // No summary yet, or one that cannot be read (an evidence failure, recorded above): start from who the runner was.
     let invocation = { run_dir: runDir };
     try {
       invocation = JSON.parse(
@@ -444,7 +473,59 @@ function completeSummary(result, evidenceErrors) {
     }
     summary = { schema: 3, invocation, stacks: [] };
   }
-  if (summary.invocation?.finished) {
+  const { records: durable, errors: unreadable } = readStackRecords(runDir);
+  for (const e of unreadable)
+    evidenceErrors.push(`a stack record could not be read: ${e}`);
+  // The runner could not write its summary (it then ends without releasing this process): that is an evidence failure of the run, and
+  // the stacks it could not publish are evidence too.
+  const failed = readRunFile(
+    "summary-error.json",
+    "the runner's summary-error.json",
+    evidenceErrors,
+  );
+  if (failed !== null)
+    evidenceErrors.push(
+      `the runner could not write its summary: ${String(failed.error ?? "unknown").split("\n")[0]}`,
+    );
+  let planned = null;
+  try {
+    planned = JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8"));
+  } catch {
+    // no plan was written: nothing was planned
+  }
+  const runErrors = [
+    ...new Set([
+      ...(summary.evidence_errors ?? []),
+      ...(failed?.evidence_errors ?? []),
+      ...journal.runErrors,
+    ]),
+  ];
+  // The summary's records, then every committed record and every record of summary-error.json, joined by observation.
+  const byKey = new Map();
+  const put = (r) => {
+    if (!r?.browser) return;
+    const key = stackKey(r.browser, r.index);
+    byKey.set(key, joinVersions(byKey.get(key), r));
+  };
+  const projected = new Map();
+  for (const r of summary.stacks ?? []) {
+    put(r);
+    projected.set(stackKey(r.browser, r.index), r);
+  }
+  // Is the finished summary the runner's quiescent terminal summary, covering everything known here? Then only the release was lost.
+  const complete =
+    summary.invocation?.finished === true &&
+    summary.terminal?.quiescent === true &&
+    unreadable.length === 0 &&
+    failed === null &&
+    journal.runErrors.every((e) =>
+      (summary.evidence_errors ?? []).includes(e),
+    ) &&
+    [...durable].every(([key, r]) => covers(projected.get(key), r)) &&
+    [...journal.checkpoints].every(([key, cp]) =>
+      covers(projected.get(key), cp.facts),
+    );
+  if (complete) {
     summary.reaper = { ok: result.ok, file: join(runDir, "reaper.json") };
     if (!result.ok) {
       // A clean-up this process could not verify is a failure of the run, whatever the runner had concluded before it died.
@@ -457,42 +538,8 @@ function completeSummary(result, evidenceErrors) {
     publishAtomically(path, `${JSON.stringify(summary, null, 2)}\n`);
     return;
   }
-  const { records: durable, errors: unreadable } = readStackRecords(runDir);
-  for (const e of unreadable)
-    evidenceErrors.push(`a stack record could not be read: ${e}`);
-  // The runner could not write its summary (it then ends without releasing this process): that is an evidence failure of the run.
-  try {
-    const failed = JSON.parse(
-      readFileSync(join(runDir, "summary-error.json"), "utf8"),
-    );
-    evidenceErrors.push(
-      `the runner could not write its summary: ${String(failed.error ?? "unknown").split("\n")[0]}`,
-    );
-  } catch (error) {
-    if (error?.code !== "ENOENT")
-      evidenceErrors.push(
-        `the runner's summary-error.json could not be read: ${String(error?.message ?? error)}`,
-      );
-  }
-  let planned = null;
-  try {
-    planned = JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8"));
-  } catch {
-    // no plan was written: nothing was planned
-  }
-  // The summary's records, then every committed record merged in (by sequence), then the stacks the runner did not finish.
-  const byKey = new Map();
-  for (const r of summary.stacks ?? [])
-    byKey.set(stackKey(r.browser, r.index), r);
-  for (const [key, record] of durable) {
-    const known = byKey.get(key);
-    byKey.set(
-      key,
-      known && (known.seq ?? 0) > (record.seq ?? 0)
-        ? mergeFacts(record, known)
-        : mergeFacts(known, record),
-    );
-  }
+  for (const r of durable.values()) put(r);
+  for (const r of failed?.stacks ?? []) put(r);
   const store = createStackStore(runDir);
   const keys = new Set([
     ...journal.checkpoints.keys(),
@@ -503,14 +550,28 @@ function completeSummary(result, evidenceErrors) {
   for (const key of keys) {
     const cp = journal.checkpoints.get(key) ?? null;
     const record = durable.get(key) ?? null;
-    if (record?.phase === "settled" && (record.seq ?? 0) >= (cp?.seq ?? 0))
-      continue; // complete: committed after its own clean-up
-    const recovered = recoverStack(cp, record, planned, result);
-    let committed = recovered;
+    // Complete only when committed after its own clean-up AND covering everything observed of the stack.
+    if (record?.phase === "settled" && covers(record, cp?.facts ?? null))
+      continue;
+    const recovered = recoverStack(
+      joinVersions(record, cp?.facts ?? null),
+      cp,
+      planned,
+      result,
+    );
+    // The recovered version is a new observation, covering every one it joined.
+    const obs =
+      Math.max(
+        observation(record),
+        cp?.obs ?? -1,
+        observation(byKey.get(key)),
+      ) + 1;
+    let committed = { ...recovered, obs };
     try {
       committed = store.commit(
         {
           ...recovered,
+          obs,
           browser: cp?.browser ?? record?.browser,
           index: cp?.index ?? record?.index,
           stack: cp?.stack ?? record?.stack,
@@ -523,7 +584,7 @@ function completeSummary(result, evidenceErrors) {
         `the recovered record of ${key} could not be committed: ${String(error?.message ?? error)}`,
       );
     }
-    byKey.set(key, mergeFacts(byKey.get(key), committed));
+    byKey.set(key, joinVersions(byKey.get(key), committed));
   }
   const records = [...byKey.values()];
   const has = (browser, index) =>
@@ -547,18 +608,30 @@ function completeSummary(result, evidenceErrors) {
     signalled: result.reason,
     planned: records.length,
     failures: [
-      ...(summary.evidence_errors ?? []),
+      ...runErrors,
       ...evidenceErrors,
       ...(result.ok ? [] : ["the reaper's clean-up was not verified"]),
     ],
   });
+  const finishedBefore = summary.invocation?.finished === true;
+  // The controller was lost before a terminal summary that covers everything, so the run is never a pass.
+  const reconciled = outcome === "passed" ? "cancelled" : outcome;
   Object.assign(summary, {
     invocation: { ...summary.invocation, finished: true },
-    // The controller was lost, so the run is never a pass.
-    outcome: outcome === "passed" ? "cancelled" : outcome,
+    ...(finishedBefore && summary.outcome !== reconciled
+      ? { outcome_before_reaper: summary.outcome }
+      : {}),
+    outcome: reconciled,
+    ...project(records, {
+      browsers: planned?.browsers ?? [
+        ...new Set(records.map((r) => r.browser)),
+      ],
+      planned: planned?.stacks?.length,
+    }),
     controller_lost: true,
+    ...(finishedBefore ? { reconciled_after_finish: true } : {}),
     stacks: records,
-    evidence_errors: [...(summary.evidence_errors ?? []), ...evidenceErrors],
+    evidence_errors: [...new Set([...runErrors, ...evidenceErrors])],
     cleanup_failed: !result.ok || Boolean(summary.cleanup_failed),
     reaper: { ok: result.ok, file: join(runDir, "reaper.json") },
   });
