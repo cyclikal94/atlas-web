@@ -2736,3 +2736,197 @@ test.describe("revision 9, R17: a choice the form cannot show is never lost acro
       await expect(section(page)).toHaveAttribute("data-submitted", "0");
     });
 });
+
+// ---- revision 10 ------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 10 (review of 14 October 2026, R17 `recovery-control-state-value-projection` and R11 `recovery-remount-field-schema-stale-session`,
+ * both incomplete_fix; design assessment of 14 October 2026, Q13): the actual worker update (A to B) with input the form could not account
+ * for. R17: an unfinished number entry (`1e`: the engine's own `validity.badInput`, asserted, never simulated) is not an empty field: "Save
+ * and reload" fails, nothing reloads, the entry is never written over, and once the person completes it the update carries it; a second
+ * tab holding one is never reloaded by the other tab's update and keeps it. R11: the page the update brings admits fewer fields than A's
+ * copy holds: the restore is incomplete, B's save fails and A's copy and hand-off stay until the field is shown again. Fixture
+ * `atlas-fixture-number` and `atlas-fixture-admit` (TEST INJECTION, `recovery-form.tsx`). FIXTURE evidence (generation servers, production
+ * timers and headers), not installed-PWA or device evidence.
+ */
+test.describe("revision 10, R17 and R11: what the form cannot account for is never lost across the actual worker update (A to B)", () => {
+  const count = (page: Page) => page.getByRole("spinbutton", { name: "Count" });
+  const native = (page: Page) =>
+    count(page).evaluate((element) => ({
+      value: (element as HTMLInputElement).value,
+      badInput: (element as HTMLInputElement).validity.badInput,
+    }));
+  const section = (page: Page) => page.locator("[data-fixture-form]");
+  const withNumber = async (page: Page) => {
+    await page.evaluate(() =>
+      sessionStorage.setItem("atlas-fixture-number", "1"),
+    );
+    await reloadQuietly(page);
+    await formReady(page);
+  };
+
+  for (const typed of ["1e", "12"])
+    test(`${typed === "1e" ? "" : "control: "}Count typed ${typed}: ${typed === "1e" ? "'Save and reload' fails and nothing reloads; the entry is untouched; completed (1e5), 'Retry save' carries it to B" : "'Save and reload' carries it to B"}`, async ({
+      context,
+      generations,
+    }) => {
+      await seedAccount(context, generations);
+      const page = await openApp(context, generations);
+      await workerActive(page);
+      await withNumber(page);
+      await generations.serve("fixture-b");
+      await checkForUpdate(page);
+      await expect(
+        updateRegion(page).getByRole("button", { name: "Save and reload" }),
+      ).toBeVisible();
+      await count(page).pressSequentially(typed);
+      expect(await native(page)).toEqual(
+        typed === "1e"
+          ? { value: "", badInput: true }
+          : { value: "12", badInput: false },
+      );
+      expect(await dirtyCount(page)).toBe(1);
+      if (typed === "1e") {
+        await mark(page);
+        await updateRegion(page)
+          .getByRole("button", { name: "Save and reload" })
+          .click();
+        await expect(updateRegion(page).getByText(SAVE_FAILED)).toBeVisible();
+        expect(await marked(page)).toBe(true);
+        expect(await build(page)).toBe("a");
+        expect(await native(page)).toEqual({ value: "", badInput: true });
+        await count(page).press("End");
+        await count(page).pressSequentially("5");
+        expect(await native(page)).toEqual({ value: "1e5", badInput: false });
+        await quiet(page);
+        await updateRegion(page)
+          .getByRole("button", { name: "Retry save" })
+          .click();
+        await reloadedOntoB(page);
+        await expect(count(page)).toHaveValue("1e5");
+      } else {
+        await saveAndReload(page);
+        await expect(count(page)).toHaveValue("12");
+      }
+      await expect(restoredBanner(page)).toBeVisible();
+      await expect(section(page)).toHaveAttribute("data-submitted", "0");
+    });
+
+  for (const typed of ["1e", "12"])
+    test(`${typed === "1e" ? "" : "control: "}a second tab holds Count ${typed}; the first tab's update reloads only the first; the second ${typed === "1e" ? "keeps its unfinished entry as an obligation (dirty, never captured; untouched unless the first tab's boot remounted its form), with no copy of it" : "saves its copy (the peer flush) and stays"}`, async ({
+      context,
+      generations,
+    }) => {
+      await seedAccount(context, generations);
+      const first = await openApp(context, generations);
+      await workerActive(first);
+      await reloadQuietly(first);
+      const second = await openApp(context, generations);
+      await withNumber(second);
+      await generations.serve("fixture-b");
+      await checkForUpdate(first);
+      for (const tab of [first, second]) {
+        await formReady(tab);
+        await expect(
+          updateRegion(tab).getByRole("button", { name: "Save and reload" }),
+        ).toBeVisible();
+      }
+      await count(second).pressSequentially(typed);
+      expect((await native(second)).badInput).toBe(typed === "1e");
+      const mounts = () =>
+        second.evaluate(
+          () =>
+            (window as unknown as { __atlasFormMounts?: number })
+              .__atlasFormMounts ?? 0,
+        );
+      const mountedBefore = await mounts();
+      await title(first).fill(ORIGINAL);
+      await mark(second);
+      await saveAndReload(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      expect(await marked(second)).toBe(true);
+      expect(await build(second)).toBe("a");
+      const rows = (await recoveryRows(context, generations)).filter(
+        (row) => !row.terminal,
+      );
+      if (typed === "1e") {
+        // The first tab's boot may remount this tab's protected tree (F-1, WEB-08c lifecycle): a new element cannot hold the old native
+        // entry, so it is visible only where no remount happened; either way the obligation stays (dirty, never captured, no reload).
+        const remounted = (await mounts()) > mountedBefore;
+        test.info().annotations.push({
+          type: "second-tab-remounted",
+          description: String(remounted),
+        });
+        expect(await native(second)).toEqual({
+          value: "",
+          badInput: !remounted,
+        });
+        expect(await dirtyCount(second)).toBe(1);
+        expect(rows.some((row) => "count" in row.fields)).toBe(false);
+      } else
+        expect(
+          rows.filter((row) => row.fields.count === "12").map(isHandoffRow),
+        ).toEqual([false]);
+    });
+
+  for (const narrowed of [true, false])
+    test(`${narrowed ? "" : "control: "}A saves title and notes; B ${narrowed ? "admits only the title: incomplete, B's save fails and A's copy and hand-off stay; notes shown again: back, saved, A's copies removed" : "admits both: restored completely, and B's save removes A's copies"}`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await oneTabWithUpdate(context, generations);
+      await title(page).fill(ORIGINAL);
+      await notes(page).fill("UNFINISHED NOTES");
+      if (narrowed)
+        await page.evaluate(() =>
+          sessionStorage.setItem("atlas-fixture-admit", '["title"]'),
+        );
+      await saveAndReload(page);
+      await page.evaluate(() =>
+        sessionStorage.removeItem("atlas-fixture-admit"),
+      );
+      const fromA = (await recoveryRows(context, generations)).filter(
+        (row) => !row.terminal,
+      );
+      expect(fromA.filter(isHandoffRow)).toHaveLength(1);
+      expect(fromA.filter((row) => !isHandoffRow(row))).toHaveLength(1);
+      await expect(title(page)).toHaveValue(ORIGINAL);
+      if (narrowed) {
+        await expect(notes(page)).toHaveCount(0);
+        await expect(section(page)).toHaveAttribute("data-incomplete", "notes");
+        expect(await dirtyCount(page)).toBe(1);
+        expect(await flushNow(page)).toBe("failed");
+        expect(
+          (await recoveryRows(context, generations))
+            .filter((row) => !row.terminal)
+            .map((row) => row.tab_instance_id)
+            .sort(),
+        ).toEqual(fromA.map((row) => row.tab_instance_id).sort());
+        await page.evaluate(() =>
+          (window as unknown as FixtureWindow).__atlasFormProps?.({
+            allow: ["title", "notes"],
+            shown: ["title", "notes"],
+          }),
+        );
+        await expect(notes(page)).toHaveValue("UNFINISHED NOTES");
+        await expect(section(page)).toHaveAttribute("data-incomplete", "");
+      } else {
+        await expect(section(page)).toHaveAttribute("data-incomplete", "");
+        await expect(notes(page)).toHaveValue("UNFINISHED NOTES");
+      }
+      expect(await flushNow(page)).toBe("saved");
+      const after = (await recoveryRows(context, generations)).filter(
+        (row) => !row.terminal,
+      );
+      expect(after).toHaveLength(1);
+      expect(after[0]?.fields).toEqual({
+        title: ORIGINAL,
+        notes: "UNFINISHED NOTES",
+      });
+      for (const row of fromA)
+        expect(after.map((one) => one.tab_instance_id)).not.toContain(
+          row.tab_instance_id,
+        );
+      await expect(section(page)).toHaveAttribute("data-submitted", "0");
+    });
+});

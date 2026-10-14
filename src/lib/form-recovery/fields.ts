@@ -4,6 +4,7 @@ import {
   fieldOf,
   internalOf,
   isUnsupported,
+  OPAQUE,
   type Shape,
   sameShape,
 } from "./controls";
@@ -59,6 +60,23 @@ import type { RecoverableFieldSpec, RecoverySnapshot } from "./port";
  *    field can show it exactly; an edit of the field keeps the person's new value and the owed one stays owed. A field showing an owed value
  *    again holds it (no longer owed). Several owed values of one field are kept, none replacing another.
  *  - Every write is exact (`FieldAccess.write`): a restore the field cannot show changes nothing and stays owed (`applySnapshot` returns it).
+ *
+ * NOTHING IS TAKEN FOR COMPLETE THAT IS NOT (revision 10; review of 14 October 2026, R17 and R11; design assessment of 14 October 2026,
+ * RC1/RC2, I1-I5, C1-C4). Revision 9 still projected two kinds of input onto something smaller and took the projection as the whole:
+ *
+ *  - A number field showing `1e` (what the person is still typing) has the value "": it read as an empty field, so the form looked clean, or
+ *    an earlier copy was discarded as if the person had cleared it. Such a field now reads OPAQUE (`controls.ts`): input no copy can hold, an
+ *    obligation from the moment it is seen (even before any edit event), resolved only by a terminal act that covered it and was not
+ *    followed by another edit of the field. It is never written over. Only an edit of that same field (completing it, clearing it, a
+ *    reset) ends it; when it goes otherwise (a script, a render, the field removed or replaced) it stays owed: what it held is gone from the
+ *    page, so the form cannot be saved without loss and an update reload stops with retry or an explicit discard (Q4).
+ *  - A copy restored into a form that does not admit or show some of its fields kept only the fields admitted: the rest were neither
+ *    restored nor owed, the restore was reported complete, and the next save cleaned the copy up. Now EVERY value of a copy becomes the
+ *    form's (`applySnapshot`): a field not admitted or not shown keeps it in the ledger (never read from or written to the page), it is
+ *    reported incomplete and is an obligation until the field shows it again or a terminal act resolves it. Where a field starts from is
+ *    known only for a field the form has shown: an unknown start is never taken for "" (`resolved`).
+ *  - What a copy holds is accounted for POSITIVELY before anything replaces or removes it (`accounts`): each of its values is in the capture
+ *    replacing it (the field's state now, which the person may have changed since: their progress) or held and resolved.
  *
  * Memory only: nothing here is written anywhere.
  */
@@ -161,8 +179,11 @@ export function openFields(
       fields.present.set(name, field.key);
       fields.shapes.set(name, field.shape);
       fields.seen.set(name, 0);
-      fields.ledger[name] = field.read();
-      fields.initial[name] = field.read();
+      const shown = field.read();
+      fields.ledger[name] = shown;
+      // Revision 10 (R17): a native editing state already there is input, never where the form starts from (the next page shows the
+      // field's default).
+      fields.initial[name] = shown === OPAQUE ? field.initial() : shown;
     }
   return fields;
 }
@@ -177,6 +198,22 @@ export function owe(fields: FieldState, name: string, entry: Owed): void {
     (known) => known.value !== entry.value,
   );
   fields.owed.set(name, [...others, entry]);
+}
+
+/**
+ * Revision 10 (R17; C2): `shown`, read from the very field `name` followed (the same element, the same shape), is what it holds now. A
+ * native editing state the field no longer shows WITHOUT an edit of it since it was last read (a script set its value, a render replaced
+ * it) was not ended by the person: what it held is gone from the page, and it stays owed.
+ */
+function take(
+  fields: FieldState,
+  name: string,
+  shown: string,
+  edited: boolean,
+): void {
+  if (fields.ledger[name] === OPAQUE && shown !== OPAQUE && !edited)
+    owe(fields, name, { value: OPAQUE });
+  fields.ledger[name] = shown;
 }
 
 /** Revision 9: the values `name` owes, minus those `keep` refuses. */
@@ -209,7 +246,7 @@ function reconcile(fields: FieldState, name: string, field: FieldAccess): void {
   fields.seen.set(name, fields.input);
   // Edited since it was last read: what it shows is the person's.
   if (edited) fields.fallback.delete(name);
-  if (same) fields.ledger[name] = shown;
+  if (same) take(fields, name, shown, edited);
   else {
     // Shown again, for the first time, or in another shape (revision 8: another kind; revision 9: another option or member, another type).
     if (fields.initial[name] === undefined)
@@ -254,7 +291,12 @@ function reconcile(fields: FieldState, name: string, field: FieldAccess): void {
     fields.fallback.delete(name);
   }
   const holds = fields.ledger[name];
-  settleOwed(fields, name, (entry) => entry.value !== holds);
+  // Revision 10 (R17): an owed native editing state is never settled by another one shown later (what the first held is gone).
+  settleOwed(
+    fields,
+    name,
+    (entry) => entry.value !== holds || entry.value === OPAQUE,
+  );
 }
 
 /**
@@ -291,7 +333,12 @@ export function refresh(fields: FieldState): void {
       field?.key === element &&
       sameShape(fields.shapes.get(name), field.shape)
     )
-      fields.ledger[name] = field.read();
+      take(
+        fields,
+        name,
+        field.read(),
+        lastEdit(fields, name) > (fields.seen.get(name) ?? 0),
+      );
   }
 }
 
@@ -318,35 +365,48 @@ export function resolved(
   name: string,
   value: string,
 ): boolean {
+  const edit = lastEdit(fields, name);
+  const cover = fields.covered.get(name);
+  const covered = cover !== undefined && edit <= cover.at;
+  // Revision 10 (R17; C2): a native editing state is the person's input whatever its edit count (it may be there before the form first
+  // reads it): only a terminal act that covered it, with no edit of the field since, resolves it.
+  if (value === OPAQUE) return covered && cover.value === OPAQUE;
   // Revision 8 (R17): a field whose state cannot be represented needs nothing only while it has not been edited since it was shown (or since
   // a terminal act covered it): an edit of it is input no copy can hold.
-  if (isUnsupported(value)) {
-    const edit = lastEdit(fields, name);
-    const cover = fields.covered.get(name);
-    return edit === 0 || (cover !== undefined && edit <= cover.at);
-  }
-  if (value === (fields.initial[name] ?? "")) return true;
-  const cover = fields.covered.get(name);
+  if (isUnsupported(value)) return edit === 0 || covered;
+  // Revision 10 (R11; I2): where a field starts from is known only for a field the form has shown; an unknown start is never "".
+  const start = fields.initial[name];
   return (
-    cover !== undefined &&
-    cover.value === value &&
-    lastEdit(fields, name) <= cover.at
+    (start !== undefined && value === start) ||
+    (covered && cover.value === value)
   );
 }
 
-/** The values a copy can hold NOW: the admitted fields shown (or, while no mount shows the form, the ones its last mount showed). */
-export function capturable(fields: FieldState): Values {
+/**
+ * Revision 10: what the admitted fields shown hold NOW (or, while no mount shows the form, the ones its last mount showed), each as its
+ * state, an unsupported state and a native editing state included: what an explicit discard leaves, and covers.
+ */
+export function shownOf(fields: FieldState): Values {
   sync(fields);
   const names = admitted(fields);
   const values: Values = {};
   for (const name of fields.present.keys()) {
     const value = fields.ledger[name];
-    // Revision 8 (R17): an unsupported state is never captured (it stays the form's: retained, `retainedOf`).
-    if (names.has(name) && value !== undefined && !isUnsupported(value))
-      values[name] = value;
+    if (names.has(name) && value !== undefined) values[name] = value;
   }
   return values;
 }
+
+/**
+ * The values a copy can hold NOW: the admitted fields shown (`shownOf`). Revision 8 (R17): an unsupported state is never captured (it
+ * stays the form's: retained, `retainedOf`); revision 10: nor a native editing state (`OPAQUE`, decoded as unsupported).
+ */
+export const capturable = (fields: FieldState): Values =>
+  Object.fromEntries(
+    Object.entries(shownOf(fields)).filter(
+      ([, value]) => !isUnsupported(value),
+    ),
+  );
 
 /** Everything the form holds: the ledger (shown, retained and not admitted any more). */
 export function held(fields: FieldState): Values {
@@ -374,6 +434,24 @@ export const allResolved = (fields: FieldState, values: Values): boolean =>
   Object.entries(values).every(([name, value]) =>
     resolved(fields, name, value),
   );
+
+/**
+ * Revision 10 (R11; design assessment C4, I5): whether the form accounts for every value of `copy` (a copy it was restored from): the field
+ * is in `captured` (what replaces the copy holds the field's state now, which the person may have changed since: their progress), or the
+ * form holds a value for it that needs no copy. Positive: a value the form does not hold at all is never accounted for. Equal text, the
+ * order of operations or the identity of a capture are no substitute: a copy not accounted for is neither replaced nor cleaned up.
+ */
+export const accounts = (
+  fields: FieldState,
+  copy: Values,
+  captured: Values,
+): boolean =>
+  Object.keys(copy).every((name) => {
+    const holds = fields.ledger[name];
+    return (
+      name in captured || (holds !== undefined && resolved(fields, name, holds))
+    );
+  });
 
 /**
  * Whether restoring `copy` would give back what the form holds: each field shown, from the copy or (a field it lacks) from where the form
@@ -446,8 +524,8 @@ export function coverUnedited(
 
 /** An explicit discard: the retained and owed values are dropped with the rest of the input (the person's act). */
 export function dropRetained(fields: FieldState): void {
-  const shown = capturable(fields);
-  fields.ledger = { ...shown };
+  // What the fields shown hold stays theirs (revision 10: their whole state, `shownOf`; the act covers it).
+  fields.ledger = shownOf(fields);
   fields.owed = new Map();
   fields.fallback = new Map();
 }
@@ -473,9 +551,12 @@ export function setSchema(
 }
 
 /**
- * Puts a copy into the form (a restore after a reload, or an alternative the person chose): the fields shown take its values, an admitted
- * field not shown keeps its value in the ledger (it comes back when the field is shown), and every field it names counts as edited.
- * Returns the fields shown that could not take the copy's value (revision 9, R17, C4: the restore is incomplete; their values are owed).
+ * Puts a copy into the form (a restore after a reload, or an alternative the person chose): the fields shown take its values, and every
+ * field it names counts as edited. Revision 10 (R11; C3): EVERY value of the copy becomes the form's, whatever the schema admits now: a
+ * field not admitted, or admitted but not shown, keeps the copy's value in the ledger (never read from or written to the page; it comes
+ * back when the field is admitted and shown), as an obligation until then. Returns the fields of the copy the form does not show
+ * (revision 9, R17, C4: a field shown that could not take its value, owed; revision 10: a field not admitted or not shown, retained, whose
+ * value needs a copy): the restore is incomplete.
  */
 export function applySnapshot(
   fields: FieldState,
@@ -484,29 +565,27 @@ export function applySnapshot(
 ): string[] {
   sync(fields);
   const values = internalOf(snapshot);
+  const names = Object.keys(values);
+  const admits = admitted(fields);
+  const unshown = (name: string): boolean =>
+    !admits.has(name) || !fields.present.has(name);
   // Revision 8 (R17): a field that cannot show the copy's state (another kind of control now, an option gone) keeps its own; the copy's
   // state stays owed, never dropped. Revision 9: every write is exact, so a field that could not show it is known (no false success),
   // and the value comes back once the field can show it (unless the person types over it first).
   const misfits = new Set(restoreValues(form, values, fields.allow));
-  const names: string[] = [];
-  for (const { name } of fields.allow) {
-    const value = values[name];
-    if (value === undefined) continue;
-    names.push(name);
-    if (!fields.present.has(name) && accessOf(form, name) === null)
-      fields.ledger[name] = value;
-  }
+  for (const name of names)
+    if (unshown(name)) fields.ledger[name] = values[name] as string;
   noteInput(fields, names);
   sync(fields);
   const incomplete: string[] = [];
-  for (const name of misfits)
-    if (fields.ledger[name] !== values[name]) {
-      incomplete.push(name);
-      owe(fields, name, {
-        value: values[name] as string,
-        returns: lastEdit(fields, name),
-      });
-    }
+  for (const name of names) {
+    const value = values[name] as string;
+    if (misfits.has(name)) {
+      if (fields.ledger[name] === value) continue;
+      owe(fields, name, { value, returns: lastEdit(fields, name) });
+    } else if (!unshown(name) || resolved(fields, name, value)) continue;
+    incomplete.push(name);
+  }
   return incomplete;
 }
 
@@ -613,8 +692,8 @@ const INPUT_EVENTS = ["input", "change", "reset"] as const;
  * Follows the fields of `element` while a mount shows them: every input/reset event is an edit of the field it names (every field for a
  * reset, or an event that names none) and is read at once, in the capture phase, before any handler of the page can remove the field; a
  * change event is an edit only when the field shows another value than at its last edit event (revision 5: otherwise it only commits that
- * edit); a reset is read again after the browser has reset the form (its event comes first); a field added or removed is noticed at once.
- * Returns the stop.
+ * edit); a reset is read again after the browser has reset the form (its event comes first: revision 10, what each field shows then is
+ * the reset's edit); a field added or removed is noticed at once. Returns the stop.
  */
 export function watch(
   fields: FieldState,
@@ -653,10 +732,15 @@ export function watch(
       }
     }
     sync(fields);
-    if (event.type === "reset")
+    if (event.type === "reset") {
+      // Revision 10 (R17; C2): the browser resets the fields AFTER this event, so what each shows then is the reset's (an edit not read
+      // yet), even where it ends a native editing state.
+      for (const name of fields.seen.keys())
+        fields.seen.set(name, fields.input - 1);
       setTimeout(() => {
         if (!stopped) sync(fields);
       }, 0);
+    }
   };
   for (const type of INPUT_EVENTS)
     element.addEventListener(type, onInput, true);

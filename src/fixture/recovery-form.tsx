@@ -44,11 +44,17 @@ import {
  * TEST INJECTION (revision 9, R17): with choices, also a single select ("Priority"); `without` (option values) leaves those options out of
  * Tags and Priority, the select itself staying (as a feature form that narrows its options would), from `atlas-fixture-without` (a JSON
  * array in the tab's session storage, read when the form mounts) or `__atlasFormProps({ without })`.
+ * TEST INJECTION (revision 10, R17 and R11): with `atlas-fixture-number` set to "1" in the tab's session storage when the form mounts, the
+ * form also shows and admits a number field ("Count"), so a spec can carry an unfinished number entry into a real update; with
+ * `atlas-fixture-admit` (a JSON array of field names) set when the form mounts, only those fields are admitted AND shown, as a feature form
+ * whose conditional fields start hidden would (`__atlasFormProps` shows the others again).
  */
 const HOLD_KEY = "atlas-fixture-hold-form";
 const CHOICES_KEY = "atlas-fixture-choices";
 const FAIL_READ_KEY = "atlas-fixture-fail-handoff-read";
 const WITHOUT_KEY = "atlas-fixture-without";
+const NUMBER_KEY = "atlas-fixture-number";
+const ADMIT_KEY = "atlas-fixture-admit";
 
 /** The real port, with its first hand-off read refused (TEST INJECTION, above); one wrapper per port, so a pinned port stays the same. */
 const injected = new WeakMap<FormRecoveryPort, FormRecoveryPort>();
@@ -110,10 +116,19 @@ type FixtureScope = {
 export function FixtureRecoveryForm() {
   const [key, setKey] = useState(0);
   const [props, setProps] = useState<FixtureProps>(() => {
-    const fields =
-      sessionStorage.getItem(CHOICES_KEY) === "1"
-        ? [...ALLOW, "pinned", "tags", "priority"]
-        : ALLOW;
+    const all = [
+      ...ALLOW,
+      ...(sessionStorage.getItem(CHOICES_KEY) === "1"
+        ? ["pinned", "tags", "priority"]
+        : []),
+      ...(sessionStorage.getItem(NUMBER_KEY) === "1" ? ["count"] : []),
+    ];
+    const admit: unknown = JSON.parse(
+      sessionStorage.getItem(ADMIT_KEY) ?? "null",
+    );
+    const fields = Array.isArray(admit)
+      ? all.filter((name) => admit.includes(name))
+      : all;
     return {
       formContext: FIXTURE_FORM_CONTEXT,
       allow: fields,
@@ -293,6 +308,12 @@ function FixtureRecoveryFormMount({
                   </option>
                 ))}
             </select>
+          </label>
+        ) : null}
+        {shown.includes("count") ? (
+          <label className="flex flex-col gap-1">
+            Count
+            <input name="count" type="number" defaultValue="" />
           </label>
         ) : null}
         <label className="flex flex-col gap-1">

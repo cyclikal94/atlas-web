@@ -2,6 +2,7 @@ import type { RefObject } from "react";
 import { versioned } from "./control-state";
 import { snapshotParts } from "./controls";
 import {
+  accounts,
   adopt,
   allResolved,
   capturable,
@@ -14,6 +15,7 @@ import {
   held,
   sameHeld,
   setSchema,
+  shownOf,
   sync,
   type Values,
   watch,
@@ -105,6 +107,14 @@ import type { RecoveryTab } from "./tab-identity";
  *    one transaction), and the hand-off itself LAST (`removeCopies`), so until every copy it names is settled the hand-off stays the durable
  *    record of them. A clean-up that does not land stays owed (`debts`): tried again at the next save or terminal act, and written into the
  *    next hand-off, so a reload never forgets it. Equal text, an equal time or the order of a list confer nothing.
+ *  - A COPY IS REPLACED OR CLEANED UP ONLY ONCE THE FORM ACCOUNTS FOR ALL OF IT (revision 10; review of 14 October 2026, R11 and R17; design
+ *    assessment C3/C4). Revision 9 cleaned up the copy a form was restored from once a save asked for after the restore had landed (or the
+ *    form looked back at its clean values), whatever that save held: a copy with a field the form did not admit was removed although that
+ *    value was nowhere else. The session now keeps EVERYTHING the copy holds (`source.values`), and a save neither starts nor certifies the
+ *    copy's clean-up unless the form accounts for every one of its values (`fields.accounts`): held in the capture (or changed by the person
+ *    since) or needing no copy; so does this page's own copy, which a save overwrites. The order of the save (`source.at`) still only says
+ *    that the copy was taken before it, and the clean-up is bound to the very copy the save accounted for. A terminal act resolves the
+ *    copies' values (a discard drops them, a submission covers them); only their removal is left.
  *
  * Memory only: nothing here is written anywhere except through the port.
  */
@@ -122,7 +132,8 @@ export { normaliseAllow, schemaKey } from "./fields";
 export interface Persisted {
   /**
    * This page's own latest durable copy (its values), the order of the save that wrote it, and (revision 8, R16) the identity of that capture
-   * (null: a copy of this page's own written before captures had one, restored after a remount).
+   * (null: a copy of this page's own written before captures had one, restored after a remount). Revision 10 (R11): `values` is everything
+   * the copy holds (one restored after a remount: all of it, never what the form shows of it), until a terminal act resolves it (`{}`).
    */
   own: { values: Values; op: number; capture: string | null } | null;
   /** Whether this page has ever asked to write a copy under its own identifier (so a discard must reach it). */
@@ -136,7 +147,8 @@ export interface Persisted {
   /**
    * Revision 8 (R16): `capture` is the capture of the source as it was READ (removed only while it still holds it; null for a copy written
    * before captures had identities, removed by its key), `lineage` the copies a hand-off source names (removed with it, before it), and `at`
-   * the session's order when it became the source: only a save asked for after that holds what it restored.
+   * the session's order when it became the source: only a save asked for after that holds what it restored. Revision 10 (R11): `values` is
+   * EVERYTHING the copy holds, whatever the form admits or shows (never a projection of it), until a terminal act resolves it (`{}`).
    */
   source: {
     id: string;
@@ -467,6 +479,12 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
   // Retained input (a field no longer admitted or no longer shown) cannot be captured, and a capture without it would replace a copy that
   // may hold it (revision 3, R11; D1; revision 4): nothing is written, and the form stays dirty.
   if (hasDebt(session.fields)) return "failed";
+  // Revision 10 (R11; C4): the copy the form was restored from, and this page's own copy (which a save overwrites), are replaced or cleaned
+  // up only when the form accounts for every value they hold (`accounts`): otherwise nothing is written or removed, and the form stays dirty.
+  const restored = session.persisted.source;
+  const now = valuesOf(session);
+  for (const copy of [restored, session.persisted.own])
+    if (copy && !accounts(session.fields, copy.values, now)) return "failed";
   // Pinned NOW (before anything is awaited): the write reaches this session's database, or nothing.
   const target = targetOf(session);
   if (!target) return "failed";
@@ -474,7 +492,6 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
   session.order.next += 1;
   const op = session.order.next;
   const allow = session.fields.allow;
-  const now = valuesOf(session);
   // Nothing unfinished (each value is where the form starts from again, or covered by a terminal act and not edited since: revision 4,
   // R3): the copies are discarded instead, so the next page shows that state (R2).
   if (allResolved(session.fields, now)) {
@@ -523,20 +540,21 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
   if (session.order.lastTerminal < op && (state.own?.op ?? -1) < op) {
     // Revision 8 (R16): a source restored BEFORE this capture was asked for is held by it now: it (and the copies a hand-off source names)
     // become owed removals, exact by key and capture, until their removal lands. A source chosen after the capture is not held by it.
-    const source = state.source;
-    const covered = source !== null && source.id !== id && source.at < op;
+    // Revision 10 (R11; C4): only the very source this capture accounted for (above, the source when it was asked for: chosen before it); a
+    // source chosen since is another one, never held by it.
+    const covered =
+      restored !== null && state.source === restored && restored.id !== id;
     session.persisted = {
       ...state,
       own: { values, op, capture },
       source: covered ? null : state.source,
-      debts:
-        covered && source !== null
-          ? distinctCopies([
-              ...state.debts,
-              ...source.lineage,
-              sourceTarget(source),
-            ])
-          : state.debts,
+      debts: covered
+        ? distinctCopies([
+            ...state.debts,
+            ...restored.lineage,
+            sourceTarget(restored),
+          ])
+        : state.debts,
       // This page's own copy is newer than every discard that did not land: nothing unwanted can be restored in its place.
       owed: state.source === null && state.owed < op ? 0 : state.owed,
     };
@@ -714,8 +732,13 @@ export function terminalAct(
   else fields.owed = new Map();
   // What the act leaves needs no copy until it is edited again (revision 4, R3).
   if (clean !== null) cover(fields, clean, fields.input);
+  // Revision 10 (R11): the act resolves what the copy the form was restored from, and this page's own copy, hold (dropped, or covered): only
+  // their removal is left.
+  const { source, own } = session.persisted;
   session.persisted = {
     ...session.persisted,
+    source: source && { ...source, values: {} },
+    own: own && { ...own, values: {} },
     owed: Math.max(session.persisted.owed, op),
   };
   return track(session, discardAt(session, targetOf(session), op));
@@ -923,8 +946,9 @@ export function openSession(options: OpenSession): FormSession {
       formContext: options.formContext,
       isDirty: () => isDirty(session),
       flush: () => track(session, flushSession(session)),
-      // "Discard and reload anyway": the input the form holds is the person's to drop (retained input included); what it shows is covered.
-      discard: () => terminalAct(session, valuesOf(session)),
+      // "Discard and reload anyway": the input the form holds is the person's to drop (retained input included); what it shows is covered
+      // (revision 10: its whole state, a native editing state included, `shownOf`).
+      discard: () => terminalAct(session, shownOf(session.fields)),
       freeze: () => freezeSession(session),
       settled: () =>
         session.pending.size === 0

@@ -25,6 +25,7 @@ import {
   refresh,
   sameHeld,
   setSchema,
+  shownOf,
   sync,
   type Values,
   watch,
@@ -150,6 +151,12 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  * (after showing the field again) or "Discard and reload anyway" (Q4: never a silent loss). A successful submission of the form's visible
  * state covers its hidden values: no warning or block. Your code must change field values through the DOM with an input event (or before
  * the hook's form re-renders), never silently on a field it hides in the same commit.
+ *
+ * NOTHING UNFINISHED IS TAKEN FOR EMPTY OR COMPLETE (revision 10; review of 14 October 2026, R17 and R11). A field showing what the person
+ * is still typing that the browser cannot give as a value (`1e` in a number field: `validity.badInput`) is unfinished input, not an empty
+ * field: the form is dirty, its saves fail (an update reload stops with retry or an explicit discard) and nothing is ever written over it,
+ * until the person completes or clears it, submits or discards. A copy restored into a form that does not admit or show some of its fields
+ * keeps those values (`incomplete`) until they are shown again; no save replaces or cleans up a copy the form does not account for.
  */
 export interface UseRecoverableFormOptions {
   formContext: string;
@@ -193,7 +200,9 @@ export interface RecoverableForm {
    * Revision 9 (R17, C4): the fields of `restored` the form could not show when it was restored (an option or a member gone, another kind
    * of control): their values are kept, owed (the form stays dirty; an update reload stops with retry or an explicit discard) and come back
    * once the field can show them, unless the person changes the field first. Empty when everything was shown: never claim a full restore
-   * otherwise.
+   * otherwise. Revision 10 (R11): also the fields of the copy the form does not admit or show now (a conditional field hidden, a narrower
+   * allow-list): their values are kept the same way, never read from or written to the page while excluded, and come back when the field is
+   * admitted and shown. A field leaves the list once it shows its value again.
    */
   incomplete: readonly string[];
   /** Other restorable copies of this form, newest first. */
@@ -235,22 +244,6 @@ export interface RecoverableForm {
 
 const NO_VIEW: SessionView = { restored: null, alternatives: [] };
 const NONE: readonly string[] = [];
-
-/**
- * Revision 9 (R17, C4): the values of a copy just restored, as the session records them: what the form shows now for every field that took
- * the copy's value, and the COPY's own value for every field that could not (never what the form shows instead: that was not restored).
- */
-const restoredValues = (
-  session: FormSession,
-  copy: RecoverySnapshot,
-  incomplete: readonly string[],
-): Values => {
-  const values = valuesOf(session);
-  const copied = internalOf(copy);
-  for (const name of incomplete)
-    if (copied[name] !== undefined) values[name] = copied[name];
-  return values;
-};
 
 /** What a look read (revision 7): the hand-off held and read just now, the gone tabs' copies, the abandoned hand-offs, this page's id. */
 interface Found {
@@ -375,6 +368,21 @@ export function useRecoverableForm(
     else if (mountFields.current) setSchema(mountFields.current, now);
   }, [schema]);
 
+  // Revision 10 (R11; C3): a field reported incomplete is no longer so once it shows the restored value (admitted and shown again, owing
+  // nothing): read at every commit while any is reported, so a field shown again by that commit is known at once.
+  useLayoutEffect(() => {
+    const current = session.current;
+    const named = current?.view.incomplete;
+    if (!current || !named?.length) return;
+    const fields = current.fields;
+    sync(fields);
+    const left = named.filter(
+      (name) => !fields.present.has(name) || fields.owed.has(name),
+    );
+    if (left.length < named.length)
+      setSessionView(current, { ...current.view, incomplete: left });
+  });
+
   // The mount: registered at once (unbound until the port binds it to a session); at unmount the session keeps what it shows.
   useEffect(() => {
     const element = formRef.current;
@@ -393,7 +401,8 @@ export function useRecoverableForm(
       // No database yet: nothing can be saved, and nothing of this mount's was ever saved.
       flush: async (): Promise<SaveResult> => "failed",
       discard: async (): Promise<DiscardResult> => {
-        cover(own, capturable(own), own.input);
+        // Revision 10: what its fields show is covered, whole (a native editing state included, `shownOf`).
+        cover(own, shownOf(own), own.input);
         dropRetained(own);
         return "discarded";
       },
@@ -591,7 +600,8 @@ export function useRecoverableForm(
           // Revision 8 (R17): a copy holding state this build cannot read is offered as it is, never restored in part.
           if (newest && !unreadable(newest) && form && untouched) {
             const incomplete = applySnapshot(fields, form, newest);
-            const values = restoredValues(current, newest, incomplete);
+            // Revision 10 (R11; C3): what the copy holds, ALL of it (revision 9 recorded what the form showed of it, a projection).
+            const values = internalOf(newest);
             const capture = newest.capture ?? null;
             if (newest === handed)
               // The hand-off left to this page, held by it: its source, with the copies its lineage names (R13; revision 8, R16).
@@ -967,7 +977,8 @@ export function useRecoverableForm(
         )
           return "refused";
         const incomplete = applySnapshot(current.fields, form, copy);
-        const values = restoredValues(current, copy, incomplete);
+        // Revision 10 (R11): what the copy holds, all of it.
+        const values = internalOf(copy);
         // The copy restored before is still in the store (and newer): only a copy of this page's own makes the chosen one what comes back.
         // Revision 8 (R16): the hand-off left to this page brings the copies its lineage names, as read just now (whether it was restored at
         // once or chosen later: one rule); any other copy brings none. What the page already owes (`debts`) stays owed.

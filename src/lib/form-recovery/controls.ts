@@ -17,6 +17,13 @@ import type { ControlState, RecoverySnapshot } from "./port";
  *  - UNSUPPORTED: an admitted name this module cannot represent unambiguously (a file input, a group mixing kinds or other controls, a group
  *    or select whose members repeat a value). Never captured. Untouched it needs nothing; once EDITED it is an obligation no copy can hold
  *    (`fields.resolved`), so the form stays dirty and an update reload stops with retry or an explicit discard: never a silent clean reload.
+ *  - OPAQUE (revision 10; review of 14 October 2026, R17; design assessment C1): a text input showing what the person is still typing that
+ *    the browser cannot give as a value (`validity.badInput`: `1e` in a number field, a date only partly entered), whose `.value` is "" all
+ *    the same. Revision 9 read that "" as the field's state: the form looked clean, or an earlier copy was discarded as if the person had
+ *    cleared the field, and the update reloaded without what they typed. It is input, never an empty value: never captured, never written
+ *    over (nothing could put it back), and resolved only by a terminal act that covered it (`fields.resolved`), so the form stays dirty and
+ *    an update reload stops with retry or an explicit discard. A value that is merely invalid (a mistyped e-mail address, a number out of
+ *    range, a required field left empty) is a value like any other, captured as it is.
  *
  * A field with a sensitive member (`isSensitiveField`) is sensitive as a whole: nothing of it is read. In a stored copy, text fields stay in
  * `values` as literal text and choices go to `controls` (version 1); a stored text is never decoded as a choice (`internalOf`).
@@ -58,6 +65,11 @@ export class SensitiveFieldError extends Error {
 const TAG = "\u0001";
 /** The state of an admitted field this module cannot represent: never captured, an obligation once edited. */
 export const UNSUPPORTED = `${TAG}u`;
+/**
+ * Revision 10 (R17): a native editing state with no value (`validity.badInput`): input, never captured or written over, an obligation until
+ * a terminal act covers it. Decoded, like any state this module cannot show, as unsupported.
+ */
+export const OPAQUE = `${TAG}o`;
 
 /** A text, as the field state holds it. */
 export const encodeText = (text: string): string =>
@@ -261,6 +273,11 @@ const SANITISING = ["min", "max", "step", "multiple"] as const;
 function textField(control: Control): FieldAccess {
   const select = control instanceof HTMLSelectElement ? control : null;
   const options = () => (select ? [...select.options] : []);
+  // Revision 10 (R17): what the person is still typing that the input cannot give as a value is OPAQUE, never its empty `.value`.
+  const read = (): string =>
+    control instanceof HTMLInputElement && control.validity.badInput
+      ? OPAQUE
+      : encodeText(control.value);
   return {
     key: control,
     kind: "text",
@@ -279,7 +296,7 @@ function textField(control: Control): FieldAccess {
             [control],
           )
         : shapeOf(["textarea"], [control]),
-    read: () => encodeText(control.value),
+    read,
     initial: () => {
       if (select) {
         const all = options();
@@ -292,7 +309,7 @@ function textField(control: Control): FieldAccess {
       );
     },
     write: exactly(
-      () => encodeText(control.value),
+      read,
       select
         ? keepSelected(select)
         : () => {
@@ -303,7 +320,8 @@ function textField(control: Control): FieldAccess {
           },
       (encoded) => {
         const decoded = decode(encoded);
-        if (decoded.kind !== "text") return false;
+        // Revision 10 (R17; C1): never over a native editing state: what it holds could not be put back.
+        if (decoded.kind !== "text" || read() === OPAQUE) return false;
         const text = decoded.text;
         // A single select shows a text only as one of its options (R17-B: assigning another leaves NO option selected, and reads "").
         if (select && !options().some((option) => option.value === text))

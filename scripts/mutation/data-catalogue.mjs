@@ -16049,14 +16049,15 @@ export const UNIT = [
     ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /is overtaken by the next mount's/,
-    // Re-anchored in revision 4 (the capture reads the field state's allow-list); the defect is unchanged.
+    // Re-anchored in revision 4 (the capture reads the field state's allow-list); the defect is unchanged. Re-anchored in revision 10 (the
+    // values are read before the order, for the copies' accounting); the defect is unchanged.
     patch: (t) =>
       sub(
         sub(
           sub(
             t,
-            "  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n  const now = valuesOf(session);",
-            "  const order = session.order;\n  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n  const now = valuesOf(session);",
+            "  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n",
+            "  const order = session.order;\n  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n",
           ),
           '  if (session.order.lastTerminal > op) return "failed";\n',
           '  if (order.lastTerminal > op) return "failed";\n',
@@ -16570,7 +16571,10 @@ export const UNIT = [
     file: "src/lib/form-recovery/fields.ts",
     tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /reduced on a remount while the removed field holds input/,
+    // Revision 10: the removed field's copy is also refused by the positive accounting of the own copy (`accounts`), so the original case
+    // no longer reaches the drop; the drop itself is caught by the case that asserts the held content comes back when admitted again.
+    expect:
+      /reduced on a remount while the removed field holds input|admitted again: the held content comes back into the field and is captured/,
     // Re-anchored in revision 4 (a remount's adopt drops the session's values of fields the new mount does not admit); the defect is unchanged.
     patch: (t) =>
       sub(
@@ -16587,9 +16591,15 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /reduced on a remount while the removed field holds input/,
-    // Re-anchored in revision 4 (the debt check of flushSession); the defect is unchanged.
+    // Re-anchored in revision 4 (the debt check of flushSession); the defect is unchanged. Re-expressed in revision 10 as two sites: the
+    // copy that held the input is now also protected by the positive accounting of the own copy (`accounts`), so replacing it needs both
+    // protections gone (the debt check alone is MU-1942).
     patch: (t) =>
-      sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
+      sub(
+        sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
+        '    if (copy && !accounts(session.fields, copy.values, now)) return "failed";\n',
+        '    if (copy && (false as boolean)) return "failed";\n',
+      ),
   },
   {
     id: "MU-1711",
@@ -16726,11 +16736,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
       /A succeeds; B saved and sent; edited back to A; B succeeds|a submitted text needs no copy until it is edited/,
+    // Re-anchored in revision 10 (one coverage test for every kind of state; a text's coverage is its last line); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    cover.value === value &&\n    lastEdit(fields, name) <= cover.at\n",
-        "    cover.value === value\n",
+        "    (covered && cover.value === value)\n",
+        "    (cover !== undefined && cover.value === value)\n",
       ),
   },
   {
@@ -18371,18 +18382,22 @@ export const UNIT = [
     tests: [
       "tests/lib/recoverable-form-provenance.test.tsx",
       "tests/lib/recoverable-form-lineage.test.tsx",
+      "tests/lib/recoverable-form-completeness.test.tsx",
     ],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     // Revision 8: the clean-up now acts on exact debts, never on the current source, so the original case cannot reach the defect; the
     // same rule (a landed save owes only a source chosen before it was asked for) is caught by the revision-8 case.
-    expect:
-      /an older clean-up held across choosing another copy|a save asked BEFORE another copy is chosen/,
     // Re-anchored in revision 8 (R16: a landed save holds only a source restored before it was asked for); the defect is unchanged.
+    // Re-expressed in revision 10 (R11, C4) at the rule that now carries the meaning: the save holds the very source it accounted for when
+    // it was asked (taken before its order, so the order test it replaced was always true); dropping that identity lets a late save clean up
+    // and forget the copy chosen since, the original defect (caught by the revision-10 Q9 case too).
+    expect:
+      /an older clean-up held across choosing another copy|a save asked BEFORE another copy is chosen|Q9: a save asked for BEFORE another copy is chosen/,
     patch: (t) =>
       sub(
         t,
-        "    const covered = source !== null && source.id !== id && source.at < op;",
-        "    const covered = source !== null && source.id !== id;",
+        "      restored !== null && state.source === restored && restored.id !== id;",
+        "      restored !== null && restored.id !== id;",
       ),
   },
   {
@@ -18687,7 +18702,8 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /control: A updates; no other tab before A2 reads/,
     // Re-anchored in revision 8 (R16: the predecessor is named by the hand-off's lineage, never by equal text; a landed save owes it); the defect is unchanged.
-    patch: (t) => sub(t, "              ...source.lineage,\n", ""),
+    // Re-anchored in revision 10 (R17/R11 completeness: the source a save holds is the one it accounted for, `restored`); the defect is unchanged.
+    patch: (t) => sub(t, "            ...restored.lineage,\n", ""),
   },
   {
     id: "MU-1854",
@@ -19443,11 +19459,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-controls.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /cannot represent \(a file input\)|two text inputs of one name/,
+    // Re-anchored in revision 10 (R17/R11 completeness: `capturable` filters `shownOf`); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    if (names.has(name) && value !== undefined && !isUnsupported(value))",
-        "    if (names.has(name) && value !== undefined)",
+        "      ([, value]) => !isUnsupported(value),\n",
+        "      ([, value]) => value !== undefined,\n",
       ),
   },
   {
@@ -19458,12 +19475,9 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-controls.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /cannot represent \(a file input\)|two text inputs of one name/,
+    // Re-anchored in revision 10 (R17/R11 completeness: one coverage test for every kind of state); the defect is unchanged.
     patch: (t) =>
-      sub(
-        t,
-        "  if (isUnsupported(value)) {\n    const edit = lastEdit(fields, name);\n    const cover = fields.covered.get(name);\n    return edit === 0 || (cover !== undefined && edit <= cover.at);\n  }\n",
-        "",
-      ),
+      sub(t, "  if (isUnsupported(value)) return edit === 0 || covered;\n", ""),
   },
   {
     id: "MU-1905",
@@ -19473,11 +19487,12 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-controls.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /no longer fits the field/,
+    // Re-anchored in revision 10 (R17/R11 completeness: `applySnapshot` accounts for every entry of the copy in one loop); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "  for (const name of misfits)\n    if (fields.ledger[name] !== values[name]) {",
-        "  for (const name of misfits)\n    if (false as boolean) {",
+        "      if (fields.ledger[name] === value) continue;\n      owe(fields, name, { value, returns: lastEdit(fields, name) });\n",
+        "      continue;\n",
       ),
   },
   {
@@ -19671,10 +19686,11 @@ export const UNIT = [
     tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /the successor without B reports the restore incomplete/,
+    // Re-anchored in revision 10 (R17/R11 completeness: `applySnapshot` accounts for every entry of the copy in one loop); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "      owe(fields, name, {\n        value: values[name] as string,\n        returns: lastEdit(fields, name),\n      });\n",
+        "      owe(fields, name, { value, returns: lastEdit(fields, name) });\n",
         "",
       ),
   },
@@ -19687,11 +19703,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
       /BOTH earlier values stay owed|B does NOT come back over the later edit/,
+    // Re-anchored in revision 10 (R17/R11 completeness: an owed native editing state is never settled by another); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "  settleOwed(fields, name, (entry) => entry.value !== holds);",
-        "  settleOwed(fields, name, (entry) => entry.value !== holds || true);",
+        "    (entry) => entry.value !== holds || entry.value === OPAQUE,\n",
+        "    (entry) => entry.value !== holds || true,\n",
       ),
   },
   {
@@ -19724,6 +19741,332 @@ export const UNIT = [
         "    incomplete: view.incomplete ?? NONE,",
         "    incomplete: NONE,",
       ),
+  },
+  {
+    id: "MU-1922",
+    title:
+      "WEB-14a revision 10 (R17, C1): a native editing state (badInput) is read as its empty value",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /in an initially empty number field|then the field cleared and|REQUIREMENT \(activation\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    control instanceof HTMLInputElement && control.validity.badInput\n",
+        "    control instanceof HTMLInputElement && (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-1923",
+    title:
+      "WEB-14a revision 10 (R17, C1): a write goes over a native editing state (what it held cannot be put back)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the field is never written over/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (decoded.kind !== "text" || read() === OPAQUE) return false;\n',
+        '        if (decoded.kind !== "text") return false;\n',
+      ),
+  },
+  {
+    id: "MU-1924",
+    title:
+      "WEB-14a revision 10 (R17, C2): a native editing state with no edit counted yet needs nothing (an untouched count taken as proof)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /already there when the form first reads it/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (value === OPAQUE) return covered && cover.value === OPAQUE;\n",
+        "  if (value === OPAQUE) return edit === 0 || covered;\n",
+      ),
+  },
+  {
+    id: "MU-1925",
+    title:
+      "WEB-14a revision 10 (R17, C2): a native editing state ended without an edit (a script, a render) is taken as ended by the person",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a script sets 7 without an event|a render that reads the fields/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (fields.ledger[name] === OPAQUE && shown !== OPAQUE && !edited)\n    owe(fields, name, { value: OPAQUE });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1926",
+    title:
+      "WEB-14a revision 10 (R17, C2): a render that reads the fields takes what they show over a native editing state",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a render that reads the fields/,
+    patch: (t) =>
+      sub(
+        t,
+        "      take(\n        fields,\n        name,\n        field.read(),\n        lastEdit(fields, name) > (fields.seen.get(name) ?? 0),\n      );\n",
+        "      fields.ledger[name] = field.read();\n",
+      ),
+  },
+  {
+    id: "MU-1927",
+    title:
+      "WEB-14a revision 10 (R17, C2): an owed native editing state is settled by a later one shown in the field",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /one native state never settles another/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (entry) => entry.value !== holds || entry.value === OPAQUE,\n",
+        "    (entry) => entry.value !== holds,\n",
+      ),
+  },
+  {
+    id: "MU-1928",
+    title:
+      "WEB-14a revision 10 (R17, C2): what a native form reset leaves is not read as the reset's edit",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a form reset ends it/,
+    patch: (t) =>
+      sub(
+        t,
+        "      for (const name of fields.seen.keys())\n        fields.seen.set(name, fields.input - 1);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1929",
+    title:
+      "WEB-14a revision 10 (R11, C3): a restore imports only the fields the schema admits (the others neither restored nor owed)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the successor admits nothing|partial admission|an EMPTY saved value|ON THE PAGE but not admitted|closed tab|the successor does not admit the saved field/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (unshown(name)) fields.ledger[name] = values[name] as string;\n",
+        "    if (admits.has(name) && unshown(name))\n      fields.ledger[name] = values[name] as string;\n",
+      ),
+  },
+  {
+    id: "MU-1930",
+    title:
+      "WEB-14a revision 10 (R11, C3): a restore reports complete although fields of the copy are not shown",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the successor admits nothing|partial admission|an EMPTY saved value|unchecked checkbox|CHOSEN from the alternatives|ABANDONED hand-off|the successor does not admit the saved field/,
+    patch: (t) =>
+      sub(
+        t,
+        "    } else if (!unshown(name) || resolved(fields, name, value)) continue;\n",
+        "    } else continue;\n",
+      ),
+  },
+  {
+    id: "MU-1931",
+    title:
+      'WEB-14a revision 10 (R11, I2): an unknown start is taken for "" (an empty saved value of a field never shown needs nothing)',
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an EMPTY saved value/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (start !== undefined && value === start) ||\n",
+        '    value === (start ?? "") ||\n',
+      ),
+  },
+  {
+    id: "MU-1932",
+    title:
+      "WEB-14a revision 10 (R11, C4): a save replaces or cleans up a copy the form does not account for",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the form holds NO value|the clean path too/,
+    // Replaces the condition: removing the line would leave the loop without a body (a syntax error, no evidence).
+    patch: (t) =>
+      sub(
+        t,
+        '    if (copy && !accounts(session.fields, copy.values, now)) return "failed";\n',
+        '    if (copy && (false as boolean)) return "failed";\n',
+      ),
+  },
+  {
+    id: "MU-1933",
+    title:
+      "WEB-14a revision 10 (R11, C4): a field of the copy the form holds no value for is taken as accounted for",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the form holds NO value|the clean path too/,
+    patch: (t) =>
+      sub(
+        t,
+        "      name in captured || (holds !== undefined && resolved(fields, name, holds))\n",
+        "      name in captured || holds === undefined || resolved(fields, name, holds)\n",
+      ),
+  },
+  {
+    id: "MU-1934",
+    title:
+      "WEB-14a revision 10 (R11, C3): the copy restored at mount is recorded as what the form shows of it (a projection)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the form holds NO value|OWN copy read again with a narrower schema/,
+    patch: (t) =>
+      sub(
+        t,
+        "            const values = internalOf(newest);\n",
+        "            const values = valuesOf(current);\n",
+      ),
+  },
+  {
+    id: "MU-1935",
+    title:
+      "WEB-14a revision 10 (R11, C3): a copy chosen from the alternatives is recorded as what the form shows of it (a projection)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /CHOSEN from the alternatives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const values = internalOf(copy);\n",
+        "        const values = valuesOf(current);\n",
+      ),
+  },
+  {
+    id: "MU-1936",
+    title:
+      "WEB-14a revision 10 (R11): a terminal act leaves the restored copy's values owed (its clean-up refused after a failed discard)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /when the clean-up of P and H fails/,
+    patch: (t) =>
+      sub(t, "    source: source && { ...source, values: {} },\n", ""),
+  },
+  {
+    id: "MU-1937",
+    title:
+      "WEB-14a revision 10 (R11): a terminal act leaves the own copy's values owed (every later save refused after a failed discard)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /with an own copy holding a field now hidden/,
+    patch: (t) => sub(t, "    own: own && { ...own, values: {} },\n", ""),
+  },
+  {
+    id: "MU-1938",
+    title:
+      "WEB-14a revision 10 (R17): 'Discard and reload anyway' covers only what a copy can hold (a native editing state stays dirty: the discard reload never happens)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the coordinator's discard of the session|'Discard and reload anyway' after it/,
+    patch: (t) =>
+      sub(
+        t,
+        "      discard: () => terminalAct(session, shownOf(session.fields)),\n",
+        "      discard: () => terminalAct(session, valuesOf(session)),\n",
+      ),
+  },
+  {
+    id: "MU-1939",
+    title:
+      "WEB-14a revision 10 (R17): the provisional form's discard covers only what a copy can hold",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /before the form has a database/,
+    patch: (t) =>
+      sub(
+        t,
+        "        cover(own, shownOf(own), own.input);\n",
+        "        cover(own, capturable(own), own.input);\n",
+      ),
+  },
+  {
+    id: "MU-1940",
+    title:
+      "WEB-14a revision 10 (R11, C3): a field reported incomplete stays reported after it shows its value again",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the successor admits nothing|unchecked checkbox/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (left.length < named.length)\n",
+        "    if (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-1941",
+    title:
+      "WEB-14a revision 10 (R17/R11, I7): the dirty check ignores what no copy can hold (every normal reload exit proceeds)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT \(activation\)|REQUIREMENT \(fallback\)|in an initially empty number field|the successor does not admit the saved field/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (owed > 0 || hasDebt(fields)) return true;\n",
+        "  if (owed > 0) return true;\n",
+      ),
+  },
+  {
+    id: "MU-1942",
+    title:
+      "WEB-14a revision 10 (R17/R11, C4): a save goes ahead over what no copy can hold",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    // The R11 cases are refused by the second layer (`accounts`); the R17 cases with no copy reach the clean path through this check alone.
+    expect:
+      /in an initially empty number field|already there when the form first reads it|a script sets 7 without an event/,
+    patch: (t) =>
+      sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
   },
 ];
 
