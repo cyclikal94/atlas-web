@@ -24,7 +24,23 @@ export type SyncMessage =
    * page that does not lead (a follower's notice, or any page's neutral state 3). The leading page applies its own retry when the account
    * and the epoch are the ones it is bound to; the acts it makes are versioned on the failure that stands, as its own page's are.
    */
-  | { type: "retry_requested"; account: AccountId; epoch: number };
+  | { type: "retry_requested"; account: AccountId; epoch: number }
+  /**
+   * WEB-08c revision 3 (R5, T24 D, design assessment S9): the leading page's recovery job reported "Catching up" (state 2), "Couldn't
+   * finish catching up" (state 3) or nothing for the account at that epoch. Another page shows the same neutral card from it; it never
+   * changes what may be displayed (the record and the exposure protocol decide that).
+   */
+  | {
+      type: "recovery_state";
+      account: AccountId;
+      epoch: number;
+      phase: RecoveryPhase;
+    }
+  /** A page that does not lead asks the leading page for its standing recovery report (it started, or its identity changed). */
+  | { type: "recovery_state_query"; account: AccountId; epoch: number };
+
+/** The recovery job's report as the channel carries it: `none` is no report (the card is not the recovery's). */
+export type RecoveryPhase = "catching_up" | "failed" | "none";
 
 /**
  * The store a `data_changed` hint names when a page RECORDS a stop of a local write (a durable failure streak reaching its bound) or ENDS
@@ -41,6 +57,9 @@ export interface SyncChannel {
 
 const str = (v: unknown): v is string =>
   typeof v === "string" && v.length > 0 && v.length < 200;
+
+const epochOk = (v: unknown): boolean =>
+  typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 /** Validates an incoming message against the closed union; anything else is ignored. */
 export function parseSyncMessage(value: unknown): SyncMessage | null {
@@ -70,6 +89,27 @@ export function parseSyncMessage(value: unknown): SyncMessage | null {
             account: m.account,
             tab_id: m.tab_id,
             nonce: m.nonce,
+          }
+        : null;
+    case "recovery_state":
+      return str(m.account) &&
+        epochOk(m.epoch) &&
+        (m.phase === "catching_up" ||
+          m.phase === "failed" ||
+          m.phase === "none")
+        ? {
+            type: "recovery_state",
+            account: m.account,
+            epoch: m.epoch as number,
+            phase: m.phase,
+          }
+        : null;
+    case "recovery_state_query":
+      return str(m.account) && epochOk(m.epoch)
+        ? {
+            type: "recovery_state_query",
+            account: m.account,
+            epoch: m.epoch as number,
           }
         : null;
     case "retry_requested":

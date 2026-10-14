@@ -45,7 +45,7 @@ text, the accessibility snapshot and `document.title`.
 | T21 `credential_mismatch` | `web08c-traces.test.ts` T21; `web08c-k1.test.ts` (K-1); E-L6; I-L7 | L2, L3, L4 |
 | T22 resume gate and assistive technology | `production.lifecycle-a11y.spec.ts` (automated counterpart, NOT assistive-technology evidence). Revision 2: the hold targets the IDENTIFIED display read only (the `atlas-auth` transaction the `visible` handler creates inside the dispatch, held 5 s from its creation; exactly one read-only transaction asserted), and every gate/inert change is logged, so the oracle (`holdViolations`) covers the whole interval: nothing exposed before the held read was delivered or before 5 s after `visible`; branches i, ii, iii with an open protected modal dialog; "Checking your account" announced politely exactly once; (i) Y's main heading focused with one polite "different account" line and no name; (iii) the keyed field and its text, and in a separate run the scroll position, restored; a no-hold control; sensitivity: synthetic 4.9 s release/lift cases and a real-engine 4.0 s case the oracle must flag; O-3 at 6.5 s, beyond the display read's 6 s bound (human decision T22-READ-BOUND-20261012). The manual script in `docs/accessibility.md` holds the same transaction (manual runs transferred to WEB-09d, WEB-15 collecting: **not run**) | L5; manual open |
 | T23 A–P5-N, checks 1–14 | the matrices and suites of WEB-08a (cited; the session matrix runs again in Review because K-1 changed the kernel); real pages: T23 A–D in `production.lifecycle-browser.spec.ts` (a `401` recorded while `atlas-auth` is held by a page whose callback never resolves, surviving the observing page's closure), E/F/L in I-L10; check 13 is fake-matrix only (as the brief states) | L2, L4, L5 |
-| T24 and the Q20(c) display gate | `recovery-api.test.ts`, `tests/data/recovery-job.test.ts` (cited); E-L5, I-L5; I-N4/I-N5 (cited for their own stimuli); **I-L13 R1/R2** (revision 2: composed with A→B→A, a queued command and an unfinished form); branch by branch in "T24 branches" below | L2, L3, L4 |
+| T24 and the Q20(c) display gate | `recovery-api.test.ts`, `tests/data/recovery-job.test.ts` (cited); E-L5, I-L5; I-N4/I-N5 (cited for their own stimuli); **I-L13 R1/R2** (revision 2: composed with A→B→A, a queued command and an unfinished form; revision 3: under the continuous display oracle); revision 3: **LR-1 to LR-10** (`fixture.lifecycle-recovery.spec.ts`) and the WEB-09b E-R cases under the oracle; branch by branch in "T24 branches" below | L2, L4, L5 (production leader, real engines) |
 
 ## Checks (a)–(j) of the frontend plan
 
@@ -78,26 +78,49 @@ The crash is the page being closed with a named, test-only IndexedDB fault that 
 before that write the outcome is already recorded (`pending`): the reopened page waits in 1a, and the person's fresh sign-in runs the canonical procedure FIRST (EC-42),
 which re-checks the digest and asks; nothing is deleted or rendered meanwhile.
 
-## T24 branches (revision 2, R5 of the review of 11 October 2026)
+## T24 branches (revision 3, R5 of the review of 14 October 2026)
 
-The matrix specifies T24's own checks against a fake lock manager, a fault-injecting IndexedDB and a stub `/sync` (L2). The composed cases add the switch and retained
-work against the released backend. A branch with no composed case says so; it is not counted as composed.
+The revision-2 table left B′, C2, C3, D, F, G and H(i)–(iv) "L2 only". Revision 3 maps every branch to COMPOSED evidence: the production session,
+boot and leader (`/__session?leader=production`) in Chromium, Firefox and macOS WebKit with real Web Locks, IndexedDB and BroadcastChannel and a
+scripted `/sync` (the working-client checks T24 itself specifies), plus the released-backend journeys of `integration.lifecycle.spec.ts` where the
+backend, the cookie or the switch is the point.
 
-| Branch | L2 (cited by name) | Composed (L4, production leader) | Not composed, and why |
+**The continuous display oracle** (`tests/e2e/display-oracle.ts`; qualified by `fixture.lifecycle-oracle.spec.ts`: a healthy held recovery reports
+nothing; a mount, an `inert` removal by attribute and by property, an `aria-hidden` removal, a protected title and an account name shown elsewhere,
+each made AND undone in one task, are each reported; a page that escaped enrolment fails the setup check; a kernel that lets an exposure through a
+fence (two-site build mutant) is reported). It decides, in every page of the context, that the page mounted or lifted an account only while the last
+`atlas-auth` record THAT PAGE saw committed (followed at each transaction's `complete`) names the account settled with no fence entry, from before the
+application boots to the end of the case. It is T24's "`#protected-root` is never mounted before step t6", observed over the whole interval rather
+than at the end. It runs in every case below, in every case of `fixture.data-recovery.spec.ts` and `fixture.data-leader.spec.ts` (an added
+end-of-case check; their own assertions are unchanged), and in I-L13 R1/R2, I-L14 and I-L15.
+
+**Retained work** is compared WHOLE (drafts, command bodies, pending effects, unfinished forms; canonical JSON) at every boundary before the display;
+replay is allowed only after it (T24 E).
+
+| Branch | Composed evidence (three engines) | Stimulus and assertions | Differences from the trace, and why they cannot change the invariant |
 | --- | --- | --- | --- |
-| A valid cursor | `recovery-api` "T24 A"; `recovery-job` "T24 A: a valid saved cursor…" | I-L5 (switch); I-N4 (same-account re-authentication, cited) | — |
-| B 410 → replacement snapshot | `recovery-job` "T24 B: a 410 on the first recovery page…"; "server-instructed restarts" | **I-L13 R1** (switch, queued command and form kept byte-identical; activation → finish → send, in that order); I-N5 (cited) | — |
-| B′ 409 `access_changed` mid-snapshot | `recovery-job` "control: a current-epoch `409 access_changed` abandons the snapshot and restarts it" | — | L2 only: the proxy can answer one snapshot page with 409, but no composed case was added this revision |
-| C recovery-time 401 | `recovery-api` "T24 C"; `recovery-job` "T24 C" and "control: a current-epoch entry…" | **I-L13 R2** (the read held, A's new session revoked, the read's 401: a current-epoch fence, 1b, nothing sent, work kept; the next sign-in recovers and sends once). The 401 is on the FIRST recovery read, not the second page the matrix names | — |
-| C2 recording aborted, every page destroyed, offline reload | T23 E/F/L matrices | I-L10 (an ordinary request's 401 whose recording write fails; every page closed; offline reopening shows 1e; online → 1b) | the abort is not composed for a RECOVERY-class request; the recording path is class-independent in the kernel (§3.6.1), cited, not shown composed |
-| C3 `finish` finds the epoch-5 entry: NOT_ELIGIBLE | `recovery-api` "T24 C" (finish NOT_ELIGIBLE, nothing cleared) | — | L2 only |
-| D failed page commit, whole-page retry, state 3 | `recovery-job` "a failed local commit is retried as a WHOLE page…", "a quota refusal at the activation…" | — | L2 only: no production-build IndexedDB commit fault for a recovery page was added this revision |
-| E retained drafts byte-identical; no write while fenced | `recovery-job` "review cycle 1: the recovery touches no draft…" | **I-L13 R1/R2** (bodies and form rows compared byte for byte; no command sent before the fence cleared); I-L12/I-L12c (queue across the switch and a restart) | — |
-| F crash between the data commit and the clear; failed `finish` | `recovery-job` "T24 F", "`finish` that times out on the lock…"; `recovery-api` "F: a failed release…" | — | L2 only |
-| G a second re-authentication during recovery | `recovery-api` "G: a newer settlement…"; `recovery-job` "T24 G", "R1: a `stale` request answer after a data commit…" | — | L2 only |
-| H(i)–(iv) the eligibility rule refuses | `recovery-api` "H: the eligibility rule refuses" (i), (ii), (iii), (iv) | — | L2 only |
+| A valid cursor | **LR-1**; E-R1; I-L5 (released backend, switch); I-N4 (cited) | Two catch-up pages, the first with an ACCESS REMOVAL; the final page held, then `finish` held after the final data commit; a follower opened mid-recovery. Each data commit is atomic with its cursor; the fence stands and both pages are hidden at both held boundaries; the work is byte-identical; the follower reads nothing; each page displays through its own exposure; the queued draft is sent once, after, with its own key | The fenced record and the database are seeded (T24's setup, not the UI's re-authentication, which I-L13/I-L5 compose against the backend) |
+| B 410 → replacement | **I-L13 R1** (released backend, A→B→A, under the oracle); E-R2; LR-2's first half | 410 on the return's first recovery page; the replacement activated, `finish` cleared, then the send; body and form byte-identical | — |
+| B′ 409 mid-snapshot | **LR-2** (recovery mode) | 410, a snapshot whose second staged page answers `409 access_changed`: the staged generation is abandoned and never active, the old cache stays and is hidden, a new generation is asked cursor-less, the replacement is activated whole, only then the clear | E-B9 is the ordinary-mode counterpart (not fenced) |
+| C recovery-time 401 | **LR-3**; I-L13 R2 and E-R3 keep their own (first-read) scope | The FIRST page commits, the SECOND answers 401: the recovery request's own surrender (kernel `surrender`, class `recovery`, status 401, epoch 2) records a current-epoch entry; the committed page stays; nothing more is read; hidden; a re-authentication at epoch 3 keeping both entries resumes from the committed position and clears both | Re-authentication is another tab's settlement (`settleElsewhere`); the backend's revocation is I-L13 R2's |
+| C2 aborted recording, every page gone, offline reload | **E-R3b** (WEB-09b, now under the oracle); I-L10 (released backend, ordinary class) | The recovery's 401 whose recording is ABORTED; every tab closed; an offline reload reads and counts nothing; online, the session's own verification records the current-epoch entry and the account stays hidden | The recording path is the same for both classes (`handleOrdinaryAnswer`); E-R3b exercises it for the RECOVERY class |
+| C3 `finish` NOT_ELIGIBLE | **LR-4** | After the final data commit, while `finish` waits for its lock, another tab records a current-epoch entry: `finish` answers `not_eligible`, both entries stay, nothing is shown or sent | — |
+| C3 (RERUN) | **LR-5** | The entry added is of the OLDER epoch above the captured `s`: `finish` answers `rerun`, keeps it, a second catch-up clears both | — |
+| D failed page commit | **E-R4** (DataError ×3, state 3, the visible "Try again", under the oracle); **LR-6** (quota) | LR-6, per **WEB08C-T24D-QUOTA-20261014**: an injected `QuotaExceededError` on the page's second row: none of the page is durable (one transaction), the cursor stays, the fence stands, `storage_full` and state 3 at once, no automatic retry; a FOLLOWER page shows state 3 too and its "Try again" makes the leader ask for the whole page again, which applies; then the clear and the display | Decision WEB08C-T24D-QUOTA-20261014 (`atlas-orchestrator/delivery/handoffs/web08c-t24d-quota-20261014.md`, SHA-256 `b96141c4…3430`; authority `approval/WEB-08c-T24D-quota-20261014.json`, `211fce9d…5ffbb`) replaces the quota-specific automatic-retry wording only. The follower's state 3 needed the revision-3 correction K-3 (`docs/data-handover.md`) |
+| E retained drafts | every LR case; E-R11; I-L12/I-L12b/I-L12c, I-L13 R1/R2, I-L14, I-L15 | Whole retained work byte-identical until the display; recovery sends no write and no ordinary request | — |
+| F crash between commit and clear; failed t5 | **LR-7** (offline reopening); E-R6 (online reopening); E-R7 (lock timeout), E-R7b (aborted release transaction) | LR-7: the page closes after the data commit and before the clear; the next page boots OFFLINE: the fence stands, nothing is ASKED (counted before the stub's offline refusal) or shown; online, the recovery reads from the committed position and clears at once | — |
+| G second re-authentication | **LR-10** (the old epoch's read in flight); E-R7/E-R7b (after a failed `finish`); LR-3's epoch 3 (after a recovery-time 401) | LR-10: the epoch-2 answer, released after the epoch-3 settlement, is dropped and writes nothing; the new epoch reads from the saved position, catches up and clears | — |
+| H(i) current-epoch unresolved lease | E-R13 | resolved by the session's verification before anything is read | — |
+| H(ii) operation entry | **LR-8** | the leader binds nothing for the account (row 3): no read, the job idle, the operation's card (`1a.*`) shown; its resolution (T18/T19) is I-L8's | — |
+| H(iii) `credential_unverified` | E-R10, E-R14 | refused, then resolved by the session's own O11 verification in the same epoch, then the recovery runs | — |
+| H(iv) older-epoch orphan lease | **LR-9** | the dead page's epoch-1 lease is converted (E5) and cleared by the recovery's `finish` | — |
+| H, other refusals | E-R12 (gating attempt), E-R8 (current-epoch entry) | as titled | — |
 
-## Outgoing-session variants of the switch (revision 2, Q-L1–Q-L3)
+Recorded survivors of revision 2 stay as they were: QL1-F and QL1-G (the forbidden-send oracle; blocked by the dispatcher's identity/epoch checks and the
+session stamp, caught only by the B save) and QR2-a (an ordinary 401 not recorded; another detector recorded the fence). Revision 3 attributes the
+recovery-class 401 directly (LR-3's kernel `surrender` of class `recovery`).
+
+## Outgoing-session variants of the switch (revision 2, Q-L1–Q-L3; revision 3, S2/S3)
 
 | Variant | Evidence |
 | --- | --- |
@@ -106,8 +129,8 @@ work against the released backend. A branch with no composed case says so; it is
 | Outgoing session revoked/expired | I-L5, **I-L13 R1/R2** (A's session revoked, then B, then A: the queue and form survive; one send after the recovery) |
 | All pages closed while B is settled | **I-L12c** (reopened page shows B and sends nothing of A; back to A, one send) |
 | Confirmed logout instead of a switch | I-W1 (cited: the consent count, the database and queue deleted, nothing sent, an empty queue at the next sign-in); I-L11 |
-| Ordinary offline queue, then reconnect, across a switch | — not composed (a switch needs the network; the offline queue itself is WEB-09a's I-O cases, cited) |
-| Lost answer / leader takeover with the same key (Q-L2) | — not composed this revision; the same-key replay and one backend effect are WEB-09a's I-O cases (cited) |
+| Ordinary OFFLINE queue, then reconnect, across a switch | **I-L14** (revision 3, S2): A's command queued while the page is offline at the application's boundary (nothing leaves it; the body is durable); back online every attempt is refused at a gateway until B is settled (a one-shot refusal let the dispatcher apply it to A before the switch: a correct send, but no switch); nothing of A while B, B's own command accepted; back to A: one replay, identical body and key, applied once to A only |
+| Lost answer / leader takeover with the same key (Q-L2) | **I-L15** (revision 3, S3): the backend APPLIES A's command and the answer is lost (`drop_after_forward`); the leading page closes before its retry; the other page takes over and retries A's command (refused at a gateway until A → B); nothing of A while B; back to A the retry carries the identical key and body and the backend applied it ONCE, to A only. I-O1 (cited) is the same-page lost answer |
 
 Sensitivity (integration A/B, `.agtx/evidence/WEB-08c/revision-2/ql1-ab/`): a save that does not wake the leader's dispatcher (MU-1232) fails I-L12's B control; a
 410 handled as a plain failed read fails I-L13 R1. Two leader faults that bind the previous account's queue (QL1-F, and QL1-G which also presents it as the new account's
@@ -166,7 +189,16 @@ the B save). A 401 not recorded by the ordinary-request path (QR2-a) did not fai
   then killed eight scripts, each at a trivial first statement (the signature of a stalled content process, not of a loop). Not reproduced in
   50 runs (30 at the usual load, 20 at a load average near 400). Cause not established; not re-run for a pass. Revision 1 adds a bounded,
   instrumented diagnostic of the original schedule (in-page heartbeat; on a stall, the Firefox processes' states and native stacks): see the
-  WEB-08c report.
+  WEB-08c report. **Revision 3 (R6 of the review of 14 October 2026):** the external watchdog is qualified for its result handling (its exit
+  status is the child's, 3 when it fired; a capture running when the child exits is awaited and marked complete or not; the Playwright runner
+  and worker processes are sampled beside the browser's; four self-checks met their declared outcomes) and the bounded diagnosis ran: both
+  reference schedules 10 times each and the UNCHANGED T22 (i) test 10 times under the watchdog with every protocol message logged: no stall.
+  The original log's distinctive lines (the password manager's synchronous-message fallback, "Script terminated by timeout" at the hide)
+  appear in EVERY healthy run, so they do not discriminate; its `FormHandlerChild … destroyed` lines belong to the forced teardown. No mechanism
+  is established. **Human decision WEB08C-HF9-HF13-20261014** (`atlas-orchestrator/delivery/handoffs/web08c-hf9-hf13-20261014.md`, SHA-256
+  `4d6c6616…bc15`): an unresolved, unreproduced diagnostic risk (not passed); the investigation transfers to WEB-17 (named outstanding item; hand-over in
+  `docs/data-handover.md`); WEB-09d keeps its ordinary pre-beta Firefox acceptance; any recurrence (WEB-08c's Review, WEB-09d's Firefox acceptance, later campaigns) reopens it, captured with the qualified
+  watchdog. Not D5's disposition; no assertion, timer or engine coverage relaxed.
 * **HF-10** (revision 2, Firefox, `fixture.session-neutral`): a web font's download started 1 ms before the test's next `goto` was cancelled by that navigation, and
   Firefox logged it as a console error. Test ordering: each width now waits for `document.fonts.ready` before navigating again; no message is tolerated.
 * **HF-11** (revision 2, WebKit, E-L10): "index-….js was preloaded using link preload but not used within a few seconds". The lazy chunks (`react`, `sections`,
@@ -177,6 +209,19 @@ the B save). A 401 not recorded by the ordinary-request path (QR2-a) did not fai
 * **HF-13** (revision 2, OPEN, Chromium, `fixture.session-gate` "visible … focus returns to the control that had it"): once, on a pool runner, focus was not on the
   keyed control after the lift (1 failure in 62 pool runs of that case). Not reproduced by targeted probes (identity reads answered while hidden or 0–40 ms after the
   resume, three engines) or 40 repeats of the original schedule; cause not established. A failure now attaches every page's kernel trace (diagnostic only).
+  **Revision 3 (R8 of the review of 14 October 2026): a product defect that produces exactly this failure, corrected.** The original trace shows the keyed
+  link still in the DOM after the lift (no remount; the saved target existed). The protected surface's deferred heading focus (waiting up to 120
+  animation frames for the router's heading after a mount) was not cancelled by the level-0 gate and focused the heading even after focus had moved
+  inside the tree, so an attempt still waiting from the mount could run after the restoring lift and take focus (key `null`). Shown deterministically:
+  jsdom (`resume-gate.test.tsx`, HF-13 describe) and real engines (`fixture.session-gate.spec.ts`, every animation frame held from boot: fails on the
+  previous build in three engines, passes on the corrected one); MU-8C-HF13b–d; a build with the restoration suppressed fails the original assertion in
+  three engines. Excluded by measurement (`.agtx/evidence/WEB-08c/revision-3/hf13-probe/`): the neutral heading's effect decides in its own sync-lane
+  commit while the gate is open (React 19.3 flushes those passive effects in the commit), and in the unmodified schedule the mount's attempt runs in the
+  same frame as Playwright's successful poll. Which path campaign 7 took cannot be proved from its trace (Playwright snapshots carry no focus); the
+  original assertion is unchanged, its precondition is now asserted at the focus step and at the hide, and a failure attaches a record of every focus
+  writer with its stack. **Human decision WEB08C-HF9-HF13-20261014** (same hand-off): accepted as resolved by the product correction, subject to independent
+  verification of the correction, its before/after evidence and detector sensitivity, the residual uncertainty stated; a recurrence
+  reopens it.
 * **The fixture bundle**: WEB-08c's shell-side code took the fixture build's initial JavaScript from 240,479 B (base) to 241,970 B after three
   reductions (`.agtx/evidence/WEB-08c/budget/`); operator decision FB-20261010-08C-14A re-recorded the fixture baseline and fixed its ceiling at
   266,167 B (`docs/packaging.md`). The production build is within its unchanged budget (108,620 B ≤ 109,795 B).

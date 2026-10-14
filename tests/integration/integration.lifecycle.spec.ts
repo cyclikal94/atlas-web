@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
+import { installDisplayOracle } from "../e2e/display-oracle";
 import {
   ACCOUNTS,
   expect,
@@ -763,6 +764,12 @@ test.describe("I-L13: T24 composed with A→B→A and retained work", () => {
     provokes,
   }) => {
     provokes(401, 410);
+    // WEB-08c revision 3 (R5): the whole case runs under the continuous display oracle (qualified by fixture.lifecycle-oracle.spec.ts):
+    // no page mounts or lifts an account, or shows either account's name, before its own last committed record shows that account settled
+    // with no fence. It is what proves "A stays hidden during the replacement" over the whole interval; the end-state checks below remain.
+    const oracle = await installDisplayOracle(context, {
+      markers: [name("mia"), name("liam")],
+    });
     const page = await leaderPage(context);
     const w = await fencedWithWork(page, "mia", "liam", "r1");
     let rule: { id: string } = { id: "" };
@@ -819,6 +826,7 @@ test.describe("I-L13: T24 composed with A→B→A and retained work", () => {
     expect(
       JSON.stringify(await rowsOf(page, w.id.account_id, "form_recovery")),
     ).toBe(w.formBefore);
+    await oracle.assertClean("I-L13 R1");
   });
 
   test("I-L13 R2 (T24 F/G, Q-R2): back to the fenced A, A's NEW session is revoked while the recovery's first read is held: the recovery's 401 records a current-epoch fence (1b), nothing of A's queue is sent, the work is kept; the next sign-in recovers and sends the command ONCE", async ({
@@ -826,6 +834,10 @@ test.describe("I-L13: T24 composed with A→B→A and retained work", () => {
     provokes,
   }) => {
     provokes(401);
+    // WEB-08c revision 3 (R5): under the continuous display oracle, as R1.
+    const oracle = await installDisplayOracle(context, {
+      markers: [name("nora"), name("kate")],
+    });
     const page = await leaderPage(context);
     const w = await fencedWithWork(page, "nora", "kate", "r2");
     let hold: { id: string } = { id: "" };
@@ -887,6 +899,253 @@ test.describe("I-L13: T24 composed with A→B→A and retained work", () => {
       (await backendPeople("nora")).filter((l) => l === "I-L13 r2 A queued"),
     ).toHaveLength(1);
     expect(await backendPeople("kate")).not.toContain("I-L13 r2 A queued");
+    await oracle.assertClean("I-L13 R2");
+  });
+});
+
+// ---- I-L14/I-L15: WEB-08c revision 3 (R5 of the review of 14 October 2026; design assessment S2, S3): the queue across the switch from an
+// OFFLINE origin, and a lost answer taken over by another page across the switch ----
+
+/**
+ * OFFLINE at the application's boundary (as I-L10): every API request of the context fails before the network, and the page's
+ * `navigator.onLine` answers false with the `offline` event; `onlineAgain` undoes both and fires `online`.
+ */
+async function offline(context: BrowserContext, page: Page) {
+  await context.route(`**${API}/**`, (route) =>
+    route.abort("internetdisconnected"),
+  );
+  await page.evaluate(() => {
+    const w = window as unknown as { __offline?: boolean };
+    w.__offline = true;
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      get: () => w.__offline !== true,
+    });
+    window.dispatchEvent(new Event("offline"));
+  });
+}
+async function onlineAgain(context: BrowserContext, page: Page) {
+  await context.unroute(`**${API}/**`);
+  await page.evaluate(() => {
+    (window as unknown as { __offline?: boolean }).__offline = false;
+    window.dispatchEvent(new Event("online"));
+  });
+}
+const gatewayRefusal = (ordinal?: number) =>
+  proxy.addRule({
+    method: "POST",
+    path: `${API}/commands`,
+    action: "refuse",
+    status: 503,
+    json: {
+      code: "unavailable",
+      message: "gateway",
+      request_id: "proxy",
+      details: [],
+    },
+    ...(ordinal === undefined ? {} : { ordinal }),
+  });
+/** A → B through the rail, the activation held while A is checked absent; B's own command sent and accepted. Returns when it was. */
+async function toBWithOwnCommand(page: Page, a: Who, b: Who) {
+  await openSwitchFromRail(page, a);
+  const held = await proxy.addRule({
+    method: "POST",
+    path: `${API}/browser-sessions/activate`,
+    action: "hold",
+  });
+  await switchToNew(page, b);
+  await expect
+    .poll(async () => (await proxy.held())[held.id] ?? 0, { timeout: 30_000 })
+    .toBeGreaterThanOrEqual(1);
+  await expectAbsent(page, name(a));
+  await proxy.release(held.id);
+  await proxy.removeRule(held.id);
+  await railShows(page, b);
+  return Date.now();
+}
+
+test.describe("I-L14/I-L15: the queue across the switch, offline origin and lost answer (WEB-08c revision 3)", () => {
+  test("I-L14 (S2): A's command is queued OFFLINE (nothing leaves the page; its body is durable); back online its first attempt is refused by a gateway (PROXY-INJECTED); A → B: nothing of A is sent while B is settled and B's own command is accepted; back to A: replayed ONCE, identical body and key, applied once to A only", async ({
+    context,
+  }) => {
+    const oracle = await installDisplayOracle(context, {
+      markers: [name("liam"), name("mia")],
+    });
+    const page = await leaderPage(context);
+    const sent = observeCommands(page);
+    const a = await signedIn(page, "liam");
+    await railShows(page, "liam");
+    await offline(context, page);
+    const queued = await enqueueThroughProduction(
+      page,
+      createPerson(crypto.randomUUID(), "I-L14 A offline"),
+    );
+    expect(queued.kind).toBe("queued");
+    await page.waitForTimeout(3_000);
+    expect(sent, "nothing leaves an offline page").toEqual([]);
+    expect(
+      JSON.stringify(await rowsOf(page, a.account_id, "draft_commands")),
+    ).toContain("I-L14 A offline");
+    // Back online behind a barrier: EVERY attempt is refused before the backend until B is settled, so the queue still holds A's command
+    // at the switch (a one-shot refusal let the dispatcher's next attempt apply it to A before the switch: a correct send, but no switch).
+    const barrier = await gatewayRefusal();
+    await onlineAgain(context, page);
+    await expect
+      .poll(() => sent.filter((r) => r.key === queued.localId).length, {
+        timeout: 30_000,
+      })
+      .toBeGreaterThanOrEqual(1);
+    const first = sent.filter((r) => r.key === queued.localId);
+    const switchedAt = await toBWithOwnCommand(page, "liam", "mia");
+    await proxy.removeRule(barrier.id);
+    expect(
+      (await proxy.log()).filter(
+        (e) =>
+          e.method === "POST" &&
+          e.path === `${API}/commands` &&
+          !e.events.some((v: { event: string }) => v.event === "refused"),
+      ),
+      "nothing of A reached the backend before the switch",
+    ).toEqual([]);
+    await page.waitForTimeout(5_000);
+    const bId = crypto.randomUUID();
+    const bQueued = await enqueueThroughProduction(
+      page,
+      createPerson(bId, "I-L14 B own"),
+    );
+    expect(bQueued.kind).toBe("queued");
+    await expect
+      .poll(() => backendPeople("mia"), { timeout: 60_000 })
+      .toContain("I-L14 B own");
+    const duringB = sent.filter((r) => r.at >= switchedAt);
+    expect(duringB.map((r) => r.key)).not.toContain(queued.localId);
+    expect(duringB.some((r) => r.body.includes("I-L14 A offline"))).toBe(false);
+    expect(await backendPeople("liam")).not.toContain("I-L14 A offline");
+    await returnTo(page, "liam");
+    await railShows(page, "liam", 60_000);
+    await expect
+      .poll(() => backendPeople("liam"), { timeout: 120_000 })
+      .toContain("I-L14 A offline");
+    await page.waitForTimeout(3_000);
+    const replays = sent.filter(
+      (r) => r.key === queued.localId && r.at > switchedAt,
+    );
+    expect(replays, "replayed exactly once after the return").toHaveLength(1);
+    expect(replays[0]?.body, "byte-identical body").toBe(first[0]?.body);
+    expect(
+      (await backendPeople("liam")).filter((l) => l === "I-L14 A offline"),
+    ).toHaveLength(1);
+    expect(await backendPeople("mia")).not.toContain("I-L14 A offline");
+    await oracle.assertClean("I-L14");
+  });
+
+  test("I-L15 (S3, Q-L2): the backend APPLIES A's command and its answer is lost (PROXY-INJECTED drop after forward); the leading page closes before any retry and the other page TAKES OVER (its retry refused by a gateway before A → B); nothing of A is sent while B is settled; back to A the retry carries the identical key and body and the backend applied the command ONCE, to A only", async ({
+    context,
+  }) => {
+    const oracle = await installDisplayOracle(context, {
+      markers: [name("nora"), name("quinn")],
+    });
+    const one = await leaderPage(context);
+    const sentOne = observeCommands(one);
+    const a = await signedIn(one, "nora");
+    await railShows(one, "nora");
+    const two = await leaderPage(context);
+    const sentTwo = observeCommands(two);
+    await railShows(two, "nora");
+    const roleOf = (page: Page) =>
+      page.evaluate(() => window.__atlasFixture?.session?.leader().role);
+    expect(await roleOf(one)).toBe("leader");
+    expect(await roleOf(two)).toBe("follower");
+    const lost = await proxy.addRule({
+      method: "POST",
+      path: `${API}/commands`,
+      action: "drop_after_forward",
+      ordinal: 1,
+    });
+    const queued = await enqueueThroughProduction(
+      one,
+      createPerson(crypto.randomUUID(), "I-L15 A lost answer"),
+    );
+    expect(queued.kind).toBe("queued");
+    await expect
+      .poll(
+        async () =>
+          (await proxy.log()).filter(
+            (e) =>
+              e.rule === lost.id &&
+              e.events.some((v: { event: string }) => v.event === "dropped"),
+          ).length,
+        { timeout: 30_000 },
+      )
+      .toBe(1);
+    // Every later attempt is refused before the backend until A → B has happened: the takeover's retry cannot be applied before the
+    // switch. Then the leading page goes, before its own retry (a 2 s back-off).
+    const barrier = await gatewayRefusal();
+    await one.close();
+    expect(
+      sentOne.filter((r) => r.key === queued.localId),
+      "the first page sent it once",
+    ).toHaveLength(1);
+    // The backend applied it once already.
+    await expect
+      .poll(() => backendPeople("nora"), { timeout: 30_000 })
+      .toContain("I-L15 A lost answer");
+    // The other page leads now and retries A's command (refused at the gateway): the in-flight draft survived the takeover.
+    await expect.poll(() => roleOf(two), { timeout: 30_000 }).toBe("leader");
+    await expect
+      .poll(() => sentTwo.filter((r) => r.key === queued.localId).length, {
+        timeout: 60_000,
+      })
+      .toBeGreaterThanOrEqual(1);
+    const firstBody = sentOne.find((r) => r.key === queued.localId)?.body;
+    expect(sentTwo.find((r) => r.key === queued.localId)?.body).toBe(firstBody);
+    const switchedAt = await toBWithOwnCommand(two, "nora", "quinn");
+    await proxy.removeRule(barrier.id);
+    await two.waitForTimeout(5_000);
+    const bQueued = await enqueueThroughProduction(
+      two,
+      createPerson(crypto.randomUUID(), "I-L15 B own"),
+    );
+    expect(bQueued.kind).toBe("queued");
+    await expect
+      .poll(() => backendPeople("quinn"), { timeout: 60_000 })
+      .toContain("I-L15 B own");
+    const duringB = sentTwo.filter((r) => r.at >= switchedAt);
+    expect(duringB.map((r) => r.key)).not.toContain(queued.localId);
+    expect(duringB.some((r) => r.body.includes("I-L15 A lost answer"))).toBe(
+      false,
+    );
+    await returnTo(two, "nora");
+    await railShows(two, "nora", 60_000);
+    // A's retry, identical key and body; the backend's idempotency answers it without a second effect.
+    await expect
+      .poll(
+        () =>
+          sentTwo.filter((r) => r.key === queued.localId && r.at > switchedAt)
+            .length,
+        { timeout: 120_000 },
+      )
+      .toBeGreaterThanOrEqual(1);
+    await expect
+      .poll(
+        async () =>
+          (
+            (await rowsOf(two, a.account_id, "drafts")) as Array<{
+              local_id: string;
+              status: string;
+            }>
+          ).find((d) => d.local_id === queued.localId)?.status ?? "gone",
+        { timeout: 60_000 },
+      )
+      .not.toBe("sending");
+    for (const r of sentTwo.filter((x) => x.key === queued.localId))
+      expect(r.body, "identical body on every retry").toBe(firstBody);
+    expect(
+      (await backendPeople("nora")).filter((l) => l === "I-L15 A lost answer"),
+      "one backend effect",
+    ).toHaveLength(1);
+    expect(await backendPeople("quinn")).not.toContain("I-L15 A lost answer");
+    await oracle.assertClean("I-L15");
   });
 });
 

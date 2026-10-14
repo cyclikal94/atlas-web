@@ -16931,6 +16931,148 @@ export const UNIT = [
         "    void journey;",
       ),
   },
+  {
+    id: "MU-8C-HF13b",
+    title:
+      "WEB-08c revision 3 (R8, HF-13): the level-0 gate does not cancel a heading attempt still waiting from the mount",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/resume-gate.test.tsx"],
+    expect: /a level-0 gate cancels the pending heading attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        "      // The gate owns focus until the lift: a heading attempt still waiting from the mount is obsolete (HF-13).\n      focusToken += 1;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-8C-HF13c",
+    title:
+      "WEB-08c revision 3 (R8, HF-13): a deferred heading attempt takes focus from a control the person moved to inside the tree",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/resume-gate.test.tsx"],
+    expect: /does not take focus from a control the person moved to/,
+    patch: (t) => sub(t, "      if (deferred && moved) return;\n", ""),
+  },
+  {
+    id: "MU-8C-HF13d",
+    title:
+      "WEB-08c revision 3 (R8, HF-13 sensitivity): a same-account lift does not restore the keyed control (the original assertion must fail)",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/resume-gate.test.tsx"],
+    expect:
+      /focus returns to the control that had it|the original schedule of HF-13/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (target) target.focus();\n",
+        "        if (target) void target;\n",
+      ),
+  },
+  {
+    id: "MU-8C-RR1",
+    title:
+      "WEB-08c revision 3 (R5, S9): the leading page does not announce its recovery report (a follower keeps showing 'Catching up' after the recovery stopped)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /adopts the leader's 'failed' report/,
+    patch: (t) =>
+      sub(
+        t,
+        '      deps.channel.post({ type: "recovery_state", ...announced });\n',
+        "      void announced;\n",
+      ),
+  },
+  {
+    id: "MU-8C-RR2",
+    title:
+      "WEB-08c revision 3 (R5, S9): a hint for another identity replaces the page's kept report (and withdraws its card 3)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect:
+      /a report for another epoch is not adopted|a report for another account is not adopted/,
+    patch: (t) =>
+      sub(
+        t,
+        "      identity.account_id !== message.account ||\n      identity.epoch !== message.epoch\n    )\n      return;\n    hinted = {",
+        "      false\n    )\n      return;\n    hinted = {",
+      ),
+  },
+  {
+    id: "MU-8C-RR3",
+    title:
+      "WEB-08c revision 3 (R5, S9): the leading page applies another page's recovery report instead of showing its own job's",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /the leading page never adopts/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const applyHinted = (): void => {\n    if (leading()) return;\n",
+        "  const applyHinted = (): void => {\n",
+      ),
+  },
+  {
+    id: "MU-8C-RR4",
+    title:
+      "WEB-08c revision 3 (R5, S9): a page that starts after the report never asks for the standing one",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /opened AFTER the report/,
+    patch: (t) =>
+      sub(
+        t,
+        '    asked = key;\n    deps.channel.post({\n      type: "recovery_state_query",\n',
+        '    asked = key;\n    void ({\n      type: "recovery_state_query",\n',
+      ),
+  },
+  {
+    id: "MU-8C-RR5",
+    title:
+      "WEB-08c revision 3 (R5, S9): the leading page does not answer a query for its standing report",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /opened AFTER the report/,
+    patch: (t) =>
+      sub(
+        t,
+        '              deps.channel.post({ type: "recovery_state", ...standing });\n',
+        "              void standing;\n",
+      ),
+  },
+  {
+    id: "MU-8C-RR6",
+    title:
+      "WEB-08c revision 3 (R5, S9): a page whose identity changed keeps the report kept for the previous identity",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /identity changes drops the adopted report/,
+    patch: (t) =>
+      sub(
+        t,
+        "      kept !== null &&\n      identity !== null &&\n      kept.account === identity.account_id &&\n      kept.epoch === identity.epoch\n",
+        "      kept !== null &&\n      identity !== null\n",
+      ),
+  },
+  {
+    id: "MU-8C-RR7",
+    title:
+      "WEB-08c revision 3 (R5, S9): a page is given a report that changes nothing it shows (every hint re-evaluates it)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /is NOT re-evaluated by a report that changes nothing/,
+    patch: (t) => sub(t, "    if (next === applied) return;\n", ""),
+  },
+  {
+    id: "MU-8C-RR8",
+    title:
+      "WEB-08c revision 3 (R5, S9; the T22 (i) regression): a page that is not showing the recovery card is given a report (a hint wakes a gated or hidden page)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/recovery-report-routing.test.ts"],
+    expect: /T22 \(i\): a page that is NOT showing the recovery card/,
+    patch: (t) =>
+      sub(t, "    if (next !== null && !showingRecoveryCard()) return;\n", ""),
+  },
 ];
 
 /**
@@ -19583,6 +19725,145 @@ export const ENGINE = [
         t,
         "      : UNKNOWN;\n  const personal = personalEvidence.known",
         "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
+      ),
+  },
+  {
+    id: "MU-1301",
+    title:
+      "WEB-08c revision 3 (R5, T24 A/S4): (REAL ENGINE) the recovery finishes after its FIRST catch-up page, before the final data commit (the fence is cleared early)",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-1 T24 A",
+    expect: /LR-1 T24 A/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (hasMore) {\n      setState({ kind: "running", mode: issued.mode, path: issued.path });',
+        '    if (hasMore && issued.mode !== "recovery") {\n      setState({ kind: "running", mode: issued.mode, path: issued.path });',
+      ),
+  },
+  {
+    id: "MU-1302",
+    title:
+      "WEB-08c revision 3 (R5, T24 B\u2032): (REAL ENGINE) a recovery snapshot's `409 access_changed` does not restart the snapshot",
+    file: "src/data/engine/recovery-job.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-2 T24 B",
+    expect: /LR-2 T24 B/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (code === "access_changed" && issued.path === "snapshot")',
+        '      if (code === "access_changed" && issued.path === "snapshot" && (false as boolean))',
+      ),
+  },
+  {
+    id: "MU-1303",
+    title:
+      "WEB-08c revision 3 (R5, T24 C, QR2-a attribution): (REAL ENGINE) a RECOVERY-class request's 401 is not recorded as an observation",
+    file: "src/session/kernel/send.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-3 T24 C",
+    expect: /LR-3 T24 C/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (response.status === 401) {\n    observe("unauthenticated");',
+        '  if (response.status === 401) {\n    if (inflight.klass !== "recovery") observe("unauthenticated");',
+      ),
+  },
+  {
+    id: "MU-1304",
+    title:
+      "WEB-08c revision 3 (R5, T24 C3): (REAL ENGINE) `finish_recovery` does not refuse a current-epoch entry (NOT_ELIGIBLE never answered)",
+    file: "src/session/model/reducers/operation.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-4 T24 C3",
+    expect: /LR-4 T24 C3/,
+    patch: (t) =>
+      sub(
+        t,
+        "        f.epoch >= input.epoch,\n",
+        "        f.epoch > input.epoch,\n",
+      ),
+  },
+  {
+    id: "MU-1305",
+    title:
+      "WEB-08c revision 3 (R5, T24 C3 RERUN): (REAL ENGINE) `finish_recovery` removes older-epoch entries above the captured `s` too (over-clearing)",
+    file: "src/session/model/reducers/operation.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-5 T24 C3",
+    expect: /LR-5 T24 C3/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const kept = list.filter((f) => !(f.epoch < input.epoch && f.seq <= input.s));",
+        "  const kept = list.filter((f) => !(f.epoch < input.epoch));",
+      ),
+  },
+  {
+    id: "MU-1306",
+    title:
+      "WEB-08c revision 3 (R5, T24 D, K-3): (REAL ENGINE) the leading page does not announce its recovery report (a follower never shows state 3)",
+    file: "src/data/leader/leader.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-6 T24 D",
+    expect: /LR-6 T24 D/,
+    patch: (t) =>
+      sub(
+        t,
+        '      deps.channel.post({ type: "recovery_state", ...announced });\n',
+        "      void announced;\n",
+      ),
+  },
+  {
+    id: "MU-1308",
+    title:
+      "WEB-08c revision 3 (R5, T24 H(ii)): (REAL ENGINE) the leader binds an account whose operation is unresolved (row 3)",
+    file: "src/data/leader/leader.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-8 T24 H\\(ii\\)",
+    expect: /LR-8 T24 H\(ii\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (deps.operationPending(identity.account_id)) return;\n",
+        "    void deps.operationPending;\n",
+      ),
+  },
+  {
+    id: "MU-1309",
+    title:
+      "WEB-08c revision 3 (R5, T24 H(iv)): (REAL ENGINE) E5 never converts an older-epoch unresolved lease into an entry (the reducer refuses every lease; a call-site mutant of recovery.begin was EQUIVALENT: verifyUnresolved converts first too)",
+    file: "src/session/model/reducers/observation.ts",
+    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
+    grep: "LR-9 T24 H\\(iv\\)",
+    expect: /LR-9 T24 H\(iv\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        lease.epoch >= settled.epoch\n      )\n        continue;\n      pushFence(",
+        "        lease.epoch >= 0\n      )\n        continue;\n      pushFence(",
+      ),
+  },
+  {
+    id: "MU-1313",
+    title:
+      "WEB-08c revision 3 (R8, HF-13): (REAL ENGINE) both corrections reverted: the level-0 gate does not cancel the mount's heading attempt and a deferred attempt takes focus from the restored control",
+    file: "src/session/adapters/protected-surface.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "HF-13 \\(revision 3\\)",
+    expect: /HF-13 \(revision 3\)/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      // The gate owns focus until the lift: a heading attempt still waiting from the mount is obsolete (HF-13).\n      focusToken += 1;\n",
+          "",
+        ),
+        "      if (deferred && moved) return;\n",
+        "",
       ),
   },
 ];

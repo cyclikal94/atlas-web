@@ -59,6 +59,8 @@ export interface LeaderPage {
     move(account: AccountId | null, epoch?: number): void;
   };
   begins: Array<RecoveryBegin>;
+  /** Every report this page's session was given (its own job's, or one adopted from another page: WEB-08c revision 3). */
+  reports: Array<"catching_up" | "failed" | null>;
 }
 
 export interface LeaderWorld {
@@ -175,6 +177,7 @@ export function leaderWorld(): LeaderWorld {
         subscribe: () => () => undefined,
       };
       const begins: RecoveryBegin[] = [];
+      const reports: Array<"catching_up" | "failed" | null> = [];
       const attachments: LeaderAttachment[] = [];
       const leader = createSyncLeader({
         election: createLeaderElection({
@@ -218,7 +221,9 @@ export function leaderWorld(): LeaderWorld {
               handle: { account: a, epoch: pageEnv.identity.epoch, s: 1 },
             },
           finish: async () => "cleared",
-          report: () => undefined,
+          report: (phase) => {
+            reports.push(phase);
+          },
         },
         // Nothing in this world refuses a request before it is sent: the admission probe always finds it open (R3's waits are the
         // recovery world's and the native cases').
@@ -291,6 +296,7 @@ export function leaderWorld(): LeaderWorld {
         },
         identity,
         begins,
+        reports,
       };
       pages.set(id, page);
       leader.start();

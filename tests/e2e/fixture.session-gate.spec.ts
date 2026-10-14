@@ -141,9 +141,66 @@ const gated = (page: Page) =>
     };
   });
 
+/**
+ * WEB-08c revision 3 (R8, HF-13): DIAGNOSTIC ONLY, no assertion depends on it. Every programmatic `focus()`/`blur()` (with its stack), every
+ * focus change and every open/close of a dialog is recorded in the page from before the application boots, so a failed focus assertion
+ * names the writer that moved focus (the campaign-7 trace could not: Playwright's DOM snapshots carry no focus).
+ */
+async function recordFocusWriters(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const log: Array<Record<string, unknown>> = [];
+    (window as unknown as { __focusWriters?: unknown }).__focusWriters = log;
+    const describe = (el: Element | null | undefined): string | null => {
+      if (!el) return null;
+      if (el === document.body) return "BODY";
+      const key = el.getAttribute("data-focus-key");
+      return `${el.tagName}${el.id ? `#${el.id}` : ""}${key ? `[${key}]` : ""}${el.closest("#protected-root") ? "{protected}" : ""}${el.closest("[data-neutral-state]") ? "{neutral}" : ""}`;
+    };
+    const push = (entry: Record<string, unknown>) => {
+      if (log.length < 2_000)
+        log.push({
+          t: Math.round(performance.now() * 10) / 10,
+          active: describe(document.activeElement),
+          ...entry,
+        });
+    };
+    const stack = () =>
+      (new Error().stack ?? "").split("\n").slice(2, 7).join(" | ");
+    const focus = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function (this: HTMLElement, o) {
+      focus.call(this, o);
+      push({ op: "focus()", el: describe(this), stack: stack() });
+    };
+    const blur = HTMLElement.prototype.blur;
+    HTMLElement.prototype.blur = function (this: HTMLElement) {
+      blur.call(this);
+      push({ op: "blur()", el: describe(this), stack: stack() });
+    };
+    for (const name of ["showModal", "close"] as const) {
+      const original = HTMLDialogElement.prototype[name];
+      HTMLDialogElement.prototype[name] = function (
+        this: HTMLDialogElement,
+        ...args: never[]
+      ) {
+        (original as (...a: never[]) => void).apply(this, args);
+        push({ op: `dialog.${name}`, el: describe(this) });
+      } as never;
+    }
+    document.addEventListener(
+      "focusin",
+      (e) => push({ op: "focusin", el: describe(e.target as Element) }),
+      true,
+    );
+  });
+}
+
 test.describe("S-GATE: exposure and the resume gate with real inert and the real top layer", () => {
+  test.beforeEach(async ({ context }) => {
+    await recordFocusWriters(context);
+  });
   // WEB-08c revision 2 (HF-13, pool request-d461b22caa2343fc898f): DIAGNOSTIC ONLY, no assertion is affected. When a case fails, every open
   // session-harness page's kernel trace is attached, so an unexplained resume (focus not returned once in 62 pool runs) can be read next time.
+  // Revision 3 adds the page's record of focus writers (above).
   test.afterEach(async ({ context }, testInfo) => {
     if (testInfo.status === testInfo.expectedStatus) return;
     for (const [index, page] of context.pages().entries()) {
@@ -153,6 +210,18 @@ test.describe("S-GATE: exposure and the resume gate with real inert and the real
       if (trace)
         await testInfo.attach(`kernel-trace-page-${index}.json`, {
           body: JSON.stringify(trace, null, 1),
+          contentType: "application/json",
+        });
+      const writers = await page
+        .evaluate(
+          () =>
+            (window as unknown as { __focusWriters?: unknown })
+              .__focusWriters ?? null,
+        )
+        .catch(() => null);
+      if (writers)
+        await testInfo.attach(`focus-writers-page-${index}.json`, {
+          body: JSON.stringify(writers, null, 1),
           contentType: "application/json",
         });
     }
@@ -233,14 +302,38 @@ test.describe("S-GATE: exposure and the resume gate with real inert and the real
     await stub(context);
     await seed(context, settled("acct-a", 1, "s1"));
     const page = await open(context);
-    await page.evaluate(() => {
+    // WEB-08c revision 3 (R8, HF-13): the focus step's precondition is ASSERTED (the keyed link exists, is connected and is the active
+    // element in the same task), and asserted again in the task of the hide, where the position is saved. Nothing else changed.
+    const focused = await page.evaluate(() => {
       const link = document.querySelector<HTMLElement>(
         'nav[aria-label="Primary"] a',
       );
       link?.setAttribute("data-focus-key", "first-nav");
       link?.focus();
+      return {
+        exists: link !== null,
+        connected: link?.isConnected === true,
+        active: link !== null && document.activeElement === link,
+      };
     });
-    await setVisibility(page, "hidden");
+    expect(focused, "precondition: the keyed link has focus").toEqual({
+      exists: true,
+      connected: true,
+      active: true,
+    });
+    const atHide = await page.evaluate(() => {
+      const before =
+        document.activeElement?.getAttribute("data-focus-key") ?? null;
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      return before;
+    });
+    expect(atHide, "precondition: the keyed link has focus at the hide").toBe(
+      "first-nav",
+    );
     const stillUp = await page.evaluate(() => {
       Object.defineProperty(document, "visibilityState", {
         configurable: true,
@@ -266,6 +359,96 @@ test.describe("S-GATE: exposure and the resume gate with real inert and the real
       ),
     ).toBe("first-nav");
     expect(await page.title()).toMatch(/Atlas/);
+  });
+
+  test("HF-13 (revision 3): a heading attempt still waiting from the mount cannot take focus after the lift has restored the keyed control (the page's animation frames held from boot, then run)", async ({
+    context,
+  }) => {
+    await stub(context);
+    await seed(context, settled("acct-a", 1, "s1"));
+    // NAMED HOLD (test-only): every animation frame the page asks for is queued, not run, until the test runs the queue. The protected
+    // surface waits for the router's heading with animation frames, so the mount's heading attempt stays waiting through the whole
+    // focus/hide/resume/lift sequence: the order campaign 7's failure needs, made deterministic. Waits below poll on a timer, never a frame.
+    await context.addInitScript(() => {
+      const frames = { hold: true, queue: [] as FrameRequestCallback[] };
+      (window as unknown as { __frames?: typeof frames }).__frames = frames;
+      const raf = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = (callback: FrameRequestCallback) => {
+        if (!frames.hold) return raf(callback);
+        frames.queue.push(callback);
+        return frames.queue.length;
+      };
+    });
+    const page = await context.newPage();
+    await page.goto(`/__session?route=${encodeURIComponent("/today")}`);
+    await page.waitForFunction(
+      () => {
+        const root = document.getElementById("protected-root");
+        return (
+          root &&
+          !root.hasAttribute("inert") &&
+          root.querySelector("h1") !== null
+        );
+      },
+      undefined,
+      { polling: 50 },
+    );
+    // Precondition of this schedule: the heading is rendered, a frame is waiting and the heading has NOT been focused by the mount.
+    const waiting = await page.evaluate(() => ({
+      queued:
+        (window as unknown as { __frames?: { queue: unknown[] } }).__frames
+          ?.queue.length ?? 0,
+      headingFocused:
+        document.activeElement === document.querySelector("#protected-root h1"),
+    }));
+    expect(waiting.queued, "precondition: a frame is waiting").toBeGreaterThan(
+      0,
+    );
+    expect(waiting.headingFocused, "precondition: heading not focused").toBe(
+      false,
+    );
+    const focused = await page.evaluate(() => {
+      const link = document.querySelector<HTMLElement>(
+        'nav[aria-label="Primary"] a',
+      );
+      link?.setAttribute("data-focus-key", "first-nav");
+      link?.focus();
+      return link !== null && document.activeElement === link;
+    });
+    expect(focused, "precondition: the keyed link has focus").toBe(true);
+    await setVisibility(page, "hidden");
+    await setVisibility(page, "visible");
+    await page.waitForFunction(
+      () => !document.getElementById("protected-root")?.hasAttribute("inert"),
+      undefined,
+      { polling: 50 },
+    );
+    // The original immediate assertion.
+    expect(
+      await page.evaluate(() =>
+        document.activeElement?.getAttribute("data-focus-key"),
+      ),
+    ).toBe("first-nav");
+    // Every frame held since boot now runs, in the order asked, as the browser's next frame would run them.
+    const ran = await page.evaluate(() => {
+      const frames = (
+        window as unknown as {
+          __frames?: { hold: boolean; queue: FrameRequestCallback[] };
+        }
+      ).__frames;
+      if (!frames) return 0;
+      frames.hold = false;
+      const due = frames.queue.splice(0);
+      for (const callback of due) callback(performance.now());
+      return due.length;
+    });
+    expect(ran).toBeGreaterThan(0);
+    expect(
+      await page.evaluate(() =>
+        document.activeElement?.getAttribute("data-focus-key"),
+      ),
+      "no obsolete heading attempt takes focus after the restoring lift",
+    ).toBe("first-nav");
   });
 
   test("a fence recorded while the page was hidden prevents the lift: level 1, the reconnect card, nothing protected remains", async ({

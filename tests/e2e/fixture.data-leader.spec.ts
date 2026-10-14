@@ -32,6 +32,7 @@ import {
   untilSync,
 } from "./data-leader-helpers";
 import { upsert, uuid } from "./data-sync-helpers";
+import { type DisplayOracle, installDisplayOracle } from "./display-oracle";
 import { expect, test } from "./helpers";
 
 /**
@@ -48,6 +49,32 @@ import { expect, test } from "./helpers";
  *   E-R1  matrix 3.7.3: a fenced account (settled at epoch 2 over an epoch-1 `invalid_session` entry) is caught up from its saved cursor
  *         while hidden, then `finish` clears the fence and the account is displayed; unsent drafts are byte-identical.
  */
+
+// WEB-08c revision 3 (R5; design assessment P1/P2): every case of this file ALSO runs under the continuous no-early-display oracle
+// (`display-oracle.ts`, qualified by `fixture.lifecycle-oracle.spec.ts`): no page mounts or lifts an account, or shows a protected title,
+// before its own last committed `atlas-auth` record names that account settled with no fence entry, and every page of the context was
+// enrolled before its application ran. The cases' own assertions are unchanged; this adds a check over the whole run.
+let displayOracle: DisplayOracle | null = null;
+test.beforeEach(async ({ context }) => {
+  displayOracle = await installDisplayOracle(context);
+});
+test.afterEach(async ({ context }, testInfo) => {
+  const oracle = displayOracle;
+  displayOracle = null;
+  if (!oracle) return;
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await testInfo.attach("display-oracle-violations.json", {
+      body: JSON.stringify(
+        { violations: oracle.violations(), pages: context.pages().length },
+        null,
+        1,
+      ),
+      contentType: "application/json",
+    });
+    return;
+  }
+  await oracle.assertClean(testInfo.title);
+});
 
 test.describe("E-B: production leadership and the first snapshot", () => {
   test("E-B1 one leader among three pages; the followers send nothing and report a follower's status", async ({

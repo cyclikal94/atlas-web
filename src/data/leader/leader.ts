@@ -18,7 +18,7 @@ import {
   type RecoveryJob,
   type RecoveryJobDeps,
 } from "../engine/recovery-job";
-import type { SyncChannel } from "../engine/sync-channel";
+import type { RecoveryPhase, SyncChannel } from "../engine/sync-channel";
 import {
   createSyncEngine,
   type SyncEngine,
@@ -166,11 +166,112 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
   const service = (): AccountService | null =>
     bound?.service.live === true ? bound.service : null;
 
+  /**
+   * WEB-08c revision 3 (R5 of the review of 14 October 2026, T24 D; design assessment S9): the recovery job's report ("Catching up",
+   * state 2; "Couldn't finish catching up", state 3) was the page memory of the LEADING page only, so every other page of the account kept
+   * saying "Catching up" after the recovery had stopped, and offered no "Try again" (which already reaches the leading page on
+   * `atlas-sync`). The leading page now announces each report for the identity it serves, as a HINT; a page that does not lead shows the
+   * same card when the hint names exactly its own (account, epoch), and asks for the standing report when it starts or its identity
+   * changes. The hint changes only which neutral card is shown: what may be displayed is decided by the record and the exposure protocol.
+   */
+  let announced: {
+    account: AccountId;
+    epoch: number;
+    phase: RecoveryPhase;
+  } | null = null;
+  /**
+   * The latest report the leading page announced for THIS page's identity (a hint, kept), and the report this page's session was last
+   * given. A report only chooses between the recovery cards (2 and 3), and every `recovery.report` makes the session evaluate again, so a
+   * page is given a report only while it SHOWS card 2 or 3 and only when it changes it. A page that is gated, hidden, frozen or displaying
+   * is never woken by a hint (found by T22 (i): a hidden page that adopted the switching leader's report evaluated and closed its display
+   * before the resume; a frozen Chromium page receives queued broadcasts on unfreeze, before `visible`); it takes the kept report when it
+   * comes to show the card.
+   */
+  let hinted: {
+    account: AccountId;
+    epoch: number;
+    phase: "catching_up" | "failed" | null;
+  } | null = null;
+  let applied: "catching_up" | "failed" | null = null;
+  let asked: string | null = null;
+  const showingRecoveryCard = (): boolean => {
+    const view = deps.view.get();
+    return (
+      view.kind === "neutral" && (view.state === "2" || view.state === "3")
+    );
+  };
+  const applyHinted = (): void => {
+    if (leading()) return;
+    const identity = deps.identity.get();
+    const kept = hinted;
+    const next =
+      kept !== null &&
+      identity !== null &&
+      kept.account === identity.account_id &&
+      kept.epoch === identity.epoch
+        ? kept.phase
+        : null;
+    if (next === applied) return;
+    // Not showing the recovery card: nothing to change, nothing woken. (Withdrawing one is always allowed: it follows the evaluation that
+    // changed the identity, or the leader's own report.)
+    if (next !== null && !showingRecoveryCard()) return;
+    applied = next;
+    deps.recovery.report(next);
+  };
+  const recovery: SyncLeaderDeps["recovery"] = {
+    begin: (account) => deps.recovery.begin(account),
+    finish: (handle) => deps.recovery.finish(handle),
+    report(phase) {
+      deps.recovery.report(phase);
+      const identity = deps.identity.get();
+      if (identity === null) return;
+      announced = {
+        account: identity.account_id,
+        epoch: identity.epoch,
+        phase: phase ?? "none",
+      };
+      deps.channel.post({ type: "recovery_state", ...announced });
+    },
+  };
+  const adoptReport = (message: {
+    account: AccountId;
+    epoch: number;
+    phase: RecoveryPhase;
+  }): void => {
+    const identity = deps.identity.get();
+    if (
+      identity === null ||
+      identity.account_id !== message.account ||
+      identity.epoch !== message.epoch
+    )
+      return;
+    hinted = {
+      account: message.account,
+      epoch: message.epoch,
+      phase: message.phase === "none" ? null : message.phase,
+    };
+    applyHinted();
+  };
+  /** A page that does not lead: follow the kept report (its card or identity may have changed), and ask once per identity for it. */
+  const askForReport = (): void => {
+    applyHinted();
+    const identity = deps.identity.get();
+    const key =
+      identity === null ? null : `${identity.account_id}:${identity.epoch}`;
+    if (identity === null || key === asked) return;
+    asked = key;
+    deps.channel.post({
+      type: "recovery_state_query",
+      account: identity.account_id,
+      epoch: identity.epoch,
+    });
+  };
+
   const job = createRecoveryJob({
     identity: deps.identity,
     view: deps.view,
     fetchFor: deps.fetchFor,
-    recovery: deps.recovery,
+    recovery,
     admission: deps.admission,
     apiUrl: deps.apiUrl,
     online: deps.online,
@@ -443,6 +544,15 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
 
   const follow = (): void => {
     if (disposed) return;
+    if (leading()) {
+      // The page leads now: its own job reports; a card adopted from the previous leader is no longer this page's to keep.
+      asked = null;
+      hinted = null;
+      if (applied !== null) {
+        applied = null;
+        deps.recovery.report(null);
+      }
+    } else askForReport();
     if (!leading()) {
       attempt += 1;
       opening = null;
@@ -504,6 +614,23 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
         // is woken by its own facade only, so the hint is what makes it look now rather than at some unrelated wake.
         deps.channel.subscribe((message) => {
           // Another page's person asked for a retry of updates: this page applies it only if it leads that account at that epoch.
+          if (message.type === "recovery_state") {
+            adoptReport(message);
+            return;
+          }
+          if (message.type === "recovery_state_query") {
+            const standing = announced;
+            if (
+              leading() &&
+              standing !== null &&
+              // No report is the asking page's default: nothing to send.
+              standing.phase !== "none" &&
+              standing.account === message.account &&
+              standing.epoch === message.epoch
+            )
+              deps.channel.post({ type: "recovery_state", ...standing });
+            return;
+          }
           if (message.type === "retry_requested") {
             retryHere({ account: message.account, epoch: message.epoch });
             return;
