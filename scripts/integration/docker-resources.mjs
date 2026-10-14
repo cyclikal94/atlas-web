@@ -342,14 +342,16 @@ export async function disposeLabelled(docker, { filter, refs = {} }) {
     let found;
     let own;
     try {
-      found = await inventory(docker, filter);
+      // The stack's own leases first, and on their own: when the rest of the inventory cannot be read, each image is still
+      // released or its pending obligation named (review r7 DA-1, revision 8), never silently left behind.
       own = await leasesOf(docker, filter);
+      for (const l of own)
+        if (!leases.some((x) => x.name === l.name)) leases.push(l);
+      found = await inventory(docker, filter);
     } catch (error) {
       result.errors.push(String(error?.message ?? error));
       break;
     }
-    for (const l of own)
-      if (!leases.some((x) => x.name === l.name)) leases.push(l);
     // Lease volumes are released with their images, after the containers that used the images are gone.
     const volumes = found.volumes.filter((v) => !own.some((l) => l.name === v));
     if (
@@ -584,6 +586,8 @@ async function releaseImage(docker, lease, refs, result) {
   } catch (error) {
     out.action = "unknown";
     out.error = String(error?.message ?? error);
+    // Undecided: the pin's owner record (if there is one) still holds the obligation; say where it would be.
+    out.obligation = recordName(lease.key);
     out.ok = false;
     return out;
   }

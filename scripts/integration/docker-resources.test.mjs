@@ -837,6 +837,11 @@ test("DA-1: when the daemon cannot be identified, nothing is acquired and a rele
   });
   assert.equal(result.ok, false);
   assert.equal(result.images[0]?.action, "unknown");
+  assert.equal(
+    result.images[0]?.obligation,
+    recordName(pinKey(BACKEND_IMAGE)),
+    "an undecided release names the record that may still hold its obligation",
+  );
   assert.equal(state.volumes.has("a-lease"), true);
   assert.equal(state.images.has(BACKEND_IMAGE), true);
 });
@@ -910,4 +915,47 @@ test("DA-1: a leftover lease of a settled generation holds nothing: the next gen
   assert.equal(retry.ok, true);
   assert.equal(retry.images[0]?.action, "generation_settled");
   assert.equal(state.volumes.size, 0);
+});
+
+test("DA-1: when the containers cannot be listed, the stack's image release is still attempted and names its pending obligation", async () => {
+  let broken = false;
+  const { state, docker } = fakeDaemon({
+    fail: (args) =>
+      broken && args[0] === "ps"
+        ? {
+            status: 1,
+            stdout: "",
+            stderr: "Cannot connect to the Docker daemon",
+          }
+        : null,
+  });
+  await acquireImage(docker, {
+    ref: BACKEND_IMAGE,
+    labels: LABELS,
+    name: "a-lease",
+  });
+  state.containers.set("c".repeat(64), {
+    name: "atlas-it-x-backend",
+    labels: { ...LABELS },
+    image: BACKEND_IMAGE,
+    mounts: [],
+  });
+  broken = true;
+  const result = await disposeLabelled(docker, { filter: FILTER });
+  assert.equal(result.remaining, "unknown");
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.images.length,
+    1,
+    "the lease was found although the containers could not be listed",
+  );
+  assert.equal(result.images[0]?.action, "unknown");
+  assert.equal(result.images[0]?.obligation, recordName(pinKey(BACKEND_IMAGE)));
+  assert.equal(
+    state.images.has(BACKEND_IMAGE),
+    true,
+    "nothing is removed while its users cannot be seen",
+  );
+  assert.equal(state.volumes.has(recordName(pinKey(BACKEND_IMAGE))), true);
+  assert.equal(state.volumes.has("a-lease"), true);
 });
