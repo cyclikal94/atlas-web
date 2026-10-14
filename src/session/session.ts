@@ -78,6 +78,28 @@ export function createSessionWithKernel(
   const compat = new MutableStore<ApiCompatibility>({ status: "unknown" });
   let lastVerifiedAt = Number.NEGATIVE_INFINITY;
 
+  /**
+   * HF1-SHARED-CONFIRMATION-20261013: the record's latest server confirmation of THIS session (its settlement, or any page's clean identity
+   * read), less than the interval old, counts as this page's last verification. A timestamp in the future proves nothing. It only spares a
+   * background check; it never permits display or sending.
+   */
+  const confirmedRecently = (identity: {
+    account_id: string;
+    epoch: number;
+    session_id: string;
+  }) => {
+    const shared = k.lastRecord?.confirmation;
+    if (
+      !shared ||
+      shared.account_id !== identity.account_id ||
+      shared.epoch !== identity.epoch ||
+      shared.session_id !== identity.session_id
+    )
+      return false;
+    const age = ports.clock.now() - Date.parse(shared.confirmed_at);
+    return age >= 0 && age < config.resumeVerificationMinIntervalMs;
+  };
+
   const resumeVerification = () => {
     const identity = k.identity.get();
     if (
@@ -85,7 +107,8 @@ export function createSessionWithKernel(
       k.memory.display.kind !== "displaying" ||
       !ports.page.isOnline() ||
       ports.clock.now() - lastVerifiedAt <
-        config.resumeVerificationMinIntervalMs
+        config.resumeVerificationMinIntervalMs ||
+      confirmedRecently(identity)
     )
       return;
     lastVerifiedAt = ports.clock.now();

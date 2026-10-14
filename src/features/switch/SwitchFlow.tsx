@@ -208,7 +208,7 @@ export function SwitchPicker({
               tabIndex={0}
               data-switch-list=""
               onKeyDown={onKeyDown}
-              className="flex flex-col gap-1 outline-none focus-visible:ring-2 focus-visible:ring-focus rounded-row"
+              className="flex flex-col gap-1 rounded-row"
             >
               {rows.map((row, index) => {
                 const selected = index === active;

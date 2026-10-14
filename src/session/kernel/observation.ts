@@ -244,11 +244,15 @@ export async function classify403(
 }
 
 /** A non-invalidating answer to a request that surrendered (E1): delete the lease, tell the others, reopen. */
-export function cleanRelease(k: Kernel, inflight: InFlight): void {
+export function cleanRelease(
+  k: Kernel,
+  inflight: InFlight,
+  confirm?: Parameters<typeof retireLease>[3],
+): void {
   // The lease is removed BEFORE its lock is released; a lock already surrendered stays surrendered.
   const handle = inflight.activity.leaseHandle;
   inflight.activity.leaseHandle = null;
-  void retireLease(k, inflight.lease, handle).then(() => {
+  void retireLease(k, inflight.lease, handle, confirm).then(() => {
     k.ports.hints.post({ type: "auth_state_changed" });
   });
 }

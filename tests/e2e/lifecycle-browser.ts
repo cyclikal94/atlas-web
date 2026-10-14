@@ -63,15 +63,29 @@ export interface FirstFrame {
   title: string;
 }
 
+export interface ResumeOptions {
+  /**
+   * T22 (revision 2): hold ONLY the display check's record read, the `atlas-auth` transaction the session's `visible` handler creates
+   * synchronously inside the `visibilitychange` dispatch, so that its completion is delivered `holdDisplayReadMs` after that transaction
+   * was CREATED. Nothing else is held. See `holdableAuth`.
+   */
+  holdDisplayReadMs?: number;
+  /**
+   * HISTORICAL (revision 1 and HF-9's original schedule only; never T22 evidence): every `atlas-auth` transaction created before
+   * `performance.now() + holdAuthWindowMs` has its completion delivered no earlier than that instant.
+   */
+  holdAuthWindowMs?: number;
+}
+
 /**
  * t0/t1 of matrix T4/T22: the page is hidden (a real `visibilitychange`), then, in Chromium, frozen over the DevTools protocol
  * (`Page.setWebLifecycleState`). Returns `resume()`, which unfreezes, shows the page and reports the state SYNCHRONOUSLY after the `visible`
- * event, before any task of the page has run: the first frame.
+ * event, before any task of the page has run: the first frame. `window.__visibleAt` records the instant the `visible` event was dispatched.
  */
 export async function hideThenShow(
   page: Page,
   browserName: string,
-): Promise<(options?: { holdAuthMs?: number }) => Promise<FirstFrame>> {
+): Promise<(options?: ResumeOptions) => Promise<FirstFrame>> {
   await page.evaluate(() => {
     (window as unknown as { __visibility: string }).__visibility = "hidden";
     document.dispatchEvent(new Event("visibilitychange"));
@@ -83,61 +97,134 @@ export async function hideThenShow(
   if (cdp) await cdp.send("Page.setWebLifecycleState", { state: "frozen" });
   return async (options = {}) => {
     if (cdp) await cdp.send("Page.setWebLifecycleState", { state: "active" });
-    return page.evaluate((holdAuthMs) => {
-      // T22's held local check, armed in the SAME task as the `visible` event (see `holdableAuth` below).
-      if (holdAuthMs > 0)
-        (window as unknown as { __holdAuthUntil: number }).__holdAuthUntil =
-          performance.now() + holdAuthMs;
-      (window as unknown as { __visibility: string }).__visibility = "visible";
-      document.dispatchEvent(new Event("visibilitychange"));
-      const root = document.getElementById("protected-root");
-      const gate = document.querySelector("dialog[open]");
-      const focusable = root
-        ? [
-            ...root.querySelectorAll<HTMLElement>(
-              "a[href], button, input, textarea, select, [tabindex]",
-            ),
-          ].filter((el) => !el.closest("[inert]"))
-        : [];
-      return {
-        inert: root?.hasAttribute("inert") ?? false,
-        ariaHidden: root?.getAttribute("aria-hidden") === "true",
-        gateOpen: gate !== null,
-        reachable: focusable.map((el) => el.outerHTML.slice(0, 80)),
-        title: document.title,
-      };
-    }, options.holdAuthMs ?? 0);
+    return page.evaluate(
+      ({ readMs, windowMs }) => {
+        const w = window as unknown as {
+          __holdAuthUntil?: number;
+          __holdDisplayRead?: { ms: number; armed: boolean } | null;
+          __visibleAt?: number;
+          __visibility: string;
+        };
+        // Armed in the SAME task as the `visible` event and disarmed when its dispatch returns (see `holdableAuth` below).
+        if (windowMs > 0) w.__holdAuthUntil = performance.now() + windowMs;
+        w.__holdDisplayRead = readMs > 0 ? { ms: readMs, armed: true } : null;
+        w.__visibility = "visible";
+        w.__visibleAt = performance.now();
+        document.dispatchEvent(new Event("visibilitychange"));
+        if (w.__holdDisplayRead) w.__holdDisplayRead.armed = false;
+        const root = document.getElementById("protected-root");
+        const gate = document.querySelector("dialog[open]");
+        const focusable = root
+          ? [
+              ...root.querySelectorAll<HTMLElement>(
+                "a[href], button, input, textarea, select, [tabindex]",
+              ),
+            ].filter((el) => !el.closest("[inert]"))
+          : [];
+        return {
+          inert: root?.hasAttribute("inert") ?? false,
+          ariaHidden: root?.getAttribute("aria-hidden") === "true",
+          gateOpen: gate !== null,
+          reachable: focusable.map((el) => el.outerHTML.slice(0, 80)),
+          title: document.title,
+        };
+      },
+      {
+        readMs: options.holdDisplayReadMs ?? 0,
+        windowMs: options.holdAuthWindowMs ?? 0,
+      },
+    );
   };
 }
 
+/** One `atlas-auth` transaction held by `holdableAuth`'s display-read hold. */
+export interface HeldRead {
+  /** `performance.now()` when the transaction was created. */
+  created: number;
+  /** When the engine's own `complete` event reached the hook (null: not yet). */
+  nativeComplete: number | null;
+  /** When the hook delivered it to the store's `oncomplete` (null: not yet). */
+  delivered: number | null;
+  /** `put`/`delete` calls made on its object store (a record read makes none). */
+  writes: number;
+}
+
 /**
- * TEST-ONLY (T22's "local check delayed"): while `performance.now()` is before `window.__holdAuthUntil`, every `atlas-auth` transaction
- * created has its completion delivered no earlier than that instant, so the resume's local check (whichever transaction decides it) is held
- * for the window, and no transaction waits longer than the window from its creation. A window of 4 s stays inside the kernel's own 5 s
- * cover-stall bound (`coverStallMs`); a longer wait is a STALLED store, which fails closed (finding O-3). No product hook exists.
+ * TEST-ONLY (T22's "local check delayed"). Revision 2: the hold targets the IDENTIFIED read. The session's `visible` handler starts the display
+ * check synchronously, and `transact` creates its transaction synchronously (`idb-auth-store.ts`), so the transaction created on
+ * `atlas-auth` while `window.__holdDisplayRead.armed` is true (only inside `resume()`'s `visibilitychange` dispatch) IS the display check's
+ * record read. Its native completion is kept and delivered `ms` after the transaction was CREATED: what the store and kernel observe as
+ * "the read answered" is that delivery. Every held transaction is logged in `window.__heldReads` (creation, native completion, delivery,
+ * writes); a spec asserts exactly one, with no writes, so a hold that hit another transaction fails its setup. No product hook exists.
+ *
+ * `holdAuthWindowMs` keeps the revision-1 window hold for the historical HF-9 schedule only (`window.__heldAuth` counts it).
  */
 export async function holdableAuth(context: BrowserContext) {
   await context.addInitScript(() => {
     const w = window as unknown as {
       __holdAuthUntil?: number;
       __heldAuth?: number;
+      __holdDisplayRead?: { ms: number; armed: boolean } | null;
+      __heldReads?: Array<{
+        created: number;
+        nativeComplete: number | null;
+        delivered: number | null;
+        writes: number;
+      }>;
     };
+    w.__heldReads = [];
     const transaction = IDBDatabase.prototype.transaction;
     IDBDatabase.prototype.transaction = function (
       this: IDBDatabase,
       ...args: Parameters<IDBDatabase["transaction"]>
     ) {
       const tx = transaction.apply(this, args);
-      const until = w.__holdAuthUntil ?? 0;
-      if (this.name !== "atlas-auth" || performance.now() >= until) return tx;
-      w.__heldAuth = (w.__heldAuth ?? 0) + 1;
+      if (this.name !== "atlas-auth") return tx;
+      const created = performance.now();
+      const display = w.__holdDisplayRead;
+      const windowUntil = w.__holdAuthUntil ?? 0;
+      let deliverAt: number;
+      let entry: NonNullable<typeof w.__heldReads>[number] | null = null;
+      if (display?.armed) {
+        deliverAt = created + display.ms;
+        entry = { created, nativeComplete: null, delivered: null, writes: 0 };
+        w.__heldReads?.push(entry);
+        const objectStore = tx.objectStore.bind(tx);
+        tx.objectStore = (name: string) => {
+          const store = objectStore(name);
+          for (const method of ["put", "delete"] as const) {
+            const original = store[method].bind(store) as (
+              ...a: unknown[]
+            ) => IDBRequest;
+            (store as unknown as Record<string, unknown>)[method] = (
+              ...a: unknown[]
+            ) => {
+              if (entry) entry.writes += 1;
+              return original(...a);
+            };
+          }
+          return store;
+        };
+      } else if (created < windowUntil) {
+        deliverAt = windowUntil;
+        w.__heldAuth = (w.__heldAuth ?? 0) + 1;
+      } else return tx;
       let handler: ((this: IDBTransaction, event: Event) => unknown) | null =
         null;
       tx.addEventListener("complete", (event) => {
-        setTimeout(
-          () => handler?.call(tx, event),
-          Math.max(0, until - performance.now()),
-        );
+        if (entry) entry.nativeComplete = performance.now();
+        // A timer may fire slightly EARLY against `performance.now()` (Chromium, campaign 2026-10-13T21-05-25.391Z-08a4ecef: a "5 s" hold
+        // delivered at 4,999.x ms), so delivery waits until the deadline has really passed.
+        const deliver = () => {
+          const left = deliverAt - performance.now();
+          if (left > 0) {
+            setTimeout(deliver, Math.ceil(left));
+            return;
+          }
+          if (entry) entry.delivered = performance.now();
+          handler?.call(tx, event);
+        };
+        deliver();
       });
       Object.defineProperty(tx, "oncomplete", {
         configurable: true,
@@ -149,6 +236,67 @@ export async function holdableAuth(context: BrowserContext) {
       return tx;
     } as typeof transaction;
   });
+}
+
+/** The display-read hold's log (`holdableAuth`). */
+export const heldReads = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __heldReads?: HeldRead[] }).__heldReads ?? [],
+  );
+
+/**
+ * Every change of the resume gate (`dialog#resume-gate` open) and of `#protected-root`'s `inert`, with its `performance.now()` instant, from
+ * the first script of every page: the gate's whole history, so an early lift between two samples cannot go unseen.
+ */
+export async function recordGateTransitions(context: BrowserContext) {
+  await context.addInitScript(() => {
+    const log: Array<{ at: number; gateOpen: boolean; inert: boolean }> = [];
+    (window as unknown as { __gateLog: typeof log }).__gateLog = log;
+    const snapshot = () => {
+      const gateOpen =
+        document.querySelector("dialog#resume-gate[open]") !== null;
+      // A page whose protected root does not exist yet exposes nothing: recorded as inert.
+      const inert =
+        document.getElementById("protected-root")?.hasAttribute("inert") ??
+        true;
+      const last = log[log.length - 1];
+      if (!last || last.gateOpen !== gateOpen || last.inert !== inert)
+        log.push({ at: performance.now(), gateOpen, inert });
+    };
+    new MutationObserver(snapshot).observe(document, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["open", "inert"],
+    });
+  });
+}
+
+export interface GateTransition {
+  at: number;
+  gateOpen: boolean;
+  inert: boolean;
+}
+export const gateLog = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { __gateLog?: GateTransition[] }).__gateLog ?? [],
+  );
+
+/**
+ * The first instant at or after `from` when the protected tree was exposed (gate closed AND root not inert), or null. A pure function of
+ * the transition log, so a spec can also show that it detects an early lift (the sensitivity case).
+ */
+export function firstExposure(
+  log: GateTransition[],
+  from: number,
+): number | null {
+  let current: GateTransition | undefined;
+  for (const entry of log) if (entry.at <= from) current = entry;
+  if (current && !current.gateOpen && !current.inert) return from;
+  for (const entry of log)
+    if (entry.at > from && !entry.gateOpen && !entry.inert) return entry.at;
+  return null;
 }
 
 /**

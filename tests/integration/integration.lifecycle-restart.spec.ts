@@ -310,6 +310,46 @@ async function sessionAlive(who: Who, sessionId: string) {
   return alive;
 }
 
+/** A sign-in exchange for `who` on `deviceId` whose grant is NOT redeemed; the verifier is kept so the grant itself can be redeemed later. */
+async function issueGrant(who: Who, deviceId: string) {
+  await budget(who);
+  const verifier = freshVerifier();
+  const exchanged = await raw("POST", "/browser-sessions", {
+    body: {
+      username: ACCOUNTS[who].username,
+      password: ACCOUNTS[who].password,
+      device_id: deviceId,
+      attempt_challenge: await challengeFor(verifier),
+    },
+  });
+  expect(exchanged.status).toBe(200);
+  const grant = (exchanged.json as { grant?: string }).grant ?? "";
+  expect(grant).not.toBe("");
+  return { grant, verifier };
+}
+
+/** `POST /browser-sessions/activate` with exactly this grant and verifier, then `current()` with the cookie it set (if any). */
+async function activateGrant(issued: { grant: string; verifier: string }) {
+  const activated = await raw("POST", "/browser-sessions/activate", {
+    body: { grant: issued.grant, verifier: issued.verifier },
+  });
+  const [pair] = (activated.setCookie[0] ?? "").split(";");
+  const cookie = activated.status === 200 ? (pair ?? "") : "";
+  if (cookie === "")
+    return { status: activated.status, cookie, sessionId: "", current: null };
+  const current = await raw("GET", "/browser-sessions/current", {
+    cookie,
+    headers: { "x-atlas-session": "1" },
+  });
+  const body = current.json as { session_id?: string } | null;
+  return {
+    status: activated.status,
+    cookie,
+    sessionId: body?.session_id ?? "",
+    current: current.json,
+  };
+}
+
 // ---- I-L8: T18 logout, every page closed --------------------------------------------------------------------------------------------
 
 test.describe("I-L8: T18 logout with every page closed, recovered from the envelope (rendered data and a draft)", () => {
@@ -669,51 +709,104 @@ test.describe("I-L8: T19 self-retirement with every page closed (rendered data a
     ).toContain("t19q3-draft");
   });
 
-  test("I-L8 T19 S3/S4: a grant for this device issued by another sign-in exchange after the read (S3), and then redeemed (S4): rejected_stale each time, nothing deleted, and S3's grant survives (its sign-in is not silently killed)", async ({
+  // WEB-08c revision 2 (R5 of the review of 11 October 2026; design assessment Q-S3/Q-S4): revision 1 ran S3 and S4 as one loop, checked only
+  // that the captured grant STRING was non-empty (it would pass if the rejected retirement had cancelled the grant) and made S4 a fresh
+  // exchange instead of redeeming the grant it had issued. Each variant now has its own fresh baseline; the verifier is kept, and the issued
+  // grant itself is redeemed: after the rejection (S3) or before it (S4). The cancelled-grant control shows the redemption oracle detects a
+  // destroyed grant.
+  test("I-L8 T19 S3: a grant G1 for this device issued after the read, NOT redeemed, then the retirement: rejected_stale, nothing deleted, and G1 (with its own verifier) still activates a session that current() identifies", async ({
     context,
     provokes,
   }) => {
     provokes(409);
     const page = await leaderPage(context);
-    const x = await seededAccount(page, "ivan", "t19s-draft");
+    const x = await seededAccount(page, "ivan", "t19s3-draft");
     const deviceId = (await records(page)).device?.device_id ?? "";
-    for (const variant of ["S3", "S4"] as const) {
-      const row = await readCurrentDevice(page);
-      // Another sign-in exchange for (ivan, this device): a grant is ISSUED (and for S4, redeemed into a session).
-      await budget("ivan");
-      const exchanged = await raw("POST", "/browser-sessions", {
-        body: {
-          username: ACCOUNTS.ivan.username,
-          password: ACCOUNTS.ivan.password,
-          device_id: deviceId,
-          attempt_challenge: await challengeFor(freshVerifier()),
-        },
-      });
-      expect(exchanged.status).toBe(200);
-      const grant = (exchanged.json as { grant?: string }).grant ?? "";
-      if (variant === "S4") {
-        const s4 = await rawSignIn("ivan", deviceId);
-        expect(s4.sessionId).toBeTruthy();
-      }
-      const calls = keyedCalls(page, "DELETE", /\/devices\/[^/]+$/);
-      const started = await retire(page, row);
-      expect(started.kind).toBe("started");
-      await untilView(page, "neutral", "1a.device_changed", 60_000);
-      expect(calls.find((c) => c.key === started.operation_id)?.status).toBe(
-        409,
-      );
-      expect(await hasDatabase(page, x.account_id)).toBe(true);
-      expect(
-        JSON.stringify(await rowsOf(page, x.account_id, "form_recovery")),
-      ).toContain("t19s-draft");
-      if (variant === "S3") expect(grant.length).toBeGreaterThan(0);
-      // Review the device: the card leads back to the account.
-      await page
-        .getByRole("button", { name: "Review this device" })
-        .click()
-        .catch(() => undefined);
-      await untilView(page, "displaying", undefined, 60_000);
-    }
+    const row = await readCurrentDevice(page);
+    const g1 = await issueGrant("ivan", deviceId);
+    const calls = keyedCalls(page, "DELETE", /\/devices\/[^/]+$/);
+    const started = await retire(page, row);
+    expect(started.kind).toBe("started");
+    await untilView(page, "neutral", "1a.device_changed", 60_000);
+    const keyed = calls.filter((c) => c.key === started.operation_id);
+    expect(keyed).toHaveLength(1); // rejected_stale is never retried with a fresh token
+    expect(keyed[0]?.status).toBe(409);
+    expect(await hasDatabase(page, x.account_id)).toBe(true);
+    expect(
+      JSON.stringify(await rowsOf(page, x.account_id, "form_recovery")),
+    ).toContain("t19s3-draft");
+    expect(await sessionAlive("ivan", x.session_id)).toBe(true);
+    // G1 survived: exactly G1 with V1 activates, and the new session is identified by current().
+    const redeemed = await activateGrant(g1);
+    expect(redeemed.status).toBe(200);
+    expect(redeemed.current).toMatchObject({
+      account_id: x.account_id,
+      session_id: redeemed.sessionId,
+    });
+    await page
+      .getByRole("button", { name: "Review this device" })
+      .click()
+      .catch(() => undefined);
+    await untilView(page, "displaying", undefined, 60_000);
+  });
+
+  test("I-L8 T19 S4: the grant G1 issued for this device after the read is REDEEMED (session S) before the retirement is processed: rejected_stale, nothing deleted, no fresh-token retry, and S still works afterwards", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(409);
+    const page = await leaderPage(context);
+    const x = await seededAccount(page, "ivan", "t19s4-draft");
+    const deviceId = (await records(page)).device?.device_id ?? "";
+    const row = await readCurrentDevice(page);
+    const g1 = await issueGrant("ivan", deviceId);
+    const redeemed = await activateGrant(g1);
+    expect(redeemed.status).toBe(200);
+    const calls = keyedCalls(page, "DELETE", /\/devices\/[^/]+$/);
+    const started = await retire(page, row);
+    expect(started.kind).toBe("started");
+    await untilView(page, "neutral", "1a.device_changed", 60_000);
+    const keyed = calls.filter((c) => c.key === started.operation_id);
+    expect(keyed).toHaveLength(1);
+    expect(keyed[0]?.status).toBe(409);
+    expect(await hasDatabase(page, x.account_id)).toBe(true);
+    expect(
+      JSON.stringify(await rowsOf(page, x.account_id, "form_recovery")),
+    ).toContain("t19s4-draft");
+    // The session made from G1 is still usable after the rejection.
+    const after = await raw("GET", "/browser-sessions/current", {
+      cookie: redeemed.cookie,
+      headers: { "x-atlas-session": "1" },
+    });
+    expect(after.status).toBe(200);
+    expect(after.json).toMatchObject({
+      account_id: x.account_id,
+      session_id: redeemed.sessionId,
+    });
+    expect(await sessionAlive("ivan", x.session_id)).toBe(true);
+    await page
+      .getByRole("button", { name: "Review this device" })
+      .click()
+      .catch(() => undefined);
+    await untilView(page, "displaying", undefined, 60_000);
+  });
+
+  test("I-L8 T19 S3/S4 controls: an issued grant activates at once (healthy); a grant whose attempt was CANCELLED with its verifier is refused (the S3 redemption oracle detects a destroyed grant)", async () => {
+    const healthy = await activateGrant(
+      await issueGrant("ivan", `raw-${freshVerifier().slice(0, 10)}`),
+    );
+    expect(healthy.status).toBe(200);
+    const doomed = await issueGrant(
+      "ivan",
+      `raw-${freshVerifier().slice(0, 10)}`,
+    );
+    const cancelled = await raw("POST", "/browser-sessions/activate/cancel", {
+      body: { verifier: doomed.verifier },
+    });
+    expect(cancelled.status).toBe(200);
+    const refused = await activateGrant(doomed);
+    expect(refused.status).not.toBe(200);
+    expect(refused.cookie).toBe("");
   });
 });
 

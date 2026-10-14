@@ -682,6 +682,7 @@ export class AttemptService implements Attempts {
             epoch,
             account_id: session.account_id,
             session_id: session.session_id,
+            csrf_token: session.csrf_token,
             now: this.k.ports.clock.iso(),
           }),
       });
@@ -702,7 +703,8 @@ export class AttemptService implements Attempts {
     const { k } = this;
     const result = await this.settlementClosingWrite(epoch, session, auth);
     if (result === "SETTLED") {
-      // The CSRF token goes to page memory tagged (account, epoch) and nowhere else.
+      // The CSRF token goes to page memory tagged (account, epoch), and (HF1-SHARED-CONFIRMATION-20261013) with the settlement to the record,
+      // so the origin's other pages adopt it instead of each making an identity read.
       k.memory.csrf.set(
         k.memory.csrfKey(session.account_id, epoch),
         session.csrf_token,

@@ -142,6 +142,21 @@ const gated = (page: Page) =>
   });
 
 test.describe("S-GATE: exposure and the resume gate with real inert and the real top layer", () => {
+  // WEB-08c revision 2 (HF-13, pool request-d461b22caa2343fc898f): DIAGNOSTIC ONLY, no assertion is affected. When a case fails, every open
+  // session-harness page's kernel trace is attached, so an unexplained resume (focus not returned once in 62 pool runs) can be read next time.
+  test.afterEach(async ({ context }, testInfo) => {
+    if (testInfo.status === testInfo.expectedStatus) return;
+    for (const [index, page] of context.pages().entries()) {
+      const trace = await page
+        .evaluate(() => window.__atlasFixture?.session?.trace ?? null)
+        .catch(() => null);
+      if (trace)
+        await testInfo.attach(`kernel-trace-page-${index}.json`, {
+          body: JSON.stringify(trace, null, 1),
+          contentType: "application/json",
+        });
+    }
+  });
   test("a settled account is shown by a page loaded with no API call of its own (row 6, ordinary continuation)", async ({
     context,
   }) => {

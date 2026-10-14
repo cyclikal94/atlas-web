@@ -12,9 +12,11 @@ import {
   proxy,
   raw,
   rawSignIn as rawSignInUnpaced,
+  records,
   signIn as signInUnpaced,
   swapCookie,
   test,
+  untilRecord,
   untilView,
   type Who,
 } from "./helpers";
@@ -130,17 +132,20 @@ async function openSwitchFromRail(page: Page, who: Who) {
     page.getByRole("dialog", { name: "Switch account" }),
   ).toBeVisible();
 }
+/**
+ * ONE click, then the account card. WEB-08c revision 2, HF-1: revision 1 repeated the click (a navigation lost in the post-settlement session
+ * re-check); the product correction HF1-SHARED-CONFIRMATION-20261013 removes the identity reads that caused it, so the original single click
+ * is restored, unadapted (WEB08D-NAVIGATION-FRESHNESS-20261011: WEB-09d verifies it again in the integrated client).
+ */
 async function openSettings(page: Page) {
-  await expect(async () => {
-    await page
-      .getByRole("navigation")
-      .getByRole("link", { name: "Settings" })
-      .first()
-      .click({ timeout: 2_000 });
-    await expect(page.locator("[data-account-card]")).toBeVisible({
-      timeout: 3_000,
-    });
-  }).toPass({ timeout: 30_000 });
+  await page
+    .getByRole("navigation")
+    .getByRole("link", { name: "Settings" })
+    .first()
+    .click();
+  await expect(page.locator("[data-account-card]")).toBeVisible({
+    timeout: 30_000,
+  });
 }
 /** WF-SWITCH-02's form, for "another account" (the username typed). */
 async function switchToNew(page: Page, who: Who) {
@@ -223,6 +228,665 @@ test.describe("I-L1: WF-SWITCH A→B→A against the backend (rows 7/8, check (h
     const back = await identity(page);
     expect(back?.account_id).toBe(a.account_id);
     expect(back?.epoch).toBeGreaterThan(b?.epoch ?? 0);
+  });
+});
+
+// ---- I-L12: Q-L1, the production A→B→A switch with a queued outgoing command (R5 of the review of 11 October 2026) ----------------------
+
+/** A people command as the data layer queues it (`create_person`, Idempotency-Key = local id): a dispatchable, ready-to-send draft. */
+const createPerson = (id: string, name: string) => ({
+  endpoint: "/commands",
+  targets: [
+    {
+      resourceId: id,
+      role: "primary" as const,
+      basis: "resource" as const,
+      versionChecked: false,
+      seedIfUntracked: 1,
+    },
+  ],
+  command: { commands: [{ kind: "create_person", id, name }] },
+  displayPatch: { [id]: { label: name } },
+});
+
+/** Every POST of a command this page sends: its idempotency key, CSRF token and exact body bytes (the request observer). */
+function observeCommands(page: Page) {
+  const seen: Array<{
+    at: number;
+    key: string | null;
+    csrf: string | null;
+    body: string;
+  }> = [];
+  page.on("request", (request) => {
+    if (
+      request.method() !== "POST" ||
+      !new URL(request.url()).pathname.endsWith("/commands")
+    )
+      return;
+    const headers = request.headers();
+    seen.push({
+      at: Date.now(),
+      key: headers["idempotency-key"] ?? null,
+      csrf: headers["x-csrf-token"] ?? null,
+      body: request.postData() ?? "",
+    });
+  });
+  return seen;
+}
+
+/** The labels of `who`'s people as the BACKEND has them (a raw session of that account). */
+async function backendPeople(who: Who): Promise<string[]> {
+  const session = await rawSignIn(who);
+  const answer = await raw("GET", "/people", {
+    cookie: session.cookie,
+    headers: { "x-csrf-token": session.csrf },
+  });
+  await raw("DELETE", `/sessions/${session.sessionId}`, {
+    cookie: session.cookie,
+    headers: { "x-csrf-token": session.csrf },
+  });
+  return (
+    (answer.json as { items?: Array<{ label: string }> }).items ?? []
+  ).map((p) => p.label);
+}
+
+const enqueueThroughProduction = (page: Page, spec: unknown) =>
+  page.evaluate(
+    (given) =>
+      (
+        window as unknown as {
+          __atlasFixture: {
+            session: { enqueue(spec: unknown): Promise<unknown> };
+          };
+        }
+      ).__atlasFixture.session.enqueue(given),
+    spec,
+  ) as Promise<{ kind: string; localId?: string }>;
+
+test.describe("I-L12: Q-L1, A→B→A through the PRODUCTION leader with a ready queued command of A", () => {
+  test("I-L12: A's queued command (PROXY-INJECTED: its first attempt refused by a gateway before the backend) is never sent while B is settled; B's own command is sent and accepted; after the return A's command is replayed ONCE with the identical body and key under A's new session, and the backend applied it once, to A only", async ({
+    context,
+  }) => {
+    const page = await leaderPage(context);
+    const sent = observeCommands(page);
+    const a = await signedIn(page, "kate");
+    await railShows(page, "kate");
+    // A's first send attempt is refused by a gateway that never forwards it (`refuse`, qualified in delaying-proxy.test.ts): nothing is
+    // applied, and the draft stays queued in A's database under the PRODUCTION leader's dispatcher, which is not stopped by the test.
+    const refused = await proxy.addRule({
+      method: "POST",
+      path: `${API}/commands`,
+      action: "refuse",
+      status: 503,
+      json: {
+        code: "unavailable",
+        message: "gateway",
+        request_id: "proxy",
+        details: [],
+      },
+      ordinal: 1,
+    });
+    const aId = crypto.randomUUID();
+    const queued = await enqueueThroughProduction(
+      page,
+      createPerson(aId, "I-L12 A queued"),
+    );
+    expect(queued.kind).toBe("queued");
+    await expect
+      .poll(
+        async () =>
+          (await proxy.log()).filter(
+            (e) =>
+              e.rule === refused.id &&
+              e.events.some((v: { event: string }) => v.event === "refused"),
+          ).length,
+        { timeout: 30_000 },
+      )
+      .toBe(1);
+    const first = sent.filter((r) => r.key === queued.localId);
+    expect(first).toHaveLength(1);
+    await proxy.removeRule(refused.id);
+
+    // A → B through the rail, the activation held: A is not perceivable during 1c.
+    await openSwitchFromRail(page, "kate");
+    const held = await proxy.addRule({
+      method: "POST",
+      path: `${API}/browser-sessions/activate`,
+      action: "hold",
+    });
+    await switchToNew(page, "quinn");
+    await expect
+      .poll(async () => (await proxy.held())[held.id] ?? 0, { timeout: 30_000 })
+      .toBeGreaterThanOrEqual(1);
+    await expectAbsent(page, name("kate"));
+    await proxy.release(held.id);
+    await proxy.removeRule(held.id);
+    await railShows(page, "quinn");
+    const b = await identity(page);
+    expect(b?.account_id).not.toBe(a.account_id);
+    const switchedAt = Date.now();
+    // First, with B settled and its leader bound: nothing of A leaves the page (a leader that binds or dispatches the wrong queue sends A's
+    // ready draft at once: the dispatcher re-evaluates its queue from the oldest draft when it starts).
+    await page.waitForTimeout(5_000);
+    const beforeB = sent.filter((r) => r.at >= switchedAt);
+    expect(beforeB.map((r) => r.key)).not.toContain(queued.localId);
+    expect(beforeB.some((r) => r.body.includes("I-L12 A queued"))).toBe(false);
+    expect(await backendPeople("quinn")).not.toContain("I-L12 A queued");
+    // B's own ready command is sent and accepted (so "A was not sent" cannot pass because dispatch is broken for everyone).
+    const bId = crypto.randomUUID();
+    const bQueued = await enqueueThroughProduction(
+      page,
+      createPerson(bId, "I-L12 B own"),
+    );
+    expect(bQueued.kind).toBe("queued");
+    await expect
+      .poll(() => backendPeople("quinn"), { timeout: 60_000 })
+      .toContain("I-L12 B own");
+    // And still nothing of A, now that B's dispatcher has certainly run.
+    const duringB = sent.filter((r) => r.at >= switchedAt);
+    expect(duringB.map((r) => r.key)).not.toContain(queued.localId);
+    expect(duringB.some((r) => r.body.includes("I-L12 A queued"))).toBe(false);
+    expect(
+      duringB.filter((r) => r.key === bQueued.localId).length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(await backendPeople("quinn")).not.toContain("I-L12 A queued");
+    expect(await backendPeople("kate")).not.toContain("I-L12 A queued");
+
+    // B → A from Settings: the retained account, a fresh attempt. A's queue is A's again and its command is replayed once.
+    await openSettings(page);
+    await page
+      .locator("[data-account-card]")
+      .getByRole("button", { name: "Switch account" })
+      .click();
+    await page
+      .getByRole("dialog", { name: "Switch account" })
+      .locator('[data-switch-row="retained"]')
+      .click();
+    const dialog = page.getByRole("dialog", {
+      name: `Sign in as ${name("kate")}`,
+    });
+    await budget("kate");
+    await dialog.getByLabel("Password").fill(password("kate"));
+    await dialog
+      .getByRole("button", { name: `Sign in as ${name("kate")}` })
+      .click();
+    await railShows(page, "kate");
+    const back = await identity(page);
+    expect(back?.account_id).toBe(a.account_id);
+    await expect
+      .poll(() => backendPeople("kate"), { timeout: 120_000 })
+      .toContain("I-L12 A queued");
+    await page.waitForTimeout(3_000);
+    const replays = sent.filter(
+      (r) => r.key === queued.localId && r.at > switchedAt,
+    );
+    expect(
+      replays,
+      "A's command replayed exactly once after the return",
+    ).toHaveLength(1);
+    expect(replays[0]?.body, "byte-identical body").toBe(first[0]?.body);
+    // Stamped with A's NEW session (a fresh attempt): neither the first attempt's token nor B's.
+    const bToken = sent.find((r) => r.key === bQueued.localId)?.csrf;
+    expect(replays[0]?.csrf).not.toBe(first[0]?.csrf);
+    expect(replays[0]?.csrf).not.toBe(bToken);
+    // The backend applied A's command once, to A only.
+    const kates = await backendPeople("kate");
+    expect(kates.filter((l) => l === "I-L12 A queued")).toHaveLength(1);
+    expect(await backendPeople("quinn")).not.toContain("I-L12 A queued");
+    expect(kates).not.toContain("I-L12 B own");
+  });
+});
+
+/** A's ready command, its first attempt refused before the backend (PROXY-INJECTED), so it waits in A's queue. Returns what was observed. */
+async function queuedBehindRefusal(page: Page, label: string) {
+  const sent = observeCommands(page);
+  const refused = await proxy.addRule({
+    method: "POST",
+    path: `${API}/commands`,
+    action: "refuse",
+    status: 503,
+    json: {
+      code: "unavailable",
+      message: "gateway",
+      request_id: "proxy",
+      details: [],
+    },
+    ordinal: 1,
+  });
+  const queued = await enqueueThroughProduction(
+    page,
+    createPerson(crypto.randomUUID(), label),
+  );
+  expect(queued.kind).toBe("queued");
+  await expect
+    .poll(() => sent.filter((r) => r.key === queued.localId).length, {
+      timeout: 30_000,
+    })
+    .toBe(1);
+  await proxy.removeRule(refused.id);
+  return { sent, queued, first: sent.filter((r) => r.key === queued.localId) };
+}
+
+test.describe("I-L12 outgoing-session variants (Q-L3)", () => {
+  test("I-L12b: the switch to B is REFUSED at the activation (PROXY-INJECTED 503 device_capacity, never forwarded): A stays settled and is displayed again; A's queued command is then sent ONCE under A's original session and applied once; B gets nothing", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(503);
+    const page = await leaderPage(context);
+    const a = await signedIn(page, "kate");
+    await railShows(page, "kate");
+    const w = await queuedBehindRefusal(page, "I-L12b A queued");
+    const refuse = await proxy.addRule({
+      method: "POST",
+      path: `${API}/browser-sessions/activate`,
+      action: "refuse",
+      status: 503,
+      json: {
+        code: "device_capacity",
+        message: "full",
+        request_id: "proxy",
+        details: [],
+      },
+      ordinal: 1,
+    });
+    await openSwitchFromRail(page, "kate");
+    const refusedAt = Date.now();
+    await switchToNew(page, "quinn");
+    await railShows(page, "kate", 60_000);
+    await proxy.removeRule(refuse.id);
+    expect((await identity(page))?.account_id).toBe(a.account_id);
+    await expect
+      .poll(() => backendPeople("kate"), { timeout: 120_000 })
+      .toContain("I-L12b A queued");
+    const after = w.sent.filter(
+      (r) => r.key === w.queued.localId && r.at >= refusedAt,
+    );
+    expect(after).toHaveLength(1);
+    expect(after[0]?.body).toBe(w.first[0]?.body);
+    // The same session as the first attempt: the refused switch changed nothing.
+    expect(after[0]?.csrf).toBe(w.first[0]?.csrf);
+    expect(
+      (await backendPeople("kate")).filter((l) => l === "I-L12b A queued"),
+    ).toHaveLength(1);
+    expect(await backendPeople("quinn")).not.toContain("I-L12b A queued");
+  });
+
+  test("I-L12c: every page is CLOSED while B is settled: the reopened page shows B and sends nothing of A's kept queue; back to A, the command is sent ONCE with the identical body and applied once to A only", async ({
+    context,
+  }) => {
+    const page = await leaderPage(context);
+    const a = await signedIn(page, "kate");
+    await railShows(page, "kate");
+    const w = await queuedBehindRefusal(page, "I-L12c A queued");
+    await openSwitchFromRail(page, "kate");
+    await switchToNew(page, "quinn");
+    await railShows(page, "quinn");
+    for (const open of context.pages()) await open.close();
+    const reopened = await leaderPage(context);
+    const sent = observeCommands(reopened);
+    await railShows(reopened, "quinn", 60_000);
+    await reopened.waitForTimeout(5_000);
+    expect(sent.map((r) => r.key)).not.toContain(w.queued.localId);
+    expect(sent.some((r) => r.body.includes("I-L12c A queued"))).toBe(false);
+    expect(await backendPeople("quinn")).not.toContain("I-L12c A queued");
+    expect(await backendPeople("kate")).not.toContain("I-L12c A queued");
+    // A's queue was kept across the restart, byte for byte.
+    expect(
+      JSON.stringify(await rowsOf(reopened, a.account_id, "draft_commands")),
+    ).toContain("I-L12c A queued");
+    await openSettings(reopened);
+    await reopened
+      .locator("[data-account-card]")
+      .getByRole("button", { name: "Switch account" })
+      .click();
+    await reopened
+      .getByRole("dialog", { name: "Switch account" })
+      .locator('[data-switch-row="retained"]')
+      .click();
+    const dialog = reopened.getByRole("dialog", {
+      name: `Sign in as ${name("kate")}`,
+    });
+    await budget("kate");
+    await dialog.getByLabel("Password").fill(password("kate"));
+    await dialog
+      .getByRole("button", { name: `Sign in as ${name("kate")}` })
+      .click();
+    await railShows(reopened, "kate", 60_000);
+    await expect
+      .poll(() => backendPeople("kate"), { timeout: 120_000 })
+      .toContain("I-L12c A queued");
+    const replays = sent.filter((r) => r.key === w.queued.localId);
+    expect(replays).toHaveLength(1);
+    expect(replays[0]?.body).toBe(w.first[0]?.body);
+    expect(
+      (await backendPeople("kate")).filter((l) => l === "I-L12c A queued"),
+    ).toHaveLength(1);
+    expect(await backendPeople("quinn")).not.toContain("I-L12c A queued");
+  });
+});
+
+// ---- I-L13: Q-R1/Q-R2, T24's recovery branches composed with the switch and with retained work (R5 of the review of 11 October 2026) ----
+
+/** The rows of one store of an account's database, read with plain IndexedDB (the database the production leader writes). */
+const rowsOf = (page: Page, account: string, store: string) =>
+  page.evaluate(
+    async ({ acct, storeName }) => {
+      const found = (await indexedDB.databases()).find((d) =>
+        (d.name ?? "").includes(acct),
+      );
+      if (!found?.name) return [];
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const open = indexedDB.open(found.name as string);
+        open.onsuccess = () => resolve(open.result);
+        open.onerror = () => reject(open.error);
+      });
+      try {
+        if (!db.objectStoreNames.contains(storeName)) return [];
+        return await new Promise<unknown[]>((resolve, reject) => {
+          const request = db
+            .transaction(storeName, "readonly")
+            .objectStore(storeName)
+            .getAll();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      } finally {
+        db.close();
+      }
+    },
+    { acct: account, storeName: store },
+  );
+
+/** An unfinished form of the account, saved as the form-recovery writer stores it (fixture: the data harness on this page's registry). */
+async function seedForm(page: Page, account: string, text: string) {
+  await page.evaluate(
+    async ({ acct, value }) => {
+      const data = window.__atlasData;
+      if (!data) throw new Error("no data harness");
+      data.setIdentity(acct);
+      await data.open(acct);
+      await data.put(acct, "form_recovery", [
+        {
+          form_context: `i-l13-${value}`,
+          tab_instance_id: "tab",
+          fields: { title: value },
+          redacted: [],
+          saved_at: new Date().toISOString(),
+          capture_seq: 1,
+          terminal: false,
+          content_digest: `digest-${value}`,
+        },
+      ]);
+    },
+    { acct: account, value: text },
+  );
+}
+
+const leaderTrace = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window.__atlasFixture?.session?.trace ?? []) as Array<{
+        at: number;
+        event: string;
+        data?: Record<string, unknown>;
+      }>,
+  );
+
+/** Revoke every session of `who` except the raw one used to do it (the backend's own 401 at the next request of the revoked one). */
+async function revokeOthers(who: Who) {
+  const other = await rawSignIn(who);
+  const sessions = await raw("GET", "/sessions", {
+    cookie: other.cookie,
+    headers: { "x-csrf-token": other.csrf },
+  });
+  for (const row of (
+    sessions.json as { sessions: Array<{ id: string; current: boolean }> }
+  ).sessions.filter((s) => !s.current))
+    await raw("DELETE", `/sessions/${row.id}`, {
+      cookie: other.cookie,
+      headers: { "x-csrf-token": other.csrf },
+    });
+  await raw("DELETE", `/sessions/${other.sessionId}`, {
+    cookie: other.cookie,
+    headers: { "x-csrf-token": other.csrf },
+  });
+}
+
+/**
+ * The common start of I-L13: A displayed with a READY queued command (its first attempt PROXY-INJECTED: refused by a gateway, never applied)
+ * and an unfinished form; A's session revoked elsewhere, so A is fenced (1b); the person signs in as B instead, from the 1b card.
+ */
+async function fencedWithWork(page: Page, a: Who, b: Who, tag: string) {
+  const sent = observeCommands(page);
+  const id = await signedIn(page, a);
+  await railShows(page, a);
+  const refused = await proxy.addRule({
+    method: "POST",
+    path: `${API}/commands`,
+    action: "refuse",
+    status: 503,
+    json: {
+      code: "unavailable",
+      message: "gateway",
+      request_id: "proxy",
+      details: [],
+    },
+    ordinal: 1,
+  });
+  const queued = await enqueueThroughProduction(
+    page,
+    createPerson(crypto.randomUUID(), `I-L13 ${tag} A queued`),
+  );
+  expect(queued.kind).toBe("queued");
+  await expect
+    .poll(() => sent.filter((r) => r.key === queued.localId).length, {
+      timeout: 30_000,
+    })
+    .toBe(1);
+  await proxy.removeRule(refused.id);
+  await seedForm(page, id.account_id, `i-l13-${tag}-form`);
+  const formBefore = JSON.stringify(
+    await rowsOf(page, id.account_id, "form_recovery"),
+  );
+  expect(formBefore).toContain(`i-l13-${tag}-form`);
+  const bodiesBefore = JSON.stringify(
+    await rowsOf(page, id.account_id, "draft_commands"),
+  );
+  expect(bodiesBefore).toContain(`I-L13 ${tag} A queued`);
+  await revokeOthers(a);
+  await page.evaluate(() => window.__atlasFixture?.session?.leaderNudge());
+  await untilView(page, "neutral", "1b", 60_000);
+  await page.getByRole("button", { name: "Reconnect" }).click();
+  await budget(b);
+  await page.getByLabel("Username").fill(name(b));
+  await page.getByLabel("Password").fill(password(b));
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await railShows(page, b);
+  return {
+    sent,
+    id,
+    queued,
+    first: sent.filter((r) => r.key === queued.localId),
+    formBefore,
+    bodiesBefore,
+  };
+}
+
+/** Back to A from Settings (a retained account, a fresh attempt). */
+/**
+ * Back to A from Settings (a retained account, a fresh attempt). `whileActivating` runs while A's activation answer is HELD (the page is
+ * gated, so B's sync engine has stopped): a rule added there addresses the RETURN's recovery reads, not a poll of B's still-running engine
+ * (campaign 2026-10-13T21-10-28.584Z-7a0b7a7b: a "first `/sync`" rule caught B's poll in Firefox and WebKit).
+ */
+async function returnTo(
+  page: Page,
+  a: Who,
+  whileActivating?: () => Promise<void>,
+) {
+  await openSettings(page);
+  await page
+    .locator("[data-account-card]")
+    .getByRole("button", { name: "Switch account" })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Switch account" })
+    .locator('[data-switch-row="retained"]')
+    .click();
+  const dialog = page.getByRole("dialog", { name: `Sign in as ${name(a)}` });
+  await budget(a);
+  await dialog.getByLabel("Password").fill(password(a));
+  const activation = whileActivating
+    ? await proxy.addRule({
+        method: "POST",
+        path: `${API}/browser-sessions/activate`,
+        action: "hold",
+        ordinal: 1,
+      })
+    : null;
+  await dialog.getByRole("button", { name: `Sign in as ${name(a)}` }).click();
+  if (activation && whileActivating) {
+    await expect
+      .poll(async () => (await proxy.held())[activation.id] ?? 0, {
+        timeout: 30_000,
+      })
+      .toBe(1);
+    await whileActivating();
+    await proxy.release(activation.id);
+    await proxy.removeRule(activation.id);
+  }
+}
+
+test.describe("I-L13: T24 composed with A→B→A and retained work", () => {
+  test("I-L13 R1 (T24 B, Q-R1): back to the fenced A, the recovery's first page is PROXY-INJECTED 410: a replacement snapshot is built and activated while A stays hidden, `finish` clears the fence, A is displayed; A's queued body and unfinished form are byte-identical, and the command is sent ONCE, only after the fence cleared, and applied once", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(401, 410);
+    const page = await leaderPage(context);
+    const w = await fencedWithWork(page, "mia", "liam", "r1");
+    let rule: { id: string } = { id: "" };
+    const returnedAt = Date.now();
+    await returnTo(page, "mia", async () => {
+      rule = await proxy.addRule({
+        method: "GET",
+        path: `${API}/sync`,
+        ordinal: 1,
+        action: "rewrite_status",
+        status: 410,
+      });
+    });
+    await railShows(page, "mia", 60_000);
+    await proxy.removeRule(rule.id);
+    expect(
+      Object.values((await records(page)).auth_state.fences).flat(),
+    ).toEqual([]);
+    await expect
+      .poll(() => backendPeople("mia"), { timeout: 120_000 })
+      .toContain("I-L13 r1 A queued");
+    // The trace of this return: begin eligible → replacement activated → finish cleared → display; the command only after that.
+    const trace = (await leaderTrace(page)).filter((e) => e.at >= returnedAt);
+    const index = (pred: (e: (typeof trace)[number]) => boolean) =>
+      trace.findIndex(pred);
+    const activated = index(
+      (e) =>
+        e.event === "data.recovery_commit" && e.data?.value === "activated",
+    );
+    const cleared = index(
+      (e) => e.event === "data.recovery_finish" && e.data?.result === "cleared",
+    );
+    const firstSend = index((e) => e.event === "data.outbox_send");
+    expect(activated, "the replacement snapshot was activated").toBeGreaterThan(
+      -1,
+    );
+    expect(cleared, "finish cleared after the activation").toBeGreaterThan(
+      activated,
+    );
+    expect(
+      firstSend,
+      "the queued command was sent only after the fence cleared",
+    ).toBeGreaterThan(cleared);
+    const replays = w.sent.filter(
+      (r) => r.key === w.queued.localId && r.at >= returnedAt,
+    );
+    expect(replays).toHaveLength(1);
+    expect(replays[0]?.body).toBe(w.first[0]?.body);
+    expect(
+      (await backendPeople("mia")).filter((l) => l === "I-L13 r1 A queued"),
+    ).toHaveLength(1);
+    expect(await backendPeople("liam")).not.toContain("I-L13 r1 A queued");
+    // The unfinished form survived the switch and the replacement, byte for byte.
+    expect(
+      JSON.stringify(await rowsOf(page, w.id.account_id, "form_recovery")),
+    ).toBe(w.formBefore);
+  });
+
+  test("I-L13 R2 (T24 F/G, Q-R2): back to the fenced A, A's NEW session is revoked while the recovery's first read is held: the recovery's 401 records a current-epoch fence (1b), nothing of A's queue is sent, the work is kept; the next sign-in recovers and sends the command ONCE", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(401);
+    const page = await leaderPage(context);
+    const w = await fencedWithWork(page, "nora", "kate", "r2");
+    let hold: { id: string } = { id: "" };
+    const returnedAt = Date.now();
+    await returnTo(page, "nora", async () => {
+      hold = await proxy.addRule({
+        method: "GET",
+        path: `${API}/sync`,
+        ordinal: 1,
+        action: "hold_request",
+      });
+    });
+    await expect
+      .poll(async () => (await proxy.held())[hold.id] ?? 0, { timeout: 60_000 })
+      .toBe(1);
+    const epoch = (await records(page)).auth_state.settled?.epoch ?? 0;
+    // The recovery's read is in flight; A's new session ends on the server; the read reaches the backend only now: 401.
+    await revokeOthers("nora");
+    await proxy.release(hold.id);
+    await proxy.removeRule(hold.id);
+    await untilRecord(
+      page,
+      (s) =>
+        Object.values(s.fences)
+          .flat()
+          .some((f) => f.kind === "invalid_session" && f.epoch === epoch),
+      "the recovery's 401 is a CURRENT-epoch invalid_session fence",
+    );
+    await untilView(page, "neutral", "1b", 60_000);
+    await page.waitForTimeout(3_000);
+    expect(
+      w.sent.filter((r) => r.key === w.queued.localId && r.at >= returnedAt),
+      "nothing of A's queue is sent while A is fenced",
+    ).toEqual([]);
+    expect(await backendPeople("nora")).not.toContain("I-L13 r2 A queued");
+    expect(
+      JSON.stringify(await rowsOf(page, w.id.account_id, "draft_commands")),
+    ).toBe(w.bodiesBefore);
+    expect(
+      JSON.stringify(await rowsOf(page, w.id.account_id, "form_recovery")),
+    ).toBe(w.formBefore);
+    // The person signs in again (1b's Reconnect): the recovery runs on the new epoch, then the command is sent once.
+    const again = Date.now();
+    await page.getByRole("button", { name: "Reconnect" }).click();
+    await budget("nora");
+    await page.getByLabel("Username").fill(name("nora"));
+    await page.getByLabel("Password").fill(password("nora"));
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await railShows(page, "nora", 60_000);
+    await expect
+      .poll(() => backendPeople("nora"), { timeout: 120_000 })
+      .toContain("I-L13 r2 A queued");
+    const replays = w.sent.filter(
+      (r) => r.key === w.queued.localId && r.at >= again,
+    );
+    expect(replays).toHaveLength(1);
+    expect(replays[0]?.body).toBe(w.first[0]?.body);
+    expect(
+      (await backendPeople("nora")).filter((l) => l === "I-L13 r2 A queued"),
+    ).toHaveLength(1);
+    expect(await backendPeople("kate")).not.toContain("I-L13 r2 A queued");
   });
 });
 

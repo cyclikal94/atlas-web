@@ -66,12 +66,13 @@ export interface ProxyRule {
     | "rewrite_status"
     | "rewrite_json"
     | "replace_response"
+    | "refuse"
     | "swap";
   ms?: number;
   status?: number;
   set?: Record<string, unknown>;
   delete?: string[];
-  /** `replace_response`: the JSON body to answer with. */
+  /** `replace_response` and `refuse`: the JSON body to answer with. */
   json?: unknown;
 }
 export interface ProxyLogEntry {

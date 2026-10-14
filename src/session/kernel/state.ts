@@ -289,21 +289,14 @@ export class Kernel {
   /**
    * Race a promise against the stall interval. Resolves the string "stalled" when no answer came in time.
    *
-   * "In time" is the matrix's "stalls BEYOND `ms`" (§3.6.1 step 2, §3.6.2 step 5): when the bound's timer fires, the verdict waits a
-   * further `stallGraceMs` (250 ms), so an answer that was already due at the bound is an answer. An engine may run the bound's timer
-   * before the answer's own completion when both fall due within a few milliseconds (its timer order and coalescing decide), so without
-   * the grace a transaction that completes AT the bound was a stall in some runs and an answer in others (WEB-08c, R4 of the review of
-   * 11 October 2026: T22's local check held for exactly 5 s; a single event-loop turn was measured to be not enough in WebKit under
-   * load). Only a fail-closed wait is lengthened: nothing is exposed or sent while it lasts.
+   * The bound is HARD (matrix §3.6.2 step 1, Ex5; WEB-08c R4 of the review of 11 October 2026): whichever the page observes first decides.
+   * An answer delivered after the bound's timer has run is late, however close it was due; a later completion never revives the activity
+   * the caller has already ended (an ordinary cover is then not sent, a recording is retried). No grace, and nothing is backdated from a
+   * requested timer delay.
    */
   async withStall<T>(work: Promise<T>, ms: number): Promise<T | "stalled"> {
     return new Promise<T | "stalled">((resolve, reject) => {
-      let timer = this.ports.clock.setTimeout(() => {
-        timer = this.ports.clock.setTimeout(
-          () => resolve("stalled"),
-          this.config.stallGraceMs,
-        );
-      }, ms);
+      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);
       work.then(
         (value) => {
           this.ports.clock.clearTimeout(timer);

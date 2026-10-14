@@ -6,6 +6,7 @@ import { checkProperties } from "../support/session/properties";
 import {
   fencesOf,
   holdAnswers,
+  identityReadsSoFar,
   newWorld,
   openPage,
   ordinaryGet,
@@ -490,7 +491,10 @@ describe("T12: an interrupted switch", () => {
     const f = await newWorld();
     const l = await signedInPage(f);
     const views = recordViews(l.page);
-    const held = holdAnswers(f, (r) => isCurrent(r.path) && r.ordinal > 1);
+    // ADAPTED (WEB-08c revision 2, HF1-SHARED-CONFIRMATION-20261013): was `r.ordinal > 1` (every identity read after the post-sign-in resume
+    // verification, which the shared confirmation now spares); the same "every identity read from the sign-in on".
+    const before = identityReadsSoFar(f);
+    const held = holdAnswers(f, (r) => isCurrent(r.path) && r.ordinal > before);
     f.server.addRule({
       match: (r) => isActivate(r.path),
       dropAfterForward: true,

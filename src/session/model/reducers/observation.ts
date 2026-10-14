@@ -4,6 +4,7 @@ import type {
   AuthRecords,
   Epoch,
   InvalidReason,
+  IsoInstant,
   LeaseId,
   ObservationKind,
   SessionId,
@@ -298,12 +299,41 @@ export function clearCredentialUnverified(
 /** Rule 12: the owner retires ITS OWN lease; it touches nothing else. Absent commits nothing. */
 export function retireOwnLease(
   records: Readonly<AuthRecords>,
-  input: { lease_id: LeaseId },
+  input: {
+    lease_id: LeaseId;
+    /**
+     * HF1-SHARED-CONFIRMATION-20261013: a clean identity read of the SETTLED session (same account, epoch and session id) refreshes the shared
+     * `confirmation` in the same transaction that deletes its lease. `settled` itself is never written here (P-F).
+     */
+    confirm?: {
+      account_id: AccountId;
+      epoch: Epoch;
+      session_id: SessionId;
+      csrf_token: string;
+      now: IsoInstant;
+    };
+  },
 ): Rmw<"DONE"> {
-  if (records.auth_state.leases[input.lease_id] === undefined)
+  const confirm = input.confirm;
+  const settled = records.auth_state.settled;
+  const confirms =
+    confirm !== undefined &&
+    settled !== null &&
+    settled.account_id === confirm.account_id &&
+    settled.epoch === confirm.epoch &&
+    settled.session_id === confirm.session_id;
+  if (records.auth_state.leases[input.lease_id] === undefined && !confirms)
     return { write: null, result: "DONE" };
   const state = draft(records);
   delete state.leases[input.lease_id];
+  if (confirms)
+    state.confirmation = {
+      account_id: confirm.account_id,
+      epoch: confirm.epoch,
+      session_id: confirm.session_id,
+      csrf_token: confirm.csrf_token,
+      confirmed_at: confirm.now,
+    };
   return { write: { auth_state: state }, result: "DONE" };
 }
 

@@ -243,9 +243,12 @@ for (const scheme of ["dark", "light"] as const) {
           const stub = new AuthStub();
           await stub.install(context);
           for (const [width, height] of WIDTHS) {
-            // A FRESH document each time: a fragment-only navigation does not reload the page.
-            await context.setOffline(false);
+            // A FRESH document each time: a fragment-only navigation does not reload the page. WEB-08c revision 2 (HF-12, campaign
+            // 2026-10-13T22-48-14.169Z-f76783ae, Firefox "join-offline"): leave the page BEFORE going back online. Online first, the `online`
+            // event made the offline page's session start its re-check read, which the navigation 2 ms later aborted, and Firefox reported the
+            // aborted transaction. `about:blank` needs no network; every check below is unchanged.
             await page.goto("about:blank");
+            await context.setOffline(false);
             await page.setViewportSize({ width, height });
             await surface.open(page, stub);
             const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;

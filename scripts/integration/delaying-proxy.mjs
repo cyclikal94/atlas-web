@@ -17,6 +17,9 @@
 //   replace_response     forward, then answer with `status` and the JSON body `json` (for example an Atlas-formatted error with its `code`) and none of the backend's headers
 //   rewrite_json         forward, then set/delete fields of the JSON body: { set: {...}, delete: [...] }
 //   swap                 with `with: <other rule id>`: hold both, then deliver each to the OTHER's client on release
+//   refuse               do NOT forward: answer at once with `status` and the JSON body `json` (default `{}`), no backend headers (WEB-08c
+//                        revision 2: a gateway that refuses a request before it reaches the backend, so nothing is applied and the
+//                        client keeps its queued work; the log entry records `refused`)
 import { createServer, request as httpRequest } from "node:http";
 
 export function createProxy({ upstream, port = 0, controlPort = 0 }) {
@@ -206,6 +209,15 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
           event: "buffered_request",
         });
       });
+      return;
+    }
+    if (rule?.action === "refuse") {
+      req.resume();
+      const body = JSON.stringify(rule.json ?? {});
+      res.writeHead(rule.status ?? 503, { "content-type": "application/json" });
+      res.end(body);
+      entry.status = rule.status ?? 503;
+      entry.events.push({ t: 0, event: "refused", status: entry.status });
       return;
     }
     if (rule?.action === "hold_request") {

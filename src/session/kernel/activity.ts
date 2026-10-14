@@ -82,12 +82,13 @@ export async function retireLease(
   k: Kernel,
   leaseId: LeaseId,
   handle: { release(): void } | null,
+  confirm?: Parameters<typeof retireOwnLease>[1]["confirm"],
 ): Promise<void> {
   for (let attempt = 0; !k.disposed; attempt += 1) {
     try {
       const outcome = await k.withStall(
         k.transact(
-          (records) => retireOwnLease(records, { lease_id: leaseId }),
+          (records) => retireOwnLease(records, { lease_id: leaseId, confirm }),
           "retire",
         ),
         k.config.recordingStallMs,

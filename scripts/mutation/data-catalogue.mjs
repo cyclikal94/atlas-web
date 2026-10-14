@@ -16753,16 +16753,140 @@ export const UNIT = [
   {
     id: "MU-8C-R4a",
     title:
-      "WEB-08c R4: the stall bound decides 'stalled' AT the bound's timer, with no grace (an answer due at 5 s loses to the engine's timer order; T22's restore fails)",
+      "WEB-08c R4 (revision 2): the stall bound regains a 250 ms grace (a lease completing at 5,200 ms is sent; the review's regression)",
     file: "src/session/kernel/state.ts",
     tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect:
-      /the answer falls due at the same instant as the bound|within the grace/,
+    expect: /is late: stalled \(no grace\)|NOT_COVERED, never sent/,
     patch: (t) =>
       sub(
         t,
-        '          () => resolve("stalled"),\n          this.config.stallGraceMs,',
-        '          () => resolve("stalled"),\n          0,',
+        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);',
+        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms + 250);',
+      ),
+  },
+  {
+    id: "MU-8C-R4d",
+    title:
+      "WEB-08c R4 (revision 2): the bound's verdict waits one more timer turn (revision 1's first tie-break: an answer observed after the bound's timer still wins)",
+    file: "src/session/kernel/state.ts",
+    tests: ["tests/session/web08c-stall-bound.test.ts"],
+    expect: /observed AFTER the bound's timer is late/,
+    patch: (t) =>
+      sub(
+        t,
+        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);',
+        '      const timer = this.ports.clock.setTimeout(\n        () => this.ports.clock.setTimeout(() => resolve("stalled"), 0),\n        ms,\n      );',
+      ),
+  },
+  {
+    id: "MU-8C-R4e",
+    title:
+      "WEB-08c R4 (T22-READ-BOUND-20261012): the display read keeps the 5 s recording bound (T22's 5 s read ties with the timer and fails closed)",
+    file: "src/session/kernel/evaluate.ts",
+    tests: ["tests/session/web08c-stall-bound.test.ts"],
+    expect: /is an answer: the page stays displayed/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const records = await readRecords(k, k.config.displayReadStallMs);",
+        "  const records = await readRecords(k);",
+      ),
+  },
+  {
+    id: "MU-8C-R4f",
+    title:
+      "WEB-08c R4 (T22-READ-BOUND-20261012): every record reader gets the display read's 6 s (the longer bound leaks beyond the display check)",
+    file: "src/session/kernel/evaluate.ts",
+    tests: ["tests/session/web08c-stall-bound.test.ts"],
+    expect: /every other reader keeps the hard 5 s/,
+    patch: (t) =>
+      sub(
+        t,
+        "  bound = k.config.recordingStallMs,",
+        "  bound = k.config.displayReadStallMs,",
+      ),
+  },
+  {
+    id: "MU-8C-HF1a",
+    title:
+      "WEB-08c HF-1 (HF1-SHARED-CONFIRMATION-20261013): the settlement does not share the activation's token (every other page makes its own identity read again)",
+    file: "src/session/kernel/attempts.ts",
+    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+    expect:
+      /writes the confirmation of exactly the settled session|adopts the token and the confirmation/,
+    patch: (t) => sub(t, "            csrf_token: session.csrf_token,\n", ""),
+  },
+  {
+    id: "MU-8C-HF1b",
+    title:
+      "WEB-08c HF-1: a page adopts a shared token that names another session",
+    file: "src/session/kernel/evaluate.ts",
+    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+    expect: /names ANOTHER session is neither adopted/,
+    patch: (t) =>
+      sub(
+        t,
+        "    shared.session_id === settled.session_id\n  ) {",
+        "    true\n  ) {",
+      ),
+  },
+  {
+    id: "MU-8C-HF1c",
+    title: "WEB-08c HF-1: a page adopts a shared token of an older epoch",
+    file: "src/session/kernel/evaluate.ts",
+    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+    expect: /older epoch .* is never adopted/,
+    patch: (t) => sub(t, "    shared.epoch === settled.epoch &&\n", ""),
+  },
+  {
+    id: "MU-8C-HF1d",
+    title:
+      "WEB-08c HF-1: a confirmation of another session spares the resume verification",
+    file: "src/session/session.ts",
+    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+    expect: /does not spare the resume verification/,
+    patch: (t) =>
+      sub(
+        t,
+        "      shared.session_id !== identity.session_id\n",
+        "      false\n",
+      ),
+  },
+  {
+    id: "MU-8C-HF1e",
+    title:
+      "WEB-08c HF-1: a confirmation dated in the future spares the resume verification",
+    file: "src/session/session.ts",
+    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+    expect: /dated in the FUTURE/,
+    patch: (t) => sub(t, "    return age >= 0 && age <", "    return age <"),
+  },
+  {
+    id: "MU-8C-HF1f",
+    title:
+      "WEB-08c HF-1: the lease retirement records a confirmation for a session the record does not settle",
+    file: "src/session/model/reducers/observation.ts",
+    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+    expect: /writes NO confirmation/,
+    patch: (t) =>
+      sub(
+        t,
+        "    settled.session_id === confirm.session_id;",
+        "    settled.account_id === confirm.account_id;",
+      ),
+  },
+  {
+    id: "MU-8C-HF1g",
+    title:
+      "WEB-08c HF-1: a clean identity read does not refresh the shared confirmation",
+    file: "src/session/kernel/identity.ts",
+    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+    expect: /refreshes the shared confirmation/,
+    patch: (t) =>
+      sub(
+        t,
+        "  cleanRelease(k, inflight, {\n    account_id: inflight.account,",
+        "  cleanRelease(k, inflight, undefined && {\n    account_id: inflight.account,",
       ),
   },
   {

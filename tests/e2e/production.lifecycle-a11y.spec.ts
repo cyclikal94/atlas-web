@@ -5,12 +5,18 @@ import { expect } from "./helpers";
 import {
   allowFreeze,
   displayedAs,
+  firstExposure,
+  type GateTransition,
+  gateLog,
+  type HeldRead,
+  heldReads,
   hideThenShow,
   holdableAuth,
   missHintsWhileHidden,
   newMarker,
   passwordOf,
   publicSignIn,
+  recordGateTransitions,
 } from "./lifecycle-browser";
 
 /**
@@ -21,11 +27,16 @@ import {
  *
  * Setup per run: account C displays the "Signing in" dialog (a PROTECTED MODAL dialog) with keyboard focus in its keyed "Current password"
  * field and unsaved text. t0 the page is hidden; t1 frozen (Chromium; elsewhere it stays hidden); t2 in another page (i) another account
- * settles, (ii) C is invalidated, or (iii) nothing changes; t3 the page is shown with the LOCAL CHECK HELD for the approved 5 s (a
- * test-only delay of every `atlas-auth` transaction created in the window, injected by an init script, qualified by the no-hold control
- * below: no product hook exists); t4 for the whole hold only the gate is exposed and "Checking your account" is announced politely once;
- * t5 the branch's outcome, focus and (iii) scroll. R4 of the review of 11 October 2026 restored the 5 s and these assertions (an earlier
- * version held 4 s and accepted no announcement and the reopened dialog of branch i).
+ * settles, (ii) C is invalidated, or (iii) nothing changes; t3 the page is shown with the LOCAL CHECK HELD for the approved 5 s; t4 for the
+ * whole hold only the gate is exposed and "Checking your account" is announced politely once; t5 the branch's outcome, focus and (iii) scroll.
+ *
+ * Revision 2 (R4 of the reviews of 11 October 2026; design assessment Q-T1): the hold targets the IDENTIFIED display read only (the
+ * transaction the `visible` handler creates inside the dispatch; `holdableAuth`), delivered 5 s after it was created, and the spec asserts
+ * that exactly that one read-only transaction was held for the full 5 s. Every gate/inert change is logged with its instant
+ * (`recordGateTransitions`), so the oracle is "no exposure before the held read was delivered AND before 5 s after `visible`", over the
+ * whole interval, not samples that stop 200 ms short. The kernel's display read gives up only after 6 s (`displayReadStallMs`, human
+ * decision T22-READ-BOUND-20261012); every cover and write keeps its hard 5 s. Controls: no hold; an early (4.9 s) delivery that the oracle
+ * must flag; O-3 beyond 6 s fails closed. No product hook exists.
  */
 async function newStub(context: BrowserContext, ...names: string[]) {
   const stub = new AuthStub();
@@ -103,6 +114,65 @@ const announcedSince = (page: Page, since: number) =>
     since,
   );
 
+const visibleAtOf = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __visibleAt: number }).__visibleAt,
+  );
+
+/**
+ * T22's hold oracle as a pure function, so the same code is asserted EMPTY on every T22 run and NON-EMPTY on the sensitivity runs: the hold
+ * hit exactly the display read (one read-only transaction created inside the `visible` dispatch), held it for `hold` from its creation, and
+ * nothing protected was exposed before it was delivered or before `hold` after the `visible` event (over the whole transition log).
+ */
+function holdViolations(
+  reads: HeldRead[],
+  log: GateTransition[],
+  visibleAt: number,
+  hold: number,
+): string[] {
+  const out: string[] = [];
+  if (reads.length !== 1)
+    return [`held ${reads.length} transactions, not exactly the display read`];
+  const read = reads[0] as HeldRead;
+  if (read.writes !== 0)
+    out.push("the held transaction wrote: not a record read");
+  if (read.created - visibleAt >= 50)
+    out.push("not created inside the `visible` dispatch");
+  if (read.nativeComplete === null || read.delivered === null)
+    return [...out, "not delivered"];
+  if (read.nativeComplete >= read.delivered)
+    out.push("the engine's completion was not held");
+  if (read.delivered - read.created < hold)
+    out.push("released before the full hold");
+  const exposed = firstExposure(log, visibleAt);
+  if (exposed !== null && exposed < read.delivered)
+    out.push("exposed before the held read was delivered");
+  if (exposed !== null && exposed - visibleAt < hold)
+    out.push("exposed during the hold");
+  return out;
+}
+
+/** Waits for the held read's delivery, then asserts `holdViolations` is empty. Returns the instants. */
+async function expectHeldDisplayRead(page: Page, hold: number) {
+  await expect
+    .poll(async () => (await heldReads(page))[0]?.delivered ?? null, {
+      timeout: hold + 10_000,
+    })
+    .not.toBeNull();
+  const visibleAt = await visibleAtOf(page);
+  const reads = await heldReads(page);
+  const log = await gateLog(page);
+  expect(
+    holdViolations(reads, log, visibleAt, hold),
+    "T22 hold oracle",
+  ).toEqual([]);
+  return {
+    visibleAt,
+    delivered: (reads[0] as HeldRead).delivered as number,
+    exposed: firstExposure(log, visibleAt),
+  };
+}
+
 /**
  * Page one shows C's "Signing in" dialog with focus and unsaved text in its keyed field, over a Settings page scrolled down (so a restored
  * scroll position is observable). Every OTHER page is opened first: a page that boots makes every page of the origin check its session and
@@ -116,6 +186,7 @@ async function setUp(
 ) {
   await allowFreeze(context);
   await holdableAuth(context);
+  await recordGateTransitions(context);
   await missHintsWhileHidden(context);
   await recordAnnouncements(context);
   // The OTHER pages boot first, so one of them is the origin's sync leader and page one (the tab with the form) is not: a leader's own
@@ -219,9 +290,9 @@ for (const branch of ["i", "ii", "iii"] as const)
         two.getByRole("heading", { level: 1, name: "Reconnect to keep going" }),
       ).toBeVisible({ timeout: 20_000 });
     }
-    // t3: shown, with the local check held for the approved 5 s.
-    const shownAt = await one.evaluate(() => performance.now());
-    const first = await resume({ holdAuthMs: T22_HOLD_MS });
+    // t3: shown, with the display read held for the approved 5 s.
+    const first = await resume({ holdDisplayReadMs: T22_HOLD_MS });
+    const shownAt = await visibleAtOf(one);
     expect(
       first.inert && first.ariaHidden,
       "t3: the first frame is inert and hidden",
@@ -235,11 +306,12 @@ for (const branch of ["i", "ii", "iii"] as const)
       description: JSON.stringify({ browserName, branch, ...first }),
     });
     if (first.gateOpen) {
-      // t4: for the WHOLE hold, only the gate is exposed: Tab and Shift+Tab reach nothing protected, the tree exposes nothing of C.
+      // t4: during the hold, Tab and Shift+Tab reach nothing protected and the tree exposes nothing of C (sampled while keys are pressed);
+      // the WHOLE interval's gate state is asserted from the transition log by `expectHeldDisplayRead` below.
       const keys = ["Tab", "Shift+Tab", "Tab", "Tab"];
       for (;;) {
         const now = await reach(one);
-        if (now.at - shownAt >= T22_HOLD_MS - 200) break;
+        if (now.at - shownAt >= T22_HOLD_MS - 600) break;
         expect(now.gateOpen, "t4: the gate stays up").toBe(true);
         expect(now.inert && now.ariaHidden, "t4: inert and hidden").toBe(true);
         expect(now.focusInProtected, "t4: nothing protected has focus").toBe(
@@ -252,23 +324,18 @@ for (const branch of ["i", "ii", "iii"] as const)
         expect(tree).not.toContain("unsaved-text-4410");
         await one.waitForTimeout(400);
       }
+      const held = await expectHeldDisplayRead(one, T22_HOLD_MS);
       const checking = (await announcedSince(one, shownAt)).filter(
         (entry) =>
           entry.polite &&
           entry.text === "Checking your account" &&
-          entry.at - shownAt < T22_HOLD_MS,
+          entry.at < held.delivered,
       );
       expect(
         checking.length,
         "t4: 'Checking your account' is announced politely once",
       ).toBe(1);
     }
-    expect(
-      await one.evaluate(
-        () => (window as unknown as { __heldAuth?: number }).__heldAuth ?? 0,
-      ),
-      "the local check was held",
-    ).toBeGreaterThanOrEqual(1);
     // t5.
     if (branch === "i") {
       // Y's shell, at its own start (nothing of C's location survives), with focus on its main heading.
@@ -364,15 +431,9 @@ test("T22 (iii) scroll: the same account's page, scrolled, with the local check 
   const { one, scrollY } = await setUp(context, c, 0, { dialog: false });
   expect(scrollY, "the Settings page is scrolled").toBeGreaterThan(0);
   const resume = await hideThenShow(one, browserName);
-  const shownAt = await one.evaluate(() => performance.now());
-  const first = await resume({ holdAuthMs: T22_HOLD_MS });
+  const first = await resume({ holdDisplayReadMs: T22_HOLD_MS });
   expect(first.gateOpen).toBe(true);
-  for (;;) {
-    const now = await reach(one);
-    if (now.at - shownAt >= T22_HOLD_MS - 200) break;
-    expect(now.gateOpen, "the gate stays up").toBe(true);
-    await one.waitForTimeout(400);
-  }
+  await expectHeldDisplayRead(one, T22_HOLD_MS);
   await expect(one.locator("#protected-root:not([inert])")).toHaveCount(1, {
     timeout: 30_000,
   });
@@ -394,8 +455,8 @@ test("T22 hook qualification (control): the same resume with NO hold lifts at on
   await newStub(context, c);
   const { one } = await setUp(context, c);
   const resume = await hideThenShow(one, browserName);
-  const shownAt = await one.evaluate(() => performance.now());
-  const first = await resume({ holdAuthMs: 0 });
+  const first = await resume({});
+  const shownAt = await visibleAtOf(one);
   expect(first.gateOpen).toBe(true);
   const field = one
     .getByRole("dialog", { name: "Signing in" })
@@ -406,14 +467,85 @@ test("T22 hook qualification (control): the same resume with NO hold lifts at on
   expect(lifted.at - shownAt, "lifted well inside the 5 s hold").toBeLessThan(
     T22_HOLD_MS / 2,
   );
-  expect(
-    await one.evaluate(
-      () => (window as unknown as { __heldAuth?: number }).__heldAuth ?? 0,
-    ),
-  ).toBe(0);
+  expect(await heldReads(one)).toEqual([]);
 });
 
-test("O-3: a local check held BEYOND the kernel's 5 s cover-stall bound is a stalled store: it fails closed (nothing protected is exposed at any point) and the account is displayed again through a new exposure; focus is not restored into the closed tree", async ({
+test("T22 oracle sensitivity (deterministic, synthetic logs): a release or a lift at 4,900 ms, a second held transaction and a write are each reported", () => {
+  const read = (created: number, delivered: number, writes = 0): HeldRead => ({
+    created,
+    nativeComplete: created + 5,
+    delivered,
+    writes,
+  });
+  const lift = (at: number): GateTransition[] => [
+    { at: 0, gateOpen: true, inert: true },
+    { at, gateOpen: false, inert: false },
+  ];
+  // Healthy control: created 1 ms after `visible`, delivered at 5,001, lifted at 5,040.
+  expect(holdViolations([read(1, 5_001)], lift(5_040), 0, T22_HOLD_MS)).toEqual(
+    [],
+  );
+  expect(holdViolations([read(1, 4_901)], lift(4_940), 0, T22_HOLD_MS)).toEqual(
+    expect.arrayContaining([
+      "released before the full hold",
+      "exposed during the hold",
+    ]),
+  );
+  // Released on time, but the gate lifted at 4,900 (before the read answered): an early lift.
+  expect(holdViolations([read(1, 5_001)], lift(4_900), 0, T22_HOLD_MS)).toEqual(
+    expect.arrayContaining([
+      "exposed before the held read was delivered",
+      "exposed during the hold",
+    ]),
+  );
+  expect(
+    holdViolations(
+      [read(1, 5_001), read(2, 5_002)],
+      lift(5_040),
+      0,
+      T22_HOLD_MS,
+    ),
+  ).toHaveLength(1);
+  expect(
+    holdViolations([read(1, 5_001, 1)], lift(5_040), 0, T22_HOLD_MS),
+  ).toContain("the held transaction wrote: not a record read");
+  expect(holdViolations([], lift(5_040), 0, T22_HOLD_MS)).toHaveLength(1);
+});
+
+test("T22 oracle sensitivity (real engine): a display read delivered EARLY (4,000 ms) is reported, including the exposure inside the 5 s", async ({
+  context,
+  browserName,
+}) => {
+  test.setTimeout(60_000);
+  const c = newMarker("carol");
+  await newStub(context, c);
+  const { one } = await setUp(context, c);
+  const resume = await hideThenShow(one, browserName);
+  const first = await resume({ holdDisplayReadMs: 4_000 });
+  expect(first.gateOpen).toBe(true);
+  const field = one
+    .getByRole("dialog", { name: "Signing in" })
+    .getByLabel("Current password");
+  await expect(field).toBeFocused({ timeout: 15_000 });
+  const violations = holdViolations(
+    await heldReads(one),
+    await gateLog(one),
+    await visibleAtOf(one),
+    T22_HOLD_MS,
+  );
+  test.info().annotations.push({
+    type: "t22-sensitivity",
+    description: JSON.stringify(violations),
+  });
+  expect(violations).toEqual(
+    expect.arrayContaining([
+      "released before the full hold",
+      "exposed during the hold",
+    ]),
+  );
+});
+
+test("O-3: a display read held BEYOND the kernel's 6 s display-read bound (T22-READ-BOUND-20261012) is a stalled store: it fails closed (nothing protected is exposed at any point) and the account is displayed again through a new exposure; focus is not restored into the closed tree", async ({
   context,
   browserName,
 }) => {
@@ -422,10 +554,11 @@ test("O-3: a local check held BEYOND the kernel's 5 s cover-stall bound is a sta
   await newStub(context, c);
   const { one } = await setUp(context, c);
   const resume = await hideThenShow(one, browserName);
-  const first = await resume({ holdAuthMs: 5_500 });
+  // Revision 2: was a 5.5 s window hold of every transaction, beyond the then 5 s bound; the display read's bound is now 6 s.
+  const first = await resume({ holdDisplayReadMs: 6_500 });
   expect(first.inert && first.ariaHidden).toBe(true);
   const samples: Array<{ inert: boolean; focusInProtected: boolean }> = [];
-  for (let i = 0; i < 12; i += 1) {
+  for (let i = 0; i < 14; i += 1) {
     samples.push(await reach(one));
     await one.waitForTimeout(500);
   }

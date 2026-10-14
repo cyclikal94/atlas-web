@@ -96,16 +96,20 @@ it and focus a link in the navigation instead). Put the cursor in "Current passw
 submitting. Open the same site in a second tab or window (on a phone: a second tab) and sign in there only when a branch says so.
 
 **Delaying the local check (test-only, nothing ships).** Before each return to the tab, run this snippet in the developer tools console of the tab under test (on iOS
-and Android use the remote inspector). It holds the completion of the NEXT `atlas-auth` transaction, the local check, until **5 s after that transaction began** (the
-matrix's 5 s), then disarms itself. The application treats a store as stalled only when it has not answered 250 ms BEYOND 5 s (an answer due at 5 s is an answer: R4 of the
-WEB-08c review of 11 October 2026), so this is the approved t4 branch; a longer hold is a stalled store that fails closed (finding O-3), which is a different branch.
+and Android use the remote inspector). It holds exactly the display check's record read: the first `atlas-auth` transaction created after the tab becomes visible again,
+which the application creates inside its `visibilitychange` handler (the same transaction the automated counterpart holds and checks). Its completion is delivered **5 s
+after that transaction was created** (the matrix's 5 s), then the snippet disarms itself. The display check waits up to 6 s for its read before treating the store as
+stalled (human decision T22-READ-BOUND-20261012, 12 October 2026; every other store wait keeps its hard 5 s), so a 5 s hold is the approved t4 branch. A hold longer than
+6 s is a stalled store that fails closed (finding O-3), which is a different branch.
 
 ```js
-(() => { const t = IDBDatabase.prototype.transaction; let armed = true;
+(() => { const t = IDBDatabase.prototype.transaction; let armed = false, used = false;
+  window.addEventListener("visibilitychange", () => { if (!used && document.visibilityState === "visible") armed = true; }, { capture: true });
   IDBDatabase.prototype.transaction = function (...a) { const tx = t.apply(this, a);
-    if (!armed || this.name !== "atlas-auth") return tx; armed = false; let h = null;
+    if (!armed || this.name !== "atlas-auth") return tx; armed = false; used = true; let h = null;
     const until = performance.now() + 5000;
-    tx.addEventListener("complete", (e) => setTimeout(() => h && h.call(tx, e), Math.max(0, until - performance.now())));
+    const go = (e) => { const left = until - performance.now(); if (left > 0) setTimeout(() => go(e), Math.ceil(left)); else if (h) h.call(tx, e); };
+    tx.addEventListener("complete", go);
     Object.defineProperty(tx, "oncomplete", { configurable: true, get: () => h, set: (f) => { h = f; } });
     return tx; }; })();
 ```

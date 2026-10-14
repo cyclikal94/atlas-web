@@ -154,12 +154,20 @@ export async function handleIdentityAnswer(
   if (parsed.account_id !== inflight.account)
     return record("different_account");
 
-  // A 200 for the settled account: clean (E1). The token is refreshed for the SAME account only.
+  // A 200 for the settled account: clean (E1). The token is refreshed for the SAME account only. HF1-SHARED-CONFIRMATION-20261013: the
+  // lease's deletion also records this answer as the session's latest confirmation, with its token, when the record still settles exactly
+  // this session (account, epoch, session id), so the origin's other pages need no identity read of their own for 30 s.
   k.memory.csrf.set(
     k.memory.csrfKey(inflight.account, inflight.epoch),
     parsed.csrf_token,
   );
-  cleanRelease(k, inflight);
+  cleanRelease(k, inflight, {
+    account_id: inflight.account,
+    epoch: inflight.epoch,
+    session_id: parsed.session_id,
+    csrf_token: parsed.csrf_token,
+    now: k.ports.clock.iso(),
+  });
   releaseHoldAndReevaluate(k, inflight.account, holdId);
   const needsRelease =
     inflight.unresolved.size > 0 ||

@@ -16,6 +16,7 @@ import {
 import { logoutEnvelope, operation } from "../support/session/records";
 import {
   fencesOf,
+  forceResumeVerification,
   holdAnswers,
   installAttempt,
   leaseIds,
@@ -66,10 +67,10 @@ describe("write-ahead lease before every send", () => {
     await run(f, ordinaryGet(l.page, l.account, l.epoch));
     await run(f, l.page.session.operations.listSessions());
     await run(f, l.page.session.operations.readDevices());
-    // Verification (an identity read) and a resume verification.
-    await f.world.advance(40_000);
-    l.page.session.actions.retry();
-    await f.world.runUntilIdle();
+    // Verification (an identity read) and a resume verification. ADAPTED (WEB-08c revision 2, HF1-SHARED-CONFIRMATION-20261013): was "advance
+    // 40 s, then retry()", which ran no verification; the one counted came after the sign-in, which the settlement's shared confirmation now
+    // spares. The page returns after the interval instead.
+    await forceResumeVerification(f, l.page);
     const issued = f.world.logs.filter(
       (e) => e.type === "trace.request.issued",
     );
@@ -173,9 +174,7 @@ describe("a first failing lease write sends nothing", () => {
       (e: { kind?: string }) => e.kind,
     );
     await f.world.runUntilIdle();
-    // ADAPTED (WEB-08c R4 of the review of 11 October 2026): was `advance(5000)`. A stall is decided BEYOND the bound, after the kernel's
-    // `stallGraceMs`; the lease write still never completes and the request is still never sent.
-    await f.world.advance(5000 + l.page.kernel.config.stallGraceMs);
+    await f.world.advance(5000);
     expect(await outcome).toBe("not_covered");
     expect(
       f.world.logs.some(

@@ -102,6 +102,18 @@ function validSettled(value: unknown): boolean {
   );
 }
 
+function validConfirmation(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isObject(value)) return false;
+  return (
+    isString(value.account_id) &&
+    isInt(value.epoch) &&
+    isString(value.session_id) &&
+    isString(value.csrf_token) &&
+    isString(value.confirmed_at)
+  );
+}
+
 function validFence(value: unknown): boolean {
   if (!isObject(value)) return false;
   if (
@@ -134,6 +146,7 @@ export function validateAuthState(value: unknown): AuthState | null {
   if (!isObject(value) || value.schema !== 1) return null;
   if (!isInt(value.latest_epoch) || !isInt(value.fence_seq)) return null;
   if (!validAttempt(value.attempt) || !validSettled(value.settled)) return null;
+  if (!validConfirmation(value.confirmation)) return null;
   if (!isObject(value.fences) || !isObject(value.leases)) return null;
   for (const list of Object.values(value.fences)) {
     if (!Array.isArray(list) || !list.every(validFence)) return null;

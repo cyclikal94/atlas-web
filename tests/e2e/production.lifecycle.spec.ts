@@ -92,18 +92,62 @@ async function expectAbsent(page: Page, value: string) {
   expect(tree, "accessibility tree").not.toContain(value);
 }
 
-/** Opens Settings and returns once the account card is drawn (a navigation lost in a session re-check is tried again: HF-1). */
+/**
+ * Opens Settings with ONE click and waits for the account card. WEB-08c revision 2, HF-1: revision 1 repeated the click (a navigation lost in a
+ * session re-check); the product correction HF1-SHARED-CONFIRMATION-20261013 removes the post-settlement identity reads that caused the
+ * re-check, so the original single click is restored, unadapted.
+ */
 async function openSettings(page: Page) {
-  await expect(async () => {
-    await page
-      .getByRole("navigation")
-      .getByRole("link", { name: "Settings" })
-      .first()
-      .click({ timeout: 2_000 });
-    await expect(page.locator("[data-account-card]")).toBeVisible({
-      timeout: 3_000,
-    });
-  }).toPass({ timeout: 30_000 });
+  await page
+    .getByRole("navigation")
+    .getByRole("link", { name: "Settings" })
+    .first()
+    .click();
+  await expect(page.locator("[data-account-card]")).toBeVisible({
+    timeout: 30_000,
+  });
+}
+
+/**
+ * Waits until an account database of this origin holds `username` as its persisted verified profile: what the switcher's retained row is
+ * named from (`retained-accounts.ts`; nothing else names it). Read with plain IndexedDB, every store of every `atlas-<uuid>` database.
+ */
+async function untilRetainedName(page: Page, username: string) {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async (name) => {
+          const dbs = (await indexedDB.databases()).filter((d) =>
+            /^atlas-[0-9a-f-]{36}$/i.test(d.name ?? ""),
+          );
+          for (const d of dbs) {
+            const db = await new Promise<IDBDatabase>((resolve, reject) => {
+              const open = indexedDB.open(d.name as string);
+              open.onsuccess = () => resolve(open.result);
+              open.onerror = () => reject(open.error);
+            });
+            try {
+              for (const store of [...db.objectStoreNames]) {
+                const rows = await new Promise<unknown[]>((resolve) => {
+                  const request = db
+                    .transaction(store, "readonly")
+                    .objectStore(store)
+                    .getAll();
+                  request.onsuccess = () => resolve(request.result);
+                  request.onerror = () => resolve([]);
+                });
+                if (JSON.stringify(rows).includes(`"username":"${name}"`))
+                  return true;
+              }
+            } finally {
+              db.close();
+            }
+          }
+          return false;
+        }, username),
+      { timeout: 30_000 },
+    )
+    .toBe(true);
 }
 
 async function signInAndDisplay(page: Page, username: string) {
@@ -597,6 +641,11 @@ test.describe("E-L5: T13, switching back to an account that carries its own row 
     const b = marker("bobby");
     const { stub } = await newStub(context, a, b);
     await signInAndDisplay(page, a);
+    // T13's precondition: A is a RETAINED account, named by its own verified profile. WEB-08c revision 2: once the post-sign-in identity
+    // reads were removed (HF1-SHARED-CONFIRMATION-20261013), WebKit revoked A ~95 ms after it displayed, before its first sync had persisted
+    // that profile, so the retained row was correctly unnamed ("An account used on this computer before", run hf1-browser-1). The test now
+    // establishes the precondition instead of relying on that delay.
+    await untilRetainedName(page, a);
     // A's session ends on the server; A's next request detects it: row 4/5 fence, 1b. The Settings navigation makes such a request, but a
     // background read can come first (seen in WebKit: the page was already on 1b and the rail gone before the click), so the click is
     // only the trigger, never the assertion.
@@ -715,7 +764,15 @@ test.describe("E-L6: T17 and T21 across two pages", () => {
     });
     stub.cookie = "sess-x";
     const reads = stub.recordsFor(CURRENT).length;
-    await openSettings(one).catch(() => undefined);
+    // The Settings navigation is only the TRIGGER (its stamped request meets the mismatch); the page legitimately leaves the shell for 1d, so
+    // the click is bounded and the outcome below is the assertion. WEB-08c revision 2: `openSettings` is now the unadapted single click and
+    // waits for the account card, which a correctly fenced page never draws (run hf1-browser-1, Firefox: both pages were on 1d at once).
+    await one
+      .getByRole("navigation")
+      .getByRole("link", { name: "Settings" })
+      .first()
+      .click({ timeout: 5_000 })
+      .catch(() => undefined);
     for (const page of [one, two]) {
       await expect(
         page.getByRole("heading", {
