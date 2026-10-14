@@ -438,6 +438,80 @@ describe("E4: a reload resends nothing", () => {
   );
 });
 
+describe("E4b: after a reload, a failed read of the enrolment is not permission to guess or resend (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4)", () => {
+  test(
+    "the reload's read fails: no change can be made and nothing is sent; Try again reads (never sends), and only then a fresh change is offered",
+    SLOW,
+    async () => {
+      const first = await mounted({
+        version: 1,
+        active: false,
+        aggregate_consent: true,
+      });
+      await press(first.t, button(CONTROLS_COPY.join));
+      await act(async () =>
+        first.sent[0]?.release({ ok: false, kind: "uncertain" }),
+      );
+      await first.t.settle();
+      first.t.unmount();
+      cleanup();
+      forgetTaskMemory();
+      // The reloaded page's first read fails.
+      const task = await seededTask({
+        definition: { participation: "everyone" },
+      });
+      let failing = true;
+      let reads = 0;
+      const sent: string[] = [];
+      const api = fakeApi({
+        readEnrolment: async () => {
+          reads += 1;
+          return failing
+            ? { ok: false, kind: "uncertain" }
+            : {
+                ok: true,
+                value: {
+                  version: 2,
+                  active: true,
+                  aggregate_consent: true,
+                  policy: POLICY,
+                },
+              };
+        },
+        enrol: async (_command, key) => {
+          sent.push(key);
+          return { ok: true, value: { revision: 3 } };
+        },
+      });
+      const t = await mountTasks({
+        path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        rows: task.rows,
+        api,
+      });
+      await t.until(
+        () =>
+          settings()?.textContent?.includes(CONTROLS_COPY.enrolUnavailable) ===
+          true,
+      );
+      expect(settings()?.textContent).toContain(CONTROLS_COPY.enrolUnavailable);
+      expect(button(CONTROLS_COPY.join)).toBeNull();
+      expect(button(CONTROLS_COPY.leave)).toBeNull();
+      expect(document.querySelector("[data-enrolment-uncertain]")).toBeNull();
+      expect(sent).toEqual([]);
+      failing = false;
+      const before = reads;
+      await press(t, button(copy.TRY_AGAIN));
+      await t.until(() => button(CONTROLS_COPY.leave) !== null);
+      expect(reads).toBeGreaterThan(before);
+      expect(sent).toEqual([]);
+      // Reconciled: the current state (version 2, active) is shown and a fresh, explicit change is possible.
+      await press(t, button(CONTROLS_COPY.leave));
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).not.toBe(first.sent[0]?.key);
+    },
+  );
+});
+
 describe("X2: the pending change is accessible (jsdom layer; no manual assistive-technology claim)", () => {
   test(
     "the disabled control is described by its reason, and the section has no axe violations",
