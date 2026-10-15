@@ -3,6 +3,7 @@ import { applyPolicyChange, samePolicy } from "../../sharing";
 import type { PeopleEnv } from "../env";
 import { type HeldRun, isCurrentMemory } from "../memory";
 import { baseGuard, putFieldUpdateRequest } from "../model/commands";
+import { sentSomething } from "../online";
 import type { HeldChange, HeldFailure } from "./held-store";
 
 /**
@@ -85,6 +86,9 @@ export async function runHeldChange(
     );
     const result = outcome.result;
     held.attempt = outcome.attempt;
+    // A command was sent (whatever its answer said): the summaries shown are read again.
+    if (isCurrentMemory(memory) && sentSomething(result))
+      memory.invalidateSummaries();
     if (result.ok) {
       run.policyDone = true;
       // The audience is now the one asked for: a later run must not try to change it again.

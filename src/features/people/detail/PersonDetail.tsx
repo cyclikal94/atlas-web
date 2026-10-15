@@ -45,16 +45,32 @@ import {
   projectedRows,
   type ShownRow,
 } from "../model/project";
+import {
+  audienceText,
+  effectiveText,
+  type FieldAudience,
+  summaryCurrentFor,
+} from "../model/summary";
 import { Banner, PendingBadge, useOutboxSave } from "../parts";
-import { OutstandingChain, ResourceScan } from "../reads";
+import { OutstandingChain, ResourceScan, type ScanResult } from "../reads";
+import {
+  type SummaryView,
+  shownOf,
+  useSummary,
+  type WalkedPages,
+  walkPages,
+} from "../summaries";
+import { SummaryNotes } from "../summary-notes";
 import { FieldValueView } from "./FieldValueView";
 import { IdentityHeader } from "./IdentityHeader";
+import { SharedWithSection } from "./SharedWith";
 
 /**
  * WF-PEOPLE-02, the person detail (§4.3): the identity header, the fields table ("Field | Value | Who can see it"), "Add a field", the
- * "New fields start as" panel, the archived fields and the held audience changes. Everything shown comes from the cache with this
- * device's outstanding saves folded over it. A person the cache does not hold (and no save of this device creates) is "not on this
- * device", and NOTHING of theirs stays on screen (PPL-5: a field is shown only under its visible person).
+ * "Shared with" rail, the "New fields start as" panel, the archived fields and the held audience changes. Everything shown comes from the
+ * cache with this device's outstanding saves folded over it. A person the cache does not hold (and no save of this device creates) is "not
+ * on this device", and NOTHING of theirs stays on screen (PPL-5: a field is shown only under its visible person). Who can see the person
+ * and each field comes from the viewer-safe summaries while online (finding 8, `summaries.tsx`), never from owner-only policy reads.
  */
 export interface PersonDetailSlots {
   /** WEB-11b: "Ask to link…" beside the header actions. */
@@ -113,6 +129,9 @@ export function PersonDetail({
               />
               <Conflicts ids={[personId]} />
               <FieldsSection person={shown} changes={changes} />
+              {shown.projected ? null : (
+                <SharedWithSection personId={personId} />
+              )}
               <DefaultsPanel />
               {children}
             </div>
@@ -278,7 +297,9 @@ function FieldSteps({
         const archived = rows.filter((row) => row.row.archived);
         return (
           <>
-            <FieldRows
+            <AudiencedRows
+              step={step}
+              start={start}
               rows={active}
               person={person}
               settled={step.settled || step.status !== "ready"}
@@ -311,20 +332,91 @@ function FieldSteps({
   );
 }
 
+/**
+ * The fields of one step with who can see each: `GET /people/{id}/field-audiences` from the step's own start, page after page, until every
+ * active field of the step was seen, a page passed the step's last id (both are in ascending id order), the end, or the step's page bound.
+ * Read once the step has settled, and only for fields this device has synced.
+ */
+function AudiencedRows({
+  step,
+  start,
+  rows,
+  person,
+  settled,
+}: {
+  step: ScanResult;
+  start: string | null;
+  rows: ShownRow[];
+  person: ShownRow;
+  settled: boolean;
+}) {
+  const env = usePeopleEnv();
+  const personId = person.row.id;
+  const ids = step.settled
+    ? rows.filter((row) => !row.projected).map((row) => row.row.id)
+    : [];
+  const key =
+    ids.length === 0 || person.projected
+      ? null
+      : `fields:${personId}:${start ?? ""}:${ids.join(",")}`;
+  const view = useSummary<WalkedPages<FieldAudience>>(key, (current) => {
+    const last = ids.reduce((a, b) => (b > a ? b : a), "");
+    return walkPages(
+      (after) =>
+        env.api.readFieldAudiences(personId, {
+          after,
+          limit: FIELD_STEP,
+          archived: false,
+        }),
+      {
+        start,
+        keep: () => false,
+        limit: 1,
+        pages: FIELD_STEP_PAGES,
+        covered: (read, lastRead) =>
+          ids.every((id) => read.has(id)) ||
+          (lastRead !== null && lastRead >= last),
+      },
+      current,
+    );
+  });
+  return (
+    <FieldRows
+      rows={rows}
+      person={person}
+      settled={settled}
+      audiences={key === null ? null : view}
+    />
+  );
+}
+
 function FieldRows({
   rows,
   person,
   settled,
+  audiences,
 }: {
   rows: ShownRow[];
   person: ShownRow;
   /** The step's walk is over: only then does "no fields" mean anything (finding 5). */
   settled: boolean;
+  /** Who can see each field (null: nothing to read). */
+  audiences: SummaryView<WalkedPages<FieldAudience>> | null;
 }) {
   if (rows.length === 0)
     return settled ? (
       <p className="text-[13px] text-ink-2">{copy.NO_FIELDS}</p>
     ) : null;
+  const read =
+    audiences === null ? null : (shownOf(audiences)?.value.read ?? null);
+  // Shown beside a cached field only when it is not older than what this device shows.
+  const audienceOf = (row: ShownRow): FieldAudience | null => {
+    if (row.projected || read === null) return null;
+    const summary = read.get(row.row.id) ?? null;
+    return summary !== null && summaryCurrentFor(summary, row.row)
+      ? summary
+      : null;
+  };
   return (
     <div className="flex flex-col gap-1">
       <div
@@ -338,14 +430,42 @@ function FieldRows({
       </div>
       <List className="flex flex-col gap-1">
         {rows.map((row) => (
-          <FieldRow key={row.row.id} field={row} person={person} />
+          <FieldRow
+            key={row.row.id}
+            field={row}
+            person={person}
+            summary={audienceOf(row)}
+          />
         ))}
       </List>
+      {audiences !== null ? (
+        <SummaryNotes
+          view={audiences}
+          partial={rows.some(
+            (row) => audienceOf(row)?.audience.disclosure === "partial",
+          )}
+          words={{
+            offline: copy.FIELDS_SUMMARY_OFFLINE,
+            failed: copy.FIELDS_SUMMARY_FAILED,
+            checking: copy.FIELDS_SUMMARY_CHECKING,
+          }}
+          partialNote={copy.FIELDS_PARTIAL_NOTE}
+        />
+      ) : null}
     </div>
   );
 }
 
-function FieldRow({ field, person }: { field: ShownRow; person: ShownRow }) {
+function FieldRow({
+  field,
+  person,
+  summary,
+}: {
+  field: ShownRow;
+  person: ShownRow;
+  /** Who can see it, from the field audiences (null: not known here now). */
+  summary: FieldAudience | null;
+}) {
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
   const defaults = useSharingDefaults();
@@ -354,13 +474,22 @@ function FieldRow({ field, person }: { field: ShownRow; person: ShownRow }) {
   const nameId = useId();
   const read = env.memory.policies.get(row.id);
   const home = primaryHousehold(defaults.record);
+  // The field audiences' own sharing first; else what this page's policy read said (D-11a-13); else the question.
   const audience =
-    read === undefined
-      ? copy.AUDIENCE_UNKNOWN
-      : audienceLabel(
-          classify(read.policy, home?.id ?? null),
-          home?.household?.name ?? null,
-        );
+    summary !== null
+      ? audienceText(summary.audience)
+      : read === undefined
+        ? copy.AUDIENCE_UNKNOWN
+        : audienceLabel(
+            classify(read.policy, home?.id ?? null),
+            home?.household?.name ?? null,
+          );
+  // A field's own sharing is an upper bound: who can actually see it is counted only when the summary may count it.
+  const reach =
+    summary === null
+      ? null
+      : (effectiveText(summary.effective, person.row.label) ??
+        copy.FIELD_AUDIENCE_UPPER(person.row.label));
   const editable =
     !field.projected ||
     (field.createDraft !== null && field.pending === "not_sent");
@@ -377,7 +506,7 @@ function FieldRow({ field, person }: { field: ShownRow; person: ShownRow }) {
           <PendingBadge mark={field.pending} />
         </span>
         <FieldValueView raw={row.value} />
-        <span>
+        <span className="flex flex-col items-start gap-1">
           {field.projected ? (
             <span className="text-[12.5px] text-ink-2">
               {copy.WAIT_FOR_SYNC_FIELD}
@@ -386,6 +515,7 @@ function FieldRow({ field, person }: { field: ShownRow; person: ShownRow }) {
             <button
               type="button"
               data-people-action="field-audience"
+              data-field-audience={summary?.audience.disclosure ?? "unknown"}
               aria-describedby={nameId}
               onClick={() => setSharing(true)}
               className="atlas-transition min-h-11 rounded-control border border-hairline-strong px-3 text-left text-[12.5px] text-ink-1 hover:bg-row-hover"
@@ -393,6 +523,14 @@ function FieldRow({ field, person }: { field: ShownRow; person: ShownRow }) {
               {audience}
             </button>
           )}
+          {reach !== null ? (
+            <span className="text-[12px] text-ink-2" data-field-reach="">
+              {reach}
+              {summary?.audience.disclosure === "partial"
+                ? ` ${copy.FIELD_AUDIENCE_PARTIAL}`
+                : ""}
+            </span>
+          ) : null}
         </span>
         <span className="flex flex-wrap items-start gap-1.5">
           {!row.can_edit ? (
@@ -424,7 +562,11 @@ function FieldRow({ field, person }: { field: ShownRow; person: ShownRow }) {
         <ResourcePolicyEditor
           resourceId={row.id}
           open={sharing}
-          onOpenChange={setSharing}
+          onOpenChange={(open) => {
+            setSharing(open);
+            // What the editor sent (its commands are online, outside the queue) changes the summaries shown.
+            if (!open) env.memory.invalidateSummaries();
+          }}
         />
       )}
     </li>

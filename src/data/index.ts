@@ -126,6 +126,8 @@ export {
 // A port over the account database's form copies (WEB-11a's held changes): only lazy screens import it.
 export { createFormRecoveryPort } from "./ports/form-recovery";
 export type { Loadable } from "./store/port";
+// The applied server revision (WEB-11a's summary invalidation): only lazy screens import it.
+export { useAppliedRevision } from "./ui/applied-revision";
 export { useDraftWithCommand } from "./ui/draft-body";
 export {
   createDataEnv,

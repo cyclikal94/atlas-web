@@ -13,7 +13,10 @@ export const NEW_PERSON = "New person";
 export const SEARCH = "Search people";
 export const FILTER_LABEL = "Show"; // PROVISIONAL
 export const FILTER_ALL = "All";
-export const FILTER_ARCHIVED = "Archived"; // PROVISIONAL: replaces the drawn ownership chips (E-2)
+export const FILTER_IN_HOME = "In Home";
+export const FILTER_SHARED_WITH_ME = "Shared with me";
+export const FILTER_NOT_LINKED = "Not linked";
+export const FILTER_ARCHIVED = "Archived"; // PROVISIONAL: an addition beside the drawn chips (archived people, Q21)
 export const EMPTY =
   "No one here yet. People appear once you add them, or once someone shares one with you.";
 export const EMPTY_ARCHIVED = "Nobody is archived."; // PROVISIONAL
@@ -41,6 +44,28 @@ export const OUTSTANDING_CAPPED =
 export const COLUMN_PERSON = "Person";
 export const COLUMN_ACCOUNT = "Account";
 export const COLUMN_DETAILS = "Details";
+export const COLUMN_VISIBLE_TO = "Visible to";
+export const ADDED_BY_YOU = "Added by you";
+export const SHARED_BY = (owner: string) => `Shared with you by ${owner}`;
+// The viewer-safe summaries (finding 8, API 0.29): online-only display data, never shown offline or as live.
+export const VISIBLE_TO = (audience: string) => `Visible to: ${audience}`; // PROVISIONAL (a labelled line: the list shares the screen with the detail)
+export const SUMMARY_CHECKING = "Checking who can see these people…"; // PROVISIONAL
+export const SUMMARY_OFFLINE =
+  "Who can see each person and their account links are checked when you're online."; // PROVISIONAL
+export const SUMMARY_FAILED = "Couldn't check who can see these people."; // PROVISIONAL
+export const SUMMARY_AS_OF = (time: string) =>
+  `Sharing checked at ${time}. Atlas checks again every minute while you're online.`; // PROVISIONAL (never presented as live)
+export const PARTIAL_NOTE =
+  "For people someone else owns, you see only how they're shared with you. The owner may have shared them more widely."; // PROVISIONAL (product decision 2, 14 October)
+export const VIEW_OFFLINE =
+  "This view needs a connection. All and Archived work offline."; // PROVISIONAL
+export const VIEW_FAILED = "Couldn't load this view."; // PROVISIONAL
+export const IN_HOME_NO_HOME =
+  "You haven't chosen a primary household, so nobody is In Home. Everyone you can see is still under All."; // PROVISIONAL (product decision 3)
+export const IN_HOME_EMPTY = (home: string) =>
+  `Nobody is shared with ${home} yet.`; // PROVISIONAL
+export const SHARED_WITH_ME_EMPTY = "Nobody has shared a person with you yet."; // PROVISIONAL
+export const NOT_LINKED_EMPTY = "Everyone here is linked to an account."; // PROVISIONAL
 export const FIELD_COUNT = (n: number) => `${n} field${n === 1 ? "" : "s"}`;
 export const ARCHIVED_TAG = "Archived";
 export const YOU = "You";
@@ -139,6 +164,36 @@ export const DEFAULTS_EXPLAIN = (home: string) =>
 export const DEFAULTS_UNKNOWN = "Isn't known yet: the defaults haven't loaded";
 export const ARCHIVED_FIELDS = (n: number) => `Archived fields (${n})`;
 export const CHOOSE_WHO = "Choose who can see it"; // PROVISIONAL (after a private save)
+export const FIELDS_SUMMARY_OFFLINE =
+  "Who can see each field is checked when you're online."; // PROVISIONAL
+export const FIELDS_SUMMARY_FAILED = "Couldn't check who can see these fields."; // PROVISIONAL
+export const FIELDS_SUMMARY_CHECKING = "Checking who can see these fields…"; // PROVISIONAL
+export const FIELDS_PARTIAL_NOTE =
+  "For fields someone else owns, you see only how they're shared with you. The owner may have shared them more widely."; // PROVISIONAL (product decision 2)
+export const FIELD_AUDIENCE_PARTIAL =
+  "The owner may have shared it more widely."; // PROVISIONAL (product decision 2)
+export const FIELD_AUDIENCE_UPPER = (person: string) =>
+  `Only people who can also see ${person} can see it.`; // PROVISIONAL (a field's own sharing is an upper bound)
+
+// ---- "Shared with" (WF-PEOPLE-02 rail; finding 8) ---------------------------------------------------------------------------------------
+export const SHARED_WITH = "Shared with";
+export const OWNER_ROLE = "owner";
+export const CAN_VIEW = "can view";
+export const CAN_EDIT = "can edit";
+export const HOUSEHOLD_SIZE = (n: number) =>
+  `${n} member${n === 1 ? "" : "s"} in the household`; // PROVISIONAL (household size, never an audience count)
+export const HOUSEHOLD_LEFT = "A household you've left"; // PROVISIONAL (redacted: the owner is no longer a member)
+export const EXCLUDED_MEMBER = "can't see it"; // PROVISIONAL (excluded by the owner)
+export const EXCLUDED_ACCOUNTS = (names: string) => `Excluded: ${names}`; // PROVISIONAL
+export const ONLY_YOU_RAIL = "Only you can see this person."; // PROVISIONAL
+export const RAIL_PARTIAL = (owner: string) =>
+  `${owner} owns this person. You see only how it's shared with you; ${owner} may have shared it more widely.`; // PROVISIONAL (product decision 2)
+export const RAIL_OFFLINE =
+  "Who it's shared with is checked when you're online."; // PROVISIONAL
+export const RAIL_CHECKING = "Checking who it's shared with…"; // PROVISIONAL
+export const RAIL_FAILED = "Couldn't check who it's shared with."; // PROVISIONAL
+export const RAIL_NOT_FOUND =
+  "Atlas can't show who this person is shared with."; // PROVISIONAL
 
 // ---- rename and unlink (Q21 gap 6) ----------------------------------------------------------------------------------------------------
 export const RENAME_OTHER_OWNS = (name: string) => `${name} owns this name`;

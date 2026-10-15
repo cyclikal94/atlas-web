@@ -10,6 +10,7 @@ import { PeopleBoundary } from "./env";
 import { FieldEditorDialog } from "./field/FieldEditorDialog";
 import { PeopleList } from "./list/PeopleList";
 import { peopleSlots } from "./slots";
+import { useSummaryFreshness } from "./summaries";
 
 /**
  * The People screens, loaded LAZILY by their routes (`route.tsx`): one chunk, never part of an initial bundle (the fixture's entry includes
@@ -34,6 +35,8 @@ function ListHeader() {
 }
 
 function PeopleLayout() {
+  // The viewer-safe summaries shown anywhere below are read again when anything they depend on may have changed (finding 8).
+  useSummaryFreshness();
   const mode = useLayoutMode();
   const matches = useMatches();
   const leaf = matches.at(-1);

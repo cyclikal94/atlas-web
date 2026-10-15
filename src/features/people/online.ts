@@ -3,6 +3,16 @@ import type { PeopleEnv } from "./env";
 import { isCurrentMemory } from "./memory";
 import { type Attempt, afterOutcome, attemptFor } from "./model/attempt";
 
+/** Whether a command's outcome means a request may have reached the server (anything but offline, not sent or closed). */
+export const sentSomething = (result: {
+  ok: boolean;
+  kind?: string;
+}): boolean =>
+  result.ok ||
+  (result.kind !== "offline" &&
+    result.kind !== "not_sent" &&
+    result.kind !== "closed");
+
 /**
  * Sends ONE online-only people command (§4.7): the attempt for `body` is the uncertain one kept under `key` in the identity's page memory
  * when it is for the same body, else a new one; a `not_sent` is asked again quietly, a bounded number of times; afterwards the attempt is
@@ -31,6 +41,8 @@ export async function sendOnline<T>(
     await sleep(delay);
   }
   if (!isCurrentMemory(memory)) return result;
+  // A command was sent (whatever its answer said): the summaries shown are read again (finding 8: a receipt invalidates them).
+  if (sentSomething(result)) memory.invalidateSummaries();
   const kept = afterOutcome(
     attempt,
     previous,

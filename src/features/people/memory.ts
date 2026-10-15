@@ -14,7 +14,10 @@ import type { LinkageState } from "./model/linkage";
  *  - `heldRuns`: the held audience changes this page is running now, and whether the person discarded one while it ran (the held
  *    changes themselves are DURABLE, in the account's database: `field/held-store.ts`, finding 6 of the review of 13 October);
  *  - `drafts`: editor input kept by the in-dialog sync control or across a remount (field editor, rename);
- *  - `attempts`: the uncertain attempt of an online-only command, per target (same key and body on "Try again").
+ *  - `attempts`: the uncertain attempt of an online-only command, per target (same key and body on "Try again");
+ *  - `summaries`: the viewer-safe summaries read for this identity (finding 8, `summaries.tsx`), per query, for the CURRENT invalidation
+ *    `summaryGeneration` only, with the highest `preferences_version` applied and each row's highest versions (the contract's
+ *    monotonicity rules: an older answer is never applied over a newer one in the same epoch). Display data only, never a permission.
  *
  * Nothing is written to storage: a reload forgets it, and so does any other identity. Memory for one identity is dropped the moment
  * another identity asks for its own, so nothing learnt or kept under one account (or an earlier sign-in of it) is shown or sent under
@@ -35,6 +38,15 @@ export interface HeldRun {
   holdId: string;
   cancelled: boolean;
   policyDone: boolean;
+}
+
+/** One summary read, by its query (`summaries.tsx`): what it answered under the generation it was asked at. */
+export interface SummaryEntry {
+  generation: number;
+  state:
+    | { kind: "loading" }
+    | { kind: "ready"; value: unknown; checkedAt: number }
+    | { kind: "failed"; reason: "failed" | "not_found" | "stale" };
 }
 
 type Listener = () => void;
@@ -64,6 +76,17 @@ export class PeopleMemory {
   /** The count "Possible duplicates" showed from its first page, per person ("2", "2+"; null: none claimed). */
   readonly duplicateCounts = new Map<string, string | null>();
   readonly attempts = new Map<string, Attempt>();
+  /** Bumped by every invalidation: every earlier summary read is superseded, and none of its answers is applied. */
+  summaryGeneration = 0;
+  /** The highest `preferences_version` a summary applied in this epoch (0: none yet). */
+  summaryPreferences = 0;
+  /** The highest `version`/`policy_version` applied for each summarised row (person or field), by id. */
+  readonly summaryFloors = new Map<
+    string,
+    { version: number; policyVersion: number }
+  >();
+  /** The summary reads of the current generation, by query key. */
+  readonly summaries = new Map<string, SummaryEntry>();
   private listeners = new Set<Listener>();
   private revision = 0;
 
@@ -81,6 +104,16 @@ export class PeopleMemory {
     };
   };
   readonly version = (): number => this.revision;
+
+  /**
+   * Something a summary depends on may have changed (a projection, a receipt, a reconnection, households or the primary household, the
+   * 60-second refresh, the view becoming visible): every summary is read again, and every read still on its way is superseded.
+   */
+  invalidateSummaries(): void {
+    this.summaryGeneration += 1;
+    this.summaries.clear();
+    this.touch();
+  }
 
   /** The pairs of `personId` hidden with "Not the same". */
   dismissedOf(personId: string): ReadonlySet<string> {

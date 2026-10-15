@@ -1080,7 +1080,6 @@ describe("finding 7: every record stays reachable", () => {
 
   test("control: in a small list a search finds the last person at once", async () => {
     const w = peopleWorld();
-    w.people.prefetchLinkage = 0;
     w.setCache(people(201));
     await w.mount("/people");
     fireEvent.change(screen.getByRole("searchbox", { name: "Search people" }), {
@@ -1091,7 +1090,6 @@ describe("finding 7: every record stays reachable", () => {
 
   test("beyond a step's bound, search continues with 'Keep searching' and finds the last person", async () => {
     const w = peopleWorld();
-    w.people.prefetchLinkage = 0;
     w.setCache(people(2101));
     await w.mount("/people");
     fireEvent.change(screen.getByRole("searchbox", { name: "Search people" }), {
@@ -1111,7 +1109,6 @@ describe("finding 7: every record stays reachable", () => {
 
   test("browsing: 'Next people' moves a step at a time to the last person; 'Previous people' goes back", async () => {
     const w = peopleWorld();
-    w.people.prefetchLinkage = 0;
     w.setCache(people(250));
     await w.mount("/people");
     await screen.findByRole("link", { name: /Person 0000/ });

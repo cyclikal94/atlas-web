@@ -385,10 +385,12 @@ describe("the fields table", () => {
       screen.getByRole("button", { name: "Archived fields (1)" }),
     );
     expect(screen.getByText("Old")).toBeInTheDocument();
-    // No field's audience is claimed without a policy read (D-11a-13).
+    // The audience comes from the viewer-safe field audiences (finding 8), never from an owner-only policy read (D-11a-13).
     expect(
-      within(await row(1)).getByRole("button", { name: "Who can see it?" }),
+      within(await row(1)).getByRole("button", { name: "Only you" }),
     ).toBeInTheDocument();
+    expect(await row(1)).toHaveTextContent("Nobody else can see it.");
+    expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toEqual([]);
     expect((await axe(document.body)).violations).toEqual([]);
   });
 

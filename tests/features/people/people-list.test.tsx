@@ -16,7 +16,7 @@ import { peopleWorld, person } from "../../support/people/world";
 
 /**
  * WF-PEOPLE-01 (A1): rows from the cache with this device's outstanding saves folded in, sort, search, the Archived filter, the states
- * (Loading, Empty, Offline-first-visit, Error), and the linkage shown only where a person read said it, with the bounded prefetch (D-11a-3).
+ * (Loading, Empty, Offline-first-visit, Error), and the account line from the viewer-safe summaries, never a per-person read (D-11a-20).
  * jsdom with axe; fixture evidence.
  */
 const media = installMatchMedia({ width: 1440 });
@@ -133,7 +133,7 @@ describe("the people list", () => {
     expect(w.env.calls.map((c) => c.action)).toContain("retryLoad");
   });
 
-  test("the linkage is shown only from a person read; the prefetch reads at most 25, two at a time, once per identity", async () => {
+  test("the account line comes from the summaries, one bounded read per step; the list makes no person read (finding 8)", async () => {
     const w = peopleWorld();
     const people = ids(30).map((id, i) =>
       person({ id, label: `P${String(i).padStart(2, "0")}` }),
@@ -141,44 +141,34 @@ describe("the people list", () => {
     w.setCache(people);
     w.api.linked.set(people[0]?.id as string, ME);
     w.api.linked.set(people[1]?.id as string, MO);
-    let inFlight = 0;
-    let most = 0;
-    const original = w.api.readPerson;
-    w.api.readPerson = async (id) => {
-      inFlight += 1;
-      most = Math.max(most, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      inFlight -= 1;
-      return original(id);
-    };
     await w.mount("/people");
     await waitFor(() =>
-      expect(w.api.calls.filter((c) => c.op === "readPerson")).toHaveLength(25),
-    );
-    await waitFor(() =>
       expect(document.querySelectorAll("[data-person-linkage]").length).toBe(
-        25,
+        30,
       ),
     );
-    expect(most).toBeLessThanOrEqual(2);
-    const first = document.querySelector(
-      `[data-person-row="${people[0]?.id}"]`,
-    );
-    expect(first).toHaveTextContent("Linked to your account");
+    expect(w.api.calls.filter((c) => c.op === "readPerson")).toEqual([]);
+    expect(w.api.calls.filter((c) => c.op === "readSummaries")).toEqual([
+      {
+        op: "readSummaries",
+        args: ["all", { after: null, limit: 100, archived: false }],
+      },
+    ]);
+    expect(
+      document.querySelector(`[data-person-row="${people[0]?.id}"]`),
+    ).toHaveTextContent("Linked to your account");
     expect(
       document.querySelector(`[data-person-row="${people[1]?.id}"]`),
     ).toHaveTextContent("Linked · they control their name");
-    // Rows past the prefetch bound say nothing about linkage.
     expect(
-      document.querySelector(
-        `[data-person-row="${people[29]?.id}"] [data-person-linkage]`,
-      ),
-    ).toBeNull();
-    // Leaving and coming back does not ask again (page memory for this identity).
+      document.querySelector(`[data-person-row="${people[29]?.id}"]`),
+    ).toHaveTextContent("Not linked to an account");
+    // Leaving and coming back within the same invalidation generation does not ask again (page memory for this identity).
     cleanup();
     await w.mount("/people");
     await waitFor(() => expect(rowNames()).toHaveLength(30));
-    expect(w.api.calls.filter((c) => c.op === "readPerson")).toHaveLength(25);
+    expect(document.querySelectorAll("[data-person-linkage]").length).toBe(30);
+    expect(w.api.calls.filter((c) => c.op === "readSummaries")).toHaveLength(1);
   });
 
   test("offline, nothing is read and no linkage is claimed", async () => {

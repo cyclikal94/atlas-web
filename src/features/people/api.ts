@@ -6,10 +6,22 @@ import {
   classifyThrown,
   type SharingFailure,
 } from "../sharing";
+import {
+  type FieldAudience,
+  type PersonSummary,
+  type PersonSummaryDetail,
+  parseFieldAudience,
+  parsePersonSummary,
+  parsePersonSummaryDetail,
+  parseSummaryPage,
+  type SummaryPage,
+  type SummaryScope,
+} from "./model/summary";
 
 /**
- * The people endpoints of the pinned contract (`v0.28.0-rc.1`) that WEB-11a uses ONLINE (D-11a-14): the person read that says who
- * controls a profile, the duplicate suggestions, the two profile commands and a shared field create. Every call goes through the
+ * The people endpoints of the pinned contract (`v0.29.0-rc.1`, API 0.29.0) that WEB-11a uses ONLINE (D-11a-14): the person read that says
+ * who controls a profile, the duplicate suggestions, the viewer-safe summaries (finding 8: `model/summary.ts`), the two profile commands
+ * and a shared field create. Every call goes through the
  * session's STAMPED typed client for the displayed `(account, epoch)` (lint R1); nothing here queues.
  *
  * Answers are classified with the sharing slice's rules (`classifyAnswer`, `classifyThrown`): a refusal needs an Atlas error body, a
@@ -50,8 +62,27 @@ export interface CommandAttempt {
   body: string;
 }
 
+/** One page of a summary read: after the cursor, at most `limit` (1–100) rows. */
+export interface SummaryPageQuery {
+  after: string | null;
+  limit: number;
+  archived: boolean;
+}
+
 export interface PeopleApi {
   readPerson(id: string): Promise<PeopleResult<PersonDetailAnswer>>;
+  /** `GET /people/summaries`: one page of the reader's visible people in `scope`, filtered by the server BEFORE pagination. */
+  readSummaries(
+    scope: SummaryScope,
+    page: SummaryPageQuery,
+  ): Promise<PeopleResult<SummaryPage<PersonSummary>>>;
+  /** `GET /people/{id}/summary`: one person's summary and its "Shared with" rail. */
+  readPersonSummary(id: string): Promise<PeopleResult<PersonSummaryDetail>>;
+  /** `GET /people/{id}/field-audiences`: one page of the person's visible fields, each with its own sharing and who can see it. */
+  readFieldAudiences(
+    id: string,
+    page: SummaryPageQuery,
+  ): Promise<PeopleResult<SummaryPage<FieldAudience>>>;
   readDuplicates(
     id: string,
     page: { after?: string | null; limit: number },
@@ -304,6 +335,51 @@ export function createPeopleApi(
               },
             }),
           (body) => parseProjectionPage(body, page.limit),
+        ),
+      ),
+    readSummaries: async (scope, page) =>
+      offline() ??
+      readUntilSent(() =>
+        call(
+          () =>
+            client().GET("/people/summaries", {
+              params: {
+                query: {
+                  scope,
+                  archived: page.archived,
+                  limit: page.limit,
+                  ...(page.after ? { after: page.after } : {}),
+                },
+              },
+            }),
+          (body) => parseSummaryPage(body, page, parsePersonSummary),
+        ),
+      ),
+    readPersonSummary: async (id) =>
+      offline() ??
+      readUntilSent(() =>
+        call(
+          () =>
+            client().GET("/people/{id}/summary", { params: { path: { id } } }),
+          parsePersonSummaryDetail,
+        ),
+      ),
+    readFieldAudiences: async (id, page) =>
+      offline() ??
+      readUntilSent(() =>
+        call(
+          () =>
+            client().GET("/people/{id}/field-audiences", {
+              params: {
+                path: { id },
+                query: {
+                  archived: page.archived,
+                  limit: page.limit,
+                  ...(page.after ? { after: page.after } : {}),
+                },
+              },
+            }),
+          (body) => parseSummaryPage(body, page, parseFieldAudience),
         ),
       ),
     peopleCommand: async (attempt) =>

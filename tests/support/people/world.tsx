@@ -24,6 +24,7 @@ import type {
   PeopleResult,
   PersonDetailAnswer,
   ProjectionPage,
+  SummaryPageQuery,
 } from "../../../src/features/people/api";
 import {
   type PeopleEnv,
@@ -37,6 +38,20 @@ import {
   heldContextOf,
 } from "../../../src/features/people/field/held-store";
 import { peopleMemory } from "../../../src/features/people/memory";
+import {
+  type AudienceSummary,
+  type FieldAudience,
+  type PeopleHome,
+  type PersonSummary,
+  type PersonSummaryDetail,
+  parseFieldAudience,
+  parsePersonSummary,
+  parsePersonSummaryDetail,
+  parseSummaryPage,
+  type SharedWith,
+  type SummaryPage,
+  type SummaryScope,
+} from "../../../src/features/people/model/summary";
 import { SharingEnvProvider } from "../../../src/features/sharing/env";
 import { SessionProvider } from "../../../src/session";
 import { sessionDouble } from "../../helpers/session-double";
@@ -83,10 +98,35 @@ export interface FakePeopleApi extends PeopleApi {
     duplicates: PeopleAnswer<ProjectionPage>[];
     people: PeopleAnswer<{ revision: number; person_id: string }>[];
     shared: PeopleAnswer<{ revision: number }>[];
+    summaries: PeopleAnswer<SummaryPage<PersonSummary>>[];
+    personSummary: PeopleAnswer<PersonSummaryDetail>[];
+    fieldAudiences: PeopleAnswer<SummaryPage<FieldAudience>>[];
   };
   /** Linked accounts by person id (the default answer of `readPerson`); a person absent from the cache is `not_found`. */
   linked: Map<string, string | null>;
+  /**
+   * The viewer-safe summaries the fake server derives from the cache (an owner's private person or field by default), with these
+   * overrides by id. Every answer is checked by the real strict parser: a fixture the contract would not send fails the test.
+   */
+  summary: {
+    persons: Map<string, Partial<PersonSummary>>;
+    rails: Map<string, SharedWith>;
+    fields: Map<string, Partial<FieldAudience>>;
+    home: PeopleHome | null;
+    preferencesVersion: number;
+  };
+  /** The people the fake server answers for (default: every cached person); for a server ahead of or behind the cache. */
+  summaryOf(id: string): PersonSummary | null;
 }
+
+export const OWNER_ONLY: AudienceSummary = {
+  disclosure: "complete",
+  in_home: false,
+  households: [],
+  your_direct_grant: null,
+  direct_grant_count: 0,
+  excluded_count: 0,
+};
 
 export function fakePeopleApi(
   cache: () => Map<string, CacheRow>,
@@ -100,10 +140,149 @@ export function fakePeopleApi(
     if (next === undefined) return fallback();
     return typeof next === "function" ? next() : next;
   };
+  const personSummary = (row: CacheRow): PersonSummary => {
+    const linked = api.linked.get(row.id) ?? null;
+    const base: PersonSummary = {
+      id: row.id,
+      label: row.label,
+      version: row.version,
+      policy_version: row.policy_version ?? 1,
+      archived: row.archived,
+      linkage: linked === null ? "none" : linked === ME ? "you" : "other",
+      linked_account_id: linked,
+      owner: { account_id: ME, username: "me", you: true, person: null },
+      added_by_you: "unknown",
+      your_access: "owner",
+      field_count: [...cache().values()].filter(
+        (f) => f.kind === "field" && f.parent_id === row.id && !f.archived,
+      ).length,
+      audience: OWNER_ONLY,
+    };
+    return { ...base, ...(api.summary.persons.get(row.id) ?? {}) };
+  };
+  const inScope = (scope: SummaryScope, s: PersonSummary) =>
+    scope === "all" ||
+    (scope === "in_home" && api.summary.home !== null && s.audience.in_home) ||
+    (scope === "shared_with_me" && !s.owner.you && s.added_by_you !== "yes") ||
+    (scope === "not_linked" && s.linkage === "none");
+  const pageOf = <Item extends { id: string; archived: boolean }>(
+    all: Item[],
+    query: SummaryPageQuery,
+    parse: (value: unknown) => Item | null,
+  ): SummaryPage<Item> => {
+    const rest = all
+      .filter((item) => item.archived === query.archived)
+      .filter((item) => query.after === null || item.id > query.after)
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+    const items = rest.slice(0, query.limit);
+    const page = {
+      items,
+      next_after:
+        items.length === query.limit ? (items.at(-1)?.id ?? null) : null,
+      home: api.summary.home,
+      preferences_version: api.summary.preferencesVersion,
+    };
+    const checked = parseSummaryPage(
+      JSON.parse(JSON.stringify(page)),
+      query,
+      parse,
+    );
+    if (checked === null)
+      throw new Error("the fake summary page breaks the contract");
+    return checked;
+  };
   const api: FakePeopleApi = {
     calls: [],
     linked: new Map(),
-    next: { person: [], duplicates: [], people: [], shared: [] },
+    next: {
+      person: [],
+      duplicates: [],
+      people: [],
+      shared: [],
+      summaries: [],
+      personSummary: [],
+      fieldAudiences: [],
+    },
+    summary: {
+      persons: new Map(),
+      rails: new Map(),
+      fields: new Map(),
+      home: null,
+      preferencesVersion: 1,
+    },
+    summaryOf(id) {
+      const row = cache().get(id);
+      return row === undefined || row.kind !== "person"
+        ? null
+        : personSummary(row);
+    },
+    async readSummaries(scope, page) {
+      api.calls.push({ op: "readSummaries", args: [scope, page] });
+      return take(api.next.summaries, () => ({
+        ok: true,
+        value: pageOf(
+          [...cache().values()]
+            .filter((row) => row.kind === "person")
+            .map(personSummary)
+            .filter((s) => inScope(scope, s)),
+          page,
+          parsePersonSummary,
+        ),
+      }));
+    },
+    async readPersonSummary(id) {
+      api.calls.push({ op: "readPersonSummary", args: [id] });
+      return take(api.next.personSummary, () => {
+        const summary = api.summaryOf(id);
+        if (summary === null) return { ok: false, kind: "not_found" };
+        const rail: SharedWith = api.summary.rails.get(id) ?? {
+          disclosure: summary.audience.disclosure,
+          owner: summary.owner,
+          accounts: [],
+          households: [],
+          excluded_accounts: summary.owner.you ? [] : null,
+        };
+        const detail = parsePersonSummaryDetail(
+          JSON.parse(
+            JSON.stringify({
+              summary,
+              shared_with: rail,
+              home: api.summary.home,
+              preferences_version: api.summary.preferencesVersion,
+            }),
+          ),
+        );
+        if (detail === null)
+          throw new Error("the fake person summary breaks the contract");
+        return { ok: true, value: detail };
+      });
+    },
+    async readFieldAudiences(id, page) {
+      api.calls.push({ op: "readFieldAudiences", args: [id, page] });
+      return take(api.next.fieldAudiences, () => {
+        if (api.summaryOf(id) === null) return { ok: false, kind: "not_found" };
+        const fields = [...cache().values()]
+          .filter((row) => row.kind === "field" && row.parent_id === id)
+          .map(
+            (row): FieldAudience => ({
+              id: row.id,
+              version: row.version,
+              policy_version: row.policy_version ?? 1,
+              archived: row.archived,
+              owner_is_you: true,
+              your_access: "owner",
+              audience: OWNER_ONLY,
+              effective: {
+                disclosure: "complete",
+                account_count: 0,
+                limited_count: 0,
+              },
+              ...(api.summary.fields.get(row.id) ?? {}),
+            }),
+          );
+        return { ok: true, value: pageOf(fields, page, parseFieldAudience) };
+      });
+    },
     async readPerson(id) {
       api.calls.push({ op: "readPerson", args: [id] });
       return take(api.next.person, () => {
@@ -183,6 +362,8 @@ export interface PeopleWorld {
   noDatabase(): void;
   /** Every list read fails (the store's `error`). */
   failReads(): void;
+  /** The sync engine applied a page of changes (`sync_state.applied_revision` moves): the summaries' invalidation signal. */
+  advanceRevision(): void;
   mount(path: string): Promise<{ router: ReturnType<typeof createAppRouter> }>;
 }
 
@@ -201,6 +382,7 @@ export function peopleWorld(
   const listeners = new Set<Listener>();
   let version = 0;
   let failing = false;
+  let appliedRevision = 1;
   let seq = 100;
   const notify = () => {
     version += 1;
@@ -252,6 +434,10 @@ export function peopleWorld(
         },
       };
     },
+    "data.readAppliedRevision": () => ({
+      status: "ready",
+      value: appliedRevision,
+    }),
     "data.readFormCopies": (input) => {
       const prefix = input.prefix as string;
       const live = [...copies.values()]
@@ -525,7 +711,6 @@ export function peopleWorld(
       writable: true,
       newId: base.newId,
       now: () => Date.now(),
-      prefetchLinkage: 25,
       memory: peopleMemory(identity),
       held: heldStore,
       exclusive,
@@ -629,6 +814,10 @@ export function peopleWorld(
     },
     failReads() {
       failing = true;
+      act(() => notify());
+    },
+    advanceRevision() {
+      appliedRevision += 1;
       act(() => notify());
     },
     async mount(path) {

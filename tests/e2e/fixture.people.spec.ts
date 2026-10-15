@@ -18,6 +18,7 @@ import {
   ME,
   MO,
   navigateInApp,
+  notSummary,
   personP,
   publish,
   servePeople,
@@ -36,6 +37,9 @@ import {
  * field's policy across the remount; E-P12 viewports and themes; E-P13 keyboard only. Revision 1 (the review of 13 October 2026):
  * E-P14 an edit bound to what it began on; E-P15 a held change durable across a reload; E-P16 Discard stops a running held change;
  * E-P17 state stays with its person; E-P18 every person reachable in bounded steps. E-P5 also asserts the conflicted save's content.
+ * Finding 8 with API 0.29's viewer-safe summaries: E-P19 the drawn lines and the server's In Home / Shared with me / Not linked views,
+ * offline included; E-P20 the "Shared with" rails and the field audience tags; E-P21 a synced change reads them again, and an answer it
+ * superseded is never shown.
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -51,7 +55,7 @@ const send = (page: Page) =>
 const detail = (page: Page) => page.locator(`[data-person-detail="${P}"]`);
 
 test.describe("E-P1: the people list (A1)", () => {
-  test("sorted by name, searchable, archived people only under Archived; the linkage of at most 25 people is read, once", async ({
+  test("sorted by name, searchable, archived people only under Archived; the Account line comes from the summaries, never a person read", async ({
     context,
   }, info) => {
     const people = Array.from({ length: 30 }, (_, i) =>
@@ -70,9 +74,7 @@ test.describe("E-P1: the people list (A1)", () => {
     await expect(rows).toHaveCount(30);
     await expect(rows.first()).toContainText("Person 00");
     await expect(rows.first()).toContainText("Linked to your account");
-    const personReads = () =>
-      served.log.filter((l) => /^GET \/people\/[0-9a-f-]{36}$/.test(l));
-    await expect.poll(() => personReads().length).toBe(25);
+    await expect(page.locator("[data-person-linkage]")).toHaveCount(30);
     await page
       .getByRole("searchbox", { name: "Search people" })
       .fill("person 07");
@@ -81,14 +83,24 @@ test.describe("E-P1: the people list (A1)", () => {
     await page.getByRole("button", { name: "Archived" }).click();
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toContainText("Ada");
-    // The Archived filter shows one person nobody has asked about: that one is read; nobody is ever read twice.
-    await expect.poll(() => personReads().length).toBe(26);
+    await expect(rows.first()).toContainText("Not linked to an account");
     await page.getByRole("button", { name: "All" }).click();
     await expect(rows).toHaveCount(30);
-    await page.waitForTimeout(500);
-    recordEvidence(info, "e-p1", { personReads: personReads() });
-    expect(personReads()).toHaveLength(26);
-    expect(new Set(personReads()).size).toBe(26);
+    const personReads = served.log.filter((l) =>
+      /^GET \/people\/[0-9a-f-]{36}$/.test(l),
+    );
+    const summaryReads = served.log
+      .filter((l) => l.startsWith("GET /people/summaries"))
+      .map((l) => new URL(l.slice(4), "http://x").searchParams);
+    recordEvidence(info, "e-p1", { personReads, log: served.log });
+    // Finding 8: the list reads no person (the 0.28 prefetch of 25 is gone); every summary read is bounded and of the step's view.
+    expect(personReads).toEqual([]);
+    expect(summaryReads.length).toBeGreaterThan(0);
+    for (const query of summaryReads) {
+      expect(query.get("scope")).toBe("all");
+      expect(query.get("limit")).toBe("100");
+    }
+    expect(summaryReads.some((q) => q.get("archived") === "true")).toBe(true);
   });
 });
 
@@ -443,11 +455,16 @@ test.describe("E-P6: a held audience change (A6)", () => {
     const before = served.log.length;
     await connectivity(context, page, true);
     await expect.poll(async () => (await draftsOf(page)).length).toBe(1);
-    expect(served.log.slice(before)).toEqual([
+    expect(served.log.slice(before).filter(notSummary)).toEqual([
       `GET /policies/${F}`,
       "POST /management-commands",
       `GET /policies/${F}`,
     ]);
+    // The audience change was sent: the summaries shown are read again after it (finding 8).
+    const sent = served.log.lastIndexOf("POST /management-commands");
+    await expect
+      .poll(() => served.log.slice(sent).some((l) => !notSummary(l)))
+      .toBe(true);
     await send(page);
     await expect.poll(() => net.commands.length).toBe(1);
     expect(JSON.parse(net.commands[0]?.body ?? "{}").command).toMatchObject({
@@ -1061,7 +1078,7 @@ test.describe("E-P16: Discard stops a held change that is running (A6; finding 2
     const before = served.log.length;
     await connectivity(context, page, true);
     await expect
-      .poll(() => served.log.slice(before))
+      .poll(() => served.log.slice(before).filter(notSummary))
       .toEqual([`GET /policies/${F}`]);
     await row.getByRole("button", { name: "Discard" }).click();
     held.open();
@@ -1128,5 +1145,273 @@ test.describe("E-P18: every person stays reachable in bounded steps (Q9; finding
     );
     await page.getByRole("button", { name: "Previous people" }).click();
     await expect(rows.first()).toContainText("Person 100");
+  });
+});
+
+// ---- finding 8: the viewer-safe summaries (API 0.29) ----------------------------------------------------------------------------------
+const K8 = "88888888-8888-4888-8888-000000000001";
+const M8 = "88888888-8888-4888-8888-000000000002";
+const S8 = "88888888-8888-4888-8888-000000000003";
+const A8 = "88888888-8888-4888-8888-000000000004";
+const HOUSEHOLD = {
+  id: HOME,
+  can_edit: false,
+  you_are_member: true,
+  name: "Home",
+  version: 1,
+  member_count: 2,
+};
+const OWNER_HOME = {
+  disclosure: "complete",
+  in_home: true,
+  households: [HOUSEHOLD],
+  your_direct_grant: null,
+  direct_grant_count: 0,
+  excluded_count: 0,
+};
+const PARTIAL_HOME = {
+  disclosure: "partial",
+  in_home: true,
+  households: [HOUSEHOLD],
+  your_direct_grant: null,
+  direct_grant_count: null,
+  excluded_count: null,
+};
+const MO_OWNER = {
+  account_id: MO,
+  username: "mo",
+  you: false,
+  person: { id: M8, label: "Mo" },
+};
+const SAM_SHARED = {
+  owner: MO_OWNER,
+  your_access: "view",
+  added_by_you: "no",
+  audience: PARTIAL_HOME,
+};
+
+test.describe("E-P19: the drawn lines and views from the viewer-safe summaries (finding 8)", () => {
+  test("Account, Visible to and who added each person; In Home, Shared with me and Not linked are the server's; offline they need a connection and nothing old is shown", async ({
+    context,
+  }, info) => {
+    const { served, page } = await setup(
+      context,
+      "/people",
+      [
+        personP(K8, "Kieran"),
+        personP(M8, "Mo", { can_edit: false }),
+        personP(S8, "Sam", { can_edit: false }),
+        personP(A8, "Ada"),
+      ],
+      {
+        linked: { [K8]: ME, [M8]: MO },
+        arrange: (s) => {
+          s.summaries.set(K8, { added_by_you: "yes", audience: OWNER_HOME });
+          s.summaries.set(M8, {
+            owner: { ...MO_OWNER, person: null },
+            your_access: "view",
+            added_by_you: "yes",
+            audience: PARTIAL_HOME,
+          });
+          s.summaries.set(S8, SAM_SHARED);
+          s.summaries.set(A8, { added_by_you: "yes", audience: OWNER_HOME });
+        },
+      },
+    );
+    const rows = page.locator("[data-person-row]");
+    const row = (id: string) => page.locator(`[data-person-row="${id}"]`);
+    await expect(row(S8)).toContainText("Shared with you by Mo");
+    await expect(row(S8)).toContainText("Visible to: Shared from Home");
+    await expect(row(K8)).toContainText("Linked to your account");
+    await expect(row(M8)).toContainText("Added by you");
+    await expect(row(M8)).toContainText("Linked · they control their name");
+    await expect(row(A8)).toContainText("Visible to: Home · can view");
+    await expect(
+      page.getByText(/The owner may have shared them more widely/),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Shared with me" }).click();
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("Sam");
+    await page.getByRole("button", { name: "Not linked" }).click();
+    await expect(rows).toHaveCount(2);
+    await page.getByRole("button", { name: "In Home" }).click();
+    await expect(rows).toHaveCount(4);
+    const scopes = new Set(
+      served.log
+        .filter((l) => l.startsWith("GET /people/summaries"))
+        .map((l) => new URL(l.slice(4), "http://x").searchParams.get("scope")),
+    );
+    expect([...scopes].sort()).toEqual([
+      "all",
+      "in_home",
+      "not_linked",
+      "shared_with_me",
+    ]);
+    await connectivity(context, page, false);
+    await expect(
+      page.getByText(
+        "This view needs a connection. All and Archived work offline.",
+      ),
+    ).toBeVisible();
+    await expect(rows).toHaveCount(0);
+    await page.getByRole("button", { name: "All" }).click();
+    await expect(rows).toHaveCount(4);
+    await expect(page.locator("[data-person-audience]")).toHaveCount(0);
+    await expect(page.locator("[data-person-linkage]")).toHaveCount(0);
+    await expect(page.locator("[data-person-attribution]")).toHaveCount(0);
+    await connectivity(context, page, true);
+    await expect(page.locator("[data-person-audience]")).toHaveCount(4);
+    recordEvidence(info, "e-p19", { log: served.log });
+  });
+});
+
+test.describe("E-P20: Shared with and the field tags (finding 8)", () => {
+  test("the owner's complete rail and another owner's partial one; a field's own sharing and who can see it; no owner-only policy read", async ({
+    context,
+  }) => {
+    const { served, page } = await setup(
+      context,
+      `/people/${A8}`,
+      [
+        personP(A8, "Ada"),
+        personP(S8, "Sam", { can_edit: false }),
+        personP(M8, "Mo", { can_edit: false }),
+        fieldP(F, A8, "Phone", { kind: "text", text: "07700 900461" }),
+      ],
+      {
+        arrange: (s) => {
+          s.summaries.set(S8, SAM_SHARED);
+          s.rails.set(A8, {
+            disclosure: "complete",
+            owner: { account_id: ME, username: "me", you: true, person: null },
+            accounts: [{ account_id: MO, username: "mo", can_edit: true }],
+            households: [
+              {
+                ...HOUSEHOLD,
+                members: [
+                  { account_id: ME, username: "me", excluded: false },
+                  { account_id: MO, username: "mo", excluded: true },
+                ],
+              },
+            ],
+            excluded_accounts: [{ account_id: MO, username: "mo" }],
+          });
+          s.rails.set(S8, {
+            disclosure: "partial",
+            owner: MO_OWNER,
+            accounts: [{ account_id: ME, username: "me", can_edit: false }],
+            households: [{ ...HOUSEHOLD, members: null }],
+            excluded_accounts: null,
+          });
+          s.fieldAudiences.set(A8, [
+            {
+              id: F,
+              version: 1,
+              policy_version: 1,
+              archived: false,
+              owner_is_you: true,
+              your_access: "owner",
+              audience: OWNER_HOME,
+              effective: {
+                disclosure: "complete",
+                account_count: 1,
+                limited_count: 0,
+              },
+            },
+          ]);
+        },
+      },
+    );
+    const rail = page.getByRole("region", { name: "Shared with" });
+    await expect(rail).toHaveAttribute("data-shared-with", "complete");
+    await expect(rail).toContainText("mo (can't see it)");
+    await expect(rail).toContainText("Excluded: mo");
+    await expect(rail).toContainText("2 members in the household");
+    const field = page.locator(`[data-field-row="${F}"]`);
+    await expect(
+      field.getByRole("button", { name: "Home · can view" }),
+    ).toBeVisible();
+    await expect(field).toContainText("1 other person can see it.");
+    await navigateInApp(page, `/people/${S8}`);
+    const other = page.getByRole("region", { name: "Shared with" });
+    await expect(other).toHaveAttribute("data-shared-with", "partial");
+    await expect(other).toContainText(
+      "Mo owns this person. You see only how it's shared with you; Mo may have shared it more widely.",
+    );
+    await expect(other).not.toContainText("Excluded");
+    expect(served.log.filter((l) => l.startsWith("GET /policies/"))).toEqual(
+      [],
+    );
+  });
+});
+
+test.describe("E-P21: freshness and supersession in real IndexedDB (finding 8)", () => {
+  test("a synced change (here a field of a listed person: the list's people are the same) reads the summaries again; an answer it superseded is never shown", async ({
+    context,
+  }, info) => {
+    const { net, served, page } = await setup(
+      context,
+      "/people",
+      [personP(S8, "Sam", { can_edit: false })],
+      { arrange: (s) => s.summaries.set(S8, SAM_SHARED) },
+    );
+    const row = page.locator(`[data-person-row="${S8}"]`);
+    const reads = () =>
+      served.log.filter((l) => l.startsWith("GET /people/summaries")).length;
+    await expect(row).toContainText("Shared with you by Mo");
+    // The B5 record is loaded (its arrival is a signal of its own), so only the synced changes below can ask again.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (a) =>
+            window.__atlasData
+              ?.defaultsRecord(a)
+              .then((r) => r?.snapshot.defaults.revision ?? null),
+          ME,
+        ),
+      )
+      .not.toBeNull();
+    await page.waitForTimeout(300);
+    const before = reads();
+    // The next summary read is held, and claims Sam was added by me: once superseded it must never be shown.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    served.summaryScript.push({
+      status: 200,
+      after: held,
+      body: {
+        items: [
+          {
+            id: S8,
+            label: "Sam",
+            version: 1,
+            policy_version: 1,
+            archived: false,
+            linkage: "none",
+            linked_account_id: null,
+            ...SAM_SHARED,
+            added_by_you: "yes",
+            field_count: 0,
+          },
+        ],
+        next_after: null,
+        home: served.home,
+        preferences_version: 1,
+      },
+    });
+    const field = fieldP(F, S8, "Phone", { kind: "text", text: "0770" });
+    await publish(page, net, [field], { start: false });
+    await expect.poll(reads).toBe(before + 1);
+    // A second synced change supersedes the held read: the newer answer is shown.
+    await publish(page, net, [{ ...field, version: 2 }], { start: false });
+    await expect.poll(reads).toBe(before + 2);
+    await expect(row).toContainText("Shared with you by Mo");
+    release();
+    await page.waitForTimeout(500);
+    await expect(row).toContainText("Shared with you by Mo");
+    await expect(row).not.toContainText("Added by you");
+    recordEvidence(info, "e-p21", { log: served.log });
   });
 });

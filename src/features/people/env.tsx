@@ -27,8 +27,6 @@ export interface PeopleEnv {
   writable: boolean;
   newId(): string;
   now(): number;
-  /** How many people the list reads the linkage of while online (D-11a-3: 25). */
-  prefetchLinkage: number;
   memory: PeopleMemory;
   /** The account's DURABLE held audience changes (form copies of its database, finding 6). */
   held: HeldStore;
@@ -111,7 +109,6 @@ function ProductionPeopleEnv({ children }: { children: ReactNode }) {
             writable: sharing.writable,
             newId: sharing.newId,
             now: sharing.now,
-            prefetchLinkage: 25,
             memory: peopleMemory(sharing.identity),
             held,
             exclusive: webLocksExclusive,

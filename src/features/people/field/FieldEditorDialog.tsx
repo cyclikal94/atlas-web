@@ -65,7 +65,7 @@ import {
   formatValue,
   parseFieldValue,
 } from "../model/values";
-import { sendOnline } from "../online";
+import { sendOnline, sentSomething } from "../online";
 import { Banner, Choices, FieldError, useOutboxSave } from "../parts";
 import { OutstandingChain, usePersonLinkage } from "../reads";
 import { heldContextOf, heldPrefixOf } from "./held-store";
@@ -633,6 +633,9 @@ function Editor({
       memory.attempts.delete(`policy:${existing.id}`);
     else memory.attempts.set(`policy:${existing.id}`, changed.attempt);
     const result = changed.result;
+    // A command was sent (whatever its answer said): the summaries shown are read again.
+    if (isCurrentMemory(memory) && sentSomething(result))
+      memory.invalidateSummaries();
     if (!result.ok) {
       setSaving(false);
       if (result.kind === "changed" || result.kind === "conflict") {
@@ -742,7 +745,10 @@ function Editor({
         resourceId={existing.id}
         open
         onOpenChange={(open) => {
-          if (!open) setPolicyEditor(false);
+          if (!open) {
+            setPolicyEditor(false);
+            env.memory.invalidateSummaries();
+          }
         }}
       />
     );

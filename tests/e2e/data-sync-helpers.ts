@@ -479,10 +479,15 @@ export function pageText(
   changes: unknown[][],
   nextCursor: string,
   hasMore = false,
+  /** The first batch's revision (a real server's revisions only grow: a caller that publishes again passes a higher one). */
+  firstRevision = 1,
 ): string {
   return JSON.stringify({
     phase: "delta",
-    batches: changes.map((c, i) => ({ revision: i + 1, changes: c })),
+    batches: changes.map((c, i) => ({
+      revision: firstRevision + i,
+      changes: c,
+    })),
     next_cursor: nextCursor,
     has_more: hasMore,
   });

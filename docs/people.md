@@ -2,12 +2,19 @@
 
 The People destination (`/people`): who you have added or can see, each person's typed fields, who controls a profile, renaming and unlinking,
 duplicate suggestions, and archiving. Built on the WEB-09a data layer (`src/data`) and WEB-12a's sharing editors (`src/features/sharing`).
-Pinned contract: `v0.28.0-rc.1`.
+Pinned contract: `v0.29.0-rc.1` (API 0.29.0, schema 1006; adopted by `1adadae`, merged here by `7d71ba7` on 15 October 2026). Evidence
+recorded earlier against `v0.28.0-rc.1` stays historical and is not re-attributed to 0.29.
 
 ## What the pinned contract provides (and does not)
 
 - Projections of `person` and `field` sync like every resource. A projection carries **no linkage, owner or policy summary**. A person
   linked to another account syncs with `can_edit: false`, exactly like an ordinary read-only share.
+- **Viewer-safe summaries (API 0.29, BE-PEOPLE-SUMMARY; backend `docs/people.md` "Viewer-safe summaries" at `4396c99`):**
+  `GET /people/summaries?scope=&archived=&after=&limit=` (the reader's visible people, `scope` = `all` / `in_home` / `shared_with_me` /
+  `not_linked` applied over the WHOLE visible set before pagination, 1–100 per page in ascending id order), `GET /people/{id}/summary` (one
+  person and its "Shared with" rail) and `GET /people/{id}/field-audiences` (each visible field's own sharing and who can actually see it).
+  Online-only, `private, no-store`, identity-bound display data, never a permission; no owner-only branch, so no `403` from sharing. The
+  owner's audience is `complete`; every other reader's is `partial`, always (product decisions of 14 October 2026).
 - **Linkage is online only:** `GET /people/{id}` → `{ person, linked_account_id }`. `GET /policies/{id}` is owner-only (`403` otherwise).
 - Field values are the seven `FieldValue` kinds: `text`, `quantity`, `date`, `url`, `boolean`, `choices`, `checklist` (bounds in
   `model/values.ts`, transcribed from the server's own validation).
@@ -54,18 +61,21 @@ reopens it with its draft), and `/settings/archived`.
    `pending_effects` row on the first target stands), windows of 100 by `created_seq`, plus the drafts needing a decision as headers. Whichever
    card integrates second keeps the first's plan and hook, moves its callers to it (here: `reads.tsx` `OutstandingChain`), and both cards'
    tests must pass against it.
-4. **Q4 recovery contexts** (`model/recovery.ts`): `people-field:<personId>:<fieldId|new:<formId>>`, `people-rename:<personId>`,
+4. **Summaries after a command** (finding 8): every online people command sent through `online.ts` `sendOnline` (WEB-11b's link and merge
+   commands included) and every audience change invalidates the viewer-safe summaries shown (`memory.invalidateSummaries`); a new online
+   command path must do the same. Queued commands are covered by the queue's counts and the applied revision (`useAppliedRevision`).
+5. **Q4 recovery contexts** (`model/recovery.ts`): `people-field:<personId>:<fieldId|new:<formId>>`, `people-rename:<personId>`,
    `people-new:<formId>`. WEB-14a captures them; WEB-11a does not touch `src/lib/form-recovery`. A restore fills a form and never submits.
 
-## Decisions (D-11a-1 to D-11a-16)
+## Decisions (D-11a-1 to D-11a-23)
 
 - **D-11a-1** Every field write is a typed `put_field`; `create_field` only for the new person's first note (SHARE-10 batch); `edit` only to
   rename a person whose profile is not linked.
 - **D-11a-2** Linkage is read online (`GET /people/{id}`) and kept in the identity's page memory (outlives a remount; a `403`/`404` is remembered
   until Try again). Unknown linkage is shown as unknown, with the reason; it is never inferred from `can_edit`.
-- **D-11a-3** List rows show what the contract supports: the name, initials, the cached field count, the pending mark, "Archived". The account
-  text appears only for people whose linkage was read: the first 25 people shown are read, two at a time, once per identity. No "Visible to"
-  column, no ownership filters (E-2).
+- **D-11a-3** (superseded by D-11a-20 for API 0.29) List rows show the name, initials, the cached field count, the pending mark and
+  "Archived". The 0.28 prefetch of 25 linkage reads is REMOVED: the account line comes from the summaries for every row, and the list makes
+  no `GET /people/{id}` at all.
 - **D-11a-4** Lists are read in BOUNDED STEPS with a continuation (Q9; revision 1, finding 7): a step (`reads.tsx` `ResourceScan`) walks live
   pages of 100 (`useResourceList`) from a cursor and keeps at most 100 rows that match the view and the search, reading at most 20 pages for the
   people list, 10 for a person's fields and 50 per kind for the ledger. "Next people" / "Keep searching" / "Next fields" / "Next items"
@@ -98,8 +108,9 @@ reopens it with its draft), and `/settings/archived`.
   with the confirmed policy version, under the hold's id as its local id. Every failure keeps the held draft with its reason, Try again and
   Discard. Discard while it runs stops it at the next admission boundary (before the policy write, after it, before and inside the content
   write); a policy change already made, or possibly made, is said so, and its attempt is kept for recovery (finding 2).
-- **D-11a-13** A field's audience is named only after this page read its policy; otherwise the button reads "Who can see it?" and opens the
-  policy editor, which shows its own owner-only state.
+- **D-11a-13** (revised by D-11a-21) A field's audience comes from the field audiences summary while online and not older than the
+  cached field; else from a policy this page read in the editor; else the button reads "Who can see it?". It opens the policy editor, which
+  shows its own owner-only state. No owner-only policy is read to fill the table.
 - **D-11a-14** Online reads are this slice's own small reads through the stamped client, bound to the displayed identity; a read the session
   held back (`not_sent`) is asked again, bounded.
 - **D-11a-15** A save while the item's previous draft is still queued and unsent edits that draft in place (its review block kept), but only
@@ -117,12 +128,52 @@ reopens it with its draft), and `/settings/archived`.
 - **D-11a-19** (revision 1, finding 4) A person's screen is keyed by the person (`screens.tsx`), as is the duplicates view: an open rename and
   its typed name, the fields' step and the duplicates' pages never carry over to another person; a typed rename is kept under its own person.
 - **D-11a-16** Master-detail from 1280 px; one column below. Dialogs are sheets below 768 px.
+- **D-11a-20** (finding 8, API 0.29) The drawn views and lines. Chips "All", "In Home", "Shared with me", "Not linked" (drawn) and
+  "Archived" (Q21). All and Archived are the CACHE's (offline-capable, this device's unsent saves folded in); while online each step's
+  people are joined by id to `GET /people/summaries` (`scope=all`, the step's own `archived`) read from the step's start until every person
+  of the step was seen, a page passed its last id, the end, or the step's page bound (20). In Home, Shared with me and Not linked are the
+  SERVER's: each step walks the summary pages themselves (100 kept, at most 20 pages, search over the names read, "Next people" / "Keep
+  searching" continue from the server's cursor), so nothing cached is filtered and called complete; offline they say they need a
+  connection. In Home with no primary household is the explained empty state (product decision 3). Each row says who added the person
+  ("You" when linked to you; "Added by you" only for `yes`; "Shared with you by {owner}" for another owner, the owner's visible person's
+  name or their username; nothing for `unknown`: product decision 1), the account ("Linked to your account" / "Linked · they control their
+  name" / "Not linked to an account") and "Visible to: {audience}". A list that shows a partial audience says once that the owner may have
+  shared them more widely (product decision 2).
+- **D-11a-21** (finding 8) Who can see a person and a field. The owner's audience: "Only you", one household with its role ("Home · can
+  view", "· N excluded"), or the counts ("2 households, 1 person", "· mixed" across households). A reader's partial audience names only
+  what reaches them ("Shared from Home", "Shared with you", "… and with you"), never "Only you", never other access. Household SIZE is never
+  said as an audience. A field's tag is its own sharing (an upper bound); under it, "N other people can see it" (and how many it is shared
+  with cannot see the person) only when `effective` is `complete`, else "Only people who can also see {person} can see it." The detail's
+  "Shared with" (`GET /people/{id}/summary`): the owner, each account and household with its role, the household's size said as its size
+  ("4 members in the household"), and for the owner the members of a household they belong to (excluded ones marked "can't see it") and
+  "Excluded: …"; a reader's rail is partial and says "{owner} owns this person. You see only how it's shared with you; {owner} may have
+  shared it more widely." Unknown, failed or offline is never "Only you".
+- **D-11a-22** (finding 8) How the summaries are read (`summaries.tsx`). For the displayed identity only (the env and its page memory);
+  in memory only, per query, for the current invalidation generation. An invalidation supersedes every earlier read (an answer that arrives
+  after it is dropped) and a traversal it interrupts starts again from its own first page. The pages of one traversal must share one
+  `preferences_version` or it restarts; an answer whose `preferences_version` is lower than one applied in this epoch is not applied (read
+  again, at most three times, then "Couldn't check"); a higher one makes every other summary out of date; a row is never replaced by one
+  with a lower `version` or `policy_version`; a summary older than the cached projection is not shown beside it. INVALIDATED (re-read) on
+  any synced change (`useAppliedRevision`: `sync_state.applied_revision`, which moves on any committed batch, a superset of person and field
+  changes), any change of the queue's counts (a command receipt), every online command sent and every close of the policy editor, a
+  change of the B5 record's households or primary household, reconnection, every 60 seconds while shown online and visible, and whenever
+  the page becomes visible again. Offline a summary is unavailable (never an old one); every view says when it was checked ("Sharing
+  checked at {time}. Atlas checks again every minute while you're online."), never live.
+- **D-11a-23** (finding 8) Layout within the budgets (production CSS within 5 bytes of its limit): the list shares the desktop screen with
+  the detail (380 px), so "Account" and "Visible to" are labelled lines of each row rather than table columns; "Shared with" is a section
+  of the detail below the fields rather than a right rail. No new utility class was added.
 
 What is shown of unsent changes: a queued draft has no overlay until it is claimed, so the screens fold the bodies of the outstanding drafts
 (`useOutstandingCreates`) over the cache (`model/project.ts`): a create is projected and marked "Not sent yet"; a later rename, field update or
 archive is folded over its row. A projected row is never a base for a version-checked command.
 
 ## Limits
+
+- The summaries are as fresh as their snapshot: up to the 60-second refresh behind a household or primary household change made elsewhere
+  (the contract's own bound). Each invalidation re-reads every summary shown (a list step's join, the person's summary, the fields' step).
+- Search in In Home / Shared with me / Not linked matches the names the server returned: a rename not sent yet is shown folded over the
+  row but is not searched there until it is sent.
+- "Recent changes" (the drawn rail's second panel) is still not built: no history endpoint exists.
 
 - Hidden form values (PRODUCT-DECISIONS-20261011 item 2): the field type switch keeps each type's value; the new person's hidden note keeps
   its text; a save sends only what applies, with no warning. A refused or uncertain save keeps everything. Inputs are locked while saving.
@@ -138,8 +189,8 @@ archive is folded over its row. A projected row is never a base for a version-ch
 ## Not claimed
 
 Fixture evidence (component tests, `tests/e2e/fixture.people.spec.ts`) is not integration evidence. The real-backend cases
-(`tests/integration/integration.people.spec.ts`, I-PPL1 to I-PPL14) are focused evidence for a fixture-stage task on SQLite through the delaying
-proxy, with the fixture test leader; `integration_passed` stays false (BE-Q1 and BE-CH1 have no completion record). No PostgreSQL, HTTPS, device
+(`tests/integration/integration.people.spec.ts`, I-PPL1 to I-PPL16, against `v0.29.0-rc.1`; I-PPL1 to I-PPL14's earlier runs against
+`v0.28.0-rc.1` stay historical) are focused evidence for a fixture-stage task on SQLite through the delaying proxy, with the fixture test leader; `integration_passed` stays false (BE-Q1 and BE-CH1 have no completion record). No PostgreSQL, HTTPS, device
 or screen-reader evidence (WEB-09d), no production-leader integration beyond the fixture case E-P2b, no copy approval (STAGED-ACCEPTANCE §5).
 
 ## Additions and deviations for the copy and visual checkpoint (plan §9)
@@ -152,8 +203,11 @@ the fixture spec named.
 | Linkage unknown: "Who controls this profile isn't known on this device." with its reason; rename reason "Needs a connection to check who controls this name" | `/people/$id` | E-P7 (one column, offline) |
 | An unlinked person's rename queues offline; a linked rename stays online-only | `/people/$id` | E-P7 |
 | Unlink confirmation: "Unlink your account from this profile?" and its body | `/people/$id` | E-P7 |
-| "All / Archived" filter in place of the drawn ownership chips; no "Visible to" or "Account" column beyond what was read (E-2: NOT a routine deviation; see the decision below) | `/people` | E-P1 |
-| No detail rail ("Shared with", "Recent changes") | `/people/$id` | E-P2 |
+| The drawn chips plus "Archived"; "Account" and "Visible to: …" as labelled lines of each row, not columns (D-11a-23); "Added by you", "Shared with you by {owner}", "You"; "Visible to: Shared from {household}" for a partial audience; "For people someone else owns, you see only how they're shared with you. The owner may have shared them more widely."; "Sharing checked at {time}. Atlas checks again every minute while you're online."; "Who can see each person and their account links are checked when you're online."; "Checking who can see these people…"; "Couldn't check who can see these people." | `/people` | E-P1, E-P19 |
+| Server views' states: "This view needs a connection. All and Archived work offline."; "You haven't chosen a primary household, so nobody is In Home. Everyone you can see is still under All."; "Nobody is shared with {home} yet."; "Nobody has shared a person with you yet."; "Everyone here is linked to an account."; "Couldn't load this view." | `/people` | E-P19, component tests |
+| "Shared with" as a section below the fields (D-11a-23), household size as "{n} members in the household", members "(can't see it)", "Excluded: …", "Only you can see this person.", the partial rail's sentence, offline/checking/failed/not found copy; no "Recent changes" (no history endpoint) | `/people/$id` | E-P20 |
+| Field tags from the field audiences; "N other people can see it.", "N people it's shared with can't see {person}.", "Only people who can also see {person} can see it.", "The owner may have shared it more widely.", "For fields someone else owns, …"; "Who can see each field is checked when you're online." | `/people/$id` | E-P20 |
+| Owner audiences: "Home · can view" for a person (drawn "Home · 4 people": a household's size is not an audience count, so it is not said as one) | `/people`, `/people/$id` | E-P19, E-P20 |
 | Pending marks "Not sent yet", "Sending…", "Waiting for the server", "Waiting for your review" | `/people/$id` | E-P2, E-P10 |
 | Bounded steps: "Next people", "Previous people", "Keep searching", "Showing {n} so far. There may be more further on.", "No one matches “{q}” so far. There are more people to check.", "Next fields", "Next items"; a step is sorted by name within itself; "More unsent changes are waiting than this page shows. All of them are in Sync."; "This value can't be shown on this device" | `/people`, `/people/$id`, `/settings/archived` | E-P18, component tests |
 | The review of a changed field: "This field changed since you opened it", "Current: …", "Who can see it now: …", "Yours: …", "Check who can see it first: that needs a connection"; the rename's "This person changed since you started. Review the name, then save again." | `/people/$id/fields/$fid`, `/people/$id` | E-P14, E-P5 |
@@ -172,10 +226,10 @@ Escalations and their decisions (revision 1, 13 October 2026):
 - **E-1** (finding 6) — DECIDED by Kieran: durable, in WEB-11a. Implemented over the account database's form copies (D-11a-12); no schema
   change was needed (the `form_recovery` store and its port already carry the account's unsent form content with every Q20 rule). The
   integration owner of WEB-14a (Q4 recovery) must keep `people-held:` copies out of any form it restores or discards by family.
-- **E-2** (finding 8) — DECIDED by Kieran: **WEB-11a is on an explicit dependency hold until BE-PEOPLE-SUMMARY (a backend viewer-safe
-  audience/linkage summary; created, researched and in Planning on 14 October 2026) is accepted and shipped and its verified API types are
-  adopted here.** The drawn "In Home / Shared with me / Not linked" filters, the "Visible to" column, per-row audience tags and the detail
-  rail's "Shared with" need what a viewer may know of each row's audience and linkage without the owner-only `GET /policies/{id}` (a
-  speculative `403` remounts the protected tree, D-12a-13). The remaining implementation resumes then, followed by an independent review of
-  the complete result; nothing here substitutes unsafe per-row reads.
+- **E-2** (finding 8) — DECIDED by Kieran (13–14 October 2026): a dependency hold until BE-PEOPLE-SUMMARY was accepted, shipped and its
+  API types adopted. **RESOLVED 15 October 2026:** BE-PEOPLE-SUMMARY shipped as `v0.29.0-rc.1` (backend `4396c99`), adopted by `1adadae`
+  and merged here by `7d71ba7` (the operator's handover PEOPLE-API-029-20261015, `frontend-adoption.md` and
+  `released-contract-handoff.md`). The drawn views, lines, tags and "Shared with" are built on the three viewer-safe reads (D-11a-20 to
+  D-11a-23), with the product decisions of 14 October (`delivery/handoffs/people-summary-product-decisions-20261014.md`); no owner-only
+  policy read fills any of them. The independent review of the complete result follows.
 - **E-3** the list's duplicate banner (one read per person) and the Requests entry (WEB-11b) are not built; recorded for the checkpoint.

@@ -107,7 +107,38 @@ export interface Served {
   management: Array<{ key: string | null; body: unknown }>;
   managementScript: Answer[];
   snapshot: unknown;
+  /**
+   * The viewer-safe summaries (API 0.29, finding 8), derived from `people`: by default the account's own private person, its linkage from
+   * `linked`. `summaries` overrides fields of a person's summary by id; `rails` gives a person's "Shared with"; `fieldAudiences` lists a
+   * person's field audiences (default: none). `summaryScript` answers `GET /people/summaries` first, in order (then the derived page).
+   */
+  summaries: Map<string, Record<string, unknown>>;
+  rails: Map<string, unknown>;
+  fieldAudiences: Map<string, Array<Record<string, unknown>>>;
+  home: {
+    id: string;
+    name: string;
+    version: number;
+    member_count: number;
+  } | null;
+  preferencesVersion: number;
+  summaryScript: Answer[];
 }
+
+/** Not one of the viewer-safe summary reads (finding 8), which any invalidation repeats: for logs that assert another order. */
+export const notSummary = (line: string): boolean =>
+  !/^GET \/people\/(summaries|[0-9a-f-]{36}\/(summary|field-audiences))/.test(
+    line,
+  );
+
+export const OWNER_ONLY = {
+  disclosure: "complete",
+  in_home: false,
+  households: [],
+  your_direct_grant: null,
+  direct_grant_count: 0,
+  excluded_count: 0,
+};
 
 export function snapshotOf(
   revision: string,
@@ -169,6 +200,56 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
     management: [],
     managementScript: [],
     snapshot: snapshotOf(rev(1)),
+    summaries: new Map(),
+    rails: new Map(),
+    fieldAudiences: new Map(),
+    home: { id: HOME, name: "Home", version: 1, member_count: 2 },
+    preferencesVersion: 1,
+    summaryScript: [],
+  };
+  const summaryOf = (entry: { person: Projection; linked: string | null }) => {
+    const { person, linked } = entry;
+    return {
+      id: person.id,
+      label: person.label,
+      version: person.version,
+      policy_version: person.policy_version,
+      archived: person.archived,
+      linkage: linked === null ? "none" : linked === ME ? "you" : "other",
+      linked_account_id: linked,
+      owner: { account_id: ME, username: "me", you: true, person: null },
+      added_by_you: "unknown",
+      your_access: "owner",
+      field_count: 0,
+      audience: OWNER_ONLY,
+      ...(served.summaries.get(person.id) ?? {}),
+    } as Record<string, unknown> & {
+      id: string;
+      archived: boolean;
+      linkage: string;
+      added_by_you: string;
+      owner: { you: boolean };
+      audience: { in_home: boolean };
+    };
+  };
+  const pageOf = <T extends { id: string; archived: boolean }>(
+    all: T[],
+    url: URL,
+  ) => {
+    const archived = url.searchParams.get("archived") === "true";
+    const after = url.searchParams.get("after");
+    const limit = Number(url.searchParams.get("limit") ?? "50");
+    const rest = all
+      .filter((item) => item.archived === archived)
+      .filter((item) => after === null || item.id > after)
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+    const items = rest.slice(0, limit);
+    return {
+      items,
+      next_after: items.length === limit ? (items.at(-1)?.id ?? null) : null,
+      home: served.home,
+      preferences_version: served.preferencesVersion,
+    };
   };
   let revision = 900;
   await context.route(`**${API}/**`, async (route: Route) => {
@@ -208,6 +289,67 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
         json(200, (served.snapshot as { households: unknown[] }).households),
       );
     if (path === "/invitations") return route.fulfill(json(200, []));
+    if (path === "/people/summaries") {
+      served.log.push(`GET ${path}${url.search}`);
+      const scope = url.searchParams.get("scope") ?? "all";
+      const all = [...served.people.values()]
+        .map(summaryOf)
+        .filter(
+          (s) =>
+            scope === "all" ||
+            (scope === "in_home" &&
+              served.home !== null &&
+              s.audience.in_home) ||
+            (scope === "shared_with_me" &&
+              !s.owner.you &&
+              s.added_by_you !== "yes") ||
+            (scope === "not_linked" && s.linkage === "none"),
+        );
+      return answer(route, served.summaryScript.shift(), () =>
+        pageOf(all, url),
+      );
+    }
+    const summary = /^\/people\/([0-9a-f-]{36})\/summary$/.exec(path);
+    if (summary) {
+      served.log.push(`GET ${path}`);
+      const id = summary[1] as string;
+      const known = served.people.get(id);
+      if (!known) return route.fulfill(json(404, atlas("not_found")));
+      const s = summaryOf(known);
+      return route.fulfill(
+        json(200, {
+          summary: s,
+          shared_with: served.rails.get(id) ?? {
+            disclosure: s.owner.you ? "complete" : "partial",
+            owner: s.owner,
+            accounts: [],
+            households: [],
+            excluded_accounts: s.owner.you ? [] : null,
+          },
+          home: served.home,
+          preferences_version: served.preferencesVersion,
+        }),
+      );
+    }
+    const audiences = /^\/people\/([0-9a-f-]{36})\/field-audiences$/.exec(path);
+    if (audiences) {
+      served.log.push(`GET ${path}${url.search}`);
+      const id = audiences[1] as string;
+      if (!served.people.has(id))
+        return route.fulfill(json(404, atlas("not_found")));
+      return route.fulfill(
+        json(
+          200,
+          pageOf(
+            (served.fieldAudiences.get(id) ?? []) as Array<{
+              id: string;
+              archived: boolean;
+            }>,
+            url,
+          ),
+        ),
+      );
+    }
     const duplicates = /^\/people\/([0-9a-f-]{36})\/duplicates$/.exec(path);
     if (duplicates) {
       served.log.push(`GET ${path}${url.search}`);
@@ -289,6 +431,9 @@ export async function navigateInApp(page: Page, path: string): Promise<void> {
   }, path);
 }
 
+/** The server revision of the next published page: it only grows, as a real server's does (the applied revision follows it). */
+let publishedRevision = 100;
+
 /** One `/sync` delta page upserting `resources`, applied through the fixture leader (which it starts on first use). */
 export async function publish(
   page: Page,
@@ -296,11 +441,15 @@ export async function publish(
   resources: Projection[],
   options: { start?: boolean } = {},
 ): Promise<void> {
+  publishedRevision += 1;
+  const revision = publishedRevision;
   net.script.push(() => ({
     status: 200,
     body: pageText(
       [resources.map((resource) => ({ kind: "upsert", resource }))],
       `cursor-${net.requests.length + 1}`,
+      false,
+      revision,
     ),
   }));
   if (options.start !== false) {

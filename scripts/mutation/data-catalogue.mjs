@@ -17092,6 +17092,482 @@ export const UNIT = [
         '                {false ? (\n                  <Button\n                    data-people-action="next-fields"',
       ),
   },
+
+  // WEB-11a finding 8 (API 0.29's viewer-safe summaries; the hold lifted on 15 October 2026): strict parsing, wording, the read rules,
+  // the freshness signals and the views.
+  {
+    id: "MU-2164",
+    title: "WEB-11a F8: a partial audience may carry the owner's counts",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "  } else if (direct_grant_count !== null || excluded_count !== null)\n    return null;",
+        "  } else if (false) return null;",
+      ),
+  },
+  {
+    id: "MU-2165",
+    title:
+      "WEB-11a F8: a complete person audience is accepted for a reader who is not its owner",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if ((audience.disclosure === "complete") !== owner.you) return null;',
+        "",
+      ),
+  },
+  {
+    id: "MU-2166",
+    title: "WEB-11a F8: a partial rail may list a household's members",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (excluded !== null || households.some((h) => h.members !== null))\n      return null;",
+        "    if (excluded !== null) return null;",
+      ),
+  },
+  {
+    id: "MU-2167",
+    title:
+      "WEB-11a F8: a summary page out of id order (or not after its cursor) is accepted",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a page is in ascending id order after its cursor/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (previous !== null && !(item.id > previous)) return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2168",
+    title: "WEB-11a F8: a summary page of the other archived state is accepted",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a page is in ascending id order after its cursor/,
+    patch: (t) =>
+      sub(t, "    if (item.archived !== query.archived) return null;\n", ""),
+  },
+  {
+    id: "MU-2169",
+    title: "WEB-11a F8: a page's next cursor need not be its last id",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a page is in ascending id order after its cursor/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (next !== null && (!isUuid(next) || next !== items.at(-1)?.id))",
+        "  if (next !== null && !isUuid(next))",
+      ),
+  },
+  {
+    id: "MU-2170",
+    title:
+      "WEB-11a F8: a reader's partial audience with no named household says 'Only you'",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a reader's partial audience names only what reaches them/,
+    patch: (t) =>
+      sub(t, '    return "Shared with you";', '    return "Only you";'),
+  },
+  {
+    id: "MU-2171",
+    title: "WEB-11a F8: a household's size is said as the audience",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /never household size/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (households.length === 1 && direct === 0 && only !== undefined)\n",
+        '  if (households.length === 1 && direct === 0 && only?.member_count)\n    return (only.name ?? "") + " · " + only.member_count + " people";\n  if (households.length === 1 && direct === 0 && only !== undefined)\n',
+      ),
+  },
+  {
+    id: "MU-2172",
+    title:
+      "WEB-11a F8: effective counts are accepted for a reader who does not own the field",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!isInt(account_count, 0) || !isInt(limited_count, 0) || !owner_is_you)",
+        "    if (!isInt(account_count, 0) || !isInt(limited_count, 0))",
+      ),
+  },
+  {
+    id: "MU-2173",
+    title: "WEB-11a F8: an unknown attribution is said as 'Added by you'",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /attribution is separate from ownership; unknown claims nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (summary.added_by_you === "yes") return { kind: "added_by_you" };',
+        '  if (summary.added_by_you !== "no") return { kind: "added_by_you" };',
+      ),
+  },
+  {
+    id: "MU-2174",
+    title: "WEB-11a F8: the reader's own person is said to be shared with them",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /attribution is separate from ownership; unknown claims nothing/,
+    patch: (t) => sub(t, "  if (!summary.owner.you)\n", "  if (true)\n"),
+  },
+  {
+    id: "MU-2175",
+    title:
+      "WEB-11a F8: a summary older than the cached projection's version is shown beside it",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a summary older than the cached projection is not shown beside it/,
+    patch: (t) =>
+      sub(t, "  if (summary.version < cached.version) return false;\n", ""),
+  },
+  {
+    id: "MU-2176",
+    title: "WEB-11a F8: a traversal mixing pages of two snapshots is applied",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /pages from different snapshots restart the traversal/,
+    patch: (t) =>
+      sub(
+        t,
+        '    } else if (answer.preferences_version !== preferences)\n      return { kind: "restart" };',
+        "    }",
+      ),
+  },
+  {
+    id: "MU-2177",
+    title:
+      "WEB-11a F8: a superseded walk reads on (neither the check before a page nor the one after its answer stops it)",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /a superseded walk stops before its next page/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '    const result = await readPage(after);\n    if (!current()) return { kind: "superseded" };',
+          "    const result = await readPage(after);",
+        ),
+        '  for (let page = 0; page < options.pages; page += 1) {\n    if (!current()) return { kind: "superseded" };',
+        "  for (let page = 0; page < options.pages; page += 1) {",
+      ),
+  },
+  {
+    id: "MU-2178",
+    title:
+      "WEB-11a F8: an answer older than the applied preferences_version is applied",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /an older preferences_version is never applied/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (outcome.preferencesVersion < memory.summaryPreferences) return "stale";\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2179",
+    title:
+      "WEB-11a F8: a newer preferences_version leaves every other summary standing",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /a newer one makes every other summary out of date/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (before !== 0 && outcome.preferencesVersion > before) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2180",
+    title:
+      "WEB-11a F8: a row may be replaced by one with a lower policy version",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect:
+      /a row is never replaced by one with a lower version or policy version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (row.version < floor.version || row.policy_version < floor.policyVersion)",
+        "      row.version < floor.version",
+      ),
+  },
+  {
+    id: "MU-2181",
+    title:
+      "WEB-11a F8: an answer is applied to the memory of an identity no longer displayed",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /another identity's late answer writes into a memory nobody reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "    isCurrentMemory(memory) &&\n    memory.summaryGeneration === entry.generation &&",
+        "    memory.summaryGeneration === entry.generation &&",
+      ),
+  },
+  {
+    id: "MU-2182",
+    title: "WEB-11a F8: a summary read is made again while one is on its way",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /never twice for one query and generation/,
+    patch: (t) => sub(t, "  if (known !== undefined) {", "  if (false) {"),
+  },
+  {
+    id: "MU-2183",
+    title: "WEB-11a F8: an invalidation keeps the reads it superseded",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect:
+      /never twice for one query and generation; an answer after an invalidation is dropped/,
+    patch: (t) => sub(t, "    this.summaries.clear();\n", ""),
+  },
+  {
+    id: "MU-2184",
+    title:
+      "WEB-11a F8: an online command's receipt does not invalidate the summaries",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /every online command that may have reached the server/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (sentSomething(result)) memory.invalidateSummaries();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2185",
+    title:
+      "WEB-11a F8: a command that never left (offline) invalidates the summaries",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /every online command that may have reached the server/,
+    patch: (t) => sub(t, '  (result.kind !== "offline" &&', "  (true &&"),
+  },
+  {
+    id: "MU-2186",
+    title:
+      "WEB-11a F8: a synced change (the applied revision) does not re-read the summaries",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect:
+      /a synced change, a queue change and a households or primary household change/,
+    patch: (t) =>
+      sub(
+        t,
+        '    revision.status === "ready" ? String(revision.value) : revision.status,',
+        '    "revision",',
+      ),
+  },
+  {
+    id: "MU-2187",
+    title:
+      "WEB-11a F8: a households or primary household change does not re-read the summaries",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect:
+      /a synced change, a queue change and a households or primary household change/,
+    patch: (t) =>
+      sub(
+        t,
+        '    record === null\n      ? "-"',
+        '    record === record\n      ? "-"',
+      ),
+  },
+  {
+    id: "MU-2188",
+    title:
+      "WEB-11a F8: the summaries shown are refreshed every ten minutes, not every minute",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /every 60 seconds and whenever the page is visible again/,
+    patch: (t) =>
+      sub(t, "    }, SUMMARY_REFRESH_MS);", "    }, SUMMARY_REFRESH_MS * 10);"),
+  },
+  {
+    id: "MU-2189",
+    title: "WEB-11a F8: the minute's refresh reads while the page is hidden",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /nothing while hidden/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const timer = setInterval(() => {\n      if (visible()) memory.invalidateSummaries();",
+        "    const timer = setInterval(() => {\n      memory.invalidateSummaries();",
+      ),
+  },
+  {
+    id: "MU-2190",
+    title: "WEB-11a F8: reconnecting does not re-read the summaries",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /online again reads them again/,
+    patch: (t) =>
+      sub(t, "      !before.online &&\n      env.online", "      false"),
+  },
+  {
+    id: "MU-2191",
+    title: "WEB-11a F8: a summary read earlier is shown offline",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /never an old one/,
+    patch: (t) =>
+      sub(t, "  if (key === null || !env.online) {", "  if (key === null) {"),
+  },
+  {
+    id: "MU-2192",
+    title:
+      "WEB-11a F8: a server scope reads every person and so lists them all",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /each is a scope the server applies before paging/,
+    patch: (t) =>
+      sub(
+        t,
+        "          env.api.readSummaries(scope, {",
+        '          env.api.readSummaries("all", {',
+      ),
+  },
+  {
+    id: "MU-2193",
+    title: "WEB-11a F8: In Home without a primary household is not explained",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /In Home without a primary household is an explained empty state/,
+    patch: (t) =>
+      sub(t, '  if (scope === "in_home" && home === null)', "  if (false)"),
+  },
+  {
+    id: "MU-2194",
+    title:
+      "WEB-11a F8: a field summary older than the cached field is shown as its tag",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /an older field summary than the cache, or offline, is never shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return summary !== null && summaryCurrentFor(summary, row.row)",
+        "    return summary !== null",
+      ),
+  },
+  {
+    id: "MU-2195",
+    title:
+      "WEB-11a F8: a person summary older than the cached person is shown beside it",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect:
+      /a summary older than what this device shows is not shown beside the person/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return summary !== null && summaryCurrentFor(summary, row.row)",
+        "    return summary !== null",
+      ),
+  },
+  {
+    id: "MU-2196",
+    title:
+      "WEB-11a F8: a partial rail does not say the owner may have shared it more widely",
+    file: "src/features/people/detail/SharedWith.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /anyone else's rail is partial/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {rail.disclosure === "partial" ? (',
+        "          {false ? (",
+      ),
+  },
+  {
+    id: "MU-2197",
+    title: "WEB-11a F8: the owner's rail does not name the excluded accounts",
+    file: "src/features/people/detail/SharedWith.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /the owner's rail is complete/,
+    patch: (t) =>
+      sub(
+        t,
+        "          rail.excluded_accounts.length > 0 ? (",
+        "          rail.excluded_accounts.length > 99 ? (",
+      ),
+  },
+  {
+    id: "MU-2198",
+    title: "WEB-11a F8: a field's tag never says who can actually see it",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /who can actually see it when it may be counted/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : (effectiveText(summary.effective, person.row.label) ??",
+        "      : (null ??",
+      ),
+  },
+  {
+    id: "MU-2199",
+    title:
+      "WEB-11a F8: the list never says that partial audiences may be shared more widely",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /each row says who added them/,
+    patch: (t) =>
+      sub(
+        t,
+        '          partial={shown.some(\n            (row) => summaryOf(row)?.audience.disclosure === "partial",\n          )}',
+        "          partial={false}",
+      ),
+  },
+  {
+    id: "MU-2200",
+    title:
+      "WEB-11a F8: the owner is named by username even when the reader can see their person",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /each row says who added them/,
+    patch: (t) =>
+      sub(t, "  owner.person?.label ?? owner.username;", "  owner.username;"),
+  },
+  {
+    id: "MU-2205",
+    title:
+      "WEB-11a F8: the applied revision is never read (a synced change is no signal)",
+    file: "src/data/plans/applied-revision.ts",
+    tests: ["tests/data/applied-revision.test.ts"],
+    expect: /a committed page with a batch moves it/,
+    patch: (t) =>
+      sub(
+        t,
+        "  decide: ({ sync }) => sync?.applied_revision ?? null,",
+        "  decide: () => null,",
+      ),
+  },
 ];
 
 /**
@@ -19869,6 +20345,63 @@ export const ENGINE = [
         t,
         "            step.settled && step.next !== null\n              ? () => onStarts([...starts, step.next])\n              : null",
         "            null",
+      ),
+  },
+
+  // WEB-11a finding 8 (API 0.29's viewer-safe summaries): real-engine mutants, each caught by its native case.
+  {
+    id: "MU-2201",
+    title:
+      "WEB-11a F8: (REAL ENGINE) a synced change does not re-read the summaries, so a superseded answer stands",
+    file: "src/features/people/summaries.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P21:",
+    expect: /E-P21:/,
+    patch: (t) =>
+      sub(
+        t,
+        '    revision.status === "ready" ? String(revision.value) : revision.status,',
+        '    "revision",',
+      ),
+  },
+  {
+    id: "MU-2202",
+    title: "WEB-11a F8: (REAL ENGINE) a summary read earlier is shown offline",
+    file: "src/features/people/summaries.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P19:",
+    expect: /E-P19:/,
+    patch: (t) =>
+      sub(t, "  if (key === null || !env.online) {", "  if (key === null) {"),
+  },
+  {
+    id: "MU-2203",
+    title:
+      "WEB-11a F8: (REAL ENGINE) a server scope reads every person and so lists them all",
+    file: "src/features/people/list/PeopleList.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P19:",
+    expect: /E-P19:/,
+    patch: (t) =>
+      sub(
+        t,
+        "          env.api.readSummaries(scope, {",
+        '          env.api.readSummaries("all", {',
+      ),
+  },
+  {
+    id: "MU-2204",
+    title:
+      "WEB-11a F8: (REAL ENGINE) a partial rail does not say the owner may have shared it more widely",
+    file: "src/features/people/detail/SharedWith.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P20:",
+    expect: /E-P20:/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {rail.disclosure === "partial" ? (',
+        "          {false ? (",
       ),
   },
 ];

@@ -144,7 +144,11 @@ export function IdentityHeader({
       <ResourcePolicyEditor
         resourceId={person.id}
         open={sharing}
-        onOpenChange={setSharing}
+        onOpenChange={(open) => {
+          setSharing(open);
+          // What the editor sent (its commands are online, outside the queue) changes the summaries shown.
+          if (!open) env.memory.invalidateSummaries();
+        }}
       />
     </section>
   );

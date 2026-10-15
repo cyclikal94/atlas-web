@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import {
+  ACCOUNTS,
   bootHarness,
   expect,
   exposeSession,
@@ -15,7 +16,8 @@ import {
 } from "./helpers";
 
 /**
- * WEB-11a against the RELEASED backend (`v0.28.0-rc.1`) on a disposable SQLite database, behind the delaying proxy: the production session,
+ * WEB-11a against the RELEASED backend (the pinned `v0.29.0-rc.1`, API 0.29.0; earlier runs against `v0.28.0-rc.1` stay historical evidence) on a
+ * disposable SQLite database, behind the delaying proxy: the production session,
  * the production data controller and the People screens, with the FIXTURE test leader standing in for production leadership (it is woken
  * with `retryOutbox()` after a save made by the tree). Commands marked HARNESS are sent by the test through the session's stamped client,
  * not by the UI (the N5 fixtures' `reference_account`/`request_link`/`respond_request` are WEB-11b's UI). FOCUSED REAL-BACKEND EVIDENCE for
@@ -24,7 +26,8 @@ import {
  *
  * I-PPL1 SHARE-10 through the UI; I-PPL2 SHARE-10's atomic refusal; I-PPL3 TASK-10's seven kinds and refusals; I-PPL4 TASK-10a and Q1; I-PPL5 a held
  * audience change; I-PPL6 rename; I-PPL7 unlink; I-PPL8 N5 (a)(b)(c); I-PPL9 archive and restore; I-PPL10 PPL-3; I-PPL11 PPL-5; I-PPL12 PPL-6; I-PPL13 lost
- * responses; I-PPL14 a real defaults_changed.
+ * responses; I-PPL14 a real defaults_changed. Finding 8 (API 0.29's viewer-safe summaries): I-PPL15 the owner's complete view and a Home member's
+ * partial one (list lines, scopes, rails, field tags, revocation); I-PPL16 attribution across a link, and In Home without a primary household.
  */
 const API = "/api/experimental/v1";
 
@@ -1614,5 +1617,280 @@ test.describe("I-PPL14: a real defaults_changed (A16)", () => {
       type: "evidence",
       description: JSON.stringify({ statuses }),
     });
+  });
+});
+
+// ---- finding 8: the viewer-safe summaries against the released backend (API 0.29) -------------------------------------------------------
+/** HARNESS: makes `household` the account's primary household (`set_primary_household`, guarded by its `preferences_version`). */
+async function primary(page: Page, id: Id, household: string): Promise<void> {
+  const defaults = (await raw(page, id, "GET", "/defaults")).body as {
+    preferences_version: number;
+    primary_household_id: string | null;
+  };
+  if (defaults.primary_household_id === household) return;
+  expect(
+    (
+      await management(page, id, [
+        {
+          kind: "set_primary_household",
+          household_id: household,
+          expected_version: defaults.preferences_version,
+        },
+      ])
+    ).status,
+  ).toBe(200);
+}
+const personRow = (page: Page, person: string) =>
+  page.locator(`[data-person-row="${person}"]`);
+const fieldRowOf = (page: Page, field: string) =>
+  page.locator(`[data-field-row="${field}"]`);
+const view = (page: Page, name: string) =>
+  page
+    .locator("[data-people-list]")
+    .getByRole("button", { name, exact: true })
+    .click();
+
+test.describe("I-PPL15 and I-PPL16: the viewer-safe summaries (finding 8, API 0.29)", () => {
+  test("I-PPL15 the owner's complete view and a Home member's partial one: list lines, scopes, rails, field tags; a revocation leaves the member's scope", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "carol", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "dave");
+      const home = await household(a, aId, b, bId);
+      await primary(a, aId, home);
+      await primary(b, bId, home);
+      const homeView = {
+        grants: [{ kind: "household", id: home, edit: false }],
+        exclude_accounts: [],
+      };
+      // HARNESS: made private, then shared with Home (a content create carries no household grant).
+      const shared = await seedPerson(a, aId, "I-S Shared");
+      const created = await policyOf(a, aId, shared.person);
+      expect(
+        (
+          await management(a, aId, [
+            {
+              kind: "replace_policy",
+              id: shared.person,
+              expected_version: created.body.version,
+              policy: homeView,
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      const own = await seedPerson(a, aId, "I-S Private");
+      const visible = crypto.randomUUID();
+      const hidden = crypto.randomUUID();
+      const fieldCommand = (field: string, label: string, policy: unknown) => ({
+        kind: "put_field",
+        id: field,
+        parent_id: shared.person,
+        label,
+        value: { kind: "text", text: label },
+        initial_policy: policy,
+      });
+      // HARNESS: a shared create is online (/task-access-commands); a private one is an ordinary task command.
+      const madeVisible = await raw(
+        a,
+        aId,
+        "POST",
+        "/task-access-commands",
+        { command: fieldCommand(visible, "Phone", homeView) },
+        crypto.randomUUID(),
+      );
+      expect(madeVisible.status, JSON.stringify(madeVisible.body)).toBe(200);
+      const madeHidden = await taskCommand(
+        a,
+        aId,
+        fieldCommand(hidden, "Note", PRIVATE),
+      );
+      expect(madeHidden.status, JSON.stringify(madeHidden.body)).toBe(200);
+      await cached(a, aId, hidden);
+      // The owner: complete.
+      await go(a, "/people");
+      await expect(personRow(a, shared.person)).toContainText(
+        "Visible to: Home · can view",
+        { timeout: 30_000 },
+      );
+      await expect(personRow(a, shared.person)).toContainText("Added by you");
+      await expect(personRow(a, shared.person)).toContainText(
+        "Not linked to an account",
+      );
+      await expect(personRow(a, own.person)).toContainText(
+        "Visible to: Only you",
+      );
+      await go(a, `/people/${shared.person}`);
+      const ownerRail = a.getByRole("region", { name: "Shared with" });
+      await expect(ownerRail).toHaveAttribute("data-shared-with", "complete", {
+        timeout: 30_000,
+      });
+      await expect(ownerRail).toContainText(ACCOUNTS.dave.username);
+      await expect(ownerRail).toContainText("2 members in the household");
+      await expect(fieldRowOf(a, visible)).toContainText("Home · can view", {
+        timeout: 30_000,
+      });
+      await expect(fieldRowOf(a, visible)).toContainText(
+        "1 other person can see it.",
+      );
+      await expect(fieldRowOf(a, hidden)).toContainText("Only you");
+      await expect(fieldRowOf(a, hidden)).toContainText(
+        "Nobody else can see it.",
+      );
+      // The member: partial, always, and the scopes are the server's.
+      await leader(b, bId.account_id);
+      await reopenBound(b, bId.account_id, "/people");
+      await cached(b, bId, shared.person);
+      await expect(personRow(b, shared.person)).toContainText(
+        "Shared with you by",
+        { timeout: 30_000 },
+      );
+      await expect(personRow(b, shared.person)).toContainText(
+        "Visible to: Shared from Home",
+      );
+      await expect(personRow(b, own.person)).toHaveCount(0);
+      await expect(
+        b.getByText(/The owner may have shared them more widely/),
+      ).toBeVisible();
+      for (const name of ["In Home", "Shared with me", "Not linked"]) {
+        await view(b, name);
+        await expect(personRow(b, shared.person)).toBeVisible({
+          timeout: 30_000,
+        });
+      }
+      await go(b, `/people/${shared.person}`);
+      const memberRail = b.getByRole("region", { name: "Shared with" });
+      await expect(memberRail).toHaveAttribute("data-shared-with", "partial", {
+        timeout: 30_000,
+      });
+      await expect(memberRail).toContainText("may have shared it more widely");
+      await expect(memberRail).not.toContainText("can't see it");
+      await expect(memberRail).not.toContainText("Excluded");
+      await expect(fieldRowOf(b, visible)).toContainText("Shared from Home", {
+        timeout: 30_000,
+      });
+      await expect(fieldRowOf(b, visible)).toContainText(
+        "The owner may have shared it more widely.",
+      );
+      await expect(fieldRowOf(b, hidden)).toHaveCount(0);
+      // HARNESS cross-check: the backend's own answers say what the screens said.
+      const memberDetail = (
+        await raw(b, bId, "GET", `/people/${shared.person}/summary`)
+      ).body as {
+        summary: { audience: { disclosure: string }; added_by_you: string };
+        shared_with: { households: Array<{ members: unknown }> };
+      };
+      expect(memberDetail.summary.audience.disclosure).toBe("partial");
+      expect(memberDetail.summary.added_by_you).toBe("no");
+      expect(memberDetail.shared_with.households.map((h) => h.members)).toEqual(
+        [null],
+      );
+      // Revocation: the owner narrows the person to private; the member's scope loses it at the next read after its sync.
+      await go(b, "/people");
+      await view(b, "Shared with me");
+      await expect(personRow(b, shared.person)).toBeVisible({
+        timeout: 30_000,
+      });
+      const pp = await policyOf(a, aId, shared.person);
+      expect(
+        (
+          await management(a, aId, [
+            {
+              kind: "replace_policy",
+              id: shared.person,
+              expected_version: pp.body.version,
+              policy: PRIVATE,
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      await cached(b, bId, shared.person, false);
+      await expect(personRow(b, shared.person)).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      const after = (
+        await raw(b, bId, "GET", "/people/summaries?scope=shared_with_me")
+      ).body as { items: Array<{ id: string }> };
+      expect(after.items.map((item) => item.id)).not.toContain(shared.person);
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ home, shared, own, visible, hidden }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL16 a person added by A and linked to B: A still sees 'Added by you' and B's control, B sees 'You'; In Home with no primary household is explained", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "erin", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "alice");
+      const { person } = await seedPerson(a, aId, "I-S Linked");
+      await link(a, aId, b, bId, person);
+      await reopenBound(a, aId.account_id, "/people");
+      await expect(personRow(a, person)).toContainText("Added by you", {
+        timeout: 30_000,
+      });
+      await expect(personRow(a, person)).toContainText(
+        "Linked · they control their name",
+      );
+      // Added by A, so never "Shared with me" for A, whoever owns it now (product decision 1).
+      await view(a, "Shared with me");
+      await expect(a.locator("[data-people-scope]")).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(personRow(a, person)).toHaveCount(0);
+      await leader(b, bId.account_id);
+      await reopenBound(b, bId.account_id, "/people");
+      await cached(b, bId, person);
+      await expect(personRow(b, person)).toContainText("You", {
+        timeout: 30_000,
+      });
+      await expect(personRow(b, person)).toContainText(
+        "Linked to your account",
+      );
+      // HARNESS: no primary household for B (cleared if one is set), so In Home is the explained empty state.
+      const defaults = (await raw(b, bId, "GET", "/defaults")).body as {
+        preferences_version: number;
+        primary_household_id: string | null;
+      };
+      if (defaults.primary_household_id !== null)
+        expect(
+          (
+            await management(b, bId, [
+              {
+                kind: "set_primary_household",
+                household_id: null,
+                expected_version: defaults.preferences_version,
+              },
+            ])
+          ).status,
+        ).toBe(200);
+      await view(b, "In Home");
+      await expect(
+        b.getByText(
+          "You haven't chosen a primary household, so nobody is In Home. Everyone you can see is still under All.",
+        ),
+      ).toBeVisible({ timeout: 30_000 });
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({
+          person,
+          bPrimary: defaults.primary_household_id,
+        }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
   });
 });

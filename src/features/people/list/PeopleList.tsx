@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
@@ -12,8 +12,6 @@ import {
 import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
-import { useMemoryRevision } from "../memory";
-import type { LinkageState } from "../model/linkage";
 import {
   byName,
   type Change,
@@ -23,30 +21,55 @@ import {
   projectedRows,
   type ShownRow,
 } from "../model/project";
-import { Avatar, Banner, PendingBadge } from "../parts";
 import {
-  linkageIn,
-  OutstandingChain,
-  ResourceScan,
-  readLinkage,
-  type ScanResult,
-} from "../reads";
+  attributionOf,
+  audienceText,
+  type PersonSummary,
+  type SummaryScope,
+  summaryCurrentFor,
+} from "../model/summary";
+import { Avatar, Banner, PendingBadge } from "../parts";
+import { OutstandingChain, ResourceScan, type ScanResult } from "../reads";
+import {
+  type SummaryView,
+  shownOf,
+  useSummary,
+  type WalkedPages,
+  walkPages,
+} from "../summaries";
+import { SummaryNotes } from "../summary-notes";
 import { NewPersonDialog } from "./NewPersonDialog";
 
 /**
- * WF-PEOPLE-01, the people list (§4.1). Rows come from the cache with this device's outstanding saves folded over them (a queued new person
- * is shown, marked "Not sent yet"). The list is read in BOUNDED STEPS (Q9; finding 7 of the review of 13 October 2026): a step keeps at most
- * 100 people that match the view and the search, reading at most 20 pages of 100 to find them, and "Next people" / "Keep searching"
- * continue from where it stopped ("Previous people" goes back), so every person stays reachable and nothing past the step is read. The
- * cache lists people by id, so a step is sorted by name within itself. Search is over the names shown, which are only names the person can
- * see. "All" lists people that are not archived; "Archived" lists the archived ones. The "Account" text appears only for people whose
- * linkage this page has read (D-11a-3): while online, the first 25 rows shown are read, two at a time, once per identity.
+ * WF-PEOPLE-01, the people list (§4.1). The list is read in BOUNDED STEPS (Q9; finding 7 of the review of 13 October 2026): a step keeps
+ * at most 100 people that match the view and the search, reading at most 20 pages of 100 to find them, and "Next people" / "Keep
+ * searching" continue from where it stopped ("Previous people" goes back), so every person stays reachable. A step is sorted by name within
+ * itself. Search is over the names shown, which are only names the person can see.
+ *
+ * The views (finding 8; API 0.29's viewer-safe summaries, `summaries.tsx`):
+ *  - "All" and "Archived" come from the CACHE, with this device's outstanding saves folded over it (a queued new person is shown, marked
+ *    "Not sent yet"), and work offline. While online, each step's people are joined BY ID to `GET /people/summaries` read over the same id
+ *    range (both are in ascending id order), for the "Account" and "Visible to" lines and who added them. Offline they say they are
+ *    checked when online: never an old answer.
+ *  - "In Home", "Shared with me" and "Not linked" are the SERVER's: `scope` is evaluated over the whole visible set before pagination, so
+ *    each step walks the summary pages themselves and is complete at each read. They need a connection, and say so; nothing cached is
+ *    filtered and called complete. In Home without a primary household is an explained empty state (product decision 3).
  *
  * States: Loading (five skeleton rows; header and controls paint at once), Empty (a completed sync with nobody), Offline-first-visit (no
  * sync yet: never shown as Empty), Error (the store failed: a banner with Try again), each with "New person" still offered.
  */
 const PEOPLE_STEP = 100;
 const PEOPLE_STEP_PAGES = 20;
+const SUMMARY_PAGE = 100;
+
+type PeopleView = "all" | Exclude<SummaryScope, "all"> | "archived";
+const VIEWS: readonly { view: PeopleView; label: string }[] = [
+  { view: "all", label: copy.FILTER_ALL },
+  { view: "in_home", label: copy.FILTER_IN_HOME },
+  { view: "shared_with_me", label: copy.FILTER_SHARED_WITH_ME },
+  { view: "not_linked", label: copy.FILTER_NOT_LINKED },
+  { view: "archived", label: copy.FILTER_ARCHIVED },
+];
 
 const normalise = (text: string) =>
   text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
@@ -54,7 +77,7 @@ const normalise = (text: string) =>
 export function PeopleList({ selectedId }: { selectedId: string | null }) {
   const env = usePeopleEnv();
   const [query, setQuery] = useState("");
-  const [view, setView] = useState<"all" | "archived">("all");
+  const [view, setView] = useState<PeopleView>("all");
   const [creating, setCreating] = useState(false);
   // The start of each step walked so far (null: the first); a new search or view begins again from the first.
   const [starts, setStarts] = useState<(string | null)[]>([null]);
@@ -84,7 +107,7 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
         />
         <fieldset className="flex flex-wrap items-center gap-1.5">
           <legend className="sr-only">{copy.FILTER_LABEL}</legend>
-          {(["all", "archived"] as const).map((value) => (
+          {VIEWS.map(({ view: value, label }) => (
             <button
               key={value}
               type="button"
@@ -97,26 +120,38 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
               }}
               className={`atlas-transition min-h-11 rounded-control border px-3 text-[13px] text-ink-1 hover:bg-row-hover data-[status=active]:bg-select-tint ${view === value ? "border-action-fill" : "border-hairline-strong"}`}
             >
-              {value === "all" ? copy.FILTER_ALL : copy.FILTER_ARCHIVED}
+              {label}
             </button>
           ))}
         </fieldset>
       </div>
       <CacheGate>
         <OutstandingChain>
-          {(outstanding) => (
-            <PeopleSteps
-              env={env}
-              changes={changesOfAll(outstanding.rows)}
-              outstandingCapped={outstanding.capped}
-              query={query}
-              view={view}
-              starts={starts}
-              onStarts={setStarts}
-              selectedId={selectedId}
-              onNew={() => setCreating(true)}
-            />
-          )}
+          {(outstanding) =>
+            view === "all" || view === "archived" ? (
+              <PeopleSteps
+                env={env}
+                changes={changesOfAll(outstanding.rows)}
+                outstandingCapped={outstanding.capped}
+                query={query}
+                view={view}
+                starts={starts}
+                onStarts={setStarts}
+                selectedId={selectedId}
+                onNew={() => setCreating(true)}
+              />
+            ) : (
+              <ScopeSteps
+                env={env}
+                scope={view}
+                changes={changesOfAll(outstanding.rows)}
+                query={query}
+                starts={starts}
+                onStarts={setStarts}
+                selectedId={selectedId}
+              />
+            )
+          }
         </OutstandingChain>
       </CacheGate>
       <NewPersonDialog open={creating} onClose={() => setCreating(false)} />
@@ -124,6 +159,7 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
   );
 }
 
+// ---- All / Archived: the cache, joined by id to the summaries ------------------------------------------------------------------------
 function PeopleSteps({
   env,
   changes,
@@ -167,10 +203,11 @@ function PeopleSteps({
       pages={PEOPLE_STEP_PAGES}
     >
       {(step) => (
-        <Rows
+        <CachedRows
           env={env}
           step={step}
-          first={start === null}
+          start={start}
+          archived={view === "archived"}
           shown={[
             ...step.rows.map((row) => foldOne(row, byId)),
             // This device's queued new people are shown once, with the first step.
@@ -201,10 +238,46 @@ function PeopleSteps({
   );
 }
 
-function Rows({
+/**
+ * The summaries of one cached step's people: `GET /people/summaries` from the step's own start, page after page, until every person of the
+ * step was seen, a page passed the step's last id (the order is the same), the end, or the step's page bound. Nothing is read before
+ * the step has settled, or for a step with nobody synced in it.
+ */
+function useStepSummaries(
+  env: PeopleEnv,
+  step: ScanResult,
+  start: string | null,
+  archived: boolean,
+): SummaryView<WalkedPages<PersonSummary>> {
+  const ids = step.settled ? step.rows.map((row) => row.id) : [];
+  const key =
+    ids.length === 0
+      ? null
+      : `people-join:${archived}:${start ?? ""}:${ids.join(",")}`;
+  return useSummary(key, (current) => {
+    const last = ids.reduce((a, b) => (b > a ? b : a), "");
+    return walkPages(
+      (after) =>
+        env.api.readSummaries("all", { after, limit: SUMMARY_PAGE, archived }),
+      {
+        start,
+        keep: () => false,
+        limit: 1,
+        pages: PEOPLE_STEP_PAGES,
+        covered: (read, lastRead) =>
+          ids.every((id) => read.has(id)) ||
+          (lastRead !== null && lastRead >= last),
+      },
+      current,
+    );
+  });
+}
+
+function CachedRows({
   env,
   step,
-  first,
+  start,
+  archived,
   shown,
   outstandingCapped,
   query,
@@ -216,7 +289,8 @@ function Rows({
 }: {
   env: PeopleEnv;
   step: ScanResult;
-  first: boolean;
+  start: string | null;
+  archived: boolean;
   shown: ShownRow[];
   outstandingCapped: boolean;
   query: string;
@@ -226,15 +300,13 @@ function Rows({
   onPrevious: (() => void) | null;
   onNext: (() => void) | null;
 }) {
-  useMemoryRevision(env.memory);
   const inputs = useStatusInputs();
   const actions = useDataActions();
+  const summaries = useStepSummaries(env, step, start, archived);
+  const read = shownOf(summaries)?.value.read ?? null;
   const wanted = normalise(query);
-  usePrefetchLinkage(
-    env,
-    shown.filter((row) => !row.projected).map((row) => row.row.id),
-  );
   const status = step.status;
+  const first = start === null;
 
   if (status === "failed")
     return (
@@ -246,20 +318,7 @@ function Rows({
       />
     );
   if ((status === "loading" || !step.settled) && shown.length === 0)
-    return (
-      <div
-        aria-busy="true"
-        data-people-state="loading"
-        className="flex flex-col gap-1.5"
-      >
-        {[0, 1, 2, 3, 4].map((n) => (
-          <div
-            key={n}
-            className="min-h-12 rounded-row border border-hairline bg-panel"
-          />
-        ))}
-      </div>
-    );
+    return <Skeleton />;
   const neverSynced =
     status === "absent" ||
     inputs.cache === "empty" ||
@@ -285,6 +344,14 @@ function Rows({
     );
   // The step stopped at its page bound before it found a full step: more people may match further on.
   const partial = step.settled && !step.end && shown.length < PEOPLE_STEP;
+  // A summary is shown beside a cached person only when it is not older than what this device shows.
+  const summaryOf = (row: ShownRow): PersonSummary | null => {
+    if (row.projected || read === null) return null;
+    const summary = read.get(row.row.id) ?? null;
+    return summary !== null && summaryCurrentFor(summary, row.row)
+      ? summary
+      : null;
+  };
   return (
     <div className="flex flex-col gap-2">
       {neverSynced ? (
@@ -307,8 +374,11 @@ function Rows({
           {shown.map((row) => (
             <PersonRow
               key={row.row.id}
-              env={env}
               row={row}
+              summary={summaryOf(row)}
+              count={
+                row.projected ? null : <FieldCount personId={row.row.id} />
+              }
               selected={row.row.id === selectedId}
             />
           ))}
@@ -319,20 +389,7 @@ function Rows({
           {copy.SEARCH_PARTIAL(shown.length)}
         </p>
       ) : null}
-      {onPrevious !== null || onNext !== null ? (
-        <div className="flex flex-wrap gap-2" data-people-steps="">
-          {onPrevious !== null ? (
-            <Button data-people-action="previous-people" onClick={onPrevious}>
-              {copy.PREVIOUS_PEOPLE}
-            </Button>
-          ) : null}
-          {onNext !== null ? (
-            <Button data-people-action="next-people" onClick={onNext}>
-              {partial ? copy.KEEP_SEARCHING : copy.NEXT_PEOPLE}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
+      <Steps onPrevious={onPrevious} onNext={onNext} partial={partial} />
       {outstandingCapped ? (
         <p
           className="text-[12.5px] text-ink-2"
@@ -341,30 +398,237 @@ function Rows({
           {copy.OUTSTANDING_CAPPED}
         </p>
       ) : null}
+      {shown.some((row) => !row.projected) ? (
+        <SummaryNotes
+          view={summaries}
+          partial={shown.some(
+            (row) => summaryOf(row)?.audience.disclosure === "partial",
+          )}
+        />
+      ) : null}
     </div>
   );
 }
 
-function linkageText(linkage: LinkageState): string | null {
-  if (!linkage.known) return null;
-  return linkage.kind === "self"
+// ---- In Home / Shared with me / Not linked: the server's scopes --------------------------------------------------------------------
+/** A summary as a person row, so this device's outstanding saves fold over it as over a cached one. */
+const rowOf = (summary: PersonSummary): CacheRow => ({
+  id: summary.id,
+  kind: "person",
+  parent_id: null,
+  label: summary.label,
+  value: null,
+  version: summary.version,
+  policy_version: summary.policy_version,
+  can_edit: summary.your_access !== "view",
+  archived: summary.archived,
+  kind_date: null,
+});
+
+function ScopeSteps({
+  env,
+  scope,
+  changes,
+  query,
+  starts,
+  onStarts,
+  selectedId,
+}: {
+  env: PeopleEnv;
+  scope: Exclude<SummaryScope, "all">;
+  changes: Change[];
+  query: string;
+  starts: (string | null)[];
+  onStarts(starts: (string | null)[]): void;
+  selectedId: string | null;
+}) {
+  const wanted = normalise(query);
+  const start = starts.at(-1) ?? null;
+  const byId = useMemo(() => changesById(changes), [changes]);
+  const view = useSummary<WalkedPages<PersonSummary>>(
+    `people:${scope}:${start ?? ""}:${wanted}`,
+    (current) =>
+      walkPages(
+        (after) =>
+          env.api.readSummaries(scope, {
+            after,
+            limit: SUMMARY_PAGE,
+            archived: false,
+          }),
+        {
+          start,
+          keep: (item) =>
+            wanted === "" || normalise(item.label).includes(wanted),
+          limit: PEOPLE_STEP,
+          pages: PEOPLE_STEP_PAGES,
+        },
+        current,
+      ),
+  );
+  if (view.status === "offline")
+    return <StatePanel state="view-offline" message={copy.VIEW_OFFLINE} />;
+  if (view.status === "failed")
+    return (
+      <Banner
+        message={copy.VIEW_FAILED}
+        action={<Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>}
+      />
+    );
+  const shown = shownOf(view);
+  if (shown === null) return <Skeleton />;
+  const { kept, next, end, home } = shown.value;
+  if (scope === "in_home" && home === null)
+    return <StatePanel state="no-home" message={copy.IN_HOME_NO_HOME} />;
+  const rows = kept
+    .map((summary) => ({ summary, row: foldOne(rowOf(summary), byId) }))
+    .sort((a, b) => byName(a.row, b.row));
+  const partial = !end && kept.length < PEOPLE_STEP;
+  return (
+    <div className="flex flex-col gap-2" data-people-scope={scope}>
+      {rows.length === 0 ? (
+        <p data-people-state="no-match" className="text-[13px] text-ink-2">
+          {wanted !== ""
+            ? end
+              ? copy.NO_MATCH(query.trim())
+              : copy.NO_MATCH_YET(query.trim())
+            : scope === "in_home"
+              ? copy.IN_HOME_EMPTY(home?.name ?? copy.FILTER_IN_HOME)
+              : scope === "shared_with_me"
+                ? copy.SHARED_WITH_ME_EMPTY
+                : copy.NOT_LINKED_EMPTY}
+        </p>
+      ) : (
+        <List className="flex flex-col gap-1">
+          {rows.map(({ summary, row }) => (
+            <PersonRow
+              key={summary.id}
+              row={row}
+              summary={summary}
+              count={
+                <span
+                  className="flex-none text-[12.5px] text-ink-2"
+                  data-field-count=""
+                >
+                  {copy.FIELD_COUNT(summary.field_count)}
+                </span>
+              }
+              selected={summary.id === selectedId}
+            />
+          ))}
+        </List>
+      )}
+      {partial && rows.length > 0 ? (
+        <p className="text-[12.5px] text-ink-2" data-people-state="partial">
+          {copy.SEARCH_PARTIAL(rows.length)}
+        </p>
+      ) : null}
+      <Steps
+        onPrevious={
+          starts.length > 1 ? () => onStarts(starts.slice(0, -1)) : null
+        }
+        onNext={
+          !end && next !== null ? () => onStarts([...starts, next]) : null
+        }
+        partial={partial}
+      />
+      <SummaryNotes
+        view={view}
+        partial={kept.some((s) => s.audience.disclosure === "partial")}
+      />
+    </div>
+  );
+}
+
+// ---- shared parts ---------------------------------------------------------------------------------------------------------------------
+function Skeleton() {
+  return (
+    <div
+      aria-busy="true"
+      data-people-state="loading"
+      className="flex flex-col gap-1.5"
+    >
+      {[0, 1, 2, 3, 4].map((n) => (
+        <div
+          key={n}
+          className="min-h-12 rounded-row border border-hairline bg-panel"
+        />
+      ))}
+    </div>
+  );
+}
+
+function StatePanel({ state, message }: { state: string; message: string }) {
+  return (
+    <div
+      data-people-state={state}
+      className="flex flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+    >
+      <p className="text-[13.5px] leading-[1.55] text-ink-1">{message}</p>
+    </div>
+  );
+}
+
+function Steps({
+  onPrevious,
+  onNext,
+  partial,
+}: {
+  onPrevious: (() => void) | null;
+  onNext: (() => void) | null;
+  partial: boolean;
+}) {
+  if (onPrevious === null && onNext === null) return null;
+  return (
+    <div className="flex flex-wrap gap-2" data-people-steps="">
+      {onPrevious !== null ? (
+        <Button data-people-action="previous-people" onClick={onPrevious}>
+          {copy.PREVIOUS_PEOPLE}
+        </Button>
+      ) : null}
+      {onNext !== null ? (
+        <Button data-people-action="next-people" onClick={onNext}>
+          {partial ? copy.KEEP_SEARCHING : copy.NEXT_PEOPLE}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function linkageText(summary: PersonSummary): string {
+  return summary.linkage === "you"
     ? copy.ROW_LINK_SELF
-    : linkage.kind === "other"
+    : summary.linkage === "other"
       ? copy.ROW_LINK_OTHER
       : copy.ROW_LINK_NONE;
 }
 
+function attributionText(summary: PersonSummary): string | null {
+  const attribution = attributionOf(summary);
+  switch (attribution.kind) {
+    case "you":
+      return copy.YOU;
+    case "added_by_you":
+      return copy.ADDED_BY_YOU;
+    case "shared_by":
+      return copy.SHARED_BY(attribution.owner);
+    case "none":
+      return null;
+  }
+}
+
 function PersonRow({
-  env,
   row,
+  summary,
+  count,
   selected,
 }: {
-  env: PeopleEnv;
   row: ShownRow;
+  summary: PersonSummary | null;
+  count: ReactNode;
   selected: boolean;
 }) {
   const person = row.row;
-  const linkage = row.projected ? null : linkageText(linkageIn(env, person.id));
+  const attribution = summary === null ? null : attributionText(summary);
   return (
     <li className="list-none">
       <Link
@@ -381,12 +645,28 @@ function PersonRow({
             {person.label}
           </span>
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-ink-2">
-            {linkage ? <span data-person-linkage="">{linkage}</span> : null}
+            {attribution !== null ? (
+              <span data-person-attribution="">{attribution}</span>
+            ) : null}
+            {summary !== null ? (
+              <span data-person-linkage="">
+                <span className="sr-only">{copy.COLUMN_ACCOUNT}: </span>
+                {linkageText(summary)}
+              </span>
+            ) : null}
             {person.archived ? <span>{copy.ARCHIVED_TAG}</span> : null}
             <PendingBadge mark={row.pending} />
           </span>
+          {summary !== null ? (
+            <span
+              className="text-[12.5px] text-ink-2"
+              data-person-audience={summary.audience.disclosure}
+            >
+              {copy.VISIBLE_TO(audienceText(summary.audience))}
+            </span>
+          ) : null}
         </span>
-        {row.projected ? null : <FieldCount personId={person.id} />}
+        {count}
       </Link>
     </li>
   );
@@ -406,33 +686,4 @@ function FieldCount({ personId }: { personId: string }) {
         : `${copy.FIELD_COUNT(count)}+`}
     </span>
   );
-}
-
-/**
- * D-11a-3: while online, reads the linkage of the first `env.prefetchLinkage` people shown, two at a time, once per identity per page
- * lifetime (never again for a person already asked, answered or refused).
- */
-function usePrefetchLinkage(env: PeopleEnv, ids: readonly string[]) {
-  const key = ids.slice(0, env.prefetchLinkage).join(",");
-  useEffect(() => {
-    if (!env.online || key === "") return;
-    const memory = env.memory;
-    const queue = key.split(",").filter((id) => !memory.prefetched.has(id));
-    for (const id of queue) memory.prefetched.add(id);
-    let cancelled = false;
-    const worker = async () => {
-      for (;;) {
-        if (cancelled) return;
-        const id = queue.shift();
-        if (id === undefined) return;
-        await readLinkage(env, id);
-      }
-    };
-    void Promise.all([worker(), worker()]);
-    return () => {
-      cancelled = true;
-      // What was not asked yet may be asked by the next run.
-      for (const id of queue) memory.prefetched.delete(id);
-    };
-  }, [env, key]);
 }
