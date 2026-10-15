@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
+import pin from "../../../contract-pin.json";
 import { capacityText } from "../../../src/features/settings/sessions-devices/CapacityLine";
 import {
   BROWSER_TEXT,
@@ -19,7 +20,8 @@ import { serverAcceptsName } from "../../support/session/server";
 /**
  * WEB-08d: the decoders against the BE-Q25 contract. `tests/fixtures/be-q25/labels-and-capacity-30fec6a.json` is a verbatim extract
  * of backend commit 30fec6a (the schemas, the `behaviour.labels_and_capacity` probe payloads, and the name vectors of the backend's
- * own Rust tests); the drift check compares it with the RELEASED `@atlas/api-types` 0.28.0-rc.1 contract this client is pinned to.
+ * own Rust tests). The accepted API 0.29 release retains these schemas: keep the original extract and compare it with the current
+ * released contract, while checking that contract's bytes against the independently verified release pin.
  */
 interface Extract {
   source: { commit: string; openapi_sha256: string };
@@ -53,15 +55,22 @@ const enumOf = (schema: string, member: string): unknown[] => {
   return values;
 };
 
-describe("drift: the released contract is the one the decoders were written from", () => {
-  test("the installed @atlas/api-types openapi.json is byte-identical to the planned 30fec6a contract (087ced05…)", () => {
+describe("drift: the released contract preserves the BE-Q25 decoder contract", () => {
+  test("the installed contract matches accepted API 0.29 and retains the original extract's provenance", () => {
     expect(extract.source.commit).toBe(
       "30fec6a3f31aaeea9c69d10216c78b8c02645661",
     );
-    expect(createHash("sha256").update(releasedBytes).digest("hex")).toBe(
-      extract.source.openapi_sha256,
+    expect(extract.source.openapi_sha256).toBe(
+      "087ced05e7a731d99b6374bbe0572e40746cec88dad0ce350c7bfe52fbf153fc",
     );
-    expect(released.info.version).toBe("0.28.0");
+    expect(pin.backend_commit).toBe("4396c99300d00798fc10e61d459f4d9fce699ee8");
+    expect(pin.contract_sha256).toBe(
+      "369ca0de5ab0cd5983252b55d4a546263819c236fa285a386b0dd374bf82b6e0",
+    );
+    expect(createHash("sha256").update(releasedBytes).digest("hex")).toBe(
+      pin.contract_sha256,
+    );
+    expect(released.info.version).toBe("0.29.0");
   });
 
   test.each(["ClientLabel", "Capacity", "DeviceName", "DeviceNameUpdate"])(
