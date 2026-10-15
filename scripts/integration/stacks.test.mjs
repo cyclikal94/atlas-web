@@ -192,7 +192,14 @@ test("Playwright's discovery: the full programme gives every case one stack and 
       assert.match(titles("-snapshot"), new RegExp(id));
     // Every earlier stack's cases are exactly those of the stacks that replace it: stacks were only split.
     const SPLIT = {
-      "": ["base", "-pages", "-password-path", "-sharing", "-snapshot"],
+      "": [
+        "base",
+        "-pages",
+        "-password-path",
+        "-sharing",
+        "-snapshot",
+        "-calendar",
+      ],
       "-registration": ["-registration", "-registration-i25"],
     };
     for (const [i, legacy] of LEGACY.entries()) {

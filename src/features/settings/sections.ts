@@ -1,4 +1,5 @@
 import type { AnyRoute } from "@tanstack/react-router";
+import { buildCalendarsSection } from "../calendars/section";
 import { buildAppearanceSection } from "./appearance-section";
 import { buildSessionsDevicesSection } from "./sessions-devices/section";
 import { buildSigningInSection } from "./signing-in/section";
@@ -51,6 +52,15 @@ const SECTIONS: readonly SettingsSection[] = [
     order: 50,
     owner: "WEB-07",
     build: buildAppearanceSection,
+  },
+  {
+    id: "calendars",
+    label: "Calendars",
+    description: "Calendars you've added, and their connections.",
+    route: "calendars",
+    order: 60,
+    owner: "WEB-13",
+    build: buildCalendarsSection,
   },
   {
     id: "data",

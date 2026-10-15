@@ -38,7 +38,7 @@
     "test:integration-tools": "node --test scripts/integration/*.test.mjs"
   },
   "dependencies": {
-    "@atlas/api-types": "file:vendor/atlas-api-types-0.28.0-rc.1.tgz",
+    "@atlas/api-types": "file:vendor/atlas-api-types-0.29.0-rc.1.tgz",
     "@fontsource-variable/geist": "5.3.0",
     "@fontsource-variable/geist-mono": "5.3.0",
     "@radix-ui/react-dialog": "1.1.23",

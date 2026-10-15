@@ -13,6 +13,8 @@
 //                        DISCARDS buffered requests instead of forwarding them, so no late write lands in a later test.
 //   delay                deliver the response after `ms`
 //   drop_after_forward   forward, let the backend commit, then destroy the connection (the browser sees it close)
+//   drop_client_after    forward, and after `ms` destroy the BROWSER's connection while the backend request carries on: an answer lost
+//                        while the original is still EXECUTING (WEB-13a, case 6(a)); the backend's eventual answer is discarded
 //   rewrite_status       forward, then answer with `status` and an empty JSON body and NONE of the backend's headers (a gateway's error carries no Set-Cookie)
 //   replace_response     forward, then answer with `status` and the JSON body `json` (for example an Atlas-formatted error with its `code`) and none of the backend's headers
 //   rewrite_json         forward, then set/delete fields of the JSON body: { set: {...}, delete: [...] }
@@ -106,6 +108,15 @@ export function createProxy({
             entry.status = upstreamRes.statusCode;
             tell({ event: "answered", id, status: upstreamRes.statusCode });
             const body = Buffer.concat(chunks);
+            if (rule?.action === "drop_client_after") {
+              // The browser's connection is already gone: the backend finished, and nobody receives its answer.
+              entry.events.push({
+                t: Date.now() - entry.at,
+                event: "discarded",
+                status: upstreamRes.statusCode,
+              });
+              return;
+            }
             const deliver = (override) => {
               // The client may have given up (its own time-out) long before a buffered request was released.
               if (res.destroyed || res.writableEnded) {
@@ -224,6 +235,16 @@ export function createProxy({
       if (buffered) upstreamReq.end(buffered);
       else req.pipe(upstreamReq);
     };
+    if (rule?.action === "drop_client_after") {
+      const timer = setTimeout(() => {
+        entry.events.push({
+          t: Date.now() - entry.at,
+          event: "dropped_client",
+        });
+        req.socket.destroy();
+      }, rule.ms ?? 0);
+      timer.unref?.();
+    }
     if (rule?.action === "buffer_request") {
       const chunks = [];
       req.on("data", (c) => chunks.push(c));

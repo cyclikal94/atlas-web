@@ -49,6 +49,8 @@ export const FULL_STACKS = [
     oidc: false,
   },
   { suffix: "-data", files: [spec("data")], oidc: false },
+  // WEB-13a's linked-calendar journeys retain their own throttle-isolated stack and loopback feed.
+  { suffix: "-calendar", files: [spec("calendars")], oidc: false },
   {
     suffix: "-traces",
     files: [spec("web08b-traces")],

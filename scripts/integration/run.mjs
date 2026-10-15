@@ -73,6 +73,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { audit, createAdmissionRecorder } from "./admission.mjs";
+import { createCalendarFeed } from "./calendar-feed.mjs";
 import { createProxy } from "./delaying-proxy.mjs";
 import {
   DOCKER_CONTEXT,
@@ -503,6 +504,18 @@ async function prepare(state, signal) {
   // and the environment only.
   const accounts = {};
   let revision;
+  // WEB-13a: the loopback calendar feed (the "provider" the backend fetches linked calendars from). The SQLite backend is given a
+  // fresh, disposable integration key (64 hex characters, by the environment only, never written anywhere) and an outbound exception
+  // for the feed's exact origin, because it denies plain HTTP and loopback addresses by default. The PostgreSQL repeat runs the
+  // backend in a container, which cannot reach a loopback feed: its I-CAL linked cases skip themselves with that reason.
+  let calendar = null;
+  if (!postgres) {
+    const feed = createCalendarFeed();
+    scope.defer("calendar-feed", () => feed.stop());
+    calendar = await feed.start();
+    state.ports.push(Number(new URL(calendar.origin).port));
+    journal({ type: "ports", ports: state.ports });
+  }
   let oidc = null;
   if (stack.oidc && !postgres) {
     // The stub provider, on loopback, before the backend: the backend discovers it at the first single-sign-on request.
@@ -618,6 +631,8 @@ async function prepare(state, signal) {
         ATLAS_DATABASE_URL: database,
         ATLAS_BIND: `127.0.0.1:${backendPort}`,
         ATLAS_PUBLIC_ORIGIN: origin,
+        ATLAS_SECRET_KEY: randomBytes(32).toString("hex"),
+        ATLAS_OUTBOUND_ALLOW_ORIGINS: calendar?.origin ?? "",
         ...(oidc
           ? {
               ATLAS_OIDC_ISSUER: oidc.issuer,
@@ -717,6 +732,7 @@ async function prepare(state, signal) {
     // WEB-08b measurements and evidence stay apart from every earlier task's (the earlier default is WEB-08a-named).
     ATLAS_MEASUREMENTS_DIR: join(dirname(evidence), "profiling"),
     ATLAS_INTEGRATION_BACKEND_REVISION: JSON.stringify(revision),
+    ...(calendar === null ? {} : { ATLAS_INTEGRATION_FEED: calendar.origin }),
     ATLAS_E2E_BROWSERS: state.browser === "chromium" ? "" : "all",
   };
 }

@@ -22,13 +22,13 @@ test.describe("I-11: api_version", () => {
   const compat = (page: import("@playwright/test").Page) =>
     page.evaluate(() => window.__s.compat.get());
 
-  test("the released backend reports 0.28.0: supported, and sign-in is offered", async ({
+  test("the released backend reports 0.29.0: supported, and sign-in is offered", async ({
     context,
   }) => {
     const page = await bootHarness(context);
     await expect
       .poll(() => compat(page))
-      .toMatchObject({ status: "supported", version: "0.28.0" });
+      .toMatchObject({ status: "supported", version: "0.29.0" });
     await expect(
       page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
     ).toBeVisible();
@@ -36,8 +36,8 @@ test.describe("I-11: api_version", () => {
   });
 
   for (const [version, status] of [
-    ["0.29.0", "unsupported"],
-    ["0.27.9", "unsupported"],
+    ["0.30.0", "unsupported"],
+    ["0.28.9", "unsupported"],
   ] as const) {
     test(`a proxy that rewrites api_version to ${version}: ${status}; the compatibility screen replaces the sign-in entry`, async ({
       context,

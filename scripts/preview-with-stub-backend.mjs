@@ -18,7 +18,7 @@ const stub = createServer((request, response) => {
   const path = new URL(request.url ?? "/", "http://x").pathname;
   response.setHeader("content-type", "application/json");
   if (path === "/health") {
-    response.end(JSON.stringify({ api_version: "0.28.0", status: "ok" }));
+    response.end(JSON.stringify({ api_version: "0.29.0", status: "ok" }));
   } else if (path === "/ready") {
     response.end(JSON.stringify({ status: "ready" }));
   } else {
