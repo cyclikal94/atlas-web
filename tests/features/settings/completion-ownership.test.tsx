@@ -31,6 +31,7 @@ import {
   sessionDouble,
   sessionRow,
 } from "../../helpers/session-double";
+import { eventuallyShown } from "../../helpers/shown";
 
 /**
  * WEB-08d review R4 (revision 3) and the design assessment's A4 and A5: an answer belongs to the interaction that asked for it. A
@@ -393,9 +394,10 @@ describe("A4: a Check now answer belongs to the screen that asked", () => {
     }));
     const opened = await signingIn({ readAccount, changePassword }, overrides);
     await submitPassword(opened.dialog);
-    const button = await within(opened.dialog).findByRole("button", {
-      name: "Check now",
-    });
+    const button = await eventuallyShown(
+      () => within(opened.dialog).queryByRole("button", { name: "Check now" }),
+      "Check now",
+    );
     const before = readAccount.mock.calls.length;
     hold = true;
     fireEvent.click(button);
@@ -470,9 +472,10 @@ describe("A4: a Check now answer belongs to the screen that asked", () => {
     }));
     const { dialog } = await signingIn({ readAccount, changePassword });
     await submitPassword(dialog);
-    const button = await within(dialog).findByRole("button", {
-      name: "Check now",
-    });
+    const button = await eventuallyShown(
+      () => within(dialog).queryByRole("button", { name: "Check now" }),
+      "Check now",
+    );
     const before = readAccount.mock.calls.length;
     act(() => {
       button.click();

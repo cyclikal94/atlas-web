@@ -420,7 +420,16 @@ describe("R46: a retirement that cannot be established keeps the stop, and its b
     const held = delayResult(w.service.store, "data.readLocalWriteStops");
     w.reload();
     await w.settle();
-    expect((await w.outbox.enqueue(edit("new"))).kind).toBe("queued");
+    // The save is answered while that first look is still held (WEB-08d revision 17: a save that waits on the held look itself is an
+    // assertion failure here, not a test that hangs until its timeout).
+    let saved: { kind: string } | undefined;
+    const save = w.outbox.enqueue(edit("new")).then((answer) => {
+      saved = answer;
+      return answer;
+    });
+    await w.settle();
+    expect(saved?.kind).toBe("queued");
+    await save;
     held.release();
     await w.settle();
     expect(streaksOf(w)).toEqual({

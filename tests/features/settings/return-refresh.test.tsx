@@ -28,6 +28,7 @@ import {
   sessionDouble,
   sessionRow,
 } from "../../helpers/session-double";
+import { eventuallyShown, shown } from "../../helpers/shown";
 
 /**
  * WEB08D-NAVIGATION-FRESHNESS-20261011 (Q8): both management lists read again, quietly, when the person comes back to the tab
@@ -232,9 +233,12 @@ const returnToTab = async () => {
 };
 
 const renamePhone = () =>
-  screen.getByRole("button", {
-    name: `Rename ${isolate("Kieran's phone")}, last synced 3 hours ago`,
-  });
+  shown(
+    screen.queryByRole("button", {
+      name: `Rename ${isolate("Kieran's phone")}, last synced 3 hours ago`,
+    }),
+    "the named device's Rename button",
+  );
 
 describe("a return reads both lists again (Q8)", () => {
   test("a change made elsewhere appears after the tab is visible again; each list is read once", async () => {
@@ -445,9 +449,13 @@ describe("lifetime, offline and failure (Q8)", () => {
     }));
     world.elsewhere();
     await returnToTab();
-    await screen.findByText("Couldn't load your devices — please try again.", {
-      selector: "main p",
-    });
+    await eventuallyShown(
+      () =>
+        screen.queryByText("Couldn't load your devices — please try again.", {
+          selector: "main p",
+        }),
+      "the devices list's load error",
+    );
     expect(document.querySelectorAll("[data-device-row]")).toHaveLength(0);
     // The sessions list read on its own and shows the change.
     await waitFor(() =>

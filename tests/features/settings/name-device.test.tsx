@@ -26,6 +26,7 @@ import {
   sessionRow,
   WITHDRAW,
 } from "../../helpers/session-double";
+import { eventuallyShown, shown } from "../../helpers/shown";
 
 /**
  * WEB-08d: recognisable rows, both capacities, naming and the named confirmations, through the real Settings route over a double of
@@ -205,11 +206,12 @@ describe("recognisable rows (D-8d-03 to D-8d-06)", () => {
         name: "Retire this device, Chrome on macOS",
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", {
+    shown(
+      screen.queryByRole("button", {
         name: `Retire ${isolate("Kieran's phone")}, last synced 3 hours ago`,
       }),
-    ).toBeInTheDocument();
+      "the named device's Retire button",
+    );
     expect(
       screen.getByRole("button", {
         name: `Rename ${isolate("Kieran's phone")}, last synced 3 hours ago`,
@@ -349,9 +351,10 @@ describe("capacity (D-8d-11)", () => {
         "3 of 3 sign-ins in use. A new sign-in won't work until you sign one out.",
       ),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("We can't show how many devices can sync."),
-    ).toBeInTheDocument();
+    shown(
+      screen.queryByText("We can't show how many devices can sync."),
+      "the unknown devices capacity line",
+    );
     cleanup();
     await mount({
       listSessions: vi.fn(async () =>
@@ -390,7 +393,10 @@ describe("capacity (D-8d-11)", () => {
       listSessions: vi.fn(async () => labelledSessions()),
       readDevices,
     });
-    await screen.findByText("2 of 8 places for syncing in use.");
+    await eventuallyShown(
+      () => screen.queryByText("2 of 8 places for syncing in use."),
+      "the devices capacity line",
+    );
     answer = "hold";
     // A naming change reloads the list.
     fireEvent.click(
@@ -429,7 +435,12 @@ describe("naming (D-8d-09, D-8d-10)", () => {
       readDevices: vi.fn(async () => labelledDevices()),
       ...operations,
     });
-    fireEvent.click(await screen.findByRole("button", { name: button }));
+    fireEvent.click(
+      await eventuallyShown(
+        () => screen.queryByRole("button", { name: button }),
+        `the "${button}" button`,
+      ),
+    );
     const dialog = await screen.findByRole("dialog");
     return { ...mounted, dialog };
   };
@@ -446,7 +457,10 @@ describe("naming (D-8d-09, D-8d-10)", () => {
       listSessions: vi.fn(async () => labelledSessions()),
       readDevices: vi.fn(async () => ok(rest)),
     });
-    await screen.findByText("Firefox on Windows");
+    await eventuallyShown(
+      () => screen.queryByText("Firefox on Windows"),
+      "the unnamed device's row",
+    );
     expect(
       screen.queryAllByRole("button", { name: /^(Re)?[Nn]ame / }),
     ).toHaveLength(0);
@@ -722,7 +736,10 @@ describe("naming (D-8d-09, D-8d-10)", () => {
     const { dialog } = await open();
     type(dialog, " Den");
     save(dialog);
-    await within(dialog).findByText("Remove the space at the start or end.");
+    await eventuallyShown(
+      () => within(dialog).queryByText("Remove the space at the start or end."),
+      "the refusal of a name with a space at its end",
+    );
     expect(dialog.closest("[data-portal-root]")).not.toBeNull();
     expect((await axe(document.body)).violations).toEqual([]);
   });
@@ -739,9 +756,13 @@ describe("confirmations name the selected item (D-8d-12)", () => {
       retireOtherDevice,
     });
     fireEvent.click(
-      await screen.findByRole("button", {
-        name: `Retire ${isolate("Kieran's phone")}, last synced 3 hours ago`,
-      }),
+      await eventuallyShown(
+        () =>
+          screen.queryByRole("button", {
+            name: `Retire ${isolate("Kieran's phone")}, last synced 3 hours ago`,
+          }),
+        "the named device's Retire button",
+      ),
     );
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveAccessibleName(`Retire ${isolate("Kieran's phone")}?`);

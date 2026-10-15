@@ -493,7 +493,14 @@ describe("a ledger that cannot answer at all: nothing is admitted on a guess (re
     const tight = pageOver(origin, "A", FLOOR + 5 * MIB);
     const late = origin.hang("A");
     const pending = tight.reserve("input", BODY);
+    let answered = false;
+    void pending.then(() => {
+      answered = true;
+    });
     await vi.advanceTimersByTimeAsync(DATA_CONFIG.quotaLedgerWaitMs);
+    // Refused AT the wait, not asked again (WEB-08d revision 17: a guard that retries a silent ledger is an assertion failure here, not
+    // a test that hangs on a retry timer nothing advances).
+    expect(answered).toBe(true);
     expect(await pending).toMatchObject({
       verdict: "refuse",
       unestablished: true,

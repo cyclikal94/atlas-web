@@ -1176,8 +1176,13 @@ describe("review cycle 2: a request refused before it was sent is an explicit ad
     for (let i = 0; i < 20; i += 1) w.fire();
     await w.settle();
     expect(w.requests).toHaveLength(before);
-    // Ten minutes: paced attempts only (1 s doubling to 60 s), so a bounded handful, never a burst.
-    await w.advance(600_000);
+    // Ten minutes: paced attempts only (1 s doubling to 60 s), so a bounded handful, never a burst. Time alone makes no probe loop
+    // either: the first second asks the admission probe a handful of times (3), never once a millisecond (WEB-08d revision 17: a job
+    // that re-probes every millisecond is now an assertion failure here, not a run that exhausts the world or the test's time).
+    const probed = w.probes.length;
+    await w.advance(1_000);
+    expect(w.probes.length - probed).toBeLessThanOrEqual(10);
+    await w.advance(599_000);
     const paced = w.requests.length - before;
     expect(paced).toBeGreaterThanOrEqual(5);
     expect(paced).toBeLessThanOrEqual(16);
