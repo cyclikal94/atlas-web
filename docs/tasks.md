@@ -235,13 +235,33 @@ Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its re
     move is a failed read. At most two journal requests are in flight per view (a further one waits holding numbers only, and is never sent if
     no longer wanted), so the retained payload is at most the three window pages plus two answers in flight. The number of requests in flight is
     shown as `data-journal-requests` (for tests: 0 once every answer has been taken in).
+37. **What was typed belongs to its draft; one save decision for the Save shown and the save admitted (R16, R17; revision 6, design
+    assessment items 1–7).** A fix's input is held by a DRAFT (raw value, a revision counting edits across every editor of it, whether it is
+    unsaved, and the revision a pending save submitted), not by the editor showing it. Closing the full history ("Back to recent entries" or a
+    refusal) parks a draft that holds unsaved input — typed or restored — and opening that entry's fix again moves it back, however many times,
+    until Cancel discards it, a save of exactly that revision acknowledges it, or the view ends (route change, protected-tree remount, reload,
+    another identity). Memory only: never persisted, never sent, never an authority. A save's answer settles only the draft and revision it
+    submitted wherever the draft is now (the submitting editor closes; a newer editor of the same draft stays, marked saved; a parked draft is
+    retired; anything edited since is kept); one save at a time per draft. `saveBlock` decides for the Save shown and, synchronously, when Save
+    is pressed: not writable; a COMMITTED correction of the entry (for good); a recent entry is saved on its own authority (offline and while
+    the history is read again); otherwise the full history must be current (online, read without failure at the stream's committed version,
+    the detail's local read current — `useTaskDetail().current`) and there must be evidence about THIS entry: a check at the current version,
+    or a window that reaches the end and holds it (kept as the entry's check when Fix is chosen there). Without it Save says why — "This fix
+    can be saved once you're online again.", "This fix can be saved once the full history is up to date.", "Check whether this entry was
+    corrected since, then save the fix." with "Check again" (a check from the entry's own place in the journal, keeping the open fix) — and
+    the input is kept. A pending correction of the entry by me does not block a newer value (R3). A check answered after the connection went
+    opens nothing. The history shows `data-stream-version` and `data-journal-version` for native barriers.
 
 Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
 `enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
 follows a committed correction), E-T16 (an enrolment change pressed again while pending) and E-T17 (another tab commits between the detail's
 reads); unit MU-2123…MU-2148 and real-engine MU-2149…MU-2151; MU-2034/2035/2037/2045/2046/2083/2118 re-expressed (same intent). Revision 5:
 `journal-ownership.test.tsx` (Q1–Q9, Q13–Q15), native E-T18 (an older check never replaces a newer editor) and E-T19 (a refused check drops the
-full history); unit MU-2152…MU-2155, MU-2157…MU-2168 and real-engine MU-2169/MU-2170; MU-2133/2135/2136/2139/2140 re-expressed (same intent).
+full history); unit MU-2152…MU-2155, MU-2157…MU-2168 and real-engine MU-2169/MU-2170; MU-2133/2135/2136/2139/2140 re-expressed (same intent). Revision 6:
+`journal-drafts.test.tsx` (Q1–Q3, Q15), `journal-save-authority.test.tsx` (Q4–Q6, Q9–Q11), native E-T20 (another tab commits while a check's
+answer is held), E-T21 (another tab commits while the fix is open and its re-read is held), E-T22 (the other tab's hint late and twice),
+E-T23 (a 404, a remounting 403 and a reload end the transient state; the queued correction stays), E-T24/E-T25 (review 6's witnesses);
+unit MU-2171…MU-2190 and real-engine MU-2191…MU-2194; MU-2045/2046/2083/2138/2153 re-expressed (same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -310,6 +330,7 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 4: the detail and the edit page with a failed local read: "Atlas couldn't read the tasks saved on this device." (or "kept changing") with "Try again"; stale: the same with "Showing what was last read on this device."; the picker's "Couldn't read this task's saved days." with "Try again" | `/tasks/<id>` with a failing local read (jsdom `detail-read-coherence.test.tsx`) |
 | Revision 4: the full history's "Earlier entries", "Load more", "Refresh", "Back to recent entries", "Couldn't refresh the full history. Showing what was last loaded.", "Checking whether this entry was corrected", "Couldn't check whether this entry was corrected since.", "This entry has been corrected since. Fix its correction instead."; a fix whose page is not shown appears above the list as "Fix this entry: {value}" | `/tasks/<id>` → Full history (jsdom `journal-window.test.tsx`, native E-T15) |
 | Revision 5: after "This history isn't available to you." the "Full history" button is offered again; "Back to recent entries" (or a refusal) closes a fix of an entry known only from the full history, and opening that entry's fix again restores what was typed; offline, or while the full history is being read again for a newer version, such an entry offers no "Fix this entry" | `/tasks/<id>` → Full history (jsdom `journal-ownership.test.tsx`, native E-T18/E-T19) |
+| Revision 6: an open fix whose Save waits says why: "This fix can be saved once you're online again.", "This fix can be saved once the full history is up to date.", "Check whether this entry was corrected since, then save the fix." with "Check again" (and "Checking whether this entry was corrected" while it runs); what was typed survives every "Back to recent entries" or refusal until Cancel or a save | `/tasks/<id>` → Full history → Fix this entry (jsdom `journal-save-authority.test.tsx`, `journal-drafts.test.tsx`, native E-T21/E-T24/E-T25) |
 | Revision 4: enrolment "Sending your change…" (the disabled reason while a change is pending) and "Try again" beside "Couldn't confirm the change. Try again." | `/tasks/<id>` of a shared task (jsdom `enrolment-attempt.test.tsx`, native E-T16) |
 | Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 

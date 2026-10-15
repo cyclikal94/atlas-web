@@ -95,6 +95,11 @@ export interface TaskDetailView {
    * complete read, stale; with `status: "error"` there is none.
    */
   readError: "failed" | "unstable" | null;
+  /**
+   * What is shown is the last complete read and no later read of this device's data is due, running or failed (revision 6, D6-5): a change
+   * seen but not yet read in leaves the shown detail a retained display, never a current one.
+   */
+  current: boolean;
   /** Reads everything again (the task, its details, the day's selection and inputs). */
   retry(): void;
   /** The task is in the cache (not only projected): sharing and revise need it. */
@@ -550,6 +555,7 @@ export function useTaskDetail(
     row,
     unreadable,
     readError,
+    current: !read.reading && readError === null,
     retry: () => setAttempt((n) => n + 1),
     synced: inputs?.taskBase !== null && inputs?.taskBase !== undefined,
     outstanding: inputs?.detail ?? EMPTY,

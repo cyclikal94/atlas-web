@@ -1,4 +1,10 @@
-import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import {
+  type BrowserContext,
+  expect,
+  type Page,
+  type Route,
+  test,
+} from "@playwright/test";
 import { recordEvidence } from "./data-evidence";
 import {
   deltaPage,
@@ -23,6 +29,7 @@ import {
 } from "./data-sync-helpers";
 import { runAxe } from "./helpers";
 import {
+  API,
   type BuiltTask,
   bodiesOf,
   buildTask,
@@ -2665,5 +2672,809 @@ test.describe("E-T19: a refused check of the rest of the journal drops the full 
         history.getByRole("button", { name: "Full history", exact: true }),
       ).toBeVisible();
       expect(asked).toEqual([0, 200]);
+    });
+});
+
+// ---- WEB-10a revision 6 (R16, R17, R18; design assessment Q1, Q4, Q12–Q14) -------------------------------------------------------------
+
+const JOURNAL_GOAL = {
+  kind: "numeric",
+  minimum: "100000",
+  maximum: null,
+  unit: "cups",
+} as const;
+
+/**
+ * A journal of my quantity entries that can grow (a correction or a new entry appended, as the backend appends), paged 200 at a time by
+ * `sequence` as the contract's. Every answer is the journal AS DISPATCHED: the page is taken when the request arrives, so a request held
+ * while another tab commits answers with what was true when it was asked.
+ */
+function liveJournal(count: number) {
+  const at = Math.floor(Date.now() / 1000);
+  const id = (n: number) =>
+    `bbbbbbbb-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const make = (n: number, replaces: number | null) => ({
+    id: id(n),
+    sequence: n,
+    logical_order: replaces ?? n,
+    replaces: replaces === null ? null : id(replaces),
+    evidence: { kind: "quantity", amount: String(n) },
+    happened_at: at,
+    recorded_by: ACCOUNT,
+  });
+  let entries = Array.from({ length: count }, (_, i) => make(i + 1, null));
+  return {
+    id,
+    /** Appends one entry (a correction of `replaces`, or a new one); returns its number. */
+    append(replaces: number | null): number {
+      const n = entries.length + 1;
+      entries = [...entries, make(n, replaces)];
+      return n;
+    },
+    /** The stream's recent tail as the progress row carries it (the last eight). */
+    tail: () =>
+      entries.slice(-8).map((e) => ({
+        id: e.id,
+        evidence: e.evidence,
+        happened_at: e.happened_at,
+        recorded_by: e.recorded_by,
+      })),
+    count: () => entries.length,
+    pageAfter(after: number): string {
+      const rest = entries.filter((e) => e.sequence > after);
+      const items = rest.slice(0, 200);
+      return JSON.stringify({
+        entries: items,
+        next_after:
+          rest.length > 200
+            ? (items[items.length - 1]?.sequence ?? null)
+            : null,
+      });
+    },
+  };
+}
+type LiveJournal = ReturnType<typeof liveJournal>;
+
+/** The task's progress row (version 1) carrying the journal's recent tail. */
+function progressOf(task: BuiltTask, journal: LiveJournal) {
+  const progress = (
+    task.upserts as Array<{ resource: Record<string, unknown> }>
+  ).find((u) => u.resource.kind === "progress")?.resource as Record<
+    string,
+    unknown
+  >;
+  Object.assign(progress.value as object, {
+    recent_entries: journal.tail(),
+    entry_count: journal.count(),
+  });
+  return progress;
+}
+
+/**
+ * The journal endpoint for ONE page (`page.route`): records every `after` asked; `holdNext(match)` holds the next request it matches until
+ * `release()`; `refuseNext(status, code)` answers the next request with a valid Atlas error. The body is taken at dispatch.
+ */
+function journalRoute(journal: LiveJournal) {
+  const asked: number[] = [];
+  let holdIf: ((after: number) => boolean) | null = null;
+  const gates: Array<() => void> = [];
+  let refusal: { status: number; code: string } | null = null;
+  const handler = async (route: Route) => {
+    const after = Number(
+      new URL(route.request().url()).searchParams.get("after"),
+    );
+    asked.push(after);
+    const refused = refusal;
+    refusal = null;
+    const body =
+      refused === null
+        ? journal.pageAfter(after)
+        : JSON.stringify({
+            code: refused.code,
+            message: refused.code,
+            request_id: "e-t-rev6",
+            details: [],
+          });
+    if (holdIf?.(after) === true) {
+      holdIf = null;
+      await new Promise<void>((resolve) => gates.push(resolve));
+    }
+    await route
+      .fulfill({
+        status: refused?.status ?? 200,
+        contentType: "application/json",
+        body,
+      })
+      .catch(() => undefined);
+  };
+  return {
+    handler,
+    asked,
+    holdNext: (match: (after: number) => boolean) => {
+      holdIf = match;
+    },
+    held: () => gates.length,
+    release: () => {
+      for (const gate of gates.splice(0)) gate();
+    },
+    refuseNext: (status: number, code: string) => {
+      refusal = { status, code };
+    },
+  };
+}
+type JournalRoute = ReturnType<typeof journalRoute>;
+
+/** Commits version `version` of my progress stream (the journal's current tail) through the fixture leader of `writer`. */
+async function commitProgress(
+  writer: Page,
+  net: SyncStub,
+  progress: Record<string, unknown>,
+  journal: LiveJournal,
+  version: number,
+): Promise<void> {
+  await commitDelta(writer, net, version, [
+    {
+      kind: "upsert",
+      resource: {
+        ...progress,
+        version,
+        value: {
+          ...(progress.value as object),
+          recent_entries: journal.tail(),
+          entry_count: journal.count(),
+        },
+      },
+    },
+  ]);
+}
+
+/**
+ * Two real tabs over one database: B (`writer`, on the task list) holds the fixture leader that commits every sync page; A shows the task
+ * detail with the journal served by `route` on A alone. Both trees are settled before anything starts (a page that boots remounts the
+ * other's tree), then B's leader is started again (WEB-09a), so B's later commit is the only change A sees.
+ */
+async function twoTabs(
+  context: BrowserContext,
+  task: BuiltTask,
+  route: JournalRoute,
+  init?: () => void,
+): Promise<{ net: SyncStub; writer: Page; page: Page }> {
+  const net = await stubNetwork(context);
+  await serveIdentityReads(context);
+  await serveTaskReads(context);
+  await seedSettled(context);
+  const writer = await bootAt(context, "/tasks");
+  await cacheTasks(writer, net, [task]);
+  const page = await context.newPage();
+  if (init !== undefined) await page.addInitScript(init);
+  await page.route(
+    `**${API}/progress/${task.progressId}/entries?*`,
+    route.handler,
+  );
+  await page.goto(
+    `/__session?route=${encodeURIComponent(`/tasks/${task.taskId}?occurrence=${task.occurrenceId}`)}`,
+  );
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await expect(page.locator("[data-entry-history]")).toHaveAttribute(
+    "data-stream-version",
+    "1",
+  );
+  await untilTreeSettled(page);
+  await untilTreeSettled(writer);
+  await startLeader(writer);
+  await waitForState(writer, "idle");
+  return { net, writer, page };
+}
+
+/** My queued corrections (records) in this page's database, oldest first, with their bodies. */
+async function recordsOf(page: Page) {
+  const drafts = (await rowsOf(page, "drafts")) as Array<{
+    local_id: string;
+    kind: string;
+    created_seq: number;
+  }>;
+  const bodies = (await rowsOf(page, "draft_commands")) as Array<{
+    local_id: string;
+    command: { command: Record<string, unknown> };
+  }>;
+  return drafts
+    .filter((d) => d.kind === "record")
+    .sort((a, b) => a.created_seq - b.created_seq)
+    .map((d) => ({
+      localId: d.local_id,
+      command: bodies.find((b) => b.local_id === d.local_id)?.command.command,
+    }));
+}
+
+/** Keeps the React click handler of the open fix's Save (taken while it is enabled) as `window.__save`: a stale callback or programmatic activation. */
+async function takeSaveHandler(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const save = document.querySelector<HTMLButtonElement>(
+      "[data-fix-form] button",
+    );
+    if (save === null || save.disabled)
+      throw new Error("Save is not enabled when its handler is taken");
+    const key = Object.keys(save).find((k) => k.startsWith("__reactProps$"));
+    const props = (save as unknown as Record<string, { onClick?: unknown }>)[
+      key ?? ""
+    ];
+    if (typeof props?.onClick !== "function")
+      throw new Error("no Save handler");
+    (window as unknown as { __save: unknown }).__save = props.onClick;
+  });
+}
+const callSaveHandler = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __save: () => void }).__save());
+
+const FIX = { name: "Fix this entry", exact: true } as const;
+const SAVE = { name: "Save the fix", exact: true } as const;
+const VALUE = "New value (cups)";
+
+/**
+ * Holds the CONSUMPTION of one journal answer in this page (`__holdBody` = a URL fragment): the request is answered at once (its lease
+ * ends, so another tab's stamped calls go on), the answer is taken as received, and its body reaches the page only when `__heldBodies` are
+ * released. A request held in flight instead keeps a stamped request of this origin unresolved, and another tab's sync waits for it.
+ */
+const holdJournalBodyInit = (): void => {
+  const w = window as unknown as {
+    __holdBody?: string | null;
+    __heldBodies?: Array<() => void>;
+  };
+  w.__holdBody = null;
+  w.__heldBodies = [];
+  const real = window.fetch.bind(window);
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : String(input);
+    const response = await real(input, init);
+    const match = w.__holdBody;
+    if (typeof match !== "string" || !url.includes(match)) return response;
+    w.__holdBody = null;
+    const text = await response.text();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    w.__heldBodies?.push(release);
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        await gate;
+        controller.enqueue(new TextEncoder().encode(text));
+        controller.close();
+      },
+    });
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+};
+const heldBodies = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { __heldBodies: unknown[] }).__heldBodies.length,
+  );
+
+test.describe("E-T20: another tab commits a correction while this tab's check of the rest of the journal is held (A8, A14, A18; R18 of revision 6, Q12)", () => {
+  for (const committed of [false, true])
+    test(`committed=${committed}: ${committed ? "B commits a correction of entry 5 and A takes in version 2 before the old answer ('not corrected', taken at dispatch) is released: nothing opens, and a fresh Fix finds the correction" : "no commit (control): the released answer opens the fix and Save queues one"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 44,
+        title: "Journal two tabs",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(210);
+      const progress = progressOf(task, journal);
+      const route = journalRoute(journal);
+      const { net, writer, page } = await twoTabs(
+        context,
+        task,
+        route,
+        holdJournalBodyInit,
+      );
+      const history = page.locator("[data-entry-history]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      // The check's answer is taken at dispatch (version 1: "not corrected") and its consumption held in A.
+      await page.evaluate(() => {
+        (window as unknown as { __holdBody: string }).__holdBody =
+          "/entries?after=200";
+      });
+      await li(5).getByRole("button", FIX).click();
+      await expect.poll(() => heldBodies(page)).toBe(1);
+      expect(route.asked).toEqual([0, 200]);
+      if (committed) {
+        journal.append(5);
+        await commitProgress(writer, net, progress, journal, 2);
+        // Barriers: A's detail took in version 2, and A's window was read again at it, while the old check is still held.
+        await expect(history).toHaveAttribute("data-stream-version", "2", {
+          timeout: 10_000,
+        });
+        await expect(history).toHaveAttribute("data-journal-version", "2", {
+          timeout: 10_000,
+        });
+        await expect(history).toHaveAttribute("data-journal-requests", "1");
+      }
+      await page.evaluate(() => {
+        for (const release of (
+          window as unknown as { __heldBodies: Array<() => void> }
+        ).__heldBodies.splice(0))
+          release();
+      });
+      // Completion barrier: the held answer has been taken in.
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      if (!committed) {
+        await expect(page.getByLabel(VALUE, { exact: true })).toHaveValue("5");
+        await page.getByRole("button", SAVE).click();
+        await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+        expect(await recordsOf(page)).toHaveLength(1);
+        expect(route.asked).toEqual([0, 200]);
+        return;
+      }
+      await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+      expect(route.asked).toEqual([0, 200, 0]);
+      await li(5).getByRole("button", FIX).click();
+      await expect.poll(() => route.asked.length).toBe(4);
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      await expect(li(5)).toContainText("Corrected");
+      await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+      expect(await recordsOf(page)).toHaveLength(0);
+    });
+});
+
+test.describe("E-T21: another tab commits while this tab's fix is open and its history is read again (A8, A14, A18; R17/R18 of revision 6, Q5, Q12)", () => {
+  for (const change of ["correction", "unrelated"] as const)
+    test(`${change}: while A's re-read at version 2 is held, Save waits and a stale Save handler queues nothing; answered, ${change === "correction" ? "the fix is blocked for good with 987 kept" : "Save queues 987 once"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 45,
+        title: "Journal open fix",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(20);
+      const progress = progressOf(task, journal);
+      const route = journalRoute(journal);
+      const { net, writer, page } = await twoTabs(context, task, route);
+      const history = page.locator("[data-entry-history]");
+      const form = page.locator("[data-fix-form]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      const input = page.getByLabel(VALUE, { exact: true });
+      const save = page.getByRole("button", SAVE);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      await li(5).getByRole("button", FIX).click();
+      await input.fill("987");
+      await expect(save).toBeEnabled();
+      await takeSaveHandler(page);
+      route.holdNext((after) => after === 0);
+      journal.append(change === "correction" ? 5 : null);
+      await commitProgress(writer, net, progress, journal, 2);
+      await expect(history).toHaveAttribute("data-stream-version", "2", {
+        timeout: 10_000,
+      });
+      await expect.poll(() => route.held()).toBe(1);
+      await expect(save).toBeDisabled();
+      await expect(form).toContainText(
+        "This fix can be saved once the full history is up to date.",
+      );
+      await callSaveHandler(page);
+      route.release();
+      await expect(history).toHaveAttribute("data-journal-version", "2");
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      await expect(input).toHaveValue("987");
+      expect(route.asked).toEqual([0, 0]);
+      if (change === "correction") {
+        await expect(li(5)).toContainText("Corrected");
+        await expect(save).toBeDisabled();
+        await expect(form).toContainText(
+          "This entry has been corrected since. Fix its correction instead.",
+        );
+        expect(await recordsOf(page)).toHaveLength(0);
+        return;
+      }
+      await expect(save).toBeEnabled();
+      expect(await recordsOf(page)).toHaveLength(0);
+      await save.click();
+      await expect(form).toHaveCount(0);
+      const records = await recordsOf(page);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.command).toMatchObject({
+        replaces: journal.id(5),
+        evidence: { kind: "quantity", amount: "987" },
+      });
+    });
+});
+
+/**
+ * Holds every `data_changed` hint that reaches this page on `atlas-sync` while `__holdHints` is set (the channel's `onmessage`, which the
+ * data layer assigns per channel), counting them; `__hintsHeld` delivers each later. Dexie's own cross-tab notification is NOT held.
+ */
+const holdSyncHintsInit = (): void => {
+  const desc = Object.getOwnPropertyDescriptor(
+    BroadcastChannel.prototype,
+    "onmessage",
+  );
+  const get = desc?.get;
+  const set = desc?.set;
+  if (get === undefined || set === undefined) return;
+  const w = window as unknown as {
+    __holdHints?: boolean;
+    __hintsHeld?: Array<() => void>;
+  };
+  w.__hintsHeld = [];
+  Object.defineProperty(BroadcastChannel.prototype, "onmessage", {
+    configurable: true,
+    enumerable: desc?.enumerable ?? true,
+    get() {
+      return get.call(this);
+    },
+    set(fn: unknown) {
+      const channel = this as BroadcastChannel;
+      if (typeof fn !== "function" || channel.name !== "atlas-sync") {
+        set.call(this, fn);
+        return;
+      }
+      set.call(this, (event: MessageEvent) => {
+        if (
+          w.__holdHints === true &&
+          (event.data as { type?: string } | null)?.type === "data_changed"
+        ) {
+          w.__hintsHeld?.push(() => fn.call(channel, event));
+          return;
+        }
+        return fn.call(channel, event);
+      });
+    },
+  });
+};
+
+test.describe("E-T22: the other tab's hint arrives late and twice (A8, A18; R18 of revision 6, Q13)", () => {
+  test("B commits a correction of entry 5 while A holds its hints; A takes in version 2 from the store (whether before the hint is recorded); the late, duplicated hints bring no old facts back; an explicit Refresh ends on version 2's facts", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 46,
+      title: "Journal late hint",
+      goal: JOURNAL_GOAL,
+    });
+    const journal = liveJournal(20);
+    const progress = progressOf(task, journal);
+    const route = journalRoute(journal);
+    const { net, writer, page } = await twoTabs(
+      context,
+      task,
+      route,
+      holdSyncHintsInit,
+    );
+    const history = page.locator("[data-entry-history]");
+    const form = page.locator("[data-fix-form]");
+    const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+    const input = page.getByLabel(VALUE, { exact: true });
+    const save = page.getByRole("button", SAVE);
+    await page
+      .getByRole("button", { name: "Full history", exact: true })
+      .click();
+    await expect(history).toHaveAttribute("data-journal-version", "1");
+    await li(5).getByRole("button", FIX).click();
+    await input.fill("987");
+    await page.evaluate(() => {
+      (window as unknown as { __holdHints: boolean }).__holdHints = true;
+    });
+    journal.append(5);
+    await commitProgress(writer, net, progress, journal, 2);
+    // B's engine posts a content-free hint after its commit: A holds it (precondition).
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __hintsHeld: unknown[] }).__hintsHeld
+                .length,
+          ),
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThanOrEqual(1);
+    // Observed, not assumed: did A take in version 2 through the store's own notification while the hint was held? (bounded look)
+    const beforeHint = await page
+      .waitForFunction(
+        () =>
+          document
+            .querySelector("[data-entry-history]")
+            ?.getAttribute("data-stream-version") === "2",
+        undefined,
+        { timeout: 5_000 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+    test.info().annotations.push({
+      type: "version 2 taken in while the hint was held",
+      description: String(beforeHint),
+    });
+    // The held hints, delivered late and each twice.
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __holdHints: boolean;
+        __hintsHeld: Array<() => void>;
+      };
+      w.__holdHints = false;
+      for (const deliver of w.__hintsHeld.splice(0)) {
+        deliver();
+        deliver();
+      }
+    });
+    await expect(history).toHaveAttribute("data-stream-version", "2", {
+      timeout: 10_000,
+    });
+    await expect(history).toHaveAttribute("data-journal-version", "2", {
+      timeout: 10_000,
+    });
+    await expect(history).toHaveAttribute("data-journal-requests", "0");
+    // The authoritative re-read.
+    await history.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(() => route.asked.length).toBe(3);
+    await expect(history).toHaveAttribute("data-journal-requests", "0");
+    await expect(history).toHaveAttribute("data-journal-version", "2");
+    expect(route.asked).toEqual([0, 0, 0]);
+    await expect(li(5)).toContainText("Corrected");
+    await expect(save).toBeDisabled();
+    await expect(form).toContainText(
+      "This entry has been corrected since. Fix its correction instead.",
+    );
+    await expect(input).toHaveValue("987");
+    expect(await recordsOf(page)).toHaveLength(0);
+  });
+});
+
+test.describe("E-T23: a refusal that remounts the protected tree, and a hard reload, end the journal's transient state; the queued correction stays (A8, A13, A14; R18 of revision 6, Q14)", () => {
+  for (const how of ["not_found", "forbidden", "reload"] as const)
+    test(`${how === "not_found" ? "a 404 on Refresh (mounted retention control): the same history; Fix 5 reopens on the parked 987" : how === "forbidden" ? "a 403 on Refresh remounts the protected tree: a new history, no editor; Fix 5 opens on its own value" : "a hard reload: a new history, no editor; Fix 5 opens on its own value"}; the queued fix of entry 6 keeps its id and body and nothing more is queued`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 47,
+        title: "Journal lifetimes",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(20);
+      progressOf(task, journal);
+      const route = journalRoute(journal);
+      const url = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+      const { page } = await setup(context, url, [task]);
+      await page.route(
+        `**${API}/progress/${task.progressId}/entries?*`,
+        route.handler,
+      );
+      const history = page.locator("[data-entry-history]");
+      const form = page.locator("[data-fix-form]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      const input = page.getByLabel(VALUE, { exact: true });
+      const full = page.getByRole("button", {
+        name: "Full history",
+        exact: true,
+      });
+      await full.click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      // A durable queued correction of entry 6.
+      await li(6).getByRole("button", FIX).click();
+      await input.fill("66");
+      await page.getByRole("button", SAVE).click();
+      await expect(form).toHaveCount(0);
+      const queued = await recordsOf(page);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]?.command).toMatchObject({
+        replaces: journal.id(6),
+        evidence: { kind: "quantity", amount: "66" },
+      });
+      // An open fix of entry 5 with unsaved input.
+      await li(5).getByRole("button", FIX).click();
+      await input.fill("987");
+      await page.evaluate(() => {
+        const h = document.querySelector("[data-entry-history]") as
+          | (Element & { __mark?: boolean })
+          | null;
+        if (h !== null) h.__mark = true;
+      });
+      if (how === "reload") {
+        await page.goto(`/__session?route=${encodeURIComponent(url)}`);
+        await page.waitForFunction(
+          () => window.__atlasFixture?.session?.booted !== undefined,
+        );
+        await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      } else {
+        route.refuseNext(how === "forbidden" ? 403 : 404, how);
+        await history
+          .getByRole("button", { name: "Refresh", exact: true })
+          .click();
+      }
+      if (how === "not_found") {
+        await expect(
+          history.getByText("This history isn't available to you.", {
+            exact: true,
+          }),
+        ).toBeVisible();
+        expect(
+          await page.evaluate(
+            () =>
+              (
+                document.querySelector("[data-entry-history]") as
+                  | (Element & { __mark?: boolean })
+                  | null
+              )?.__mark === true,
+          ),
+        ).toBe(true);
+      } else {
+        // Barrier: a NEW history node (the protected tree remounted, or the document was replaced).
+        await page.waitForFunction(
+          () => {
+            const h = document.querySelector("[data-entry-history]") as
+              | (Element & { __mark?: boolean })
+              | null;
+            return h !== null && h.__mark !== true;
+          },
+          undefined,
+          { timeout: 15_000 },
+        );
+      }
+      await expect(form).toHaveCount(0);
+      await expect(
+        page.getByRole("heading", { name: "Recent entries", exact: true }),
+      ).toBeVisible();
+      expect(await recordsOf(page)).toEqual(queued);
+      // An explicit Full history begins afresh.
+      await full.click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      await li(5).getByRole("button", FIX).click();
+      await expect(input).toHaveValue(how === "not_found" ? "987" : "5");
+      expect(await recordsOf(page)).toEqual(queued);
+    });
+});
+
+test.describe("E-T24: what was typed for a fix survives every closure of the full history (A8, A14; R16 of revision 6, Q1; review 6's witness)", () => {
+  for (const how of ["back", "refusal"] as const)
+    for (const cycles of [1, 2])
+      test(`${how}, ${cycles} ${cycles === 1 ? "closure" : "closures"}: 987 typed once is there after reopening each time`, async ({
+        context,
+      }) => {
+        const task = buildTask({
+          n: 48,
+          title: "Journal restored input",
+          goal: JOURNAL_GOAL,
+        });
+        const journal = liveJournal(20);
+        progressOf(task, journal);
+        const route = journalRoute(journal);
+        const { page } = await setup(
+          context,
+          `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+          [task],
+        );
+        await page.route(
+          `**${API}/progress/${task.progressId}/entries?*`,
+          route.handler,
+        );
+        const history = page.locator("[data-entry-history]");
+        const input = page.getByLabel(VALUE, { exact: true });
+        const reopen = async () => {
+          await page
+            .getByRole("button", { name: "Full history", exact: true })
+            .click();
+          await page
+            .locator(`[data-entry="${journal.id(5)}"]`)
+            .getByRole("button", FIX)
+            .click();
+          await expect(history).toHaveAttribute("data-journal-requests", "0");
+        };
+        await reopen();
+        await expect(input).toHaveValue("5");
+        await input.fill("987");
+        for (let i = 0; i < cycles; i += 1) {
+          if (how === "back")
+            await page
+              .getByRole("button", {
+                name: "Back to recent entries",
+                exact: true,
+              })
+              .click();
+          else {
+            route.refuseNext(404, "not_found");
+            await history
+              .getByRole("button", { name: "Refresh", exact: true })
+              .click();
+            await expect(
+              history.getByText("This history isn't available to you.", {
+                exact: true,
+              }),
+            ).toBeVisible();
+          }
+          await expect(history.locator("[data-fix-form]")).toHaveCount(0);
+          await reopen();
+          await expect(input).toHaveValue("987");
+        }
+        expect(await recordsOf(page)).toHaveLength(0);
+      });
+});
+
+test.describe("E-T25: offline, a fix known only from the full history waits; a recent entry's fix is saved (A8, A14; R17 of revision 6, Q4; review 6's witness)", () => {
+  for (const mode of ["online-full", "offline-full", "offline-recent"] as const)
+    test(`${mode}: ${mode === "offline-full" ? "Save waits with its reason, a stale Save handler queues nothing, 987 kept" : "Save queues one record"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 49,
+        title: "Journal save authority",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(20);
+      progressOf(task, journal);
+      const route = journalRoute(journal);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await page.route(
+        `**${API}/progress/${task.progressId}/entries?*`,
+        route.handler,
+      );
+      const form = page.locator("[data-fix-form]");
+      const input = page.getByLabel(VALUE, { exact: true });
+      const save = page.getByRole("button", SAVE);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await page
+        .locator(
+          `[data-entry="${journal.id(mode === "offline-recent" ? 20 : 5)}"]`,
+        )
+        .getByRole("button", FIX)
+        .click();
+      await input.fill("987");
+      await expect(save).toBeEnabled();
+      await takeSaveHandler(page);
+      if (mode !== "online-full") {
+        await goOfflineAtBoundary(page);
+        await expect(
+          page.getByText("The full history needs a connection.", {
+            exact: true,
+          }),
+        ).toBeVisible();
+      }
+      if (mode === "offline-full") {
+        await expect(save).toBeDisabled();
+        await expect(form).toContainText(
+          "This fix can be saved once you're online again.",
+        );
+        await callSaveHandler(page);
+        await expect(input).toHaveValue("987");
+        await expect(form).toHaveCount(1);
+        expect(await recordsOf(page)).toHaveLength(0);
+        return;
+      }
+      await save.click();
+      await expect(form).toHaveCount(0);
+      const records = await recordsOf(page);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.command).toMatchObject({
+        replaces: journal.id(mode === "offline-recent" ? 20 : 5),
+        evidence: { kind: "quantity", amount: "987" },
+      });
     });
 });

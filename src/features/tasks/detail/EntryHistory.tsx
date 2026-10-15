@@ -42,6 +42,11 @@ export const HISTORY_COPY = {
   fixSave: "Save the fix",
   cancel: "Cancel",
   fixed: "Fix saved on this device. Not sent yet.",
+  fixOffline: "This fix can be saved once you're online again.",
+  fixWaits: "This fix can be saved once the full history is up to date.",
+  fixUnchecked:
+    "Check whether this entry was corrected since, then save the fix.",
+  recheck: "Check again",
   newValue: "New value",
   done: "Done",
   notDone: "Not done",
@@ -81,6 +86,8 @@ interface Shown {
   replaces: string | null;
   /** A saved entry the full history has not been re-read for yet (newer than the pages shown): nothing is known of its corrections. */
   unchecked: boolean;
+  /** Its place in the journal (an entry read from the full history), or null: a correction of it comes after it. */
+  sequence: number | null;
 }
 
 /** One page of the journal: the entries after `start` (by `sequence`), and where the next page begins. */
@@ -134,17 +141,95 @@ interface Asker {
   life: number;
 }
 
+/**
+ * What was typed for the fix of one entry (revision 6, R16): owned by the DRAFT, not by the editor showing it, so closing the full history
+ * and opening the fix again moves it, unsaved or not, into the new editor. Memory only: never persisted, never sent, never an authority.
+ */
+interface Draft {
+  owner: string;
+  entryId: string;
+  /** Never reused. */
+  id: number;
+  /** The raw value, as typed (empty or not a number included). */
+  amount: string;
+  /** Edits made to this draft, in every editor that showed it: a success acknowledges only the revision it submitted (R3, revision 1). */
+  rev: number;
+  /** Typed and not acknowledged since: kept through a closure of the full history until Cancel, its save, or the view's end. */
+  unsaved: boolean;
+  /** The revision a pending save of this draft submitted (one attempt at a time, whichever editor shows it), or null. */
+  saving: number | null;
+}
+
 /** The open fix of one entry, held here (not by the page it is shown in): moving, evicting or refreshing a page never erases it. */
 interface OpenFix {
-  owner: string;
   entry: Shown;
-  /** Never reused (R3, revision 2): a save made by an earlier fix of the same entry cannot close a newer one. */
+  /** Never reused (R3, revision 2): a save made in an earlier editor closes no newer one. */
   session: number;
-  amount: string;
-  /** Edits made in this session: a success closes the fix only if nothing was typed after it was submitted (R3, revision 1). */
-  edits: number;
-  busy: boolean;
+  draft: Draft;
   error: string | null;
+}
+
+/** What the save decision reads: the CURRENT journal, version, connection, write permission, local read and recent tail. */
+interface SaveFacts {
+  journal: Journal | null;
+  version: number | null;
+  online: boolean;
+  writable: boolean;
+  /** The detail shown is the last complete read of this device's data: no later read is due, running or failed. */
+  current: boolean;
+  recent: ReadonlySet<string>;
+}
+
+const holds = (pages: Page[], test: (e: JournalEntry) => boolean) =>
+  pages.some((p) => p.entries.some(test));
+
+/** A window that reaches the journal's end, read at `version`, knows every correction of its entries (a correction is appended after what it fixes). */
+const coversToEnd = (j: Journal, id: string, version: number | null) =>
+  j.error === null &&
+  j.version === version &&
+  j.pages[j.pages.length - 1]?.next === null &&
+  holds(j.pages, (e) => e.id === id);
+
+/**
+ * Whether the full history is, right now, an authority to fix an entry known only from it (revisions 5 and 6): online, read without failure
+ * at the stream's committed version, and the detail's local read current (a newer local change not yet read in certifies nothing).
+ */
+export function fullAuthority(f: SaveFacts): boolean {
+  const j = f.journal;
+  return (
+    f.online &&
+    f.current &&
+    j !== null &&
+    j.pages.length > 0 &&
+    j.error === null &&
+    j.version === f.version
+  );
+}
+
+/**
+ * Why the fix of `entryId` cannot be saved now, or null (revision 6, R17): ONE decision for the Save shown and the save admitted (read
+ * synchronously when Save is pressed). A recent entry has its own authority (offline and while the history is read again, as approved); an
+ * entry known only from the full history needs a current full history AND evidence that no later correction of THIS entry exists: a check of
+ * the rest of the journal at the current version, or a window that reaches the end and holds it. A committed correction blocks for good.
+ */
+export function saveBlock(f: SaveFacts, entryId: string): string | null {
+  if (!f.writable) return copy.NOT_WRITABLE;
+  const j = f.journal;
+  if (
+    j !== null &&
+    (j.checks[entryId]?.found === "replaced" ||
+      holds(j.pages, (e) => e.replaces === entryId))
+  )
+    return HISTORY_COPY.correctedSince;
+  if (f.recent.has(entryId)) return null;
+  if (!f.online) return HISTORY_COPY.fixOffline;
+  if (j === null || !fullAuthority(f)) return HISTORY_COPY.fixWaits;
+  const check = j.checks[entryId];
+  if (check?.found === "current" && check.version === f.version) return null;
+  if (coversToEnd(j, entryId, f.version)) return null;
+  return check?.found === "failed" && check.version === f.version
+    ? HISTORY_COPY.checkFailed
+    : HISTORY_COPY.fixUnchecked;
 }
 
 /** At most this many journal requests (pages or checks) are in flight per view (design assessment C3); a further one waits, holding numbers only, and is never sent if it is no longer wanted when its turn comes. */
@@ -170,11 +255,14 @@ export function EntryHistory({
   actions,
   zone,
   writable,
+  current = true,
 }: {
   row: RowModel;
   actions: Pick<TaskActions, "record">;
   zone: string;
   writable: boolean;
+  /** The detail's local read is current (revision 6, D6-5): while it is not, an entry known only from the full history cannot be saved. */
+  current?: boolean;
 }) {
   const env = useTasksEnv();
   const heading = useId();
@@ -200,18 +288,30 @@ export function EntryHistory({
   ownerRef.current = owner;
   const versionRef = useRef(row.progressVersion);
   versionRef.current = row.progressVersion;
+  // What the save decision reads when Save is pressed: this render's facts, current at the time of the press (revision 6, R17).
+  const onlineRef = useRef(env.online);
+  onlineRef.current = env.online;
+  const writableRef = useRef(writable);
+  writableRef.current = writable;
+  const currentRef = useRef(current);
+  currentRef.current = current;
   const [openFix, setFix] = useState<OpenFix | null>(null);
-  const fix = openFix?.owner === owner ? openFix : null;
+  const fix = openFix?.draft.owner === owner ? openFix : null;
   const fixRef = useRef(fix);
   fixRef.current = fix;
   const sessions = useRef(0);
-  // A full-history fix closed by a refusal or Back to recent keeps what was typed here (memory only), for the same owner and entry.
-  const parked = useRef<{
-    owner: string;
-    entryId: string;
-    amount: string;
-  } | null>(null);
+  const drafts = useRef(0);
+  // A full-history fix closed by a refusal or Back to recent leaves its draft here (memory only), for the same owner and entry (D6-1).
+  const parked = useRef<Draft | null>(null);
   const recentRef = useRef<ReadonlySet<string>>(new Set());
+  const factsNow = (): SaveFacts => ({
+    journal: journalNow(),
+    version: versionRef.current,
+    online: onlineRef.current,
+    writable: writableRef.current,
+    current: currentRef.current,
+    recent: recentRef.current,
+  });
   // The one check of the rest of the journal shown as running, by the selection that asked for it.
   const [scan, setScan] = useState<{ entryId: string; sel: number } | null>(
     null,
@@ -242,16 +342,19 @@ export function EntryHistory({
     ownerRef.current === by.owner &&
     life.current === by.life;
 
-  /** A full-history fix has the journal's authority: it closes with it (what was typed is kept in memory, never sent). */
+  /**
+   * A full-history fix has the journal's authority: it closes with it. Its draft is parked if it holds input not yet acknowledged — typed in
+   * this editor or restored into it (R16) — or a pending save that must keep the entry's next editor waiting (never displacing an unsaved one).
+   */
   const dropFullOnlyFix = () => {
     const held = fixRef.current;
     if (held === null || recentRef.current.has(held.entry.id)) return;
-    if (held.edits > 0)
-      parked.current = {
-        owner: held.owner,
-        entryId: held.entry.id,
-        amount: held.amount,
-      };
+    const { draft } = held;
+    if (
+      draft.unsaved ||
+      (draft.saving !== null && parked.current?.unsaved !== true)
+    )
+      parked.current = draft;
     fixRef.current = null;
     setFix(null);
   };
@@ -497,24 +600,42 @@ export function EntryHistory({
       update((now) => ({ ...now, tried: null }));
   }, [env.online]);
 
-  /** Opens the fix of `entry` for selection `mine` — only if no later Fix or Cancel has happened since (a check that Back to recent, a refusal or a newer version ended never gets here). */
+  /**
+   * Opens the fix of `entry` for selection `mine` — only if no later Fix or Cancel has happened since (a check that Back to recent, a refusal
+   * or a newer version ended never gets here), and only while the entry may be fixed NOW (revision 6, D6-4: a recent entry, or a current full
+   * history; a check answered after the connection went opens nothing). The entry's open editor is kept as it is (Check again); a parked
+   * draft of the entry moves into the new editor with everything it holds.
+   */
   const openFixOf = (entry: Shown, mine: number) => {
     if (sel.current !== mine || !mounted.current) return;
-    sessions.current += 1;
+    // Opening is not saving: a local read in progress does not hide a Fix (D6-5 applies to Save only).
+    const facts = { ...factsNow(), current: true };
+    if (
+      !facts.writable ||
+      (!facts.recent.has(entry.id) && !fullAuthority(facts))
+    )
+      return;
+    const open = fixRef.current;
+    if (open !== null && open.entry.id === entry.id) return;
+    const held = parked.current;
+    if (held !== null && held.owner !== owner) parked.current = null;
     const kept =
-      parked.current?.owner === owner && parked.current.entryId === entry.id
-        ? parked.current.amount
-        : null;
+      held?.owner === owner && held.entryId === entry.id ? held : null;
     if (kept !== null) parked.current = null;
+    sessions.current += 1;
+    drafts.current += 1;
     const next: OpenFix = {
-      owner,
       entry,
       session: sessions.current,
-      amount:
-        kept ??
-        (entry.evidence.kind === "quantity" ? entry.evidence.amount : ""),
-      edits: 0,
-      busy: false,
+      draft: kept ?? {
+        owner,
+        entryId: entry.id,
+        id: drafts.current,
+        amount: entry.evidence.kind === "quantity" ? entry.evidence.amount : "",
+        rev: 0,
+        unsaved: false,
+        saving: null,
+      },
       error: null,
     };
     fixRef.current = next;
@@ -592,6 +713,7 @@ export function EntryHistory({
         replaced: committedReplaced.has(e.id),
         replaces: e.replaces,
         unchecked: false,
+        sequence: e.sequence,
       }));
     // Saved entries newer than the pages (the stream's own recent tail), until the journal is read again: shown, never as fixable.
     if (toEnd)
@@ -606,6 +728,7 @@ export function EntryHistory({
             replaced: false,
             replaces: null,
             unchecked: true,
+            sequence: null,
           });
   } else {
     shown = recent.map((e) => ({
@@ -617,6 +740,7 @@ export function EntryHistory({
       replaced: false,
       replaces: null,
       unchecked: false,
+      sequence: null,
     }));
   }
   for (const p of pending)
@@ -632,6 +756,7 @@ export function EntryHistory({
         replaced: false,
         replaces: p.replaces,
         unchecked: false,
+        sequence: null,
       });
     }
   const recentIds = new Set(recent.map((e) => e.id));
@@ -656,6 +781,15 @@ export function EntryHistory({
     // Every Fix intent takes the selection FIRST, synchronously: a lookup asked before it can no longer open anything.
     const mine = ++sel.current;
     const j = journalNow();
+    // A window that reaches the end answers for this entry: kept as its check at this version, so moving the window keeps it (D6-4).
+    if (j !== null && coversToEnd(j, entry.id, row.progressVersion))
+      update((now) => ({
+        ...now,
+        checks: {
+          ...now.checks,
+          [entry.id]: { found: "current", version: row.progressVersion },
+        },
+      }));
     // Outside a window that reaches the end, the entry may have been corrected on a later page: check that first.
     if (!full || toEnd || j === null) return openFixOf(entry, mine);
     const known = j.checks[entry.id];
@@ -665,38 +799,81 @@ export function EntryHistory({
     if (start === undefined || start === null) return openFixOf(entry, mine);
     void checkThenOpen(entry, mine, start, { owner, life: j.life });
   };
-  // The open fix's target is known to have been corrected (a saved correction, not this person's pending one): it cannot be saved.
+  /**
+   * Check again (D6-3): the open fix's entry is checked from its own place in the journal (a correction of it comes after it), whichever
+   * pages are shown, under the current authority and version; the open editor is kept as it is. A new selection: Cancel or another Fix ends it.
+   */
+  const recheck = (entry: Shown) => {
+    const mine = ++sel.current;
+    const j = journalNow();
+    if (j === null) return;
+    void checkThenOpen(entry, mine, entry.sequence ?? 0, {
+      owner,
+      life: j.life,
+    });
+  };
+  // Why the open fix cannot be saved now (D6-3): the same decision `submit` takes when Save is pressed. A check of its entry running says so.
+  const decided =
+    fix === null
+      ? null
+      : saveBlock(
+          {
+            journal,
+            version: row.progressVersion,
+            online: env.online,
+            writable,
+            current,
+            recent: recentIds,
+          },
+          fix.entry.id,
+        );
+  const unchecked =
+    decided === HISTORY_COPY.fixUnchecked ||
+    decided === HISTORY_COPY.checkFailed;
   const blocked =
-    fix !== null && committedReplaced.has(fix.entry.id)
-      ? HISTORY_COPY.correctedSince
-      : null;
+    unchecked && scan?.entryId === fix?.entry.id
+      ? HISTORY_COPY.checking
+      : decided;
+  /** A save's answer settles only the draft and revision it submitted (D6-2), wherever that draft is now: open, reopened, parked or gone. */
+  const settle = (
+    draftId: number,
+    session: number,
+    rev: number,
+    ok: boolean,
+  ) => {
+    const p = parked.current;
+    if (p !== null && p.id === draftId)
+      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };
+    setFix((f) => {
+      if (f === null || f.draft.id !== draftId) return f;
+      if (ok && f.draft.rev === rev)
+        return f.session === session
+          ? null
+          : { ...f, draft: { ...f.draft, unsaved: false, saving: null } };
+      return { ...f, draft: { ...f.draft, saving: null } };
+    });
+  };
   const submit = async (evidence: Evidence) => {
-    const current = fixRef.current;
-    if (current === null || current.busy) return;
-    const { session } = current;
-    const submitted = current.edits;
-    fixRef.current = { ...current, busy: true };
+    const open = fixRef.current;
+    if (open === null || open.draft.saving !== null) return;
+    // The linearisation point of a correction (R17): the decision is taken HERE, from what is current now, not from what was rendered.
+    if (saveBlock(factsNow(), open.entry.id) !== null) return;
+    const { session } = open;
+    const { id, rev } = open.draft;
+    const saving = { ...open, draft: { ...open.draft, saving: rev } };
+    fixRef.current = saving;
     setFix((f) =>
-      f !== null && f.session === session ? { ...f, busy: true } : f,
+      f !== null && f.session === session
+        ? { ...f, draft: { ...f.draft, saving: rev } }
+        : f,
     );
     let ok = false;
     try {
       ok = (
-        await actions.record(
-          row,
-          evidence,
-          current.entry.id,
-          HISTORY_COPY.fixed,
-        )
+        await actions.record(row, evidence, open.entry.id, HISTORY_COPY.fixed)
       ).ok;
     } finally {
-      setFix((f) =>
-        f === null || f.session !== session
-          ? f
-          : ok && f.edits === submitted
-            ? null
-            : { ...f, busy: false },
-      );
+      settle(id, session, rev, ok);
     }
   };
   const fixForm =
@@ -706,10 +883,24 @@ export function EntryHistory({
         fix={fix}
         goal={goal}
         blocked={blocked}
+        onRecheck={
+          unchecked && blocked !== HISTORY_COPY.checking
+            ? () => recheck(fix.entry)
+            : null
+        }
         onAmount={(amount) =>
           setFix((f) =>
             f !== null && f.session === fix.session
-              ? { ...f, amount, edits: f.edits + 1, error: null }
+              ? {
+                  ...f,
+                  draft: {
+                    ...f.draft,
+                    amount,
+                    rev: f.draft.rev + 1,
+                    unsaved: true,
+                  },
+                  error: null,
+                }
               : f,
           )
         }
@@ -733,6 +924,9 @@ export function EntryHistory({
       className="flex flex-col gap-2"
       data-entry-history=""
       data-journal-requests={requests}
+      // Native barriers (revision 6, R18): the stream's committed version this history renders, and the version its window was read at.
+      data-stream-version={row.progressVersion ?? ""}
+      data-journal-version={journal?.version ?? ""}
     >
       <h2 id={heading} className="text-[15px] font-medium text-ink-1">
         {full ? HISTORY_COPY.full : HISTORY_COPY.heading}
@@ -880,6 +1074,7 @@ function FixForm({
   fix,
   goal,
   blocked,
+  onRecheck,
   onAmount,
   onError,
   onSave,
@@ -887,8 +1082,10 @@ function FixForm({
 }: {
   fix: OpenFix;
   goal: Goal;
-  /** Why the fix cannot be saved (its entry was corrected since), or null. */
+  /** Why the fix cannot be saved now (the parent's one save decision), or null. */
   blocked: string | null;
+  /** Checks the rest of the journal for this entry again, keeping the fix open (when that is what Save waits for), or null. */
+  onRecheck: (() => void) | null;
   onAmount(amount: string): void;
   onError(error: string): void;
   onSave(evidence: Evidence): void;
@@ -905,7 +1102,7 @@ function FixForm({
         item_id: ev.item_id,
         complete: !ev.complete,
       });
-    const value = parseDecimalInput(fix.amount);
+    const value = parseDecimalInput(fix.draft.amount);
     if (value === null) {
       onError(MESSAGES.amount);
       return;
@@ -919,7 +1116,7 @@ function FixForm({
           <Input
             label={`${HISTORY_COPY.newValue}${goal.kind === "numeric" ? ` (${goal.unit})` : ""}`}
             inputMode="decimal"
-            value={fix.amount}
+            value={fix.draft.amount}
             onChange={(event) => onAmount(event.target.value)}
           />
         </div>
@@ -941,7 +1138,7 @@ function FixForm({
         <Button disabled reason={blocked}>
           {HISTORY_COPY.fixSave}
         </Button>
-      ) : fix.busy ? (
+      ) : fix.draft.saving !== null ? (
         <Button disabled reason={copy.SAVING}>
           {HISTORY_COPY.fixSave}
         </Button>
@@ -950,6 +1147,11 @@ function FixForm({
           {HISTORY_COPY.fixSave}
         </Button>
       )}
+      {onRecheck !== null ? (
+        <Button variant="quiet" onClick={onRecheck}>
+          {HISTORY_COPY.recheck}
+        </Button>
+      ) : null}
       <Button variant="quiet" onClick={onCancel}>
         {HISTORY_COPY.cancel}
       </Button>

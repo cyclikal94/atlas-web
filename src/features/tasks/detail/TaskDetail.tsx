@@ -417,6 +417,7 @@ export function TaskDetail({
             actions={actions}
             zone={zone}
             writable={env.writable}
+            current={view.current}
           />
           <Participation
             row={row}

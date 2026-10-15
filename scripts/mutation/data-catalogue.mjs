@@ -16952,12 +16952,13 @@ export const UNIT = [
     tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
     expect: /value typed while the save was pending stays in the open fix/,
     // Re-expressed in revision 2 (same intent): the completion now names its fix session. Again in revision 4: the open fix is held by
-    // the history (its value and edit count), and its completion compares the edit count there.
+    // the history (its value and edit count), and its completion compares the edit count there. Again in revision 6 (R16): the
+    // completion compares the DRAFT's revision (edits across every editor of it).
     patch: (t) =>
       sub(
         t,
-        "          : ok && f.edits === submitted\n            ? null",
-        "          : ok\n            ? null",
+        "      if (ok && f.draft.rev === rev)\n        return f.session === session",
+        "      if (ok)\n        return f.session === session",
       ),
   },
   {
@@ -16968,15 +16969,16 @@ export const UNIT = [
     tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
     expect: /Save waits for the pending one/,
     // Re-expressed in revision 4 (same intent): the pending save is the held fix's `busy`, refused both by the form and by the history.
+    // Again in revision 6 (R16): the pending save is the draft's `saving`, refused by the form and by `submit`.
     patch: (t) =>
       sub(
         sub(
           t,
-          "      ) : fix.busy ? (\n        <Button disabled reason={copy.SAVING}>",
-          "      ) : fix.busy && (false as boolean) ? (\n        <Button disabled reason={copy.SAVING}>",
+          "      ) : fix.draft.saving !== null ? (\n        <Button disabled reason={copy.SAVING}>",
+          "      ) : fix.draft.saving !== null && (false as boolean) ? (\n        <Button disabled reason={copy.SAVING}>",
         ),
-        "    if (current === null || current.busy) return;",
-        "    if (current === null) return;",
+        "    if (open === null || open.draft.saving !== null) return;",
+        "    if (open === null) return;",
       ),
   },
   {
@@ -17451,12 +17453,13 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/correction-ownership.test.tsx"],
     expect: /SAME entry|reopened with nothing typed/,
-    // Re-expressed in revision 4 (same intent): the completion closes whatever fix is open, not only its own session.
+    // Re-expressed in revision 4 (same intent): the completion closes whatever fix is open, not only its own session. Again in
+    // revision 6 (R16): a success closes whatever fix is open, not only an editor of the draft it submitted.
     patch: (t) =>
       sub(
         t,
-        "        f === null || f.session !== session\n          ? f",
-        "        f === null\n          ? f",
+        "      if (f === null || f.draft.id !== draftId) return f;",
+        "      if (f === null || f.draft.id !== draftId) return ok ? null : f;",
       ),
   },
   {
@@ -18017,11 +18020,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/journal-window.test.tsx"],
     expect: /corrected since \(a saved correction\)/,
+    // Re-expressed in revision 6 (same intent): the committed-replacement block is now the first test of the one save decision.
     patch: (t) =>
       sub(
         t,
-        "    fix !== null && committedReplaced.has(fix.entry.id)",
-        "    fix !== null && (false as boolean)",
+        '  if (\n    j !== null &&\n    (j.checks[entryId]?.found === "replaced" ||',
+        '  if (\n    (false as boolean) &&\n    j !== null &&\n    (j.checks[entryId]?.found === "replaced" ||',
       ),
   },
   {
@@ -18189,11 +18193,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/journal-ownership.test.tsx"],
     expect: /Q1: /,
+    // Re-expressed in revision 6 (same intent): Check again also takes the selection, so the anchor names Fix's own next lines.
     patch: (t) =>
       sub(
         t,
-        "    const mine = ++sel.current;",
-        "    const mine = sel.current;",
+        "    const mine = ++sel.current;\n    const j = journalNow();\n    // A window",
+        "    const mine = sel.current;\n    const j = journalNow();\n    // A window",
       ),
   },
   {
@@ -18394,6 +18399,275 @@ export const UNIT = [
         t,
         "  const live = (by: Asker) =>\n    mounted.current &&\n",
         "  const live = (by: Asker) =>\n",
+      ),
+  },
+  {
+    id: "MU-2171",
+    title:
+      "WEB-10a R16 (rev 6, Q1): a restored draft forgets that its input is unsaved (the next closure loses it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /Q1: .*back, 2 closure/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, unsaved: false }) ?? {",
+      ),
+  },
+  {
+    id: "MU-2172",
+    title:
+      "WEB-10a R16 (rev 6, Q1): a closure of the full history keeps nothing of the typed draft",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /Q1: .*back, 1 closure/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = draft;\n    fixRef.current = null;",
+        "      parked.current = null;\n    fixRef.current = null;",
+      ),
+  },
+  {
+    id: "MU-2173",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a save's success closes a newer editor of the same draft (reopened while it was pending)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving, reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "        return f.session === session\n          ? null",
+        "        return (true as boolean)\n          ? null",
+      ),
+  },
+  {
+    id: "MU-2174",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a parked draft whose save succeeded is not retired (an acknowledged draft comes back)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /the acknowledged draft is retired/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = { ...p, saving: null };",
+      ),
+  },
+  {
+    id: "MU-2175",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a save's success retires a parked draft edited after it was submitted",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /then parked before the answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = ok ? null : { ...p, saving: null };",
+      ),
+  },
+  {
+    id: "MU-2176",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a reopened draft forgets its pending save (a second save while the first is pending)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving, reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, saving: null }) ?? {",
+      ),
+  },
+  {
+    id: "MU-2177",
+    title:
+      "WEB-10a R16 (rev 6, Q2): a failed save closes the open fix (its input is lost)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /a failed save keeps the input/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { ...f, draft: { ...f.draft, saving: null } };\n    });",
+        "      return ok ? { ...f, draft: { ...f.draft, saving: null } } : null;\n    });",
+      ),
+  },
+  {
+    id: "MU-2178",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a failed save of a parked draft discards it",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving and the save fails/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = ok && p.rev === rev ? null : ok ? { ...p, saving: null } : null;",
+      ),
+  },
+  {
+    id: "MU-2179",
+    title:
+      "WEB-10a R17 (rev 6, Q4/Q5/Q11): Save is admitted without the save decision (only the rendered control refuses)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /direct call queues nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (saveBlock(factsNow(), open.entry.id) !== null) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2180",
+    title:
+      "WEB-10a R17 (rev 6, Q4): the open fix's Save is shown without the save decision",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q4: .*target=full-only, offline/,
+    patch: (t) => sub(t, "      : decided;", "      : null;"),
+  },
+  {
+    id: "MU-2181",
+    title:
+      "WEB-10a R17 (rev 6, Q4): an entry known only from the full history can be saved offline",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q4: .*target=full-only, offline/,
+    patch: (t) =>
+      sub(
+        sub(t, "  if (!f.online) return HISTORY_COPY.fixOffline;\n", ""),
+        "    f.online &&\n    f.current &&",
+        "    f.current &&",
+      ),
+  },
+  {
+    id: "MU-2182",
+    title:
+      "WEB-10a R17 (rev 6, Q5): the open fix is judged at the version its history was read at, not the stream's committed one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /the re-read is held/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  if (j === null || !fullAuthority(f)) return HISTORY_COPY.fixWaits;",
+            "  if (j === null || !fullAuthority({ ...f, version: j.version }))\n    return HISTORY_COPY.fixWaits;",
+          ),
+          '  if (check?.found === "current" && check.version === f.version) return null;',
+          '  if (check?.found === "current" && check.version === j.version) return null;',
+        ),
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if (coversToEnd(j, entryId, j.version)) return null;",
+      ),
+  },
+  {
+    id: "MU-2183",
+    title:
+      "WEB-10a R17 (rev 6, Q11): a local change not yet read in still counts as a current detail for a full-only save",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q11: .*target=full-only/,
+    patch: (t) =>
+      sub(t, "    f.online &&\n    f.current &&\n", "    f.online &&\n"),
+  },
+  {
+    id: "MU-2184",
+    title:
+      "WEB-10a R17 (rev 6, Q11): the task detail does not tell the history whether its local read is current",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q11: .*target=full-only/,
+    patch: (t) => sub(t, "            current={view.current}\n", ""),
+  },
+  {
+    id: "MU-2185",
+    title:
+      "WEB-10a R17 (rev 6, Q6): any current window authorises a detached fix (no evidence about its own entry)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if ((true as boolean)) return null;",
+      ),
+  },
+  {
+    id: "MU-2186",
+    title:
+      "WEB-10a R17 (rev 6, Q6): a check made at an older version still answers for the entry",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (check?.found === "current" && check.version === f.version) return null;',
+        '  if (check?.found === "current") return null;',
+      ),
+  },
+  {
+    id: "MU-2187",
+    title:
+      "WEB-10a R17 (rev 6, Q4/Q5): a recent entry loses its own authority (offline and during a re-read)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /target=recent/,
+    patch: (t) => sub(t, "  if (f.recent.has(entryId)) return null;\n", ""),
+  },
+  {
+    id: "MU-2188",
+    title:
+      "WEB-10a R17 (rev 6, Q6): Check again replaces the open fix (its value is lost)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (open !== null && open.entry.id === entry.id) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2189",
+    title:
+      "WEB-10a R17 (rev 6, Q9): a check answered after the connection went opens a full-only fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q9: .*offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (!facts.recent.has(entry.id) && !fullAuthority(facts))",
+        "      (!facts.recent.has(entry.id) && (false as boolean))",
+      ),
+  },
+  {
+    id: "MU-2190",
+    title:
+      "WEB-10a R17 (rev 6, Q6): a window that reached the end does not answer for its entry once the window moves",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /window that reached the end answers/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (j !== null && coversToEnd(j, entry.id, row.progressVersion))",
+        "    if (j !== null && (false as boolean))",
       ),
   },
 ];
@@ -21396,6 +21670,78 @@ export const ENGINE = [
         t,
         '      if (live(by)) revoke();\n      return { kind: "stop" };',
         '      return { kind: "failed" };',
+      ),
+  },
+  {
+    id: "MU-2191",
+    title:
+      "WEB-10a N-T24: (REAL ENGINE) a restored draft forgets that its input is unsaved (the next closure loses it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T24:.*2 closures",
+    expect: /E-T24:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, unsaved: false }) ?? {",
+      ),
+  },
+  {
+    id: "MU-2192",
+    title:
+      "WEB-10a N-T25: (REAL ENGINE) an entry known only from the full history can be saved offline (no save decision shown or taken)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T25:.*offline-full",
+    expect: /E-T25:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (saveBlock(factsNow(), open.entry.id) !== null) return;\n",
+          "",
+        ),
+        "      : decided;",
+        "      : null;",
+      ),
+  },
+  {
+    id: "MU-2193",
+    title:
+      "WEB-10a N-T21: (REAL ENGINE) the open fix is judged at the version its history was read at, not the stream's committed one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T21:",
+    expect: /E-T21:/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  if (j === null || !fullAuthority(f)) return HISTORY_COPY.fixWaits;",
+            "  if (j === null || !fullAuthority({ ...f, version: j.version }))\n    return HISTORY_COPY.fixWaits;",
+          ),
+          '  if (check?.found === "current" && check.version === f.version) return null;',
+          '  if (check?.found === "current" && check.version === j.version) return null;',
+        ),
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if (coversToEnd(j, entryId, j.version)) return null;",
+      ),
+  },
+  {
+    id: "MU-2194",
+    title:
+      "WEB-10a N-T20: (REAL ENGINE) a check answered after another tab's commit moved the version still opens its fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T20:.*committed=true",
+    expect: /E-T20:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      live(by) && sel.current === mine && versionRef.current === version;",
+        "      live(by) && sel.current === mine;",
       ),
   },
 ];
