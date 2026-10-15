@@ -2372,6 +2372,150 @@ test.describe("E-T16: an enrolment change pressed again while it is pending send
   });
 });
 
+test.describe("E-T28: two tabs read the same enrolment; the stale one is refused and its next change keeps the other's audience (A15, A16; R22 of revision 10, Q6)", () => {
+  test("tab A saves Only me; tab B's change at the old version is refused with nothing substituted; B's fresh change carries A's private audience", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 45,
+      title: "Two tabs",
+      participation: "everyone",
+    });
+    const shared = {
+      grants: [
+        {
+          kind: "account",
+          id: "22222222-2222-4222-8222-222222222222",
+          edit: false,
+        },
+      ],
+      exclude_accounts: [] as string[],
+    };
+    const PRIVATE = { grants: [], exclude_accounts: [] };
+    // A server that keeps one enrolment: a stale expected_version is refused (409); an OMITTED policy would take these defaults.
+    const defaults = {
+      grants: [
+        {
+          kind: "account",
+          id: "33333333-3333-4333-8333-333333333333",
+          edit: true,
+        },
+      ],
+      exclude_accounts: [] as string[],
+    };
+    let state = {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: shared as unknown,
+    };
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await context.route(
+      `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(state),
+        }),
+    );
+    const bodies: Array<Record<string, unknown>> = [];
+    await context.route(
+      "**/api/experimental/v1/task-access-commands",
+      async (route) => {
+        const command = JSON.parse(route.request().postData() ?? "{}")
+          .command as Record<string, unknown>;
+        bodies.push(command);
+        if (command.expected_version !== state.version)
+          return route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({
+              code: "conflict",
+              message: "m",
+              request_id: "11111111-1111-4111-8111-111111111111",
+              details: [],
+            }),
+          });
+        state = {
+          version: state.version + 1,
+          active: command.active as boolean,
+          aggregate_consent: command.aggregate_consent as boolean,
+          policy: command.initial_policy ?? defaults,
+        };
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ revision: 10 + bodies.length }),
+        });
+      },
+    );
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const b = await bootAt(context, path);
+    const inA = a.locator("[data-enrolment]");
+    const inB = b.locator("[data-enrolment]");
+    const consentB = inB.getByRole("checkbox", {
+      name: "Count me in the shared total",
+    });
+    // Both tabs have read version 2 (shared with one account).
+    await expect(consentB).toBeEnabled();
+    await expect(
+      inA.getByRole("button", { name: "Change…", exact: true }),
+    ).toBeEnabled();
+    // Tab A: the audience alone, made private.
+    await inA.getByRole("button", { name: "Change…", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    await inA
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect.poll(() => state.version).toBe(3);
+    expect(state).toEqual({
+      version: 3,
+      active: true,
+      aggregate_consent: true,
+      policy: PRIVATE,
+    });
+    // Tab B still shows version 2: its consent change is refused, and the refusal changes nothing.
+    await consentB.click();
+    await expect(inB).toContainText(
+      "This change wasn't accepted. The latest settings are shown.",
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 2,
+      active: true,
+      aggregate_consent: false,
+      initial_policy: shared,
+    });
+    expect(state.policy).toEqual(PRIVATE);
+    // B read again: its next change is at version 3 and keeps A's private audience.
+    await expect(inB).toContainText(
+      "Who sees your progress from now on: only you",
+    );
+    await expect(consentB).toBeEnabled();
+    await consentB.click();
+    await expect.poll(() => bodies.length).toBe(3);
+    expect(bodies[2]).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 3,
+      active: true,
+      aggregate_consent: false,
+      initial_policy: PRIVATE,
+    });
+    await expect.poll(() => state.policy).toEqual(PRIVATE);
+  });
+});
+
 test.describe("E-T27: Leave and the consent resend the audience that was read (A15, A16; R22 of revision 10)", () => {
   for (const act of ["consent", "leave"] as const)
     test(`${act}: the wire body carries the complete enrolment, its shared audience and exclusion unchanged`, async ({
