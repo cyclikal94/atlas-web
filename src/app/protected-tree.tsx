@@ -5,8 +5,10 @@ import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
 import { invitationMemory } from "../features/authentication/handoff";
 import { isJoinPath } from "../features/authentication/public-route";
 import { SwitchHost } from "../features/switch/entry";
+import { documentRouteChanges } from "../lib/route-changes";
 import { type Session, SessionProvider, useSessionView } from "../session";
 import { AccountSlot } from "./AccountSlot";
+import { appCommands } from "./commands";
 import { ProtectedProviders } from "./providers";
 import { focusWhenPresent, returnDestination } from "./return-destination";
 import { createAppRouter } from "./router";
@@ -97,6 +99,9 @@ function normalisePublicPath(): void {
 }
 
 export function createProtectedTree(session: Session) {
+  // Once per document, before the first router: the document's own record of where it is outlives every mount of the tree and every
+  // router, so a screen can tell that the person left it while the tree was unmounted (WEB-13a revision 6, `route-changes.ts`).
+  documentRouteChanges();
   /** The account this page mounted a tree for last (page memory). */
   let lastMounted: string | null = null;
   return (account?: string): ReactNode => {
@@ -115,7 +120,7 @@ export function createProtectedTree(session: Session) {
     return (
       <SessionProvider session={session}>
         <ProtectedProviders>
-          <DataProvider session={session}>
+          <DataProvider session={session} commands={appCommands()}>
             <ShellFromData router={router}>
               <RouterProvider router={router} />
               <SessionNotices />

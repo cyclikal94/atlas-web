@@ -32,13 +32,22 @@ import {
   type Notice,
   type StatusInputs,
 } from "../model/status";
-import type { DraftRow, ResourceKind } from "../model/types";
+import type { DraftRow, ResourceId, ResourceKind } from "../model/types";
+import type { CommandRegistry } from "../outbox/registries";
 import {
   type QueuePage,
   type ResourcePage,
   readMerged,
   readResourceList,
 } from "../plans/outbox";
+import {
+  type Outstanding,
+  type PendingCreatesPage,
+  type ResourceView,
+  readOutstanding,
+  readPendingCreates,
+  readResourceView,
+} from "../plans/pending-reads";
 import type { Loadable, Watchable } from "../store/port";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
 import {
@@ -80,12 +89,19 @@ export function DataProvider({
   session,
   children,
   loadBrowser = () => import("./browser-env"),
+  commands,
   host = getPageDataHost(),
 }: {
   session: Session;
   children: ReactNode;
   /** The lazy load of the browser composition. Only a test names its own, to decide WHEN the import arrives; production leaves the default. */
   loadBrowser?: () => Promise<BrowserComposition>;
+  /**
+   * What the feature slices registered about their commands (descriptions, projected creates). The application passes ONE registry,
+   * filled once per page host (`src/app/commands.ts`), so a remount or a Strict Mode replay never registers twice. Absent: the
+   * page host's registry.
+   */
+  commands?: CommandRegistry;
   /** The page's shared writer state (P-4): the page's own when omitted. A test supplies its own. */
   host?: PageDataHost;
 }) {
@@ -94,7 +110,7 @@ export function DataProvider({
   // starts in the effect and stops in its cleanup, which is the PAIR React replays (mount, cleanup, mount) and runs at unmount, so a
   // replay leaves the same live controller, never a disposed one, and nothing outlives the tree.
   const [env] = useState<DataEnv>(() =>
-    createProductionEnv(session, loadBrowser, host),
+    createProductionEnv(session, loadBrowser, host, commands),
   );
   useEffect(() => {
     env.start();
@@ -112,6 +128,7 @@ function createProductionEnv(
   session: Session,
   loadBrowser: () => Promise<BrowserComposition>,
   host: PageDataHost,
+  commands?: CommandRegistry,
 ): DataEnv {
   let browser: { dispose(): void } | null = null;
   /**
@@ -180,7 +197,7 @@ function createProductionEnv(
       channel,
       // The page's ONE markers object (R46, P-4), leased: the controller's start takes a lease and its stop gives it back.
       markers: host.markers,
-      commands: host.commands,
+      commands: commands ?? host.commands,
     },
     { start: false },
   );
@@ -503,5 +520,77 @@ export function useResourceList(options: {
         : null;
     },
     [options.kind, options.parentId, options.after, options.limit],
+  );
+}
+
+/**
+ * This device's saves that CREATE a resource of one command kind which the cache does not hold yet (a queued create has no
+ * overlay until it is claimed, so `useResourceList` cannot show it): the oldest window (100) with the exact total and the cursor of
+ * the next window (`after`). Unsettled drafts only; see `readPendingCreates`.
+ */
+export function usePendingCreates(
+  kind: string,
+  after?: number | null,
+): Loadable<PendingCreatesPage> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readPendingCreates, {
+            incarnationId: service.incarnationId,
+            kind,
+            ...(typeof after === "number" ? { after } : {}),
+          })
+        : null;
+    },
+    [kind, after],
+  );
+}
+
+/**
+ * The unsettled drafts that target one resource: exact counts by status and the newest of them (see `readOutstanding`); with `kind`,
+ * also the newest of that kind that is still expected to apply (`latestOfKind`).
+ */
+export function useOutstanding(
+  id: ResourceId,
+  kind?: string,
+): Loadable<Outstanding> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readOutstanding, {
+            incarnationId: service.incarnationId,
+            id,
+            ...(kind === undefined ? {} : { kind }),
+          })
+        : null;
+    },
+    [id, kind],
+  );
+}
+
+/**
+ * One resource as ONE read saw it (`readResourceView`): its cached and merged rows, its outstanding drafts, its newest create and the
+ * observation a save made from it states. For a dialog that edits the resource: nothing it shows or saves mixes two moments.
+ */
+export function useResourceView(
+  id: ResourceId,
+  kinds: { create?: string; settings?: string } = {},
+): Loadable<ResourceView> {
+  const { create, settings } = kinds;
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readResourceView, {
+            incarnationId: service.incarnationId,
+            id,
+            ...(create === undefined ? {} : { createKind: create }),
+            ...(settings === undefined ? {} : { settingsKind: settings }),
+          })
+        : null;
+    },
+    [id, create, settings],
   );
 }

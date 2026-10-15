@@ -9,6 +9,7 @@ import "../../src/data/plans/commit-page";
 import "../../src/data/plans/defaults";
 import "../../src/data/plans/form-recovery";
 import "../../src/data/plans/outbox";
+import "../../src/data/plans/pending-reads";
 import "../../src/data/plans/profile";
 import "../../src/data/plans/sync-writers";
 import "../../src/data/plans/retry-state";
@@ -215,6 +216,30 @@ describe("F-S7: the writer inventory", () => {
       expect(read.scope.length, read.name).toBeGreaterThan(0);
       expect(writers.has(read.name), read.name).toBe(false);
     }
+  });
+  test("the feature reads of WEB-13a (D-13a-4) are registered READ plans over exactly the stores they read", () => {
+    const by = (name: string) =>
+      listReadPlans().find((read) => read.name === name);
+    expect(by("data.readPendingCreates")).toMatchObject({ mode: "readonly" });
+    expect([...(by("data.readPendingCreates")?.scope ?? [])].sort()).toEqual(
+      ["cache", "draft_commands", "drafts", "sync_state"].sort(),
+    );
+    expect(by("data.readOutstanding")).toMatchObject({ mode: "readonly" });
+    expect([...(by("data.readOutstanding")?.scope ?? [])].sort()).toEqual(
+      ["draft_commands", "drafts", "sync_state"].sort(),
+    );
+    // Revision 2: Manage's one read of its source (cache, overlay, version record, drafts and the three bodies it may need).
+    expect(by("data.readResourceView")).toMatchObject({ mode: "readonly" });
+    expect([...(by("data.readResourceView")?.scope ?? [])].sort()).toEqual(
+      [
+        "cache",
+        "draft_commands",
+        "drafts",
+        "pending_effects",
+        "resource_versions",
+        "sync_state",
+      ].sort(),
+    );
   });
   test("the outbox's writers carry the guards the table gives them, and the fence guard where a draft is inserted or edited", () => {
     const by = (name: string) => plans.find((plan) => plan.name === name);

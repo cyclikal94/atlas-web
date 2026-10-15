@@ -398,7 +398,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        /read: async \(reader, input\) => \(\{\n {4}existing: await reader\.get\("drafts", input\.localId\),\n {4}touched: await readTouched\(\n {6}reader,\n {6}input\.request\.targets\.map\(\(target\) => target\.resourceId\),\n {6}new Set\(\[input\.localId\]\),\n {4}\),\n {2}\}\),/,
+        /read: async \(reader, input\) => \(\{\n {4}existing: await reader\.get\("drafts", input\.localId\),\n {4}touched: await readTouched\(\n {6}reader,\n {6}input\.request\.targets\.map\(\(target\) => target\.resourceId\),\n {6}new Set\(\[input\.localId\]\),\n {4}\),\n {4}observed: await observedNow\(reader, input\.incarnationId, input\.request\),\n {2}\}\),/,
         `read: async (reader, input) => {
     const fresh = {
       existing: await reader.get("drafts", input.localId),
@@ -410,7 +410,11 @@ export const UNIT = [
     };
     const slot = globalThis as unknown as { __stale?: Map<string, never> };
     slot.__stale ??= fresh.touched.versions as Map<string, never>;
-    return { existing: fresh.existing, touched: { ...fresh.touched, versions: slot.__stale as never } };
+    return {
+      existing: fresh.existing,
+      touched: { ...fresh.touched, versions: slot.__stale as never },
+      observed: await observedNow(reader, input.incarnationId, input.request),
+    };
   },`,
       ),
   },
@@ -17265,6 +17269,1923 @@ export const UNIT = [
         "              (false as boolean)) &&\n",
       ),
   },
+  // ---- WEB-13a: calendar sources, connections and the manual refresh (MU-1300 onwards; the range reserved for WEB-13a) ----------
+  {
+    id: "MU-1300",
+    title:
+      "WEB-13a D-13a-3: commandKindOf ignores a single wrapped command (a /calendar-commands draft's kind is its endpoint)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/outbox-model.test.ts",
+      "tests/features/calendars/commands.test.ts",
+    ],
+    expect: /a single wrapped command is recognised/,
+    patch: (t) =>
+      sub(t, '    if (typeof kind === "string") return kind;\n', ""),
+  },
+  {
+    id: "MU-1301",
+    title:
+      "WEB-13a D-13a-4: readPendingCreates lists a create whose resource the cache already holds (a source shows twice)",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/pending-reads.test.ts"],
+    expect: /lists the unsettled creates of the kind/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (cached[index] !== undefined) return;\n",
+        "          void cached;\n",
+      ),
+  },
+  {
+    id: "MU-1302",
+    title:
+      "WEB-13a D-13a-4: readPendingCreates drops a receipted create the cache does not hold yet (the source vanishes until its delta page)",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/pending-reads.test.ts"],
+    expect: /lists the unsettled creates of the kind/,
+    patch: (t) =>
+      sub(
+        t,
+        "          unsettled(row) &&\n",
+        '          unsettled(row) &&\n          row.status !== "acknowledged" &&\n',
+      ),
+  },
+  {
+    id: "MU-1303",
+    title:
+      "WEB-13a D-13a-4: readPendingCreates' total counts only the window it returns, not every pending create",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/pending-reads.test.ts"],
+    expect: /501 pending creates/,
+    patch: (t) =>
+      sub(
+        t,
+        "      total,\n      next: later",
+        "      total: kept.length,\n      next: later",
+      ),
+  },
+  {
+    id: "MU-1304",
+    title:
+      "WEB-13a D-13a-4: readPendingCreates' cursor skips the draft after the window's last one",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/pending-reads.test.ts"],
+    expect: /a window that ends exactly on the last draft|501 pending creates/,
+    patch: (t) =>
+      sub(
+        t,
+        "last !== undefined ? last.created_seq : null,",
+        "last !== undefined ? last.created_seq + 1 : null,",
+      ),
+  },
+  {
+    id: "MU-1305",
+    title:
+      "WEB-13a D-13a-4 (R21): readPendingCreates reads the body of every candidate, not only the window it keeps",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/pending-reads.test.ts"],
+    expect: /one window of bodies/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (candidates.length > 0) {\n",
+        '      if (candidates.length > 0) {\n        await bulkGetWindowed(\n          reader,\n          "draft_commands",\n          candidates.map((row) => row.local_id),\n        );\n',
+      ),
+  },
+  {
+    id: "MU-1306",
+    title:
+      "WEB-13a D-13a-4: readOutstanding counts superseded drafts as outstanding",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/pending-reads.test.ts"],
+    expect: /counts the unsettled drafts against the resource/,
+    // Re-anchored in WEB-13a revision 2 (the fold moved into \`OutstandingFold\`): the same mutation.
+    patch: (t) => sub(t, "    if (!unsettled(row)) return;\n", ""),
+  },
+  {
+    id: "MU-1307",
+    title:
+      "WEB-13a D-13a-4: readOutstanding's latest is the OLDEST outstanding draft, not the newest",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/pending-reads.test.ts"],
+    expect: /returns the NEWEST with its body|ONE body read/,
+    patch: (t) =>
+      sub(
+        t,
+        "row.created_seq > this.newest.created_seq",
+        "row.created_seq < this.newest.created_seq",
+      ),
+  },
+  {
+    id: "MU-1308",
+    title: "WEB-13a D-13a-2: the QUEUED create carries a connection key",
+    file: "src/features/calendars/model/commands.ts",
+    tests: ["tests/features/calendars/commands.test.ts"],
+    expect: /Add source builds a credential-free create/,
+    patch: (t) =>
+      sub(
+        t,
+        "command: { command: { kind: CREATE_SOURCE, id, label, timezone } },",
+        "command: {\n        command: { kind: CREATE_SOURCE, id, label, timezone, connection: null },\n      },",
+      ),
+  },
+  {
+    id: "MU-1309",
+    title: "WEB-13a D-13a-2: the QUEUED settings change carries disconnect",
+    file: "src/features/calendars/model/commands.ts",
+    tests: ["tests/features/calendars/commands.test.ts"],
+    expect: /a queued settings change carries timezone and enabled only/,
+    patch: (t) =>
+      sub(
+        t,
+        "          timezone,\n          enabled,\n        },\n      },\n      displayPatch: {",
+        "          timezone,\n          enabled,\n          disconnect: false,\n        },\n      },\n      displayPatch: {",
+      ),
+  },
+  {
+    id: "MU-1310",
+    title:
+      "WEB-13a: the queued settings change takes expected_version from the cached row, not from the outbox's bases",
+    file: "src/features/calendars/model/commands.ts",
+    tests: ["tests/features/calendars/commands.test.ts"],
+    expect: /OUTBOX's base/,
+    patch: (t) =>
+      sub(
+        t,
+        "expected_version: bases[id] as number,",
+        "expected_version: (row as { version?: number }).version as number,",
+      ),
+  },
+  {
+    id: "MU-1311",
+    title: "WEB-13a: Replace… also sends disconnect",
+    file: "src/features/calendars/model/commands.ts",
+    tests: ["tests/features/calendars/commands.test.ts"],
+    expect: /Replace restates timezone and enabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "    connection: wire(connection),\n  };",
+        "    connection: wire(connection),\n    disconnect: false,\n  };",
+      ),
+  },
+  {
+    id: "MU-1312",
+    title: "WEB-13a: Remove… also sends a connection",
+    file: "src/features/calendars/model/commands.ts",
+    tests: ["tests/features/calendars/commands.test.ts"],
+    expect: /Remove clears deliberately/,
+    patch: (t) =>
+      sub(
+        t,
+        "    disconnect: true,\n  };",
+        "    disconnect: true,\n    connection: null,\n  };",
+      ),
+  },
+  {
+    id: "MU-1313",
+    title: "WEB-13a D-13a-9: Add source is offered with no account database",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect: /no database/,
+    patch: (t) =>
+      sub(
+        t,
+        "return { add: env.hasOutbox ? on : off(NEEDS_DATABASE), link };",
+        "return { add: on, link };",
+      ),
+  },
+  {
+    id: "MU-1314",
+    title: "WEB-13a D-13a-2: Link a calendar… is offered offline",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect: /offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "    direct(env) ?? (env.calendarLinks === false ? off(CAUSE_UNCONFIGURED) : on);",
+        "    (env.online ? direct(env) : null) ??\n    (env.calendarLinks === false ? off(CAUSE_UNCONFIGURED) : on);",
+      ),
+  },
+  {
+    id: "MU-1315",
+    title:
+      "WEB-13a D-13a-8: Replace… and Remove… are offered while the source has changes waiting to send",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect:
+      /waiting changes block the connection changes|Save queues a configure/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : input.outstandingTotal > 0\n",
+        "        : input.outstandingTotal > 1_000_000\n",
+      ),
+  },
+  {
+    id: "MU-1316",
+    title: "WEB-13a: Refresh is offered offline",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect: /Refresh is unavailable offline|offline \(the O card\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    refresh =\n      direct(env) ??\n",
+        "    refresh =\n      (env.online ? direct(env) : null) ??\n",
+      ),
+  },
+  {
+    id: "MU-1317",
+    title: "WEB-13a: Refresh is offered for a turned-off source",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect: /Refresh is unavailable turned off|turned-off source says so/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (merged.archived\n        ? off(TURNED_OFF_REASON)",
+        "      (false\n        ? off(TURNED_OFF_REASON)",
+      ),
+  },
+  {
+    id: "MU-1318",
+    title:
+      "WEB-13a D-13a-6: an automatic refresh retry mints a NEW key instead of reusing the press's",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect: /resends with the SAME key/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 1 (the send now passes its run's admission check); the same mutation.
+        ".refresh(id, entry.run.key, () => current(id, generation) !== null)",
+        ".refresh(id, deps.mintKey(), () => current(id, generation) !== null)",
+      ),
+  },
+  {
+    id: "MU-1319",
+    title:
+      "WEB-13a D-13a-6: going offline does not stop a waiting retry (it is sent when the wait ends, online again or not)",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect: /offline mid-wait/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (entry.timer) timers.clearTimeout(entry.timer);\n        entry.timer = null;\n        // A request still out stays out; its answer is dropped (a new generation), and nothing waits to be sent.\n        generations += 1;\n        entry.generation = generations;\n        entry.run = refreshStep(entry.run, { type: "offline" }).run;\n',
+        "        void entry;\n",
+      ),
+  },
+  {
+    id: "MU-1320",
+    title:
+      "WEB-13a B8 cause 1: connection_unavailable is retried automatically",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /cause 1 is NOT retried/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (status === 422 && code === "connection_unavailable")\n    return { kind: "connection_unavailable" };',
+        '  if (status === 422 && code === "connection_unavailable")\n    return { kind: "transient" };',
+      ),
+  },
+  {
+    id: "MU-1321",
+    title:
+      "WEB-13a B8 cause 3: integration_unconfigured is retried automatically",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /cause 3 is NOT retried/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return { kind: "unconfigured" };',
+        '    return { kind: "transient" };',
+      ),
+  },
+  {
+    id: "MU-1322",
+    title: "WEB-13a B8 cause 6b: a 403 or 404 is retried automatically",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /cause 6b is NOT retried/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (status === 403 || status === 404) return { kind: "unavailable" };',
+        '  if (status === 403 || status === 404) return { kind: "transient" };',
+      ),
+  },
+  {
+    id: "MU-1323",
+    title:
+      "WEB-13a case 6(a): 409 refresh_in_progress is treated as a failure, not as an uncertain attempt",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /refresh_in_progress: same-key retries|recovers ends as succeeded/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (status === 409 && code === "refresh_in_progress")\n    return { kind: "in_progress" };',
+        '  if (status === 409 && code === "refresh_in_progress")\n    return { kind: "unconfirmed" };',
+      ),
+  },
+  {
+    id: "MU-1324",
+    title:
+      "WEB-13a B8 cause 4: generation_changed is resent at once, without the live read of refresh_in_progress",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect:
+      /cause 4 with nothing running: no retry|cause 4 with a newer refresh running/,
+    patch: (t) =>
+      sub(
+        t,
+        '        run: { ...run, checking: "superseded", waitedMs: 0, seen: null },\n        effect: { type: "live" },',
+        '        run: { ...run, checking: "superseded", waitedMs: 0, seen: null },\n        effect: { type: "send" },',
+      ),
+  },
+  {
+    id: "MU-1325",
+    title: "WEB-13a B8 cause 5: lease_expired is retried more than once",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /cause 5 with nothing running: ONE same-key retry/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (run.leaseRetried)\n",
+        "      if (run.leaseRetried && false)\n",
+      ),
+  },
+  {
+    id: "MU-1326",
+    title:
+      "WEB-13a: a 404 WITHOUT an Atlas body (a gateway's page) is taken as the source being unavailable",
+    file: "src/features/calendars/api.ts",
+    tests: ["tests/features/calendars/api.test.ts"],
+    expect: /an answer without an Atlas body is uncertain/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (atlas === null)\n    return { ok: false, kind: "uncertain", status: response.status };',
+        '  if (atlas === null)\n    return response.status === 404\n      ? { ok: false, kind: "refused", status: 404, code: "not_found" }\n      : { ok: false, kind: "uncertain", status: response.status };',
+      ),
+  },
+  {
+    id: "MU-1327",
+    title:
+      "WEB-13a 7(b)/7(d): a 502 whose retries ran out is shown as a successful refresh",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /cause 2 \(502\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (delay === undefined)\n        return end(run, { kind: "failed", cause: result.kind });',
+        '      if (delay === undefined)\n        return end(\n          run,\n          result.kind === "fetch_failed"\n            ? { kind: "succeeded" }\n            : { kind: "failed", cause: result.kind },\n        );',
+      ),
+  },
+  {
+    id: "MU-1328",
+    title:
+      "WEB-13a D-13a-7: a field edit keeps the submission's old key (an edited body would be sent under the old operation)",
+    file: "src/features/calendars/model/submission.ts",
+    tests: ["tests/features/calendars/submission.test.ts"],
+    expect: /an edit mints a new pair/,
+    patch: (t) =>
+      sub(
+        t,
+        "    invalidate() {\n      pair = null;\n",
+        "    invalidate() {\n",
+      ),
+  },
+  {
+    id: "MU-1329",
+    title:
+      "WEB-13a D-13a-7: Retry of an unchanged form mints a new key (a lost answer would create the source twice)",
+    file: "src/features/calendars/model/submission.ts",
+    tests: ["tests/features/calendars/submission.test.ts"],
+    expect: /the same body is the same pair/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (pair === null || text !== pairBody) {",
+        "      if (pair !== undefined || text !== pairBody) {",
+      ),
+  },
+  {
+    id: "MU-1330",
+    title:
+      "WEB-13a D-13a-7: a refusal that follows an uncertain attempt is shown as final (the first attempt may have landed)",
+    file: "src/features/calendars/model/submission.ts",
+    tests: ["tests/features/calendars/submission.test.ts"],
+    expect: /proves nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (afterUncertain && VALIDATION_BEFORE_RECEIPT.includes(code))",
+        '  if (afterUncertain && VALIDATION_BEFORE_RECEIPT.includes(code + "!"))',
+      ),
+  },
+  {
+    id: "MU-1331",
+    title: "WEB-13a D-13a-10: calendar_links false is ignored",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect: /calendar_links false/,
+    patch: (t) =>
+      sub(
+        t,
+        "    direct(env) ?? (env.calendarLinks === false ? off(CAUSE_UNCONFIGURED) : on);",
+        "    direct(env) ?? on;",
+      ),
+  },
+  {
+    id: "MU-1332",
+    title: "WEB-13a: Replace… can be sent without a URL",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/connection-dialogs.test.tsx"],
+    expect: /Replace… starts EMPTY/,
+    patch: (t) =>
+      sub(
+        t,
+        '      : panel === "replace" && connection.url.trim() === ""',
+        '      : panel === "replace" && connection.url.trim() === "\\u0000"',
+      ),
+  },
+  {
+    id: "MU-1333",
+    title: "WEB-13a: a bearer token over 4,096 characters is accepted",
+    file: "src/features/calendars/model/validation.ts",
+    tests: ["tests/features/calendars/commands.test.ts"],
+    expect: /bearer: at most 4,096/,
+    patch: (t) =>
+      sub(
+        t,
+        "length(bearer) > BEARER_MAX ? BEARER_TOO_LONG : null",
+        "length(bearer) > BEARER_MAX * 2 ? BEARER_TOO_LONG : null",
+      ),
+  },
+  {
+    id: "MU-1334",
+    title: "WEB-13a: a label over 300 characters is accepted",
+    file: "src/features/calendars/model/validation.ts",
+    tests: ["tests/features/calendars/commands.test.ts"],
+    expect: /label: required, at most 300/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (length(trimmed) > LABEL_MAX) return LABEL_TOO_LONG;",
+        "if (length(trimmed) > LABEL_MAX + 1) return LABEL_TOO_LONG;",
+      ),
+  },
+  {
+    id: "MU-1335",
+    title:
+      "WEB-13a D-13a-6: the refresh controller keeps retrying after dispose (an unmount or an identity change)",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect: /dispose \(unmount, identity change\)/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          // Re-anchored in revision 6 (the condition is formatted over lines and also checks ownership): same mutation.
+          "    return !disposed &&\n      entry !== undefined &&",
+          "    return entry !== undefined &&",
+        ),
+        "      for (const [id, entry] of entries) {\n        if (entry.timer) timers.clearTimeout(entry.timer);\n",
+        "      for (const [id, entry] of entries) {\n",
+      ),
+  },
+  {
+    id: "MU-1336",
+    title:
+      "WEB-13a case 5: a connection field is not marked data-atlas-sensitive (the recovery guard would not refuse it)",
+    file: "src/features/calendars/fields.tsx",
+    tests: ["tests/features/calendars/connection-dialogs.test.tsx"],
+    expect: /are marked sensitive/,
+    patch: (t) =>
+      sub(t, '"data-atlas-sensitive": "",', '"data-atlas-ordinary": "",'),
+  },
+  {
+    id: "MU-1337",
+    title:
+      "WEB-13a D-13a-8: after an online connection change, a queued settings change is offered at once (built on a version the server has passed)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    // Revision 2: the open dialog now also records the version itself (a synchronous latch ahead of the next render), so the screen's
+    // record is what a REOPENED Manage reads: its case is listed beside the original one. The same mutation.
+    tests: [
+      "tests/features/calendars/connection-dialogs.test.tsx",
+      "tests/features/calendars/manage-revision-2.test.tsx",
+    ],
+    expect: /Replace… starts EMPTY|the wait outlives Manage/,
+    patch: (t) => sub(t, "              onAwaiting(id, version);\n", ""),
+  },
+  {
+    id: "MU-1338",
+    title:
+      "WEB-13a: a refresh answer that arrives after the screen was remounted (the session's re-check of a 403) is lost",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect: /an answer that arrives AFTER dispose/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 1 to the line's current indentation (the old anchor matched only as a substring); the same mutation.
+        '            else late(id, generation, { type: "answer", answer });\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1339",
+    title:
+      "WEB-13a: the row does not show the values of the queued settings change it says is queued",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect:
+      /the newest queued settings change's values|Save queues a configure/,
+    patch: (t) =>
+      sub(
+        t,
+        '    latest.kind !== "configure_source" ||',
+        '    latest.kind !== "configure_source!" ||',
+      ),
+  },
+  {
+    id: "MU-1340",
+    title:
+      "WEB-13a: Refresh is offered on a source that is only pending creation",
+    file: "src/features/calendars/model/status.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect: /Refresh waits for the source to exist|validates in place/,
+    patch: (t) =>
+      sub(t, "    refresh: off(NOT_CREATED_REASON),\n", "    refresh: on,\n"),
+  },
+  {
+    id: "MU-1341",
+    title:
+      "WEB-13a D-13a-8: Replace… and Remove… are offered before the source's waiting changes have been read",
+    file: "src/features/calendars/model/status.ts",
+    tests: ["tests/features/calendars/status.test.ts"],
+    expect: /wait until the waiting changes have been read/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (input.outstandingTotal === null\n          ? off(CHECKING_CHANGES)",
+        "        (input.outstandingTotal === -1\n          ? off(CHECKING_CHANGES)",
+      ),
+  },
+  // ---- WEB-13a revision 1 (R1 to R5 of the first independent review) -----------------------------------------------------------
+  {
+    id: "MU-1344",
+    title:
+      "WEB-13a R4: the calendar client admits a request whose caller has gone (a not_sent wait outlives its form or run)",
+    file: "src/features/calendars/api.ts",
+    tests: [
+      "tests/features/calendars/api.test.ts",
+      "tests/features/calendars/refresh-controller.test.ts",
+    ],
+    expect: /asked before EVERY admission|composed with the real client/,
+    patch: (t) =>
+      sub(t, '    if (!live()) return { ok: false, kind: "closed" };\n', ""),
+  },
+  {
+    id: "MU-1345",
+    title:
+      "WEB-13a R4: the refresh controller sends without its run's admission check (a disposed or stopped run's not_sent request is sent later)",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect:
+      /admitted only while its run is current|composed with the real client/,
+    patch: (t) =>
+      sub(
+        t,
+        ".refresh(id, entry.run.key, () => current(id, generation) !== null)",
+        ".refresh(id, entry.run.key, () => true)",
+      ),
+  },
+  {
+    id: "MU-1346",
+    title:
+      "WEB-13a R3: the refresh controller starts a run while the page is offline (Check again or Refresh)",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect: /while offline neither Refresh nor Check again starts a run/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (disposed || !connected) return;",
+        "    if (disposed) return;",
+      ),
+  },
+  {
+    id: "MU-1347",
+    title:
+      "WEB-13a R3: Check again is offered whatever Refresh's enablement says (offline, turned off, view-only)",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/sources-screen.test.tsx"],
+    expect: /unavailable with Refresh's reason|unavailable with that reason/,
+    patch: (t) =>
+      sub(t, "            status.refresh.enabled ? (", "            true ? ("),
+  },
+  {
+    id: "MU-1348",
+    title:
+      "WEB-13a R1: Retry after an uncertain Replace or Remove rebuilds the command from the cache (a new key once the cache moved on)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/connection-dialogs.test.tsx"],
+    expect:
+      /Retry sends the SAME key and body|the typed connection resent exactly/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (afterUncertain ? submission.current.current() : null) ??",
+        "      (afterUncertain ? null : null) ??",
+      ),
+  },
+  {
+    id: "MU-1349",
+    title:
+      "WEB-13a R1: the wait before the next Save is measured from the cache's version at the answer, not the version the operation was built on",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/connection-dialogs.test.tsx"],
+    expect: /the receipt ends it/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (outcome.kind === "succeeded") return onDone(pair.body.version);',
+        'if (outcome.kind === "succeeded")\n      return onDone(currentSettings(current, defaultTimezone()).version);',
+      ),
+  },
+  {
+    id: "MU-1350",
+    title:
+      "WEB-13a R2: an open Manage ignores the cache gate (it keeps showing its source while the cache is being brought up to date)",
+    file: "src/features/calendars/model/visibility.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect: /the cache becomes|being brought up to date|the floor/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return gate === "open"\n        ? { kind: "cached", row: merged, view: view.value }\n        : { kind: "gone", reason: "refreshing" };',
+        '      return { kind: "cached", row: merged, view: view.value };',
+      ),
+  },
+  {
+    id: "MU-1351",
+    title:
+      "WEB-13a R2: an open Manage falls back to the row it showed last when its source leaves the cache (re-anchored in revision 2)",
+    file: "src/features/calendars/model/visibility.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/sources-screen.test.tsx",
+    ],
+    expect:
+      /the source leaves the cache|the source left the cache|its read failed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (seenCached) return { kind: "gone", reason: "removed" };',
+        '    if (seenCached) return { kind: "resolving", row: last };',
+      ),
+  },
+  {
+    id: "MU-1352",
+    title:
+      "WEB-13a R5: Manage starts from the cached row, not from the newest waiting change (a second change reverts the first)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/sources-screen.test.tsx"],
+    expect: /keeps that timezone|Nothing to save/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : displayedRow(current, live.outstanding.latestOfKind);",
+        "      : displayedRow(current, null);",
+      ),
+  },
+  {
+    id: "MU-1353",
+    title:
+      "WEB-13a R5: Save is offered before the source's waiting changes have been read",
+    file: "src/features/calendars/model/status.ts",
+    tests: ["tests/features/calendars/status.test.ts"],
+    expect: /Save is unavailable while the waiting changes are unread/,
+    patch: (t) =>
+      sub(
+        t,
+        "          : input.outstandingTotal === null\n            ? off(CHECKING_CHANGES)\n            : on;",
+        "          : on;",
+      ),
+  },
+  {
+    id: "MU-1354",
+    title:
+      "WEB-13a R4: a connection form's request is admitted after the form closed (its not_sent wait outlives it)",
+    file: "src/features/calendars/live.ts",
+    tests: [
+      "tests/features/calendars/connection-dialogs.test.tsx",
+      "tests/features/calendars/live.test.tsx",
+    ],
+    expect:
+      /nothing more is sent|cancelling the form|each condition alone ends admission/,
+    patch: (t) =>
+      sub(
+        t,
+        "      mounted.current &&\n      latest.current.api === api &&",
+        "      latest.current.api === api &&",
+      ),
+  },
+  {
+    id: "MU-1355",
+    title:
+      "WEB-13a R3: back online, the screen does not tell the refresh controller (a new press or Check again never starts again)",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/sources-screen.test.tsx"],
+    expect: /online again, it resends under the run's key/,
+    // Re-anchored in revision 4 (the effect also stops the observer offline); the same mutation: the online branch is removed.
+    patch: (t) => sub(t, "    } else controller?.online();\n", "    }\n"),
+  },
+  {
+    id: "MU-1356",
+    title:
+      "WEB-13a R4: a connection form's request waiting to be sent is admitted after the page went offline",
+    file: "src/features/calendars/live.ts",
+    tests: [
+      "tests/features/calendars/connection-dialogs.test.tsx",
+      "tests/features/calendars/live.test.tsx",
+    ],
+    expect:
+      /the page going offline: nothing more is sent|each condition alone ends admission|without a rule of its own/,
+    patch: (t) =>
+      sub(
+        t,
+        "      latest.current.online &&\n      latest.current.admit(),",
+        "      latest.current.admit(),",
+      ),
+  },
+  // ---- WEB-13a revision 2 (R6 to R8 of review r1, and the design assessment's schedules) ----------------------------------------
+  {
+    id: "MU-1359",
+    title:
+      "WEB-13a R6: a pending source's Manage is never promoted (only a source seen cached may take the cached row)",
+    file: "src/features/calendars/model/visibility.ts",
+    tests: [
+      "tests/features/calendars/status.test.ts",
+      "tests/features/calendars/manage-revision-2.test.tsx",
+    ],
+    expect: /PROMOTED|stays open as the CACHED source's|promoted too/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (base !== null && merged !== null)\n      return gate === "open"',
+        '    if (seenCached && base !== null && merged !== null)\n      return gate === "open"',
+      ),
+  },
+  {
+    id: "MU-1360",
+    title:
+      "WEB-13a R6: a promoted Manage does not remember it has seen its source cached (a later removal falls back to pending)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /never falls back to pending/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (authority.kind === "cached") seenCached.current = true;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1361",
+    title:
+      "WEB-13a R6/S1: a timezone the person typed gives way to the source's (explicit input discarded)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /a change of Timezone keeps the other published value/,
+    patch: (t) =>
+      sub(
+        t,
+        "    editedTimezone ?? sourceValue(asked.value).timezone ?? defaultTimezone();",
+        "    sourceValue(asked.value).timezone ?? editedTimezone ?? defaultTimezone();",
+      ),
+  },
+  {
+    id: "MU-1362",
+    title:
+      "WEB-13a S6/S8: the enqueue transaction does not check the observation a save states",
+    file: "src/data/plans/outbox.ts",
+    tests: [
+      "tests/data/resource-view.test.ts",
+      "tests/features/calendars/manage-revision-2.test.tsx",
+    ],
+    expect:
+      /refused as changed|another tab saves between Save and its transaction/,
+    patch: (t) =>
+      sub(
+        t,
+        '    // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.\n    if (!stillObserved(input.request, reads.observed))\n      return { result: { kind: "refused", reason: "changed" } };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1363",
+    title:
+      "WEB-13a S8: the supersede transaction does not check the observation a save states",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/resource-view.test.ts"],
+    expect: /a supersession from a conflict states it too/,
+    patch: (t) =>
+      sub(
+        t,
+        '    // Only a supersession that would be written is checked: a retry of one already made, or a refusal, says what it said before.\n    if (!stillObserved(input.request, reads.observed))\n      return { result: { kind: "refused", reason: "changed" } };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1364",
+    title:
+      "WEB-13a S6: Manage's Save does not state what it read (values from one moment paired with a later version)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /another tab saves between Save and its transaction/,
+    patch: (t) => sub(t, "        live.observation,\n", "        undefined,\n"),
+  },
+  {
+    id: "MU-1365",
+    title:
+      "WEB-13a S7/A1: Manage takes its values from the newest draft of ANY kind (an import hides a queued settings change)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /a settings change queued before an import/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : displayedRow(current, live.outstanding.latestOfKind);",
+        "      : displayedRow(current, live.outstanding.latest);",
+      ),
+  },
+  {
+    id: "MU-1366",
+    title:
+      "WEB-13a S7/A1: a row's values come from the newest draft of ANY kind (an import hides a queued settings change)",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /a settings change queued before an import/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const outstanding = useOutstanding(id, CONFIGURE_SOURCE);",
+        "  const outstanding = useOutstanding(id);",
+      ),
+  },
+  {
+    id: "MU-1367",
+    title:
+      "WEB-13a S7: the newest applicable settings change may be one that needs a decision",
+    file: "src/data/plans/pending-reads.ts",
+    tests: ["tests/data/resource-view.test.ts"],
+    expect: /whatever needs a decision/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (applies(row) && newer(this.applicableOf.get(row.kind)))",
+        "    if (newer(this.applicableOf.get(row.kind)))",
+      ),
+  },
+  {
+    id: "MU-1368",
+    title:
+      "WEB-13a R7: Manage's Save handler does not check that Save is admitted (only the button does)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect:
+      /a submission saves nothing|view-only while Manage is open|save ONE change/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!saveAdmitted() || live === null) return;",
+        "    if (live === null) return;",
+      ),
+  },
+  {
+    id: "MU-1369",
+    title:
+      "WEB-13a R7: the disabled Save is no longer the form's submit button (the Enter key submits the form)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /the disabled Save is still the form's submit button/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {...(type === undefined ? {} : { type })}\n      {...(form === undefined ? {} : { form })}\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1370",
+    title:
+      "WEB-13a S10: Manage's Save has no synchronous latch (two submissions before a render save twice)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /two submissions before the screen updates save ONE change/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (saving.current || sending.current > 0) return false;",
+        "    if (sending.current > 0) return false;",
+      ),
+  },
+  {
+    id: "MU-1371",
+    title:
+      "WEB-13a S9: Save is offered while a connection change is being sent",
+    file: "src/features/calendars/model/status.ts",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /while the Remove request is being sent/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : input.connectionBusy === true\n        ? off(WAITING_CONNECTION_CHANGE)\n        : input.awaitingSync",
+        "      : input.awaitingSync",
+      ),
+  },
+  {
+    id: "MU-1372",
+    title: "WEB-13a R8: Link's URL and token stay editable offline",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /link: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = environment.online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
+      ),
+  },
+  {
+    id: "MU-1373",
+    title: "WEB-13a R8: Replace's URL and token stay editable offline",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /replace: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
+      ),
+  },
+  {
+    id: "MU-1374",
+    title: "WEB-13a R8: Link takes a URL or token change that arrives offline",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /link: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!lifetime.online()) {\n      event.target.value = fields[name];\n      return;\n    }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1375",
+    title:
+      "WEB-13a R8: Replace takes a URL or token change that arrives offline",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /replace: offline both fields are disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!lifetime.online()) {\n      event.target.value = connection[name];\n      return;\n    }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1376",
+    title:
+      "WEB-13a S10: Link's late answer closes whatever dialog is open by then",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Link's answer arrives after it was cancelled/,
+    patch: (t) =>
+      sub(t, "    if (lifetime.mounted()) onClose();", "    onClose();"),
+  },
+  {
+    id: "MU-1377",
+    title:
+      "WEB-13a S10: a connection change's late answer closes a panel opened since",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Remove's answer arrives after its panel was closed/,
+    patch: (t) =>
+      sub(
+        t,
+        "              if (generation.current === panel.generation) openPanel(null);",
+        "              openPanel(null);",
+      ),
+  },
+  {
+    id: "MU-1378",
+    title:
+      "WEB-13a S13: a connection change waiting to be sent ignores Manage's current admission",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /not admitted again once the source has a waiting change/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const lifetime = useLive(api, online, admit);",
+        "  const lifetime = useLive(api, online);",
+      ),
+  },
+  {
+    id: "MU-1379",
+    title:
+      "WEB-13a S15: Save stays offered when the source becomes view-only while Manage is open",
+    file: "src/features/calendars/model/status.ts",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /becomes view-only while Manage is open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    : !canEdit\n      ? off(VIEW_ONLY_REASON)\n      : input.connectionBusy === true",
+        "    : input.connectionBusy === true",
+      ),
+  },
+  {
+    id: "MU-1380",
+    title:
+      "WEB-13a S10: Add source has no synchronous latch (two submissions before a render save twice)",
+    file: "src/features/calendars/AddSourceDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Add source: two submissions/,
+    patch: (t) => sub(t, "    if (saving.current) return;\n", ""),
+  },
+  {
+    id: "MU-1381",
+    title:
+      "WEB-13a S10: Link has no synchronous latch (two submissions before a render send twice)",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    tests: ["tests/features/calendars/manage-revision-2.test.tsx"],
+    expect: /Link a calendar…: two submissions/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const submit = async () => {\n    if (inFlight.current) return;\n",
+        "  const submit = async () => {\n",
+      ),
+  },
+  {
+    id: "MU-1386",
+    title:
+      "WEB-13a R9: a lease_expired retry is sent although the live read did not return the source (beyond the bounded walk, or absent)",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: [
+      "tests/features/calendars/refresh.test.ts",
+      "tests/features/calendars/api.test.ts",
+    ],
+    expect: /does not return the source|a source beyond the bounded walk/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (entry === undefined)\n    // The read did not return this source (the bounded walk stopped before it, or the list no longer has it): whether anything is\n    // running is unknown, exactly as when the read fails. No automatic retry, the cause\'s own copy.\n    return end(run, { kind: "failed", cause: checking });\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1387",
+    title:
+      "WEB-13a R9: a newer refresh seen running whose source a later read does not return is shown as finished",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /missing from a later read/,
+    patch: (t) =>
+      sub(
+        t,
+        '      entry !== undefined && finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry.health }',
+        '      entry === undefined || finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry?.health ?? null }',
+      ),
+  },
+  {
+    id: "MU-1388",
+    title:
+      "WEB-13a R9: the refresh_in_progress flag turning false alone finishes a newer refresh (a lapsed lease or a settings change counts as its result)",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /NO completing write|settings change that cleared|finishedSince/,
+    patch: (t) =>
+      sub(
+        t,
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n",
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n  return true;\n",
+      ),
+  },
+  {
+    id: "MU-1389",
+    title:
+      "WEB-13a R9: a settings change's health reset (pending) counts as a newer refresh's result",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /settings change that cleared|reset to pending/,
+    patch: (t) => sub(t, '    now.health !== "pending" &&\n', ""),
+  },
+  {
+    id: "MU-1390",
+    title:
+      "WEB-13a R9: the comparison is with the LATEST read that saw a newer refresh running, not the first",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /FIRST read that saw it running/,
+    patch: (t) => sub(t, "        seen: run.seen ?? {\n", "        seen: {\n"),
+  },
+  {
+    id: "MU-1391",
+    title:
+      "WEB-13a R9: an unchanged last_success counts as a newer refresh's success",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /NO completing write|finishedSince: unchanged/,
+    patch: (t) =>
+      sub(
+        t,
+        "now.lastSuccess > seen.lastSuccess",
+        "now.lastSuccess >= seen.lastSuccess",
+      ),
+  },
+  {
+    id: "MU-1392",
+    title:
+      "WEB-13a R9: the same health again counts as a newer refresh's result",
+    file: "src/features/calendars/model/refresh.ts",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /NO completing write|the same failure again/,
+    patch: (t) => sub(t, " &&\n    now.health !== seen.health", ""),
+  },
+  {
+    id: "MU-1393",
+    title:
+      "WEB-13a R9: the live list's last_success is not read (a written success cannot be told from a lapsed lease)",
+    file: "src/features/calendars/api.ts",
+    tests: ["tests/features/calendars/api.test.ts"],
+    expect: /last_success is read/,
+    patch: (t) =>
+      sub(
+        t,
+        '        lastSuccess:\n          typeof lastSuccess === "number" && Number.isFinite(lastSuccess)\n            ? lastSuccess\n            : null,\n',
+        "        lastSuccess: null,\n",
+      ),
+  },
+  {
+    id: "MU-1394",
+    title: "WEB-13a R9: the row says an unconfirmed newer refresh finished",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/refresh.test.ts"],
+    expect: /unconfirmed newer refresh is unconfirmed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "successor_unconfirmed":\n      return SUCCESSOR_UNCONFIRMED;\n',
+        '    case "successor_unconfirmed":\n      return successorFinished(SUCCESSOR_HEALTHY);\n',
+      ),
+  },
+  {
+    id: "MU-1397",
+    title:
+      "WEB-13a R10: the screen never reads the live list when it opens (no observation of a refresh held elsewhere or before a reload)",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /Refreshing… and holds Refresh back|view-only source is observed/,
+    // Re-anchored in revision 5 (the screen watches through its attachment to the visit's observer); the same mutation.
+    patch: (t) =>
+      sub(
+        t,
+        '    attachment.watch(listed === "" ? [] : listed.split("\\n"));\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1398",
+    title:
+      "WEB-13a R10: a source the read did not return counts as idle (absence taken as evidence)",
+    file: "src/features/calendars/model/observation.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /is unknown, not idle|only a read that RETURNED/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (entry === undefined) return { kind: "unknown", seenBusy };\n',
+        '  if (entry === undefined) return { kind: "idle" };\n',
+      ),
+  },
+  {
+    id: "MU-1399",
+    title:
+      "WEB-13a R10: a refresh seen running elsewhere does not hold Refresh back",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /holds Refresh back/,
+    patch: (t) =>
+      sub(
+        t,
+        '    refreshing: running || observation?.kind === "busy",\n',
+        "    refreshing: running,\n",
+      ),
+  },
+  {
+    id: "MU-1400",
+    title:
+      "WEB-13a R10: a press on this screen does not end the source's observation (a read made before it can change the row)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect: /read held across a press|press's own outcome is shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (entry === undefined) return;\n      drop(entry);\n      watched.delete(id);\n      notify();\n",
+        "      if (entry === undefined) return;\n      notify();\n",
+      ),
+  },
+  {
+    id: "MU-1401",
+    title:
+      "WEB-13a R10: the observation has no time limit (a refresh seen running is read for ever, a read out at the limit is waited for)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect:
+      /time limit|75 s limit|still out at the limit|suspended timer|at most 16 walks/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  const lapse = (id: string, entry: Watched): void => {\n",
+            "  const lapse = (id: string, entry: Watched): void => {\n    return;\n",
+          ),
+          "        if (entry.deadline !== null && now() >= entry.deadline)\n",
+          "        if (false)\n",
+        ),
+        // Re-anchored in revision 5 (page admission also asks that the source is listed); the same mutation.
+        // Revision 5 re-anchor (the admission records a decline): the same mutation.
+        "            entry.listed &&\n            now() < (entry.deadline ?? 0),\n",
+        "            entry.listed,\n",
+      ),
+  },
+  {
+    id: "MU-1402",
+    title: "WEB-13a R10: going offline does not stop the screen's observation",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /offline while running is observed|offline when the screen opens/,
+    patch: (t) => sub(t, "      observer?.offline();\n", ""),
+  },
+  {
+    id: "MU-1403",
+    title:
+      "WEB-13a R10: a stopped observation (offline, incompatible, disposed) starts reading again when asked",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /coming back online reads nothing|offline when the screen opens|stops being compatible ends it|dispose/,
+    patch: (t) => sub(t, "    stopped = true;\n", ""),
+  },
+  {
+    id: "MU-1404",
+    title:
+      "WEB-13a R10: listing the same sources again (a re-render) reads them again and restarts their time limit",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /ordinary re-render/,
+    // Re-anchored in revision 5 (a listed source keeps its entry for the visit): the same mutation, every id listed gets a new entry.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (entry !== undefined) {\n        if (entry.listed) continue;\n",
+        "      if (entry !== undefined && false) {\n        if (entry.listed) continue;\n",
+      ),
+  },
+  {
+    id: "MU-1405",
+    title:
+      "WEB-13a R10: a source seen idle after running is shown as refreshed (an observation claims a success)",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /no success claimed/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (observation?.kind === "busy") return REFRESHING;\n',
+        '  if (observation?.kind === "busy") return REFRESHING;\n  if (observation?.kind === "idle") return REFRESHED;\n',
+      ),
+  },
+  {
+    id: "MU-1406",
+    title:
+      "WEB-13a R10: walks of the live list overlap (a source listed while one is out starts another at once)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /walks never overlap/,
+    patch: (t) =>
+      // Both guards (the scheduler's and the walk's own): either alone keeps walks apart, so a one-site mutant is equivalent.
+      // Re-anchored in revision 5 (both also ask for an attached screen); the same mutation.
+      sub(
+        sub(
+          t,
+          "    if (stopped || !compatible || walking || attached === null) return false;\n",
+          "    if (stopped || !compatible || attached === null) return false;\n",
+        ),
+        "    if (stopped || !compatible || walking || attached === null) return;\n",
+        "    if (stopped || !compatible || attached === null) return;\n",
+      ),
+  },
+  {
+    id: "MU-1407",
+    title:
+      "WEB-13a R10: dispose (unmount, another identity) leaves a read still out current",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /dispose/,
+    patch: (t) =>
+      sub(
+        t,
+        "      disposed = true;\n      stop();\n      listeners.clear();\n",
+        "      disposed = true;\n      listeners.clear();\n",
+      ),
+  },
+  {
+    id: "MU-1408",
+    title:
+      "WEB-13a R10: a refresh seen running whose end no read showed is dropped silently (no could-not-check line)",
+    file: "src/features/calendars/SourceRow.tsx",
+    tests: ["tests/features/calendars/observation-screen.test.tsx"],
+    expect: /could not check|75 s limit/,
+    patch: (t) =>
+      sub(t, "    return OBSERVED_UNCONFIRMED;\n", "    return null;\n"),
+  },
+  {
+    id: "MU-1409",
+    title:
+      "WEB-13a R10: the refresh controller does not tell the screen's observer that a press was admitted",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect:
+      /yields the source when a press is ADMITTED|press's own outcome is shown/,
+    patch: (t) => sub(t, "    deps.onBegin?.(id);\n", ""),
+  },
+  {
+    id: "MU-1410",
+    title:
+      "WEB-13a R10: the live list is read before the server is known to be compatible",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/observation-screen.test.tsx",
+    ],
+    expect: /compatible/,
+    patch: (t) =>
+      // Every site that asks (the scheduler, the walk and its page admission): any one alone keeps the read back.
+      // Re-anchored in revision 5 (the scheduler and the walk also ask for an attached screen); the same mutation.
+      sub(
+        sub(
+          sub(
+            t,
+            "    if (stopped || !compatible || walking || attached === null) return false;\n",
+            "    if (stopped || walking || attached === null) return false;\n",
+          ),
+          "    if (stopped || !compatible || walking || attached === null) return;\n",
+          "    if (stopped || walking || attached === null) return;\n",
+        ),
+        "        compatible &&\n        cohort.some(",
+        "        cohort.some(",
+      ),
+  },
+  {
+    id: "MU-1414",
+    title:
+      "WEB-13a R11: every unmount ends the visit, so the remount a 403 causes reads the live list and the capability again",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/visit-screen.test.tsx"],
+    expect:
+      /six remounts: ONE list read|answer arriving after the remount|a remount: nothing is read again|without reading again|read once in the visit/,
+    // Re-anchored in revision 6 (the cleanup no longer ends the visit; departures do): every unmount ends it again.
+    patch: (t) =>
+      sub(
+        t,
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      visit.dispose();\n",
+      ),
+  },
+  {
+    id: "MU-1415",
+    title:
+      "WEB-13a R11: leaving the screen does not end the visit (opening it again reads nothing afresh)",
+    // Re-anchored in revision 6 to the visit's own departure handling (`visit.ts`): no departure ends a visit.
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit-screen.test.tsx"],
+    expect: /leaves and opens the screen again|leaving while a read is out/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  if (current !== null && current.departures === departures) return current;\n",
+          "  if (current !== null) return current;\n",
+        ),
+        "  off = at.subscribe(() => {\n    if (at.departures() !== departures) visit.dispose();\n  });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1416",
+    title:
+      "WEB-13a R11: a screen's detachment drops the read still out (its answer is lost, so the next screen reads again)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /first read is refused 403 while the screen is remounted|the other order|Strict Mode|poll refused 403 and the remount/,
+    patch: (t) =>
+      sub(
+        t,
+        "    for (const entry of watched.values()) {\n      entry.listed = false;\n      entry.leftBy = null;\n",
+        "    for (const entry of watched.values()) {\n      drop(entry);\n      entry.listed = false;\n      entry.leftBy = null;\n",
+      ),
+  },
+  {
+    id: "MU-1417",
+    title:
+      "WEB-13a R11: a read answered while no screen is attached is dropped (the next screen reads it again)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /answered while NO screen is attached/,
+    patch: (t) =>
+      sub(
+        t,
+        "      walking = false;\n      if (disposed) return;\n",
+        "      walking = false;\n      if (disposed || attached === null) return;\n",
+      ),
+  },
+  {
+    id: "MU-1418",
+    title:
+      "WEB-13a R11: a walk's next page (or wait to be sent) is admitted while no screen is attached (or for sources no longer listed)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /nothing is admitted while no screen is attached|another page/,
+    // The listing is the guard: a detachment unlists every source (a separate attachment check in the admission was redundant).
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored when the admission began recording a decline: the same mutation.
+        "            entry.listed &&\n            now() < (entry.deadline ?? 0),\n",
+        "            now() < (entry.deadline ?? 0),\n",
+      ),
+  },
+  {
+    id: "MU-1419",
+    title:
+      "WEB-13a R11: a new screen listing a source reads it at once (each remount reads a source still observed afresh)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /NEW screen lists a source|the other order|remounts neither restart/,
+    patch: (t) =>
+      sub(
+        t,
+        "        entry.due = entry.leftBy === attachment && observing(entry.observation);\n",
+        "        entry.due = observing(entry.observation);\n",
+      ),
+  },
+  {
+    id: "MU-1420",
+    title:
+      "WEB-13a R11: a source listed again restarts its time limit (a remount extends the observation)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect:
+      /remounts neither restart nor extend the time limit|within its first limit/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (entry.listed) continue;\n        entry.listed = true;\n",
+        "        if (entry.listed) continue;\n        if (entry.deadlineTimer !== null) timers.clearTimeout(entry.deadlineTimer);\n        entry.deadlineTimer = null;\n        entry.deadline = null;\n        entry.listed = true;\n",
+      ),
+  },
+  {
+    id: "MU-1421",
+    title:
+      "WEB-13a R11 (DA-1): the capability is read on every mount, not once per visit",
+    file: "src/features/calendars/visit.ts",
+    tests: [
+      "tests/features/calendars/visit.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect:
+      /a remount's read asks nothing|however often the screen is mounted|read once in the visit|without reading again/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (disposed || state !== "unread") return;\n',
+        "        if (disposed) return;\n",
+      ),
+  },
+  {
+    id: "MU-1422",
+    title:
+      "WEB-13a R11 (DA-1): the capability read is taken only when its answer arrives (a mount while it is out reads it again)",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /a remount's read asks nothing|admitted for the screen mounted NOW/,
+    patch: (t) => sub(t, '        state = "reading";\n', ""),
+  },
+  {
+    id: "MU-1423",
+    title:
+      "WEB-13a R11 (C3): a capability read never sent counts as made (the visit never reads it)",
+    file: "src/features/calendars/visit.ts",
+    tests: [
+      "tests/features/calendars/visit.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect:
+      /never SENT|caller gone before the request was admitted|offline when the screen opens/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored when the session's unsent closure was added: the same mutation (nothing counts as never sent).
+        '                  result.kind === "not_sent" ||\n                  (result.kind === "closed" &&\n                    (declined || result.unsent === true))\n',
+        "                  false\n",
+      ),
+  },
+  {
+    id: "MU-1424",
+    title:
+      "WEB-13a R11: a capability read out across a remount asks the unmounted screen whether it is still wanted",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /admitted for the screen mounted NOW/,
+    patch: (t) =>
+      sub(
+        sub(t, "        caller = live;\n", ""),
+        '        state = "reading";\n',
+        '        state = "reading";\n        caller = live;\n',
+      ),
+  },
+  {
+    id: "MU-1425",
+    title:
+      "WEB-13a R11: another identity does not end the visit (a read out for the old identity stays current)",
+    file: "src/features/calendars/memory.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /another identity/,
+    // Re-anchored in revision 6 (an identity's memory is dropped by `drop`, which also revokes its refresh ownership).
+    patch: (t) => sub(t, "  memory.visit?.dispose();\n", ""),
+  },
+  {
+    id: "MU-1429",
+    title:
+      "WEB-13a R11 (Q4): a refresh outcome recorded after its controller was disposed is not announced (the screen mounted before it never shows it)",
+    tests: [
+      "tests/features/calendars/refresh-controller.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /adopts the outcome|shows the press's outcome/,
+    // Re-anchored in revision 6: a recorded outcome is announced by the shared ownership (`refresh-ownership.ts`), not `onLate`.
+    file: "src/features/calendars/refresh-ownership.ts",
+    patch: (t) =>
+      sub(
+        t,
+        "      for (const listener of [...listeners]) listener(ticket.source);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1430",
+    title:
+      "WEB-13a R11 (Q4): the current controller ignores an outcome another controller recorded after the remount",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: [
+      "tests/features/calendars/refresh-controller.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /adopts the outcome|shows the press's outcome/,
+    // Re-anchored in revision 6: the controller's listener on the shared ownership.
+    patch: (t) =>
+      sub(
+        t,
+        "  const adopt = (id: string): void => {\n    if (disposed) return;\n",
+        "  const adopt = (id: string): void => {\n    return;\n",
+      ),
+  },
+  {
+    id: "MU-1431",
+    title:
+      "WEB-13a R11 (Q4): an adopted outcome replaces a run this screen's own press has going",
+    tests: ["tests/features/calendars/refresh-controller.test.ts"],
+    expect: /unless a run of its own is going/,
+    // Re-anchored in revision 6: a press of its own is protected only by owning its source; here any admission of the source owns it
+    // (the controller's late guard and the publication check both ask `owns`, so this is the whole path).
+    file: "src/features/calendars/refresh-ownership.ts",
+    patch: (t) =>
+      sub(
+        t,
+        "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+        "    !revoked && slots.has(ticket.source);\n",
+      ),
+  },
+  {
+    id: "MU-1432",
+    title:
+      "WEB-13a R11 (Q4): the screen's controller does not listen for outcomes recorded after the remount",
+    tests: [
+      "tests/features/calendars/visit-screen.test.tsx",
+      "tests/features/calendars/refresh-controller.test.ts",
+    ],
+    expect: /shows the press's outcome|adopts the outcome/,
+    // Re-anchored in revision 6: the controller subscribes to the shared ownership itself.
+    file: "src/features/calendars/refresh-controller.ts",
+    patch: (t) =>
+      sub(
+        t,
+        "  const offOwnership = ownership.subscribe(adopt);\n",
+        "  const offOwnership = (): void => undefined;\n",
+      ),
+  },
+  {
+    id: "MU-1433",
+    title:
+      "WEB-13a R11: a request the session refused at its cover (before the send boundary) is not marked unsent (its read counts as made)",
+    file: "src/features/calendars/api.ts",
+    tests: [
+      "tests/features/calendars/api.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /caller's live is asked|refused at the session's cover/,
+    patch: (t) =>
+      sub(
+        t,
+        '        return { kind: "closed", unsent: true };\n',
+        '        return { kind: "closed" };\n',
+      ),
+  },
+  {
+    id: "MU-1434",
+    title:
+      "WEB-13a R11: a walk that sent nothing ends its sources' observation for the visit (the next screen never reads them)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: [
+      "tests/features/calendars/observation.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /SENT nothing|stays unread|refused at the session's cover/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (unsent) {\n          entry.waitsFor = attached ?? 0;\n          continue;\n        }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1435",
+    title:
+      "WEB-13a R11: a walk that sent nothing is read again by the same screen at once (a loop while the session keeps refusing it)",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /SAME screen does not read it again/,
+    patch: (t) =>
+      sub(
+        t,
+        "          entry.waitsFor = attached ?? 0;\n",
+        "          entry.waitsFor = null;\n",
+      ),
+  },
+  {
+    id: "MU-1436",
+    title:
+      "WEB-13a R11: a walk whose own admission was declined (no screen attached) is taken as sent",
+    file: "src/features/calendars/observation-controller.ts",
+    tests: ["tests/features/calendars/observation.test.ts"],
+    expect: /SENT nothing, so the next screen reads it once/,
+    patch: (t) => sub(t, "      if (!admitted) declined = true;\n", ""),
+  },
+  {
+    id: "MU-1437",
+    title:
+      "WEB-13a R11 (DA-1): a capability read the session refused before its send boundary counts as made",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /refused before its send boundary/,
+    patch: (t) =>
+      sub(
+        t,
+        "                    (declined || result.unsent === true))\n",
+        "                    declined)\n",
+      ),
+  },
+  // Revision 6 (R12, R13; design assessment M1-M10). M2 (adoption guarded only while the successor runs) has no separate anchor: the
+  // design has no running-only guard, and its failure (an older publication over a finished successor) is MU-1431 and MU-1439. M6
+  // (a new visit at every remount) is MU-1414.
+  {
+    id: "MU-1438",
+    title:
+      "WEB-13a R12 (M1): a newer admission does not take the source from an older one (the first press keeps the authority to record its outcome)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: [
+      "tests/features/calendars/refresh-ownership.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /R12's order|Q3: B still running|newer press/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!revoked) slots.set(source, { owner: ticket, run: null });\n",
+        "      if (!revoked && !slots.has(source))\n        slots.set(source, { owner: ticket, run: null });\n",
+      ),
+  },
+  {
+    id: "MU-1439",
+    title:
+      "WEB-13a R12 (M3): the fence ends when the owner's run is recorded (ownership by completion, not by admission)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: [
+      "tests/features/calendars/refresh-ownership.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /R12's order|newer press finished|Q4: B ended/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+          "    !revoked &&\n    ((slots.get(ticket.source) as { released?: boolean } | undefined)?.released === true ||\n      slots.get(ticket.source)?.owner === ticket);\n",
+        ),
+        "      slot.run = run;\n",
+        "      slot.owner = ticket;\n      slot.run = run;\n      (slot as { released?: boolean }).released = true;\n",
+      ),
+  },
+  {
+    id: "MU-1440",
+    title:
+      "WEB-13a R12 (M4): the legitimate late outcome is dropped (an answer after the remount is never recorded, even with no newer press)",
+    file: "src/features/calendars/refresh-controller.ts",
+    tests: [
+      "tests/features/calendars/refresh-ownership.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /NO newer press|no newer press/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!ownership.owns(held.ticket)) return;\n",
+        "    return;\n",
+      ),
+  },
+  {
+    id: "MU-1441",
+    title:
+      "WEB-13a R13 (M5): departures are noticed only at the screen's own cleanup (revision 5): Back while the tree is closed keeps the visit",
+    file: "src/features/calendars/CalendarSources.tsx",
+    tests: ["tests/features/calendars/visit-screen.test.tsx"],
+    expect:
+      /R13's witness|leaving and coming back entirely while unmounted \((Back|raw)/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    const visit = enterVisit(memory, api, boundary);\n",
+          "    const visit = enterVisit(memory, api, {\n      departures: () => 0,\n      subscribe: () => () => undefined,\n    });\n    const opened = window.location.pathname;\n",
+        ),
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
+      ),
+  },
+  {
+    id: "MU-1442",
+    title:
+      "WEB-13a R13 (M7): the document's record misses pushState and replaceState (only popstate is seen)",
+    file: "src/lib/route-changes.ts",
+    tests: [
+      "tests/lib/route-changes.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect:
+      /raw pushState|router's history made AFTER|routers made and abandoned/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    const result = push.apply(this, args);\n    changed();\n",
+          "    const result = push.apply(this, args);\n",
+        ),
+        "    const result = replace.apply(this, args);\n    changed();\n",
+        "    const result = replace.apply(this, args);\n",
+      ),
+  },
+  {
+    id: "MU-1443",
+    title:
+      "WEB-13a R13 (M7): the document's record misses popstate (Back, Forward and go are not seen)",
+    file: "src/lib/route-changes.ts",
+    tests: [
+      "tests/lib/route-changes.test.ts",
+      "tests/features/calendars/visit-screen.test.tsx",
+    ],
+    expect: /R13's witness|Back, then Forward|Back and Forward|MOUNTED screen/,
+    patch: (t) => sub(t, '  win.addEventListener("popstate", changed);\n', ""),
+  },
+  {
+    id: "MU-1444",
+    title:
+      "WEB-13a R13 (M8): a late dispose of an ended visit ends the current visit",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect: /a late dispose of an ended visit/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (memory.visit === visit) memory.visit = null;\n",
+        "      memory.visit = null;\n",
+      ),
+  },
+  {
+    id: "MU-1445",
+    title:
+      "WEB-13a R13 (M9): a sent capability read that was refused is unread again (the next attachment of the same visit reads it)",
+    file: "src/features/calendars/visit.ts",
+    tests: ["tests/features/calendars/visit.test.ts"],
+    expect:
+      /not read again within the visit|terminal visit \(capability refused\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '          state = sent ? "read" : "unread";\n',
+        '          state = "unread";\n',
+      ),
+  },
+  {
+    id: "MU-1446",
+    title:
+      "WEB-13a R12 (M10): another identity does not revoke the refresh ownership (an answer out for the old identity is still recorded)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: ["tests/features/calendars/refresh-ownership.test.ts"],
+    expect: /another identity revokes/,
+    patch: (t) => sub(t, "      revoked = true;\n      slots.clear();\n", ""),
+  },
+  {
+    id: "MU-1447",
+    title:
+      "WEB-13a R12 (Q5): the wire key stands for the admission (Check again's same key keeps the earlier admission's authority)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    tests: ["tests/features/calendars/refresh-ownership.test.ts"],
+    expect: /SAME key is a new admission/,
+    patch: (t) =>
+      sub(
+        t,
+        "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+        "    !revoked && slots.get(ticket.source)?.owner.key === ticket.key;\n",
+      ),
+  },
 ];
 
 /**
@@ -20101,6 +22022,290 @@ export const ENGINE = [
         t,
         '    const recorded = recordStop(\n      deps.markers,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
         '    const recorded = recordStop(\n      undefined,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
+      ),
+  },
+  // ---- WEB-13a (REAL ENGINE): the Calendars screen in the production composition --------------------------------------------
+  {
+    id: "MU-1342",
+    title:
+      "WEB-13a case 5: (REAL ENGINE) the Link form keeps what was typed (the URL and token included) in sessionStorage for recovery",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL3",
+    expect: /E-CAL3/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setFields((previous) => ({ ...previous, [name]: value }));\n",
+        '    setFields((previous) => {\n      const next = { ...previous, [name]: value };\n      sessionStorage.setItem("calendar-link-form", JSON.stringify(next));\n      return next;\n    });\n',
+      ),
+  },
+  {
+    id: "MU-1343",
+    title:
+      "WEB-13a D-13a-4: (REAL ENGINE) readPendingCreates omits the cache check, so a published source is listed twice (cached and pending)",
+    file: "src/data/plans/pending-reads.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL1",
+    expect: /E-CAL1/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (cached[index] !== undefined) return;\n",
+        "          void cached;\n",
+      ),
+  },
+  {
+    id: "MU-1357",
+    title:
+      "WEB-13a R1: (REAL ENGINE) Retry after an uncertain Replace or Remove rebuilds the command from the cache (a new key once the cache moved on)",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL7",
+    expect: /E-CAL7/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (afterUncertain ? submission.current.current() : null) ??",
+        "      (afterUncertain ? null : null) ??",
+      ),
+  },
+  {
+    id: "MU-1358",
+    title:
+      "WEB-13a R2: (REAL ENGINE) an open Manage ignores the cache gate (it keeps showing its source while the cache is invalid)",
+    file: "src/features/calendars/model/visibility.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL8",
+    expect: /E-CAL8/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return gate === "open"\n        ? { kind: "cached", row: merged, view: view.value }\n        : { kind: "gone", reason: "refreshing" };',
+        '      return { kind: "cached", row: merged, view: view.value };',
+      ),
+  },
+  {
+    id: "MU-1382",
+    title:
+      "WEB-13a R6: (REAL ENGINE) a pending source's Manage is never promoted when its create is published",
+    file: "src/features/calendars/model/visibility.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL9",
+    expect: /E-CAL9/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (base !== null && merged !== null)\n      return gate === "open"',
+        '    if (seenCached && base !== null && merged !== null)\n      return gate === "open"',
+      ),
+  },
+  {
+    id: "MU-1383",
+    title:
+      "WEB-13a R7: (REAL ENGINE) Manage is submitted while Save waits, by the Enter key (Chromium, Firefox) or an explicit form submission (every engine): the disabled Save leaves the form AND the handler does not check",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL10",
+    expect: /E-CAL10/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      {...(type === undefined ? {} : { type })}\n      {...(form === undefined ? {} : { form })}\n",
+          "",
+        ),
+        "    if (!saveAdmitted() || live === null) return;",
+        "    if (live === null) return;",
+      ),
+  },
+  {
+    id: "MU-1384",
+    title:
+      "WEB-13a R8: (REAL ENGINE) Link's URL and token stay editable offline",
+    file: "src/features/calendars/LinkCalendarDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL11",
+    expect: /E-CAL11/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = environment.online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
+      ),
+  },
+  {
+    id: "MU-1385",
+    title:
+      "WEB-13a R8: (REAL ENGINE) Replace's URL and token stay editable offline",
+    file: "src/features/calendars/ManageSourceDialog.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL11",
+    expect: /E-CAL11/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const entry = online\n    ? {}\n    : ({ disabled: true, hint: NEEDS_CONNECTION } as const);",
+        "  const entry = {};",
+      ),
+  },
+  {
+    id: "MU-1395",
+    title:
+      "WEB-13a R9: (REAL ENGINE) the live re-read infers what it did not observe: a source the bounded walk did not return permits the lease retry, and a newer refresh no longer running (gone, or only its flag changed) is shown as finished",
+    file: "src/features/calendars/model/refresh.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL12",
+    expect: /E-CAL12/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            '  if (entry === undefined)\n    // The read did not return this source (the bounded walk stopped before it, or the list no longer has it): whether anything is\n    // running is unknown, exactly as when the read fails. No automatic retry, the cause\'s own copy.\n    return end(run, { kind: "failed", cause: checking });\n',
+            "",
+          ),
+          '      entry !== undefined && finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry.health }',
+          '      entry === undefined || finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry?.health ?? null }',
+        ),
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n",
+        "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n  return true;\n",
+      ),
+  },
+  {
+    id: "MU-1396",
+    title:
+      "WEB-13a S6: (REAL ENGINE) the enqueue transaction does not check the observation a save states (two tabs: B saves London over A's queued Tokyo)",
+    file: "src/data/plans/outbox.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL13",
+    expect: /E-CAL13/,
+    patch: (t) =>
+      sub(
+        t,
+        '    // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.\n    if (!stillObserved(input.request, reads.observed))\n      return { result: { kind: "refused", reason: "changed" } };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1411",
+    title:
+      "WEB-13a R10: (REAL ENGINE) the screen reads the live list but neither shows a refresh held elsewhere nor holds Refresh back for it (R10's missing half)",
+    file: "src/features/calendars/SourceRow.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "revision 4, R10",
+    expect: /revision 4, R10/,
+    patch: (t) =>
+      sub(
+        sub(t, '  if (observation?.kind === "busy") return REFRESHING;\n', ""),
+        '    refreshing: running || observation?.kind === "busy",\n',
+        "    refreshing: running,\n",
+      ),
+  },
+  {
+    id: "MU-1412",
+    title:
+      "WEB-13a R10: (REAL ENGINE) going offline does not stop the screen's observation",
+    file: "src/features/calendars/CalendarSources.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "revision 4, R10",
+    expect: /revision 4, R10/,
+    patch: (t) => sub(t, "      observer?.offline();\n", ""),
+  },
+  {
+    id: "MU-1413",
+    title:
+      "WEB-13a R10: (REAL ENGINE) a press on this screen does not end the source's observation",
+    file: "src/features/calendars/refresh-controller.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "revision 4, R10",
+    expect: /revision 4, R10/,
+    patch: (t) => sub(t, "    deps.onBegin?.(id);\n", ""),
+  },
+  {
+    id: "MU-1426",
+    title:
+      "WEB-13a R11: (REAL ENGINE) every unmount ends the visit, so the session's remount after a 403 reads the live list and the capability again",
+    file: "src/features/calendars/CalendarSources.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL14",
+    expect: /E-CAL14/,
+    // Re-anchored in revision 6 (the cleanup no longer ends the visit; departures do): every unmount ends it again.
+    patch: (t) =>
+      sub(
+        t,
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      visit.dispose();\n",
+      ),
+  },
+  {
+    id: "MU-1427",
+    title:
+      "WEB-13a R11 (DA-1): (REAL ENGINE) the capability is read on every mount, not once per visit",
+    file: "src/features/calendars/visit.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL14",
+    expect: /E-CAL14/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (disposed || state !== "unread") return;\n',
+        "        if (disposed) return;\n",
+      ),
+  },
+  {
+    id: "MU-1428",
+    title:
+      "WEB-13a R11: (REAL ENGINE) leaving the screen does not end the visit (opening it again reads nothing afresh)",
+    // Re-anchored in revision 6 to the visit's own departure handling (`visit.ts`): no departure ends a visit.
+    file: "src/features/calendars/visit.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL14",
+    expect: /E-CAL14/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  if (current !== null && current.departures === departures) return current;\n",
+          "  if (current !== null) return current;\n",
+        ),
+        "  off = at.subscribe(() => {\n    if (at.departures() !== departures) visit.dispose();\n  });\n",
+        "",
+      ),
+  },
+  // Revision 6 (R12, R13), in a real engine through the production composition.
+  {
+    id: "MU-1448",
+    title:
+      "WEB-13a R12: (REAL ENGINE) any admission of a source may record its outcome (an older press's late success replaces a newer press's state)",
+    file: "src/features/calendars/refresh-ownership.ts",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL15",
+    expect: /E-CAL15/,
+    patch: (t) =>
+      sub(
+        t,
+        "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
+        "    !revoked && slots.has(ticket.source);\n",
+      ),
+  },
+  {
+    id: "MU-1449",
+    title:
+      "WEB-13a R13: (REAL ENGINE) departures are noticed only at the screen's own cleanup: Back while the protective closure has the tree closed keeps the visit",
+    file: "src/features/calendars/CalendarSources.tsx",
+    spec: "tests/e2e/fixture.calendars.spec.ts",
+    grep: "E-CAL15",
+    expect: /E-CAL15/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    const visit = enterVisit(memory, api, boundary);\n",
+          "    const visit = enterVisit(memory, api, {\n      departures: () => 0,\n      subscribe: () => () => undefined,\n    });\n    const opened = window.location.pathname;\n",
+        ),
+        "      attachment.detach();\n",
+        "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
       ),
   },
 ];

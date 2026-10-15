@@ -24,6 +24,7 @@ export type { LeaderRole } from "./leader/election";
 export { getPageDataHost, type PageDataHost } from "./leader/page-host";
 export { markLeaderStarted } from "./leader/presence";
 export { type DataLeaderHandle, startDataLeader } from "./leader/start";
+export type { Observation } from "./model/observation";
 export type {
   Bases,
   BuildResult,
@@ -80,9 +81,13 @@ export type {
   StatusInputs,
 } from "./model/status";
 export type {
+  AccountId,
   CacheRow,
   DraftRow,
   DraftStatus,
+  DraftWithCommand,
+  Epoch,
+  JsonObject,
   LocalId,
   ProjectionPatch,
   ResourceId,
@@ -114,6 +119,11 @@ export type {
   QueuePage,
   ResourcePage,
 } from "./plans/outbox";
+export type {
+  Outstanding,
+  PendingCreatesPage,
+  ResourceView,
+} from "./plans/pending-reads";
 export {
   createDataDeletionPorts,
   type DeletionPortsOptions,
@@ -145,8 +155,11 @@ export {
   useDraftQueue,
   useNotices,
   useOptionalDataEnv,
+  useOutstanding,
+  usePendingCreates,
   useQueueSummary,
   useResourceList,
+  useResourceView,
   useSharingDefaults,
   useStatusInputs,
   useSyncStatusModel,
