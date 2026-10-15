@@ -18855,7 +18855,13 @@ export const UNIT = [
       "tests/app/protected-tree-join.test.tsx",
     ],
     expect: /the failed order|Dismiss BEFORE the frame/,
-    patch: (t) => sub(t, "        announcement.retract();\n", ""),
+    // Re-anchored in revision 8 (R20): the retraction now stands in the one reconciliation of the lists (the unmount cleanup is separate).
+    patch: (t) =>
+      sub(
+        t,
+        "        seen.delete(id);\n        announcement?.retract();\n",
+        "        seen.delete(id);\n",
+      ),
   },
   {
     id: "MU-2210",
@@ -18872,6 +18878,35 @@ export const UNIT = [
         t,
         "          if (owners.current.get(region) !== announcement) return;\n",
         "          if (\n            owners.current.get(region) !== announcement &&\n            region.textContent !== message\n          )\n            return;\n",
+      ),
+  },
+  {
+    id: "MU-2211",
+    title:
+      "WEB-10a rev 8 (R20): a change of the list re-announces whatever fact is now LATEST (positional reannouncement: dismissing the newest replays the survivor over a later message)",
+    file: "src/app/SessionNotices.tsx",
+    tests: ["tests/app/notice-announcements.test.tsx"],
+    expect:
+      /N1: dismissing the newest of two notices|N2: dismissing the newest of two notices/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const fact = feedback.filter((item) => !seen.has(item.id)).pop();\n",
+        "    const fact = feedback[feedback.length - 1];\n",
+      ),
+  },
+  {
+    id: "MU-2212",
+    title:
+      "WEB-10a rev 8 (R20): only ANNOUNCED notices are remembered, so a survivor that was shown without announcing counts as new when another is removed",
+    file: "src/app/SessionNotices.tsx",
+    tests: ["tests/app/notice-announcements.test.tsx"],
+    expect: /N4: two session notices shown|N5: facts that arrive in one render/,
+    patch: (t) =>
+      sub(
+        t,
+        "    for (const id of shown) if (!seen.has(id)) seen.set(id, null);\n",
+        "",
       ),
   },
 ];

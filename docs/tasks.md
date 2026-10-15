@@ -300,6 +300,12 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     production spec leaves a page before going online (a labelled readiness correction) and keeps a deliberate case in which the online
     re-check of the sign-in record — a read — is interrupted by navigation without any write. D3: the historical R43 double closure is an
     accepted diagnostic risk owned by WEB-17 (its exact-one assertion unchanged); HF-1's own pre-beta verification is separate and unchanged.
+40. **A notice is announced when it arrives, never because the list moved (R20; revision 8).** `SessionNotices` records every notice it has
+    shown in this presentation by id (with the announcement it made, if any) and reconciles the whole lists on each change: a removed notice
+    withdraws its own announcement (D1) and announces nothing; only an id not seen before is announced (the first new session notice, the latest
+    new sign-in fact). Dismissing one of two notices therefore never replays the other over a later message or cancels that message's frame. A
+    new session notice arriving while another is shown is now announced (it was not before). The record ends with the presentation; nothing is
+    persisted or shared between tabs.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream

@@ -1,5 +1,6 @@
 import { RouterProvider } from "@tanstack/react-router";
 import { act, render } from "@testing-library/react";
+import * as React from "react";
 import { ProtectedProviders } from "../../../src/app/providers";
 import { createAppRouter } from "../../../src/app/router";
 import { ShellEnvProvider } from "../../../src/app/shell/env";
@@ -322,6 +323,25 @@ export interface Mounted {
   ): Promise<boolean>;
 }
 
+/**
+ * WEB-10a revision 8 (review 8 R21): a test that timed out INSIDE an `act` scope keeps running after Vitest moves on (a test body is
+ * not cancelled), and its scope stays open. React then flushes no later act scope of the file, and once that scope ends during a
+ * following test's act the act depth stays corrupted: every later render waits for ever in React's act queue. The following tests
+ * then fail as if the product were wrong (a missing stale notice, a history that never appears; reproduced in the forced-order
+ * diagnostic `.agtx/evidence/web10a-revision-8/r21`). Between tests the queue is empty in a healthy run, so a mount that finds it
+ * open says so instead. (React's internal act queue; if a later React no longer exposes it, nothing is checked.)
+ */
+export function assertNoOpenActScope(where: string): void {
+  const internals = (
+    React as unknown as Record<string, { actQueue?: unknown[] | null }>
+  ).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const queue = internals?.actQueue;
+  if (queue !== undefined && queue !== null)
+    throw new Error(
+      `${where}: an earlier act() scope is still open (${queue.length} queued) - a previous test timed out inside act or did not await it; this test's results would not be its own`,
+    );
+}
+
 export async function mountTasks(options: {
   path: string;
   rows?: CacheRow[];
@@ -333,6 +353,7 @@ export async function mountTasks(options: {
   /** The cache's state as the sync state records it (revision 2: `invalid` hides cache-sourced content behind the gate). */
   cacheStatus?: "valid" | "invalid";
 }): Promise<Mounted> {
+  assertNoOpenActScope("mountTasks");
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
   await import("../../../src/features/tasks/screens");
   const world = new DataTestWorld();

@@ -136,6 +136,12 @@ async function mountWith(
     api: j.api,
   });
   await t.until(() => document.querySelector("[data-entry-history]") !== null);
+  // Revision 8 (review 8 R21): \`until\` gives up silently after its rounds; a history that never appeared is a failed setup, said here,
+  // not a null container in the test's first click.
+  expect(
+    document.querySelector("[data-entry-history]"),
+    "readiness: the detail's history did not appear within the bounded settling",
+  ).not.toBeNull();
   return { task, t, ...j };
 }
 
