@@ -10,6 +10,11 @@ import {
 import { axe } from "jest-axe";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { DataEnvProvider, useConflictInbox } from "../../../src/data";
+import {
+  DESCRIBE_CONFIGURE,
+  DESCRIBE_CREATE,
+} from "../../../src/features/calendars/copy";
+import { registerCalendarCommands } from "../../../src/features/calendars/register";
 import { CacheGate } from "../../../src/features/sync/CacheGate";
 import * as copy from "../../../src/features/sync/copy";
 import { NoticeList } from "../../../src/features/sync/NoticeBanners";
@@ -697,6 +702,37 @@ describe("the queue panel (WF-QUEUE-01)", () => {
     expect(
       screen.getByText("1.0 L recorded on “Water plants”"),
     ).toBeInTheDocument();
+  });
+
+  test("WEB-13a: a queued calendar create and settings change are described by the calendar slice's registration, content-free", () => {
+    const env = stubEnv({
+      drafts: [
+        draftRow({
+          local_id: "cal-create",
+          created_seq: 1,
+          endpoint: "/calendar-commands",
+          command: {
+            command: {
+              kind: "create_source",
+              id: "00000000-0000-4000-8000-0000000000c1",
+              label: "Private label",
+              timezone: "UTC",
+            },
+          },
+        }),
+        draftRow({
+          local_id: "cal-configure",
+          created_seq: 2,
+          endpoint: "/calendar-commands",
+          command: { command: { kind: "configure_source" } },
+        }),
+      ],
+    });
+    registerCalendarCommands(env.commands);
+    mountPanel(env);
+    expect(screen.getByText(DESCRIBE_CREATE)).toBeInTheDocument();
+    expect(screen.getByText(DESCRIBE_CONFIGURE)).toBeInTheDocument();
+    expect(screen.queryByText(/Private label/)).toBeNull();
   });
 
   test("offline, a queued change says it will send when connected", () => {

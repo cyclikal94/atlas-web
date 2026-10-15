@@ -8,8 +8,10 @@ import {
 } from "../data";
 import { invitationMemory } from "../features/authentication/handoff";
 import { isJoinPath } from "../features/authentication/public-route";
+import { documentRouteChanges } from "../lib/route-changes";
 import { type Session, SessionProvider } from "../session";
 import { AccountSlot } from "./AccountSlot";
+import { appCommands } from "./commands";
 import { ProtectedProviders } from "./providers";
 import { createAppRouter } from "./router";
 import { SessionNotices } from "./SessionNotices";
@@ -74,6 +76,9 @@ export function createProtectedTree(session: Session) {
   void import("../features/tasks/register").then(({ registerTaskCommands }) =>
     registerTaskCommands(getPageDataHost().commands),
   );
+  // Once per document, before the first router: the document's own record of where it is outlives every mount of the tree and every
+  // router, so a screen can tell that the person left it while the tree was unmounted (WEB-13a revision 6, `route-changes.ts`).
+  documentRouteChanges();
   return (): ReactNode => {
     normalisePublicPath();
     // A new router per mount: an account change must not inherit the previous account's location or loaders.
@@ -81,7 +86,7 @@ export function createProtectedTree(session: Session) {
     return (
       <SessionProvider session={session}>
         <ProtectedProviders>
-          <DataProvider session={session}>
+          <DataProvider session={session} commands={appCommands()}>
             <ShellFromData router={router}>
               <RouterProvider router={router} />
               <SessionNotices />

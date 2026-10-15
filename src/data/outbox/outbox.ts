@@ -73,7 +73,12 @@ export type RefusalReason =
   | "no_base"
   | "quota"
   | "storage"
-  | "identity_changed";
+  | "identity_changed"
+  /**
+   * The request stated what its caller saw (`EnqueueRequest.observed`) and the resource has changed since: nothing was stored. The
+   * caller reads the resource again and the person decides again (WEB-13a revision 2); it is never resubmitted on their behalf.
+   */
+  | "changed";
 
 export type EnqueueOutcome =
   | { kind: "queued"; localId: LocalId; createdSeq: number }

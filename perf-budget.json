@@ -23,5 +23,6 @@
       "css_gzip": 7059,
       "fonts": 83736
     }
-  }
+  },
+  "_merged_main_fixture_budget": "Accepted main f4756b2 carried WEB-13a’s separate measured fixture baseline (initial JS 243097, CSS 7240, fonts 83736) and one-off ceiling 267406. Its provenance follows. This merge retains WEB-10a’s stricter 266150 ceiling and existing baseline; it does not authorise a new combined-candidate reset. WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010 (Kieran, 10 October 2026; authority approval/fixture-budget-20261010.json and hand-off delivery/handoffs/fixture-budget-20261010.md in the orchestrator), a one-off re-record for WEB-13a revision 3, dist-fixture only and on the same terms: main's merged WEB-09b/WEB-08b shell measured 240,479 B, and the calendar screen's lazy route makes the bundler split shared React/session code out of the entry into further initial files (243,097 B); baseline re-recorded with `--record`, ceiling = that baseline plus `tolerance`, rounded down (267,406 B). WEB-09c owns replacing it with a reasoned, measured ceiling; this authorises no automatic future reset."
 }

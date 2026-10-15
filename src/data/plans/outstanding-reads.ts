@@ -160,7 +160,8 @@ export const readOutstanding = readPlan<
   },
   OutstandingPage
 >({
-  name: "data.readOutstanding",
+  // Distinct from the single-resource summary in pending-reads.ts (WEB-13a).
+  name: "data.readOutstandingResources",
   scope: ["drafts", "draft_commands", "pending_effects"],
   read: async (reader, input) => {
     const ids = [...new Set(input.ids)];

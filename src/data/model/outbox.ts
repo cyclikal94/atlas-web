@@ -1,4 +1,5 @@
 import { canonicalJson, digestOf } from "./canonical";
+import type { Observation } from "./observation";
 import { OUTSTANDING } from "./reconcile";
 import { isArrayIndex, MAX_DEPTH, snapshotPlain } from "./snapshot";
 import type {
@@ -86,6 +87,12 @@ export interface EnqueueRequest {
    * lost (the commit happened, the answer did not arrive) is recognised and not made twice. The facade supplies one otherwise.
    */
   localId?: LocalId;
+  /**
+   * What the caller saw when it chose the values it builds from (`readResourceView`'s `observation`), or nothing. When given, the save
+   * is written only if the enqueue (or supersede) transaction reads the SAME facts of that resource; otherwise nothing is written and
+   * the answer is `refused / changed` (WEB-13a revision 2). A retry of a save that was already made is recognised first.
+   */
+  observed?: Observation;
   /**
    * PURE. For an edit of a queued draft or a supersession only: called inside the writing transaction with the draft as it is stored
    * NOW (the one being edited, or the one being replaced). `false` refuses the request (`draft_changed`) and nothing is written. A
@@ -430,6 +437,14 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
       ? {}
       : { dependsOnExtra: [...request.dependsOnExtra] }),
     ...(request.localId === undefined ? {} : { localId: request.localId }),
+    ...(request.observed === undefined
+      ? {}
+      : {
+          observed: {
+            resourceId: request.observed.resourceId,
+            token: request.observed.token,
+          },
+        }),
     ...(request.expectDraft === undefined
       ? {}
       : {

@@ -1,4 +1,5 @@
 import { DATA_CONFIG } from "../model/config";
+import { ObservationFold } from "../model/observation";
 import { TargetFold } from "../model/related";
 import type { RowOf, StoreName } from "../model/schema";
 import type {
@@ -166,4 +167,37 @@ export async function readEarliestSharing(
     if (earliest !== null) out.set(earliest.local_id, earliest);
   }
   return [...out.values()];
+}
+
+/**
+ * What a caller saw of one resource (`model/observation.ts`): its cached row, its version record, and every draft that names it, walked
+ * a window at a time and folded into one token. `visit` sees each of those drafts as it is walked (a caller that folds them for itself
+ * reads the population once). The SAME read serves a screen's view and the enqueue or supersede transaction that checks it.
+ */
+export async function readObservation(
+  reader: Reader,
+  incarnationId: string,
+  id: ResourceId,
+  visit?: (row: DraftRow) => void,
+  window: number = WINDOW,
+): Promise<{
+  base: CacheRow | undefined;
+  version: ResourceVersionRow | undefined;
+  token: string;
+}> {
+  const base = await reader.get("cache", id);
+  const version = await reader.get("resource_versions", id);
+  const fold = new ObservationFold(incarnationId, id, base, version);
+  await walkIndex(
+    reader,
+    "drafts",
+    "index_targets",
+    range.only(id),
+    (row) => {
+      fold.add(row);
+      visit?.(row);
+    },
+    window,
+  );
+  return { base, version, token: fold.token() };
 }
