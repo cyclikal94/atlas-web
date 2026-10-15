@@ -113,6 +113,28 @@ replaced unenrolled document, a closed page's violation, and a healthy control o
 in three engines, with its unmutated control) and the revision-3 product mutant rebuilt on this source (AB-1: reported). The review's own probes pass
 unchanged. An injected DOM value is a conservative proxy: it does not prove a person perceived it, and none of this is manual assistive-technology evidence.
 
+**Revision 5 (R5-A/R5-B of review 5, 14 October 2026; design assessment P1-P4).** Revision 4 restored historical VALUES but still read the
+document's TOPOLOGY as it was at the end of a batch: a subtree inserted and dismantled in one task lost the descendants it was inserted with, a title
+text node detached afterwards was no longer title content, and page totals let an interrupted enrolled document pay for a loaded document that never
+enrolled (the review's probes). The oracle is now three test-only modules. `display-recorder.ts` judges every batch of mutation records against the
+document AS IT WAS at each record: the batch's start is reconstructed by undoing the records from the live end state (values by their old values, child
+lists by their added/removed nodes and sibling anchors), then the records are replayed forwards, each judged with that moment's descendants,
+connectedness, `#protected-root` identity, title membership and id references (a self-check requires the replay to reach the live child lists; any
+mismatch, and every recorder bound, is incomplete). It also judges a form field's `value` PROPERTY (no mutation record shows it), reports an attached
+shadow root as unobserved, no longer exempts a title written while the document loads (the static titles are recognised by value), and binds itself to
+its own document (a Window reused by a later document, as Firefox's first same-origin iframe document reuses its initial `about:blank` Window with no
+init script, is not judged by a stale recorder; the test reports such a document as unobserved). A separate document WITNESS gives every document its
+identity and keeps its terminal counters in a cookie no application request or `document.cookie` at the application's paths can see, written before
+each report: measured in Chromium, Firefox and WebKit, a binding report made just before `page.close()` is often lost, the cookie never was. The ledger
+(`display-ledger.ts`) accounts for each document by that identity: a witnessed main document must have enrolled; once replaced or closed, every report
+it says it made must have arrived (a gap is incomplete); a successor's answer never acknowledges its predecessor; documents that escaped the witness too
+are found from the host's own loads; the sealed collection is serialised and repeated until nothing happened during it. Qualified on explicit
+histories (`tests/oracle/`, S1-S17) and natively in three engines ("Q1 (revision 5)": nested, sibling, moved, replaced and fragment subtrees, detached
+and replaced titles, replacement roots, remounts, the value property, parser titles, two tabs, helpers, the review's interrupted-document schedule and a
+still-loading one, identical URLs, replacement, redirect (not WebKit: a route-fulfilled 302 does not complete there), closure and lost tails, held and
+dropped reports, concurrent sealing, a successor, inspection failures and bounds, frames and blank documents), with eighteen semantic mutants (R5-M1 to
+R5-M11 and OR-1 to OR-7 re-anchored), each caught in three engines after its control, run on an isolated copy. The review's own probes pass unchanged.
+
 **Retained work** is compared WHOLE (drafts, command bodies, pending effects, unfinished forms; canonical JSON) at every boundary before the display;
 replay is allowed only after it (T24 E).
 

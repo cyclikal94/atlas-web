@@ -183,7 +183,14 @@ test.afterEach(async ({ context }, testInfo) => {
   if (testInfo.status !== testInfo.expectedStatus) {
     await testInfo.attach("display-oracle.json", {
       body: JSON.stringify(
-        { violations: current.violations(), pages: context.pages().length },
+        {
+          violations: current.violations(),
+          pages: context.pages().length,
+          // WEB-08c revision 5: the per-document ledger (diagnostic only; a failed case stays failed).
+          ledger: await current
+            .coverage()
+            .catch((error: unknown) => String(error)),
+        },
         null,
         1,
       ),

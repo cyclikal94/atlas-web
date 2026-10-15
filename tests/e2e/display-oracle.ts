@@ -1,34 +1,60 @@
 import type { BrowserContext, Page } from "@playwright/test";
+import {
+  type Answer,
+  assess,
+  type Counter,
+  type DocumentOutcome,
+  type LedgerResult,
+  type OracleEvent,
+  type PageState,
+  parseCounter,
+  type Role,
+  type WitnessEvent,
+} from "./display-ledger";
+import {
+  DEFAULT_LIMITS,
+  EVIDENCE_COOKIE,
+  oracleScript,
+  type RecorderLimits,
+  witnessScript,
+} from "./display-recorder";
 import { expect } from "./helpers";
 
 /**
- * WEB-08c revision 3 (R5; design assessment P1, Q1): a CONTINUOUS no-early-display oracle for real pages. TEST-ONLY: it is an init script,
- * installed in every page of a context before any application script runs, and a binding that reports to the test process.
+ * WEB-08c revision 3 (R5; design assessment P1, Q1), revised in revisions 4 and 5: a CONTINUOUS no-early-display oracle for real pages.
+ * TEST-ONLY: two init scripts installed in every document of a context before any application script runs (`display-recorder.ts`: the
+ * document WITNESS, then the RECORDER), two bindings that report to the test process, and the document LEDGER (`display-ledger.ts`).
  *
  * What it decides. A page may expose an account (put a node into `#protected-root`, remove its `inert` or `aria-hidden`, set a protected
  * title, or show an account's marker text anywhere in the document) only while the LATEST `atlas-auth` record THIS page has seen COMMITTED
  * names that account as settled with no fence entry for it. That record is observed at the durable boundary itself: every `atlas-auth`
  * transaction of the page is followed, the record it read (`getAll`) or wrote (`put` of `auth_state`) is summarised, and the summary is
- * adopted only when the transaction's `complete` event is delivered (a completion listener added when the transaction is created runs before
- * the application's own `oncomplete`). An aborted transaction changes nothing. The exposure cover is such a transaction, so a correct page
- * always has the authorising record in hand before its `act`; a page that lifts or mounts while its last committed record still holds the
- * fence is a violation, whatever happens afterwards.
+ * adopted only when the transaction's `complete` event is delivered, after every DOM change made before it has been judged. An aborted
+ * transaction changes nothing. A page that lifts or mounts while its last committed record still holds the fence is a violation, whatever
+ * happens afterwards.
  *
- * Why not the final state. Every DOM change is taken from a `MutationObserver`'s RECORDS, which keep each change (an `inert` removed and set
- * again in one task is two records; a node appended and removed is two records), and the records are drained synchronously into the same
- * ordered log before every observed `atlas-auth` event and kernel trace event, so the order of a mutation and a durable boundary is the
- * order in the page. A violation is recorded when it happens and reported at once; a later re-gate cannot erase it.
+ * How it reads the DOM (revision 5, R5-A). Every change is taken from `MutationObserver` records and judged as the document WAS at that
+ * record (reconstructed from the records; see `display-recorder.ts`), never by its final topology: a subtree inserted and dismantled in one
+ * task, a title text node changed and detached, a name or text set and reset, are each judged on what they showed while they showed it.
  *
- * Enrolment. Each page reports `enrolled` from the init script, before the document has any application script; `assertClean` fails for
- * any page of the context that did not enrol (a page that escaped the oracle is a failed setup, never a silent pass).
+ * What it covers (revision 5, R5-B). Every DOCUMENT of the context is accounted for by its own identity (`display-ledger.ts`): each
+ * witnessed main document must have enrolled, and its evidence must be complete (answered for itself when the run is sealed, or, once
+ * replaced or closed, every substantive report it says it made delivered); documents that escaped the witness too are found from the
+ * host's own loads. A failure to observe is MISSING or INCOMPLETE, never clean.
  *
  * The kernel trace of the fixture's session harness (`window.__atlasFixture.session.trace`) is followed when it exists, as annotations
  * only (the production build has none); it never authorises anything.
  */
 
 export interface OracleViolation {
+  /** The controller's ordinal of the page that delivered it (1 for the first page the installation saw; 0 unknown). */
   page: number;
+  /** The document that recorded it (the witness's identity). */
+  doc: string;
+  /** Its position in the document's ordered log. */
   seq: number;
+  /** Its position in the document's substantive report sequence. */
+  sseq: number;
   kind: "mount" | "lift" | "title" | "marker";
   detail: string;
   /** The page's latest committed `atlas-auth` record when it happened (null: none yet). */
@@ -47,6 +73,15 @@ export interface RecordSummary {
  */
 export const FIXTURE_ACCOUNT_MARKERS: readonly string[] = ["alice"];
 
+/** One report as it crosses from a document to the test (qualification only: a transport fault is injected here). */
+export interface TransportReport {
+  binding: "witness" | "oracle";
+  doc: string;
+  type: string;
+  sseq?: number;
+  url?: string;
+}
+
 export interface OracleOptions {
   /**
    * Account-specific text (usernames, cached content). None of it may be in the document while NO account is authorised: the neutral
@@ -54,590 +89,170 @@ export interface OracleOptions {
    * switcher lists them by their verified names, by design.)
    */
   markers?: string[];
+  /** Recorder bounds (qualification lowers them to reach each one); reaching one is incomplete evidence. */
+  limits?: Partial<RecorderLimits>;
+  /** QUALIFICATION ONLY: decides the fate of each report (deliver, lose it, or deliver it later). Consumers never set it. */
+  transport?: (
+    report: TransportReport,
+  ) => "deliver" | "drop" | Promise<"deliver" | "drop">;
 }
 
-interface PageReport {
-  type: "enrolled" | "violation" | "boundary" | "incomplete";
-  page: number;
-  url?: string;
-  violation?: OracleViolation;
-  boundary?: { seq: number; account: string | null; kind: string };
-  detail?: string;
-}
-
-/** The in-page part. Self-contained: it is serialised into the init script. */
-function oracleScript(config: { markers: string[] }): void {
-  const w = window as unknown as {
-    __displayOracle?: unknown;
-    __displayOracleReport?: (report: unknown) => void;
-    __atlasFixture?: unknown;
-  };
-  if (new URL(location.href).searchParams.get("oracle") === "off") return;
-  const pageId = Math.floor(Math.random() * 1e9);
-  const log: Array<Record<string, unknown>> = [];
-  const violations: Array<Record<string, unknown>> = [];
-  let seq = 0;
-  let record: {
-    settled: string | null;
-    epoch: number | null;
-    fences: Record<string, number>;
-    tx: number;
-  } | null = null;
-  /** The account whose exposure this page is in (opened by an authorised exposure, ended by a gate or an empty root). */
-  let episode: string | null = null;
-  const report = (payload: Record<string, unknown>) => {
-    try {
-      w.__displayOracleReport?.({ page: pageId, ...payload });
-    } catch {
-      // The binding is gone (the page is closing): the in-page log keeps it.
-    }
-  };
-  /** A limit of the recorder that was reached: the page's qualification is INCOMPLETE (never a clean result). */
-  const limits: string[] = [];
-  const incomplete = (what: string) => {
-    if (limits.includes(what)) return;
-    limits.push(what);
-    report({ type: "incomplete", detail: what });
-  };
-  const push = (entry: Record<string, unknown>) => {
-    seq += 1;
-    const item = { seq, t: performance.now(), ...entry };
-    if (log.length < 20_000) log.push(item);
-    else incomplete("log over 20000 entries");
-    return item;
-  };
-  const authorised = (): string | null => {
-    if (!record || record.settled === null) return null;
-    return (record.fences[record.settled] ?? 0) === 0 ? record.settled : null;
-  };
-  const violate = (kind: string, detail: string) => {
-    const item = push({ op: "VIOLATION", kind, detail, record });
-    const v = { page: pageId, seq: item.seq, kind, detail, record };
-    violations.push(v);
-    report({ type: "violation", violation: v });
-  };
-  const rootOf = () => document.getElementById("protected-root");
-  /** An exposure event: allowed only for the authorised account; it opens (or continues) that account's episode. */
-  const exposure = (kind: string, detail: string) => {
-    const allowed = authorised();
-    if (allowed === null) {
-      violate(kind, detail);
-      return;
-    }
-    if (episode !== allowed) {
-      episode = allowed;
-      const item = push({ op: "episode.open", account: allowed, record });
-      report({
-        type: "boundary",
-        boundary: { seq: item.seq, account: allowed, kind: "episode.open" },
-      });
-    }
-  };
-  /**
-   * WEB-08c revision 4 (R5 of the review of 14 October 2026; design assessment P1, S13/S14): what a node EXPOSES to a reader or to
-   * assistive technology is its text AND its name-bearing attributes. Every one of them is watched, on every element of the document,
-   * and judged on each value WRITTEN, reconstructed per target from the records (an attribute: the next record's old value for the same
-   * element and attribute; a text node: the next record's old value for the same node), so a value set and reset in one task is seen.
-   */
-  const NAMED = [
-    "aria-label",
-    "aria-description",
-    "aria-roledescription",
-    "aria-valuetext",
-    "aria-placeholder",
-    "aria-labelledby",
-    "aria-describedby",
-    "title",
-    "alt",
-    "placeholder",
-    "value",
-    "label",
-  ];
-  const GATES = ["inert", "aria-hidden"];
-  /** The text an attribute value exposes: an id reference names the text of the elements it refers to. */
-  const attributeText = (name: string, value: string | null): string => {
-    if (value === null) return "";
-    if (name !== "aria-labelledby" && name !== "aria-describedby") return value;
-    return value
-      .split(/\s+/)
-      .map((id) => (id ? document.getElementById(id) : null))
-      .map((el) =>
-        el
-          ? `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""}`
-          : "",
-      )
-      .join(" ");
-  };
-  /** A node's text and the name-bearing attributes of it and of every element under it. */
-  const exposedText = (node: Node): string => {
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
-    if (!(node instanceof Element)) return "";
-    const parts = [node.textContent ?? ""];
-    const elements = [node, ...node.querySelectorAll("*")];
-    for (const el of elements.slice(0, 5_000))
-      for (const name of NAMED)
-        if (
-          el.hasAttribute(name) &&
-          // HF-14: a value the person entered into this field is not judged (below).
-          !(name === "value" && entered.get(el) === el.getAttribute(name))
-        )
-          parts.push(attributeText(name, el.getAttribute(name)));
-    if (elements.length > 5_000) incomplete("subtree over 5000 elements");
-    return parts.join(" ");
-  };
-  /**
-   * Nodes INSERTED while no exposure episode was open (and everything under them then). Their earlier values are as prohibited as their
-   * later ones: an old value of one of their records, or the text of one that is removed again, is judged too. (A node that was present
-   * during an authorised episode is not: its unmount under the gate is legitimate.)
-   */
-  /**
-   * WEB-08c revision 4 (HF-14): what the PERSON entered into a form field is not something the application disclosed. React mirrors a
-   * controlled input's value into its `value` attribute, so a username typed into the sign-in form while another account is fenced was
-   * reported as a marker (I-L13 R1/R2 in three engines: "kate", "liam", "nora", each the test's own typing). The value of every `input`
-   * event is recorded per element (capture phase, before the framework mirrors it), and a `value` attribute written EQUAL to what the person
-   * entered in that element is not judged. Any other value write (a prefill with no input event, another field's value) still is.
-   */
-  const entered = new WeakMap<Node, string>();
-  document.addEventListener(
-    "input",
-    (event) => {
-      const target = event.target as { value?: unknown } | null;
-      if (target && typeof target.value === "string")
-        entered.set(target as unknown as Node, target.value);
-    },
-    true,
-  );
-  const insertedClosed = new WeakSet<Node>();
-  /** The inserted subtree a node came with: one exposure of that subtree is reported once, whichever of its records shows it. */
-  const insertedWith = new WeakMap<Node, Node>();
-  const enrolClosed = (node: Node) => {
-    insertedClosed.add(node);
-    insertedWith.set(node, node);
-    const walker = document.createTreeWalker(node);
-    let count = 0;
-    while (walker.nextNode() && count < 20_000) {
-      insertedClosed.add(walker.currentNode);
-      insertedWith.set(walker.currentNode, node);
-      count += 1;
-    }
-    if (count >= 20_000) incomplete("inserted subtree over 20000 nodes");
-  };
-  /** The markers already reported for a node: one exposure is one violation, however many of its records show it. */
-  const reportedOn = new WeakMap<Node, Set<string>>();
-  const checkMarkers = (text: string, where: string, from: Node) => {
-    if (episode !== null) return;
-    const node = insertedWith.get(from) ?? from;
-    for (const word of config.markers) {
-      if (!text.includes(word)) continue;
-      {
-        let seen = reportedOn.get(node);
-        if (!seen) {
-          seen = new Set();
-          reportedOn.set(node, seen);
-        }
-        if (seen.has(word)) continue;
-        seen.add(word);
-      }
-      violate("marker", `${where}: "${word}"`);
-    }
-  };
-  const NEUTRAL_TITLES = new Set([
-    "",
-    "Atlas",
-    // The fixture build's own static title (index.html of the fixture mode): the build's name, nothing about an account.
-    "Atlas (fixture)",
-    "Sign in · Atlas",
-    "Join · Atlas",
-  ]);
-  /**
-   * Judged on the value WRITTEN (a title set and reset in one task is two writes), never on the title as it is now. A value of one
-   * title text node is reported once, however many of its records show it.
-   */
-  const titlesOn = new WeakMap<Node, Set<string>>();
-  const checkTitle = (title: string, from?: Node) => {
-    push({ op: "title", title });
-    if (NEUTRAL_TITLES.has(title.trim()) || episode !== null) return;
-    if (from) {
-      const node = insertedWith.get(from) ?? from;
-      let seen = titlesOn.get(node);
-      if (!seen) {
-        seen = new Set();
-        titlesOn.set(node, seen);
-      }
-      if (seen.has(title)) return;
-      seen.add(title);
-    }
-    violate("title", `title "${title}"`);
-  };
-  /** Whether a record is the setter's own change of the <title> element (already judged on the value written). */
-  const titleRecord = (r: MutationRecord): boolean => {
-    const target = r.target as Node;
-    if (target.nodeName === "TITLE" || target.parentNode?.nodeName === "TITLE")
-      return true;
-    return [...r.addedNodes].some((node) => node.nodeName === "TITLE");
-  };
-  const titleDescriptor = Object.getOwnPropertyDescriptor(
-    Document.prototype,
-    "title",
-  );
-  if (titleDescriptor?.set) {
-    const setTitle = titleDescriptor.set;
-    Object.defineProperty(Document.prototype, "title", {
-      ...titleDescriptor,
-      set(this: Document, value: string) {
-        drain();
-        checkTitle(String(value));
-        setTitle.call(this, value);
-        // The setter's own change of the <title> element is already judged; every OTHER record is handled (none is discarded unseen).
-        handle(observer.takeRecords().filter((r) => !titleRecord(r)));
-      },
-    });
-  }
-  const inTitle = (node: Node) =>
-    node.nodeName === "TITLE" || node.parentNode?.nodeName === "TITLE";
-  const handle = (records: MutationRecord[]) => {
-    const root = rootOf();
-    // The value a record SET is the next record's old value for the same TARGET (and attribute); only the last record's is the value as
-    // it is now. Reading the current value instead hides a change undone in the same task (attributes: revision 3; text: revision 4).
-    const setTo = new Map<MutationRecord, string | null>();
-    const laterAttr = new Map<Node, Map<string, MutationRecord>>();
-    const laterText = new Map<Node, MutationRecord>();
-    for (let index = records.length - 1; index >= 0; index -= 1) {
-      const r = records[index] as MutationRecord;
-      const target = r.target as Node;
-      if (r.type === "attributes") {
-        const key = `${r.attributeNamespace ?? ""}|${r.attributeName ?? ""}`;
-        let byName = laterAttr.get(target);
-        if (!byName) {
-          byName = new Map();
-          laterAttr.set(target, byName);
-        }
-        const next = byName.get(key);
-        const current =
-          target instanceof Element
-            ? r.attributeNamespace
-              ? target.getAttributeNS(
-                  r.attributeNamespace,
-                  r.attributeName ?? "",
-                )
-              : target.getAttribute(r.attributeName ?? "")
-            : null;
-        setTo.set(r, next ? next.oldValue : current);
-        byName.set(key, r);
-      } else if (r.type === "characterData") {
-        const next = laterText.get(target);
-        setTo.set(r, next ? next.oldValue : (target.textContent ?? ""));
-        laterText.set(target, r);
-      }
-    }
-    for (const r of records) {
-      const target = r.target as Node;
-      const inRoot =
-        root !== null && (target === root || root.contains(target));
-      const where = inRoot ? "protected-root" : "document";
-      if (r.type === "attributes") {
-        const name = r.attributeName ?? "";
-        const now = setTo.get(r) ?? null;
-        if (target === root && GATES.includes(name)) {
-          push({ op: "attr", name, old: r.oldValue, now });
-          // A lift: `inert` removed; `aria-hidden` removed or made "false" (both expose the tree to assistive technology).
-          const lifted =
-            name === "inert"
-              ? now === null && r.oldValue !== null
-              : (now === null || now === "false") &&
-                r.oldValue !== null &&
-                r.oldValue !== "false";
-          if (lifted)
-            exposure(
-              "lift",
-              `${name} ${now === null ? "removed" : `set to "${now}"`}`,
-            );
-          else if (now !== null && name === "inert") {
-            // A gate: the episode of the account ends (a lift must be authorised again).
-            if (episode !== null) push({ op: "episode.close", reason: "gate" });
-            episode = null;
-          }
-        } else if (NAMED.includes(name)) {
-          // HF-14: the person's own entry into this field, mirrored by the framework, is not a disclosure.
-          if (name === "value" && now !== null && entered.get(target) === now)
-            continue;
-          checkMarkers(attributeText(name, now), `${where} [${name}]`, target);
-          if (insertedClosed.has(target))
-            checkMarkers(
-              attributeText(name, r.oldValue),
-              `${where} [${name}] (earlier)`,
-              target,
-            );
-        }
-      } else if (r.type === "childList") {
-        // A tree is mounted by inserting its root container DIRECTLY into #protected-root (and portals stay inside the tree, lint R3).
-        // Re-renders deep inside a retained, inert tree are not an exposure; its lift is.
-        if (target === root && r.addedNodes.length > 0) {
-          push({ op: "add", nodes: r.addedNodes.length });
-          if (episode === null)
-            exposure("mount", "node inserted into #protected-root");
-        }
-        if (target === root && r.removedNodes.length > 0) {
-          push({ op: "remove", nodes: r.removedNodes.length });
-          if (root && root.childNodes.length === 0) {
-            if (episode !== null)
-              push({ op: "episode.close", reason: "unmounted" });
-            episode = null;
-          }
-        }
-        for (const node of r.addedNodes) {
-          if (episode === null) enrolClosed(node);
-          // The parser's own static <title> (the document is still loading) is the build's, not a write by the application.
-          if (inTitle(node) || target.nodeName === "TITLE") {
-            if (document.readyState !== "loading")
-              checkTitle(node.textContent ?? "");
-          } else if (episode === null)
-            checkMarkers(exposedText(node), where, node);
-        }
-        // A node inserted while closed and removed again (in this task or later) was in the document: what it showed then is judged.
-        if (episode === null)
-          for (const node of r.removedNodes)
-            if (
-              insertedClosed.has(node) &&
-              !inTitle(node) &&
-              target.nodeName !== "TITLE"
-            )
-              checkMarkers(exposedText(node), `${where} (removed)`, node);
-      } else if (r.type === "characterData") {
-        const now = setTo.get(r) ?? "";
-        if (inTitle(target)) {
-          checkTitle(now, target);
-          if (insertedClosed.has(target) && r.oldValue !== null)
-            checkTitle(r.oldValue, target);
-        } else {
-          checkMarkers(now, where, target);
-          if (insertedClosed.has(target) && r.oldValue !== null)
-            checkMarkers(r.oldValue, `${where} (earlier)`, target);
-        }
-      }
-    }
-  };
-  const observer = new MutationObserver(handle);
-  const drain = () => handle(observer.takeRecords());
-  const arm = () =>
-    observer.observe(document, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      characterDataOldValue: true,
-      attributes: true,
-      attributeOldValue: true,
-      attributeFilter: [...GATES, ...NAMED],
-    });
-  arm();
-
-  // ---- the durable boundary: every atlas-auth transaction of this page ----
-  type TxInfo = { id: number; mode: string; read: unknown; written: unknown };
-  const txs = new WeakMap<IDBTransaction, TxInfo>();
-  let txIds = 0;
-  const summarise = (values: unknown[], id: number) => {
-    const state = values.find(
-      (v) =>
-        v !== null &&
-        typeof v === "object" &&
-        "fences" in (v as object) &&
-        "settled" in (v as object),
-    ) as
-      | {
-          settled: { account_id: string; epoch: number } | null;
-          fences: Record<string, unknown[]>;
-        }
-      | undefined;
-    if (!state) return { settled: null, epoch: null, fences: {}, tx: id };
-    const fences: Record<string, number> = {};
-    for (const [account, list] of Object.entries(state.fences ?? {}))
-      fences[account] = Array.isArray(list) ? list.length : 0;
-    return {
-      settled: state.settled?.account_id ?? null,
-      epoch: state.settled?.epoch ?? null,
-      fences,
-      tx: id,
-    };
-  };
-  const transaction = IDBDatabase.prototype.transaction;
-  IDBDatabase.prototype.transaction = function (
-    this: IDBDatabase,
-    ...args: Parameters<IDBDatabase["transaction"]>
-  ) {
-    const tx = transaction.apply(this, args);
-    if (this.name === "atlas-auth") {
-      const info: TxInfo = {
-        id: ++txIds,
-        mode: String(args[1] ?? "readonly"),
-        read: null,
-        written: null,
-      };
-      txs.set(tx, info);
-      tx.addEventListener("complete", () => {
-        drain();
-        const summary = (info.written ?? info.read) as typeof record;
-        if (summary) {
-          record = summary;
-          push({ op: "auth.commit", tx: info.id, record: summary });
-        }
-      });
-      tx.addEventListener("abort", () => {
-        drain();
-        push({ op: "auth.abort", tx: info.id });
-      });
-    }
-    return tx;
-  } as IDBDatabase["transaction"];
-  const getAll = IDBObjectStore.prototype.getAll;
-  IDBObjectStore.prototype.getAll = function (
-    this: IDBObjectStore,
-    ...args: Parameters<IDBObjectStore["getAll"]>
-  ) {
-    const request = getAll.apply(this, args);
-    const info = txs.get(this.transaction);
-    if (info)
-      request.addEventListener("success", () => {
-        info.read = summarise(request.result as unknown[], info.id);
-      });
-    return request;
-  } as IDBObjectStore["getAll"];
-  const put = IDBObjectStore.prototype.put;
-  IDBObjectStore.prototype.put = function (
-    this: IDBObjectStore,
-    ...args: Parameters<IDBObjectStore["put"]>
-  ) {
-    const info = txs.get(this.transaction);
-    if (info && args[1] === "auth_state")
-      info.written = summarise([args[0]], info.id);
-    return put.apply(this, args);
-  } as IDBObjectStore["put"];
-
-  // ---- annotations: the fixture harness's kernel trace, when there is one ----
-  let fixture: unknown;
-  const follow = (value: unknown) => {
-    const trace = (value as { session?: { trace?: unknown[] } } | undefined)
-      ?.session?.trace;
-    if (!Array.isArray(trace) || (trace as { __oracle?: boolean }).__oracle)
-      return;
-    (trace as { __oracle?: boolean }).__oracle = true;
-    const original = trace.push.bind(trace);
-    Object.defineProperty(trace, "push", {
-      configurable: true,
-      writable: true,
-      value: (...items: Array<{ event?: string; data?: unknown }>) => {
-        drain();
-        for (const item of items)
-          if (
-            item.event &&
-            /^(act\.|display\.|gate\.|hold\.|data\.recovery_|evaluate$)/.test(
-              item.event,
-            )
-          )
-            push({ op: `k:${item.event}`, data: item.data });
-        return original(...items);
-      },
-    });
-  };
-  Object.defineProperty(window, "__atlasFixture", {
-    configurable: true,
-    get: () => fixture,
-    set: (value) => {
-      fixture = value;
-      follow(value);
-    },
-  });
-
-  w.__displayOracle = {
-    log,
-    violations,
-    mark(label: string) {
-      drain();
-      push({ op: "mark", label });
-    },
-    state: () => ({ record, episode }),
-    /** Drains every pending record and answers what this document holds (the final acknowledgement of `assertClean`). */
-    flush: () => {
-      drain();
-      return { page: pageId, violations: [...violations], limits: [...limits] };
-    },
-  };
-  push({ op: "enrolled", readyState: document.readyState });
-  report({ type: "enrolled", url: location.href });
+export interface Coverage {
+  open: number;
+  enrolled: number;
+  loaded: number;
+  missing: string[];
+  incomplete: string[];
+  documents: DocumentOutcome[];
+  violations: OracleViolation[];
 }
 
 export interface DisplayOracle {
-  /** Violations reported by every page of the context so far, including pages that have closed. */
+  /** Violations DELIVERED so far by every document of the context, including documents that were replaced or closed. */
   violations(): OracleViolation[];
   /** The test marks a point in a page's log (for example "finish released"). */
   mark(page: Page, label: string): Promise<void>;
-  /** The page's own ordered log (diagnostic). */
+  /** The page's own ordered log (diagnostic; empty when its document has no recorder). */
   log(page: Page): Promise<Array<Record<string, unknown>>>;
   /**
-   * Every DOCUMENT the context loaded enrolled before its application ran, every open document can be inspected and acknowledges what
-   * it holds, no recorder limit was reached, and no document (open or closed) reported a violation.
+   * Seals the run: every document of the context is accounted for (its enrolment, and complete evidence), no recorder limit was reached,
+   * and no document (open, replaced or closed) recorded a violation.
    */
   assertClean(message?: string): Promise<void>;
   /**
-   * The coverage of the oracle (WEB-08c revision 4, DA-H1/S16): `missing` lists every document that did not enrol (an open page whose
-   * CURRENT document is not enrolled, asked in the page itself; a page that loaded more documents than enrolled from it, closed pages
-   * included) and every open document that could not be inspected (unknown is never enrolled). `incomplete` lists recorder limits.
+   * The sealed ledger (WEB-08c revision 5, R5-B): one outcome per document. Calls are serialised; each collects its own state, repeated
+   * until nothing happened in the context during the collection (else incomplete).
    */
-  coverage(): Promise<{
-    open: number;
-    enrolled: number;
-    loaded: number;
-    missing: string[];
-    incomplete: string[];
-  }>;
+  coverage(): Promise<Coverage>;
+  /** The last sealed ledger (diagnostic attachments). */
+  lastCoverage(): Coverage | null;
   /** The marker vocabulary this installation checks (a caller's evidence states it). */
   readonly markers: readonly string[];
 }
+
+type FlushAnswer = {
+  doc: string;
+  role: Role | null;
+  /** Whether the window still shows this recorder's own document. */
+  current: boolean;
+  sseq: number;
+  violations: Array<Omit<OracleViolation, "page">>;
+  limits: string[];
+};
 
 export async function installDisplayOracle(
   context: BrowserContext,
   options: OracleOptions = {},
 ): Promise<DisplayOracle> {
-  const reports: Array<PageReport & { from: Page | null }> = [];
   const markers = [...(options.markers ?? [])];
-  await context.exposeBinding(
-    "__displayOracleReport",
-    (source, payload: PageReport) => {
-      // Only a page's MAIN frame is an application document (the app has no frames; a frame's report still counts as a violation).
-      const main = source.frame === source.page?.mainFrame();
-      reports.push({ ...payload, from: main ? source.page : null });
-    },
-  );
-  // Each document draws its own id in the page (one init script serves every page of the context).
-  await context.addInitScript(oracleScript, { markers });
-  /**
-   * Every document a page LOADED (its main frame's `domcontentloaded`), by page: each must have enrolled. A document that loaded and was
-   * replaced or closed before it could be asked is still accounted for here.
-   */
-  const loaded = new Map<Page, string[]>();
+  const limits: RecorderLimits = { ...DEFAULT_LIMITS, ...options.limits };
+  /** Anything that happened in the context (a page, a load, a navigation, a close, a delivered report): a sealed interval has none. */
+  let activity = 0;
+  const pages = new Map<Page, { id: number; loads: string[] }>();
+  // The expected-document side is registered BEFORE any script or binding: every page of the context, and every page it opens later.
   const watch = (page: Page) => {
-    if (loaded.has(page)) return;
-    loaded.set(page, []);
+    if (pages.has(page)) return pages.get(page)?.id ?? 0;
+    const state = { id: pages.size + 1, loads: [] as string[] };
+    pages.set(page, state);
+    activity += 1;
     page.on("domcontentloaded", () => {
-      const url = page.url();
-      if (url !== "about:blank") loaded.get(page)?.push(url);
+      activity += 1;
+      state.loads.push(page.url());
     });
+    const busy = () => {
+      activity += 1;
+    };
+    page.on("framenavigated", busy);
+    page.on("frameattached", busy);
+    page.on("framedetached", busy);
+    page.on("close", busy);
+    return state.id;
   };
   for (const page of context.pages()) watch(page);
   context.on("page", watch);
-  type Flushed = {
-    page: number;
-    violations: OracleViolation[];
-    limits: string[];
-  } | null;
-  const flushed: Flushed[] = [];
-  const violations = () =>
+  const idOf = (page: Page | null | undefined) => (page ? watch(page) : 0);
+
+  const witness: WitnessEvent[] = [];
+  const reports: OracleEvent[] = [];
+  const decide = async (report: TransportReport) =>
+    options.transport ? await options.transport(report) : "deliver";
+  await context.exposeBinding(
+    "__displayOracleWitness",
+    async (
+      source,
+      payload: {
+        doc: string;
+        role: Role;
+        type: "document" | "loaded";
+        url: string;
+      },
+    ) => {
+      const fate = await decide({
+        binding: "witness",
+        doc: payload.doc,
+        type: payload.type,
+        url: payload.url,
+      });
+      if (fate !== "deliver") return;
+      activity += 1;
+      witness.push({
+        page: idOf(source.page),
+        main: source.frame === source.page?.mainFrame(),
+        doc: payload.doc,
+        role: payload.role,
+        type: payload.type,
+        url: payload.url,
+      });
+    },
+  );
+  await context.exposeBinding(
+    "__displayOracleReport",
+    async (source, payload: Omit<OracleEvent, "page" | "main">) => {
+      const fate = await decide({
+        binding: "oracle",
+        doc: payload.doc,
+        type: payload.type,
+        sseq: payload.sseq,
+        url: payload.url,
+      });
+      if (fate !== "deliver") return;
+      activity += 1;
+      reports.push({
+        ...payload,
+        page: idOf(source.page),
+        // Only a page's MAIN frame is an application document (the app has no frames; a frame's violation still counts).
+        main: source.frame === source.page?.mainFrame(),
+      });
+    },
+  );
+  // The witness first: the recorder of the same document takes its identity from it.
+  await context.addInitScript(witnessScript, EVIDENCE_COOKIE);
+  await context.addInitScript(oracleScript, { markers, limits });
+
+  const violations = (): OracleViolation[] =>
     reports
       .filter((r) => r.type === "violation" && r.violation)
-      .map((r) => r.violation as OracleViolation);
+      .map(
+        (r) =>
+          ({
+            ...(r.violation as object),
+            page: r.page,
+            sseq: r.sseq ?? 0,
+          }) as OracleViolation,
+      );
+  let last: Coverage | null = null;
+  let chain: Promise<unknown> = Promise.resolve();
+  const coverage = () => {
+    const run = chain.then(collect);
+    chain = run.catch(() => undefined);
+    return run;
+  };
   return {
     violations,
     assertClean,
     markers,
+    coverage,
+    lastCoverage: () => last,
     async mark(page, label) {
       await page.evaluate(
         (l) =>
@@ -659,93 +274,145 @@ export async function installDisplayOracle(
           ).__displayOracle?.log ?? []) as Array<Record<string, unknown>>,
       );
     },
-    coverage,
   };
-  /** Asks the page's current document to drain and acknowledge; `undefined` when it cannot be inspected (after a few tries). */
-  async function flush(page: Page): Promise<Flushed | "closed" | undefined> {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (page.isClosed()) return "closed";
-      try {
-        return await page.evaluate(
-          () =>
-            (
-              window as unknown as {
-                __displayOracle?: { flush(): Flushed };
-              }
-            ).__displayOracle?.flush() ?? null,
-        );
-      } catch {
-        // A navigation replaced the document while it was asked: ask the new one.
-        await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-      }
+
+  /** Asks a page's CURRENT document, once, for its identity and what it holds (bounded: an unanswered question is a failed inspection). */
+  async function ask(page: Page) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        page.evaluate(() => {
+          const w = window as unknown as {
+            __displayOracleDocument?: { doc: string; current(): boolean };
+            __displayOracle?: { flush(): unknown };
+          };
+          // A witness left by an EARLIER document of a reused Window does not witness this one.
+          const handle = w.__displayOracleDocument;
+          return {
+            witness: handle?.current() ? handle.doc : null,
+            answer: (w.__displayOracle?.flush() ?? null) as FlushAnswer | null,
+            url: location.href,
+          };
+        }),
+        new Promise<never>((_, fail) => {
+          timer = setTimeout(
+            () => fail(new Error("no answer in 10 s")),
+            10_000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
     }
-    return page.isClosed() ? "closed" : undefined;
   }
-  async function coverage() {
-    const missing: string[] = [];
-    const incomplete: string[] = [];
-    const pages = context.pages().filter((page) => !page.isClosed());
-    flushed.length = 0;
-    /** Pages whose CURRENT document is already reported missing (its load is not counted twice below). */
-    const reported = new Set<Page>();
-    for (const page of pages) {
-      if (page.url() === "about:blank") continue;
-      const answer = await flush(page);
-      if (answer === "closed") continue;
-      if (answer === undefined) {
-        missing.push(`${page.url()} (uninspectable)`);
-        reported.add(page);
-      } else if (answer === null) {
-        missing.push(page.url());
-        reported.add(page);
-      } else {
-        flushed.push(answer);
-        for (const limit of answer.limits)
-          incomplete.push(`${page.url()}: ${limit}`);
+  /** Whether each SUBFRAME's current document is observed by its own witness and recorder. */
+  async function framesOf(page: Page) {
+    const frames: Array<{ url: string; observed: boolean | null }> = [];
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame()) continue;
+      const url = frame.url();
+      const observed = await frame
+        .evaluate(() => {
+          const w = window as unknown as {
+            __displayOracleDocument?: { current(): boolean };
+            __displayOracle?: { flush(): { current?: boolean } };
+          };
+          return (
+            w.__displayOracleDocument?.current() === true &&
+            w.__displayOracle?.flush().current === true
+          );
+        })
+        .catch(() => null);
+      frames.push({ url, observed });
+    }
+    return frames;
+  }
+  async function collect(): Promise<Coverage> {
+    let states: PageState[] = [];
+    let answers: Answer[] = [];
+    let counters: Counter[] = [];
+    let unstable: string | undefined;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const before = activity;
+      states = [];
+      answers = [];
+      for (const [page, state] of [...pages]) {
+        const loads = [...state.loads];
+        if (page.isClosed()) {
+          states.push({
+            page: state.id,
+            loads,
+            inspection: { state: "closed" },
+          });
+          continue;
+        }
+        const url = page.url();
+        try {
+          const got = await ask(page);
+          if (got.answer) answers.push({ ...got.answer, page: state.id });
+          states.push({
+            page: state.id,
+            loads,
+            frames: await framesOf(page),
+            inspection: {
+              state: "answered",
+              // The CURRENT document: its witness, or a recorder of its own when the witness was switched off (a test seam).
+              doc: got.witness ?? (got.answer?.current ? got.answer.doc : null),
+              url: got.url,
+            },
+          });
+        } catch (error) {
+          states.push({
+            page: state.id,
+            loads,
+            inspection: page.isClosed()
+              ? { state: "closed" }
+              : {
+                  state: "failed",
+                  url,
+                  error: String(error).split("\n")[0]?.slice(0, 200) ?? "",
+                },
+          });
+        }
       }
+      counters = (await context.cookies())
+        .map((c) => parseCounter(c.name, c.value, EVIDENCE_COOKIE.cookiePrefix))
+        .filter((c): c is Counter => c !== null);
+      if (activity === before) {
+        unstable = undefined;
+        break;
+      }
+      unstable = `the sealed collection never found an interval with no activity (5 attempts; last ${before} → ${activity})`;
     }
-    // Every loaded document of every page (closed ones too) must have enrolled from that page.
-    for (const [page, urls] of loaded) {
-      // A page's initial `about:blank` document enrols too, and is not one of the documents it LOADED (revision 3 found it hiding one).
-      const enrolledHere = reports.filter(
-        (r) =>
-          r.type === "enrolled" &&
-          r.from === page &&
-          r.url !== undefined &&
-          r.url !== "about:blank",
-      ).length;
-      const deficit = urls.length - enrolledHere - (reported.has(page) ? 1 : 0);
-      if (deficit > 0)
-        missing.push(
-          `${deficit} more of ${urls.length} documents of a page (${urls.at(-1) ?? ""}) did not enrol`,
-        );
-    }
-    for (const r of reports)
-      if (r.type === "incomplete")
-        incomplete.push(`page ${r.page}: ${r.detail ?? ""}`);
-    return {
-      open: pages.length,
-      enrolled: reports.filter((r) => r.type === "enrolled").length,
-      loaded: [...loaded.values()].reduce((n, urls) => n + urls.length, 0),
-      missing: [...new Set(missing)],
-      incomplete: [...new Set(incomplete)],
+    const result: LedgerResult = assess({
+      pages: states,
+      witness: [...witness],
+      reports: [...reports],
+      answers,
+      counters,
+      unstable,
+    });
+    last = {
+      open: states.filter((s) => s.inspection.state !== "closed").length,
+      enrolled: result.enrolled,
+      loaded: result.loaded,
+      missing: result.missing,
+      incomplete: result.incomplete,
+      documents: result.documents,
+      violations: result.violations as OracleViolation[],
     };
+    return last;
   }
   async function assertClean(message?: string) {
-    const { missing, incomplete } = await coverage();
-    expect(missing, `${message ?? ""} pages that escaped the oracle`).toEqual(
-      [],
-    );
+    const { missing, incomplete, violations: all } = await coverage();
+    expect(
+      missing,
+      `${message ?? ""} documents that escaped the oracle`,
+    ).toEqual([]);
     expect(
       incomplete,
-      `${message ?? ""} recorder limits reached (incomplete)`,
+      `${message ?? ""} incomplete evidence (recorder limits, undelivered reports, uninspectable pages)`,
     ).toEqual([]);
-    // What each open document holds is acknowledged: a violation whose report was not delivered (yet) is still counted.
-    const all = new Map<string, OracleViolation>();
-    for (const v of violations()) all.set(`${v.page}:${v.seq}`, v);
-    for (const answer of flushed)
-      for (const v of answer?.violations ?? [])
-        all.set(`${v.page}:${v.seq}`, v);
-    expect([...all.values()], `${message ?? ""} early display`).toEqual([]);
+    expect(all, `${message ?? ""} early display`).toEqual([]);
   }
 }
