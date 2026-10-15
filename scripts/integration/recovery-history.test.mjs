@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -297,23 +298,28 @@ test("claims are exclusive and complete: the next number is taken, a claim is ne
   assert.throws(() => claimAttempt(file, { pid: 1 }), /ENOTDIR|EEXIST/);
 });
 
-test("awaitEarlier: an ended attempt (record, or claimant gone) is waited for no longer; a running or unknown claimant is never overtaken", (t) => {
+test("awaitEarlier: an attempt whose claimant is gone is waited for no longer; a running or unknown claimant is never overtaken", (t) => {
+  // Revision 14 (review r13 H4h) ADAPTATION, labelled: revision 13's version of this case took attempt 1's record ("{}") as its end
+  // whatever its claimant did, and its last cell asserted that a record appearing while the claimant still ran ended the wait. The
+  // intents kept: a gone claimant without a record is unknown; a running or unknown one is never overtaken; an attempt that wrote its
+  // record and then ended is not unknown. What changed: a record never ends the wait by itself (see the admission table below).
   const dir = scratch(t);
   claimAttempt(dir, { pid: 101, started: "a" });
   claimAttempt(dir, { pid: 102, started: "b" });
   claimAttempt(dir, { pid: 103, started: "c" });
-  recordAttempt(dir, 1, "{}");
+  recordAttempt(dir, 1, JSON.stringify({ attempt: 1, ok: true }));
   let slept = 0;
   const sleep = () => {
     slept += 1;
   };
-  // 2 is gone without a record: ended, unknown.
+  // 1 wrote its record and is gone: ended, not unknown. 2 is gone without a record: ended, unknown.
   const gone = awaitEarlier(dir, 3, { waitMs: 0, sleep, live: () => false });
   assert.deepEqual(gone, {
     ready: true,
     ended: [{ attempt: 2, claim: { attempt: 2, pid: 102, started: "b" } }],
+    errors: [],
   });
-  // Running: waited for until the bound, then not ready (nothing may be replaced).
+  // 2 running (1 gone): waited for until the bound, then not ready (nothing may be replaced).
   const busy = awaitEarlier(dir, 3, {
     waitMs: 50,
     pollMs: 1,
@@ -322,7 +328,7 @@ test("awaitEarlier: an ended attempt (record, or claimant gone) is waited for no
       const until = Date.now() + 5;
       while (Date.now() < until);
     },
-    live: () => true,
+    live: (pid) => pid !== 101,
   });
   assert.equal(busy.ready, false);
   assert.deepEqual(busy.waiting, {
@@ -331,10 +337,15 @@ test("awaitEarlier: an ended attempt (record, or claimant gone) is waited for no
   });
   assert.ok(slept > 0, "it waited");
   // Unknown (the process table cannot be read) is not "gone".
-  const unknown = awaitEarlier(dir, 3, { waitMs: 0, sleep, live: () => null });
+  const unknown = awaitEarlier(dir, 3, {
+    waitMs: 0,
+    sleep,
+    live: (pid) => (pid === 101 ? false : null),
+  });
   assert.equal(unknown.ready, false);
+  assert.equal(unknown.waiting.attempt, 2);
   assert.match(unknown.waiting.why, /cannot be known/);
-  // The claimant ends while this attempt waits: it goes on, the attempt unknown.
+  // The claimants end while this attempt waits: it goes on, 2 unknown.
   let polls = 0;
   const ends = awaitEarlier(dir, 3, {
     waitMs: 60_000,
@@ -349,23 +360,244 @@ test("awaitEarlier: an ended attempt (record, or claimant gone) is waited for no
     ends.ended.map((e) => e.attempt),
     [2],
   );
-  // Its record appears while this attempt waits: ended, not unknown.
+  // 2's record appears while its claimant still runs: still waited for (H4h); then the claimant ends: ended, not unknown.
   let more = 0;
   const recorded = awaitEarlier(dir, 3, {
     waitMs: 60_000,
     sleep: () => {
       more += 1;
-      if (more === 2) recordAttempt(dir, 2, "{}");
+      if (more === 2)
+        recordAttempt(dir, 2, JSON.stringify({ attempt: 2, ok: true }));
     },
-    live: () => true,
+    live: (pid) => pid === 102 && more < 4,
   });
-  assert.deepEqual(recorded, { ready: true, ended: [] });
-  // A claim that cannot be read names no owner: never overtaken.
+  assert.equal(more, 4, "the record alone did not end the wait");
+  assert.deepEqual(recorded, { ready: true, ended: [], errors: [] });
+  // A claim that cannot be read names no owner: never overtaken, and its read failure is this recovery's.
   claimAttempt(dir, { pid: 104 });
   writeFileSync(claimFile(dir, 3), "{");
   const torn = awaitEarlier(dir, 5, { waitMs: 0, sleep, live: () => false });
   assert.equal(torn.ready, false);
   assert.equal(torn.waiting.attempt, 3);
+  assert.equal(torn.errors.length, 1);
+  assert.match(torn.errors[0], /^recovery attempt 3's claim could not be read/);
+});
+
+test("H4h admission table: whatever an earlier attempt's record pathname holds, only a readable claim of that attempt whose claimant is gone admits the next", () => {
+  // Fake liveness (the `live` seam), labelled: the real process table is used in the PID-reuse case below and by the reaper cases.
+  const records = [
+    ["absent", null],
+    [
+      "valid",
+      (f) =>
+        writeFileSync(
+          f,
+          JSON.stringify({ attempt: 1, ok: true, evidence_errors: [] }),
+        ),
+    ],
+    ["torn", (f) => writeFileSync(f, '{"attempt":1,"ok":tr')],
+    ["null", (f) => writeFileSync(f, "null")],
+    ["a list", (f) => writeFileSync(f, "[]")],
+    ["an empty object", (f) => writeFileSync(f, "{}")],
+    [
+      "another attempt",
+      (f) =>
+        writeFileSync(
+          f,
+          JSON.stringify({ attempt: 7, ok: true, evidence_errors: [] }),
+        ),
+    ],
+    ["a directory", (f) => mkdirSync(f)],
+  ];
+  const owners = [
+    ["alive", () => true],
+    ["ended", () => false],
+    ["unknown", () => null],
+  ];
+  for (const [recordLabel, make] of records)
+    for (const [ownerLabel, live] of owners) {
+      const label = `record ${recordLabel}, claimant ${ownerLabel}`;
+      const dir = mkdtempSync(join(tmpdir(), "atlas-recovery-admission-"));
+      try {
+        claimAttempt(dir, { pid: 201, started: "x" });
+        claimAttempt(dir, { pid: 202, started: "y" });
+        make?.(attemptFile(dir, 1));
+        const r = awaitEarlier(dir, 2, { waitMs: 0, sleep: () => {}, live });
+        assert.deepEqual(r.errors, [], label);
+        if (ownerLabel !== "ended") {
+          assert.equal(r.ready, false, `${label}: never admitted`);
+          assert.equal(r.waiting.attempt, 1, label);
+          continue;
+        }
+        assert.equal(r.ready, true, label);
+        assert.deepEqual(
+          r.ended.map((e) => e.attempt),
+          recordLabel === "absent" ? [1] : [],
+          `${label}: only a missing record is "ended without its record"`,
+        );
+        // What the admitted recovery then establishes: only a valid record of attempt 1 is clean.
+        const h = readHistory(dir, 2, r.ended);
+        if (recordLabel === "valid") {
+          assert.deepEqual(h.errors, [], label);
+          assert.deepEqual(h.history.errors, [], label);
+          assert.equal(h.history.cleanupNotVerified, false, label);
+        } else {
+          assert.equal(
+            h.history.cleanupNotVerified,
+            true,
+            `${label}: never clean`,
+          );
+          const all = [...h.errors, ...h.history.errors].join("\n");
+          assert.match(
+            all,
+            {
+              absent: /recovery attempt 1 ended without its record/,
+              torn: /recovery attempt 1's record could not be read/,
+              null: /recovery attempt 1's record is not valid evidence: it is not a JSON object/,
+              "a list":
+                /recovery attempt 1's record is not valid evidence: it is not a JSON object/,
+              // A record without its attempt number is unusable too.
+              "an empty object":
+                /recovery attempt 1's record is not valid evidence: it names attempt null/,
+              "another attempt":
+                /recovery attempt 1's record is not valid evidence: it names attempt 7/,
+              "a directory":
+                /recovery attempt 1's record could not be read: EISDIR/,
+            }[recordLabel],
+            label,
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  // The claim itself: missing, unreadable, of another shape, naming another attempt or without an owner never admits, whatever the
+  // process table says; each unreadable one is a failure of the waiting recovery.
+  const claims = [
+    ["missing", null, /its claim is missing/, false],
+    ["torn", '{"attempt":1,', /could not be read/, true],
+    ["a directory", "dir", /could not be read: EISDIR/, true],
+    [
+      "without its owner",
+      JSON.stringify({ attempt: 1 }),
+      /`pid` is not a process id/,
+      true,
+    ],
+    [
+      "of another attempt",
+      JSON.stringify({ attempt: 9, pid: 201, started: "x" }),
+      /names attempt 9/,
+      true,
+    ],
+    [
+      "without its attempt",
+      JSON.stringify({ pid: 201, started: "x" }),
+      /names attempt null/,
+      true,
+    ],
+  ];
+  for (const [label, text, why, isError] of claims) {
+    const dir = mkdtempSync(join(tmpdir(), "atlas-recovery-admission-"));
+    try {
+      mkdirSync(recoveriesDir(dir));
+      if (text === "dir") mkdirSync(claimFile(dir, 1));
+      else if (text !== null) writeFileSync(claimFile(dir, 1), text);
+      writeFileSync(
+        claimFile(dir, 2),
+        JSON.stringify({ attempt: 2, pid: 202 }),
+      );
+      recordAttempt(dir, 1, JSON.stringify({ attempt: 1, ok: true }));
+      const r = awaitEarlier(dir, 2, {
+        waitMs: 0,
+        sleep: () => {},
+        live: () => false,
+      });
+      assert.equal(r.ready, false, `claim ${label}: never admitted`);
+      assert.match(r.waiting.why, why, label);
+      assert.equal(r.errors.length, isError ? 1 : 0, label);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H4h: a record is read only once its claimant is gone; claim read failures seen while waiting stay failures when a later poll reads the claim", (t) => {
+  const dir = scratch(t);
+  claimAttempt(dir, { pid: 301, started: "s" });
+  claimAttempt(dir, { pid: 302, started: "t" });
+  // The claimant writes its record and exits between this recovery's two looks: asked whether it runs, it has just finished.
+  const finished = awaitEarlier(dir, 2, {
+    waitMs: 0,
+    sleep: () => {},
+    live: () => {
+      if (!existsSync(attemptFile(dir, 1)))
+        recordAttempt(dir, 1, JSON.stringify({ attempt: 1, ok: true }));
+      return false;
+    },
+  });
+  assert.deepEqual(
+    finished,
+    { ready: true, ended: [], errors: [] },
+    "a normal completion is not unknown",
+  );
+  // A claim that cannot be read on the first poll (a directory), then can (its claimant gone): admitted, the read failure kept.
+  const other = scratch(t);
+  mkdirSync(recoveriesDir(other));
+  mkdirSync(claimFile(other, 1));
+  writeFileSync(claimFile(other, 2), JSON.stringify({ attempt: 2, pid: 302 }));
+  let polls = 0;
+  const r = awaitEarlier(other, 2, {
+    waitMs: 60_000,
+    sleep: () => {
+      polls += 1;
+      // Labelled: the case replaces the claim, which no recovery ever does, to make a read failure transient.
+      rmSync(claimFile(other, 1), { recursive: true });
+      writeFileSync(
+        claimFile(other, 1),
+        JSON.stringify({ attempt: 1, pid: 301, started: "s" }),
+      );
+    },
+    live: () => false,
+  });
+  assert.equal(polls, 1);
+  assert.equal(r.ready, true);
+  assert.equal(r.errors.length, 1);
+  assert.match(
+    r.errors[0],
+    /^recovery attempt 1's claim could not be read: EISDIR/,
+  );
+});
+
+test("H4h: the real process table: a claimant's pid reused by another process (other start time) is gone; the same process is not", async (t) => {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  t.after(() => child.kill("SIGKILL"));
+  await new Promise((r) => child.once("spawn", r));
+  const dir = scratch(t);
+  mkdirSync(recoveriesDir(dir));
+  writeFileSync(
+    claimFile(dir, 1),
+    JSON.stringify({
+      attempt: 1,
+      pid: child.pid,
+      started: startedOf(child.pid),
+    }),
+  );
+  mkdirSync(attemptFile(dir, 1));
+  const live = awaitEarlier(dir, 2, { waitMs: 0, sleep: () => {} });
+  assert.equal(live.ready, false, "a live claimant with an unreadable record");
+  assert.match(live.waiting.why, /is running/);
+  writeFileSync(
+    claimFile(dir, 1),
+    JSON.stringify({
+      attempt: 1,
+      pid: child.pid,
+      started: "Thu Jan  1 00:00:00 1970",
+    }),
+  );
+  const reused = awaitEarlier(dir, 2, { waitMs: 0, sleep: () => {} });
+  assert.deepEqual(reused, { ready: true, ended: [], errors: [] });
 });
 
 test("running(): a live process with its start time is running; the same pid with another start time, or a finished one, is not", async (t) => {

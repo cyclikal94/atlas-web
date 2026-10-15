@@ -1703,6 +1703,7 @@ import {
   attemptFile,
   claimFile,
   previousFile,
+  recordAttempt,
   recoveriesDir,
   startedOf,
 } from "./recovery-history.mjs";
@@ -2085,6 +2086,13 @@ test("H4g order: two overlapping recoveries publish one after the other; the lat
     evidence: dir,
     env: faults({ reaper_hold_inputs: [2] }),
   });
+  // Revision 14, labelled (clean-up only, no assertion changed): a failure before the releases below must not leave A or B held until
+  // the reaper's deadline (with a mutant, that pushed this file past the mutation driver's time limit: a TIMEOUT, never a catch).
+  t.after(async () => {
+    releaseHolds(runDir, [1, 2]);
+    await Promise.allSettled([a, b]);
+    rmSync(dir, { recursive: true, force: true });
+  });
   assert.ok(
     await until(() => existsSync(claimFile(runDir, 2))),
     "B claimed attempt 2",
@@ -2150,4 +2158,242 @@ test("H4g: a recovery whose runner may still be running leaves the summary to it
   assert.ok(has(r.reaped?.run_evidence_errors, "earlier: lost"), r.log);
   assert.ok(has(r.reaped?.recovery_history?.evidence_errors, "earlier: lost"));
   assert.equal(r.code, 1, r.log);
+});
+
+// ---- review r13 H4h (revision 14): an earlier recovery's record pathname never admits the next while its claimant may still publish ---
+/** A JSON output that must exist: its absence is an assertion failure, never a TypeError (a mutant's verdict depends on it). */
+function readOutput(path, label) {
+  assert.equal(existsSync(path), true, `${label}: ${path} exists`);
+  return JSON.parse(read(path));
+}
+/** Release the hold seam's attempts `ns` of `runDir` (recreating the folder when a case's clean-up removed it first). */
+function releaseHolds(runDir, ns) {
+  for (const n of ns)
+    try {
+      mkdirSync(join(runDir, "faults"), { recursive: true });
+      writeFileSync(
+        join(runDir, "faults", `reaper-hold-inputs-${n}.release`),
+        "",
+      );
+    } catch {}
+}
+/**
+ * A run folder with a covered, clean terminal summary and no recovery yet, its hold seam's markers, and `start` (a recovery started
+ * now, with whether it has ended yet). A case that fails before it releases a hold must not leave that recovery held until the
+ * reaper's deadline: its clean-up releases every hold and joins every recovery it started before the folder is removed.
+ */
+function heldRun(t) {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4h-"));
+  const runDir = join(dir, "run");
+  const runs = [];
+  t.after(async () => {
+    releaseHolds(runDir, [1, 2, 3]);
+    await Promise.allSettled(runs.map((r) => r.result));
+    rmSync(dir, { recursive: true, force: true });
+  });
+  mkdirSync(runDir);
+  writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN0));
+  writeFileSync(
+    join(runDir, "summary.json"),
+    JSON.stringify(finishedSummary([settled0])),
+  );
+  const marker = (n, end) =>
+    join(runDir, "faults", `reaper-hold-inputs-${n}.${end}`);
+  const start = (opts) => {
+    const run = { done: false };
+    run.result = reapIn(runDir, { messages: C3_MESSAGES, ...opts }).then(
+      (r) => {
+        run.done = true;
+        return r;
+      },
+    );
+    runs.push(run);
+    return run;
+  };
+  return {
+    dir,
+    runDir,
+    start,
+    reached: (n) => existsSync(marker(n, "reached")),
+    release: (n) => writeFileSync(marker(n, "release"), ""),
+  };
+}
+
+test("H4h: an unreadable record of an earlier recovery that still runs never admits the next; the outputs after both keep the failure (control: a clean overlap)", async (t) => {
+  // The review's schedule: A holds after reading a clean covered run; a directory appears at A's record path (EISDIR); B starts.
+  for (const mode of ["clean (control)", "unreadable record"]) {
+    const { dir, runDir, start, reached, release } = heldRun(t);
+    const a = start({
+      evidence: dir,
+      env: faults({ reaper_hold_inputs: [1] }),
+    });
+    assert.ok(
+      await until(() => reached(1)),
+      `${mode}: A holds after its inputs`,
+    );
+    if (mode !== "clean (control)") mkdirSync(attemptFile(runDir, 1));
+    const summaryBefore = read(join(runDir, "summary.json"));
+    const b = start({ evidence: dir });
+    assert.ok(
+      await until(() => existsSync(claimFile(runDir, 2))),
+      `${mode}: B claimed attempt 2`,
+    );
+    // An observation window only (the order's own bound stays 30 s): B publishes nothing while A is held and running.
+    assert.equal(
+      await until(
+        () =>
+          existsSync(join(runDir, "reaper.json")) ||
+          read(join(runDir, "summary.json")) !== summaryBefore ||
+          existsSync(attemptFile(runDir, 2)),
+        1500,
+      ),
+      false,
+      `${mode}: B replaces nothing while A may still publish`,
+    );
+    assert.equal(a.done, false, `${mode}: A still running`);
+    assert.equal(b.done, false, `${mode}: B still waiting`);
+    release(1);
+    const doneA = await a.result;
+    const doneB = await b.result;
+    const finalReaper = readOutput(join(runDir, "reaper.json"), mode);
+    const finalSummary = readOutput(join(runDir, "summary.json"), mode);
+    assert.equal(finalReaper.attempt, 2, `${mode}: the last publisher is B`);
+    assert.equal(finalSummary.reaper?.attempt, 2, mode);
+    if (mode === "clean (control)") {
+      assert.equal(doneA.code, 0, doneA.log);
+      assert.equal(doneB.code, 0, doneB.log);
+      assert.equal(finalSummary.outcome, "passed", doneB.log);
+      assert.deepEqual(finalSummary.evidence_errors, [], doneB.log);
+      assert.deepEqual(finalReaper.recovery_history?.evidence_errors, []);
+      continue;
+    }
+    // A could not write its record (the directory is there): its exit and stderr say so.
+    assert.equal(doneA.code, 1, doneA.log);
+    assert.match(
+      doneA.log,
+      /evidence NOT written: recovery attempt 1's record/,
+    );
+    // B read A's record only after A had ended: unreadable, a failure B and its outputs keep.
+    assert.equal(doneB.code, 1, doneB.log);
+    const eisdir = /recovery attempt 1's record could not be read: EISDIR/;
+    assert.equal(finalSummary.outcome, "failed", doneB.log);
+    assert.match((finalSummary.evidence_errors ?? []).join("\n"), eisdir);
+    assert.match((finalReaper.evidence_errors ?? []).join("\n"), eisdir);
+    assert.match(
+      (finalReaper.recovery_history?.evidence_errors ?? []).join("\n"),
+      eisdir,
+    );
+    assert.equal(finalReaper.recovery_history?.cleanup_not_verified, true);
+    const own = readOutput(attemptFile(runDir, 2), mode);
+    assert.match((own.evidence_errors ?? []).join("\n"), eisdir);
+  }
+});
+
+test("H4h: a valid record does not admit the next recovery while its claimant still runs; once it has ended the run stays clean, not unknown", async (t) => {
+  const r = await coveredRun(t);
+  assert.equal(r.code, 0, r.log);
+  assert.equal(
+    existsSync(attemptFile(r.runDir, 1)),
+    true,
+    `the first recovery recorded attempt 1: ${r.log}`,
+  );
+  const holder = await holdClaim(t, r.runDir, 2);
+  recordAttempt(
+    r.runDir,
+    2,
+    `${JSON.stringify({ attempt: 2, ok: true, evidence_errors: [] })}\n`,
+  );
+  const reaperBefore = read(join(r.runDir, "reaper.json"));
+  const summaryBefore = read(join(r.runDir, "summary.json"));
+  const waiting = again(r.runDir);
+  assert.ok(
+    await until(() => existsSync(claimFile(r.runDir, 3))),
+    "attempt 3 claimed",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(read(join(r.runDir, "reaper.json")), reaperBefore);
+  assert.equal(read(join(r.runDir, "summary.json")), summaryBefore);
+  assert.equal(existsSync(attemptFile(r.runDir, 3)), false);
+  holder.kill("SIGKILL");
+  const done = await waiting;
+  assert.equal(done.code, 0, done.log);
+  assert.equal(done.reaped?.attempt, 3);
+  assert.equal(done.summary?.outcome, "passed", done.log);
+  assert.doesNotMatch(done.log, /ended without its record/);
+});
+
+test("H4h: a recovery refused while an earlier one holds its inputs replaces nothing; the recovery after both have ended keeps the refusal", async (t) => {
+  const { dir, runDir, start, reached, release } = heldRun(t);
+  const a = start({
+    evidence: dir,
+    env: faults({ reaper_hold_inputs: [1] }),
+  });
+  assert.ok(await until(() => reached(1)), "A holds after its inputs");
+  const summaryBefore = read(join(runDir, "summary.json"));
+  // B's order bound is shortened: it bounds waiting for another recovery and is not a duration under test.
+  const b = await reapIn(runDir, {
+    messages: C3_MESSAGES,
+    evidence: dir,
+    env: { ATLAS_REAPER_ORDER_WAIT_MS: "1000" },
+  });
+  assert.equal(b.code, 1, b.log);
+  assert.equal(read(join(runDir, "summary.json")), summaryBefore);
+  assert.equal(existsSync(join(runDir, "reaper.json")), false);
+  const refusal = readOutput(attemptFile(runDir, 2), "B's record");
+  assert.match(refusal.refused, /^recovery attempt 1 has not ended/);
+  release(1);
+  const doneA = await a.result;
+  // A's outputs are what A read before B refused (a projection of its own inputs; A cannot know a later refusal). Recorded, not judged.
+  assert.equal(
+    readOutput(join(runDir, "reaper.json"), doneA.log).attempt,
+    1,
+    doneA.log,
+  );
+  const c = await again(runDir);
+  assert.equal(c.code, 1, c.log);
+  assert.equal(c.reaped?.attempt, 3);
+  assert.equal(c.summary?.outcome, "failed", c.log);
+  assert.match(
+    (c.summary?.evidence_errors ?? []).join("\n"),
+    /this recovery replaced nothing: recovery attempt 1 has not ended/,
+  );
+  assert.deepEqual(
+    c.reaped?.recovery_history?.attempts?.map((e) => e.attempt),
+    [1, 2, 3],
+  );
+});
+
+test("H4h: a claim this recovery could not read while it waited stays one of its failures after a later poll reads it", async (t) => {
+  const r = await coveredRun(t);
+  assert.equal(r.code, 0, r.log);
+  assert.equal(
+    existsSync(attemptFile(r.runDir, 1)),
+    true,
+    `the first recovery recorded attempt 1: ${r.log}`,
+  );
+  // Labelled: a directory at claim 2 that the case later replaces by a claim of a finished process (no recovery replaces a claim).
+  mkdirSync(claimFile(r.runDir, 2));
+  const waiting = again(r.runDir);
+  assert.ok(
+    await until(() => existsSync(claimFile(r.runDir, 3))),
+    "attempt 3 claimed",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(existsSync(attemptFile(r.runDir, 3)), false, "it waited");
+  const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((resolve) => gone.once("exit", resolve));
+  rmSync(claimFile(r.runDir, 2), { recursive: true });
+  writeFileSync(
+    claimFile(r.runDir, 2),
+    JSON.stringify({ attempt: 2, pid: gone.pid, started: null }),
+  );
+  const done = await waiting;
+  assert.equal(done.code, 1, done.log);
+  const errors = (done.summary?.evidence_errors ?? []).join("\n");
+  assert.match(errors, /recovery attempt 2's claim could not be read: EISDIR/);
+  assert.match(errors, /recovery attempt 2 ended without its record/);
+  assert.match(
+    (done.reaped?.evidence_errors ?? []).join("\n"),
+    /recovery attempt 2's claim could not be read: EISDIR/,
+  );
 });

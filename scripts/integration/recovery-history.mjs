@@ -7,9 +7,10 @@
 //
 // 1. One order. Each recovery takes the next attempt number with an exclusive claim, `<run dir>/recoveries/<n>.claim` (written aside and
 //    linked, so a claim is complete whenever it is visible; claims are never moved, replaced or removed). Before it reads anything it
-//    waits until every earlier attempt has ENDED: its record exists, or its claimant (pid and start time) is no longer running. A
-//    claimant that is running, or whose state cannot be known (the process table cannot be read, the claim cannot be read), is never
-//    overtaken: when the wait is over the recovery refuses to replace any output (`awaitEarlier`). Two recoveries of one run therefore
+//    waits until every earlier attempt has ENDED: its claimant (pid and start time) is no longer running (revision 14: a record alone
+//    is not that). A claimant that is running, or whose state cannot be known (the process table cannot be read, the claim cannot be
+//    read or names another attempt), is never overtaken: when the wait is over the recovery refuses to replace any output
+//    (`awaitEarlier`). Two recoveries of one run therefore
 //    publish one after the other, and the later one reads everything the earlier one wrote. This needs no kernel lock, so it is the same
 //    on every host the reaper runs on.
 // 2. Every output that can be the only witness of a failure is read. The previous `reaper.json` and every attempt record are read as
@@ -23,6 +24,15 @@
 //    whatever they are, readable or not) before it is replaced.
 //
 // Error lists keep the order in which they were first seen; as sets, joins are commutative, associative and idempotent.
+//
+// Review r13 H4h (revision 14): revision 13 took an earlier attempt's record pathname, readable or not, as proof that the attempt had
+// ended, without asking whether its claimant still ran. A directory (EISDIR) or torn file at `recoveries/<n>.json` while attempt n was
+// alive and holding a clean draft let the next attempt publish failed outputs, after which attempt n replaced them with its older
+// pass. Now an attempt has ended only when its readable claim (naming that attempt) belongs to a claimant known to be gone: whether a
+// record exists, or what it says, never admits a successor. Only then is the record read, because only then is it what that attempt
+// finally wrote: absent is "ended without its record" (unknown), unreadable is an evidence failure of the reading recovery
+// (readHistory), present is history. Every claim that could not be read while waiting is an evidence failure as well, even when a
+// later poll reads it.
 import { execFileSync } from "node:child_process";
 import { linkSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -212,9 +222,11 @@ export function claimAttempt(runDir, identity) {
 }
 
 /**
- * Wait until every attempt before `attempt` has ended. Returns { ready: true, ended } (`ended`: the attempts whose claimant is gone
- * without a record) or, once `waitMs` has passed, { ready: false, waiting: { attempt, why } }. `sleep(ms)` blocks; `live(pid, started)`
- * answers true, false or null (unknown, never taken as "gone").
+ * Wait until every attempt before `attempt` has ended: its claimant is known to be gone (revision 14: a record pathname, readable or
+ * not, is never taken as that). Returns { ready: true, ended, errors } (`ended`: the attempts whose claimant is gone without a record)
+ * or, once `waitMs` has passed, { ready: false, waiting: { attempt, why }, errors }. `errors` are the claims that could not be read
+ * while waiting, each once (this recovery's evidence failures, also when a later poll could read it). `sleep(ms)` blocks;
+ * `live(pid, started)` answers true, false or null (unknown, never taken as "gone").
  */
 export function awaitEarlier(
   runDir,
@@ -222,21 +234,20 @@ export function awaitEarlier(
   { waitMs, pollMs = 100, sleep, live = running },
 ) {
   const deadline = Date.now() + waitMs;
+  const errors = [];
+  const saw = (error) => {
+    if (!errors.includes(error)) errors.push(error);
+  };
   for (;;) {
     const ended = [];
     let waiting = null;
     for (let k = 1; k < attempt && waiting === null; k += 1) {
-      const record = readEvidence(attemptFile(runDir, k), {
-        what: `recovery attempt ${k}'s record`,
-        shape: () => null,
-      });
-      // Written (readable or not: the reading decides what it says): that attempt has ended.
-      if (record.state !== "absent") continue;
       const claim = readEvidence(claimFile(runDir, k), {
         what: `recovery attempt ${k}'s claim`,
         shape: SHAPES.claim,
       });
       if (claim.state !== "present") {
+        if (claim.state === "unreadable") saw(claim.error);
         waiting = {
           attempt: k,
           why:
@@ -246,9 +257,14 @@ export function awaitEarlier(
         };
         break;
       }
+      if (claim.value.attempt !== k) {
+        const error = `recovery attempt ${k}'s claim names attempt ${JSON.stringify(claim.value.attempt ?? null)}, so who holds it is unknown`;
+        saw(error);
+        waiting = { attempt: k, why: error };
+        break;
+      }
       const state = live(claim.value.pid, claim.value.started ?? null);
-      if (state === false) ended.push({ attempt: k, claim: claim.value });
-      else
+      if (state !== false) {
         waiting = {
           attempt: k,
           why:
@@ -256,9 +272,19 @@ export function awaitEarlier(
               ? `whether its claimant (pid ${claim.value.pid}) is running cannot be known`
               : `its claimant (pid ${claim.value.pid}) is running`,
         };
+        break;
+      }
+      // Its claimant is gone, so nothing more can be added to its record: only now is the record what it finally wrote. Absent: it
+      // ended without one (unknown). Present or unreadable: readHistory reads it (an unreadable record is a failure, never clean).
+      const record = readEvidence(attemptFile(runDir, k), {
+        what: `recovery attempt ${k}'s record`,
+        shape: SHAPES.recovery,
+      });
+      if (record.state === "absent")
+        ended.push({ attempt: k, claim: claim.value });
     }
-    if (waiting === null) return { ready: true, ended };
-    if (Date.now() >= deadline) return { ready: false, waiting };
+    if (waiting === null) return { ready: true, ended, errors };
+    if (Date.now() >= deadline) return { ready: false, waiting, errors };
     sleep(pollMs);
   }
 }
@@ -305,13 +331,21 @@ export function readHistory(runDir, attempt, ended = []) {
   const numbers = new Set(listed ?? []);
   for (let k = 1; k < (attempt ?? 1); k += 1) numbers.add(k);
   numbers.delete(attempt);
-  for (const k of [...numbers].sort((a, b) => a - b))
+  for (const k of [...numbers].sort((a, b) => a - b)) {
+    const input = readEvidence(attemptFile(runDir, k), {
+      what: `recovery attempt ${k}'s record`,
+      shape: SHAPES.recovery,
+    });
+    // Review r13 H4h (revision 14): a record naming another attempt says nothing certain about this one: unusable, never clean.
     take(
-      readEvidence(attemptFile(runDir, k), {
-        what: `recovery attempt ${k}'s record`,
-        shape: SHAPES.recovery,
-      }),
+      input.state === "present" && input.value.attempt !== k
+        ? {
+            state: "unreadable",
+            error: `recovery attempt ${k}'s record is not valid evidence: it names attempt ${JSON.stringify(input.value.attempt ?? null)}`,
+          }
+        : input,
     );
+  }
   for (const { attempt: k, claim } of ended)
     history = joinHistory(history, unknownAttempt(k, claim));
   return { history, errors };

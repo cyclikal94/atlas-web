@@ -56,6 +56,11 @@
 // wait (default 30 s). Qualification seam: `reaper_hold_inputs: [n]` holds attempt n after it has read everything and before it
 // publishes (faults.mjs).
 //
+// Review r13 H4h (revision 14): an unreadable record of a still-running earlier attempt (a directory at `recoveries/<n>.json`) let the
+// next recovery publish before it, and the earlier one then replaced the failed outputs with its older pass. A recovery now goes on
+// only once every earlier claimant is known to have ended, whatever its record pathname holds (recovery-history.mjs `awaitEarlier`);
+// a claim that could not be read while it waited is one of its evidence failures.
+//
 //   node scripts/integration/reaper.mjs <run dir> <token> <runner pid>      (journal on stdin; started by run.mjs, never by hand)
 import { execFileSync, spawn } from "node:child_process";
 import {
@@ -469,7 +474,7 @@ function finish(result) {
   // Review r12 H4g (revision 13): first this recovery's place in the run's order of recoveries (it never overtakes an earlier one that
   // may still be running), then everything the earlier ones established, before anything is decided or replaced.
   let attempt = null;
-  let order = { ready: false, waiting: null };
+  let order = { ready: false, waiting: null, errors: [] };
   try {
     attempt = claimAttempt(runDir, {
       pid: process.pid,
@@ -486,6 +491,8 @@ function finish(result) {
     );
   }
   result.attempt = attempt;
+  // Review r13 H4h: every claim this recovery could not read while it waited, also one a later poll read.
+  evidenceErrors.push(...order.errors);
   if (!order.ready) {
     result.refused = order.waiting
       ? `recovery attempt ${order.waiting.attempt} has not ended (${order.waiting.why})`
