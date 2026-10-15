@@ -7,6 +7,10 @@
 // silently and ran after the password, logout and credential-changing cases on the same backend, accounts and sign-in throttle.
 // Every spec file is now NAMED by exactly one stack or a separate obligation, and `assignCases` checks Playwright's own listing:
 // a discovered case in no stack, in two, or in a file nobody names stops the run before any backend starts.
+//
+// Revision 16 (review R23a): a stack passes only on terminal execution evidence. The report's shape, its start time and its totals
+// are checked, every planned case needs exactly one passing result at retry 0 (or the exact designed-skip shape), and every planned
+// case is counted exactly once, as `unproven` when the evidence does not show what happened to it.
 
 const SPEC = (name) => `tests/integration/integration.${name}.spec.ts`;
 
@@ -310,22 +314,205 @@ export function designedSkip(file, test, context) {
   return null;
 }
 
+const isObject = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const isCount = (value) => Number.isInteger(value) && value >= 0;
+const TEST_STATUSES = new Set(["expected", "unexpected", "flaky", "skipped"]);
+const RESULT_STATUSES = new Set([
+  "passed",
+  "failed",
+  "timedOut",
+  "skipped",
+  "interrupted",
+]);
+const EXPECTED_STATUSES = new Set([
+  "passed",
+  "failed",
+  "timedOut",
+  "skipped",
+  "interrupted",
+]);
+
+/**
+ * Revision 16 (R23a): what is wrong with the SHAPE of a parsed Playwright JSON report, as the pinned reporter writes it (every field
+ * this module reads, with its type), or [] when nothing is. Checked before anything walks the report, so a malformed nested value is
+ * an explained incomplete result, never a throw and never a guess. A `--list` report has the same shape (its tests have no results).
+ */
+export function reportShapeProblems(parsed) {
+  const problems = [];
+  const note = (problem) => {
+    if (problems.length < 5) problems.push(problem);
+    else if (problems.length === 5)
+      problems.push("(further shape problems not listed)");
+  };
+  if (!isObject(parsed)) return ["the report is not a JSON object"];
+  const { stats } = parsed;
+  if (!isObject(stats)) note("the report has no stats");
+  else {
+    if (
+      typeof stats.startTime !== "string" ||
+      !Number.isFinite(Date.parse(stats.startTime))
+    )
+      note(`stats.startTime is not a time: ${JSON.stringify(stats.startTime)}`);
+    if (
+      typeof stats.duration !== "number" ||
+      !Number.isFinite(stats.duration) ||
+      stats.duration < 0
+    )
+      note(
+        `stats.duration is not a duration: ${JSON.stringify(stats.duration)}`,
+      );
+    for (const key of ["expected", "skipped", "unexpected", "flaky"])
+      if (!isCount(stats[key])) note(`stats.${key} is not a count`);
+  }
+  if (!Array.isArray(parsed.errors)) note("errors is not a list");
+  if (!Array.isArray(parsed.suites)) {
+    note("suites is not a list");
+    return problems;
+  }
+  const annotations = (value, where) => {
+    if (value === undefined) return;
+    if (!Array.isArray(value) || !value.every(isObject))
+      note(`${where}: annotations is not a list of objects`);
+  };
+  const result = (value, where) => {
+    if (!isObject(value)) {
+      note(`${where} is not an object`);
+      return;
+    }
+    if (!RESULT_STATUSES.has(value.status))
+      note(`${where} has an unknown status ${JSON.stringify(value.status)}`);
+    if (!isCount(value.retry)) note(`${where}.retry is not a count`);
+    annotations(value.annotations, where);
+  };
+  const test = (value, where) => {
+    if (!isObject(value)) {
+      note(`${where} is not an object`);
+      return;
+    }
+    if (typeof value.projectName !== "string")
+      note(`${where} has no projectName`);
+    if (!TEST_STATUSES.has(value.status))
+      note(`${where} has an unknown status ${JSON.stringify(value.status)}`);
+    if (!EXPECTED_STATUSES.has(value.expectedStatus))
+      note(
+        `${where} has an unknown expectedStatus ${JSON.stringify(value.expectedStatus)}`,
+      );
+    annotations(value.annotations, where);
+    if (!Array.isArray(value.results)) {
+      note(`${where}.results is not a list`);
+      return;
+    }
+    for (const [k, each] of value.results.entries())
+      result(each, `${where}.results[${k}]`);
+  };
+  const spec = (value, where, file) => {
+    if (!isObject(value)) {
+      note(`${where} is not an object`);
+      return;
+    }
+    if (typeof value.title !== "string") note(`${where} has no title`);
+    if (typeof value.file !== "string" && typeof file !== "string")
+      note(`${where} has no file`);
+    if (!Array.isArray(value.tests)) {
+      note(`${where}.tests is not a list`);
+      return;
+    }
+    for (const [j, each] of value.tests.entries())
+      test(each, `${where}.tests[${j}]`);
+  };
+  const suite = (value, where, file) => {
+    if (!isObject(value)) {
+      note(`${where} is not an object`);
+      return;
+    }
+    if (typeof value.title !== "string") note(`${where} has no title`);
+    const own = typeof value.file === "string" ? value.file : file;
+    for (const [key, list] of [
+      ["specs", value.specs],
+      ["suites", value.suites],
+    ])
+      if (list !== undefined && !Array.isArray(list))
+        note(`${where}.${key} is not a list`);
+    if (Array.isArray(value.specs))
+      for (const [i, each] of value.specs.entries())
+        spec(each, `${where}.specs[${i}]`, own);
+    if (Array.isArray(value.suites))
+      for (const [i, child] of value.suites.entries())
+        suite(child, `${where}.suites[${i}]`, own);
+  };
+  for (const [i, value] of parsed.suites.entries())
+    suite(value, `suites[${i}]`, undefined);
+  return problems;
+}
+
+/**
+ * Revision 16 (R23a, I1/I2): what ONE planned case's own test record proves. A listed test object is not execution evidence: only
+ * exactly one terminal `passed` result at retry 0 under status `expected` / expectedStatus `passed` is a pass, and a designed skip
+ * needs the pinned reporter's skip shape (status and expectedStatus `skipped`, one `skipped` result) as well as its own annotation
+ * and condition. Returns [outcome, reason]: passed | designed | failed | interrupted | not_run | unproven.
+ */
+function caseOutcome(file, test, context) {
+  const results = test.results;
+  const shown = `status ${test.status}, expected ${test.expectedStatus}, results [${results.map((r) => `${r.status}@${r.retry}`).join(", ")}]`;
+  if (results.some((r) => r.status === "interrupted"))
+    return ["interrupted", "interrupted"];
+  if (results.length > 1 || results.some((r) => r.retry !== 0))
+    return ["failed", "retried (no retry is approved)"];
+  if (test.status === "unexpected" || test.status === "flaky")
+    return ["failed", test.status];
+  const [only] = results;
+  if (only && (only.status === "failed" || only.status === "timedOut"))
+    return ["failed", `a ${only.status} execution under ${shown}`];
+  if (test.status === "expected")
+    return test.expectedStatus === "passed" && only?.status === "passed"
+      ? ["passed", null]
+      : ["unproven", `no terminal passing execution (${shown})`];
+  // status skipped
+  if (results.length === 0)
+    return ["not_run", "not run, and not a designed skip"];
+  if (test.expectedStatus !== "skipped" || only.status !== "skipped")
+    return ["unproven", `contradictory skip (${shown})`];
+  const reason = designedSkip(file, test, context);
+  return reason !== null
+    ? ["designed", reason]
+    : ["not_run", "not run, and not a designed skip"];
+}
+
+/** Every planned case accounted for once (revision 16, I6): the outcome counts of one stack. */
+export const emptyCounts = () => ({
+  passed: 0,
+  designed_skips: 0,
+  failed: 0,
+  interrupted: 0,
+  not_run: 0,
+  unproven: 0,
+  not_launched: 0,
+});
+const total = (planned) => [...planned.values()].reduce((n, k) => n + k, 0);
+
 /**
  * R23: whether ONE stack's run is complete and passed. `report` is the raw text of its result file, or null when there is none.
- * A zero exit is not enough, and neither is a green report with a non-zero exit. Returns verdict passed | failed | incomplete.
+ * A zero exit is not enough, and neither is a green report with a non-zero exit. Returns verdict passed | failed | incomplete, and
+ * counts that account for every planned case exactly once (`unproven`: the report does not prove what happened to it).
+ *
+ * Revision 16 (R23a): the report's shape is checked first (`reportShapeProblems`); its start time must be a real time inside this
+ * stack's own run (`startedAt` .. `finishedAt`); every case needs its own terminal execution evidence (`caseOutcome`); and the
+ * report's own totals must agree with its tests.
  */
 export function judgeStack({
   planned,
   report,
   exitCode,
   startedAt,
+  finishedAt,
   project,
   context,
   refusals = [],
   deliberateThrottle = false,
 }) {
   const reasons = [];
-  const counts = { passed: 0, designed_skips: 0, failed: 0, not_run: 0 };
+  const counts = emptyCounts();
   const designed = [];
   let incomplete = false;
   let failed = false;
@@ -336,6 +523,12 @@ export function judgeStack({
       counts,
       designed_skips: designed,
     };
+  };
+  const unproven = (reason) => {
+    incomplete = true;
+    reasons.push(reason);
+    counts.unproven = total(planned);
+    return finish();
   };
   // A non-zero exit fails the stack whatever its result file says.
   if (exitCode !== 0) {
@@ -348,38 +541,28 @@ export function judgeStack({
       `the backend refused ${refusals.length} request(s) with 429 (first: ${refusals[0].method} ${refusals[0].path}): this stack's throttle budget was not its own`,
     );
   }
-  if (report === null) {
-    incomplete = true;
-    reasons.push("no result file");
-    return finish();
-  }
+  if (report === null) return unproven("no result file");
   let parsed;
   try {
     parsed = JSON.parse(report);
   } catch {
-    incomplete = true;
-    reasons.push("the result file is not JSON");
-    return finish();
+    return unproven("the result file is not JSON");
   }
-  if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    !Array.isArray(parsed.suites) ||
-    !parsed.stats ||
-    typeof parsed.stats.startTime !== "string"
-  ) {
-    incomplete = true;
-    reasons.push("the result file is not a complete Playwright JSON report");
-    return finish();
-  }
-  if (Date.parse(parsed.stats.startTime) < startedAt) {
-    incomplete = true;
-    reasons.push(
+  const shape = reportShapeProblems(parsed);
+  if (shape.length > 0)
+    return unproven(
+      `the result file is not a complete Playwright JSON report: ${shape.join("; ")}`,
+    );
+  const began = Date.parse(parsed.stats.startTime);
+  if (!Number.isFinite(startedAt) || began < startedAt)
+    return unproven(
       `the result file is stale: it started at ${parsed.stats.startTime}, before this stack`,
     );
-    return finish();
-  }
-  if ((parsed.errors ?? []).length > 0) {
+  if (finishedAt !== undefined && !(began <= finishedAt))
+    return unproven(
+      `the result file started at ${parsed.stats.startTime}, after this stack finished`,
+    );
+  if (parsed.errors.length > 0) {
     failed = true;
     reasons.push(
       `Playwright reported ${parsed.errors.length} error(s) outside a test: ${String(parsed.errors[0]?.message ?? "").slice(0, 200)}`,
@@ -393,15 +576,45 @@ export function judgeStack({
       `${wrong.length} result(s) for another project (${wrong[0].project})`,
     );
   }
-  const got = counted(cases.map((c) => c.key));
+  // The report's own totals must agree with its tests (a contradictory report is not evidence either way).
+  const statuses = { expected: 0, skipped: 0, unexpected: 0, flaky: 0 };
+  for (const { test } of cases) statuses[test.status] += 1;
+  const disagree = Object.keys(statuses).filter(
+    (key) => parsed.stats[key] !== statuses[key],
+  );
+  if (disagree.length > 0) {
+    incomplete = true;
+    reasons.push(
+      `the report's totals contradict its tests (${disagree.map((k) => `${k} ${parsed.stats[k]} != ${statuses[k]}`).join(", ")})`,
+    );
+  }
+  const used = new Map();
+  const extra = [];
+  for (const { key, file, test } of cases) {
+    const n = used.get(key) ?? 0;
+    if (n >= (planned.get(key) ?? 0)) {
+      extra.push(key);
+      continue;
+    }
+    used.set(key, n + 1);
+    const [outcome, reason] = caseOutcome(file, test, context);
+    if (outcome === "passed") counts.passed += 1;
+    else if (outcome === "designed") {
+      counts.designed_skips += 1;
+      designed.push({ key, reason });
+    } else {
+      if (outcome === "failed") failed = true;
+      else incomplete = true;
+      counts[outcome] += 1;
+      reasons.push(`${reason}: ${key}`);
+    }
+  }
   const missing = [];
   for (const [key, n] of planned)
-    for (let i = got.get(key) ?? 0; i < n; i += 1) missing.push(key);
-  const extra = [];
-  for (const [key, n] of got)
-    for (let i = planned.get(key) ?? 0; i < n; i += 1) extra.push(key);
+    for (let i = used.get(key) ?? 0; i < n; i += 1) missing.push(key);
   if (missing.length > 0) {
     incomplete = true;
+    counts.unproven += missing.length;
     reasons.push(
       `${missing.length} planned case(s) have no result (first: ${missing[0]})`,
     );
@@ -411,38 +624,6 @@ export function judgeStack({
     reasons.push(
       `${extra.length} result(s) were not planned (first: ${extra[0]})`,
     );
-  }
-  for (const { key, file, test } of cases) {
-    const results = test.results ?? [];
-    if (results.length > 1 || results.some((r) => (r.retry ?? 0) > 0)) {
-      failed = true;
-      counts.failed += 1;
-      reasons.push(`retried (no retry is approved): ${key}`);
-      continue;
-    }
-    if (test.status === "expected" && test.expectedStatus === "passed") {
-      counts.passed += 1;
-      continue;
-    }
-    if (test.status === "skipped") {
-      const reason = results.some((r) => r.status === "interrupted")
-        ? null
-        : designedSkip(file, test, context);
-      if (reason !== null) {
-        counts.designed_skips += 1;
-        designed.push({ key, reason });
-      } else {
-        incomplete = true;
-        counts.not_run += 1;
-        reasons.push(
-          `${results.some((r) => r.status === "interrupted") ? "interrupted" : "not run, and not a designed skip"}: ${key}`,
-        );
-      }
-      continue;
-    }
-    failed = true;
-    counts.failed += 1;
-    reasons.push(`${test.status}: ${key}`);
   }
   return finish();
 }

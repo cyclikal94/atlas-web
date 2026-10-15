@@ -9,7 +9,8 @@
 //             stack's backend allows. Revision 15 (R22, R23): every discovered case is in exactly one stack (checked before any backend
 //             starts), each stack's own result is judged after its clean-up, and the first stack that is not a complete pass stops the
 //             schedule (scripts/integration/schedule.mjs). `--evidence` must not hold this invocation's files already.
-//   --serve   start everything and print the URLs; run until interrupted (for exploring; nothing is run)
+//   --serve   start everything and print the URLs; run until interrupted (for exploring; nothing is run). Revision 16 (R23c): the first
+//             SIGINT/SIGTERM stops and cleans up the served stack and exits 130/143; it no longer waits for a schedule serve mode never has
 //   --app     serve this built directory instead of dist-fixture (WEB-14a: `dist-pwa/fixture-a`, the fixture entry WITH the service worker,
 //             for I-U2); the specs see it as ATLAS_INTEGRATION_APP. The default is unchanged.
 //   --stacks  a comma-separated subset of the default stacks (stacks.mjs DEFAULT_STACKS), run in their usual order; the summary is
@@ -26,6 +27,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -98,6 +100,16 @@ let provider = null;
 let exchanges = [];
 // R23: the first SIGINT/SIGTERM. The stack in progress is stopped and cleaned up, its partial result kept, and nothing else starts.
 let interrupted = null;
+// Revision 16 (R23c): settles on the first signal (and stays settled), so a wait that has no schedule behind it (`--serve`) ends too.
+let cancel;
+const cancelled = new Promise((resolveCancel) => {
+  cancel = resolveCancel;
+});
+const exitFor = (signal) => (signal === "SIGINT" ? 130 : 143);
+/** Revision 16: checked after every awaited or blocking step of a stack's preparation, so no further resource starts after a signal. */
+const stopIfInterrupted = () => {
+  if (interrupted) throw new Error(`interrupted by ${interrupted}`);
+};
 
 const listening = (port) =>
   new Promise((resolveCheck) => {
@@ -183,11 +195,13 @@ function cleanup() {
 }
 
 // The first signal: stop the stack in progress (Playwright is asked to interrupt, so it still writes its partial result), let the
-// schedule clean up, record it and mark the rest not run. A second signal, or a schedule that has not finished 120 s later, cleans
-// up and exits at once.
+// schedule clean up, record it and mark the rest not run. In `--serve` mode the same signal ends the served wait, which cleans up and
+// exits (revision 16, R23c). A second signal, or a schedule that has not finished 120 s later, cleans up and exits at once: a forced
+// path, never the ordinary one.
 const onSignal = (signal) => {
-  const code = signal === "SIGINT" ? 130 : 143;
+  const code = exitFor(signal);
   if (interrupted) {
+    console.error(`${signal} again: forcing clean-up and exit`);
     cleanup().finally(() => process.exit(code));
     return;
   }
@@ -197,10 +211,13 @@ const onSignal = (signal) => {
   );
   for (const child of children)
     if (!exited(child)) child.kill(child.playwright ? "SIGINT" : "SIGTERM");
-  setTimeout(
-    () => cleanup().finally(() => process.exit(code)),
-    120_000,
-  ).unref();
+  cancel(signal);
+  setTimeout(() => {
+    console.error(
+      `${signal}: still running 120 s later: forcing clean-up and exit`,
+    );
+    cleanup().finally(() => process.exit(code));
+  }, 120_000).unref();
 };
 process.on("SIGINT", () => onSignal("SIGINT"));
 process.on("SIGTERM", () => onSignal("SIGTERM"));
@@ -266,6 +283,7 @@ async function stackRun(browser, stack) {
     await freePort(),
   ];
   ports.push(backendPort, previewPort, proxyPort, controlPort);
+  stopIfInterrupted();
   const origin = `http://127.0.0.1:${previewPort}`;
   // alice and bob for the read-only and sign-in specs; carol, dave and erin for the specs that change an account (password,
   // logout, retirement), so no spec depends on another spec's side effects. Passwords are generated per run and travel by stdin
@@ -281,12 +299,14 @@ async function stackRun(browser, stack) {
     });
     oidc = await provider.start();
     ports.push(oidc.issuerPort, oidc.controlPort);
+    stopIfInterrupted();
   }
 
   if (postgres) {
     // OPTIONAL repeat: the released backend CONTAINER image against a disposable PostgreSQL (docs/session.md, "Integration").
     const started = await startPostgresBackend({ backendPort, origin, names });
     extraCleanup = started.stop;
+    stopIfInterrupted();
     Object.assign(accounts, started.accounts);
     revision = started.describe;
     lastBackend = started.describe;
@@ -300,6 +320,7 @@ async function stackRun(browser, stack) {
       [join(root, "scripts/integration/fetch-backend.mjs")],
       { encoding: "utf8" },
     );
+    stopIfInterrupted();
     if (fetched.status !== 0)
       throw new Error(
         `fetch-backend failed:\n${fetched.stdout}${fetched.stderr}`,
@@ -318,6 +339,7 @@ async function stackRun(browser, stack) {
 
     // 2. Accounts, made with the backend's own command.
     for (const name of names) {
+      stopIfInterrupted();
       const password = randomBytes(16).toString("hex");
       const made = spawnSync(backend.binary, ["account", name], {
         input: `${password}\n`,
@@ -333,6 +355,7 @@ async function stackRun(browser, stack) {
 
     // 2b. Standalone signup invitations, made with the backend's own command (the token is printed once).
     for (let i = 0; i < 19; i += 1) {
+      stopIfInterrupted();
       const made = spawnSync(backend.binary, ["invite"], {
         env: { ...process.env, ATLAS_DATABASE_URL: database },
         encoding: "utf8",
@@ -345,6 +368,7 @@ async function stackRun(browser, stack) {
     }
 
     // 3. The backend.
+    stopIfInterrupted();
     const server = spawn(backend.binary, [], {
       env: {
         ...process.env,
@@ -379,6 +403,7 @@ async function stackRun(browser, stack) {
     );
 
   // 4. The delaying proxy, then the preview server whose backend is the proxy.
+  stopIfInterrupted();
   proxy = createProxy({
     upstream: `http://127.0.0.1:${backendPort}`,
     port: proxyPort,
@@ -386,6 +411,7 @@ async function stackRun(browser, stack) {
     observe: (exchange) => exchanges.push(exchange),
   });
   const urls = await proxy.start();
+  stopIfInterrupted();
   const preview = spawn(
     process.execPath,
     [
@@ -411,6 +437,7 @@ async function stackRun(browser, stack) {
   preview.once("error", (e) => (previewError = e));
   await waitFor(`${origin}/`, "preview");
   if (previewError) throw previewError;
+  stopIfInterrupted();
 
   const env = {
     ...process.env,
@@ -435,15 +462,16 @@ async function stackRun(browser, stack) {
   };
   if (serve) {
     console.error(
-      `serving: preview ${origin}  proxy control ${urls.controlUrl}  backend ${env.ATLAS_INTEGRATION_BACKEND}`,
+      `serving: preview ${origin}  proxy control ${urls.controlUrl}  backend ${env.ATLAS_INTEGRATION_BACKEND}  (owned ports: ${ports.join(", ")})`,
     );
     writeFileSync(join(tmp, "env.json"), JSON.stringify(env));
-    await new Promise(() => undefined);
-    return 0;
+    // Revision 16 (R23c): until the first signal (already received counts), then back to the caller, which cleans up and exits.
+    await cancelled;
+    return { exitCode: null, signal: interrupted, exchanges };
   }
 
   // 5. The specs.
-  if (interrupted) throw new Error(`interrupted by ${interrupted}`);
+  stopIfInterrupted();
   const run = spawn(
     process.execPath,
     [
@@ -483,52 +511,69 @@ const layer = postgres
   ? "integration (PostgreSQL repeat): the session module and its production adapters in a real engine against the RELEASED backend CONTAINER IMAGE on a disposable PostgreSQL, behind the delaying proxy, for the specs selected by --grep only; NOT the WEB-08c lifecycle traces on a rendered cache, NOT real Safari or a real device, NOT assistive technology, NOT the unmodified Compose or Ingress arrangement"
   : "integration: the session module and its production adapters in a real engine against the RELEASED backend on a disposable SQLite database, behind the delaying proxy; NOT the WEB-08c lifecycle traces on a rendered cache, NOT real Safari or a real device, NOT assistive technology, NOT PostgreSQL";
 
-if (serve) {
-  // `--serve` starts one stack and never returns: nothing is run, judged or recorded.
+/**
+ * `--serve`: one stack, served until the first signal; nothing is run, judged or recorded. Revision 16 (R23c): the signal (or a
+ * failure) ends the wait, the stack is cleaned up here and the process exits: 130/143 after a signal, 1 after a failure. It never
+ * continues into the schedule below.
+ */
+async function serveOnly() {
   mkdirSync(evidence, { recursive: true });
+  let failed = null;
   try {
     await main(browsers[0], STACKS[0]);
   } catch (error) {
-    console.error(String(error?.stack ?? error));
-    await cleanup();
-    process.exit(1);
+    if (!interrupted) failed = error;
   }
+  if (failed) console.error(String(failed?.stack ?? failed));
+  const { problems } = await cleanup();
+  for (const problem of problems) console.error(`clean-up problem: ${problem}`);
+  return interrupted ? exitFor(interrupted) : 1;
 }
 
 // One fresh stack per stack and engine: the specs that change an account (password, logout, retirement, device capacity) must not
 // leave the next stack with accounts, sessions or a throttle they have used up.
-const status = await runIntegration({
-  options: {
-    browsers,
-    stacks: STACKS,
-    manifest,
-    partial,
-    narrowed,
-    evidence,
-    env: process.env,
-    app,
-    layer,
-  },
-  deps: {
-    list: playwrightLister({
-      root,
-      browsers,
-      dir: join(evidence, "discovery"),
-      env: process.env,
-    }),
-    execute: (stack, browser) => main(browser, stack),
-    cleanup,
-    readReport: (file) =>
-      existsSync(file) ? readFileSync(file, "utf8") : null,
-    exists: existsSync,
-    write: (file, text) => {
-      mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, text);
-    },
-    now: () => Date.now(),
-    log: (message) => console.error(message),
-    interrupted: () => interrupted,
-    backend: () => lastBackend,
-  },
-});
+const status = serve
+  ? await serveOnly()
+  : await runIntegration({
+      options: {
+        browsers,
+        stacks: STACKS,
+        manifest,
+        partial,
+        narrowed,
+        evidence,
+        env: process.env,
+        app,
+        layer,
+      },
+      deps: {
+        list: playwrightLister({
+          root,
+          browsers,
+          dir: join(evidence, "discovery"),
+          env: process.env,
+        }),
+        execute: (stack, browser) => main(browser, stack),
+        cleanup,
+        readReport: (file) =>
+          existsSync(file) ? readFileSync(file, "utf8") : null,
+        exists: existsSync,
+        // Revision 16 (C5): created only if absent (`wx`): of two invocations given the same directory, one claims it.
+        claim: (file, text) => {
+          mkdirSync(dirname(file), { recursive: true });
+          writeFileSync(file, text, { flag: "wx" });
+        },
+        // A reader never sees a half-written record: written beside it, then renamed over it.
+        write: (file, text) => {
+          mkdirSync(dirname(file), { recursive: true });
+          const partialFile = `${file}.partial`;
+          writeFileSync(partialFile, text);
+          renameSync(partialFile, file);
+        },
+        now: () => Date.now(),
+        log: (message) => console.error(message),
+        interrupted: () => interrupted,
+        backend: () => lastBackend,
+      },
+    });
 process.exit(status);

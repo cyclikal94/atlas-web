@@ -1,5 +1,7 @@
 import type { Stack } from "./stacks.mjs";
 
+export const OWNER: string;
+
 export function evidencePaths(
   evidence: string,
   browsers: string[],
@@ -39,6 +41,8 @@ export function runIntegration(options: {
     cleanup: () => Promise<{ problems: string[] }>;
     readReport: (file: string) => string | null;
     exists: (path: string) => boolean;
+    /** Creates `file` only if it does not exist (throws otherwise): this invocation's exclusive claim on its evidence directory. */
+    claim: (file: string, text: string) => void;
     write: (file: string, text: string) => void;
     now: () => number;
     log: (message: string) => void;

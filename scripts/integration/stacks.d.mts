@@ -53,15 +53,24 @@ export function designedSkip(
   test: unknown,
   context: SkipContext,
 ): string | null;
+export interface Counts {
+  passed: number;
+  designed_skips: number;
+  failed: number;
+  interrupted: number;
+  /** In the report, but never executed and not a designed skip. */
+  not_run: number;
+  /** Planned, but the evidence does not show what happened to it (no, unreadable, malformed or contradictory result). */
+  unproven: number;
+  /** Planned, but its stack was never started (or ended before Playwright started). */
+  not_launched: number;
+}
+export function emptyCounts(): Counts;
+export function reportShapeProblems(parsed: unknown): string[];
 export interface Judged {
   verdict: "passed" | "failed" | "incomplete";
   reasons: string[];
-  counts: {
-    passed: number;
-    designed_skips: number;
-    failed: number;
-    not_run: number;
-  };
+  counts: Counts;
   designed_skips: Array<{ key: string; reason: string }>;
 }
 export function judgeStack(options: {
@@ -69,6 +78,7 @@ export function judgeStack(options: {
   report: string | null;
   exitCode: number | null;
   startedAt: number;
+  finishedAt?: number;
   project: string;
   context: SkipContext;
   refusals?: Array<{ method: string; path: string; at: number }>;

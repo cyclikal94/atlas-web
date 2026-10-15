@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import {
   type Launched,
+  OWNER,
   playwrightLister,
   runIntegration,
 } from "../../scripts/integration/schedule.mjs";
@@ -20,6 +21,7 @@ import {
   DEFAULT_STACKS,
   DESIGNED_SKIPS,
   designedSkip,
+  judgeStack,
   planStacks,
   reportCases,
   type Stack,
@@ -30,6 +32,10 @@ import {
  * WEB-14a revision 15 (review R22, R23): the integration runner's stack assignment and schedule, through the runner's own modules
  * (scripts/integration/stacks.mjs, schedule.mjs). Discovery is Playwright's real `--list` of tests/integration (no backend, no
  * browser); only the stack PROCESSES are doubles: `execute` writes the result file a stack's Playwright would write.
+ *
+ * Revision 16 (review R23a-c): the judge is also checked against a REAL result of the pinned reporter
+ * (tests/static/fixtures/integration-report-base-chromium.json: the r15 author run's chromium base stack, sanitised), one field changed
+ * at a time; and the schedule's evidence writes, result reads and ownership claim fail one phase at a time.
  */
 const ROOT = resolve(__dirname, "../..");
 const BROWSERS = ["chromium", "firefox", "webkit"];
@@ -98,12 +104,16 @@ function report(
     outcome = () => "passed",
     startTime = new Date().toISOString(),
     errors = [],
+    mutate,
   }: {
     outcome?: (key: string, file: string) => Outcome;
     startTime?: string;
     errors?: unknown[];
+    /** Changes the finished report (one field at a time): aggregate and terminal fields need not change together. */
+    mutate?: (report: Record<string, unknown> & { suites: Suite[] }) => void;
   } = {},
 ): string {
+  const totals = { expected: 0, skipped: 0, unexpected: 0, flaky: 0 };
   const files = new Map<string, Suite>();
   for (const key of keys) {
     const [project, file, ...titles] = key.split(" › ") as [
@@ -185,19 +195,31 @@ function report(
                       : [],
                   results: [result("skipped")],
                 };
+    totals[test.status as keyof typeof totals] += 1;
     suite.specs.push({
       title: titles.at(-1) as string,
       file: `../integration/${file}`,
       tests: [test],
     });
   }
-  return JSON.stringify({
+  const finished = {
     config: {},
     suites: [...files.values()],
     errors,
-    stats: { startTime, expected: 0, skipped: 0, unexpected: 0, flaky: 0 },
-  });
+    stats: { startTime, duration: 1, ...totals },
+  };
+  mutate?.(finished);
+  return JSON.stringify(finished);
 }
+/** The first test record of a report (its first file's first spec, depth-first). */
+const firstTest = (r: { suites: Suite[] }) => {
+  const walk = (suite: Suite): Record<string, unknown> | undefined =>
+    (suite.specs[0]?.tests[0] as Record<string, unknown> | undefined) ??
+    suite.suites.map(walk).find(Boolean);
+  return walk(r.suites[0] as Suite) as Record<string, unknown> & {
+    results: Array<Record<string, unknown>>;
+  };
+};
 /** The double's normal answer: everything passes, the measurement specs are their designed skips. */
 const normal = (_key: string, file: string): Outcome =>
   DESIGNED_FILES.has(file) && file.includes("profile") ? "designed" : "passed";
@@ -206,6 +228,7 @@ interface World {
   evidence: string;
   events: string[];
   launches: string[];
+  logs: string[];
   status: number;
   schedule: () => {
     entries: Array<{
@@ -218,15 +241,28 @@ interface World {
   };
   summary: () => Record<string, unknown> & {
     status: string;
-    entries: Array<{
-      state: string;
-      stack: string;
-      browser: string;
-      reasons: string[];
-      phase?: string;
-    }>;
+    complete: boolean;
+    accounted: boolean;
+    evidence: { complete: boolean; errors: Array<{ file: string }> };
+    entries: Entry[];
   };
 }
+interface Entry {
+  state: string;
+  stack: string;
+  browser: string;
+  reasons: string[];
+  phase?: string;
+  planned_cases: number;
+  counts?: Record<string, number>;
+}
+/** Each entry's counts add up to its planned cases. */
+const conserved = (entries: Entry[]) =>
+  entries.every(
+    (e) =>
+      Object.values(e.counts ?? {}).reduce((n, k) => n + k, 0) ===
+      e.planned_cases,
+  );
 let worlds = 0;
 async function world({
   stacks = STACKS,
@@ -240,6 +276,10 @@ async function world({
   interrupted = () => null as string | null,
   write,
   before,
+  readReport,
+  exists,
+  claim,
+  evidence: given,
 }: {
   stacks?: Stack[];
   manifest?: Stack[];
@@ -257,12 +297,21 @@ async function world({
   interrupted?: () => string | null;
   write?: (file: string, text: string) => void;
   before?: (evidence: string) => void;
+  readReport?: (file: string) => string | null;
+  exists?: (path: string) => boolean;
+  claim?: (file: string, text: string) => void;
+  evidence?: string;
 } = {}): Promise<World> {
   worlds += 1;
-  const evidence = join(scratch, `world-${worlds}`);
+  const evidence = given ?? join(scratch, `world-${worlds}`);
   before?.(evidence);
   const events: string[] = [];
   const launches: string[] = [];
+  const logs: string[] = [];
+  const realWrite = (file: string, text: string) => {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text);
+  };
   let running = 0;
   const status = await runIntegration({
     options: {
@@ -300,17 +349,26 @@ async function world({
         events.push("cleanup");
         return cleanup();
       },
-      readReport: (file) =>
-        existsSync(file) ? readFileSync(file, "utf8") : null,
-      exists: existsSync,
-      write:
-        write ??
+      readReport: (file) => {
+        events.push("read");
+        if (readReport) return readReport(file);
+        return existsSync(file) ? readFileSync(file, "utf8") : null;
+      },
+      exists: exists ?? existsSync,
+      claim:
+        claim ??
         ((file, text) => {
           mkdirSync(dirname(file), { recursive: true });
-          writeFileSync(file, text);
+          writeFileSync(file, text, { flag: "wx" });
         }),
+      write: (file, text) => {
+        events.push(`write ${file.slice(evidence.length + 1)}`);
+        (write ?? realWrite)(file, text);
+      },
       now: () => Date.now(),
-      log: () => undefined,
+      log: (line) => {
+        logs.push(line);
+      },
       interrupted,
       backend: () => ({ tag: "double" }),
     },
@@ -321,12 +379,24 @@ async function world({
     evidence,
     events,
     launches,
+    logs,
     status,
     schedule: () => read("schedule.json"),
     summary: () => read("summary.json"),
   };
 }
 const ORDER = BROWSERS.flatMap((b) => STACKS.map((s) => `${b}/${s.name}`));
+/** The processes' events in order: launch, clean-up, result read (evidence writes and listings left out). */
+const runsOf = (events: string[]) =>
+  events.filter(
+    (e) => e.startsWith("launch ") || e === "cleanup" || e === "read",
+  );
+/** After the last launch: it was cleaned up, and nothing launched after it. */
+const endsCleanly = (events: string[]) => {
+  const runs = runsOf(events);
+  const last = runs.map((e) => e.startsWith("launch ")).lastIndexOf(true);
+  return runs.slice(last + 1).includes("cleanup");
+};
 
 describe("R22: every discovered integration case is in exactly one stack (Playwright's own listing)", () => {
   test("the default stacks and the separate I-U2 obligation cover the whole listing once, in every engine", async () => {
@@ -435,7 +505,16 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
             {
               title: "a case nobody assigned",
               file: "../integration/integration.new.spec.ts",
-              tests: [{ projectName: "integration-firefox", results: [] }],
+              // As Playwright's --list writes a test: no result.
+              tests: [
+                {
+                  projectName: "integration-firefox",
+                  status: "skipped",
+                  expectedStatus: "passed",
+                  annotations: [],
+                  results: [],
+                },
+              ],
             },
           ],
           suites: [],
@@ -457,6 +536,24 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       s.name === "snapshot" ? { ...s, grep: "I-N1" } : s,
     );
     const unmatched = await world({ stacks: narrow });
+    // Revision 16: a listing that is not the reporter's shape is not an inventory (nothing is guessed from it).
+    const malformed = await world({
+      list: async (selection, label) => {
+        const text = await cachedList(selection, label);
+        if (selection.length > 0) return text;
+        const whole = JSON.parse(text);
+        whole.suites[0].specs = { not: "a list" };
+        return JSON.stringify(whole);
+      },
+    });
+    expect(malformed.status).toBe(1);
+    expect(malformed.launches).toEqual([]);
+    expect(malformed.summary()).toMatchObject({
+      status: "failed",
+      not_started: expect.stringMatching(
+        /^discovery failed: the listing is malformed: suites\[0\]\.specs is not a list/,
+      ),
+    });
     for (const [w, problem] of [
       [unknown, "in no stack: integration-firefox › integration.new.spec.ts"],
       [twice, "in more than one stack (sharing, sharing-again)"],
@@ -487,8 +584,14 @@ describe("R23: the next stack or browser starts only after the previous one pass
     const w = await world();
     expect(w.status).toBe(0);
     expect(w.launches).toEqual(ORDER);
-    const runs = w.events.filter((e) => !e.startsWith("list"));
-    expect(runs).toEqual(ORDER.flatMap((o) => [`launch ${o}`, "cleanup"]));
+    expect(runsOf(w.events)).toEqual(
+      ORDER.flatMap((o) => [`launch ${o}`, "cleanup", "read"]),
+    );
+    // Every launch is admitted by its own "running" record, written immediately before it.
+    for (const [i, e] of w.events.entries())
+      if (e.startsWith("launch "))
+        expect(w.events[i - 1]).toBe("write schedule.json");
+    expect(w.events.at(-1)).toBe("write summary.json");
     const summary = w.summary();
     expect(summary.status).toBe("passed");
     expect(summary.complete).toBe(true);
@@ -500,8 +603,17 @@ describe("R23: the next stack or browser starts only after the previous one pass
         passed: 153,
         designed_skips: 6,
         failed: 0,
+        interrupted: 0,
         not_run: 0,
+        unproven: 0,
+        not_launched: 0,
+        accounted: true,
       });
+    expect(summary).toMatchObject({
+      accounted: true,
+      evidence: { complete: true, errors: [] },
+    });
+    expect(existsSync(join(w.evidence, OWNER))).toBe(true);
     expect(summary.separate_obligations).toEqual([
       expect.objectContaining({
         name: "pwa",
@@ -696,6 +808,55 @@ describe("R23: the next stack or browser starts only after the previous one pass
       "failed",
       "result",
     ],
+    // Revision 16 (R23a): one field of an otherwise passing report, through the real scheduler.
+    [
+      "exit 0 with a case that has no execution result under a passing aggregate",
+      "chromium/sharing",
+      (file, keys) => {
+        writeFileSync(
+          file,
+          report(keys, {
+            mutate: (r) => {
+              firstTest(r).results = [];
+            },
+          }),
+        );
+        return { exitCode: 0 };
+      },
+      "incomplete",
+      "result",
+    ],
+    [
+      "exit 0 with an interrupted execution under a passing aggregate",
+      "chromium/sharing",
+      (file, keys) => {
+        writeFileSync(
+          file,
+          report(keys, {
+            mutate: (r) => {
+              (firstTest(r).results[0] as Record<string, unknown>).status =
+                "interrupted";
+            },
+          }),
+        );
+        return { exitCode: 0 };
+      },
+      "incomplete",
+      "result",
+    ],
+    [
+      "exit 0 with an invalid report start time",
+      "firefox/base",
+      (file, keys) => {
+        writeFileSync(
+          file,
+          report(keys, { outcome: normal, startTime: "not-a-time" }),
+        );
+        return { exitCode: 0 };
+      },
+      "incomplete",
+      "result",
+    ],
     [
       "a backend 429 outside the deliberate settings case, with a green result",
       "chromium/sharing",
@@ -725,9 +886,7 @@ describe("R23: the next stack or browser starts only after the previous one pass
       const index = ORDER.indexOf(at);
       expect(w.launches).toEqual(ORDER.slice(0, index + 1));
       // The failed stack was cleaned up too, and nothing launched after it.
-      expect(w.events.filter((e) => !e.startsWith("list")).at(-1)).toBe(
-        "cleanup",
-      );
+      expect(endsCleanly(w.events)).toBe(true);
       const entries = w.summary().entries;
       expect(entries[index]).toMatchObject({ state, phase });
       expect(entries[index]?.reasons.length).toBeGreaterThan(0);
@@ -746,6 +905,11 @@ describe("R23: the next stack or browser starts only after the previous one pass
       expect(w.schedule().entries.map((e) => e.state)).toEqual(
         entries.map((e) => e.state),
       );
+      // Revision 16 (I6): every planned case is accounted for once, the stopped ones as not launched.
+      expect(w.summary().accounted).toBe(true);
+      expect(conserved(entries)).toBe(true);
+      for (const e of entries.slice(index + 1))
+        expect(e.counts?.not_launched).toBe(e.planned_cases);
     },
     120_000,
   );
@@ -851,7 +1015,7 @@ describe("R23: the next stack or browser starts only after the previous one pass
       expect(w.status).toBe(code);
       const index = ORDER.indexOf("firefox/registration");
       expect(w.launches).toEqual(ORDER.slice(0, index + 1));
-      expect(w.events.at(-1)).toBe("cleanup");
+      expect(endsCleanly(w.events)).toBe(true);
       const entries = w.summary().entries;
       expect(entries[index]).toMatchObject({ state: "interrupted" });
       expect(entries[index]?.reasons[0]).toBe(`interrupted by ${signal}`);
@@ -865,11 +1029,19 @@ describe("R23: the next stack or browser starts only after the previous one pass
 
   test("a signal during discovery starts no stack", async () => {
     let received: string | null = null;
+    // Revision 16 (I3): after a known cancellation no stack is even admitted (recorded running), not merely not launched.
+    const recorded: string[] = [];
     const w = await world({
       interrupted: () => received,
       list: async (selection, label) => {
         received = "SIGTERM";
         return cachedList(selection, label);
+      },
+      write: (file, text) => {
+        if (file.endsWith("schedule.json"))
+          for (const e of JSON.parse(text).entries) recorded.push(e.state);
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, text);
       },
     });
     expect(w.status).toBe(143);
@@ -877,6 +1049,10 @@ describe("R23: the next stack or browser starts only after the previous one pass
     expect(new Set(w.summary().entries.map((e) => e.state))).toEqual(
       new Set(["not_run"]),
     );
+    expect(recorded).not.toContain("running");
+    expect(w.summary().entries[0]?.reasons).toEqual([
+      "not started: interrupted by SIGTERM",
+    ]);
   }, 120_000);
 
   test("a schedule that cannot be written stops before the next stack; the exit is non-zero", async () => {
@@ -1050,4 +1226,792 @@ test("the manifest names each stack once, with the older result-file names uncha
   expect(
     DEFAULT_STACKS.filter((s) => s.deliberateThrottle).map((s) => s.name),
   ).toEqual(["settings"]);
+});
+
+describe("R23a (revision 16): a stack passes only on terminal execution evidence (a REAL pinned-reporter result, one field changed at a time)", () => {
+  type Obj = Record<string, unknown>;
+  type Test = Obj & { results: Obj[]; annotations: Obj[] };
+  type Report = Obj & { stats: Obj; suites: Obj[]; errors: unknown[] };
+  // The r15 author run's chromium base stack (sanitised; provenance in the revision-16 execution report): 19 passes and the six
+  // designed measurement skips, with the reporter's real annotations, serial skip shape and totals.
+  const REAL = readFileSync(
+    join(__dirname, "fixtures/integration-report-base-chromium.json"),
+    "utf8",
+  );
+  const real = () => JSON.parse(REAL) as Report;
+  const PLANNED = new Map<string, number>();
+  for (const c of reportCases(real()))
+    PLANNED.set(c.key, (PLANNED.get(c.key) ?? 0) + 1);
+  const START = Date.parse(real().stats.startTime as string);
+  const tests = (r: Report) => reportCases(r).map((c) => c.test as Test);
+  const passing = (r: Report) =>
+    tests(r).find((t) => t.status === "expected") as Test;
+  const skipped = (r: Report) =>
+    tests(r).find((t) => t.status === "skipped") as Test;
+  const firstSpecs = (r: Report) => {
+    const walk = (suite: Obj): Obj[] | undefined =>
+      (suite.specs as Obj[]).length > 0
+        ? (suite.specs as Obj[])
+        : (suite.suites as Obj[]).map(walk).find(Boolean);
+    return walk(r.suites[0] as Obj) as Obj[];
+  };
+  const judge = (
+    r: unknown,
+    over: Partial<Parameters<typeof judgeStack>[0]> = {},
+  ) =>
+    judgeStack({
+      planned: PLANNED,
+      report: typeof r === "string" ? r : JSON.stringify(r),
+      exitCode: 0,
+      startedAt: START - 1_000,
+      finishedAt: START + 60_000,
+      project: "integration-chromium",
+      context: { env: {}, oidc: false, app: "" },
+      ...over,
+    });
+  const sum = (counts: object) =>
+    Object.values(counts as Record<string, number>).reduce((n, k) => n + k, 0);
+
+  test("positive control: the unchanged real report passes, 19 terminal passes and 6 designed skips, every case counted once", () => {
+    expect(PLANNED.size).toBe(25);
+    const judged = judge(real());
+    expect(judged).toMatchObject({ verdict: "passed", reasons: [] });
+    expect(judged.counts).toEqual({
+      passed: 19,
+      designed_skips: 6,
+      failed: 0,
+      interrupted: 0,
+      not_run: 0,
+      unproven: 0,
+      not_launched: 0,
+    });
+  });
+
+  const whole = { unproven: 25, passed: 0 };
+  const cases: Array<
+    [
+      string,
+      (r: Report) => void,
+      "failed" | "incomplete",
+      string,
+      Record<string, number>,
+    ]
+  > = [
+    // Terminal execution evidence of one passing case (its aggregate fields unchanged).
+    [
+      "no execution result under a passing aggregate (results: [])",
+      (r) => {
+        passing(r).results = [];
+      },
+      "incomplete",
+      "no terminal passing execution",
+      { passed: 18, unproven: 1 },
+    ],
+    [
+      "an interrupted execution under a passing aggregate",
+      (r) => {
+        (passing(r).results[0] as Obj).status = "interrupted";
+      },
+      "incomplete",
+      "interrupted: integration-chromium",
+      { passed: 18, interrupted: 1 },
+    ],
+    [
+      "a failed execution under a passing aggregate",
+      (r) => {
+        (passing(r).results[0] as Obj).status = "failed";
+      },
+      "failed",
+      "a failed execution under status expected",
+      { passed: 18, failed: 1 },
+    ],
+    [
+      "a timed-out execution under a passing aggregate",
+      (r) => {
+        (passing(r).results[0] as Obj).status = "timedOut";
+      },
+      "failed",
+      "a timedOut execution",
+      { passed: 18, failed: 1 },
+    ],
+    [
+      "a skipped execution under a passing aggregate",
+      (r) => {
+        (passing(r).results[0] as Obj).status = "skipped";
+      },
+      "incomplete",
+      "no terminal passing execution",
+      { passed: 18, unproven: 1 },
+    ],
+    [
+      "a passing aggregate that expected a skip",
+      (r) => {
+        passing(r).expectedStatus = "skipped";
+      },
+      "incomplete",
+      "no terminal passing execution",
+      { passed: 18, unproven: 1 },
+    ],
+    [
+      "a second execution (a retry) under a passing aggregate",
+      (r) => {
+        const t = passing(r);
+        t.results.push({ ...(t.results[0] as Obj), retry: 1 });
+      },
+      "failed",
+      "retried (no retry is approved)",
+      { passed: 18, failed: 1 },
+    ],
+    [
+      "one execution at retry 1",
+      (r) => {
+        (passing(r).results[0] as Obj).retry = 1;
+      },
+      "failed",
+      "retried (no retry is approved)",
+      { passed: 18, failed: 1 },
+    ],
+    [
+      "an unexpected aggregate over a passing execution (totals unchanged)",
+      (r) => {
+        passing(r).status = "unexpected";
+      },
+      "incomplete",
+      "the report's totals contradict its tests (expected 19 != 18, unexpected 0 != 1)",
+      { passed: 18, failed: 1 },
+    ],
+    [
+      "totals that contradict the tests",
+      (r) => {
+        r.stats.expected = 20;
+      },
+      "incomplete",
+      "the report's totals contradict its tests",
+      { passed: 19, designed_skips: 6 },
+    ],
+    // The report's shape: nothing is walked or guessed from a malformed report.
+    [
+      "an execution result without a retry count",
+      (r) => {
+        delete (passing(r).results[0] as Obj).retry;
+      },
+      "incomplete",
+      "retry is not a count",
+      whole,
+    ],
+    [
+      "an unknown terminal status",
+      (r) => {
+        (passing(r).results[0] as Obj).status = "finished";
+      },
+      "incomplete",
+      'has an unknown status "finished"',
+      whole,
+    ],
+    [
+      "an unknown aggregate status",
+      (r) => {
+        passing(r).status = "done";
+      },
+      "incomplete",
+      'has an unknown status "done"',
+      whole,
+    ],
+    [
+      "execution results that are not a list",
+      (r) => {
+        (passing(r) as Obj).results = null;
+      },
+      "incomplete",
+      "results is not a list",
+      whole,
+    ],
+    [
+      "an execution result that is not an object",
+      (r) => {
+        passing(r).results[0] = "passed" as unknown as Obj;
+      },
+      "incomplete",
+      "results[0] is not an object",
+      whole,
+    ],
+    [
+      "a test that is not an object",
+      (r) => {
+        (firstSpecs(r)[0] as Obj).tests = [null];
+      },
+      "incomplete",
+      "tests[0] is not an object",
+      whole,
+    ],
+    [
+      "specs that are not a list",
+      (r) => {
+        (r.suites[0] as Obj).specs = { title: "x" };
+      },
+      "incomplete",
+      "suites[0].specs is not a list",
+      whole,
+    ],
+    [
+      "suites that are not a list",
+      (r) => {
+        (r as Obj).suites = {};
+      },
+      "incomplete",
+      "suites is not a list",
+      whole,
+    ],
+    [
+      "annotations that are not a list",
+      (r) => {
+        passing(r).annotations = "evidence" as unknown as Obj[];
+      },
+      "incomplete",
+      "annotations is not a list",
+      whole,
+    ],
+    [
+      "no stats",
+      (r) => {
+        delete (r as Obj).stats;
+      },
+      "incomplete",
+      "the report has no stats",
+      whole,
+    ],
+    [
+      "an invalid start time",
+      (r) => {
+        r.stats.startTime = "not a valid timestamp";
+      },
+      "incomplete",
+      'stats.startTime is not a time: "not a valid timestamp"',
+      whole,
+    ],
+    [
+      "no start time",
+      (r) => {
+        delete r.stats.startTime;
+      },
+      "incomplete",
+      "stats.startTime is not a time",
+      whole,
+    ],
+    [
+      "a missing total",
+      (r) => {
+        delete r.stats.flaky;
+      },
+      "incomplete",
+      "stats.flaky is not a count",
+      whole,
+    ],
+    [
+      "errors that are not a list",
+      (r) => {
+        (r as Obj).errors = null;
+      },
+      "incomplete",
+      "errors is not a list",
+      whole,
+    ],
+    // The invocation's own time and the report-level checks.
+    [
+      "a start time before this stack started (stale)",
+      (r) => {
+        r.stats.startTime = new Date(START - 2_000).toISOString();
+      },
+      "incomplete",
+      "the result file is stale",
+      whole,
+    ],
+    [
+      "a start time after this stack finished",
+      (r) => {
+        r.stats.startTime = new Date(START + 120_000).toISOString();
+      },
+      "incomplete",
+      "after this stack finished",
+      whole,
+    ],
+    [
+      "a Playwright error outside any test",
+      (r) => {
+        r.errors = [{ message: "global setup failed" }];
+      },
+      "failed",
+      "error(s) outside a test",
+      { passed: 19, designed_skips: 6 },
+    ],
+    // Identity: the planned multiset, exactly.
+    [
+      "a planned case without a result",
+      (r) => {
+        const specs = firstSpecs(r);
+        const [gone] = specs.splice(0, 1) as Array<{ tests: Test[] }>;
+        const status = (gone as { tests: Test[] }).tests[0]?.status;
+        r.stats.expected =
+          (r.stats.expected as number) - (status === "expected" ? 1 : 0);
+      },
+      "incomplete",
+      "1 planned case(s) have no result",
+      { unproven: 1 },
+    ],
+    [
+      "an unplanned extra result",
+      (r) => {
+        const specs = firstSpecs(r);
+        specs.push(structuredClone(specs[0] as Obj));
+        r.stats.expected = (r.stats.expected as number) + 1;
+      },
+      "incomplete",
+      "1 result(s) were not planned",
+      { passed: 19, designed_skips: 6 },
+    ],
+    [
+      "a result for another project",
+      (r) => {
+        passing(r).projectName = "integration-firefox";
+      },
+      "incomplete",
+      "1 result(s) for another project (integration-firefox)",
+      { passed: 18, unproven: 1 },
+    ],
+  ];
+  test.each(cases)(
+    "%s is not a pass, and every planned case is still counted once",
+    (_label, change, verdict, reason, counts) => {
+      const r = real();
+      change(r);
+      const judged = judge(r);
+      expect(judged.verdict).toBe(verdict);
+      expect(judged.reasons.join(" | ")).toContain(reason);
+      expect(judged.counts).toMatchObject(counts);
+      expect(sum(judged.counts)).toBe(25);
+    },
+  );
+
+  test("a non-zero exit with the real green report fails; an absent, non-JSON or non-object result proves nothing about its 25 cases", () => {
+    expect(judge(real(), { exitCode: 1 })).toMatchObject({
+      verdict: "failed",
+      reasons: ["Playwright exited 1"],
+    });
+    for (const [report, reason] of [
+      [null, "no result file"],
+      ['{"suites": [', "the result file is not JSON"],
+      ["[]", "the report is not a JSON object"],
+    ] as const) {
+      const judged = judge(report === null ? null : report, {
+        report: report,
+      });
+      expect(judged.verdict).toBe("incomplete");
+      expect(judged.reasons.join(" ")).toContain(reason);
+      expect(judged.counts).toMatchObject({ unproven: 25, passed: 0 });
+    }
+  });
+
+  const skips: Array<
+    [string, (r: Report) => void, string, Record<string, number>]
+  > = [
+    [
+      "its execution record removed (results: [])",
+      (r) => {
+        skipped(r).results = [];
+      },
+      "not run, and not a designed skip",
+      { designed_skips: 5, not_run: 1 },
+    ],
+    [
+      "an interrupted execution",
+      (r) => {
+        (skipped(r).results[0] as Obj).status = "interrupted";
+      },
+      "interrupted",
+      { designed_skips: 5, interrupted: 1 },
+    ],
+    [
+      "a passing aggregate expectation (not the reporter's skip shape)",
+      (r) => {
+        skipped(r).expectedStatus = "passed";
+      },
+      "contradictory skip",
+      { designed_skips: 5, unproven: 1 },
+    ],
+    [
+      "another skip description",
+      (r) => {
+        const t = skipped(r);
+        for (const a of [
+          ...t.annotations,
+          ...t.results.flatMap((x) => x.annotations as Obj[]),
+        ])
+          if (a.type === "skip") a.description = "skipped for another reason";
+      },
+      "not run, and not a designed skip",
+      { designed_skips: 5, not_run: 1 },
+    ],
+  ];
+  test.each(skips)(
+    "a measurement skip with %s is not a designed skip",
+    (_label, change, reason, counts) => {
+      const r = real();
+      change(r);
+      const judged = judge(r);
+      expect(judged.verdict).toBe("incomplete");
+      expect(judged.reasons.join(" | ")).toContain(reason);
+      expect(judged.counts).toMatchObject({ passed: 19, ...counts });
+      expect(sum(judged.counts)).toBe(25);
+    },
+  );
+
+  test("the real measurement skips are designed only while ATLAS_PROFILE is unset", () => {
+    const judged = judge(real(), {
+      context: { env: { ATLAS_PROFILE: "1" }, oidc: false, app: "" },
+    });
+    expect(judged.verdict).toBe("incomplete");
+    expect(judged.counts).toMatchObject({
+      passed: 19,
+      designed_skips: 0,
+      not_run: 6,
+    });
+  });
+});
+
+describe("R23b (revision 16): an evidence, result or ownership failure launches nothing after it and still reaches a terminal ledger", () => {
+  const LAST = ORDER.length - 1;
+  /** A write double that fails (ENOSPC) when `fails` says so for this file's nth write. */
+  const failingWrite = (
+    fails: (name: string, text: string, n: number) => boolean,
+  ) => {
+    const seen = new Map<string, number>();
+    return (file: string, text: string) => {
+      const name = file.endsWith("discovery.json")
+        ? "discovery/discovery.json"
+        : (file.split("/").at(-1) as string);
+      const n = (seen.get(name) ?? 0) + 1;
+      seen.set(name, n);
+      if (fails(name, text, n))
+        throw Object.assign(
+          new Error("ENOSPC: no space left on device (double)"),
+          { code: "ENOSPC" },
+        );
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, text);
+    };
+  };
+  /** The schedule write that admits entry `index`: that entry is the one recorded running. */
+  const admits = (index: number) => (name: string, text: string) =>
+    name === "schedule.json" &&
+    JSON.parse(text).entries[index].state === "running";
+  const checkLedger = (w: World, failedFile: string) => {
+    const summary = w.summary();
+    expect(summary.status).not.toBe("passed");
+    expect(summary.complete).toBe(false);
+    expect(summary.evidence.complete).toBe(false);
+    expect(summary.evidence.errors.map((e) => e.file)).toContain(failedFile);
+    expect(summary.entries.some((e) => e.state === "running")).toBe(false);
+    expect(summary.accounted).toBe(true);
+    expect(conserved(summary.entries)).toBe(true);
+  };
+
+  test.each([
+    [
+      "the discovery record",
+      (name: string) => name.startsWith("discovery/"),
+      0,
+      "discovery/discovery.json",
+    ],
+    [
+      "the initial schedule",
+      (name: string, _t: string, n: number) =>
+        name === "schedule.json" && n === 1,
+      0,
+      "schedule.json",
+    ],
+    ["the first stack's admission record", admits(0), 0, "schedule.json"],
+    [
+      "a middle stack's admission record (firefox/base)",
+      admits(13),
+      13,
+      "schedule.json",
+    ],
+    ["the last stack's admission record", admits(LAST), LAST, "schedule.json"],
+  ] as const)(
+    "%s cannot be written: no stack launches from then on, and the exit is 1",
+    async (_label, fails, launched, failedFile) => {
+      const w = await world({ write: failingWrite(fails) });
+      expect(w.status).toBe(1);
+      expect(w.launches).toEqual(ORDER.slice(0, launched));
+      if (launched > 0) expect(endsCleanly(w.events)).toBe(true);
+      checkLedger(w, failedFile);
+      const entries = w.summary().entries;
+      expect(
+        entries.slice(0, launched).every((e) => e.state === "passed"),
+      ).toBe(true);
+      expect(entries.slice(launched).every((e) => e.state === "not_run")).toBe(
+        true,
+      );
+      if (failedFile === "schedule.json" && launched === LAST)
+        expect(entries[LAST]?.reasons[0]).toBe(
+          "not started: its admission record (schedule.json) could not be written",
+        );
+    },
+    120_000,
+  );
+
+  test("the last stack's result record cannot be written: every stack ran and passed, but the invocation is incomplete and exits 1", async () => {
+    const w = await world({
+      write: failingWrite(
+        (name, _t, n) => name === "schedule.json" && n === 2 * ORDER.length + 1,
+      ),
+    });
+    expect(w.status).toBe(1);
+    expect(w.launches).toEqual(ORDER);
+    checkLedger(w, "schedule.json");
+    expect(w.summary().status).toBe("incomplete");
+    expect(w.summary().entries.every((e) => e.state === "passed")).toBe(true);
+  }, 120_000);
+
+  test("a one-shot failure of the final schedule write, the disk then writable again: the summary still says incomplete, exit 1", async () => {
+    const w = await world({
+      write: failingWrite(
+        (name, _t, n) => name === "schedule.json" && n === 2 * ORDER.length + 2,
+      ),
+    });
+    expect(w.status).toBe(1);
+    expect(w.launches).toEqual(ORDER);
+    checkLedger(w, "schedule.json");
+    expect(w.summary().status).toBe("incomplete");
+  }, 120_000);
+
+  test("the summary cannot be written: no summary file, the terminal ledger goes to the log, exit 1", async () => {
+    const w = await world({
+      write: failingWrite((name) => name === "summary.json"),
+    });
+    expect(w.status).toBe(1);
+    expect(w.launches).toEqual(ORDER);
+    expect(existsSync(join(w.evidence, "summary.json"))).toBe(false);
+    const ledger = w.logs.find((l) =>
+      l.startsWith("the summary could not be written"),
+    ) as string;
+    const terminal = JSON.parse(ledger.slice(ledger.indexOf("\n") + 1));
+    expect(terminal).toMatchObject({
+      status: "incomplete",
+      complete: false,
+      evidence: { complete: false, errors: [{ file: "summary.json" }] },
+    });
+  }, 120_000);
+
+  test("a disk that refuses every write after the claim: nothing launches, nothing hangs, the ledger is logged, exit 1", async () => {
+    const w = await world({ write: failingWrite(() => true) });
+    expect(w.status).toBe(1);
+    expect(w.launches).toEqual([]);
+    expect(existsSync(join(w.evidence, OWNER))).toBe(true);
+    expect(existsSync(join(w.evidence, "schedule.json"))).toBe(false);
+    expect(
+      w.logs.some((l) => l.startsWith("the summary could not be written")),
+    ).toBe(true);
+  }, 120_000);
+
+  test("a signal that arrives as a stack is admitted: that stack does not launch (exit 143)", async () => {
+    let received: string | null = null;
+    const w = await world({
+      interrupted: () => received,
+      write: (file, text) => {
+        if (file.endsWith("schedule.json") && admits(2)("schedule.json", text))
+          received = "SIGTERM";
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, text);
+      },
+    });
+    expect(w.status).toBe(143);
+    expect(w.launches).toEqual(ORDER.slice(0, 2));
+    expect(w.summary().entries[2]).toMatchObject({
+      state: "not_run",
+      reasons: ["not started: interrupted by SIGTERM"],
+    });
+    expect(w.summary().status).toBe("interrupted");
+  }, 120_000);
+
+  const unreadable = (code: string, at: string) => (file: string) => {
+    if (
+      file.endsWith(`results-${at.replace("/", "-").replace("-base", "")}.json`)
+    )
+      throw Object.assign(
+        new Error(`${code}: reading the result file (double)`),
+        {
+          code,
+        },
+      );
+    return existsSync(file) ? readFileSync(file, "utf8") : null;
+  };
+  test.each([
+    ["EIO", "chromium/sharing"],
+    [
+      "ENOENT (removed between the existence check and the read)",
+      "firefox/base",
+    ],
+  ])(
+    "a result file that cannot be read (%s) makes that stack incomplete after its clean-up; the rest are not run and the ledger is complete",
+    async (code, at) => {
+      const w = await world({
+        readReport: unreadable(code.split(" ")[0] as string, at),
+      });
+      const index = ORDER.indexOf(at);
+      expect(w.status).toBe(1);
+      expect(w.launches).toEqual(ORDER.slice(0, index + 1));
+      expect(endsCleanly(w.events)).toBe(true);
+      const summary = w.summary();
+      expect(summary.entries[index]).toMatchObject({
+        state: "incomplete",
+        phase: "result",
+        counts: { unproven: summary.entries[index]?.planned_cases },
+      });
+      expect(summary.entries[index]?.reasons[0]).toMatch(
+        /^the result file could not be read: (EIO|ENOENT)/,
+      );
+      expect(
+        summary.entries.slice(index + 1).every((e) => e.state === "not_run"),
+      ).toBe(true);
+      expect(summary).toMatchObject({
+        status: "incomplete",
+        complete: false,
+        accounted: true,
+      });
+      expect(summary.evidence.complete).toBe(true);
+      expect(w.schedule().entries.some((e) => e.state === "running")).toBe(
+        false,
+      );
+    },
+    120_000,
+  );
+
+  test("an unreadable result AND an unwritable summary: still exit 1, both in the logged terminal ledger", async () => {
+    const w = await world({
+      readReport: unreadable("EIO", "chromium/sharing"),
+      write: failingWrite((name) => name === "summary.json"),
+    });
+    expect(w.status).toBe(1);
+    expect(w.launches).toEqual(
+      ORDER.slice(0, ORDER.indexOf("chromium/sharing") + 1),
+    );
+    const ledger = w.logs.find((l) =>
+      l.startsWith("the summary could not be written"),
+    ) as string;
+    const terminal = JSON.parse(ledger.slice(ledger.indexOf("\n") + 1));
+    expect(terminal.status).toBe("incomplete");
+    expect(terminal.evidence.errors).toEqual([
+      expect.objectContaining({ file: "summary.json" }),
+    ]);
+    expect(
+      terminal.entries[ORDER.indexOf("chromium/sharing")].reasons[0],
+    ).toMatch(/^the result file could not be read: EIO/);
+  }, 120_000);
+
+  test("an error while judging a stack (a malformed process record) is contained: that stack is incomplete, nothing launches after it", async () => {
+    const at = "chromium/pages";
+    const w = await world({
+      execute: async (stack, browser, file, keys) => {
+        writeFileSync(file, report(keys, { outcome: normal }));
+        return {
+          exitCode: 0,
+          exchanges:
+            `${browser}/${stack.name}` === at
+              ? ([null] as unknown as Launched["exchanges"])
+              : [],
+        };
+      },
+    });
+    const index = ORDER.indexOf(at);
+    expect(w.status).toBe(1);
+    expect(w.launches).toEqual(ORDER.slice(0, index + 1));
+    expect(w.summary().entries[index]).toMatchObject({
+      state: "incomplete",
+      phase: "result",
+    });
+    expect(w.summary().entries[index]?.reasons[0]).toMatch(
+      /^the result could not be judged: /,
+    );
+    expect(w.summary().accounted).toBe(true);
+  }, 120_000);
+});
+
+describe("C5 (revision 16): one invocation owns its evidence directory", () => {
+  test("two invocations that both found the directory empty: exactly one claims it; the other lists, writes and launches nothing", async () => {
+    const one = planStacks({
+      grep: "I-14e",
+      passthrough: [],
+      oidc: true,
+      postgres: false,
+    });
+    planned.set("narrowed", await keysOf(stackArgs(one.stacks[0] as Stack)));
+    const evidence = join(scratch, "shared-evidence");
+    const claims: string[] = [];
+    const claim = (file: string, text: string) => {
+      mkdirSync(dirname(file), { recursive: true });
+      try {
+        writeFileSync(file, text, { flag: "wx" });
+        claims.push("won");
+      } catch (error) {
+        claims.push("lost");
+        throw error;
+      }
+    };
+    // Both observed every path absent before either claimed (the interleaving a plain existence check cannot exclude).
+    const [a, b] = await Promise.all(
+      [0, 1].map(() =>
+        world({
+          stacks: one.stacks,
+          narrowed: true,
+          evidence,
+          exists: () => false,
+          claim,
+        }),
+      ),
+    );
+    expect(claims.sort()).toEqual(["lost", "won"]);
+    const [winner, loser] =
+      (a as World).status === 0
+        ? [a as World, b as World]
+        : [b as World, a as World];
+    expect(winner.status).toBe(0);
+    expect(loser.status).toBe(1);
+    expect(loser.events).toEqual([]);
+    expect(loser.launches).toEqual([]);
+    expect(loser.logs.join("\n")).toMatch(
+      /REFUSED: could not claim .*invocation\.json/,
+    );
+    expect(winner.launches).toEqual(BROWSERS.map((b) => `${b}/narrowed`));
+    expect(winner.summary()).toMatchObject({
+      status: "passed",
+      complete: true,
+    });
+  }, 120_000);
+
+  test("a claim left by an earlier (crashed) invocation is refused, not taken over, and its bytes are kept; a fresh directory runs", async () => {
+    const left = '{"pid": 1, "claimed_at": "2026-10-15T00:00:00.000Z"}\n';
+    const refused = await world({
+      before: (evidence) => {
+        mkdirSync(evidence, { recursive: true });
+        writeFileSync(join(evidence, OWNER), left);
+      },
+    });
+    expect(refused.status).toBe(1);
+    expect(refused.events).toEqual([]);
+    expect(readFileSync(join(refused.evidence, OWNER), "utf8")).toBe(left);
+    // The same claim, met at the exclusive create rather than at the existence check.
+    const raced = await world({
+      exists: () => false,
+      before: (evidence) => {
+        mkdirSync(evidence, { recursive: true });
+        writeFileSync(join(evidence, OWNER), left);
+      },
+    });
+    expect(raced.status).toBe(1);
+    expect(raced.events).toEqual([]);
+    expect(readFileSync(join(raced.evidence, OWNER), "utf8")).toBe(left);
+    const fresh = await world();
+    expect(fresh.status).toBe(0);
+  }, 120_000);
 });
