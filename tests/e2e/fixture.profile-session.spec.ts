@@ -60,7 +60,7 @@ async function stubNetwork(context: BrowserContext): Promise<void> {
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ status: "ok", api_version: "0.28.0" }),
+      body: JSON.stringify({ status: "ok", api_version: "0.29.0" }),
     }),
   );
   await context.route("**/api/experimental/v1/**", (route) =>

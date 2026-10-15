@@ -20,7 +20,7 @@ checked against it by `scripts/check-route-parity.mjs` (`pnpm check:route-parity
 
 Two facts about the list:
 
-- At the pinned backend release (`v0.28.0-rc.1`) the backend registers `/health`, `/ready` and everything under
+- At the pinned backend release (`v0.29.0-rc.1`) the backend registers `/health`, `/ready` and everything under
   `/api/experimental/v1/`. It has **no** top-level `/auth` or `/oidc` route; the OIDC callback is
   `/api/experimental/v1/oidc/callback`. `/auth` and `/oidc` are defensive reservations, kept because Q10 names authentication
   callback paths and the offline shell must never answer them.
