@@ -33,6 +33,13 @@
 // finally wrote: absent is "ended without its record" (unknown), unreadable is an evidence failure of the reading recovery
 // (readHistory), present is history. Every claim that could not be read while waiting is an evidence failure as well, even when a
 // later poll reads it.
+//
+// Review r14 H4i (revision 15): revision 14 read an ended attempt's record when admitting, kept only its absence, and read it again in
+// readHistory, so a read that failed at admission and succeeded at the history read left no trace (the recovery passed and exited 0).
+// Immutable bytes are not infallible reads. Both reads now go through one reader (`readAttemptRecord`: the shape and the attempt it
+// names), and awaitEarlier keeps what an unreadable record read established, across polls and whatever a later read finds: the error
+// (this recovery's evidence failure) and an unverified earlier clean-up (`history`), which the reaper joins with readHistory's before
+// anything is decided. A later successful read adds history; it never takes away a failure seen earlier.
 import { execFileSync } from "node:child_process";
 import { linkSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -168,6 +175,27 @@ export function unknownAttempt(attempt, claim) {
   };
 }
 
+/** What an earlier attempt's record that could not be read establishes: its clean-up is not verified (the error is the reader's own). */
+const UNVERIFIED = Object.freeze({ ...EMPTY, cleanupNotVerified: true });
+
+/**
+ * Attempt `k`'s record, read as absent, present or unreadable (evidence-inputs.mjs), by every site that reads it. Review r13 H4h
+ * (revision 14): a record naming another attempt (or none) says nothing certain about this one: unusable, never clean.
+ */
+export function readAttemptRecord(runDir, k) {
+  const input = readEvidence(attemptFile(runDir, k), {
+    what: `recovery attempt ${k}'s record`,
+    shape: SHAPES.recovery,
+  });
+  return input.state === "present" && input.value.attempt !== k
+    ? {
+        state: "unreadable",
+        path: input.path,
+        error: `recovery attempt ${k}'s record is not valid evidence: it names attempt ${JSON.stringify(input.value.attempt ?? null)}`,
+      }
+    : input;
+}
+
 /** The history as `reaper.json` carries it. */
 export const serialise = (h) => ({
   evidence_errors: h.errors,
@@ -223,10 +251,12 @@ export function claimAttempt(runDir, identity) {
 
 /**
  * Wait until every attempt before `attempt` has ended: its claimant is known to be gone (revision 14: a record pathname, readable or
- * not, is never taken as that). Returns { ready: true, ended, errors } (`ended`: the attempts whose claimant is gone without a record)
- * or, once `waitMs` has passed, { ready: false, waiting: { attempt, why }, errors }. `errors` are the claims that could not be read
- * while waiting, each once (this recovery's evidence failures, also when a later poll could read it). `sleep(ms)` blocks;
- * `live(pid, started)` answers true, false or null (unknown, never taken as "gone").
+ * not, is never taken as that). Returns { ready: true, ended, errors, history } (`ended`: the attempts whose claimant is gone without a
+ * record) or, once `waitMs` has passed, { ready: false, waiting: { attempt, why }, errors, history }. `errors` are the claims, and the
+ * records of ended attempts, that could not be read while waiting, each once (this recovery's evidence failures, also when a later poll
+ * or readHistory could read it); `history` is what those records establish (revision 15, review r14 H4i: an unverified earlier
+ * clean-up), EMPTY when every record read was clean. `sleep(ms)` blocks; `live(pid, started)` answers true, false or null (unknown,
+ * never taken as "gone").
  */
 export function awaitEarlier(
   runDir,
@@ -235,6 +265,7 @@ export function awaitEarlier(
 ) {
   const deadline = Date.now() + waitMs;
   const errors = [];
+  let history = EMPTY;
   const saw = (error) => {
     if (!errors.includes(error)) errors.push(error);
   };
@@ -275,16 +306,19 @@ export function awaitEarlier(
         break;
       }
       // Its claimant is gone, so nothing more can be added to its record: only now is the record what it finally wrote. Absent: it
-      // ended without one (unknown). Present or unreadable: readHistory reads it (an unreadable record is a failure, never clean).
-      const record = readEvidence(attemptFile(runDir, k), {
-        what: `recovery attempt ${k}'s record`,
-        shape: SHAPES.recovery,
-      });
+      // ended without one (unknown). Present: readHistory reads it again for its history. Unreadable: a failure, never clean, kept here
+      // (revision 15, review r14 H4i): this read's failure is not undone by a later read of the same bytes that succeeds.
+      const record = readAttemptRecord(runDir, k);
       if (record.state === "absent")
         ended.push({ attempt: k, claim: claim.value });
+      else if (record.state === "unreadable") {
+        saw(record.error);
+        history = joinHistory(history, UNVERIFIED);
+      }
     }
-    if (waiting === null) return { ready: true, ended, errors };
-    if (Date.now() >= deadline) return { ready: false, waiting, errors };
+    if (waiting === null) return { ready: true, ended, errors, history };
+    if (Date.now() >= deadline)
+      return { ready: false, waiting, errors, history };
     sleep(pollMs);
   }
 }
@@ -314,7 +348,7 @@ export function readHistory(runDir, attempt, ended = []) {
       history = joinHistory(history, historyOf(input.value));
     else if (input.state === "unreadable") {
       errors.push(input.error);
-      history = joinHistory(history, { ...EMPTY, cleanupNotVerified: true });
+      history = joinHistory(history, UNVERIFIED);
     }
   };
   take(
@@ -331,21 +365,8 @@ export function readHistory(runDir, attempt, ended = []) {
   const numbers = new Set(listed ?? []);
   for (let k = 1; k < (attempt ?? 1); k += 1) numbers.add(k);
   numbers.delete(attempt);
-  for (const k of [...numbers].sort((a, b) => a - b)) {
-    const input = readEvidence(attemptFile(runDir, k), {
-      what: `recovery attempt ${k}'s record`,
-      shape: SHAPES.recovery,
-    });
-    // Review r13 H4h (revision 14): a record naming another attempt says nothing certain about this one: unusable, never clean.
-    take(
-      input.state === "present" && input.value.attempt !== k
-        ? {
-            state: "unreadable",
-            error: `recovery attempt ${k}'s record is not valid evidence: it names attempt ${JSON.stringify(input.value.attempt ?? null)}`,
-          }
-        : input,
-    );
-  }
+  for (const k of [...numbers].sort((a, b) => a - b))
+    take(readAttemptRecord(runDir, k));
   for (const { attempt: k, claim } of ended)
     history = joinHistory(history, unknownAttempt(k, claim));
   return { history, errors };

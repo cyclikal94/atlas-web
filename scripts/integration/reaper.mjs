@@ -61,6 +61,14 @@
 // only once every earlier claimant is known to have ended, whatever its record pathname holds (recovery-history.mjs `awaitEarlier`);
 // a claim that could not be read while it waited is one of its evidence failures.
 //
+// Review r14 H4i (revision 15): an earlier attempt's record that could not be read when this recovery was admitted, and could when its
+// history was read, left no trace. What the admission read established (its error, an unverified earlier clean-up) is now joined with
+// the history before anything is decided, also on a refusal; a later successful read never takes a failure away. The design
+// assessment's neighbour (C3/Q9): a committed stack record that cannot be read when its `stack-end` arrives was only
+// `confirmed: false`, so a later healthy read on a take-over forgot it. The acknowledgement keeps it (`unreadable`) and a take-over
+// makes it one of its evidence failures; on a release this process publishes nothing (the runner's terminal summary is the evidence)
+// and says it on stderr.
+//
 //   node scripts/integration/reaper.mjs <run dir> <token> <runner pid>      (journal on stdin; started by run.mjs, never by hand)
 import { execFileSync, spawn } from "node:child_process";
 import {
@@ -213,17 +221,28 @@ const isMessage = (m) =>
   (m.type !== "run-error" || typeof m.reason === "string");
 let released = null;
 let taking = null;
-/** Does the runner's committed record of (browser, index) show it settled at sequence `seq` or later? (Recorded, never acted on.) */
+/**
+ * Does the runner's committed record of (browser, index) show it settled at sequence `seq` or later? (Recorded, never acted on.)
+ * { confirmed } and, when the record could not be read, `unreadable` (why): revision 15, an observed read failure is kept.
+ */
 const committedSettled = (browser, index, seq) => {
-  if (typeof seq !== "number") return false;
+  if (typeof seq !== "number") return { confirmed: false };
   const record = readStackRecord(stackFile(runDir, browser, index));
-  return (
-    record !== null &&
-    !record.unreadable &&
-    record.phase === "settled" &&
-    (record.seq ?? 0) >= seq
-  );
+  if (record?.unreadable)
+    return { confirmed: false, unreadable: record.unreadable };
+  return {
+    confirmed:
+      record !== null && record.phase === "settled" && (record.seq ?? 0) >= seq,
+  };
 };
+/** The acknowledgements whose committed record could not be read, as evidence failures. */
+const unreadableAcknowledgements = () =>
+  journal.acknowledged
+    .filter((a) => a.unreadable !== undefined)
+    .map(
+      (a) =>
+        `the committed record of ${a.key} could not be read when its stack-end was journalled: ${a.unreadable}`,
+    );
 
 const lines = createInterface({ input: process.stdin });
 lines.on("line", (line) => {
@@ -277,7 +296,7 @@ lines.on("line", (line) => {
     journal.acknowledged.push({
       key: stackKey(m.browser, m.index),
       seq: m.seq ?? null,
-      confirmed: committedSettled(m.browser, m.index, m.seq),
+      ...committedSettled(m.browser, m.index, m.seq),
     });
   } else if (m.type === "run-error") {
     if (!journal.runErrors.includes(m.reason)) journal.runErrors.push(m.reason);
@@ -286,6 +305,10 @@ lines.on("line", (line) => {
   } else if (m.type === "released") released = m;
 });
 lines.on("close", () => {
+  // Revision 15 (C3/Q9): a release publishes nothing; what this process could not read is said on stderr before it exits.
+  if (released)
+    for (const error of unique(unreadableAcknowledgements()))
+      say(`after the release (the runner's summary is the evidence): ${error}`);
   if (released) process.exit(0);
   void takeOver("the runner ended without releasing its journal");
 });
@@ -471,10 +494,13 @@ function finish(result) {
   // (the parent copy, reaper.json, the other output) publishes that output once more. Bounded: no output is written more than twice,
   // and stderr and the exit code are the last channel.
   const evidenceErrors = [];
+  // Revision 15 (design assessment r14 C3/Q9): what this process could not read when a stack-end was journalled stays a failure, also
+  // when its later read of the same record succeeds.
+  evidenceErrors.push(...unique(unreadableAcknowledgements()));
   // Review r12 H4g (revision 13): first this recovery's place in the run's order of recoveries (it never overtakes an earlier one that
   // may still be running), then everything the earlier ones established, before anything is decided or replaced.
   let attempt = null;
-  let order = { ready: false, waiting: null, errors: [] };
+  let order = { ready: false, waiting: null, errors: [], history: EMPTY };
   try {
     attempt = claimAttempt(runDir, {
       pid: process.pid,
@@ -491,7 +517,8 @@ function finish(result) {
     );
   }
   result.attempt = attempt;
-  // Review r13 H4h: every claim this recovery could not read while it waited, also one a later poll read.
+  // Review r13 H4h: every claim this recovery could not read while it waited, also one a later poll read. Review r14 H4i (revision 15):
+  // and every ended attempt's record it could not read then, also one readHistory reads below.
   evidenceErrors.push(...order.errors);
   if (!order.ready) {
     result.refused = order.waiting
@@ -501,12 +528,15 @@ function finish(result) {
       `this recovery replaced nothing: ${result.refused}, and replacing what that recovery writes could erase what it found`,
     );
   }
-  let history = EMPTY;
+  // Review r14 H4i (revision 15): what the admission's reads established (an unverified earlier clean-up), joined with what readHistory
+  // reads, before anything is decided; a refused recovery's own record carries it too. A failure both reads saw is said once.
+  let history = order.history;
   let draft = null;
   if (order.ready) {
     const earlier = readHistory(runDir, attempt, order.ended);
-    history = earlier.history;
-    evidenceErrors.push(...earlier.errors);
+    history = joinHistory(history, earlier.history);
+    for (const error of earlier.errors)
+      if (!evidenceErrors.includes(error)) evidenceErrors.push(error);
     try {
       draft = completeSummary(result, evidenceErrors, history);
     } catch (error) {

@@ -408,7 +408,7 @@ async function reapDead(
  */
 async function reapIn(
   runDir,
-  { messages = [], evidence, raw = [], env = {}, runner = null },
+  { messages = [], evidence, raw = [], env = {}, runner = null, execArgv = [] },
 ) {
   const sent = messages;
   // Revision 13: `runner`, a live process named as the runner (a recovery whose runner may still be running).
@@ -421,6 +421,8 @@ async function reapIn(
   const reaper = spawn(
     process.execPath,
     [
+      // Revision 15: Node options of the reaper process only (a case's labelled read-fault preload).
+      ...execArgv,
       join(here, "reaper.mjs"),
       runDir,
       `ATLAS_TEST_${Date.now()}`,
@@ -2396,4 +2398,422 @@ test("H4h: a claim this recovery could not read while it waited stays one of its
     (done.reaped?.evidence_errors ?? []).join("\n"),
     /recovery attempt 2's claim could not be read: EISDIR/,
   );
+});
+
+// ---- review r14 H4i (revision 15): a read failure observed once stays a failure when a later read of the same bytes succeeds -------
+import { createHash } from "node:crypto";
+import { pathToFileURL } from "node:url";
+import { stackFile } from "./stack-records.mjs";
+
+/**
+ * A labelled read-fault seam for one reaper process (a Node preload given by `execArgv`; nothing in the reaper or its files changes):
+ * the reads of exactly `path` are counted, each logged with its ordinal and the function that read it, and the reads numbered in
+ * `fail` throw EIO. The file's bytes never change. `reads()` is the log, so a case can prove which read failed and that each read
+ * site was reached.
+ */
+function readFault(t, path, fail) {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4i-fault-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const preload = join(dir, "read-fault.mjs");
+  const log = join(dir, "reads.jsonl");
+  writeFileSync(
+    preload,
+    `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const target = ${JSON.stringify(path)};
+const fail = new Set(${JSON.stringify(fail)});
+const SITES = ["awaitEarlier", "readHistory", "committedSettled", "readStackRecords"];
+const original = fs.readFileSync;
+let reads = 0;
+fs.readFileSync = function (file, ...rest) {
+  if (String(file) === target) {
+    reads += 1;
+    const stack = new Error().stack ?? "";
+    const site = SITES.find((s) => stack.includes(\`at \${s} \`)) ?? null;
+    const failed = fail.has(reads);
+    fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ read: reads, site, failed }) + "\\n");
+    if (failed) {
+      const error = new Error(\`EIO: injected transient read failure \${reads}\`);
+      error.code = "EIO";
+      throw error;
+    }
+  }
+  return original.call(this, file, ...rest);
+};
+syncBuiltinESMExports();
+`,
+  );
+  return {
+    execArgv: ["--import", pathToFileURL(preload).href],
+    reads: () =>
+      (read(log) ?? "")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line)),
+  };
+}
+const sha256 = (path) =>
+  createHash("sha256").update(readFileSync(path)).digest("hex");
+const EIO =
+  /recovery attempt 1's record could not be read: EIO: injected transient read failure/;
+const joined = (list) => (list ?? []).join("\n");
+/** Every final channel of a recovery after an observed record read failure: exit, summary, reaper.json, its own record, stderr. */
+function assertKept(run, n, label) {
+  assert.equal(run.code, 1, `${label}: ${run.log}`);
+  assert.equal(run.summary?.outcome, "failed", `${label}: ${run.log}`);
+  assert.match(joined(run.summary?.evidence_errors), EIO, `${label}: summary`);
+  assert.equal(run.summary?.cleanup_failed, true, `${label}: summary`);
+  assert.equal(run.reaped?.attempt, n, label);
+  assert.match(
+    joined(run.reaped?.evidence_errors),
+    EIO,
+    `${label}: reaper.json`,
+  );
+  assert.match(
+    joined(run.reaped?.recovery_history?.evidence_errors),
+    EIO,
+    `${label}: reaper.json history`,
+  );
+  assert.equal(
+    run.reaped?.recovery_history?.cleanup_not_verified,
+    true,
+    `${label}: attempt 1's clean-up is not verified`,
+  );
+  const own = readOutput(attemptFile(run.runDir, n), label);
+  assert.match(joined(own.evidence_errors), EIO, `${label}: own record`);
+  assert.equal(own.recovery_history?.cleanup_not_verified, true, label);
+  assert.ok(distinct(run.summary?.evidence_errors), `${label}: said once`);
+  assert.ok(distinct(run.reaped?.evidence_errors), `${label}: said once`);
+  assert.match(
+    run.log,
+    /evidence NOT written: recovery attempt 1's record could not be read: EIO/,
+    label,
+  );
+}
+
+test("H4i: an earlier attempt's record read failure at admission or at the history read stays a failure of every final channel and of a later recovery (controls: healthy, an unreached ordinal)", async (t) => {
+  // Two real, sequential reapers over a covered clean run: attempt 1 completes normally; attempt 2 reads attempt 1's record twice
+  // (admission, then history) with the labelled seam failing read `fail` (0: none; 3: an ordinal never reached, the inert control).
+  for (const [label, fail, site] of [
+    ["healthy (control)", 0, null],
+    ["an unreached ordinal (inert control)", 3, null],
+    [
+      "admission read fails, history read succeeds (review r14 H4i)",
+      1,
+      "awaitEarlier",
+    ],
+    ["history read fails", 2, "readHistory"],
+  ]) {
+    const first = await coveredRun(t);
+    assert.equal(first.code, 0, `${label}: ${first.log}`);
+    const record = attemptFile(first.runDir, 1);
+    assert.equal(existsSync(record), true, `${label}: attempt 1 recorded`);
+    const before = sha256(record);
+    const fault = readFault(t, record, [fail]);
+    const second = await again(first.runDir, { execArgv: fault.execArgv });
+    const reads = fault.reads();
+    assert.deepEqual(
+      reads.map((r) => r.site),
+      ["awaitEarlier", "readHistory"],
+      `${label}: both read sites reached, once each`,
+    );
+    assert.deepEqual(
+      reads.filter((r) => r.failed).map((r) => r.site),
+      site === null ? [] : [site],
+      `${label}: the failed read`,
+    );
+    assert.equal(
+      sha256(record),
+      before,
+      `${label}: attempt 1's bytes unchanged`,
+    );
+    if (site === null) {
+      assert.equal(second.code, 0, `${label}: ${second.log}`);
+      assert.equal(second.summary?.outcome, "passed", label);
+      assert.deepEqual(second.summary?.evidence_errors, [], label);
+      assert.deepEqual(second.reaped?.evidence_errors, [], label);
+      assert.equal(
+        second.reaped?.recovery_history?.cleanup_not_verified,
+        false,
+        label,
+      );
+      continue;
+    }
+    assertKept(second, 2, label);
+    // A third recovery, no fault: attempt 1's record now reads clean, and the failure survives through attempt 2's record and reaper.json.
+    const third = await again(first.runDir);
+    assert.equal(third.code, 1, `${label}: third: ${third.log}`);
+    assert.equal(third.summary?.outcome, "failed", `${label}: third`);
+    assert.match(
+      joined(third.summary?.evidence_errors),
+      EIO,
+      `${label}: third summary`,
+    );
+    assert.match(
+      joined(third.reaped?.recovery_history?.evidence_errors),
+      EIO,
+      `${label}: third history`,
+    );
+    assert.deepEqual(
+      third.reaped?.evidence_errors,
+      [],
+      `${label}: third's own reads were clean`,
+    );
+    assert.equal(
+      sha256(record),
+      before,
+      `${label}: attempt 1's bytes still unchanged`,
+    );
+  }
+});
+
+test("H4i: a record read failure on an early poll survives later healthy polls while another attempt runs, and a refusal's own record keeps it", async (t) => {
+  for (const mode of ["the earlier attempt ends", "refused"]) {
+    const first = await coveredRun(t);
+    assert.equal(first.code, 0, `${mode}: ${first.log}`);
+    const record = attemptFile(first.runDir, 1);
+    assert.equal(existsSync(record), true, `${mode}: attempt 1 recorded`);
+    const before = sha256(record);
+    const holder = await holdClaim(t, first.runDir, 2);
+    const reaperBefore = read(join(first.runDir, "reaper.json"));
+    const summaryBefore = read(join(first.runDir, "summary.json"));
+    const fault = readFault(t, record, [1]);
+    // The refused recovery's order bound is shortened: it bounds waiting for another recovery and is not a duration under test.
+    const waiting = again(first.runDir, {
+      execArgv: fault.execArgv,
+      ...(mode === "refused"
+        ? { env: { ATLAS_REAPER_ORDER_WAIT_MS: "1500" } }
+        : {}),
+    });
+    // Attempt 1's record is read on every poll while attempt 2's claimant runs: the first read failed, later ones did not.
+    assert.ok(
+      await until(() => fault.reads().length >= 3),
+      `${mode}: it polled after the failed read`,
+    );
+    if (mode === "the earlier attempt ends") holder.kill("SIGKILL");
+    const done = await waiting;
+    const reads = fault.reads();
+    assert.deepEqual(
+      reads[0],
+      { read: 1, site: "awaitEarlier", failed: true },
+      mode,
+    );
+    assert.ok(
+      reads.slice(1).every((r) => !r.failed),
+      mode,
+    );
+    assert.equal(
+      sha256(record),
+      before,
+      `${mode}: attempt 1's bytes unchanged`,
+    );
+    if (mode === "refused") {
+      assert.equal(done.code, 1, done.log);
+      assert.equal(
+        reads.at(-1).site,
+        "awaitEarlier",
+        "no history is read on a refusal",
+      );
+      assert.equal(
+        read(join(first.runDir, "reaper.json")),
+        reaperBefore,
+        "reaper.json not replaced",
+      );
+      assert.equal(
+        read(join(first.runDir, "summary.json")),
+        summaryBefore,
+        "nor the summary",
+      );
+      const own = readOutput(attemptFile(first.runDir, 3), mode);
+      assert.match(own.refused, /^recovery attempt 2 has not ended/);
+      assert.match(joined(own.evidence_errors), EIO);
+      assert.equal(own.recovery_history?.cleanup_not_verified, true);
+      assert.match(
+        done.log,
+        /evidence NOT written: recovery attempt 1's record could not be read: EIO/,
+      );
+      continue;
+    }
+    assert.equal(
+      reads.at(-1).site,
+      "readHistory",
+      `${mode}: the history read succeeded`,
+    );
+    assertKept(done, 3, mode);
+    assert.match(
+      joined(done.summary?.evidence_errors),
+      /recovery attempt 2 ended without its record/,
+    );
+  }
+});
+
+test("H4i: an admission read failure with a failed summary publication: reaper.json and the own record are its witnesses, and the next recovery keeps it", async (t) => {
+  const first = await coveredRun(t);
+  assert.equal(first.code, 0, first.log);
+  const record = attemptFile(first.runDir, 1);
+  assert.equal(existsSync(record), true, "attempt 1 recorded");
+  const summaryBefore = read(join(first.runDir, "summary.json"));
+  const fault = readFault(t, record, [1]);
+  const second = await again(first.runDir, {
+    execArgv: fault.execArgv,
+    env: faults({ reaper_publish_fail: { "summary.json": [1] } }),
+  });
+  assert.equal(
+    existsSync(
+      join(first.runDir, "faults", "reaper-publish-summary-json-1.failed"),
+    ),
+    true,
+    `the summary publication was attempted and failed: ${second.log}`,
+  );
+  assert.equal(second.code, 1, second.log);
+  // The bounded design's limit, kept visible: the summary is still the first recovery's.
+  assert.equal(read(join(first.runDir, "summary.json")), summaryBefore);
+  assert.match(joined(second.reaped?.evidence_errors), EIO);
+  assert.match(
+    joined(second.reaped?.evidence_errors),
+    /^summary\.json: injected failure/m,
+  );
+  assert.equal(second.reaped?.recovery_history?.cleanup_not_verified, true);
+  assert.match(
+    joined(readOutput(attemptFile(first.runDir, 2), "own").evidence_errors),
+    EIO,
+  );
+  const third = await again(first.runDir);
+  assert.equal(third.code, 1, third.log);
+  assert.equal(third.summary?.outcome, "failed", third.log);
+  assert.match(joined(third.summary?.evidence_errors), EIO);
+});
+
+test("H4i neighbour (design assessment C3/Q9): a committed record that cannot be read when its stack-end arrives stays a failure of a take-over; a release says it (controls: healthy)", async (t) => {
+  const ACK =
+    /the committed record of chromium-0 could not be read when its stack-end was journalled: EIO: injected transient read failure 1/;
+  const committed = (runDir) => {
+    const store = createStackStore(runDir);
+    store.commit({ ...name0, outcome: "running", obs: 1 }, "started");
+    return store.commit(
+      { ...name0, ...REPORT_FAILURE, cleanup: { ok: true }, obs: 2 },
+      "settled",
+    ).seq;
+  };
+  const journalled = (seq) => [
+    { type: "stack", browser: "chromium", index: 0, stack: "base" },
+    {
+      type: "judged",
+      browser: "chromium",
+      index: 0,
+      seq,
+      obs: 2,
+      record: { ...REPORT_FAILURE, cleanup: { ok: true } },
+    },
+    { type: "stack-end", browser: "chromium", index: 0, seq },
+  ];
+  for (const faulty of [false, true]) {
+    const label = faulty
+      ? "the acknowledgement's read fails"
+      : "healthy (control)";
+    // A take-over: the runner was lost after the stack-end.
+    const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4i-ack-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const runDir = join(dir, "run");
+    mkdirSync(runDir);
+    writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN));
+    writeFileSync(
+      join(runDir, "summary.json"),
+      JSON.stringify({
+        schema: 3,
+        invocation: { finished: false },
+        outcome: "running",
+        stacks: [],
+      }),
+    );
+    const seq = committed(runDir);
+    const fault = readFault(
+      t,
+      stackFile(runDir, "chromium", 0),
+      faulty ? [1] : [],
+    );
+    const r = await reapIn(runDir, {
+      messages: journalled(seq),
+      evidence: dir,
+      execArgv: fault.execArgv,
+    });
+    const reads = fault.reads();
+    assert.equal(
+      reads[0]?.site,
+      "committedSettled",
+      `${label}: the acknowledgement read the record first`,
+    );
+    assert.equal(reads[0]?.failed, faulty, label);
+    assert.ok(
+      reads.some((x) => x.site === "readStackRecords" && !x.failed),
+      `${label}: the take-over's later read of the record succeeded`,
+    );
+    // The reaper's exit is its own evidence (the stack's failure is the summary's): 1 only when what it read could not be read.
+    assert.equal(r.code, faulty ? 1 : 0, `${label}: ${r.log}`);
+    assert.equal(r.summary?.outcome, "failed", `${label}: the stack failed`);
+    const ack = r.reaped?.acknowledged ?? [];
+    assert.equal(ack.length, 1, label);
+    assert.equal(ack[0].confirmed, !faulty, label);
+    if (!faulty) {
+      assert.equal(ack[0].unreadable, undefined, label);
+      assert.doesNotMatch(
+        joined(r.summary?.evidence_errors),
+        /when its stack-end was journalled/,
+        label,
+      );
+      assert.doesNotMatch(
+        joined(r.reaped?.evidence_errors),
+        /when its stack-end was journalled/,
+        label,
+      );
+    } else {
+      assert.match(
+        ack[0].unreadable,
+        /EIO: injected transient read failure 1/,
+        label,
+      );
+      assert.match(joined(r.summary?.evidence_errors), ACK, label);
+      assert.match(joined(r.reaped?.evidence_errors), ACK, label);
+      assert.match(
+        joined(readOutput(attemptFile(runDir, 1), label).evidence_errors),
+        ACK,
+        label,
+      );
+    }
+    // A release: the runner published its summary; this process publishes nothing and exits 0, and says what it could not read.
+    const releasedDir = mkdtempSync(
+      join(tmpdir(), "atlas-reaper-h4i-release-"),
+    );
+    t.after(() => rmSync(releasedDir, { recursive: true, force: true }));
+    const releasedRun = join(releasedDir, "run");
+    mkdirSync(releasedRun);
+    const releasedSeq = committed(releasedRun);
+    const releasedFault = readFault(
+      t,
+      stackFile(releasedRun, "chromium", 0),
+      faulty ? [1] : [],
+    );
+    const rel = await reapIn(releasedRun, {
+      messages: [...journalled(releasedSeq), { type: "released", ok: true }],
+      evidence: releasedDir,
+      execArgv: releasedFault.execArgv,
+    });
+    assert.equal(rel.code, 0, `${label}: release: ${rel.log}`);
+    assert.equal(
+      existsSync(join(releasedRun, "reaper.json")),
+      false,
+      `${label}: release publishes nothing`,
+    );
+    assert.deepEqual(
+      releasedFault.reads().map((x) => [x.site, x.failed]),
+      [["committedSettled", faulty]],
+      `${label}: release`,
+    );
+    if (faulty)
+      assert.match(
+        rel.log,
+        /after the release \(the runner's summary is the evidence\): the committed record of chromium-0 could not be read when its stack-end was journalled: EIO/,
+      );
+    else assert.doesNotMatch(rel.log, /after the release/);
+  }
 });
