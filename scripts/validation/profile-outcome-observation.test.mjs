@@ -310,10 +310,10 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 7; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 8; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 7);
+  assert.equal(evidence.CONTRACT_VERSION, 8);
   assert.equal(device.DEVICE_SCHEMA, 4);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
@@ -1577,8 +1577,8 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 
 // ---- versions -----------------------------------------------------------------------------------------------------------------------
 
-test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10) and 6 (revision 11) are not evidence of version 7", (t) => {
-  for (const version of [3, 4, 5, 6]) {
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11) and 7 (revision 12) are not evidence of version 8", (t) => {
+  for (const version of [3, 4, 5, 6, 7]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1591,7 +1591,7 @@ test("case: stages recorded under contract versions 3 (review 9's Air request), 
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 7`),
+          .includes(`recorded under contract ${version}, not 8`),
       ),
     );
   }
@@ -1713,14 +1713,19 @@ test("case R12-M3 (DA-M1): two samples' scan times swapped (summary and hash rec
 test("case R12-M4 (DA-M2): a P-4 sync sample paired with ANOTHER sample's request (segments recomputed from it), or with no retained support, is invalid; a request-latency sample needs no written page", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
+  // REVISION 13 ADAPTATION (labelled; contract 8): revision 12's support named one request per sample, so its "another sample's request"
+  // was spliced into that field. The witness (`sync-request-sample/2`) retains every /sync entry the read saw; the same intent is the next
+  // sample's request substituted for sample 0's own entry, with every series value recomputed from it. That request began after sample 0's
+  // step ended, so no request lies inside the step and the sample is invalid in every series that rests on it.
   const file = join(dir, "samples/P-4.sync.firefox.json");
   const support = readJson(file);
   const [a, b] = support.samples;
-  a.request = { ...b.request };
+  a.resources = [{ ...b.resources[0] }];
   writeFileSync(file, `${JSON.stringify(support, null, 2)}\n`);
-  const tick = Number(a.tick.line.split("ms")[0]);
-  const commit = Number(a.commit.line.split("ms")[0]);
-  const r0 = a.request;
+  const lineOf = (e, at) => e.lines[at - e.mark.from];
+  const tick = Number(lineOf(a, a.selected.start).split("ms")[0]);
+  const commit = Number(lineOf(a, a.selected.commit).split("ms")[0]);
+  const r0 = a.resources[0];
   const set = (seg, v) =>
     rewriteSeries(dir, `P-4 sync page ${seg}`, "firefox", (s) => [
       v,
@@ -1745,7 +1750,7 @@ test("case R12-M4 (DA-M2): a P-4 sync sample paired with ANOTHER sample's reques
   ])
     assert.match(
       reasons(cell(r, `${name}[firefox]`)),
-      /sample 0: its request is not inside its step/,
+      /sample 0: its operation is invalid: 0 \/sync requests lie inside the operation/,
       name,
     );
   assert.equal(r.complete, false);
@@ -1768,8 +1773,10 @@ test("case R12-M4 (DA-M2): a P-4 sync sample paired with ANOTHER sample's reques
   const dir3 = scratch(t);
   writeComplete(dir3);
   editJson(join(dir3, "samples/P-4.sync.chromium.json"), (v) => {
-    const c = v.samples[0].commit;
-    c.line = `${c.line.split(" ")[0]} data.sync_commit ${JSON.stringify({ kind: "applied", value: "lease_lapsed" })}`;
+    const e = v.samples[0];
+    const at = e.selected.commit - e.mark.from;
+    e.lines[at] =
+      `${e.lines[at].split(" ")[0]} data.sync_commit ${JSON.stringify({ kind: "applied", value: "lease_lapsed" })}`;
   });
   assert.deepEqual(unsatisfied(contract.resolveEvidence(dir3)), []);
 });
@@ -1814,4 +1821,572 @@ test("case R12-E2 (invariant 5): an admitted device W2 run that left nothing is 
   assert.deepEqual(errors, [
     "runs[6] (W2 run 2): the cache holds 0 rows; the served page leaves 200",
   ]);
+});
+
+// ---- revision 13 (review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1, Q3/Q4): each request sample is re-derived from its witness ------
+// The P-4/P-10 sync support is each sample's bounded witness (`sync-request-sample/2`) and the P-4 draft series carry theirs
+// (`draft-request-sample/1`). Every case below edits one witness of a complete programme, rebinds every series value that rests on it
+// (computed HERE from the edited times, by hand, never with the rule the contract applies) and expects the cell, the reason, the
+// withheld desktop support and both validator modes' refusal.
+
+const SYNC_P4 = [
+  "P-4 sync page pre_issue_ms",
+  "P-4 sync page request_ms",
+  "P-4 sync page post_response_ms",
+  "P-4 sync page total_ms",
+];
+const SYNC_P10U = "P-10 sync page request_ms (unthrottled loopback)";
+const DRAFT_P4 = [
+  "P-4 draft enqueue_ms",
+  "P-4 draft claim_ms",
+  "P-4 draft stamping_ms",
+  "P-4 draft request_ms",
+  "P-4 draft record_ms",
+  "P-4 draft total_ms",
+];
+const DRAFT_P10U = "P-10 draft request_ms (unthrottled loopback)";
+const syncFile = (dir, engine, which = "P-4") =>
+  join(dir, `samples/${which}.sync.${engine}.json`);
+const draftFile = (dir, engine) =>
+  join(dir, `samples/P-4.draft.${engine}.json`);
+const ln = (ms, event, data) =>
+  `${ms}ms ${event} ${data === undefined ? "" : JSON.stringify(data)}`;
+const msAt = (line) => Number(String(line).split("ms")[0]);
+/** Moves every later sample's positions by `delta` trace lines (lines were inserted into, or removed from, sample `k`). */
+const shiftAfter = (v, k, delta) => {
+  for (const e of v.samples.slice(k + 1)) {
+    e.mark.from += delta;
+    e.read.to += delta;
+    for (const key of Object.keys(e.selected))
+      if (key !== "request") e.selected[key] += delta;
+  }
+};
+/** Sets sample `k` of each named series of `engine` to `values[name]`. */
+const rebind = (dir, engine, k, values) => {
+  for (const [name, value] of Object.entries(values))
+    rewriteSeries(dir, name, engine, (s) =>
+      s.map((x, i) => (i === k ? value : x)),
+    );
+};
+/** What revision 12's selector made of a witness: the first real tick, the first commit after it, the request; values by hand. */
+const syncValues = (tickMs, commitMs, r) => ({
+  "P-4 sync page pre_issue_ms": r.requestStart - tickMs,
+  "P-4 sync page request_ms": r.responseEnd - r.requestStart,
+  "P-4 sync page post_response_ms": commitMs - r.responseEnd,
+  "P-4 sync page total_ms": commitMs - tickMs,
+  [SYNC_P10U]: r.responseEnd - r.requestStart,
+});
+
+test("control R13-K1: the complete programme's sync and draft witnesses resolve ok (a wake inside a step, a later step's start after the read, an acknowledged or removed draft row); a request-latency step whose commit wrote nothing is one sample", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const p4 = readJson(syncFile(dir, "webkit"));
+  assert.equal(p4.method, "sync-request-sample/2");
+  assert.ok(
+    p4.samples.some((e) => e.lines.some((l) => l.includes('"coalesced":true'))),
+  );
+  assert.ok(p4.samples.some((e) => e.read.to > e.selected.end + 1));
+  assert.equal(
+    readJson(draftFile(dir, "webkit")).method,
+    "draft-request-sample/1",
+  );
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), []);
+  // The throttled P-10 witness: a lapsed commit still ends ONE request's processing (latency needs no written page).
+  editJson(syncFile(dir, "firefox", "P-10"), (v) => {
+    const e = v.samples[3];
+    const at = e.selected.commit - e.mark.from;
+    e.lines[at] = ln(msAt(e.lines[at]), "data.sync_commit", {
+      kind: "applied",
+      value: "lease_lapsed",
+    });
+    e.lines[e.selected.end - e.mark.from] = ln(
+      msAt(e.lines[e.selected.end - e.mark.from]),
+      "data.sync_next",
+      { when: "after", state: "running" },
+    );
+  });
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), []);
+});
+
+test("case R13-C1 (review 13 R2, DA-R2-A/B): an earlier step that ended without a request before the sample's step: revision 12's 92-style selection, or the honest later step, is invalid in every series that rests on it; the package withholds support and both validator modes refuse it", (t) => {
+  for (const honest of [false, true]) {
+    const dir = `${scratch(t)}-${honest}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    const v = readJson(syncFile(dir, "chromium"));
+    const e = v.samples[0];
+    const tick = msAt(e.lines[0]);
+    // Review 13's order: tick, end (a local-storage stop: no request), then the requesting step.
+    e.lines.splice(
+      0,
+      0,
+      ln(tick - 90, "data.sync_tick", { why: "nudge", coalesced: false }),
+      ln(tick - 89, "data.sync_next", { when: "event", state: "stopped" }),
+    );
+    e.read.to += 2;
+    e.selected = {
+      start: honest ? e.selected.start + 2 : e.mark.from,
+      commit: e.selected.commit + 2,
+      end: e.selected.end + 2,
+      request: 0,
+    };
+    shiftAfter(v, 0, 2);
+    writeFileSync(syncFile(dir, "chromium"), `${JSON.stringify(v, null, 2)}\n`);
+    const commit = msAt(e.lines[e.selected.commit - e.mark.from]);
+    rebind(
+      dir,
+      "chromium",
+      0,
+      syncValues(honest ? tick : tick - 90, commit, e.resources[0]),
+    );
+    if (!honest)
+      assert.equal(
+        syncValues(tick - 90, commit, e.resources[0])[
+          "P-4 sync page pre_issue_ms"
+        ] -
+          syncValues(tick, commit, e.resources[0])[
+            "P-4 sync page pre_issue_ms"
+          ],
+        90,
+      );
+    const r = contract.resolveEvidence(dir);
+    const ids = [...SYNC_P4, SYNC_P10U].map((n) => `${n}[chromium]`);
+    assert.deepEqual(unsatisfied(r), ids.sort());
+    for (const id of ids)
+      assert.match(
+        reasons(cell(r, id)),
+        /sample 0: its operation is invalid: the sample's step ended without a commit \(.*data\.sync_next.*"state":"stopped".*\): no later step can stand for it/,
+        id,
+      );
+    assert.equal(r.complete, false);
+    refusedEndToEnd(dir);
+  }
+});
+
+test("case R13-C2 (DA-R2-B): the witness's own boundaries: a removed step end leaves the operation pending, a removed start shows a step that began before the sample, a second start inside the step, two commits, an edited slice that is no longer contiguous", (t) => {
+  const cases = [
+    [
+      "end removed",
+      (e) => {
+        e.lines.splice(e.selected.end - e.mark.from, 1);
+      },
+      -1,
+      /sample 0: its operation is pending: the sample's step has not ended/,
+    ],
+    [
+      "start removed",
+      (e) => {
+        e.lines.splice(0, 1);
+      },
+      -1,
+      /sample 0: its operation is invalid: a step that began before the sample traced data\.sync_commit inside it/,
+    ],
+    [
+      "second start",
+      (e) => {
+        e.lines.splice(
+          1,
+          0,
+          ln(msAt(e.lines[0]) + 1, "data.sync_tick", {
+            why: "timer",
+            coalesced: false,
+          }),
+        );
+      },
+      1,
+      /sample 0: its operation is invalid: a second step started before the sample's step ended/,
+    ],
+    [
+      "two commits",
+      (e) => {
+        const at = e.selected.commit - e.mark.from;
+        e.lines.splice(at, 0, e.lines[at]);
+      },
+      1,
+      /sample 0: its operation is invalid: the sample's step traced two commits/,
+    ],
+    [
+      "not contiguous",
+      (e) => {
+        e.lines.pop();
+      },
+      0,
+      /sample 0: its operation is invalid: its trace slice is not contiguous from the mark to the read/,
+    ],
+  ];
+  for (const [label, edit, delta, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/ /g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editJson(syncFile(dir, "webkit"), (v) => {
+      const e = v.samples[0];
+      edit(e);
+      e.read.to += delta;
+      shiftAfter(v, 0, delta);
+    });
+    const r = contract.resolveEvidence(dir);
+    const ids = [...SYNC_P4, SYNC_P10U].map((n) => `${n}[webkit]`).sort();
+    assert.deepEqual(unsatisfied(r), ids, label);
+    assert.match(
+      reasons(cell(r, "P-4 sync page request_ms[webkit]")),
+      reason,
+      label,
+    );
+  }
+});
+
+test("case R13-C3 (DA-R2-B, invariant 3): a second /sync request inside the step, one that began before it, one overlapping its end, an entry without usable timing, or a full resource buffer leave no unique request", (t) => {
+  const cases = [
+    [
+      "second inside",
+      (e) =>
+        e.resources.push({
+          ...e.resources[0],
+          startTime: e.resources[0].startTime + 0.1,
+        }),
+      /2 \/sync requests lie inside the operation \(2 since the sample began\)/,
+    ],
+    [
+      "began before",
+      (e) =>
+        e.resources.unshift({
+          ...e.resources[0],
+          startTime: msAt(e.lines[0]) - 5,
+          requestStart: msAt(e.lines[0]) - 4,
+          responseEnd: msAt(e.lines[0]) - 3,
+        }),
+      /a \/sync request began before the sample's operation/,
+    ],
+    [
+      "overlaps the end",
+      (e) =>
+        e.resources.push({
+          ...e.resources[0],
+          startTime: e.resources[0].startTime + 1,
+          requestStart: e.resources[0].startTime + 1.2,
+          responseEnd: msAt(e.lines[e.selected.commit - e.mark.from]) + 30,
+        }),
+      /a \/sync request overlaps the sample's operation without lying inside it/,
+    ],
+    [
+      "no timing",
+      (e) => {
+        e.resources[0].requestStart = null;
+      },
+      /a request entry has no usable timing/,
+    ],
+    [
+      "buffer full",
+      (e) => {
+        e.read.resource_entries = 250;
+      },
+      /the resource-timing buffer was full: requests may be missing/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/ /g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editJson(syncFile(dir, "firefox", "P-10"), (v) => {
+      edit(v.samples[7]);
+    });
+    const r = contract.resolveEvidence(dir);
+    assert.deepEqual(
+      unsatisfied(r),
+      ["P-10 sync page duration_ms (proxy delay 250 ms)[firefox]"],
+      label,
+    );
+    assert.match(
+      reasons(
+        cell(r, "P-10 sync page duration_ms (proxy delay 250 ms)[firefox]"),
+      ),
+      new RegExp(`sample 7: its operation is invalid: ${reason.source}`),
+      label,
+    );
+  }
+});
+
+test("case R13-C4 (invariant 1): identity and binding: a reloaded page, an engine started again, another page instance in the file, another engine's file, another test's file, a recorded selection the witness does not show, overlapping samples, the old method and a recorded failure are each refused", (t) => {
+  const cases = [
+    [
+      "reloaded",
+      (v) => {
+        v.samples[4].read.page = "another-page";
+      },
+      /sample 4: its operation is invalid: the page was reloaded or replaced during the sample/,
+    ],
+    [
+      "time origin",
+      (v) => {
+        v.samples[4].read.time_origin += 1;
+      },
+      /sample 4: its operation is invalid: the page was reloaded or replaced during the sample/,
+    ],
+    [
+      "engine started",
+      (v) => {
+        v.samples[4].read.epochs = [
+          { generation: 2, run: 1, trace: v.samples[4].mark.from + 1 },
+        ];
+        v.samples[4].read.generation = 2;
+      },
+      /sample 4: its operation is invalid: the engine was started again during the sample/,
+    ],
+    [
+      "another page instance",
+      (v) => {
+        v.samples[4].mark.page = "another-page";
+        v.samples[4].read.page = "another-page";
+      },
+      /sample 4: it was collected on another page instance/,
+    ],
+    [
+      "engine binding",
+      (v) => {
+        v.engine = "webkit";
+      },
+      /samples\/P-4\.sync\.chromium\.json is webkit's support, not chromium's/,
+    ],
+    [
+      "collection binding",
+      (v) => {
+        v.evidence.collection.test = "P-10: a different test";
+      },
+      /samples\/P-4\.sync\.chromium\.json was not written by this series' stage, invocation and test/,
+    ],
+    [
+      "selection moved",
+      (v) => {
+        v.samples[4].selected.commit = v.samples[4].selected.end;
+      },
+      /sample 4: its recorded selection is not the operation its witness shows/,
+    ],
+    [
+      "overlap",
+      (v) => {
+        const e = v.samples[5];
+        const by = e.mark.from - (v.samples[4].read.to - 1);
+        e.mark.from -= by;
+        e.read.to -= by;
+        for (const key of ["start", "commit", "end"]) e.selected[key] -= by;
+      },
+      /sample 5: it overlaps the previous sample's operation/,
+    ],
+    [
+      "old method",
+      (v) => {
+        v.method = "sync-request-sample/1";
+      },
+      /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/2/,
+    ],
+    [
+      "failure recorded",
+      (v) => {
+        v.failure = {
+          index: 320,
+          warmup: false,
+          problem: "the sample's step has not ended within 30000 ms",
+          witness: null,
+        };
+      },
+      /records an incomplete sample: the sample's step has not ended within 30000 ms/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/ /g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editJson(syncFile(dir, "chromium"), edit);
+    const r = contract.resolveEvidence(dir);
+    const ids = [...SYNC_P4, SYNC_P10U].map((n) => `${n}[chromium]`).sort();
+    assert.deepEqual(unsatisfied(r), ids, label);
+    assert.match(
+      reasons(cell(r, "P-4 sync page total_ms[chromium]")),
+      reason,
+      label,
+    );
+  }
+});
+
+test("case R13-D1 (DA-N1): a draft whose first send got no answer and was sent again: revision 12's first-send stamping (92 ms longer) is invalid in every draft series; the package withholds support and both validator modes refuse it", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const v = readJson(draftFile(dir, "chromium"));
+  const e = v.samples[0];
+  const sendB = msAt(e.lines[0]);
+  const sendA = sendB - 92;
+  e.mark.t1 = Math.min(e.mark.t1, sendA - 0.5);
+  e.mark.t0 = Math.min(e.mark.t0, e.mark.t1 - 0.25);
+  // A (not sent: no answer), then B (resend) and its answer.
+  e.lines = [
+    ln(sendA, "data.outbox_send", { resend: false }),
+    ln(sendB, "data.outbox_send", { resend: true }),
+    e.lines[1],
+  ];
+  e.read.to += 1;
+  e.selected = { send: e.mark.from, answer: e.mark.from + 2, request: 0 };
+  shiftAfter(v, 0, 1);
+  writeFileSync(draftFile(dir, "chromium"), `${JSON.stringify(v, null, 2)}\n`);
+  const r0 = e.resources[0];
+  const answer = msAt(e.lines[2]);
+  const values = {
+    "P-4 draft enqueue_ms": e.mark.t1 - e.mark.t0,
+    "P-4 draft claim_ms": sendA - e.mark.t1,
+    "P-4 draft stamping_ms": r0.requestStart - sendA,
+    "P-4 draft request_ms": r0.responseEnd - r0.requestStart,
+    "P-4 draft record_ms": answer - r0.responseEnd,
+    "P-4 draft total_ms": e.read.done - e.mark.t0,
+    [DRAFT_P10U]: r0.responseEnd - r0.requestStart,
+  };
+  assert.ok(values["P-4 draft stamping_ms"] - (r0.requestStart - sendB) === 92);
+  rebind(dir, "chromium", 0, values);
+  const r = contract.resolveEvidence(dir);
+  const ids = [...DRAFT_P4, DRAFT_P10U].map((n) => `${n}[chromium]`).sort();
+  assert.deepEqual(unsatisfied(r), ids);
+  for (const id of ids)
+    assert.match(
+      reasons(cell(r, id)),
+      /sample 0: its operation is invalid: the draft was sent again before an answer: a first attempt that got no answer cannot donate its send/,
+      id,
+    );
+  assert.equal(r.complete, false);
+  refusedEndToEnd(dir);
+});
+
+test("case R13-D2 (DA-N1): the draft witness's other relations: a draft waiting at the mark, a first send that is a resend, a send before the enqueue ended, a failed step before the answer, a second /commands request, the outcome not recorded, a read before the answer, the support missing", (t) => {
+  const cases = [
+    [
+      "waiting",
+      (e) => {
+        e.mark.waiting = 1;
+      },
+      /another draft was waiting when the sample began/,
+    ],
+    [
+      "resend",
+      (e) => {
+        e.lines[0] = e.lines[0].replace('"resend":false', '"resend":true');
+      },
+      /the sample's first send is a resend/,
+    ],
+    [
+      "send before enqueue end",
+      (e) => {
+        e.mark.t1 = msAt(e.lines[0]) + 3;
+      },
+      /its send precedes the end of its enqueue/,
+    ],
+    [
+      "failed step",
+      (e) => {
+        e.lines[1] = ln(msAt(e.lines[1]), "data.outbox_step_failed");
+      },
+      /the dispatcher's step failed before the answer/,
+    ],
+    [
+      "second request",
+      (e) =>
+        e.resources.push({
+          ...e.resources[0],
+          startTime: e.resources[0].startTime + 0.05,
+        }),
+      /2 \/commands requests lie inside the operation/,
+    ],
+    [
+      "not settled",
+      (e) => {
+        e.settled.status = "in_flight";
+      },
+      /the draft's outcome was not recorded/,
+    ],
+    [
+      "another draft settled",
+      (e) => {
+        e.settled.local_id = "00000000-0000-4000-8000-000000000000";
+      },
+      /the draft's outcome was not recorded/,
+    ],
+    [
+      "read before answer",
+      (e) => {
+        e.read.done = msAt(e.lines[1]) - 5;
+      },
+      /the sample was read before its answer/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/ /g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editJson(draftFile(dir, "firefox"), (v) => {
+      edit(v.samples[9]);
+    });
+    const r = contract.resolveEvidence(dir);
+    const ids = [...DRAFT_P4, DRAFT_P10U].map((n) => `${n}[firefox]`).sort();
+    assert.deepEqual(unsatisfied(r), ids, label);
+    assert.match(
+      reasons(cell(r, "P-4 draft stamping_ms[firefox]")),
+      new RegExp(`sample 9: its operation is invalid: ${reason.source}`),
+      label,
+    );
+  }
+  const dir = scratch(t);
+  writeComplete(dir);
+  rmSync(draftFile(dir, "webkit"));
+  const r = contract.resolveEvidence(dir);
+  assert.deepEqual(
+    unsatisfied(r),
+    [...DRAFT_P4, DRAFT_P10U].map((n) => `${n}[webkit]`).sort(),
+  );
+  assert.match(
+    reasons(cell(r, "P-4 draft request_ms[webkit]")),
+    /its per-sample support \(samples\/P-4\.draft\.webkit\.json\) is missing or malformed/,
+  );
+});
+
+test("control R13-K2 (the released backend's first real-writer run): a draft read in the same evaluation as its answer may lie up to the answer line's 1 ms rounding before it; its total is then still the sample's", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const v = readJson(draftFile(dir, "webkit"));
+  const e = v.samples[11];
+  const answer = msAt(e.lines[1]);
+  e.read.done = answer - 0.3;
+  e.read.at = e.read.done;
+  writeFileSync(draftFile(dir, "webkit"), `${JSON.stringify(v, null, 2)}\n`);
+  rebind(dir, "webkit", 11, { "P-4 draft total_ms": e.read.done - e.mark.t0 });
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), []);
+});
+
+test("case R13-C5 (DA-R2-B): two samples' values exchanged with their selections intact (summary and hash recomputed) are refused by the recomputation, for the sync request series and the draft stamping series", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const swap = (s) => [s[1], s[0], ...s.slice(2)];
+  rewriteSeries(dir, "P-4 sync page request_ms", "chromium", swap);
+  rewriteSeries(dir, "P-4 draft stamping_ms", "chromium", swap);
+  const sync = readJson(syncFile(dir, "chromium")).samples;
+  const draft = readJson(draftFile(dir, "chromium")).samples;
+  const req = (e) => e.resources[0].responseEnd - e.resources[0].requestStart;
+  const stamp = (e) => e.resources[0].requestStart - msAt(e.lines[0]);
+  assert.notEqual(req(sync[0]), req(sync[1]));
+  assert.notEqual(stamp(draft[0]), stamp(draft[1]));
+  const r = contract.resolveEvidence(dir);
+  // P-10's unthrottled series is no longer P-4's samples, and the P-4 total no longer their sum: both named too.
+  assert.deepEqual(unsatisfied(r), [
+    "P-10 sync page request_ms (unthrottled loopback)[chromium]",
+    "P-4 draft stamping_ms[chromium]",
+    "P-4 sync page request_ms[chromium]",
+    "P-4 sync page total_ms[chromium]",
+  ]);
+  assert.match(
+    reasons(cell(r, "P-4 sync page request_ms[chromium]")),
+    new RegExp(
+      `sample 0: ${req(sync[1])} is not its operation's request_ms \\(${req(sync[0])}\\)`,
+    ),
+  );
+  assert.match(
+    reasons(cell(r, "P-4 draft stamping_ms[chromium]")),
+    new RegExp(
+      `sample 0: ${stamp(draft[1])} is not its operation's stamping_ms \\(${stamp(draft[0])}\\)`,
+    ),
+  );
 });

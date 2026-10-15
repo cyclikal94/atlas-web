@@ -69,9 +69,14 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * schema 4 (each engine run carries its observation and effects); and the P-2 scan/commit series and the P-4/P-10 sync segments are each
  * bound to their own operation by retained per-sample support (`raw/P-2.samples.<engine>.json`, `samples/P-4.sync.<engine>.json`,
  * `samples/P-10.sync.<engine>.json`); version 6 evidence (no Air request was recorded under it) resolves incomplete and stays history,
- * unchanged.
+ * unchanged. Version 8 (WEB-09c revision 13, review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1): a P-4/P-10 sync sample's support is
+ * its whole bounded witness (`sync-request-sample/2`: the mark one page call set before it triggered the step, page and engine identity,
+ * the contiguous trace slice to the read and every `/sync` entry), from which the consumer derives again the FIRST real step after the
+ * mark, closed by its own end, and its one request; the P-4 draft series (and P-10's unthrottled draft requests) are bound the same way
+ * (`samples/P-4.draft.<engine>.json`, `draft-request-sample/1`: one send, its answer, its one `/commands` request and the draft's recorded
+ * outcome). Version 7 evidence (no Air request was recorded under it) resolves incomplete and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 7;
+export const CONTRACT_VERSION = 8;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [

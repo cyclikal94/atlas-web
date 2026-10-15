@@ -116,6 +116,12 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > admission; P-2 took the retry's timings, and P-4/P-10 could pair a step with another request (synthetic diagnostics and a source assessment; no Air
 > programme ran on revision 11). Revision 12 binds every admission and timed sample to its own operation (contract version 7, below); no measurement was
 > taken under version 6, and no figure here changes.
+>
+> **Status after review 13 (revision 13, 14 October 2026).** Review 13 found that revision 12's P-4/P-10 sync sampler still let an earlier step that ended
+> without a request (a local-storage stop, an offline or session gate) donate its start to a later step's request and commit (synthetic schedule: a 92 ms
+> pre-issue instead of 2), and that its three selected lines let no consumer see the end in between; the design assessment also found the P-4 draft path
+> taking the FIRST send of a retried draft. Revision 13 retains each sample's bounded witness and derives the operation from it in the writer and again in
+> the consumer (contract version 8, below). No measurement was taken under version 7, and no figure here changes.
 
 ## Read this first
 
@@ -511,7 +517,8 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
 * P-4: each sync-page total is the sum of its segments (a draft total at least theirs); the shell's medians and every derived figure follow from its runs;
 * the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures
   (schema 4: an engine run carries the observation its outcome was classified from and the cache it left, both judged as a cold run's are);
-* P-2's scan and commit series, and the P-4/P-10 sync segments, are recomputed from their per-sample support (contract version 7, below);
+* P-2's scan and commit series are recomputed from their per-sample support (contract version 7), and the P-4/P-10 sync segments and the P-4
+  draft segments from each sample's bounded witness (contract version 8, below);
 * every row lies in the lines its stage sealed; malformed nested evidence is a named finding of its cell, never a crash or an empty success.
 
 From revision 9 (review 9 R2; contract version 4) every admitted or refused P-11 and P-W2 cold run carries the one observation it was classified from
@@ -561,6 +568,22 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   step's end reads the trace and the `/sync` ResourceTiming entries; the step start is the first non-coalesced `data.sync_tick`, the commit the first after
   it, and the request the ONE `/sync` entry between them (1 ms trace rounding). A latency sample does not need a written page. The support
   (`samples/P-4.sync.<engine>.json`, `samples/P-10.sync.<engine>.json`) is retained and the segments are recomputed from it.
+* **Each request sample is the first step after its mark, closed by its own end (revision 13; contract version 8).** P-4/P-10 (sync): one page call
+  waits until no real step is open, then clears ResourceTiming, records the mark (page instance, time origin, engine starts, trace position) and nudges;
+  one later evaluation copies together the contiguous trace slice from the mark, every `/sync` entry and the page/engine identity
+  (`sync-request-sample/2`). The sample is the FIRST non-coalesced step after the mark: its own first `data.sync_next`/`data.sync_step_failed` closes it
+  before its commit or request is looked for. A step that ends with no commit fails the sample at that end (a later step can never stand for it); a
+  second real start or commit inside it, a commit or end before any start, a reload or engine start since the mark, a `/sync` entry that began before the
+  step or overlaps it without lying inside [tick, commit] (1 ms rounding), not exactly one entry inside, an entry without usable timing or a full
+  ResourceTiming buffer are each invalid. Coalesced ticks are retained and never split a step; a later step's lines after the end are retained and
+  ignored. Warm-ups follow the same rule; the first incomplete sample stops the collection and is written, with its witness, into the support file
+  (`failure`) before the test fails. P-4 draft: one page call waits for an empty queue, marks and enqueues; the sample is the first send
+  (`resend: false`) after the enqueue, its first answer with no second send or failed step between, the one `/commands` entry inside them and the draft's
+  own recorded outcome (`draft-request-sample/1`, `samples/P-4.draft.<engine>.json`); a first attempt that got no answer (not sent, aborted) never donates
+  its send. The draft total runs to the observation that read the answer (its line's 1 ms rounding allowed). The contract re-derives every selection from
+  the witness with the writers' own rule (`scripts/lib/profile-sample-rules.mjs`), binds each file to its series' engine, stage, invocation and test, and
+  recomputes every value; segment definitions are unchanged. Version-7 evidence resolves incomplete and stays history. Limits: ResourceTiming carries no
+  request identity, so uniqueness is established by the bounded window (cleared at the mark, no open step, one draft in the queue), not by a request key.
 * **Device results are schema 4 (revision 12; schema 3 below is its predecessor).** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
   admitted run's figures must equal; W5 and killed attempts carry none. Schema 4 adds the run's own observation (made by the page with the same cold

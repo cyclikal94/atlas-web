@@ -33,6 +33,11 @@
 // sync segments carry per-sample support (a real-shaped trace and `raw/P-2.samples.<engine>.json`; `samples/P-4.sync.<engine>.json`,
 // `samples/P-10.sync.<engine>.json`) from which the series are computed the way the writers compute them.
 //
+// Revision 13 (review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1; contract version 8): the P-4/P-10 sync support is each sample's
+// whole bounded witness (`sync-request-sample/2`: mark, page/engine identity, contiguous trace slice with a wake inside some steps and a
+// later step's start after some reads, every `/sync` entry, selected references), and the P-4 draft series carry the same kind of
+// support (`samples/P-4.draft.<engine>.json`, `draft-request-sample/1`); every series is computed here from the generated times.
+//
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
 // thing and expect the exact cell the contract must name.
@@ -1289,17 +1294,21 @@ export function writeProgramme(
     });
 
     // ---- integration: P-4, P-10, P-W2, W2-limits ----
-    const syncTitle = "P-4: what the page does around ONE sync page";
-    // Revision 12 (DA-M2): each sample is one operation, its support as the writer records it (the step start, its commit and end lines,
-    // and the one /sync ResourceTiming entry between them); the segments are computed from it the way the writer computes them.
-    const syncSamples = (count, warmup, label, request0) => {
+    // Revision 13 (review 13 R2, DA-R2-A/B, DA-N1; contract 8): each sample's support is its whole bounded witness as the collectors record
+    // it (the mark, page and engine identity, the contiguous trace slice to the read, every request entry) with the selected references;
+    // the segments are computed here from the generated times, the way the writers compute them (not with the rule the contract applies).
+    const PAGE = `synthetic-page-${engine}`;
+    const ORIGIN = 1_760_400_000_000.25;
+    const SYNC_PATH = "/api/experimental/v1/sync";
+    const syncWitnesses = (count, warmup, label, request0) => {
       const out = [];
       let at = 5_000;
-      let line = 40;
+      let from = 40 + warmup * 3;
       for (let k = 0; k < count; k += 1) {
         at += 97 + (k % 7);
         const tick = at;
         const request = {
+          name: SYNC_PATH,
           startTime: tick + 0.25 + (k % 3) * 0.1,
           requestStart: tick + 0.5 + (k % 5) * 0.2,
           responseEnd:
@@ -1310,40 +1319,74 @@ export function writeProgramme(
             (seeded(`${label}|${engine}|${k}`) % 400) / 100,
         };
         const commit = Math.ceil(request.responseEnd) + 1 + (k % 4);
+        const lines = [
+          `${tick}ms data.sync_tick ${JSON.stringify({ why: "now", coalesced: false })}`,
+        ];
+        // A wake while the step runs is retained and never splits it.
+        if (k % 4 === 1)
+          lines.push(
+            `${tick + 1}ms data.sync_tick ${JSON.stringify({ why: "wake", coalesced: true })}`,
+          );
+        const commitAt = from + lines.length;
+        lines.push(
+          `${commit}ms data.sync_commit ${JSON.stringify({ kind: "applied", value: "committed", bytes: 412, scan_ms: 0.4, commit_ms: 1.2 })}`,
+        );
+        const endAt = from + lines.length;
+        lines.push(
+          `${commit}ms data.sync_next ${JSON.stringify({ when: "after", state: "idle" })}`,
+        );
+        // A read that came after a later step had begun keeps its lines; they are outside the sample.
+        if (k % 5 === 2)
+          lines.push(
+            `${commit + 2}ms data.sync_tick ${JSON.stringify({ why: "timer", coalesced: false })}`,
+          );
+        const to = from + lines.length;
         out.push({
           index: warmup + k,
-          tick: {
-            trace: line,
-            line: `${tick}ms data.sync_tick ${JSON.stringify({ why: "now", coalesced: false })}`,
+          mark: {
+            page: PAGE,
+            time_origin: ORIGIN,
+            epochs: 1,
+            generation: 1,
+            from,
+            at: tick - 0.5,
           },
-          commit: {
-            trace: line + 1,
-            line: `${commit}ms data.sync_commit ${JSON.stringify({ kind: "applied", value: "committed" })}`,
+          read: {
+            page: PAGE,
+            time_origin: ORIGIN,
+            epochs: [],
+            generation: 1,
+            to,
+            at: commit + 0.75,
+            resource_entries: 1 + (k % 3),
           },
-          end: {
-            trace: line + 2,
-            line: `${commit}ms data.sync_next ${JSON.stringify({ when: "after", state: "idle" })}`,
-          },
-          request,
-          sync_entries: 1,
+          lines,
+          resources: [request],
+          selected: { start: from, commit: commitAt, end: endAt, request: 0 },
         });
-        line += 5;
-        at = commit;
+        from = to + (k % 2);
+        at = commit + 3;
       }
       return out;
     };
     const msOf = (l) => Number(/^(-?\d+)ms /.exec(l)[1]);
-    const p4 = syncSamples(300, 20, "P-4", 3);
-    const pre = p4.map((e) => e.request.requestStart - msOf(e.tick.line));
+    const lineAt = (e, at) => e.lines[at - e.mark.from];
+    const tickOf = (e) => msOf(lineAt(e, e.selected.start));
+    const commitOf = (e) => msOf(lineAt(e, e.selected.commit));
+    const syncTitle = "P-4: what the page does around ONE sync page";
+    const p4 = syncWitnesses(300, 20, "P-4", 3);
+    const pre = p4.map((e) => e.resources[0].requestStart - tickOf(e));
     const syncRequest = p4.map(
-      (e) => e.request.responseEnd - e.request.requestStart,
+      (e) => e.resources[0].responseEnd - e.resources[0].requestStart,
     );
-    const post = p4.map((e) => msOf(e.commit.line) - e.request.responseEnd);
+    const post = p4.map((e) => commitOf(e) - e.resources[0].responseEnd);
     json(`samples/P-4.sync.${engine}.json`, {
-      method: "sync-request-sample/1",
+      method: "sync-request-sample/2",
       engine,
       warmup: 20,
       samples: p4,
+      failure: null,
+      evidence: stamp("integration", engine, syncTitle),
     });
     const p4Extra = { warmup: 20 };
     series(
@@ -1375,7 +1418,7 @@ export function writeProgramme(
       engine,
       syncTitle,
       "P-4 sync page total_ms",
-      p4.map((e) => msOf(e.commit.line) - msOf(e.tick.line)),
+      p4.map((e) => commitOf(e) - tickOf(e)),
       p4Extra,
     );
     series(
@@ -1387,22 +1430,95 @@ export function writeProgramme(
       { ...p4Extra, stampedRequestTimeoutMs: 30_000 },
     );
     const draftTitle = "P-4: what the page does around ONE draft submission";
-    const segments = Object.fromEntries(
-      ["enqueue_ms", "claim_ms", "stamping_ms", "request_ms", "record_ms"].map(
-        (seg) => [seg, distinct(`P-4 draft ${seg}`, engine, 300, 1)],
+    const COMMANDS_PATH = "/api/experimental/v1/commands";
+    const drafts = [];
+    {
+      let from = 60;
+      let at = 9_000.125;
+      for (let k = 0; k < 300; k += 1) {
+        const v = (seg) => sampleOf(`P-4 draft ${seg}|${engine}`, k, 1);
+        const t0 = at;
+        const t1 = t0 + v("enqueue_ms");
+        const send = Math.ceil(t1) + 1 + (k % 3);
+        const requestStart = send + 0.3 + (k % 4) * 0.2;
+        const responseEnd = requestStart + 2 + v("request_ms");
+        const answer = Math.ceil(responseEnd) + 1 + (k % 2);
+        const done = answer + 0.6 + (k % 3) * 0.1;
+        const lines = [
+          `${send}ms data.outbox_send ${JSON.stringify({ resend: false })}`,
+          `${answer}ms data.outbox_answer ${JSON.stringify({ kind: "receipt" })}`,
+        ];
+        const local = `00000000-0000-4000-8000-${(700_000 + k).toString(16).padStart(12, "0")}`;
+        drafts.push({
+          index: 20 + k,
+          local_id: local,
+          enqueued: "queued",
+          mark: { page: PAGE, time_origin: ORIGIN, from, waiting: 0, t0, t1 },
+          read: {
+            page: PAGE,
+            time_origin: ORIGIN,
+            epochs: [],
+            generation: null,
+            to: from + lines.length,
+            at: done,
+            done,
+            resource_entries: 1,
+          },
+          lines,
+          resources: [
+            {
+              name: COMMANDS_PATH,
+              startTime: requestStart - 0.1,
+              requestStart,
+              responseEnd,
+            },
+          ],
+          settled: {
+            local_id: local,
+            status: k % 2 ? "absent" : "acknowledged",
+          },
+          selected: { send: from, answer: from + 1, request: 0 },
+        });
+        from += lines.length + 1;
+        at = done + 5 + (k % 7);
+      }
+    }
+    json(`samples/P-4.draft.${engine}.json`, {
+      method: "draft-request-sample/1",
+      engine,
+      warmup: 20,
+      samples: drafts,
+      failure: null,
+      evidence: stamp("integration", engine, draftTitle),
+    });
+    const sendOf = (e) => msOf(e.lines[0]);
+    const answerOf = (e) => msOf(e.lines[1]);
+    const segments = {
+      enqueue_ms: drafts.map((e) => e.mark.t1 - e.mark.t0),
+      claim_ms: drafts.map((e) => sendOf(e) - e.mark.t1),
+      stamping_ms: drafts.map((e) => e.resources[0].requestStart - sendOf(e)),
+      request_ms: drafts.map(
+        (e) => e.resources[0].responseEnd - e.resources[0].requestStart,
       ),
-    );
+      record_ms: drafts.map((e) => answerOf(e) - e.resources[0].responseEnd),
+    };
+    const draftExtra = { warmup: 20 };
     for (const [seg, samples] of Object.entries(segments))
-      series("integration", engine, draftTitle, `P-4 draft ${seg}`, samples);
+      series(
+        "integration",
+        engine,
+        draftTitle,
+        `P-4 draft ${seg}`,
+        samples,
+        draftExtra,
+      );
     series(
       "integration",
       engine,
       draftTitle,
       "P-4 draft total_ms",
-      segments.enqueue_ms.map(
-        (_, i) =>
-          Object.values(segments).reduce((n, s) => n + s[i], 0) + 0.5 + (i % 3),
-      ),
+      drafts.map((e) => e.read.done - e.mark.t0),
+      draftExtra,
     );
     series(
       "integration",
@@ -1410,21 +1526,23 @@ export function writeProgramme(
       draftTitle,
       "P-10 draft request_ms (unthrottled loopback)",
       segments.request_ms,
-      { stampedRequestTimeoutMs: 30_000 },
+      { ...draftExtra, stampedRequestTimeoutMs: 30_000 },
     );
-    const p10 = syncSamples(100, 0, "P-10", 250);
+    const p10 = syncWitnesses(100, 0, "P-10", 250);
     json(`samples/P-10.sync.${engine}.json`, {
-      method: "sync-request-sample/1",
+      method: "sync-request-sample/2",
       engine,
       warmup: 0,
       samples: p10,
+      failure: null,
+      evidence: stamp("integration", engine, "P-10:"),
     });
     series(
       "integration",
       engine,
       "P-10:",
       "P-10 sync page duration_ms (proxy delay 250 ms)",
-      p10.map((e) => e.request.responseEnd - e.request.startTime),
+      p10.map((e) => e.resources[0].responseEnd - e.resources[0].startTime),
     );
     value("integration", engine, "W2:", "backend", {
       health: {
@@ -1889,7 +2007,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 7,
+      contract_version: 8,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

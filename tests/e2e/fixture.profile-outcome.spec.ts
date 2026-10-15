@@ -1,19 +1,27 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
+import { syncWitnessSelection } from "../../scripts/lib/profile-sample-rules.mjs";
 import { w4 } from "../../scripts/lib/profile-workloads.mjs";
 import {
+  ACCOUNT,
   bootSession,
   seedSettled,
   startLeader,
+  startOutbox,
   stubNetwork,
   waitForState,
 } from "./data-sync-helpers";
 import { oneColdRun } from "./profile-cold-run";
 import {
+  collectDraftSamples,
+  collectSyncSamples,
   p2SampleProblems,
+  prepareSyncSample,
   readSyncSample,
+  type SyncMark,
+  type SyncWitness,
+  samplePageOf,
   selectP2Sample,
-  syncSample,
 } from "./profile-samples";
 
 /**
@@ -132,13 +140,157 @@ test("P-2 and P-4 selectors: a lapsed sample is refused as no written page; heal
       continue;
     }
     expect(problems).toEqual([]);
-    const read = await (
-      await page.waitForFunction(readSyncSample, before, {
-        timeout: 60_000,
-        polling: 10,
-      })
-    ).jsonValue();
-    const { problem } = syncSample(read as never);
-    expect(problem).toBeNull();
   }
+  // Revision 13: the P-4/P-10 collector (one mark per sample, its bounded witness and the shared rule) over the real engine and its
+  // real ResourceTiming entries.
+  const c = await collectSyncSamples(samplePageOf(page), {
+    warmup: 1,
+    samples: 3,
+    timeout: 60_000,
+    polling: 10,
+  });
+  expect(c.failure).toBeNull();
+  expect(c.samples.map((e) => [e.index, e.resources.length])).toEqual([
+    [1, 1],
+    [2, 1],
+    [3, 1],
+  ]);
+});
+
+/**
+ * WEB-09c revision 13 (review 13 R2; design assessment DA-R2-A/DA-N1, Q7): the request-association schedules natively, in Chromium, Firefox
+ * and WebKit, through the production engine and dispatcher, their real ResourceTiming entries and the stubbed network. The no-request
+ * step is the engine's own offline gate (`navigator.onLine` overridden to false, no event: the step publishes waiting and ends with no
+ * request), then the browser's `online` event resumes it; the lapsed step is the labelled fixture fault seam above; the restart is the
+ * harness's `restartSync`; the draft's first request is aborted by the stub (a lost connection) and the dispatcher's paced retry sends
+ * again. Production timers are unchanged. Not a measurement: nothing is recorded into a programme.
+ */
+const markAndRead = async (
+  page: import("@playwright/test").Page,
+): Promise<{ mark: SyncMark; witness: SyncWitness }> => {
+  const mark = (await (
+    await page.waitForFunction(prepareSyncSample, undefined, {
+      timeout: 60_000,
+      polling: 10,
+    })
+  ).jsonValue()) as SyncMark;
+  const witness = (await (
+    await page.waitForFunction(
+      readSyncSample,
+      { mark, force: false },
+      { timeout: 60_000, polling: 10 },
+    )
+  ).jsonValue()) as SyncWitness;
+  return { mark, witness };
+};
+const setOnline = (page: import("@playwright/test").Page, on: boolean) =>
+  page.evaluate((online) => {
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      get: () => online,
+    });
+    if (online) window.dispatchEvent(new Event("online"));
+  }, on);
+
+test("P-4/P-10 natively: a step that ended with no request is the sample's failure, also on a late read; a lapsed step is a complete latency sample; an engine restart since the mark is refused", async ({
+  context,
+}) => {
+  test.setTimeout(180_000);
+  const net = await stubNetwork(context);
+  await seedSettled(context);
+  const page = await bootSession(context);
+  await startLeader(page);
+  await waitForState(page, "idle");
+  // (1) Offline, no event: the nudged step publishes waiting and ends without a request.
+  await setOnline(page, false);
+  const offline = await markAndRead(page);
+  const problem = syncWitnessSelection(offline.witness).problem;
+  expect(problem).toMatch(
+    /^the sample's step ended without a commit \(\d+ms data\.sync_next \{"when":"event","state":"waiting"\}\): no later step can stand for it$/,
+  );
+  expect(offline.witness.resources).toEqual([]);
+  // The browser comes back: the next step requests and commits. A late read of the whole history is still that failure.
+  const requests = net.requests.length;
+  await setOnline(page, true);
+  await waitForState(page, "idle");
+  await expect.poll(() => net.requests.length).toBeGreaterThan(requests);
+  const late = (await page.evaluate(readSyncSample, {
+    mark: offline.mark,
+    force: true,
+  })) as SyncWitness;
+  expect(late.lines.some((l) => l.includes("data.sync_commit"))).toBe(true);
+  expect(late.resources.length).toBeGreaterThan(0);
+  expect(syncWitnessSelection(late).problem).toBe(problem);
+  // (2) A lapsed hold: the step commits applied/lease_lapsed (nothing written) and ends running: one complete latency sample.
+  const body = W4;
+  net.script.push(() => ({ status: 200, body }));
+  await page.evaluate(() => {
+    (
+      globalThis as { __fixtureLapseReservations?: number }
+    ).__fixtureLapseReservations = 3;
+  });
+  const lapsed = await markAndRead(page);
+  const s = syncWitnessSelection(lapsed.witness);
+  expect(s.status, String(s.problem)).toBe("complete");
+  expect(
+    lapsed.witness.lines[(s.selected?.commit ?? 0) - lapsed.mark.from],
+  ).toContain('"value":"lease_lapsed"');
+  expect(
+    lapsed.witness.lines[(s.selected?.end ?? 0) - lapsed.mark.from],
+  ).toContain('"state":"running"');
+  await waitForState(page, "idle");
+  // (3) An engine started again between the mark and the read.
+  const mark = (await (
+    await page.waitForFunction(prepareSyncSample, undefined, {
+      timeout: 60_000,
+      polling: 10,
+    })
+  ).jsonValue()) as SyncMark;
+  await page.evaluate(() => window.__atlasData?.restartSync());
+  const restarted = (await (
+    await page.waitForFunction(
+      readSyncSample,
+      { mark, force: false },
+      { timeout: 60_000, polling: 10 },
+    )
+  ).jsonValue()) as SyncWitness;
+  expect(syncWitnessSelection(restarted).problem).toBe(
+    "the engine was started again during the sample",
+  );
+});
+
+test("P-4 draft natively: healthy drafts are one send, its answer and its request; a draft whose first request was aborted and sent again fails as sent again", async ({
+  context,
+}) => {
+  test.setTimeout(180_000);
+  const net = await stubNetwork(context);
+  await seedSettled(context);
+  const page = await bootSession(context);
+  await startOutbox(page);
+  const options = {
+    timeout: 30_000,
+    polling: 10,
+    account: ACCOUNT,
+    person: () => crypto.randomUUID(),
+  };
+  const healthy = await collectDraftSamples(samplePageOf(page), {
+    ...options,
+    warmup: 1,
+    samples: 2,
+  });
+  expect(healthy.failure).toBeNull();
+  expect(healthy.samples.map((e) => [e.index, e.resources.length])).toEqual([
+    [1, 1],
+    [2, 1],
+  ]);
+  net.commandScript.push(() => ({ abort: true }));
+  const aborted = await collectDraftSamples(samplePageOf(page), {
+    ...options,
+    warmup: 0,
+    samples: 1,
+  });
+  expect(aborted.values).toEqual([]);
+  expect(aborted.failure?.problem).toBe(
+    "the draft was sent again before an answer: a first attempt that got no answer cannot donate its send",
+  );
 });

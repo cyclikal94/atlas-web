@@ -57,6 +57,13 @@ import {
   tracePayload,
 } from "./profile-outcome-rules.mjs";
 import {
+  DRAFT_WITNESS_METHOD,
+  draftWitnessSelection,
+  SYNC_WITNESS_METHOD,
+  syncWitnessSelection,
+  TRACE_ROUNDING_MS,
+} from "./profile-sample-rules.mjs";
+import {
   observeW2Capture,
   sameTargetProblems,
   W2_SEED,
@@ -1155,8 +1162,30 @@ function crossChecks(ev, cell, samples, row) {
     const file = m[3]
       ? `samples/P-10.sync.${engine}.json`
       : `samples/P-4.sync.${engine}.json`;
-    const problems = syncSupportProblems(ev, file, segment, samples, row);
+    const problems = syncSupportProblems(
+      ev,
+      file,
+      segment,
+      samples,
+      row,
+      engine,
+    );
     if (problems.length || name !== "P-4 sync page total_ms") return problems;
+  }
+  m =
+    /^(?:P-4 draft (enqueue_ms|claim_ms|stamping_ms|request_ms|record_ms|total_ms)|P-10 draft (request_ms) \(unthrottled loopback\))$/.exec(
+      name,
+    );
+  if (m) {
+    const problems = draftSupportProblems(
+      ev,
+      `samples/P-4.draft.${engine}.json`,
+      m[1] ?? m[2],
+      samples,
+      row,
+      engine,
+    );
+    if (problems.length || name !== "P-4 draft total_ms") return problems;
   }
   if (name === "P-4 sync page total_ms") {
     const parts = ["pre_issue_ms", "request_ms", "post_response_ms"].map((s) =>
@@ -1186,11 +1215,13 @@ function crossChecks(ev, cell, samples, row) {
     if (parts.some((p) => !p)) return [];
     if (parts.some((p) => p.length !== samples.length))
       return ["its segment series do not match it sample for sample"];
-    // The draft total runs to after the answer was read, so it is at least the sum of the segments that lie inside it.
+    // The draft total runs to the observation that read the answer, so it is at least the sum of the segments that lie inside it, up to
+    // the answer line's own 1 ms rounding (revision 13: the observation now reads the answer and the time in ONE evaluation, so the
+    // rounded line can lie up to half a millisecond after it).
     return samples.every(
       (t, i) =>
         parts.reduce((n, p) => n + p[i], 0) <=
-        t + 1e-6 * Math.max(1, Math.abs(t)),
+        t + TRACE_ROUNDING_MS + 1e-6 * Math.max(1, Math.abs(t)),
     )
       ? []
       : ["a total is shorter than the segments inside it"];
@@ -1291,74 +1322,139 @@ function p2SupportProblems(ev, engine, shape, metric, samples, row) {
 }
 
 /**
- * A P-4/P-10 sync series against its per-sample operations (revision 12, design assessment DA-M2; contract version 7): each sample's
- * first non-coalesced step start, the first commit after it, the step end after that, and the ONE `/sync` request inside [start,
- * commit] (1 ms trace rounding), from `samples/P-4.sync.<engine>.json` or `samples/P-10.sync.<engine>.json`; the series value is
- * recomputed from that support. Latency does not require a written page.
+ * The common frame of a per-sample support file (revision 13, review 13 R2; contract version 8): its method, its engine (the series'), its
+ * stamp (the series row's stage, invocation and collection test), no recorded failure, one entry per sample after the warm-ups, in order,
+ * each mark at or after the previous sample's read, and one page instance and time origin for the whole file.
  */
-function syncSupportProblems(ev, file, segment, samples, row) {
+function supportFrameProblems(ev, file, method, samples, row, engine) {
   const entry = ev.readJson(file);
   if (!entry.present || entry.error || !isObj(entry.value))
-    return [`its per-sample support (${file}) is missing or malformed`];
+    return {
+      problems: [`its per-sample support (${file}) is missing or malformed`],
+    };
   const v = entry.value;
-  if (v.method !== "sync-request-sample/1" || !Array.isArray(v.samples))
-    return [`${file} is not sync-request-sample/1`];
+  if (v.method !== method || !Array.isArray(v.samples))
+    return { problems: [`${file} is not ${method}`] };
+  if (v.engine !== engine)
+    return { problems: [`${file} is ${v.engine}'s support, not ${engine}'s`] };
+  if (
+    !ev.relaxed &&
+    (!isObj(v.evidence) ||
+      v.evidence.stage !== row?.stage ||
+      v.evidence.invocation !== row?.invocation ||
+      !isObj(v.evidence.collection) ||
+      v.evidence.collection.test !== row?.collection?.test)
+  )
+    return {
+      problems: [
+        `${file} was not written by this series' stage, invocation and test`,
+      ],
+    };
+  if (v.failure !== null)
+    return {
+      problems: [
+        `${file} records an incomplete sample: ${String(v.failure?.problem ?? v.failure)}`,
+      ],
+    };
   if (v.samples.length !== samples.length)
-    return ["its per-sample support does not name one operation per sample"];
+    return {
+      problems: [
+        "its per-sample support does not name one operation per sample",
+      ],
+    };
   const warmup = isCount(row?.warmup) ? row.warmup : 0;
-  if (v.warmup !== warmup) return [`${file} records another warm-up count`];
-  const at = (line) =>
-    Number(/^(-?\d+)ms /.exec(String(line))?.[1] ?? Number.NaN);
+  if (v.warmup !== warmup)
+    return { problems: [`${file} records another warm-up count`] };
   for (const [k, e] of v.samples.entries()) {
     const where = `sample ${k}`;
+    if (!isObj(e) || e.index !== warmup + k || !isObj(e.mark) || !isObj(e.read))
+      return { problems: [`${where}: its support is malformed`] };
     if (
-      !isObj(e) ||
-      e.index !== warmup + k ||
-      !isObj(e.tick) ||
-      !isObj(e.commit) ||
-      !isObj(e.end) ||
-      !isObj(e.request)
+      e.mark.page !== v.samples[0].mark.page ||
+      e.mark.time_origin !== v.samples[0].mark.time_origin
     )
-      return [`${where}: its support is malformed`];
-    if (k > 0 && !(e.tick.trace > v.samples[k - 1].end?.trace))
-      return [`${where}: it overlaps the previous sample's operation`];
-    if (
-      traceEvent(e.tick.line) !== "data.sync_tick" ||
-      tracePayload(e.tick.line)?.coalesced !== false
-    )
-      return [`${where}: its start is not a step start`];
-    if (
-      traceEvent(e.commit.line) !== "data.sync_commit" ||
-      !(e.commit.trace > e.tick.trace)
-    )
-      return [`${where}: its commit is not after its step start`];
-    if (
-      !["data.sync_next", "data.sync_step_failed"].includes(
-        traceEvent(e.end.line),
-      ) ||
-      !(e.end.trace > e.commit.trace)
-    )
-      return [`${where}: its step end is not after its commit`];
-    const r = e.request;
-    const tick = at(e.tick.line);
-    const commit = at(e.commit.line);
-    if (
-      ![r.startTime, r.requestStart, r.responseEnd].every(Number.isFinite) ||
-      !(r.startTime >= tick - 1 && r.responseEnd <= commit + 1) ||
-      !(r.startTime <= r.requestStart && r.requestStart <= r.responseEnd)
-    )
-      return [`${where}: its request is not inside its step`];
-    const value = {
-      pre_issue_ms: r.requestStart - tick,
-      request_ms: r.responseEnd - r.requestStart,
-      post_response_ms: commit - r.responseEnd,
-      total_ms: commit - tick,
-      duration_ms: r.responseEnd - r.startTime,
-    }[segment];
-    if (!(Math.abs(value - samples[k]) <= 1e-6 * Math.max(1, Math.abs(value))))
-      return [
-        `${where}: ${samples[k]} is not its operation's ${segment} (${value})`,
-      ];
+      return {
+        problems: [`${where}: it was collected on another page instance`],
+      };
+    if (k > 0 && !(e.mark.from >= v.samples[k - 1].read?.to))
+      return {
+        problems: [`${where}: it overlaps the previous sample's operation`],
+      };
+  }
+  return { problems: [], v };
+}
+
+/** The selection a witness entry records equals the one the rule derives, and the series value is the derived one. */
+function derivedProblems(where, e, selection, segment, value) {
+  if (selection.status !== "complete")
+    return [
+      `${where}: its operation is ${selection.status}: ${selection.problem}`,
+    ];
+  if (canonical(e.selected) !== canonical(selection.selected))
+    return [
+      `${where}: its recorded selection is not the operation its witness shows`,
+    ];
+  const derived = selection.values[segment];
+  return Math.abs(derived - value) <= 1e-6 * Math.max(1, Math.abs(derived))
+    ? []
+    : [`${where}: ${value} is not its operation's ${segment} (${derived})`];
+}
+
+/**
+ * A P-4/P-10 sync series against its per-sample witnesses (revision 13, review 13 R2, design assessment DA-R2-A/DA-R2-B; contract version
+ * 8): each sample's bounded witness (`sync-request-sample/2`: page and engine identity, the contiguous trace slice from its mark, every
+ * `/sync` entry) is re-derived with the writers' own rule (scripts/lib/profile-sample-rules.mjs): the first real step after the mark,
+ * closed by its own end, one commit, the one request inside it and none before or overlapping it. A step that ended without a commit, an
+ * earlier step's start, a second request, a reload or an engine start never yields a value. Latency does not require a written page.
+ */
+function syncSupportProblems(ev, file, segment, samples, row, engine) {
+  const { problems, v } = supportFrameProblems(
+    ev,
+    file,
+    SYNC_WITNESS_METHOD,
+    samples,
+    row,
+    engine,
+  );
+  if (problems.length) return problems;
+  for (const [k, e] of v.samples.entries()) {
+    const found = derivedProblems(
+      `sample ${k}`,
+      e,
+      syncWitnessSelection(e),
+      segment,
+      samples[k],
+    );
+    if (found.length) return found;
+  }
+  return [];
+}
+
+/**
+ * The P-4 draft series (and P-10's unthrottled draft requests) against their per-sample witnesses (revision 13, design assessment DA-N1;
+ * contract version 8, `draft-request-sample/1`): no draft waiting at the mark, one first send after the enqueue, its first answer with no
+ * second send or failed step between, the one `/commands` entry inside them and the draft's recorded outcome, re-derived with the
+ * writers' rule. A first attempt that got no answer never donates its send time.
+ */
+function draftSupportProblems(ev, file, segment, samples, row, engine) {
+  const { problems, v } = supportFrameProblems(
+    ev,
+    file,
+    DRAFT_WITNESS_METHOD,
+    samples,
+    row,
+    engine,
+  );
+  if (problems.length) return problems;
+  for (const [k, e] of v.samples.entries()) {
+    const found = derivedProblems(
+      `sample ${k}`,
+      e,
+      draftWitnessSelection(e),
+      segment,
+      samples[k],
+    );
+    if (found.length) return found;
   }
   return [];
 }

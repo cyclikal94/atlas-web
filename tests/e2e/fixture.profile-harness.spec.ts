@@ -7,6 +7,23 @@ import {
 import { protocolPlan } from "../../src/fixture/data-harness/profile-capture";
 import { expect, test } from "./helpers";
 
+// REVISION 13 HARNESS ADAPTATION (labelled; formal run rev13/runs/2026-10-14T15-29-20.877Z-c4a1ca63, pool request
+// request-5008715a24df4a868e7c, Firefox): the protocol reloads its own page between attempts, and these cases call Playwright while it
+// does. With the configured trace (`retain-on-failure` records throughout), Playwright 1.63's DOM snapshotter captures each call's
+// before-snapshot and reads `element.scrollTop` (its injected script, "debugger eval code" line 393) in a document whose stylesheet has
+// not loaded; Firefox then logs "Layout was forced before the page was fully loaded", which the console guard rightly refuses. The
+// diagnostic .agtx/validation/web09c-rev13-ff-snapshot-repro.mjs reproduces exactly that warning only with DOM snapshots on, and none
+// with screenshots-only tracing. This file's traces therefore keep screenshots, actions and sources but take no DOM snapshots. The
+// console guard, every assertion and every case are unchanged; a warning from the page itself still fails the case.
+test.use({
+  trace: {
+    mode: "retain-on-failure",
+    snapshots: false,
+    screenshots: true,
+    sources: true,
+  },
+});
+
 /**
  * The device page's W2 route (`/profile-harness`, fixture only; review finding R3): the operator picks the capture file once, the page
  * keeps it on the origin, and every W2 run reads it back, hashes what it read, runs it through the production processing path and records

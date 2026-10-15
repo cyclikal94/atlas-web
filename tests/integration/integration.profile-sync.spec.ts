@@ -28,11 +28,12 @@ import {
   writeEvidence,
 } from "../e2e/profile-helpers";
 import {
-  readSyncSample,
+  collectDraftSamples,
+  collectSyncSamples,
+  DRAFT_SAMPLE_METHOD,
+  type SampleFailure,
   SYNC_SAMPLE_METHOD,
-  type SyncSampleRead,
-  syncSample,
-  syncSegments,
+  samplePageOf,
 } from "../e2e/profile-samples";
 import { readSyncBytes } from "../e2e/profile-sync-read";
 import {
@@ -94,29 +95,23 @@ async function leader(page: Page, account: string, startSync: boolean) {
   );
 }
 
-interface TraceLine {
-  at: number;
-  event: string;
+/**
+ * A sample collection's support file (revision 13, review 13 R2): every recorded sample's bounded witness and selected references, and the
+ * first sample that did not complete (`failure`, with its witness), written BEFORE the test asserts on it. Stamped with the stage, the
+ * invocation and the collection window (`writeEvidence`); the evidence contract derives every series value again from it.
+ */
+function writeSupport(
+  relative: string,
+  data: {
+    method: string;
+    engine: string;
+    warmup: number;
+    samples: unknown[];
+    failure: SampleFailure | null;
+  },
+) {
+  writeEvidence(relative, data);
 }
-const parse = (line: string): TraceLine => {
-  const m = /^(\d+)ms (\S+)/.exec(line);
-  return { at: Number(m?.[1] ?? 0), event: m?.[2] ?? "" };
-};
-
-const lastResource = (page: Page, suffix: string) =>
-  page.evaluate((s) => {
-    const entries = performance
-      .getEntriesByType("resource")
-      .filter((e) => e.name.includes(s)) as PerformanceResourceTiming[];
-    const e = entries.at(-1);
-    return e
-      ? {
-          requestStart: e.requestStart,
-          responseEnd: e.responseEnd,
-          startTime: e.startTime,
-        }
-      : null;
-  }, suffix);
 
 test("P-4: what the page does around ONE sync page, against the real backend", async ({
   context,
@@ -129,53 +124,26 @@ test("P-4: what the page does around ONE sync page, against the real backend", a
   await expect
     .poll(() => page.evaluate(() => window.__atlasData?.engineState()?.kind))
     .toBe("idle");
-  const preIssue: number[] = [];
-  const request: number[] = [];
-  const postResponse: number[] = [];
-  const total: number[] = [];
-  const p4Support: Array<Record<string, unknown>> = [];
-  for (let i = 0; i < WARMUP + SAMPLES; i += 1) {
-    // The page's resource-timing buffer holds 250 entries and then DROPS new ones, which would make "the last /sync" a stale entry.
-    await page.evaluate(() => performance.clearResourceTimings());
-    const before = await page.evaluate(
-      () => (window.__atlasData?.engineTrace ?? []).length,
-    );
-    await page.evaluate(() => window.__atlasData?.nudgeSync());
-    await expect
-      .poll(
-        () =>
-          page.evaluate(
-            (n) =>
-              (window.__atlasData?.engineTrace ?? [])
-                .slice(n)
-                .some((l) => l.includes("data.sync_commit")),
-            before,
-          ),
-        { timeout: 30_000, intervals: [2, 5, 10] },
-      )
-      .toBe(true);
-    if (i < WARMUP) continue;
-    const read = (await (
-      await page.waitForFunction(readSyncSample, before, {
-        timeout: 30_000,
-        polling: 5,
-      })
-    ).jsonValue()) as SyncSampleRead;
-    const { support, problem } = syncSample(read);
-    expect(problem, `P-4 sync sample ${i}: one operation`).toBeNull();
-    if (!support) continue;
-    const segments = syncSegments(support);
-    preIssue.push(segments.pre_issue_ms);
-    request.push(segments.request_ms);
-    postResponse.push(segments.post_response_ms);
-    total.push(segments.total_ms);
-    p4Support.push({ index: i, ...support });
-  }
-  mkdirSync(`${PROFILE_OUT}/samples`, { recursive: true });
-  writeFileSync(
-    `${PROFILE_OUT}/samples/P-4.sync.${engine}.json`,
-    `${JSON.stringify({ method: SYNC_SAMPLE_METHOD, engine, warmup: WARMUP, samples: p4Support }, null, 2)}\n`,
-  );
+  // One mark, one observation and the shared rule per sample, warm-ups included (revision 13): the first incomplete sample stops the
+  // collection, its witness is written with the support, and only then does the test fail.
+  const c = await collectSyncSamples(samplePageOf(page), {
+    warmup: WARMUP,
+    samples: SAMPLES,
+    timeout: 30_000,
+    polling: 5,
+  });
+  writeSupport(`samples/P-4.sync.${engine}.json`, {
+    method: SYNC_SAMPLE_METHOD,
+    engine,
+    warmup: WARMUP,
+    samples: c.samples,
+    failure: c.failure,
+  });
+  expect(c.failure, "P-4 sync: every sample is one complete step").toBeNull();
+  const preIssue = c.values.map((v) => v.pre_issue_ms);
+  const request = c.values.map((v) => v.request_ms);
+  const postResponse = c.values.map((v) => v.post_response_ms);
+  const total = c.values.map((v) => v.total_ms);
   const extra = {
     warmup: WARMUP,
     method:
@@ -200,78 +168,38 @@ test("P-4: what the page does around ONE draft submission, against the real back
   const page = await bootHarness(context);
   const id = await signedIn(page);
   await leader(page, id.account_id, false);
-  const enqueue: number[] = [];
-  const claim: number[] = [];
-  const stamping: number[] = [];
-  const request: number[] = [];
-  const record_: number[] = [];
-  const total: number[] = [];
-  for (let i = 0; i < WARMUP + SAMPLES; i += 1) {
-    await page.evaluate(() => performance.clearResourceTimings());
-    const before = await page.evaluate(
-      () => (window.__atlasData?.outboxTrace ?? []).length,
-    );
-    const person = crypto.randomUUID();
-    const started = await page.evaluate(
-      async ({ p, n }) => {
-        const data = window.__atlasData;
-        if (!data) throw new Error("no harness");
-        const t0 = performance.now();
-        const out = await data.enqueue({
-          endpoint: "/commands",
-          targets: [
-            {
-              resourceId: p,
-              role: "primary",
-              basis: "resource",
-              versionChecked: false,
-              seedIfUntracked: 1,
-            },
-          ],
-          command: {
-            commands: [{ kind: "create_person", id: p, name: `P-4 ${n}` }],
-          },
-        });
-        return { t0, t1: performance.now(), localId: out.localId };
-      },
-      { p: person, n: i },
-    );
-    await expect
-      .poll(
-        () =>
-          page.evaluate(
-            (n) =>
-              (window.__atlasData?.outboxTrace ?? [])
-                .slice(n)
-                .some((l) => l.includes("data.outbox_answer")),
-            before,
-          ),
-        { timeout: 30_000, intervals: [2, 5, 10] },
-      )
-      .toBe(true);
-    if (i < WARMUP) continue;
-    const lines = (
-      await page.evaluate(
-        (n) => (window.__atlasData?.outboxTrace ?? []).slice(n),
-        before,
-      )
-    ).map(parse);
-    const send = lines.find((l) => l.event === "data.outbox_send");
-    const answer = lines.find((l) => l.event === "data.outbox_answer");
-    const res = await lastResource(page, "/commands");
-    const done = await page.evaluate(() => performance.now());
-    if (!send || !answer || !res) continue;
-    enqueue.push(started.t1 - started.t0);
-    claim.push(send.at - started.t1);
-    stamping.push(res.requestStart - send.at);
-    request.push(res.responseEnd - res.requestStart);
-    record_.push(answer.at - res.responseEnd);
-    total.push(done - started.t0);
-  }
+  // Revision 13 (design assessment DA-N1): one page call enqueues once the queue holds no waiting draft; one observation reads the send,
+  // its answer and the `/commands` entries; the draft's recorded outcome closes the sample. A first attempt that got no answer (not sent,
+  // aborted) followed by a second send fails the sample: it never donates its send time.
+  const c = await collectDraftSamples(samplePageOf(page), {
+    warmup: WARMUP,
+    samples: SAMPLES,
+    timeout: 30_000,
+    polling: 5,
+    account: id.account_id,
+    person: () => crypto.randomUUID(),
+  });
+  writeSupport(`samples/P-4.draft.${engine}.json`, {
+    method: DRAFT_SAMPLE_METHOD,
+    engine,
+    warmup: WARMUP,
+    samples: c.samples,
+    failure: c.failure,
+  });
+  expect(
+    c.failure,
+    "P-4 draft: every sample is one send, its answer and its request",
+  ).toBeNull();
+  const enqueue = c.values.map((v) => v.enqueue_ms);
+  const claim = c.values.map((v) => v.claim_ms);
+  const stamping = c.values.map((v) => v.stamping_ms);
+  const request = c.values.map((v) => v.request_ms);
+  const record_ = c.values.map((v) => v.record_ms);
+  const total = c.values.map((v) => v.total_ms);
   const extra = {
     warmup: WARMUP,
     method:
-      "enqueue = the strict enqueue transaction; claim = enqueue complete to the dispatcher's send event (wake, window read, markInFlight); stamping = send event to requestStart (lease cover write, issue); request = the real backend on loopback; record = responseEnd to the answer event (the release checks and the outcome transaction). Trace times are rounded to 1 ms.",
+      "enqueue = the strict enqueue transaction; claim = enqueue complete to the dispatcher's send event (wake, window read, markInFlight); stamping = send event to requestStart (lease cover write, issue); request = the real backend on loopback; record = responseEnd to the answer event (the release checks and the outcome transaction); total = the enqueue's start to the observation that read the answer and its request. Each sample is one send, its answer and its one /commands request (draft-request-sample/1). Trace times are rounded to 1 ms.",
   };
   record("P-4 draft enqueue_ms", engine, enqueue, extra);
   record("P-4 draft claim_ms", engine, claim, extra);
@@ -303,45 +231,21 @@ test("P-10: request durations under a throttled loopback (a proxy-injected 250 m
       action: "delay",
       ms: 250,
     });
-  const sync: number[] = [];
-  const p10Support: Array<Record<string, unknown>> = [];
-  for (let i = 0; i < 100; i += 1) {
-    // The page's resource-timing buffer holds 250 entries and then DROPS new ones, which would make "the last /sync" a stale entry.
-    await page.evaluate(() => performance.clearResourceTimings());
-    const before = await page.evaluate(
-      () => (window.__atlasData?.engineTrace ?? []).length,
-    );
-    await page.evaluate(() => window.__atlasData?.nudgeSync());
-    await expect
-      .poll(
-        () =>
-          page.evaluate(
-            (n) =>
-              (window.__atlasData?.engineTrace ?? [])
-                .slice(n)
-                .some((l) => l.includes("data.sync_commit")),
-            before,
-          ),
-        { timeout: 30_000, intervals: [10, 25, 50] },
-      )
-      .toBe(true);
-    const read = (await (
-      await page.waitForFunction(readSyncSample, before, {
-        timeout: 30_000,
-        polling: 10,
-      })
-    ).jsonValue()) as SyncSampleRead;
-    const { support, problem } = syncSample(read);
-    expect(problem, `P-10 sync sample ${i}: one operation`).toBeNull();
-    if (!support) continue;
-    sync.push(syncSegments(support).duration_ms);
-    p10Support.push({ index: i, ...support });
-  }
-  mkdirSync(`${PROFILE_OUT}/samples`, { recursive: true });
-  writeFileSync(
-    `${PROFILE_OUT}/samples/P-10.sync.${engine}.json`,
-    `${JSON.stringify({ method: SYNC_SAMPLE_METHOD, engine, warmup: 0, samples: p10Support }, null, 2)}\n`,
-  );
+  const c = await collectSyncSamples(samplePageOf(page), {
+    warmup: 0,
+    samples: 100,
+    timeout: 30_000,
+    polling: 10,
+  });
+  writeSupport(`samples/P-10.sync.${engine}.json`, {
+    method: SYNC_SAMPLE_METHOD,
+    engine,
+    warmup: 0,
+    samples: c.samples,
+    failure: c.failure,
+  });
+  expect(c.failure, "P-10 sync: every sample is one complete step").toBeNull();
+  const sync = c.values.map((v) => v.duration_ms);
   record("P-10 sync page duration_ms (proxy delay 250 ms)", engine, sync, {
     stampedRequestTimeoutMs: 30_000,
     method:
