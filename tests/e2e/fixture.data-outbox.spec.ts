@@ -1,11 +1,13 @@
 import type { Page } from "@playwright/test";
 import { DATA_CONFIG } from "../../src/data/model/config";
 import type { HarnessEnqueue } from "../../src/fixture/data-harness/main";
+import { DEFAULT_CONFIG } from "../../src/session/constants";
 import { recordEvidence } from "./data-evidence";
 import {
   ACCOUNT,
   atlasError,
   bootSession,
+  confirmationAge,
   dataPage,
   type Lifetime,
   readLifetime,
@@ -16,6 +18,7 @@ import {
   stubNetwork,
   untilTreeSettled,
   uuid,
+  withoutSharedConfirmation,
 } from "./data-sync-helpers";
 import { expect, test } from "./helpers";
 
@@ -2217,6 +2220,8 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
     free: number,
     /** Called with page A once it is quiet and BEFORE the last page boots: what A's registry and tree are at the moment that matters. */
     beforeTheLastBoot: (a: Page) => Promise<void> = async () => undefined,
+    /** WEB-08c revision 10: called with page A before EACH peer page boots (the throwaway page, then page B), before `beforeTheLastBoot`. */
+    beforeEachPeerBoot: (a: Page) => Promise<void> = async () => undefined,
   ) => {
     await stubNetwork(context);
     await serveIdentityReads(context);
@@ -2262,6 +2267,7 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
     }
     // A throwaway page: its boot makes A check its session and remount its tree. With the database in existence (A's outbox made it) the
     // remounted tree BINDS it (4 connections: its pair and the harness's); with none, there is nothing to bind.
+    await beforeEachPeerBoot(a);
     const c = await bootSession(context);
     pages.C = c;
     await recordLifetime(c);
@@ -2269,6 +2275,7 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
     // A is read for the quiet only: where the engine binds a tree without a remount, or runs the check of A at C's boot, A's registry may
     // already have been closed by now, which is the mechanism and not a failure of the wait.
     if (startOutboxFirst) await settle("aAfterC", a, 0);
+    await beforeEachPeerBoot(a);
     await beforeTheLastBoot(a);
     const b = await bootSession(context);
     pages.B = b;
@@ -2298,16 +2305,35 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
   const completedChecksSince = (facts: Lifetime, since: number): number =>
     facts.episodes.filter(([start, end]) => end !== null && start >= since)
       .length;
+  /**
+   * ADAPTED ARRANGEMENT, WEB-08c revision 10 (labelled for the review to accept or reject; every assertion of the two R43 controls below is
+   * unchanged). The product decision HF1-SHARED-CONFIRMATION-20261013 (WEB-08c revision 2) records each server confirmation of the settled
+   * session in the `atlas-auth` record, and a page that boots adopts its token and, within the resume-verification interval (30 s), makes
+   * no identity read of its own. A peer's boot right after the others had settled therefore no longer makes them check their session (that
+   * check was HF-1's neutral flash), and both controls failed at their premise in Chromium and Firefox, deterministically, from that
+   * revision on (revision-10 evidence `r43/`: HEAD 4 failed; WEB-08c revision 1 and accepted main 6 passed; restoring either the token's
+   * adoption or the interval's skip makes them pass again). The check, the disposal and the closure the controls are about are unchanged
+   * and still reached: so just before each peer page boots (the throwaway page and page B in the first control, page B in the second), the
+   * record is put back as a page of the previous version left it, WITHOUT the shared confirmation, and the page boots exactly as every boot
+   * did then (its own identity read). Removing it before page B only was not the original arrangement: the first control's premise ("a check
+   * ran") was always met by the THROWAWAY page's boot, and B's boot alone left A unchecked in one Firefox run (`r43/removal-premise`); waiting
+   * out the 30 s instead also left A unchecked once in Firefox (`r43/adapted-1`). What a boot does with the confirmation in place is the case
+   * after these controls.
+   */
   test("R43 control: a page whose tree is BOUND and whose harness outbox is live loses the outbox when another page boots: the registry is closed by the tree's disposal and the first save is refused `identity_changed`, the refusal of the failing run", async ({
     context,
   }, info) => {
     let beforeB: Lifetime | null = null;
+    const confirmationRemoved: boolean[] = [];
     const { a, settled, closesAtOutbox } = await bootThree(
       context,
       true,
       FLOOR + 1_200_000,
       async (page) => {
         beforeB = await readLifetime(page);
+      },
+      async (page) => {
+        confirmationRemoved.push(await withoutSharedConfirmation(page));
       },
     );
     const first = await enqueue(a, bigSave("one", 41));
@@ -2323,6 +2349,9 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
       namedArrangement:
         "page A's harness outbox is started first, a throwaway page's boot comes next, and page B boots last",
       engineRunsTheCheck: runsTheCheck(info),
+      adaptedArrangement:
+        "WEB-08c revision 10: the shared confirmation is removed from the record just before each peer page boots (the record of the previous version)",
+      confirmationRemoved,
       settled,
       first,
       checksOfA: checks,
@@ -2331,6 +2360,10 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
       lifetimeOfAJustBeforeBBooted: beforeB,
       lifetimeOfA: facts,
     });
+    expect(
+      confirmationRemoved,
+      "arrangement: the record held a shared confirmation, removed before the throwaway page and page B booted",
+    ).toEqual([true, true]);
     // Every closure of A's registry after its outbox started is the production tree's own disposal (and the registry opens again).
     for (const close of fresh) {
       expect(close[2]).toBe("closed_for_deletion");
@@ -2362,6 +2395,69 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
     if (fresh.length > 0)
       expect(first).toEqual({ kind: "refused", reason: "identity_changed" });
     else expect(first?.kind).toBe("queued");
+  });
+
+  /**
+   * WEB-08c revision 10: the first control's ORIGINAL schedule (B boots a few seconds after the others, within the interval of the shared
+   * confirmation) as the product now behaves, in every engine: B adopts the confirmation and makes no identity read, so A does not check its
+   * session, its bound tree is not disposed, nothing closes and the outbox lives (HF1-SHARED-CONFIRMATION-20261013).
+   */
+  test("R43 (WEB-08c revision 10): the first control's pages and boots, page B booting WITHIN 30 s of the shared confirmation: B makes no identity read, A does not check its session, nothing closes and the first save is queued", async ({
+    context,
+  }, info) => {
+    const identityReads: Array<Page | null> = [];
+    context.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname ===
+        "/api/experimental/v1/browser-sessions/current"
+      )
+        identityReads.push(request.frame().page());
+    });
+    let beforeB: Lifetime | null = null;
+    let confirmationAgeAtB: number | null = null;
+    const { a, b, settled, closesAtOutbox } = await bootThree(
+      context,
+      true,
+      FLOOR + 1_200_000,
+      async (page) => {
+        confirmationAgeAtB = await confirmationAge(page);
+        beforeB = await readLifetime(page);
+      },
+    );
+    const first = await enqueue(a, bigSave("one", 41));
+    const facts = await readLifetime(a);
+    const fresh = facts.closes.slice(closesAtOutbox);
+    const sinceB = completedChecksSince(
+      facts,
+      (beforeB as Lifetime | null)?.ms ?? 0,
+    );
+    const readsOfB = identityReads.filter((page) => page === b).length;
+    recordEvidence(info, "r43-original-schedule-within-the-confirmation", {
+      confirmationAgeAtB,
+      identityReadsOfB: readsOfB,
+      settled,
+      first,
+      checksOfAAfterBBooted: sinceB,
+      closesAfterTheOutboxStarted: fresh,
+      lifetimeOfAJustBeforeBBooted: beforeB,
+      lifetimeOfA: facts,
+    });
+    expect(
+      confirmationAgeAtB,
+      "precondition: B boots within the interval of the session's shared confirmation",
+    ).not.toBeNull();
+    expect(confirmationAgeAtB as number | null).toBeLessThan(
+      DEFAULT_CONFIG.resumeVerificationMinIntervalMs,
+    );
+    expect(
+      (beforeB as Lifetime | null)?.openCount,
+      "page A's tree was bound (its pair of connections and the harness's) when the last page booted",
+    ).toBeGreaterThanOrEqual(4);
+    expect(readsOfB, "B's boot made no identity read of its own").toBe(0);
+    expect(sinceB, "A did not check its session after B booted").toBe(0);
+    expect(fresh).toEqual([]);
+    expect(facts.latch).toBe("open");
+    expect(first?.kind).toBe("queued");
   });
 
   test("R43 control: the same pages and the same boots, with both harness outboxes started AFTER the last boot (the order `twoPages` has), keep every outbox: the first save is queued and nothing closed either registry", async ({
@@ -2544,6 +2640,8 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
       channel.close();
     }, ACCOUNT);
     const bound = await untilTreeSettled(a, { connections: 4 });
+    // ADAPTED ARRANGEMENT (WEB-08c revision 10, above): B boots with the record as the previous version left it (no shared confirmation).
+    const confirmationRemoved = await withoutSharedConfirmation(a);
     const beforeB = await readLifetime(a);
     const b = await bootSession(context);
     await recordLifetime(b);
@@ -2554,12 +2652,19 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
     const fresh = facts.closes.slice(closesAtOutbox);
     recordEvidence(info, "r43-control-bound-by-a-hint", {
       engineRunsTheCheck: runsTheCheck(info),
+      adaptedArrangement:
+        "WEB-08c revision 10: the shared confirmation is removed from the record just before page B boots (the record of the previous version)",
+      confirmationRemoved,
       boundByTheHint: bound,
       first,
       closesAfterTheOutboxStarted: fresh,
       lifetimeOfAJustBeforeBBooted: beforeB,
       lifetimeOfA: facts,
     });
+    expect(
+      confirmationRemoved,
+      "arrangement: the record held a shared confirmation, removed before page B booted",
+    ).toBe(true);
     expect(
       beforeB.openCount,
       "the hint bound page A's tree: its pair of connections and the harness's, with no flip and no second page",

@@ -199,6 +199,76 @@ export async function bootSession(
 }
 
 /**
+ * WEB-08c revision 10 (HF1-SHARED-CONFIRMATION-20261013): the age, in ms, of the session's shared confirmation in this origin's `atlas-auth`
+ * record (null: none). A page that boots while the record holds a confirmation of its settled session younger than the resume-verification
+ * interval (30 s) adopts its token and makes NO identity read of its own; an older one is verified again, as every boot was before.
+ */
+export async function confirmationAge(page: Page): Promise<number | null> {
+  return page.evaluate(
+    () =>
+      new Promise<number | null>((resolve, reject) => {
+        const open = indexedDB.open("atlas-auth");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const read = db.transaction("records", "readonly");
+          const request = read.objectStore("records").get("auth_state");
+          read.oncomplete = () => {
+            db.close();
+            const at = (
+              request.result as { confirmation?: { confirmed_at?: string } }
+            )?.confirmation?.confirmed_at;
+            resolve(at === undefined ? null : Date.now() - Date.parse(at));
+          };
+          read.onerror = () => {
+            db.close();
+            reject(read.error);
+          };
+        };
+      }),
+  );
+}
+
+/**
+ * WEB-08c revision 10: removes the shared confirmation from this origin's `atlas-auth` record (one read-write transaction, nothing else
+ * changed), so the record is as a page of a version BEFORE HF1-SHARED-CONFIRMATION-20261013 left it: the next page to boot has no token to
+ * adopt and no recent confirmation, and verifies identity itself exactly as every boot did then. Returns whether one was removed.
+ */
+export async function withoutSharedConfirmation(page: Page): Promise<boolean> {
+  return page.evaluate(
+    () =>
+      new Promise<boolean>((resolve, reject) => {
+        const open = indexedDB.open("atlas-auth");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const write = db.transaction("records", "readwrite");
+          const store = write.objectStore("records");
+          const request = store.get("auth_state");
+          let removed = false;
+          request.onsuccess = () => {
+            const record = request.result as
+              | (Record<string, unknown> & { confirmation?: unknown })
+              | undefined;
+            if (record?.confirmation === undefined) return;
+            const { confirmation: _, ...rest } = record;
+            store.put(rest, "auth_state");
+            removed = true;
+          };
+          write.oncomplete = () => {
+            db.close();
+            resolve(removed);
+          };
+          write.onerror = () => {
+            db.close();
+            reject(write.error);
+          };
+        };
+      }),
+  );
+}
+
+/**
  * A booted session page whose boot is held until the test has installed its fault injection in the LIVE page and has checked it
  * (R34, revision 19). `install` runs on the loaded page (the harnesses are attached, the production session is not started: `?boot=manual`);
  * only then does the session start, so the application's first request cannot come before the injection is in force, and a page whose

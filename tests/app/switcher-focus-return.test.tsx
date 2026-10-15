@@ -19,7 +19,7 @@ import { SwitchHost } from "../../src/features/switch/entry";
 import { switchFlow } from "../../src/features/switch/state";
 import { SWITCH_COPY, stayAs } from "../../src/features/switch/switch-copy";
 import type { SyncStatusModel } from "../../src/lib/sync-chip";
-import { SessionProvider } from "../../src/session";
+import { type Session, SessionProvider } from "../../src/session";
 import { installMatchMedia } from "../helpers/match-media";
 import { sessionDouble } from "../helpers/session-double";
 import { stubEnv } from "../support/data/ui-env";
@@ -30,9 +30,10 @@ import { stubEnv } from "../support/data/ui-env";
  * control stays and takes focus back itself. Moving between the switcher's steps (a row chosen, Back) never pulls focus out of the
  * step that follows.
  *
- * The production composition: the real shell (More sheet, rail), the protected tree's account slot and the switcher's host. jsdom
- * does not make the page behind a dialog inert for focus, so a step's close that tried to return focus would succeed here; the
- * browser counterpart is `production.switcher-focus.spec.ts`.
+ * The production composition: the real shell (More sheet, rail), the protected tree's account slot and the switcher's host, mounted in
+ * `#protected-root` as the application mounts it. jsdom does not make the page behind a dialog inert for focus, so a step's close that
+ * tried to return focus would succeed here; the browser counterparts are `production.switcher-focus.spec.ts` and (DA-F1, the flow
+ * outliving the control that opened it) `production.switcher-focus-lifetime.spec.ts`.
  */
 vi.mock("../../src/data", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/data")>()),
@@ -61,14 +62,46 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
-/** `handOff: false` is the composition before R10: the slot ignores the sheet's return target. */
-async function mount(width: number, { handOff = true } = {}) {
+type View = ReturnType<Session["view"]["get"]>;
+
+/** The session's displayed view, changeable by the test (another account displaying). */
+function viewStore(initial: View) {
+  let value = initial;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => value,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    set(next: View) {
+      value = next;
+      for (const listener of [...listeners]) listener();
+    },
+  };
+}
+
+/**
+ * Mounts the composition in a fresh `#protected-root`. `handOff: false` is the composition before R10: the slot ignores the sheet's
+ * return target. Returns the way to unmount it (with its root), as a refused activation does to the outgoing account's tree.
+ */
+async function mount(
+  width: number,
+  {
+    handOff = true,
+    view = viewStore({ kind: "displaying", account_id: OWNER, epoch: 1 }),
+  } = {},
+) {
   media.set({ width });
   const env = stubEnv();
   env.setLabel("kieran");
   const router = createAppRouter({ initialPath: "/today" });
-  render(
-    <SessionProvider session={sessionDouble()}>
+  const root = document.body.appendChild(document.createElement("div"));
+  root.id = "protected-root";
+  const view_ = render(
+    <SessionProvider session={sessionDouble({}, { view })}>
       <ProtectedProviders>
         <DataEnvProvider env={env}>
           <ShellEnvProvider
@@ -93,8 +126,16 @@ async function mount(width: number, { handOff = true } = {}) {
         </DataEnvProvider>
       </ProtectedProviders>
     </SessionProvider>,
+    { container: root },
   );
   await screen.findByRole("main", { hidden: true });
+  return {
+    root,
+    unmount() {
+      view_.unmount();
+      root.remove();
+    },
+  };
 }
 
 /** Opens the picker from the More sheet; returns the More button. */
@@ -110,6 +151,10 @@ async function openFromMore(): Promise<HTMLElement> {
   );
   return more;
 }
+
+/** The rail's account control, also while a dialog makes the page behind it aria-hidden. */
+const accountControl = () =>
+  screen.getByRole("button", { name: "kieran, switch account", hidden: true });
 
 async function pickerList(): Promise<HTMLElement> {
   const picker = await screen.findByRole("dialog", { name: SWITCH_COPY.title });
@@ -140,6 +185,8 @@ describe("R10: the mobile account entry (More → account control)", () => {
   test("Escape on the picker returns focus to More (the account control closed with the sheet)", async () => {
     await mount(390);
     const more = await openFromMore();
+    // R10's hand-off: the flow keeps More itself as the control that opened it (not the account control that closed with the sheet).
+    expect(switchFlow.returnFocus()).toBe(more);
     const list = await pickerList();
     fireEvent.keyDown(list, { key: "Escape" });
     await closed();
@@ -189,14 +236,19 @@ describe("R10: the mobile account entry (More → account control)", () => {
     expect(more).toHaveFocus();
   });
 
-  test("characterisation of the defect: with the control as its own return target (before R10), nothing has focus after Escape", async () => {
+  // ADAPTED (WEB-08c revision 10, DA-F1): before R10's hand-off this case left focus on the body (revision 9's characterisation). The
+  // flow now finds the same entry in the page when the control that opened it is gone, so the pre-R10 wiring is no longer a focus loss:
+  // the hand-off itself is pinned by the opener assertions above, and the resolution by the DA-F1 cases below.
+  test("without the hand-off (the composition before R10), the opener is the account control that closed with the sheet, and the flow's own resolution still returns focus to More", async () => {
     await mount(390, { handOff: false });
     const more = await openFromMore();
+    const opener = switchFlow.returnFocus();
+    expect(opener).not.toBe(more);
+    expect(opener?.isConnected).toBe(false);
     const list = await pickerList();
     fireEvent.keyDown(list, { key: "Escape" });
     await closed();
-    expect(more).not.toHaveFocus();
-    expect(document.activeElement).toBe(document.body);
+    expect(more).toHaveFocus();
   });
 });
 
@@ -237,5 +289,76 @@ describe("R10 controls: a persistent entry control takes focus back itself", () 
     fireEvent.keyDown(list, { key: "Escape" });
     await closed();
     expect(control).toHaveFocus();
+  });
+});
+
+describe("DA-F1: the flow outlives the control that opened it; focus goes to the same entry in the page as it is now", () => {
+  test("More at 390 px, the layout changes to 1440 px at the picker: Escape returns focus to the rail's account control", async () => {
+    await mount(390);
+    const more = await openFromMore();
+    const list = await pickerList();
+    act(() => media.set({ width: 1440 }));
+    expect(more.isConnected).toBe(false);
+    const rail = accountControl();
+    fireEvent.keyDown(list, { key: "Escape" });
+    await closed();
+    expect(rail).toHaveFocus();
+  });
+
+  test("the rail at 1440 px, the layout changes to 390 px at the credential step: Escape returns focus to More", async () => {
+    await mount(1440);
+    const control = accountControl();
+    fireEvent.click(control);
+    const username = await toCredentials(await pickerList());
+    act(() => media.set({ width: 390 }));
+    expect(control.isConnected).toBe(false);
+    fireEvent.keyDown(username, { key: "Escape" });
+    await closed();
+    expect(
+      screen.getByRole("button", { name: "More", hidden: true }),
+    ).toHaveFocus();
+  });
+
+  test("a refused activation rebuilds the same account's tree with the flow kept: Escape returns focus to the NEW tree's account control", async () => {
+    const first = await mount(1440);
+    const control = accountControl();
+    fireEvent.click(control);
+    await toCredentials(await pickerList());
+    first.unmount();
+    expect(switchFlow.get().stage).toBe("sign-in");
+    await mount(1440);
+    expect(control.isConnected).toBe(false);
+    const form = await screen.findByRole("dialog", {
+      name: SWITCH_COPY.signInOther,
+    });
+    const username = within(form).getByLabelText("Username");
+    await waitFor(() => expect(username).toHaveFocus());
+    fireEvent.keyDown(username, { key: "Escape" });
+    await closed();
+    expect(accountControl()).toHaveFocus();
+  });
+
+  test("another account displaying drops the flow: nothing of the old flow takes focus, though its control is still in the page", async () => {
+    const view = viewStore({ kind: "displaying", account_id: OWNER, epoch: 1 });
+    await mount(1440, { view });
+    const control = accountControl();
+    fireEvent.click(control);
+    await pickerList();
+    act(() => view.set({ kind: "displaying", account_id: "other", epoch: 2 }));
+    await closed();
+    expect(control).not.toHaveFocus();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  test("a gate over the tree (inert) when the flow closes: focus is not returned behind it", async () => {
+    const { root } = await mount(1440);
+    const control = accountControl();
+    fireEvent.click(control);
+    const list = await pickerList();
+    root.setAttribute("inert", "");
+    fireEvent.keyDown(list, { key: "Escape" });
+    await closed();
+    expect(control).not.toHaveFocus();
+    expect(document.activeElement).toBe(document.body);
   });
 });

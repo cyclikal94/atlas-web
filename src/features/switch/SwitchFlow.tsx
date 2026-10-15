@@ -49,14 +49,56 @@ import {
  */
 const browserNavigate = (url: string) => location.assign(url);
 
+/** An element focus can go to now: in the page, not behind a modal or a gate (`inert`), and rendered. */
+const usable = (element: Element | null): element is HTMLElement =>
+  element instanceof HTMLElement &&
+  element.isConnected &&
+  element.closest("[inert]") === null &&
+  (typeof element.checkVisibility !== "function" || element.checkVisibility());
+
 /**
- * Focus returns to the control that opened the flow only when the flow CLOSES (R10 of the review of 15 October 2026). Moving between
- * its steps (a row chosen, Back) replaces one dialog with the next, which has already taken focus; the step that closed must not pull
- * it back, whether or not the page behind is inert by then.
+ * Where focus may return when the flow closes, in order. The control that opened it, while it is still usable. Otherwise the flow has
+ * outlived it (DA-F1 of the design assessment of 15 October 2026: the layout changed and replaced the navigation that held it, or a refused
+ * activation rebuilt the account's tree), and the SAME entry is found in the page as it is now: Settings' "Switch account" for a flow
+ * opened there; then the account entry of the current layout (the rail's account control, or More, which holds it on mobile); then the
+ * page heading, then <main> (Kieran's decision of 15 October 2026). Only the protected tree is searched, never by an account's name.
  */
-const returnOnlyOnClose = (event: Event) => {
-  if (switchFlow.get().stage !== "closed") event.preventDefault();
-};
+function* returnTargets(opener: HTMLElement | null): Generator<HTMLElement> {
+  if (usable(opener)) yield opener;
+  const root = document.getElementById("protected-root");
+  for (const selector of [
+    ...(opener?.hasAttribute("data-switch-account")
+      ? ["[data-switch-account]"]
+      : []),
+    "[data-account-slot]",
+    'nav button[aria-haspopup="dialog"][aria-expanded]',
+    "#main [data-page-heading]",
+    "#main",
+  ])
+    for (const element of root?.querySelectorAll(selector) ?? [])
+      if (usable(element)) yield element;
+}
+
+/**
+ * The flow's own focus return (R10 of the review and DA-F1 of the design assessment of 15 October 2026), in place of the dialog's. Moving
+ * between its steps (a row chosen, Back) replaces one dialog with the next, which has already taken focus: the step that closed returns
+ * nothing, whether or not the page behind is inert by then. When the flow CLOSES, focus returns only while the account it was opened for
+ * is the one displayed (another account, a gate or a signed-out page owns focus then), to the first of `returnTargets` that takes it.
+ */
+function useCloseFocus(owner: string): (event: Event) => void {
+  const session = useSession();
+  const opener = switchFlow.returnFocus();
+  return (event) => {
+    event.preventDefault();
+    if (switchFlow.get().stage !== "closed") return;
+    const view = session.view.get();
+    if (view.kind !== "displaying" || view.account_id !== owner) return;
+    for (const target of returnTargets(opener)) {
+      target.focus();
+      if (document.activeElement === target) return;
+    }
+  };
+}
 
 /** The current account's unsynced work as the queue counts it: waiting to send, plus what needs a decision before it can. */
 function useCurrentWaiting(): number | null {
@@ -88,6 +130,7 @@ export function SwitchPicker({
   const noteId = useId();
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const closeFocus = useCloseFocus(owner);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the listing is read once per opening, for the account it was opened for
   useEffect(() => {
@@ -158,8 +201,7 @@ export function SwitchPicker({
       onClose={onClose}
       title={SWITCH_COPY.title}
       initialFocusSelector="[data-switch-list], [data-switch-loading]"
-      returnFocusRef={{ current: switchFlow.returnFocus() }}
-      onCloseAutoFocus={returnOnlyOnClose}
+      onCloseAutoFocus={closeFocus}
     >
       <div className="flex flex-col gap-4" data-switch-picker="">
         <p
@@ -357,6 +399,7 @@ export function SwitchSignIn({
   const name = target.kind === "retained" ? target.name : null;
   const title = name ? signInAs(name) : SWITCH_COPY.signInOther;
   const cautionId = useId();
+  const closeFocus = useCloseFocus(owner);
 
   return (
     <Dialog
@@ -364,8 +407,7 @@ export function SwitchSignIn({
       onClose={onClose}
       title={title}
       syncControl={false}
-      returnFocusRef={{ current: switchFlow.returnFocus() }}
-      onCloseAutoFocus={returnOnlyOnClose}
+      onCloseAutoFocus={closeFocus}
       initialFocusSelector={
         name ? 'input[name="password"]' : 'input[name="username"]'
       }
