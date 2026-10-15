@@ -57,6 +57,8 @@ export const EVIDENCE_COOKIE: WitnessConfig = {
 export interface WitnessHandle {
   doc: string;
   role: "main" | "sub" | "blank";
+  /** The document's URL when it was created (before any script of its own ran): what the host's commit of it names. */
+  url: string;
   /** Whether the window still shows the document this witness was made for (a reused Window can show a later, unwitnessed one). */
   current(): boolean;
   note(update: { enrolled?: boolean; sequence?: number }): void;
@@ -79,8 +81,9 @@ export function witnessScript(config: WitnessConfig): void {
   } catch {
     off = false;
   }
-  // Test-only seam (qualification): a document that escapes the witness as well as the recorder.
-  if (off) return;
+  // Test-only seams (qualification): a document that escapes the witness as well as the recorder, by its URL or, keeping the SAME URL
+  // across a reload, by the browsing context's name (revision 6).
+  if (off || window.name === "__display_oracle_and_witness_off__") return;
   const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
   const doc = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(
@@ -92,9 +95,10 @@ export function witnessScript(config: WitnessConfig): void {
   } catch {
     top = false;
   }
+  // A document the application could not have served (an initial or `about:` document, an engine's error page) is "blank".
   const role: "main" | "sub" | "blank" = !top
     ? "sub"
-    : href === "" || href.startsWith("about:")
+    : !/^https?:/i.test(href)
       ? "blank"
       : "main";
   const counters = { enrolled: 0, loaded: 0, sequence: 0 };
@@ -121,6 +125,7 @@ export function witnessScript(config: WitnessConfig): void {
   const handle: WitnessHandle = Object.freeze({
     doc,
     role,
+    url: href,
     current: () => document === own,
     note(update: { enrolled?: boolean; sequence?: number }) {
       if (update.enrolled) counters.enrolled = 1;
@@ -165,7 +170,11 @@ export function oracleScript(config: RecorderConfig): void {
   } catch {
     // An initial document with no URL yet: recorded like any other.
   }
-  if (window.name === "__display_oracle_off__") return;
+  if (
+    window.name === "__display_oracle_off__" ||
+    window.name === "__display_oracle_and_witness_off__"
+  )
+    return;
   const LIMITS = config.limits;
   /**
    * This recorder's OWN document. Its wrappers sit on prototypes the Window keeps when a later document reuses it (Firefox runs no init
@@ -173,6 +182,13 @@ export function oracleScript(config: RecorderConfig): void {
    */
   const own = document;
   const mine = () => document === own;
+  /** The document's URL when the recorder was installed (the host's commit of the document names it). */
+  let created = "";
+  try {
+    created = location.href;
+  } catch {
+    created = "";
+  }
   const witnessed = w.__displayOracleDocument;
   const witness = witnessed?.current() ? witnessed : null;
   const doc =
@@ -278,18 +294,129 @@ export function oracleScript(config: RecorderConfig): void {
     "Join · Atlas",
   ]);
   /**
-   * HF-14 (revision 4), now in event order: what the PERSON entered into a form field is not something the application disclosed. Each
-   * `input` event first drains the records queued BEFORE it (so an earlier application write is judged without this exemption), then
-   * records the entered value; a `value` written equal to it afterwards (React mirrors it into the attribute) is not judged.
+   * Form fields (revision 6, R5-A of the review of 15 October 2026). A text field's `value` PROPERTY can show text that no attribute or
+   * child node holds: written while the field is detached, copied with it by `cloneNode`/`importNode`, or kept when it is adopted. Such a
+   * value is judged when the field BECOMES visible: when it is inserted (`judgeInserted`) and when its type stops concealing it (password
+   * to text), as well as when it is written into a connected field.
+   *
+   * What a record of a batch is judged with is the field's value AT that record. Every route that changes a field's value is an ordered
+   * boundary: the records queued before it are judged first (with the value as it still is), then the change happens. The wrapped routes
+   * are the `value`, `defaultValue`, `valueAsNumber` and `valueAsDate` setters, `setRangeText`, `stepUp`/`stepDown`, `form.reset()`, a
+   * reset by its event (a reset button), `click()` and `dispatchEvent` (a reset button's activation in a detached form) and `execCommand`;
+   * native editing is preceded by `beforeinput`. So when a batch is judged, a field's live value is its value at every record of the batch;
+   * a value that follows the `value` attribute or the textarea's text (a field the page never wrote) is judged through that attribute or
+   * text as it was at the record. An edit with no `beforeinput` in the very task that inserted the field cannot be ordered: INCOMPLETE.
+   *
+   * HF-14 (revision 4), now provenance per element: what the PERSON entered is not something the application disclosed. Only a TRUSTED
+   * `input` event (the engine's own editing, not one a script dispatched, not one inside a scripted `execCommand`) records the entered
+   * value, after draining the records queued before it; the same value written back afterwards (React mirrors it into the property and the
+   * attribute) is not judged. Any application write of a different value, or a reset, ends that exemption: it is never a permanent safe
+   * string, and another field never shares it.
    */
   const entered = new WeakMap<Node, string>();
-  own.addEventListener(
+  const editing = new WeakSet<Node>();
+  const CONCEALED = new Set(["hidden", "password", "file"]);
+  const valueGetters = new Map<object, (this: Node) => unknown>();
+  const isField = (node: unknown): node is HTMLInputElement =>
+    node !== null &&
+    typeof node === "object" &&
+    ((node as Node).nodeName === "INPUT" ||
+      (node as Node).nodeName === "TEXTAREA");
+  const liveValue = (field: Node): string => {
+    const proto = Object.getPrototypeOf(field) as object | null;
+    for (const [owner, get] of valueGetters)
+      if (
+        proto === owner ||
+        (proto && Object.prototype.isPrototypeOf.call(owner, proto))
+      )
+        return String(get.call(field) ?? "");
+    return "";
+  };
+  /** The value a field shows when the page never wrote its property: its `value` attribute, or a textarea's text (live). */
+  const followed = (field: Node): string[] => {
+    const raw =
+      field.nodeName === "TEXTAREA"
+        ? (field.textContent ?? "")
+        : ((field as Element).getAttribute("value") ?? "");
+    const line = raw.replace(/[\r\n]/g, "");
+    return [raw, raw.replace(/\r\n?/g, "\n"), line, line.trim()];
+  };
+  /** The property-only text a field shows with the given type (null: none, concealed, or what the person entered). */
+  const fieldText = (field: Node, type: string | null): string | null => {
+    if (!isField(field)) return null;
+    if (field.nodeName === "INPUT" && CONCEALED.has((type ?? "").toLowerCase()))
+      return null;
+    const value = liveValue(field);
+    if (value === "" || entered.get(field) === value) return null;
+    return followed(field).includes(value) ? null : value;
+  };
+  const typeOf = (field: HTMLInputElement) =>
+    field.nodeName === "INPUT" ? field.type : "textarea";
+  /** After a write the application made: its effect is judged when the field is visible; the person's exemption ends if it changed. */
+  const written = (field: HTMLInputElement, judge: boolean) => {
+    const value = liveValue(field);
+    if (entered.has(field) && entered.get(field) !== value)
+      entered.delete(field);
+    if (
+      judge &&
+      field.isConnected &&
+      !CONCEALED.has(typeOf(field).toLowerCase()) &&
+      entered.get(field) !== value
+    )
+      checkMarkers(value, `${where(field)} [value property]`);
+  };
+  /** Set while a scripted `execCommand` runs: the `input` events it fires are the script's, not the person's. */
+  let scripted = 0;
+  // Window, capturing, registered before any application script: the first listener of each event.
+  window.addEventListener(
+    "beforeinput",
+    (event) => {
+      if (!mine()) return;
+      drain();
+      if (isField(event.target)) editing.add(event.target);
+    },
+    true,
+  );
+  window.addEventListener(
     "input",
     (event) => {
+      if (!mine()) return;
+      const field = isField(event.target) ? event.target : null;
+      const records = observer.takeRecords();
+      if (
+        field &&
+        !editing.has(field) &&
+        records.some(
+          (r) =>
+            r.type === "childList" &&
+            Array.from(r.addedNodes).some(
+              (n) => n === field || n.contains(field),
+            ),
+        )
+      )
+        incomplete(
+          "a field was edited with no beforeinput in the task that inserted it (its value at insertion is unknown)",
+        );
+      handle(records);
+      if (!field) return;
+      editing.delete(field);
+      // The person's edit is theirs. A scripted `execCommand` edit is the application's: judged like any other write. A dispatched
+      // event changes no value (a value it "confirms" was judged when it was written).
+      if (scripted > 0) written(field, true);
+      else if (event.isTrusted) entered.set(field, liveValue(field));
+      else if (entered.get(field) !== liveValue(field)) entered.delete(field);
+    },
+    true,
+  );
+  window.addEventListener(
+    "reset",
+    (event) => {
+      if (!mine()) return;
       drain();
-      const target = event.target as { value?: unknown } | null;
-      if (target && typeof target.value === "string")
-        entered.set(target as unknown as Node, target.value);
+      for (const el of Array.from(
+        (event.target as HTMLFormElement | null)?.elements ?? [],
+      ))
+        entered.delete(el);
     },
     true,
   );
@@ -472,6 +599,9 @@ export function oracleScript(config: RecorderConfig): void {
         if (value !== null && !exempt(n, name, value))
           parts.push(attributeText(name, value));
       }
+      // R5-A: a field's property-only value, with the type the field had at this record.
+      const field = fieldText(n, attrOf(n, null, "type"));
+      if (field !== null) parts.push(field);
     });
     checkMarkers(parts.join(" "), where);
   };
@@ -562,6 +692,16 @@ export function oracleScript(config: RecorderConfig): void {
             if (episode !== null) push({ op: "episode.close", reason: "gate" });
             episode = null;
           }
+        } else if (!ns && name === "type" && target.nodeName === "INPUT") {
+          // R5-A: a type that stops concealing a field (password → text) shows its property-only value at this record.
+          const was = (r.oldValue ?? "").toLowerCase();
+          if (!CONCEALED.has(was)) continue;
+          const shown = fieldText(target, now);
+          if (shown !== null)
+            checkMarkers(
+              shown,
+              `${where(target)} [value property, type ${was} → ${now ?? "text"}]`,
+            );
         } else if (NAMED.includes(name)) {
           if (exempt(target, name, now)) continue;
           checkMarkers(attributeText(name, now), `${where(target)} [${name}]`);
@@ -652,7 +792,7 @@ export function oracleScript(config: RecorderConfig): void {
     characterDataOldValue: true,
     attributes: true,
     attributeOldValue: true,
-    attributeFilter: [...GATES, ...NAMED, "id"],
+    attributeFilter: [...GATES, ...NAMED, "id", "type"],
   });
 
   // ---- writes that no mutation record shows ----
@@ -686,7 +826,49 @@ export function oracleScript(config: RecorderConfig): void {
       },
     });
   }
-  // A form field's `value` PROPERTY shows text without any mutation record (S6): judged when written, unless it is what the person entered.
+  // A form field's value routes (S6; R5-A): each is an ordered boundary (the records before it are judged first), and the application's
+  // write is judged by its actual effect when the field is visible. Native coercion, return values and thrown errors are the engine's own.
+  const ours = (target: unknown) =>
+    (target as Node | null)?.ownerDocument === own && mine();
+  const wrapSetter = (proto: object, name: string, judge: boolean | null) => {
+    const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+    if (!descriptor?.set || !descriptor.get) {
+      // Without the value property no field could be judged; an absent optional route changes nothing to order.
+      if (name === "value")
+        incomplete("a form field's value property cannot be observed");
+      return;
+    }
+    const set = descriptor.set;
+    if (name === "value")
+      valueGetters.set(proto, descriptor.get as (this: Node) => unknown);
+    Object.defineProperty(proto, name, {
+      ...descriptor,
+      set(this: HTMLInputElement, value: unknown) {
+        if (!ours(this)) {
+          set.call(this, value);
+          return;
+        }
+        drain();
+        set.call(this, value);
+        if (judge !== null) written(this, judge);
+      },
+    });
+  };
+  const wrapMethod = (proto: object, name: string, judge: boolean) => {
+    const original = (proto as Record<string, unknown>)[name];
+    if (typeof original !== "function") return;
+    Object.defineProperty(proto, name, {
+      configurable: true,
+      writable: true,
+      value: function (this: HTMLInputElement, ...args: unknown[]) {
+        if (!ours(this)) return original.apply(this, args);
+        drain();
+        const result = original.apply(this, args);
+        written(this, judge);
+        return result;
+      },
+    });
+  };
   for (const proto of [
     typeof HTMLInputElement === "undefined" ? null : HTMLInputElement.prototype,
     typeof HTMLTextAreaElement === "undefined"
@@ -694,32 +876,74 @@ export function oracleScript(config: RecorderConfig): void {
       : HTMLTextAreaElement.prototype,
   ]) {
     if (!proto) continue;
-    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
-    if (!descriptor?.set) {
-      incomplete("a form field's value property cannot be observed");
-      continue;
-    }
-    const set = descriptor.set;
-    Object.defineProperty(proto, "value", {
-      ...descriptor,
-      set(this: HTMLInputElement, value: unknown) {
-        if (this.ownerDocument !== own || !mine()) {
-          set.call(this, value);
-          return;
-        }
+    wrapSetter(proto, "value", true);
+    // The default value is an attribute (input) or the text (textarea): its records are judged; only the order and the exemption here.
+    wrapSetter(proto, "defaultValue", false);
+    wrapMethod(proto, "setRangeText", true);
+    if (proto !== HTMLInputElement.prototype) continue;
+    wrapSetter(proto, "valueAsNumber", true);
+    wrapSetter(proto, "valueAsDate", true);
+    wrapMethod(proto, "stepUp", true);
+    wrapMethod(proto, "stepDown", true);
+  }
+  /** Ordering boundaries for routes that change field values as a DEFAULT ACTION or a side effect (no field setter is called). */
+  const boundary = (
+    owner: object | undefined,
+    name: string,
+    after?: (self: unknown) => void,
+  ) => {
+    const original = owner && (owner as Record<string, unknown>)[name];
+    if (typeof original !== "function") return;
+    Object.defineProperty(owner as object, name, {
+      configurable: true,
+      writable: true,
+      value: function (this: unknown, ...args: unknown[]) {
+        if (!mine()) return original.apply(this, args);
         drain();
-        const text = String(value ?? "");
-        const type = this instanceof HTMLInputElement ? this.type : "textarea";
-        if (
-          this.isConnected &&
-          type !== "hidden" &&
-          type !== "password" &&
-          entered.get(this) !== text
-        )
-          checkMarkers(text, `${where(this)} [value property]`);
-        set.call(this, value);
+        try {
+          return original.apply(this, args);
+        } finally {
+          after?.(this);
+        }
       },
     });
+  };
+  // `form.reset()` resets detached forms too (no event reaches the window then); the person's exemption ends for its fields.
+  boundary(
+    typeof HTMLFormElement === "undefined"
+      ? undefined
+      : HTMLFormElement.prototype,
+    "reset",
+    (form) => {
+      for (const el of Array.from((form as HTMLFormElement).elements ?? []))
+        entered.delete(el);
+    },
+  );
+  // A reset (or other) button activated in a detached form: by `click()` or a dispatched click.
+  boundary(
+    typeof HTMLElement === "undefined" ? undefined : HTMLElement.prototype,
+    "click",
+  );
+  boundary(
+    typeof EventTarget === "undefined" ? undefined : EventTarget.prototype,
+    "dispatchEvent",
+  );
+  // A scripted edit of the focused field: ordered, and its `input` events are not the person's.
+  if (typeof Document !== "undefined" && Document.prototype.execCommand) {
+    const execCommand = Document.prototype.execCommand;
+    Document.prototype.execCommand = function (
+      this: Document,
+      ...args: Parameters<Document["execCommand"]>
+    ) {
+      if (this !== own || !mine()) return execCommand.apply(this, args);
+      drain();
+      scripted += 1;
+      try {
+        return execCommand.apply(this, args);
+      } finally {
+        scripted -= 1;
+      }
+    } as Document["execCommand"];
   }
   // A shadow tree is outside what the observer sees: its content would be unobserved, so the evidence is incomplete.
   if (typeof Element !== "undefined" && Element.prototype.attachShadow) {
@@ -869,6 +1093,7 @@ export function oracleScript(config: RecorderConfig): void {
         doc,
         role: witness?.role ?? null,
         current: mine(),
+        url: created,
         sseq,
         violations: [...violations],
         limits: [...limits],
@@ -877,5 +1102,5 @@ export function oracleScript(config: RecorderConfig): void {
   };
   push({ op: "enrolled", readyState: document.readyState });
   witness?.note({ enrolled: true });
-  report({ type: "enrolled", url: location.href }, true);
+  report({ type: "enrolled", url: created }, true);
 }

@@ -135,6 +135,33 @@ still-loading one, identical URLs, replacement, redirect (not WebKit: a route-fu
 dropped reports, concurrent sealing, a successor, inspection failures and bounds, frames and blank documents), with eighteen semantic mutants (R5-M1 to
 R5-M11 and OR-1 to OR-7 re-anchored), each caught in three engines after its control, run on an isolated copy. The review's own probes pass unchanged.
 
+**Revision 6 (R5-A/R5-B of review 6, 15 October 2026; design assessment P1-P4).** Two gaps remained. A form field whose `value` PROPERTY was written
+while it was detached (no attribute, no text) was shown on insertion without a judgement; and a committed document that escaped both scripts and was
+replaced before `DOMContentLoaded` vanished, because the documents the oracle expected came from loads. The recorder now judges a field's
+property-only value when the field becomes visible: on insertion (with the type the field had then; hidden, password and file fields conceal it) and
+when its type stops concealing it, as well as on a write into a connected field. Every route that changes a field's value is an ordering boundary
+(the records before it are judged first): the `value`, `defaultValue`, `valueAsNumber`/`valueAsDate` setters, `setRangeText`, `stepUp`/`stepDown`,
+`form.reset()` and the `reset` event, `click()`/`dispatchEvent` (a detached reset button), `execCommand`, and `beforeinput` before native editing; an
+edit with no `beforeinput` in the task that inserted its field is incomplete. HF-14 is now provenance per element: only a TRUSTED `input` event (not a
+dispatched one, not one inside a scripted `execCommand`, whose edit is judged as the application's) records what the person entered; an application
+rewrite of another value, or a reset, ends that exemption. The EXPECTED documents are now the host's own journal of committed generations: the
+navigation event Playwright makes `framenavigated` from says whether a new document was committed, and a test-only adapter reads it (Playwright 1.63's
+client frame; when the shape is absent the journal is unavailable and every coverage is incomplete). Each generation is matched, in its own frame, to
+a document whose own evidence (witness, recorder or answer) names the URL it was created at: an unmatched generation is missing (incomplete while
+some evidence names no frame, or its page could not be inspected); a document matching no generation is an unresolved correlation (incomplete); within
+a repeated URL only the number of escaped generations is established, and they are reported as "one of" that URL's generations. Same-document
+navigations, redirect hops and aborted attempts commit nothing; engine error and blank pages are not application documents; the page's loads only
+cross-check the journal. The witness and recorder are one ordered init script; a stale answer of a reused Window is never taken as its document's;
+frame inspection is bounded; reports still in transit keep a collection from sealing. The residual: a surplus document can stand in for an escaped
+generation only if the host ALSO lost a commit of the same frame and URL. Qualified on explicit histories (`tests/oracle/`, D1-D5, N1-N7) and
+natively in three engines ("Q1 (revision 6)": the review's five property probes and three document-commitment probes with their own assertions;
+container, fragment, reset, reset-button (not reached in Firefox, which does not activate a detached reset button), range-text, default-value, type,
+copy, spoofed-input and `execCommand` field routes; the person's entry kept, rewritten and in another field; an escaped document closed while
+loading, reloaded, replaced by its own script; an escaped middle generation of one URL; a genuine HTTP redirect and an aborted navigation; another
+page's surplus document; a lost commit; a held predecessor report; evidence naming no frame; a stale answer; an unavailable journal), with fifteen new
+semantic mutants R6-M1 to R6-M15 beside the eighteen of revision 5, each caught after its control on an isolated copy. Both reviews' own probes pass
+unchanged.
+
 **Retained work** is compared WHOLE (drafts, command bodies, pending effects, unfinished forms; canonical JSON) at every boundary before the display;
 replay is allowed only after it (T24 E).
 

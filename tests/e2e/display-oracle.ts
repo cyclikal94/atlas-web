@@ -1,7 +1,8 @@
-import type { BrowserContext, Page } from "@playwright/test";
+import type { BrowserContext, Frame, Page } from "@playwright/test";
 import {
   type Answer,
   assess,
+  type CommitEvent,
   type Counter,
   type DocumentOutcome,
   type LedgerResult,
@@ -39,8 +40,17 @@ import { expect } from "./helpers";
  *
  * What it covers (revision 5, R5-B). Every DOCUMENT of the context is accounted for by its own identity (`display-ledger.ts`): each
  * witnessed main document must have enrolled, and its evidence must be complete (answered for itself when the run is sealed, or, once
- * replaced or closed, every substantive report it says it made delivered); documents that escaped the witness too are found from the
- * host's own loads. A failure to observe is MISSING or INCOMPLETE, never clean.
+ * replaced or closed, every substantive report it says it made delivered). A failure to observe is MISSING or INCOMPLETE, never clean.
+ *
+ * Which documents are expected (revision 6, R5-B of the review of 15 October 2026): the host's own JOURNAL of committed documents, kept
+ * independently of both scripts and of loading. Playwright's public `framenavigated` does not say whether a navigation committed a new
+ * document (it fires for same-document navigations too); the navigation event it is made from does (`newDocument`). This adapter reads
+ * that event from Playwright 1.63's client frame (`_eventEmitter`, "navigated"), for every frame of every page from the moment the page
+ * or frame is known. It is a TEST-ONLY dependency on a pinned private shape: when the shape is absent the journal is UNAVAILABLE and every
+ * coverage is incomplete (never clean). The page's `DOMContentLoaded` events cross-check it (a frame cannot load more documents than it
+ * committed), and so does every witnessed document (it must match a commit of its own frame).
+ *
+ * The witness and the recorder are ONE init script, the witness first: Playwright does not define the order of separate init scripts.
  *
  * The kernel trace of the fixture's session harness (`window.__atlasFixture.session.trace`) is followed when it exists, as annotations
  * only (the production build has none); it never authorises anything.
@@ -95,6 +105,10 @@ export interface OracleOptions {
   transport?: (
     report: TransportReport,
   ) => "deliver" | "drop" | Promise<"deliver" | "drop">;
+  /** QUALIFICATION ONLY: loses a commit notification (a fault of the host's journal). Consumers never set it. */
+  commits?: (commit: CommitEvent) => "deliver" | "drop";
+  /** QUALIFICATION ONLY: the host's commit adapter is treated as absent (a Playwright without the pinned shape). */
+  withoutCommitJournal?: boolean;
 }
 
 export interface Coverage {
@@ -135,6 +149,7 @@ type FlushAnswer = {
   role: Role | null;
   /** Whether the window still shows this recorder's own document. */
   current: boolean;
+  url: string;
   sseq: number;
   violations: Array<Omit<OracleViolation, "page">>;
   limits: string[];
@@ -148,13 +163,88 @@ export async function installDisplayOracle(
   const limits: RecorderLimits = { ...DEFAULT_LIMITS, ...options.limits };
   /** Anything that happened in the context (a page, a load, a navigation, a close, a delivered report): a sealed interval has none. */
   let activity = 0;
+  /** Reports the test has received but not yet decided on (a held transport): a sealed interval has none. */
+  let inTransit = 0;
   const pages = new Map<Page, { id: number; loads: string[] }>();
+  const frames = new WeakMap<Frame, number>();
+  let frameCount = 0;
+  const frameId = (frame: Frame) => {
+    let id = frames.get(frame);
+    if (id === undefined) {
+      frameCount += 1;
+      id = frameCount;
+      frames.set(frame, id);
+    }
+    return id;
+  };
+  const commits: CommitEvent[] = [];
+  let ordinal = 0;
+  const journal = options.withoutCommitJournal
+    ? {
+        available: false,
+        detail: "QUALIFICATION: the commit adapter is treated as absent",
+      }
+    : { available: true, detail: "" };
+  const hooked = new WeakSet<Frame>();
+  const isBlank = (url: string) => url === "" || url.startsWith("about:");
+  const commit = (entry: Omit<CommitEvent, "ordinal">) => {
+    activity += 1;
+    ordinal += 1;
+    const event = { ordinal, ...entry };
+    if (options.commits?.(event) === "drop") return;
+    commits.push(event);
+  };
+  /** The host's commit journal for one frame: registered when the frame is first known, before anything it shows can be judged. */
+  const hookFrame = (page: number, frame: Frame) => {
+    if (hooked.has(frame) || !journal.available) return;
+    hooked.add(frame);
+    const id = frameId(frame);
+    const main = frame.parentFrame() === null;
+    const emitter = (
+      frame as unknown as {
+        _eventEmitter?: {
+          on?: (event: string, listener: (e: unknown) => void) => unknown;
+        };
+      }
+    )._eventEmitter;
+    if (typeof emitter?.on !== "function") {
+      journal.available = false;
+      journal.detail =
+        "Playwright's client frame has no navigation event emitter (the pinned 1.63 shape)";
+      return;
+    }
+    emitter.on("navigated", (raw) => {
+      activity += 1;
+      const event = raw as {
+        url?: unknown;
+        newDocument?: unknown;
+        error?: unknown;
+      };
+      if (typeof event?.url !== "string") {
+        journal.available = false;
+        journal.detail = "a navigation event without a URL (an unpinned shape)";
+        return;
+      }
+      // An aborted attempt (error) and a same-document navigation (no newDocument) commit no document.
+      if (event.error || !event.newDocument) return;
+      commit({ page, frame: id, main, url: event.url, kind: "commit" });
+    });
+    // A document the frame already showed when the host first saw it (a popup that committed before it was reported).
+    const url = frame.url();
+    if (!isBlank(url))
+      commit({ page, frame: id, main, url, kind: "registration" });
+  };
   // The expected-document side is registered BEFORE any script or binding: every page of the context, and every page it opens later.
   const watch = (page: Page) => {
     if (pages.has(page)) return pages.get(page)?.id ?? 0;
     const state = { id: pages.size + 1, loads: [] as string[] };
     pages.set(page, state);
     activity += 1;
+    for (const frame of page.frames()) hookFrame(state.id, frame);
+    page.on("frameattached", (frame) => {
+      activity += 1;
+      hookFrame(state.id, frame);
+    });
     page.on("domcontentloaded", () => {
       activity += 1;
       state.loads.push(page.url());
@@ -163,7 +253,6 @@ export async function installDisplayOracle(
       activity += 1;
     };
     page.on("framenavigated", busy);
-    page.on("frameattached", busy);
     page.on("framedetached", busy);
     page.on("close", busy);
     return state.id;
@@ -171,11 +260,25 @@ export async function installDisplayOracle(
   for (const page of context.pages()) watch(page);
   context.on("page", watch);
   const idOf = (page: Page | null | undefined) => (page ? watch(page) : 0);
+  /** Where a report came from, captured when it is RECEIVED (before any transport delay): its page, its frame, and whether that is main. */
+  const origin = (source: { page?: Page | null; frame: Frame }) => ({
+    page: idOf(source.page),
+    // A frame the journal never saw keeps a frame identity of its own (its documents then match no commit: incomplete, never clean).
+    frame: frameId(source.frame),
+    // Only a page's MAIN frame is an application document (the app has no frames; a frame's violation still counts).
+    main: source.frame.parentFrame() === null,
+  });
 
   const witness: WitnessEvent[] = [];
   const reports: OracleEvent[] = [];
-  const decide = async (report: TransportReport) =>
-    options.transport ? await options.transport(report) : "deliver";
+  const decide = async (report: TransportReport) => {
+    inTransit += 1;
+    try {
+      return options.transport ? await options.transport(report) : "deliver";
+    } finally {
+      inTransit -= 1;
+    }
+  };
   await context.exposeBinding(
     "__displayOracleWitness",
     async (
@@ -187,6 +290,7 @@ export async function installDisplayOracle(
         url: string;
       },
     ) => {
+      const from = origin(source);
       const fate = await decide({
         binding: "witness",
         doc: payload.doc,
@@ -196,8 +300,7 @@ export async function installDisplayOracle(
       if (fate !== "deliver") return;
       activity += 1;
       witness.push({
-        page: idOf(source.page),
-        main: source.frame === source.page?.mainFrame(),
+        ...from,
         doc: payload.doc,
         role: payload.role,
         type: payload.type,
@@ -207,7 +310,8 @@ export async function installDisplayOracle(
   );
   await context.exposeBinding(
     "__displayOracleReport",
-    async (source, payload: Omit<OracleEvent, "page" | "main">) => {
+    async (source, payload: Omit<OracleEvent, "page" | "main" | "frame">) => {
+      const from = origin(source);
       const fate = await decide({
         binding: "oracle",
         doc: payload.doc,
@@ -217,17 +321,19 @@ export async function installDisplayOracle(
       });
       if (fate !== "deliver") return;
       activity += 1;
-      reports.push({
-        ...payload,
-        page: idOf(source.page),
-        // Only a page's MAIN frame is an application document (the app has no frames; a frame's violation still counts).
-        main: source.frame === source.page?.mainFrame(),
-      });
+      reports.push({ ...payload, ...from });
     },
   );
-  // The witness first: the recorder of the same document takes its identity from it.
-  await context.addInitScript(witnessScript, EVIDENCE_COOKIE);
-  await context.addInitScript(oracleScript, { markers, limits });
+  // ONE ordered bootstrap: the witness first (the recorder of the same document takes its identity from it). Each part is isolated: a
+  // failed witness leaves an unwitnessed recorder, a failed recorder an unenrolled document (missing), never a clean one.
+  await context.addInitScript({
+    content: [
+      "(() => {",
+      `  try { (${witnessScript.toString()})(${JSON.stringify(EVIDENCE_COOKIE)}); } catch (_) {}`,
+      `  try { (${oracleScript.toString()})(${JSON.stringify({ markers, limits })}); } catch (_) {}`,
+      "})();",
+    ].join("\n"),
+  });
 
   const violations = (): OracleViolation[] =>
     reports
@@ -276,24 +382,12 @@ export async function installDisplayOracle(
     },
   };
 
-  /** Asks a page's CURRENT document, once, for its identity and what it holds (bounded: an unanswered question is a failed inspection). */
-  async function ask(page: Page) {
+  /** Bounds one in-page question (an unanswered question is a failed inspection, never a clean one). */
+  async function bounded<T>(question: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        page.evaluate(() => {
-          const w = window as unknown as {
-            __displayOracleDocument?: { doc: string; current(): boolean };
-            __displayOracle?: { flush(): unknown };
-          };
-          // A witness left by an EARLIER document of a reused Window does not witness this one.
-          const handle = w.__displayOracleDocument;
-          return {
-            witness: handle?.current() ? handle.doc : null,
-            answer: (w.__displayOracle?.flush() ?? null) as FlushAnswer | null,
-            url: location.href,
-          };
-        }),
+        question,
         new Promise<never>((_, fail) => {
           timer = setTimeout(
             () => fail(new Error("no answer in 10 s")),
@@ -305,14 +399,38 @@ export async function installDisplayOracle(
       clearTimeout(timer);
     }
   }
+  /** Asks a page's CURRENT document, once, for its identity and what it holds. */
+  function ask(page: Page) {
+    return bounded(
+      page.evaluate(() => {
+        const w = window as unknown as {
+          __displayOracleDocument?: {
+            doc: string;
+            url: string;
+            current(): boolean;
+          };
+          __displayOracle?: { flush(): unknown };
+        };
+        // A witness or recorder left by an EARLIER document of a reused Window does not witness or answer for this one.
+        const handle = w.__displayOracleDocument;
+        const witnessed = handle?.current() ? handle : null;
+        return {
+          witness: witnessed?.doc ?? null,
+          created: witnessed?.url ?? null,
+          answer: (w.__displayOracle?.flush() ?? null) as FlushAnswer | null,
+          url: location.href,
+        };
+      }),
+    );
+  }
   /** Whether each SUBFRAME's current document is observed by its own witness and recorder. */
   async function framesOf(page: Page) {
-    const frames: Array<{ url: string; observed: boolean | null }> = [];
+    const found: Array<{ url: string; observed: boolean | null }> = [];
     for (const frame of page.frames()) {
       if (frame === page.mainFrame()) continue;
       const url = frame.url();
-      const observed = await frame
-        .evaluate(() => {
+      const observed = await bounded(
+        frame.evaluate(() => {
           const w = window as unknown as {
             __displayOracleDocument?: { current(): boolean };
             __displayOracle?: { flush(): { current?: boolean } };
@@ -321,11 +439,11 @@ export async function installDisplayOracle(
             w.__displayOracleDocument?.current() === true &&
             w.__displayOracle?.flush().current === true
           );
-        })
-        .catch(() => null);
-      frames.push({ url, observed });
+        }),
+      ).catch(() => null);
+      found.push({ url, observed });
     }
-    return frames;
+    return found;
   }
   async function collect(): Promise<Coverage> {
     let states: PageState[] = [];
@@ -338,9 +456,11 @@ export async function installDisplayOracle(
       answers = [];
       for (const [page, state] of [...pages]) {
         const loads = [...state.loads];
+        const mainFrame = frameId(page.mainFrame());
         if (page.isClosed()) {
           states.push({
             page: state.id,
+            mainFrame,
             loads,
             inspection: { state: "closed" },
           });
@@ -349,21 +469,26 @@ export async function installDisplayOracle(
         const url = page.url();
         try {
           const got = await ask(page);
-          if (got.answer) answers.push({ ...got.answer, page: state.id });
+          // Only the CURRENT document's own recorder answers for it (a reused Window can hold an earlier document's recorder).
+          const answer = got.answer?.current ? got.answer : null;
+          if (answer) answers.push({ ...answer, page: state.id });
           states.push({
             page: state.id,
+            mainFrame,
             loads,
             frames: await framesOf(page),
             inspection: {
               state: "answered",
               // The CURRENT document: its witness, or a recorder of its own when the witness was switched off (a test seam).
-              doc: got.witness ?? (got.answer?.current ? got.answer.doc : null),
+              doc: got.witness ?? answer?.doc ?? null,
+              docUrl: got.created ?? answer?.url ?? null,
               url: got.url,
             },
           });
         } catch (error) {
           states.push({
             page: state.id,
+            mainFrame,
             loads,
             inspection: page.isClosed()
               ? { state: "closed" }
@@ -378,11 +503,11 @@ export async function installDisplayOracle(
       counters = (await context.cookies())
         .map((c) => parseCounter(c.name, c.value, EVIDENCE_COOKIE.cookiePrefix))
         .filter((c): c is Counter => c !== null);
-      if (activity === before) {
+      if (activity === before && inTransit === 0) {
         unstable = undefined;
         break;
       }
-      unstable = `the sealed collection never found an interval with no activity (5 attempts; last ${before} → ${activity})`;
+      unstable = `the sealed collection never found an interval with no activity (5 attempts; last ${before} → ${activity}, ${inTransit} reports in transit)`;
     }
     const result: LedgerResult = assess({
       pages: states,
@@ -390,6 +515,8 @@ export async function installDisplayOracle(
       reports: [...reports],
       answers,
       counters,
+      commits: [...commits],
+      journal: { ...journal },
       unstable,
     });
     last = {

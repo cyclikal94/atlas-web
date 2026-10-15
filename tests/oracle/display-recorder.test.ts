@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createRequire } from "node:module";
 import { JSDOM } from "jsdom";
 import { describe, expect, test } from "vitest";
 import {
@@ -65,6 +66,40 @@ type Win = Window &
     __displayOracleReport: (r: unknown) => void;
     __displayOracleWitness: (r: unknown) => void;
   };
+
+/**
+ * What a person's typing does (revision 6): the ENGINE fires a trusted `beforeinput`, changes the value without the script property, then
+ * fires a trusted `input`. jsdom has no editing engine; its own internals do the same (the element's implementation, jsdom's event firing
+ * with `isTrusted`). A script cannot make either: `dispatchEvent` events are untrusted.
+ */
+const jsdomInternals = createRequire(
+  createRequire(import.meta.url).resolve("jsdom"),
+);
+const idl = jsdomInternals("./generated/idl/utils.js") as {
+  implForWrapper(wrapper: unknown): Record<string, unknown>;
+};
+const events = jsdomInternals("./jsdom/living/helpers/events.js") as {
+  fireAnEvent(
+    type: string,
+    target: unknown,
+    eventInterface?: unknown,
+    attributes?: Record<string, unknown>,
+  ): boolean;
+};
+function typeInto(
+  field: HTMLInputElement | HTMLTextAreaElement,
+  value: string,
+  { beforeinput = true }: { beforeinput?: boolean } = {},
+) {
+  const impl = idl.implForWrapper(field);
+  if (beforeinput)
+    events.fireAnEvent("beforeinput", impl, undefined, {
+      bubbles: true,
+      cancelable: true,
+    });
+  impl.value = value;
+  events.fireAnEvent("input", impl, undefined, { bubbles: true });
+}
 
 const state = (fenced: boolean) => ({
   settled: { account_id: ACCOUNT, epoch: 2 },
@@ -466,15 +501,8 @@ describe("S6: form fields in event order", () => {
     r.oracle.flush();
     return input;
   };
-  const type = (r: ReturnType<typeof recorder>, input: HTMLInputElement) => {
-    // What a person's typing does: the ENGINE changes the value (never through the script property), then fires `input`. jsdom has no
-    // editing engine, so the value the event's target then holds is supplied by an own property.
-    Object.defineProperty(input, "value", {
-      configurable: true,
-      get: () => MARKER,
-    });
-    input.dispatchEvent(new r.win.Event("input", { bubbles: true }));
-  };
+  const type = (_r: ReturnType<typeof recorder>, input: HTMLInputElement) =>
+    typeInto(input, MARKER);
   test("typed then mirrored into the value attribute: clean (HF-14)", () => {
     const r = recorder();
     const input = field(r);
@@ -506,8 +534,242 @@ describe("S6: form fields in event order", () => {
     expect(r.kinds()).toEqual(["marker"]);
     const typed = field(r);
     type(r, typed);
-    delete (typed as unknown as { value?: unknown }).value;
     typed.value = MARKER;
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+});
+
+describe("D1-D5 (revision 6, R5-A): a field's property-only value is judged when the field becomes visible", () => {
+  type Field = HTMLInputElement | HTMLTextAreaElement;
+  const make = (r: ReturnType<typeof recorder>, tag: "input" | "textarea") =>
+    r.doc.createElement(tag) as Field;
+  for (const tag of ["input", "textarea"] as const) {
+    test(`D1 ${tag}: prefilled while detached, then inserted (the review's probe): reported`, () => {
+      const r = recorder();
+      const field = make(r, tag);
+      field.value = MARKER;
+      expect(r.kinds(), "nothing is exposed while detached").toEqual([]);
+      r.doc.body.append(field);
+      expect(field.getAttribute("value")).toBe(null);
+      expect(r.kinds()).toEqual(["marker"]);
+    });
+    test(`D1 ${tag}: a safe detached prefill, inserted, is clean (control)`, () => {
+      const r = recorder();
+      const field = make(r, tag);
+      field.value = "Safe input";
+      r.doc.body.append(field);
+      expect(r.kinds()).toEqual([]);
+      expect(r.limits()).toEqual([]);
+    });
+    test(`D2 ${tag}: prefilled inside a container, inserted, then the container dismantled in the same task: reported once`, () => {
+      const r = recorder();
+      const outer = r.doc.createElement("div");
+      const field = make(r, tag);
+      field.value = MARKER;
+      outer.append(field);
+      r.doc.body.append(outer);
+      outer.replaceChildren();
+      outer.remove();
+      expect(r.kinds()).toEqual(["marker"]);
+    });
+    test(`D2 ${tag}: prefilled in a fragment, inserted, then reparented within the document: one report per insertion`, () => {
+      const r = recorder();
+      const fragment = r.doc.createDocumentFragment();
+      const field = make(r, tag);
+      field.value = MARKER;
+      fragment.append(field);
+      const holder = r.doc.createElement("div");
+      r.doc.body.append(fragment, holder);
+      holder.append(field);
+      field.remove();
+      holder.remove();
+      expect(r.kinds()).toEqual(["marker", "marker"]);
+    });
+    test(`D2 ${tag}: a marker written while detached and made safe BEFORE insertion is clean (control)`, () => {
+      const r = recorder();
+      const outer = r.doc.createElement("div");
+      const field = make(r, tag);
+      field.value = MARKER;
+      outer.append(field);
+      field.value = "Safe";
+      r.doc.body.append(outer);
+      outer.remove();
+      expect(r.kinds()).toEqual([]);
+    });
+    test(`D3 ${tag}: inserted prefilled, then made safe in the same task: the earlier exposure stands`, () => {
+      const r = recorder();
+      const field = make(r, tag);
+      field.value = MARKER;
+      r.doc.body.append(field);
+      field.value = "";
+      field.remove();
+      expect(r.kinds()).toEqual(["marker"]);
+    });
+    // The reset BUTTON of a detached form is native-only: jsdom does not run a detached button's activation behaviour.
+    test(`D3 ${tag}: inserted in a form, removed, then the DETACHED form reset programmatically: reported`, () => {
+      for (const how of ["reset()"]) {
+        const r = recorder();
+        const form = r.doc.createElement("form");
+        const field = make(r, tag);
+        const button = r.doc.createElement("button");
+        button.type = "reset";
+        form.append(field, button);
+        field.value = MARKER;
+        r.doc.body.append(form);
+        form.remove();
+        form.reset();
+        expect(field.value, how).toBe("");
+        expect(r.kinds(), how).toEqual(["marker"]);
+      }
+    });
+    test(`D3 ${tag}: setRangeText while detached, then inserted: reported; connected safe → marker → safe through setRangeText: reported`, () => {
+      const r = recorder();
+      const field = make(r, tag);
+      field.setRangeText(MARKER);
+      r.doc.body.append(field);
+      expect(r.kinds()).toEqual(["marker"]);
+      const k = recorder();
+      const connected = make(k, tag);
+      k.doc.body.append(connected);
+      connected.value = "safe";
+      connected.setRangeText(MARKER, 0, 4);
+      connected.setRangeText("safe", 0, MARKER.length);
+      expect(k.kinds()).toEqual(["marker"]);
+    });
+    test(`D3 ${tag}: a default value (attribute or text) with the marker is reported ONCE, by its record`, () => {
+      const r = recorder();
+      const field = make(r, tag);
+      field.defaultValue = MARKER;
+      r.doc.body.append(field);
+      expect(field.value).toBe(MARKER);
+      expect(r.kinds()).toEqual(["marker"]);
+    });
+    test(`D3 ${tag}: a connected form reset by its event while the field holds a safe value is clean; a cancelled reset changes nothing (controls)`, () => {
+      const r = recorder();
+      const form = r.doc.createElement("form");
+      const field = make(r, tag);
+      form.append(field);
+      r.doc.body.append(form);
+      field.value = "safe";
+      form.addEventListener("reset", (e) => e.preventDefault(), { once: true });
+      form.reset();
+      expect(field.value).toBe("safe");
+      form.reset();
+      expect(field.value).toBe("");
+      expect(r.kinds()).toEqual([]);
+    });
+    test(`D4 ${tag}: a prefilled field COPIED by cloneNode / importNode, the copy inserted: reported; a safe copy is clean`, () => {
+      for (const how of ["clone", "import", "adopt"]) {
+        const r = recorder();
+        const source =
+          how === "clone"
+            ? r.doc
+            : r.doc.implementation.createHTMLDocument("x");
+        const original = source.createElement(tag) as Field;
+        original.value = MARKER;
+        const copy =
+          how === "clone"
+            ? (original.cloneNode(true) as Field)
+            : how === "import"
+              ? (r.doc.importNode(original, true) as Field)
+              : original;
+        expect(copy.value, how).toBe(MARKER);
+        r.doc.body.append(copy);
+        expect(r.kinds(), how).toEqual(["marker"]);
+        const safe = r.doc.createElement(tag) as Field;
+        safe.value = "Safe";
+        r.doc.body.append(safe.cloneNode(true));
+        expect(r.kinds(), `${how} control`).toEqual(["marker"]);
+      }
+    });
+  }
+  test("D4: a password field holding the marker is concealed; its type made text reveals it: reported at the type change", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.type = "password";
+    field.value = MARKER;
+    r.doc.body.append(field);
+    expect(r.kinds(), "concealed").toEqual([]);
+    field.type = "text";
+    field.type = "password";
+    expect(r.kinds()).toEqual(["marker"]);
+    expect(r.details()[0]).toContain("type password → text");
+  });
+  test("D4: a hidden field's value IS its attribute (judged as such, once); revealing it adds no second report (the review's control)", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.type = "hidden";
+    r.doc.body.append(field);
+    field.value = MARKER;
+    field.type = "text";
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+  // "Inserted as password, removed, made text while detached" is native-only: the type record of a just-removed field comes from a
+  // transient registered observer, which jsdom does not implement (it would judge the insertion with the later type: an over-report).
+  test("D5: what the person typed, moved with its field, stays theirs; an application rewrite ends the exemption", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    r.doc.body.append(field);
+    typeInto(field, MARKER);
+    field.value = MARKER;
+    field.setAttribute("value", MARKER);
+    const holder = r.doc.createElement("div");
+    r.doc.body.append(holder);
+    holder.append(field);
+    expect(r.kinds(), "the person's own entry").toEqual([]);
+    field.value = "";
+    field.value = MARKER;
+    expect(r.kinds(), "rewritten by the application").toEqual(["marker"]);
+  });
+  test("D5: a script-dispatched input event is not the person's: a detached prefill it 'confirms' is still reported on insertion", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.value = MARKER;
+    field.dispatchEvent(new r.win.Event("input", { bubbles: true }));
+    r.doc.body.append(field);
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+  test("D5: a dispatched input event before a password field is revealed gives no exemption; a trusted edit does (control)", () => {
+    for (const trusted of [false, true]) {
+      const r = recorder();
+      const field = r.doc.createElement("input");
+      field.type = "password";
+      r.doc.body.append(field);
+      r.oracle.flush();
+      if (trusted) typeInto(field, MARKER);
+      else {
+        field.value = MARKER;
+        field.dispatchEvent(new r.win.Event("input", { bubbles: true }));
+      }
+      field.type = "text";
+      expect(r.kinds(), trusted ? "typed" : "dispatched").toEqual(
+        trusted ? [] : ["marker"],
+      );
+    }
+  });
+  test("D5: a trusted edit with no beforeinput in the very task that inserted its field is incomplete (its value at insertion is unknown)", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    r.doc.body.append(field);
+    typeInto(field, "typed", { beforeinput: false });
+    expect(r.limits()).toEqual([
+      "a field was edited with no beforeinput in the task that inserted it (its value at insertion is unknown)",
+    ]);
+    const k = recorder();
+    const settled = k.doc.createElement("input");
+    k.doc.body.append(settled);
+    k.oracle.flush();
+    typeInto(settled, "typed", { beforeinput: false });
+    expect(k.limits(), "control: the insertion was judged earlier").toEqual([]);
+  });
+  test("D5: the person's entry gives no exemption to another field", () => {
+    const r = recorder();
+    const a = r.doc.createElement("input");
+    const b = r.doc.createElement("input");
+    r.doc.body.append(a);
+    typeInto(a, MARKER);
+    b.value = MARKER;
+    r.doc.body.append(b);
     expect(r.kinds()).toEqual(["marker"]);
   });
 });

@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Page } from "@playwright/test";
 import {
   ACCOUNT,
@@ -1122,8 +1124,12 @@ test.describe("Q1 (revision 5): every document is accounted for by its own ident
     await page.goto("/review-doc?oracle=off&witness=off");
     await page.goto("/review-doc?after=1");
     coverage = await oracle.coverage();
+    // Adapted in revision 6 (R5-B): the same single missing document, now named by its committed generation (was: "loaded documents
+    // have no witness", the load arithmetic this revision replaced).
     expect(coverage.missing).toEqual([
-      expect.stringContaining("loaded documents have no witness"),
+      expect.stringContaining(
+        "review-doc?oracle=off&witness=off) has neither witness nor recorder",
+      ),
     ]);
   });
   test("S13 closure: an unenrolled closed page is missing; a violating page whose report is LOST before it closes is incomplete; a clean closed page is complete", async ({
@@ -1466,5 +1472,766 @@ test.describe("Q1 (revision 5): every document is accounted for by its own ident
     await helper.close();
     coverage = await oracle.coverage();
     expect(coverage.missing).toHaveLength(1);
+  });
+});
+
+/**
+ * WEB-08c revision 6 (R5-A of the review of 15 October 2026; design assessment P1, D1-D5): a form field's PROPERTY-only value is judged
+ * when the field becomes visible. The review's five probes are first, with their own assertions (the field is VISIBLE with the exact
+ * marker when the evidence is collected, while the account is fenced). Then the adjacent routes: detached subtrees, resets, range edits,
+ * default values, type reveal, copies, and the person's own entry (HF-14) against scripted or rewritten values. Each injection runs in ONE
+ * task while the production session's recovery read is held, and ends with the field removed (the product journey then completes).
+ */
+const R6_PROBES = [
+  "safe-detached",
+  "connected-control",
+  "detached-input",
+  "detached-textarea",
+  "hidden-reveal",
+] as const;
+const R6_FIELD_EXPECTED = {
+  "container-dismantled": ["marker"],
+  "fragment-reparented": ["marker", "marker"],
+  "detached-made-safe": [],
+  "inserted-then-safe": ["marker"],
+  "removed-then-form-reset": ["marker"],
+  "removed-then-reset-button": ["marker"],
+  "range-text-detached": ["marker"],
+  "default-value-once": ["marker"],
+  "cancelled-reset-control": [],
+  "password-revealed": ["marker"],
+  "password-removed-then-text": [],
+  cloned: ["marker"],
+  imported: ["marker"],
+  adopted: ["marker"],
+  "safe-clone": [],
+  "spoofed-input": ["marker"],
+  "spoofed-input-revealed": ["marker"],
+  "exec-command-insert": ["marker"],
+} as const satisfies Record<string, readonly string[]>;
+type R6Field = keyof typeof R6_FIELD_EXPECTED;
+const injectR6 = (page: Page, kind: R6Field, marker: string) =>
+  page.evaluate(
+    ({ k, m }) => {
+      const body = document.body;
+      const input = (doc: Document = document) => doc.createElement("input");
+      /** A precondition an engine does not reach (recorded, never a pass of the route it would have exercised). */
+      let note: string | null = null;
+      switch (k) {
+        case "container-dismantled": {
+          const outer = document.createElement("div");
+          const field = input();
+          field.value = m;
+          outer.append(field);
+          body.append(outer);
+          outer.replaceChildren();
+          outer.remove();
+          break;
+        }
+        case "fragment-reparented": {
+          const fragment = document.createDocumentFragment();
+          const field = input();
+          field.value = m;
+          fragment.append(field);
+          const holder = document.createElement("div");
+          body.append(fragment, holder);
+          holder.append(field);
+          holder.remove();
+          field.remove();
+          break;
+        }
+        case "detached-made-safe": {
+          const outer = document.createElement("div");
+          const field = input();
+          field.value = m;
+          outer.append(field);
+          field.value = "Safe";
+          body.append(outer);
+          outer.remove();
+          break;
+        }
+        case "inserted-then-safe": {
+          const field = input();
+          field.value = m;
+          body.append(field);
+          field.value = "";
+          field.remove();
+          break;
+        }
+        case "removed-then-form-reset":
+        case "removed-then-reset-button": {
+          const form = document.createElement("form");
+          const field = input();
+          const button = document.createElement("button");
+          button.type = "reset";
+          form.append(field, button);
+          field.value = m;
+          body.append(form);
+          form.remove();
+          if (k === "removed-then-form-reset") form.reset();
+          else button.click();
+          // Measured (revision 6): Firefox (like jsdom) runs no activation behaviour for a DETACHED reset button; the earlier exposure
+          // must be reported either way.
+          if (field.value !== "") {
+            if (k === "removed-then-form-reset")
+              throw new Error("the detached form was not reset");
+            note =
+              "this engine does not reset a detached form from its reset button";
+          }
+          break;
+        }
+        case "range-text-detached": {
+          const field = document.createElement("textarea");
+          field.setRangeText(m);
+          body.append(field);
+          field.remove();
+          break;
+        }
+        case "default-value-once": {
+          const field = input();
+          field.defaultValue = m;
+          body.append(field);
+          field.remove();
+          break;
+        }
+        case "cancelled-reset-control": {
+          const form = document.createElement("form");
+          const field = input();
+          form.append(field);
+          body.append(form);
+          field.value = "safe";
+          form.addEventListener("reset", (e) => e.preventDefault(), {
+            once: true,
+          });
+          form.reset();
+          form.reset();
+          form.remove();
+          break;
+        }
+        case "password-revealed":
+        case "password-removed-then-text": {
+          const field = input();
+          field.type = "password";
+          field.value = m;
+          body.append(field);
+          if (k === "password-removed-then-text") field.remove();
+          field.type = "text";
+          field.type = "password";
+          field.remove();
+          break;
+        }
+        case "cloned":
+        case "imported":
+        case "adopted":
+        case "safe-clone": {
+          const other = document.implementation.createHTMLDocument("x");
+          const source = input(
+            k === "cloned" || k === "safe-clone" ? document : other,
+          );
+          source.value = k === "safe-clone" ? "Safe" : m;
+          const copy =
+            k === "cloned" || k === "safe-clone"
+              ? (source.cloneNode(true) as HTMLInputElement)
+              : k === "imported"
+                ? (document.importNode(source, true) as HTMLInputElement)
+                : source;
+          body.append(copy);
+          copy.remove();
+          break;
+        }
+        case "spoofed-input": {
+          const field = input();
+          field.value = m;
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+          body.append(field);
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+          field.remove();
+          break;
+        }
+        case "spoofed-input-revealed": {
+          // A dispatched input event BEFORE the exposure: it must not make the value the person's (the reveal is still judged).
+          const field = input();
+          field.type = "password";
+          body.append(field);
+          field.value = m;
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+          field.type = "text";
+          field.type = "password";
+          field.remove();
+          break;
+        }
+        case "exec-command-insert": {
+          const field = input();
+          body.append(field);
+          field.focus();
+          // A scripted edit (deprecated API, still implemented by every engine) is the route under test.
+          const ok = document.execCommand("insertText", false, m);
+          if (!ok || field.value !== m)
+            throw new Error(`execCommand did not edit (${ok}, ${field.value})`);
+          field.remove();
+          break;
+        }
+      }
+      const root = document.getElementById("protected-root") as HTMLElement;
+      return {
+        inert: root.hasAttribute("inert"),
+        children: root.childNodes.length,
+        fields: document.querySelectorAll("input, textarea").length,
+        note,
+      };
+    },
+    { k: kind, m: marker },
+  );
+
+test.describe("Q1 (revision 6): a field's property-only value is judged when it becomes visible (D1-D5)", () => {
+  for (const mode of R6_PROBES)
+    test(`R6 review probe ${mode}: ${mode === "safe-detached" ? "a safe detached value made visible is clean" : "a visible prefilled account value is detected while fenced"}`, async ({
+      context,
+    }, info) => {
+      const oracle = await installDisplayOracle(context, {
+        markers: [R5_MARKER],
+      });
+      const { page, release } = await heldRecovery(context);
+      expect(oracle.violations()).toEqual([]);
+      await page.evaluate(
+        ({ mode, marker }) => {
+          const field = document.createElement(
+            mode === "detached-textarea" ? "textarea" : "input",
+          );
+          field.id = "review-prefill";
+          if (mode === "hidden-reveal") field.setAttribute("type", "hidden");
+          if (mode === "connected-control" || mode === "hidden-reveal")
+            document.body.append(field);
+          field.value = mode === "safe-detached" ? "Safe input" : marker;
+          if (!field.isConnected) document.body.append(field);
+          if (mode === "hidden-reveal") field.setAttribute("type", "text");
+        },
+        { mode, marker: R5_MARKER },
+      );
+      // The review's precondition: the field is visible with the exact value, now, while the account is fenced.
+      await expect(page.locator("#review-prefill")).toBeVisible();
+      await expect(page.locator("#review-prefill")).toHaveValue(
+        mode === "safe-detached" ? "Safe input" : R5_MARKER,
+      );
+      expect(await fencesOf(page)).toHaveLength(1);
+      await oracle.mark(page, "after prefill became visible");
+      const coverage = await oracle.coverage();
+      await info.attach("before-release", {
+        body: JSON.stringify(
+          { coverage, log: await oracle.log(page) },
+          null,
+          2,
+        ),
+        contentType: "application/json",
+      });
+      await page.locator("#review-prefill").evaluate((n) => n.remove());
+      release();
+      await displayed(page);
+      expect(await fencesOf(page)).toEqual([]);
+      expect(coverage.missing).toEqual([]);
+      expect(coverage.incomplete).toEqual([]);
+      expect(
+        coverage.violations.map((v) => v.kind),
+        "a visible prefilled account value is detected while fenced",
+      ).toEqual(mode === "safe-detached" ? [] : ["marker"]);
+      for (const v of coverage.violations) {
+        expect(v.record?.settled).toBe(ACCOUNT);
+        expect(v.record?.fences[ACCOUNT] ?? 0).toBeGreaterThan(0);
+      }
+    });
+
+  for (const kind of Object.keys(R6_FIELD_EXPECTED) as R6Field[]) {
+    const expected: readonly string[] = R6_FIELD_EXPECTED[kind];
+    test(`R6 field ${kind}: ${expected.length ? `reported as ${expected.join(",")} while fenced` : "control, nothing reported"}`, async ({
+      context,
+    }) => {
+      const oracle = await installDisplayOracle(context, {
+        markers: [R5_MARKER],
+      });
+      const { page, release } = await heldRecovery(context);
+      expect(oracle.violations(), "precondition: nothing yet").toEqual([]);
+      const { note, ...after } = await injectR6(page, kind, R5_MARKER);
+      expect(after).toEqual({ inert: true, children: 0, fields: 0 });
+      if (note)
+        test
+          .info()
+          .annotations.push({ type: "precondition", description: note });
+      expect(await fencesOf(page)).toHaveLength(1);
+      await oracle.mark(page, "after the injection");
+      await expect
+        .poll(() => oracle.violations().map((v) => v.kind), {
+          timeout: 5_000,
+        })
+        .toEqual([...expected]);
+      for (const v of oracle.violations()) {
+        expect(v.record?.settled).toBe(ACCOUNT);
+        expect(v.record?.fences[ACCOUNT] ?? 0).toBeGreaterThan(0);
+      }
+      release();
+      await displayed(page);
+      expect(oracle.violations().map((v) => v.kind)).toEqual([...expected]);
+      const coverage = await oracle.coverage();
+      expect(coverage.missing, JSON.stringify(coverage.documents)).toEqual([]);
+      expect(coverage.incomplete).toEqual([]);
+      if (expected.length === 0) await oracle.assertClean(`R6 ${kind}`);
+    });
+  }
+
+  for (const how of [
+    "typed-kept",
+    "typed-then-rewritten",
+    "other-field",
+  ] as const)
+    test(`R6 field provenance ${how}: ${how === "typed-kept" ? "the person's own entry, moved with its field, is NOT reported (HF-14)" : "an application value is reported despite the person's entry"}`, async ({
+      context,
+    }) => {
+      const oracle = await installDisplayOracle(context, {
+        markers: [R5_MARKER],
+      });
+      const { page, release } = await heldRecovery(context);
+      await page.evaluate(() => {
+        const field = document.createElement("input");
+        field.setAttribute("aria-label", "Username");
+        // As a React controlled input does: the value mirrored into the property and the attribute on every input event.
+        field.addEventListener("input", () => {
+          const mirrored = field.value;
+          field.value = mirrored;
+          field.setAttribute("value", mirrored);
+        });
+        document.body.append(field);
+      });
+      await page.getByLabel("Username", { exact: true }).fill(R5_MARKER);
+      await page.evaluate(
+        ({ how, marker }) => {
+          const field = document.querySelector(
+            'input[aria-label="Username"]',
+          ) as HTMLInputElement;
+          if (how === "typed-kept") {
+            // Moved with what the person entered: still theirs.
+            const holder = document.createElement("div");
+            document.body.append(holder);
+            holder.append(field);
+          } else if (how === "typed-then-rewritten") {
+            field.value = "";
+            field.value = marker;
+          } else {
+            const other = document.createElement("input");
+            other.value = marker;
+            document.body.append(other);
+            other.remove();
+          }
+        },
+        { how, marker: R5_MARKER },
+      );
+      await oracle.mark(page, "after the value");
+      expect(await fencesOf(page)).toHaveLength(1);
+      if (how === "typed-kept") expect(oracle.violations()).toEqual([]);
+      else
+        await expect
+          .poll(() => oracle.violations().map((v) => v.kind), {
+            timeout: 5_000,
+          })
+          .toEqual(["marker"]);
+      await page.evaluate(() =>
+        document.querySelectorAll("input").forEach((n) => {
+          n.remove();
+        }),
+      );
+      release();
+      await displayed(page);
+      if (how === "typed-kept") await oracle.assertClean("R6 typed kept");
+    });
+});
+
+/**
+ * WEB-08c revision 6 (R5-B of the review of 15 October 2026; design assessment P2/P3, N1-N7): the EXPECTED documents are the host's
+ * journal of committed generations. The review's three schedules are first, with its own route-fulfilled documents and assertions (the
+ * committed predecessor is held loading behind a stylesheet and verified `loading` with no oracle; the probe never waits for a load).
+ */
+async function heldDocument(
+  context: Parameters<typeof installDisplayOracle>[0],
+) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  let requested!: () => void;
+  const request = new Promise<void>((r) => {
+    requested = r;
+  });
+  await context.route("**/review-held.css", async (route) => {
+    requested();
+    await gate;
+    await route
+      .fulfill({ body: "body{color:black}", contentType: "text/css" })
+      .catch(() => undefined);
+  });
+  await context.route("**/review-document**", (route) => {
+    const url = route.request().url();
+    const replace = new URL(url).searchParams.get("replace");
+    return route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><meta charset="utf-8"><title>Atlas</title>${url.includes("slow=1") ? '<link rel="stylesheet" href="/review-held.css">' : ""}${replace ? `<script>location.replace(${JSON.stringify(replace)})</script>` : ""}<body><script>window.loadedBody=true</script>Safe`,
+    });
+  });
+  return { release, request };
+}
+const oracleIn = (page: Page) =>
+  page.evaluate(
+    () =>
+      !!(window as unknown as { __displayOracle?: unknown }).__displayOracle,
+  );
+const witnessIn = (page: Page) =>
+  page.evaluate(
+    () =>
+      !!(window as unknown as { __displayOracleDocument?: unknown })
+        .__displayOracleDocument,
+  );
+
+test.describe("Q1 (revision 6): every committed document generation is expected (N1-N7)", () => {
+  for (const mode of [
+    "healthy-interrupted",
+    "missing-loaded-control",
+    "missing-interrupted",
+  ] as const)
+    test(`R6 review probe document commitment ${mode}`, async ({
+      context,
+    }, info) => {
+      const oracle = await installDisplayOracle(context);
+      const { release, request } = await heldDocument(context);
+      const page = await context.newPage();
+      const interrupted = mode !== "missing-loaded-control";
+      const missing = mode !== "healthy-interrupted";
+      await page.goto(
+        `/review-document?${interrupted ? "slow=1&" : ""}${missing ? "oracle=off&witness=off" : "healthy=1"}`,
+        { waitUntil: interrupted ? "commit" : "load" },
+      );
+      if (interrupted) {
+        await request;
+        expect(await page.evaluate(() => document.readyState)).toBe("loading");
+      }
+      expect(await oracleIn(page)).toBe(!missing);
+      const first = page.url();
+      await page.goto("/review-document?last=1");
+      release();
+      const coverage = await oracle.coverage();
+      await info.attach("coverage", {
+        body: JSON.stringify({ first, coverage }, null, 2),
+        contentType: "application/json",
+      });
+      if (missing) {
+        expect(
+          coverage.missing.length + coverage.incomplete.length,
+          "a committed document that escaped both scripts cannot disappear on interruption",
+        ).toBeGreaterThan(0);
+        // Revision 6: it is MISSING (known absent), named by its committed generation.
+        expect(coverage.missing).toEqual([
+          expect.stringMatching(
+            /^committed document generation \d+ of page \d+ \(.*\/review-document\?.*oracle=off&witness=off\) has neither witness nor recorder$/,
+          ),
+        ]);
+        expect(coverage.incomplete).toEqual([]);
+        expect(await refused(oracle)).toBe(true);
+      } else {
+        expect(coverage.missing).toEqual([]);
+        expect(coverage.incomplete).toEqual([]);
+        expect(coverage.violations).toEqual([]);
+      }
+    });
+
+  test("N2 closure, reload and replacement: an escaped loading document that closes, a same-URL escaped reload, and an immediate script replacement each stay expected", async ({
+    context,
+  }) => {
+    const oracle = await installDisplayOracle(context);
+    const { release, request } = await heldDocument(context);
+    // (a) committed, escaped, still loading, then its page is CLOSED.
+    const closing = await context.newPage();
+    await closing.goto(
+      "/review-document?slow=1&oracle=off&witness=off&n2=close",
+      {
+        waitUntil: "commit",
+      },
+    );
+    await request;
+    expect(await closing.evaluate(() => document.readyState)).toBe("loading");
+    await closing.close();
+    release();
+    let coverage = await oracle.coverage();
+    expect(coverage.missing).toEqual([
+      expect.stringContaining("n2=close) has neither witness nor recorder"),
+    ]);
+    // ...and still after every tab closed and a new one opened.
+    const reopened = await context.newPage();
+    await reopened.goto("/review-document?n2=reopened");
+    coverage = await oracle.coverage();
+    expect(coverage.missing).toHaveLength(1);
+    // (b) the same escaped URL reloaded: two generations, both expected.
+    await reopened.goto("/review-document?oracle=off&witness=off&n2=reload");
+    await reopened.reload();
+    await reopened.goto("/review-document?n2=after-reload");
+    coverage = await oracle.coverage();
+    expect(coverage.missing.filter((m) => m.includes("n2=reload"))).toEqual([
+      expect.stringContaining("committed document generation"),
+      expect.stringContaining("committed document generation"),
+    ]);
+    // (c) an escaped document whose own first script replaces it at once.
+    await reopened.goto(
+      "/review-document?oracle=off&witness=off&n2=replaced&replace=%2Freview-document%3Fn2%3Dreplacement",
+    );
+    await reopened.waitForURL((u) => u.search.includes("n2=replacement"));
+    coverage = await oracle.coverage();
+    expect(
+      coverage.missing.filter((m) => m.includes("n2=replaced&")),
+    ).toHaveLength(1);
+    expect(coverage.incomplete).toEqual([]);
+  });
+
+  test("N3 identity: an escaped middle generation of the SAME URL is one missing generation; a real HTTP redirect, an aborted navigation and blank documents commit no application document", async ({
+    context,
+  }) => {
+    const oracle = await installDisplayOracle(context);
+    await heldDocument(context);
+    const page = await context.newPage();
+    await page.goto("/review-document?n3=same");
+    // The middle generation escapes BOTH scripts through a seam that keeps the URL (window.name survives a reload).
+    await page.evaluate(() => {
+      window.name = "__display_oracle_and_witness_off__";
+    });
+    await page.reload();
+    expect([await oracleIn(page), await witnessIn(page)]).toEqual([
+      false,
+      false,
+    ]);
+    await page.evaluate(() => {
+      window.name = "";
+    });
+    await page.reload();
+    expect(await witnessIn(page)).toBe(true);
+    let coverage = await oracle.coverage();
+    expect(coverage.missing).toEqual([
+      expect.stringMatching(
+        /^one of committed document generations \d+, \d+, \d+ of page \d+ \(.*n3=same\) has neither witness nor recorder$/,
+      ),
+    ]);
+    expect(coverage.incomplete).toEqual([]);
+    // A genuine server redirect (a local HTTP server on loopback, not a route-fulfilled 302): one generation, of the final URL.
+    const origin = new URL(page.url()).origin;
+    const server = createServer((_req, res) => {
+      res.writeHead(302, {
+        location: `${origin}/review-document?n3=redirected`,
+      });
+      res.end();
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const fresh = await context.newPage();
+      await fresh.goto(`http://127.0.0.1:${port}/redirect`);
+      expect(fresh.url()).toContain("n3=redirected");
+      // An aborted navigation commits nothing of the application (an engine may show an error page: not an application document).
+      await context.route("**/review-aborted", (route) => route.abort());
+      const aborted = await context.newPage();
+      await aborted.goto("/review-aborted").catch(() => undefined);
+      await fresh.goto("/review-document?n3=after-abort");
+      coverage = await oracle.coverage();
+      expect(coverage.missing).toHaveLength(1);
+      expect(coverage.incomplete).toEqual([]);
+      const ours = coverage.documents.filter(
+        (d) =>
+          d.page !==
+          coverage.documents.find((x) => x.url.includes("n3=same"))?.page,
+      );
+      expect(
+        ours.filter((d) => d.role === "main").map((d) => new URL(d.url).search),
+      ).toEqual(["?n3=redirected", "?n3=after-abort"]);
+    } finally {
+      server.close();
+    }
+  });
+
+  test("N4 one-to-one: another page's surplus document of the SAME URL cannot stand in for an escaped generation; a lost commit is never cancelled by an escaped document", async ({
+    context,
+  }) => {
+    let dropFor: string | null = null;
+    const oracle = await installDisplayOracle(context, {
+      commits: (c) => (dropFor && c.url.includes(dropFor) ? "drop" : "deliver"),
+    });
+    await heldDocument(context);
+    // Page A: a document whose commit notification the host loses (a journal fault): its document is a surplus.
+    dropFor = "n4=x";
+    const a = await context.newPage();
+    await a.goto("/review-document?n4=x");
+    dropFor = null;
+    // Page B: the SAME URL committed twice, the second escaping both scripts.
+    const b = await context.newPage();
+    await b.goto("/review-document?n4=x");
+    await b.evaluate(() => {
+      window.name = "__display_oracle_and_witness_off__";
+    });
+    await b.reload();
+    const coverage = await oracle.coverage();
+    expect(coverage.missing).toEqual([
+      expect.stringMatching(
+        /^one of committed document generations \d+, \d+ of page \d+ \(.*n4=x\)/,
+      ),
+    ]);
+    expect(coverage.incomplete).toEqual([
+      expect.stringMatching(
+        /matches no committed generation of its frame \(unresolved correlation\)$/,
+      ),
+      expect.stringMatching(
+        /^page \d+: the host saw 1 loaded documents but 0 commits/,
+      ),
+    ]);
+    // In ONE frame: an escaped document of one URL and a lost commit of another never cancel (the totals would be equal).
+    const c = await context.newPage();
+    await c.goto("/review-document?oracle=off&witness=off&n4=escaped");
+    dropFor = "n4=lost";
+    await c.goto("/review-document?n4=lost");
+    dropFor = null;
+    const later = await oracle.coverage();
+    expect(later.missing).toContainEqual(
+      expect.stringContaining("n4=escaped) has neither witness nor recorder"),
+    );
+    expect(later.incomplete).toContainEqual(
+      expect.stringContaining(
+        "n4=lost) matches no committed generation of its frame",
+      ),
+    );
+  });
+
+  test("N4 a predecessor's witness report HELD until after its successor committed is still its own (ownership at sending, not delivery)", async ({
+    context,
+  }) => {
+    let hold: string | null = "n4=predecessor";
+    let releaseHeld!: () => void;
+    const held = new Promise<void>((r) => {
+      releaseHeld = r;
+    });
+    const oracle = await installDisplayOracle(context, {
+      transport: async (r) => {
+        if (hold && r.binding === "witness" && r.url?.includes(hold)) {
+          await held;
+        }
+        return "deliver" as const;
+      },
+    });
+    await heldDocument(context);
+    const leader = await context.newPage();
+    const follower = await context.newPage();
+    await leader.goto("/review-document?n4=predecessor");
+    const predecessor = await docOf(leader);
+    await follower.goto("/review-document?n4=follower");
+    await leader.goto("/review-document?n4=successor");
+    hold = null;
+    releaseHeld();
+    await expect
+      .poll(async () =>
+        (await oracle.coverage()).documents.some(
+          (d) => d.doc === predecessor && d.loaded,
+        ),
+      )
+      .toBe(true);
+    const coverage = await oracle.coverage();
+    expect(coverage.missing).toEqual([]);
+    expect(coverage.incomplete).toEqual([]);
+    expect(coverage.documents.find((d) => d.doc === predecessor)).toMatchObject(
+      { outcome: "complete", url: expect.stringContaining("n4=predecessor") },
+    );
+  });
+
+  test("N5 evidence that names no frame (a retired document whose reports were all lost) leaves an escaped generation UNRESOLVED, never clean; a current document's own answer recovers its lost reports", async ({
+    context,
+  }) => {
+    let drop: string | null = null;
+    const oracle = await installDisplayOracle(context, {
+      transport: (r) =>
+        drop && (r.url?.includes(drop) || r.binding === "oracle")
+          ? "drop"
+          : "deliver",
+    });
+    await heldDocument(context);
+    const page = await context.newPage();
+    drop = "n5=lost";
+    await page.goto("/review-document?n5=lost");
+    await expect.poll(() => oracleIn(page)).toBe(true);
+    drop = null;
+    await page.goto("/review-document?oracle=off&witness=off&n5=escaped");
+    await page.goto("/review-document?n5=current");
+    let coverage = await oracle.coverage();
+    expect(coverage.missing).toEqual([]);
+    expect(coverage.incomplete).toContainEqual(
+      expect.stringMatching(
+        /n5=escaped\) has neither witness nor recorder; unresolved: 1 documents' evidence names no frame$/,
+      ),
+    );
+    // Control: the current document's own reports lost too, recovered by its own answer in the sealed interval.
+    const other = await context.newPage();
+    drop = "n5=open";
+    await other.goto("/review-document?n5=open");
+    await expect.poll(() => oracleIn(other)).toBe(true);
+    drop = null;
+    coverage = await oracle.coverage();
+    const open = coverage.documents.find((d) => d.url.includes("n5=open"));
+    expect(open).toMatchObject({ state: "open", outcome: "complete" });
+  });
+
+  test("N6 a stale answer (current: false) never enrols or completes a document; the current document is judged on its own evidence", async ({
+    context,
+  }) => {
+    const oracle = await installDisplayOracle(context);
+    await heldDocument(context);
+    const page = await context.newPage();
+    await page.goto("/review-document?n6=1");
+    const doc = await docOf(page);
+    await page.evaluate(() => {
+      const o = (
+        window as unknown as { __displayOracle: { flush: () => unknown } }
+      ).__displayOracle;
+      o.flush = () => ({
+        doc: "forged-stale",
+        role: "main",
+        current: false,
+        url: location.href,
+        sseq: 99,
+        violations: [],
+        limits: [],
+      });
+    });
+    const coverage = await oracle.coverage();
+    expect(coverage.documents.map((d) => d.doc)).not.toContain("forged-stale");
+    expect(coverage.documents.find((d) => d.doc === doc)).toMatchObject({
+      outcome: "complete",
+      reason: "all 1 reports delivered",
+    });
+    expect([coverage.missing, coverage.incomplete]).toEqual([[], []]);
+  });
+
+  test("N7 without the commit journal nothing is accounted for (incomplete); with it, a healthy page is clean (control)", async ({
+    browser,
+  }) => {
+    for (const absent of [true, false]) {
+      const context = await browser.newContext({
+        baseURL: test.info().project.use.baseURL,
+      });
+      try {
+        const oracle = await installDisplayOracle(context, {
+          withoutCommitJournal: absent,
+        });
+        await heldDocument(context);
+        const page = await context.newPage();
+        await page.goto("/review-document?n7=1");
+        const coverage = await oracle.coverage();
+        if (absent)
+          expect(coverage.incomplete).toEqual([
+            expect.stringContaining(
+              "journal of committed documents is unavailable",
+            ),
+          ]);
+        else expect([coverage.missing, coverage.incomplete]).toEqual([[], []]);
+      } finally {
+        await context.close();
+      }
+    }
   });
 });
