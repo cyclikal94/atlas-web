@@ -406,17 +406,25 @@ async function reapDead(
  * Revision 11: a reaper whose runner is already gone, over an EXISTING run directory (a second recovery of the same run), given
  * `messages` (and `raw` journal lines after them, sent as they are); `evidence` is the parent folder the hello names.
  */
-async function reapIn(runDir, { messages = [], evidence, raw = [], env = {} }) {
+async function reapIn(
+  runDir,
+  { messages = [], evidence, raw = [], env = {}, runner = null },
+) {
   const sent = messages;
-  const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-  await new Promise((r) => gone.once("exit", r));
+  // Revision 13: `runner`, a live process named as the runner (a recovery whose runner may still be running).
+  let runnerPid = runner;
+  if (runnerPid === null) {
+    const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+    await new Promise((r) => gone.once("exit", r));
+    runnerPid = gone.pid;
+  }
   const reaper = spawn(
     process.execPath,
     [
       join(here, "reaper.mjs"),
       runDir,
       `ATLAS_TEST_${Date.now()}`,
-      String(gone.pid),
+      String(runnerPid),
     ],
     {
       stdio: ["pipe", "pipe", "pipe"],
@@ -1687,4 +1695,459 @@ test("C3 controls: the seam is inert when its attempt is never reached; a failed
     both.log,
     /evidence NOT written: reaper\.json: injected failure publishing reaper\.json \(attempt 2\)/,
   );
+});
+
+// ---- review r12 H4g (revision 13): a later recovery of the same run never erases what an earlier one established -----------------
+// Every case is a real reaper over a real run folder; a later recovery is started by the case (the runner never starts two).
+import {
+  attemptFile,
+  claimFile,
+  previousFile,
+  recoveriesDir,
+  startedOf,
+} from "./recovery-history.mjs";
+
+/** A covered, clean terminal run (only the release was lost), recovered once with `env`/`evidence`, then by `reapIn` as often as asked. */
+const coveredRun = (t, { evidence, env, prepare } = {}) =>
+  reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    messages: C3_MESSAGES,
+    ...(evidence ? { evidence } : {}),
+    ...(env ? { env } : {}),
+    ...(prepare ? { prepare } : {}),
+  });
+const again = (runDir, opts = {}) =>
+  reapIn(runDir, { evidence: dirname(runDir), ...opts });
+const faults = (spec) => ({ ATLAS_INTEGRATION_FAULTS: JSON.stringify(spec) });
+const has = (list, error) => (list ?? []).includes(error);
+const distinct = (list) => new Set(list ?? []).size === (list ?? []).length;
+
+test("H4g: a failure only the first recovery's reaper.json holds survives a second and a third recovery, which fail and exit 1", async (t) => {
+  // The review's schedule: the parent copy fails (ENOTDIR), then the summary's republication (attempt 2): the summary keeps its first
+  // text (passed) and reaper.json is the only witness of both failures.
+  const first = await reapC3(t, { "summary.json": [2] });
+  assert.equal(first.failedAt("summary.json", 2), true, first.log);
+  assert.equal(first.code, 1, first.log);
+  assert.equal(
+    first.summary?.outcome,
+    "passed",
+    "the bounded write's stale summary",
+  );
+  const established = first.reaped?.evidence_errors ?? [];
+  assert.equal(established.length, 2, first.log);
+  assert.deepEqual(
+    first.reaped?.recovery_history?.evidence_errors,
+    established,
+  );
+  for (const [n, run] of [
+    [2, await again(first.runDir)],
+    [3, await again(first.runDir)],
+  ]) {
+    const label = `recovery ${n}`;
+    assert.equal(run.code, 1, `${label}: ${run.log}`);
+    assert.equal(run.summary?.outcome, "failed", `${label}: ${run.log}`);
+    assert.equal(run.summary?.outcome_before_reaper, "passed", label);
+    for (const e of established) {
+      assert.ok(
+        has(run.summary?.evidence_errors, e),
+        `${label}: summary: ${e}`,
+      );
+      assert.ok(
+        has(run.reaped?.run_evidence_errors, e),
+        `${label}: reaper.json run: ${e}`,
+      );
+      assert.ok(
+        has(run.reaped?.recovery_history?.evidence_errors, e),
+        `${label}: reaper.json history: ${e}`,
+      );
+    }
+    assert.ok(distinct(run.summary?.evidence_errors), label);
+    assert.ok(distinct(run.reaped?.recovery_history?.evidence_errors), label);
+    // This recovery's own failures (none) stay apart from the history; its clean-up was verified.
+    assert.deepEqual(run.reaped?.evidence_errors, [], label);
+    assert.equal(run.reaped?.ok, true, label);
+    assert.equal(run.reaped?.attempt, n, label);
+    assert.equal(run.summary?.reaper?.attempt, n, label);
+    assert.deepEqual(
+      run.reaped?.recovery_history?.attempts?.map((e) => e.attempt),
+      Array.from({ length: n }, (_, i) => i + 1),
+      label,
+    );
+    assert.match(run.log, /an earlier recovery of this run failed/, label);
+  }
+  // Every attempt's record, and the reaper.json each later one replaced, are kept.
+  for (const n of [1, 2, 3])
+    assert.equal(existsSync(attemptFile(first.runDir, n)), true, `record ${n}`);
+  assert.deepEqual(
+    JSON.parse(read(previousFile(first.runDir, 2))),
+    first.reaped,
+    "the first recovery's reaper.json, kept by the second",
+  );
+});
+
+test("H4g control: repeated recoveries of a clean run stay clean (exit 0, passed, nothing invented or duplicated)", async (t) => {
+  const first = await coveredRun(t);
+  const runs = [first, await again(first.runDir), await again(first.runDir)];
+  runs.forEach((run, i) => {
+    const label = `recovery ${i + 1}`;
+    assert.equal(run.code, 0, `${label}: ${run.log}`);
+    assert.equal(run.summary?.outcome, "passed", label);
+    assert.equal(run.summary?.cleanup_failed, false, label);
+    assert.deepEqual(run.summary?.evidence_errors, [], label);
+    assert.deepEqual(run.reaped?.evidence_errors, [], label);
+    assert.deepEqual(run.reaped?.run_evidence_errors, [], label);
+    assert.equal(run.reaped?.run_outcome, "passed", label);
+    assert.deepEqual(run.reaped?.recovery_history?.evidence_errors, [], label);
+    assert.equal(
+      run.reaped?.recovery_history?.cleanup_not_verified,
+      false,
+      label,
+    );
+    assert.deepEqual(
+      run.reaped?.recovery_history?.attempts?.map((e) => [e.attempt, e.ok]),
+      Array.from({ length: i + 1 }, (_, k) => [k + 1, true]),
+      label,
+    );
+    assert.doesNotMatch(
+      run.log,
+      /an earlier recovery of this run failed/,
+      label,
+    );
+  });
+});
+
+test("H4g: sole witnesses — a failure held only by a legacy reaper.json, only by an attempt record, or only by the summary is never lost", async (t) => {
+  // 1. Only a reaper.json from before revision 13 (no history fields, no attempt record) knows it; this recovery's own summary
+  // publication fails, so only its reaper.json and record can carry it on, and the next recovery fails because of them.
+  const legacy = {
+    controller_lost: true,
+    ok: true,
+    evidence_errors: ["legacy: lost"],
+  };
+  const a = await coveredRun(t, {
+    env: faults({ reaper_publish_fail: { "summary.json": [1] } }),
+    prepare: (runDir) =>
+      writeFileSync(join(runDir, "reaper.json"), JSON.stringify(legacy)),
+  });
+  assert.equal(a.code, 1, a.log);
+  assert.equal(a.summary?.outcome, "passed", "its summary was never replaced");
+  assert.ok(has(a.reaped?.run_evidence_errors, "legacy: lost"), a.log);
+  assert.ok(has(a.reaped?.recovery_history?.evidence_errors, "legacy: lost"));
+  assert.deepEqual(JSON.parse(read(previousFile(a.runDir, 1))), legacy);
+  const b = await again(a.runDir);
+  assert.equal(b.code, 1, b.log);
+  assert.equal(b.summary?.outcome, "failed", b.log);
+  assert.ok(has(b.summary?.evidence_errors, "legacy: lost"), b.log);
+  // 2. Only an attempt record knows it: reaper.json was never written and the summary's republication failed too.
+  const c = await coveredRun(t, {
+    env: faults({
+      reaper_publish_fail: { "reaper.json": [1], "summary.json": [2] },
+    }),
+  });
+  assert.equal(c.code, 1, c.log);
+  assert.equal(existsSync(join(c.runDir, "reaper.json")), false, c.log);
+  assert.equal(c.summary?.outcome, "passed", "the stale first summary");
+  assert.equal(existsSync(attemptFile(c.runDir, 1)), true, c.log);
+  const recorded = JSON.parse(read(attemptFile(c.runDir, 1)));
+  assert.match(recorded.evidence_errors.join("\n"), /^reaper\.json: injected/m);
+  assert.match(
+    recorded.evidence_errors.join("\n"),
+    /^summary\.json: injected/m,
+  );
+  const d = await again(c.runDir);
+  assert.equal(d.code, 1, d.log);
+  assert.equal(d.summary?.outcome, "failed", d.log);
+  for (const e of recorded.evidence_errors)
+    assert.ok(has(d.summary?.evidence_errors, e), `${e}: ${d.log}`);
+  // 3. Only the summary knows a run-level failure; reaper.json carries it too, so a summary torn later does not lose it.
+  const e = await reapFinished(t, {
+    summary: finishedSummary([settled0], {
+      outcome: "failed",
+      evidence_errors: ["summary-only"],
+    }),
+    messages: C3_MESSAGES,
+  });
+  assert.ok(has(e.reaped?.run_evidence_errors, "summary-only"), e.log);
+  assert.equal(e.reaped?.run_outcome, "failed");
+  writeFileSync(join(e.runDir, "summary.json"), '{"schema":3,"outc');
+  const f = await again(e.runDir);
+  assert.equal(f.summary?.outcome, "failed", f.log);
+  assert.ok(has(f.summary?.evidence_errors, "summary-only"), f.log);
+  assert.match(
+    f.summary?.evidence_errors.join("\n"),
+    /the runner's summary\.json could not be read/,
+  );
+});
+
+test("H4g: an earlier recovery's unverified clean-up (not ok, or its deadline) stays beside a later verified one; control: a verified one", async (t) => {
+  for (const [label, earlier, failed] of [
+    ["not verified", { ok: false, evidence_errors: [] }, true],
+    ["deadline", { deadline_reached: true, evidence_errors: [] }, true],
+    ["verified (control)", { ok: true, evidence_errors: [] }, false],
+  ]) {
+    const r = await coveredRun(t, {
+      prepare: (runDir) =>
+        writeFileSync(join(runDir, "reaper.json"), JSON.stringify(earlier)),
+    });
+    for (const [n, run] of [
+      [1, r],
+      [2, await again(r.runDir)],
+    ]) {
+      const at = `${label}, recovery ${n}`;
+      assert.equal(run.reaped?.ok, true, `${at}: this clean-up was verified`);
+      assert.equal(run.code, failed ? 1 : 0, `${at}: ${run.log}`);
+      assert.equal(run.summary?.cleanup_failed, failed, at);
+      assert.equal(run.summary?.outcome, failed ? "failed" : "passed", at);
+      assert.equal(
+        run.reaped?.recovery_history?.cleanup_not_verified,
+        failed,
+        at,
+      );
+    }
+  }
+});
+
+test("H4g: a previous reaper.json that cannot be read is an evidence failure that later recoveries keep; its bytes are kept", async (t) => {
+  for (const [label, text] of [
+    ["torn", '{"ok":true,"evidence_err'],
+    ["null", "null"],
+    ["errors of another type", '{"ok":true,"evidence_errors":"x"}'],
+  ]) {
+    const r = await coveredRun(t, {
+      prepare: (runDir) => writeFileSync(join(runDir, "reaper.json"), text),
+    });
+    assert.equal(r.code, 1, `${label}: ${r.log}`);
+    assert.equal(r.summary?.outcome, "failed", label);
+    const named = (r.summary?.evidence_errors ?? []).find((e) =>
+      e.startsWith("the previous recovery's reaper.json "),
+    );
+    assert.ok(named, `${label}: ${r.log}`);
+    assert.equal(read(previousFile(r.runDir, 1)), text, `${label}: kept`);
+    const next = await again(r.runDir);
+    assert.equal(next.code, 1, `${label}, next: ${next.log}`);
+    assert.equal(next.summary?.outcome, "failed", label);
+    assert.ok(has(next.summary?.evidence_errors, named), label);
+    assert.ok(
+      has(next.reaped?.recovery_history?.evidence_errors, named),
+      label,
+    );
+  }
+  // A directory: read as unreadable (EISDIR) and, as before, reaper.json cannot be published; the next recovery still fails.
+  const dir = await coveredRun(t, {
+    prepare: (runDir) => mkdirSync(join(runDir, "reaper.json")),
+  });
+  assert.equal(dir.code, 1, dir.log);
+  assert.match(
+    (dir.summary?.evidence_errors ?? []).join("\n"),
+    /the previous recovery's reaper\.json could not be read: EISDIR/,
+  );
+  const after = await again(dir.runDir);
+  assert.equal(after.code, 1, after.log);
+  assert.equal(after.summary?.outcome, "failed", after.log);
+  assert.match(
+    (after.summary?.evidence_errors ?? []).join("\n"),
+    /the previous recovery's reaper\.json could not be read: EISDIR/,
+  );
+});
+
+/** A live process holding claim `n` of `runDir` (as an earlier recovery that is still running would). */
+async function holdClaim(t, runDir, n) {
+  const holder = spawn(
+    process.execPath,
+    ["-e", "setInterval(() => {}, 1000)"],
+    {
+      stdio: "ignore",
+    },
+  );
+  t.after(() => holder.kill("SIGKILL"));
+  await new Promise((r) => holder.once("spawn", r));
+  mkdirSync(recoveriesDir(runDir), { recursive: true });
+  writeFileSync(
+    claimFile(runDir, n),
+    JSON.stringify({
+      attempt: n,
+      pid: holder.pid,
+      started: startedOf(holder.pid),
+    }),
+  );
+  return holder;
+}
+
+test("H4g order: a recovery never overtakes an earlier one that may still be running; it replaces nothing and its own record stays", async (t) => {
+  // The first recovery runs alone (attempt 1). Then attempt 2 is held by a running process. The order's bound is shortened for the
+  // refused recovery only: it bounds waiting for another recovery and is not a duration under test.
+  const r = await coveredRun(t);
+  assert.equal(r.code, 0, r.log);
+  const reaperBefore = read(join(r.runDir, "reaper.json"));
+  const summaryBefore = read(join(r.runDir, "summary.json"));
+  const holder = await holdClaim(t, r.runDir, 2);
+  const refused = await again(r.runDir, {
+    env: { ATLAS_REAPER_ORDER_WAIT_MS: "1000" },
+  });
+  assert.equal(refused.code, 1, refused.log);
+  assert.equal(
+    read(join(r.runDir, "summary.json")),
+    summaryBefore,
+    "the summary is not replaced",
+  );
+  assert.equal(
+    read(join(r.runDir, "reaper.json")),
+    reaperBefore,
+    "nor reaper.json",
+  );
+  assert.equal(existsSync(attemptFile(r.runDir, 3)), true, refused.log);
+  const own = JSON.parse(read(attemptFile(r.runDir, 3)));
+  assert.equal(own.attempt, 3);
+  assert.match(
+    own.refused,
+    /^recovery attempt 2 has not ended \(its claimant \(pid \d+\) is running\)$/,
+  );
+  assert.match(refused.log, /this recovery replaced nothing/);
+  // The holder ends without a record: the next recovery goes on; attempt 2 is unknown and attempt 3's refusal is kept.
+  holder.kill("SIGKILL");
+  await new Promise((resolve) => holder.once("exit", resolve));
+  const next = await again(r.runDir);
+  assert.equal(next.code, 1, next.log);
+  assert.equal(next.reaped?.attempt, 4);
+  assert.equal(next.summary?.outcome, "failed", next.log);
+  const errors = (next.summary?.evidence_errors ?? []).join("\n");
+  assert.match(
+    errors,
+    /recovery attempt 2 ended without its record \(pid \d+\): what it found and did is unknown/,
+  );
+  assert.match(
+    errors,
+    /this recovery replaced nothing: recovery attempt 2 has not ended/,
+  );
+});
+
+test("H4g order: an earlier recovery that ends while this one waits: it goes on and that attempt is unknown", async (t) => {
+  const r = await coveredRun(t);
+  assert.equal(r.code, 0, r.log);
+  const holder = await holdClaim(t, r.runDir, 2);
+  const reaperBefore = read(join(r.runDir, "reaper.json"));
+  const waiting = again(r.runDir);
+  assert.ok(
+    await until(() => existsSync(claimFile(r.runDir, 3))),
+    "attempt 3 claimed",
+  );
+  // While attempt 2's claimant runs, attempt 3 replaces nothing (observed for a while; the order's own bound is 30 s).
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(
+    read(join(r.runDir, "reaper.json")),
+    reaperBefore,
+    "nothing replaced while it waits",
+  );
+  assert.equal(existsSync(attemptFile(r.runDir, 3)), false);
+  holder.kill("SIGKILL");
+  const done = await waiting;
+  assert.equal(done.code, 1, done.log);
+  assert.equal(done.reaped?.attempt, 3);
+  assert.equal(done.summary?.outcome, "failed", done.log);
+  assert.match(
+    (done.summary?.evidence_errors ?? []).join("\n"),
+    /recovery attempt 2 ended without its record/,
+  );
+});
+
+test("H4g order: two overlapping recoveries publish one after the other; the later one reads what the earlier one wrote", async (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "atlas-reaper-h4g-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const notFolder = join(parent, "not-a-folder");
+  writeFileSync(notFolder, "");
+  // A run folder with a covered clean terminal summary and no recovery yet.
+  const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4g-run-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const runDir = join(dir, "run");
+  mkdirSync(runDir);
+  writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN0));
+  writeFileSync(
+    join(runDir, "summary.json"),
+    JSON.stringify(finishedSummary([settled0])),
+  );
+  const reached = (n) =>
+    existsSync(join(runDir, "faults", `reaper-hold-inputs-${n}.reached`));
+  const release = (n) =>
+    writeFileSync(
+      join(runDir, "faults", `reaper-hold-inputs-${n}.release`),
+      "",
+    );
+  // A: its parent copy fails (its own failure), held after it has read everything.
+  const a = reapIn(runDir, {
+    messages: C3_MESSAGES,
+    evidence: notFolder,
+    env: faults({ reaper_hold_inputs: [1] }),
+  });
+  assert.ok(await until(() => reached(1)), "A holds after its inputs");
+  // B starts while A holds: it takes attempt 2 and waits for A (it must not read anything A has not written yet).
+  const b = reapIn(runDir, {
+    messages: C3_MESSAGES,
+    evidence: dir,
+    env: faults({ reaper_hold_inputs: [2] }),
+  });
+  assert.ok(
+    await until(() => existsSync(claimFile(runDir, 2))),
+    "B claimed attempt 2",
+  );
+  assert.equal(
+    await until(() => reached(2), 1500),
+    false,
+    "B does not read while A may still publish",
+  );
+  release(1);
+  const doneA = await a;
+  assert.equal(doneA.code, 1, doneA.log);
+  assert.ok(await until(() => reached(2)), "B reads once A has ended");
+  release(2);
+  const doneB = await b;
+  assert.equal(doneB.code, 1, doneB.log);
+  const copyFailure = (doneA.reaped?.evidence_errors ?? []).find((e) =>
+    e.startsWith("the parent summary.json copy could not be written"),
+  );
+  assert.ok(copyFailure, doneA.log);
+  // The outputs are B's, and they carry A's failure.
+  const finalReaper = JSON.parse(read(join(runDir, "reaper.json")));
+  assert.equal(finalReaper.attempt, 2);
+  assert.ok(has(finalReaper.recovery_history?.evidence_errors, copyFailure));
+  const finalSummary = JSON.parse(read(join(runDir, "summary.json")));
+  assert.equal(finalSummary.outcome, "failed");
+  assert.ok(has(finalSummary.evidence_errors, copyFailure));
+});
+
+test("H4g: a recovery whose runner may still be running leaves the summary to it and still carries every earlier failure (reaper.json, exit)", async (t) => {
+  const runner = spawn(
+    process.execPath,
+    ["-e", "setInterval(() => {}, 1000)"],
+    {
+      stdio: "ignore",
+    },
+  );
+  t.after(() => runner.kill("SIGKILL"));
+  await new Promise((r) => runner.once("spawn", r));
+  const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4g-live-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const runDir = join(dir, "run");
+  mkdirSync(runDir);
+  writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN0));
+  const running = JSON.stringify({
+    schema: 3,
+    invocation: { finished: false },
+    outcome: "running",
+    stacks: [],
+  });
+  writeFileSync(join(runDir, "summary.json"), running);
+  writeFileSync(
+    join(runDir, "reaper.json"),
+    JSON.stringify({ ok: true, evidence_errors: ["earlier: lost"] }),
+  );
+  const r = await reapIn(runDir, { evidence: dir, runner: runner.pid });
+  assert.equal(r.reaped?.runner_alive, true, r.log);
+  assert.equal(
+    read(join(runDir, "summary.json")),
+    running,
+    "the runner's summary is the runner's",
+  );
+  assert.ok(has(r.reaped?.run_evidence_errors, "earlier: lost"), r.log);
+  assert.ok(has(r.reaped?.recovery_history?.evidence_errors, "earlier: lost"));
+  assert.equal(r.code, 1, r.log);
 });

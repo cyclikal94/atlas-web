@@ -72,6 +72,64 @@ export const SHAPES = {
       ],
     ]),
   invocation: (v) => (isObject(v) ? null : "it is not a JSON object"),
+  // Revision 13 (review r12 H4g): a recovery's record (`reaper.json`, `recoveries/<n>.json`; recovery-history.mjs). Every field is
+  // optional (a record from before revision 13 has no history), but a field that is there must be of its type.
+  recovery: (v) =>
+    first([
+      [isObject(v), "it is not a JSON object"],
+      [
+        v?.evidence_errors === undefined || listOf(v.evidence_errors, isString),
+        "`evidence_errors` is not a list of reasons",
+      ],
+      [
+        v?.ok === undefined || typeof v.ok === "boolean",
+        "`ok` is not true or false",
+      ],
+      [
+        v?.attempt === undefined ||
+          v.attempt === null ||
+          Number.isInteger(v.attempt),
+        "`attempt` is not an attempt number",
+      ],
+      [
+        v?.run_evidence_errors === undefined ||
+          listOf(v.run_evidence_errors, isString),
+        "`run_evidence_errors` is not a list of reasons",
+      ],
+      [
+        v?.run_outcome === undefined ||
+          v.run_outcome === null ||
+          isString(v.run_outcome),
+        "`run_outcome` is not an outcome",
+      ],
+      [
+        v?.recovery_history === undefined ||
+          (isObject(v.recovery_history) &&
+            (v.recovery_history.evidence_errors === undefined ||
+              listOf(v.recovery_history.evidence_errors, isString)) &&
+            (v.recovery_history.cleanup_not_verified === undefined ||
+              typeof v.recovery_history.cleanup_not_verified === "boolean") &&
+            (v.recovery_history.attempts === undefined ||
+              listOf(
+                v.recovery_history.attempts,
+                (e) =>
+                  isObject(e) &&
+                  (e.evidence_errors === undefined ||
+                    listOf(e.evidence_errors, isString)),
+              ))),
+        "`recovery_history` is not a recovery history",
+      ],
+    ]),
+  // Revision 13: a recovery attempt's claim (who holds the attempt number).
+  claim: (v) =>
+    first([
+      [isObject(v), "it is not a JSON object"],
+      [Number.isInteger(v?.pid) && v.pid > 0, "`pid` is not a process id"],
+      [
+        v?.started === undefined || v.started === null || isString(v.started),
+        "`started` is not a start time",
+      ],
+    ]),
 };
 
 const reason = (error) => String(error?.message ?? error);

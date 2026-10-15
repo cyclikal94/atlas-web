@@ -46,6 +46,13 @@
 //   reaper_publish_fail  { "summary.json": [n, ...], "reaper.json": [n, ...] }: the n-th attempt of the reaper to publish that output
 //                 fails after its complete sibling was written (the output keeps what it held), recorded first as
 //                 <run dir>/faults/reaper-publish-<output>-<n>.failed: the bounded republication can be held to one exact attempt
+//
+// Revision 13 (review r12 H4g), read by the REAPER:
+//
+//   reaper_hold_inputs  [n, ...]: recovery attempt n of the run (recovery-history.mjs), once it has taken its place after every earlier
+//                 attempt and read everything it decides from, writes <run dir>/faults/reaper-hold-inputs-<n>.reached and waits for
+//                 reaper-hold-inputs-<n>.release (at most the reaper's deadline) before it publishes: two recoveries of one run can be
+//                 held to overlap exactly there
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cancelled } from "./ownership.mjs";

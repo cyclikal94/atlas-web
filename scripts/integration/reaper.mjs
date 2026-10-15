@@ -43,6 +43,19 @@
 // sets it) does the n-th publication attempt of that output fail after its complete sibling was written, recorded first as
 // `<run dir>/faults/reaper-publish-<output>-<n>.failed`. The attempt is chosen by destination and ordinal, never by time.
 //
+// Review r12 H4g (revision 13): a later recovery of the same run erased what an earlier one had recorded. The earlier recovery's
+// summary republication had failed, so its `reaper.json` was the only witness of its failures; the next recovery did not read it,
+// found the old summary covered, published a pass, replaced `reaper.json` with its own (empty) failures and exited 0. Now
+// (recovery-history.mjs) every recovery takes an attempt number, waits until every earlier attempt has ended (it never overtakes one
+// that may still be running: it refuses to replace anything instead), and reads the previous `reaper.json` and every earlier attempt's
+// record, each absent, present or unreadable, BEFORE anything is decided. What they established is one history that only grows: their
+// evidence failures and unverified clean-ups, the run-level failures and outcome they published. It goes into the one run-level
+// reduction (`render`), into `reaper.json` (`recovery_history`, `run_evidence_errors`, `run_outcome`; `evidence_errors` stays this
+// recovery's own) and into the exit code: a recovery after a failed one never exits 0. The previous `reaper.json` is kept (hard link)
+// before it is replaced, and each attempt finally writes its own record, which nothing replaces. ATLAS_REAPER_ORDER_WAIT_MS bounds the
+// wait (default 30 s). Qualification seam: `reaper_hold_inputs: [n]` holds attempt n after it has read everything and before it
+// publishes (faults.mjs).
+//
 //   node scripts/integration/reaper.mjs <run dir> <token> <runner pid>      (journal on stdin; started by run.mjs, never by hand)
 import { execFileSync, spawn } from "node:child_process";
 import {
@@ -73,6 +86,18 @@ import {
 } from "./outcome.mjs";
 import { membersOf, processTable, stopMembers } from "./ownership.mjs";
 import {
+  awaitEarlier,
+  claimAttempt,
+  EMPTY,
+  entryOf,
+  joinHistory,
+  keepPrevious,
+  readHistory,
+  recordAttempt,
+  serialise,
+  startedOf,
+} from "./recovery-history.mjs";
+import {
   covers,
   createStackStore,
   joinVersions,
@@ -87,17 +112,36 @@ import {
 const [runDir, token, runnerPidText] = process.argv.slice(2);
 const runnerPid = Number(runnerPidText);
 const DEADLINE_MS = Number(process.env.ATLAS_REAPER_DEADLINE_MS ?? 120_000);
-// Revision 12: `reaper_publish_fail` of ATLAS_INTEGRATION_FAULTS (see the header). A specification that cannot be read applies no fault
-// (this process's clean-up must not depend on it) and is said on stderr.
+// Revision 13: how long a recovery waits for an earlier recovery of the same run to end before it refuses to publish.
+const ORDER_WAIT_MS = Number(process.env.ATLAS_REAPER_ORDER_WAIT_MS ?? 30_000);
+// Revision 12: `reaper_publish_fail` of ATLAS_INTEGRATION_FAULTS (see the header); revision 13: `reaper_hold_inputs`. A specification
+// that cannot be read applies no fault (this process's clean-up must not depend on it) and is said on stderr.
 let publishFaults = {};
+let holdInputs = [];
 try {
-  publishFaults =
-    JSON.parse(process.env.ATLAS_INTEGRATION_FAULTS ?? "{}")
-      ?.reaper_publish_fail ?? {};
+  const spec = JSON.parse(process.env.ATLAS_INTEGRATION_FAULTS || "{}");
+  publishFaults = spec?.reaper_publish_fail ?? {};
+  holdInputs = spec?.reaper_hold_inputs ?? [];
 } catch (error) {
   process.stderr.write(
     `reaper: ATLAS_INTEGRATION_FAULTS could not be read, no publication fault applies: ${String(error?.message ?? error)}\n`,
   );
+}
+/** Block this process for `ms` (the end of a recovery is synchronous: nothing else may run between what it reads and what it writes). */
+const block = (ms) =>
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+/**
+ * Revision 13 seam `reaper_hold_inputs`: attempt n, having read everything, writes `<run dir>/faults/reaper-hold-inputs-<n>.reached` and
+ * waits for `...release` (at most the reaper's deadline) before it publishes.
+ */
+function holdAfterInputs(attempt) {
+  if (attempt === null || !holdInputs.includes(attempt)) return;
+  const faults = join(runDir, "faults");
+  mkdirSync(faults, { recursive: true });
+  const name = join(faults, `reaper-hold-inputs-${attempt}`);
+  writeFileSync(`${name}.reached`, `${Date.now()}\n`);
+  const until = Date.now() + DEADLINE_MS;
+  while (!existsSync(`${name}.release`) && Date.now() < until) block(25);
 }
 const publishAttempts = new Map();
 /** Publish `<run dir>/<name>` atomically; the n-th attempt fails when `reaper_publish_fail` names it. */
@@ -422,11 +466,53 @@ function finish(result) {
   // (the parent copy, reaper.json, the other output) publishes that output once more. Bounded: no output is written more than twice,
   // and stderr and the exit code are the last channel.
   const evidenceErrors = [];
-  let draft = null;
+  // Review r12 H4g (revision 13): first this recovery's place in the run's order of recoveries (it never overtakes an earlier one that
+  // may still be running), then everything the earlier ones established, before anything is decided or replaced.
+  let attempt = null;
+  let order = { ready: false, waiting: null };
   try {
-    draft = completeSummary(result, evidenceErrors);
+    attempt = claimAttempt(runDir, {
+      pid: process.pid,
+      started: startedOf(process.pid),
+      at: result.at,
+    });
+    order = awaitEarlier(runDir, attempt, {
+      waitMs: ORDER_WAIT_MS,
+      sleep: block,
+    });
   } catch (error) {
-    evidenceErrors.push(`summary.json: ${String(error?.message ?? error)}`);
+    evidenceErrors.push(
+      `this recovery could not take its place in the run's order of recoveries: ${String(error?.message ?? error)}`,
+    );
+  }
+  result.attempt = attempt;
+  if (!order.ready) {
+    result.refused = order.waiting
+      ? `recovery attempt ${order.waiting.attempt} has not ended (${order.waiting.why})`
+      : "its place in the run's order of recoveries is unknown";
+    evidenceErrors.push(
+      `this recovery replaced nothing: ${result.refused}, and replacing what that recovery writes could erase what it found`,
+    );
+  }
+  let history = EMPTY;
+  let draft = null;
+  if (order.ready) {
+    const earlier = readHistory(runDir, attempt, order.ended);
+    history = earlier.history;
+    evidenceErrors.push(...earlier.errors);
+    try {
+      draft = completeSummary(result, evidenceErrors, history);
+    } catch (error) {
+      evidenceErrors.push(`summary.json: ${String(error?.message ?? error)}`);
+    }
+    try {
+      keepPrevious(runDir, attempt);
+    } catch (error) {
+      evidenceErrors.push(
+        `the previous reaper.json could not be kept before it is replaced: ${String(error?.message ?? error)}`,
+      );
+    }
+    holdAfterInputs(attempt);
   }
   result.acknowledged = journal.acknowledged;
   if (journal.damaged.length > 0) result.journal_damaged = journal.damaged;
@@ -447,11 +533,33 @@ function finish(result) {
       return null;
     }
   };
+  /**
+   * This recovery's record when it knows its first `known` evidence failures: `evidence_errors` are its own (as before revision 13);
+   * `recovery_history` joins them, and its clean-up, to every earlier recovery's; `run_evidence_errors` and `run_outcome` are the run's
+   * as the one reduction gives them (or, when the summary is the runner's, as far as the recoveries know them).
+   */
+  const record = (known) => {
+    const own = evidenceErrors.slice(0, known);
+    const view = draft ? draft.render(own) : null;
+    result.evidence_errors = own;
+    result.run_evidence_errors = view
+      ? view.evidence_errors
+      : unique([...history.runErrors, ...history.errors, ...own]);
+    result.run_outcome = view ? view.outcome : history.outcome;
+    result.recovery_history = serialise(
+      joinHistory(history, {
+        ...EMPTY,
+        errors: own,
+        cleanupNotVerified: result.ok !== true,
+        attempts: [entryOf(result)],
+      }),
+    );
+    return `${JSON.stringify(result, null, 2)}\n`;
+  };
   const publishReaper = () => {
     const known = evidenceErrors.length;
-    result.evidence_errors = evidenceErrors.slice(0, known);
     try {
-      publishOutput("reaper.json", `${JSON.stringify(result, null, 2)}\n`);
+      publishOutput("reaper.json", record(known));
       covering.reaper = known;
     } catch (error) {
       evidenceErrors.push(`reaper.json: ${String(error?.message ?? error)}`);
@@ -473,7 +581,8 @@ function finish(result) {
           );
       }
   }
-  publishReaper();
+  // A recovery that could not take its place after every earlier one replaces nothing (its own record below is new).
+  if (order.ready) publishReaper();
   if (
     draft &&
     covering.summary !== null &&
@@ -482,11 +591,28 @@ function finish(result) {
     publishSummary();
   if (covering.reaper !== null && covering.reaper < evidenceErrors.length)
     publishReaper();
+  // Revision 13: every attempt leaves its own record, the last thing it writes, which no later attempt replaces. If it cannot be
+  // written, a later recovery finds the claim without a record: what this attempt found is then unknown, never clean.
+  if (attempt !== null)
+    try {
+      recordAttempt(runDir, attempt, record(evidenceErrors.length));
+    } catch (error) {
+      evidenceErrors.push(
+        `recovery attempt ${attempt}'s record: ${String(error?.message ?? error)}`,
+      );
+    }
   for (const error of evidenceErrors) say(`evidence NOT written: ${error}`);
+  const earlierFailed = history.errors.length > 0 || history.cleanupNotVerified;
+  if (earlierFailed)
+    say(
+      `an earlier recovery of this run failed (${history.errors.length} evidence failure(s)${history.cleanupNotVerified ? ", a clean-up not verified" : ""}); it stays failed`,
+    );
   say(
     `clean-up ${result.ok ? "verified" : "NOT verified"}${evidenceErrors.length > 0 ? "; its evidence was NOT completely written" : ""} (${join(runDir, "reaper.json")})`,
   );
-  process.exit(result.ok && evidenceErrors.length === 0 ? 0 : 1);
+  process.exit(
+    result.ok && evidenceErrors.length === 0 && !earlierFailed ? 0 : 1,
+  );
 }
 
 /** The planned cases of (browser, index), from the run's plan.json (null when it cannot be read). */
@@ -575,8 +701,12 @@ const firstLine = (text) => String(text ?? "unknown").split("\n")[0];
  * paths: every evidence failure (the summary's, summary-error.json's, the journal's and `errors`, this process's own, which `finish`
  * passes as they are when the summary is written), the clean-up of the run and of every record, and an outcome that never goes below
  * an established failure.
+ *
+ * Review r12 H4g (revision 13): `history` is what every earlier recovery of the run established (`finish` reads it first): its
+ * failures, its unverified clean-ups and an established failure outcome join the same reduction, so a later recovery never makes less
+ * of them, whether or not the summary covers the stacks.
  */
-function completeSummary(result, evidenceErrors) {
+function completeSummary(result, evidenceErrors, history = EMPTY) {
   if (result.runner_alive !== false) {
     say(
       `the runner may still be running (pid ${runnerPid}); its summary is left to it`,
@@ -638,10 +768,14 @@ function completeSummary(result, evidenceErrors) {
       "the run's plan.json is missing although its summary records a selection: its planned stacks are unknown",
     );
   }
+  // Review r12 H4g (revision 13): with every failure an earlier recovery of the run established (recovery-history.mjs), whichever output
+  // it survived in.
   const runErrors = unique([
     ...(summary.evidence_errors ?? []),
     ...(failed?.evidence_errors ?? []),
     ...journal.runErrors,
+    ...history.runErrors,
+    ...history.errors,
   ]);
   // The summary's records, then every committed record and every record of summary-error.json, joined by observation.
   const byKey = new Map();
@@ -757,12 +891,12 @@ function completeSummary(result, evidenceErrors) {
     const cleanupNotVerified =
       !result.ok ||
       summary.cleanup_failed === true ||
-      records.some(cleanupFailed);
+      records.some(cleanupFailed) ||
+      history.cleanupNotVerified;
     const outcome = FAILED.includes(summary.outcome)
       ? summary.outcome
-      : failures.length > 0 || cleanupNotVerified
-        ? "failed"
-        : candidate;
+      : (history.outcome ??
+        (failures.length > 0 || cleanupNotVerified ? "failed" : candidate));
     return {
       ...summary,
       ...(complete
@@ -786,7 +920,11 @@ function completeSummary(result, evidenceErrors) {
       ...(planUnknown ? { plan_unknown: true } : {}),
       evidence_errors: failures,
       cleanup_failed: cleanupNotVerified,
-      reaper: { ok: result.ok, file: join(runDir, "reaper.json") },
+      reaper: {
+        ok: result.ok,
+        file: join(runDir, "reaper.json"),
+        attempt: result.attempt ?? null,
+      },
     };
   };
   return { complete, render };
