@@ -306,6 +306,12 @@ describe("accessibility (jsdom layer)", () => {
       env: { online: false },
     });
     await t.until(() => row(task.occurrenceId) !== null);
+    // Revision 9 (review 9 R21): `until` gives up silently after its rounds, and axe passes a page whose row never appeared (shown by
+    // the diagnostic that mounts no rows); the row is the page this case judges, so its readiness is asserted first.
+    expect(
+      row(task.occurrenceId),
+      "readiness: the cached row did not appear within the bounded settling",
+    ).not.toBeNull();
     expect((await axe(document.body)).violations).toEqual([]);
   });
 });

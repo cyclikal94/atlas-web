@@ -424,6 +424,12 @@ describe("accessibility (jsdom layer)", () => {
       env: { online: false },
     });
     await t.until(ready);
+    // Revision 9 (review 9 R21): `until` gives up silently after its rounds, and axe passes a detail page whose record card never
+    // appeared (shown by the diagnostic that mounts no rows); readiness is asserted before axe judges the page.
+    expect(
+      ready(),
+      "readiness: the record card did not appear within the bounded settling",
+    ).toBe(true);
     expect((await axe(document.body)).violations).toEqual([]);
   });
 });
