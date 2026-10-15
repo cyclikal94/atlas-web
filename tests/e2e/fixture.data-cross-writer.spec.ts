@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { staysHeld } from "./data-compat-observation";
 import { recordEvidence } from "./data-evidence";
 import {
   arm,
@@ -66,18 +67,9 @@ const untilWarning = (
     .toEqual({ notResponding, memoryOnly });
 const untilStatus = (page: Page, id: string, status: string) =>
   expect.poll(() => statusOf(page, id), { timeout: 20_000 }).toBe(status);
-/** The state stays `stopped` and nothing is sent while the page is observed, however the dispatcher is woken meanwhile. */
-async function staysHeld(
-  page: Page,
-  net: { commands: unknown[] },
-): Promise<void> {
-  for (let sample = 0; sample < 12; sample += 1) {
-    await page.evaluate(() => window.dispatchEvent(new Event("online")));
-    expect((await outboxState(page))?.kind).toBe("stopped");
-    expect(net.commands).toHaveLength(0);
-    await page.waitForTimeout(50);
-  }
-}
+// `staysHeld` (the twelve-reconnect observation of revision 27) is in `./data-compat-observation`: ADAPTED, WEB-14a revision 14 (R21),
+// separately labelled for the reviewer. It dispatched `online` and read the state at once, which since WEB-14a's reconnect guard reads the
+// compatibility hold (`held / compat_unconfirmed`), not the stop; each reconnect's `/health` check is now held, observed and answered.
 
 test.describe("E-O9 (revision 27, R46): a stop the dispatcher recorded ends with the facade's own success or abandonment, in a real engine", () => {
   for (const mechanism of MECHANISMS)

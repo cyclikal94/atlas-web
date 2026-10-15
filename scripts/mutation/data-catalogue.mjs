@@ -22147,7 +22147,9 @@ export const ENGINE = [
       "R47 (revision 29): (REAL ENGINE) admission takes a marker it could not read for no marker (a reloaded page sends the stopped draft)",
     file: "src/data/engine/outbox-dispatcher.ts",
     spec: "tests/e2e/fixture.data-claim-admission.spec.ts",
-    grep: "R47 cold: (marker, both unreadable: the fresh page|both unreadable and NO marker)",
+    // Re-anchored in WEB-14a revision 14 (design assessment C5): revision 33 renamed "marker, both unreadable: the fresh page" to the
+    // fault labels below, so that arm had selected nothing since; `directory` and `getItem` are the two "both unreadable" schedules.
+    grep: "R47 cold: (marker, (directory|getItem) unreadable: the fresh page|both unreadable and NO marker)",
     expect:
       /R47 cold: (marker, both unreadable: the fresh page|both unreadable and NO marker)/,
     patch: (t) =>

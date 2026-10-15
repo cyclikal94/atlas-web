@@ -733,3 +733,93 @@ describe("R46: markInFlight refuses a stopped draft in its own transaction and l
     }
   });
 });
+
+// ---- R21 (WEB-14a revision 14): a compatibility answer is not a recovery -------------------------------------------------------------
+describe("R21: no compatibility answer, in any order, lifts a stop or sends the stopped draft; only the explicit retry does", () => {
+  const STOPPED = (mechanism: Mechanism) => ({
+    kind: "stopped",
+    cause: "local_storage",
+    ...(mechanism === "memory" ? { memoryOnly: true as const } : {}),
+  });
+  const HELD = { kind: "held", reason: "compat_unconfirmed" };
+  /** A reconnect's sequence of answers (WEB-14a: `online` withdraws `supported` to `unknown` before the fresh answer). */
+  const ANSWERS = [
+    { compat: { status: "unknown" } as const, state: () => HELD },
+    {
+      compat: {
+        status: "unsupported",
+        version: "0.29.0",
+        supported: ">=0.28.0 <0.29.0",
+      } as const,
+      state: () => ({ kind: "paused", reason: "compat_unsupported" }),
+    },
+    { compat: { status: "unknown" } as const, state: () => HELD },
+    {
+      compat: { status: "missing" } as const,
+      state: () => ({ kind: "paused", reason: "compat_missing" }),
+    },
+    { compat: { status: "unreachable" } as const, state: () => HELD },
+    {
+      compat: { status: "supported", version: "0.28.0" } as const,
+      state: (m: Mechanism) => STOPPED(m),
+    },
+    { compat: { status: "unknown" } as const, state: () => HELD },
+    {
+      compat: { status: "supported", version: "0.28.0" } as const,
+      state: (m: Mechanism) => STOPPED(m),
+    },
+  ];
+
+  for (const mechanism of MECHANISMS)
+    test(`${mechanism}: unknown, unsupported, missing, unreachable and supported again leave the stop exactly as recorded and nothing sent`, async () => {
+      const w = await world();
+      try {
+        await queued(w);
+        await stopWhileHeld(w, "data.readDispatchWindow", () =>
+          facadeStop(w, mechanism),
+        );
+        expect(w.dispatcher.state.get()).toEqual(STOPPED(mechanism));
+        for (const [step, answer] of ANSWERS.entries()) {
+          w.compat.set(answer.compat);
+          await w.settle();
+          await w.advance(10_000);
+          const at = `answer ${step + 1}: ${answer.compat.status}`;
+          expect(w.dispatcher.state.get(), at).toEqual(answer.state(mechanism));
+          expect(w.sent, at).toHaveLength(0);
+          expect(where(w, "draft:a"), at).toEqual(STANDING(mechanism));
+          expect(w.outbox.storageNotResponding.get(), at).toBe(true);
+          expect(w.outbox.storageMemoryOnly.get(), at).toBe(
+            mechanism === "memory",
+          );
+          expect(w.drafts()[0]?.status, at).toBe("queued");
+        }
+        w.outbox.retry("a");
+        await w.settle();
+        await w.advance(10_000);
+        expect(w.sent.map((s) => s.key)).toEqual(["a"]);
+        expect(where(w, "draft:a")).toEqual(NOTHING);
+      } finally {
+        finish(w);
+      }
+    });
+
+  test("control: with NO stop, an unconfirmed answer holds the draft and the fresh supported answer sends it exactly once", async () => {
+    const w = await world();
+    try {
+      w.compat.set({ status: "unknown" });
+      await queued(w);
+      w.online = true;
+      w.start();
+      await w.settle();
+      await w.advance(10_000);
+      expect(w.dispatcher.state.get()).toEqual(HELD);
+      expect(w.sent).toHaveLength(0);
+      w.compat.set({ status: "supported", version: "0.28.0" });
+      await w.settle();
+      await w.advance(10_000);
+      expect(w.sent.map((s) => s.key)).toEqual(["a"]);
+    } finally {
+      finish(w);
+    }
+  });
+});

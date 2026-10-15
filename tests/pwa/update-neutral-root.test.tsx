@@ -271,6 +271,12 @@ const ungate = async (app: App) => {
 };
 const region = () =>
   document.querySelector("[data-neutral-live-region]") as HTMLElement;
+/**
+ * The neutral notice's own text, not the live region's copy of it: the region is written on the next animation frame (and asserted
+ * separately after `frame()`), so an unscoped lookup finds the text twice whenever a frame has passed (WEB-14a revision 14: one failure
+ * of the full unit suite under load; forced with one frame, deterministic).
+ */
+const NOT_REGION = { ignore: "script, style, [data-neutral-live-region]" };
 const frame = () =>
   act(() => new Promise((resolve) => requestAnimationFrame(() => resolve(0))));
 /** The update banner on whichever surface shows it (the neutral one loads lazily): its absence fails by assertion, not by a lookup error. */
@@ -323,7 +329,9 @@ describe("R19 (S2): a save that fails after the shell was unmounted by a session
       if (neutral) {
         expect(document.body.textContent).not.toContain("PRIVATE");
         expect(document.body.textContent).not.toContain(CONTEXT);
-        expect(screen.getByText(NEUTRAL_SAVE_FAILED_TEXT)).toBeInTheDocument();
+        expect(
+          screen.getByText(NEUTRAL_SAVE_FAILED_TEXT, NOT_REGION),
+        ).toBeInTheDocument();
         await frame();
         expect(region()).toHaveTextContent(NEUTRAL_SAVE_FAILED_TEXT);
       }
@@ -420,7 +428,9 @@ describe("R19 (S5): a save refused while the account is being signed out", () =>
       expect(app.reloads()).toBe(0);
       expect(await choices()).toEqual(["Discard and reload anyway"]);
       if (neutral)
-        expect(screen.getByText(NEUTRAL_SAVE_REFUSED_TEXT)).toBeInTheDocument();
+        expect(
+          screen.getByText(NEUTRAL_SAVE_REFUSED_TEXT, NOT_REGION),
+        ).toBeInTheDocument();
       await click(app, "Discard and reload anyway");
       expect(app.reloads()).toBe(1);
     });
@@ -447,7 +457,7 @@ describe("R19 (S6/S7): a discard that fails, with a copy saved earlier", () => {
         if (neutral) {
           expect(document.body.textContent).not.toContain("PRIVATE");
           expect(
-            screen.getByText(NEUTRAL_DISCARD_FAILED_TEXT),
+            screen.getByText(NEUTRAL_DISCARD_FAILED_TEXT, NOT_REGION),
           ).toBeInTheDocument();
           await frame();
           expect(region()).toHaveTextContent(NEUTRAL_DISCARD_FAILED_TEXT);

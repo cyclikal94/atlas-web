@@ -1,4 +1,16 @@
 import type { BrowserContext, Page } from "@playwright/test";
+import {
+  COMPAT_HELD,
+  type HealthAnswer,
+  healthGate,
+  reconnectHeld,
+  type StopSnapshot,
+  SUPPORTED,
+  staysHeld,
+  staysUnsent,
+  stopSnapshot,
+  supportReturns,
+} from "./data-compat-observation";
 import { recordEvidence } from "./data-evidence";
 import {
   arm,
@@ -119,39 +131,10 @@ const untilStatus = (page: Page, id: string, status: string) =>
 const untilHeld = untilOutboxPlanCalled;
 const untilLanded = (page: Page, text: string) =>
   untilDraftWriteCommitted(page, ACCOUNT, text);
-/** The state stays `stopped` and nothing is sent while the page is observed, however the dispatcher is woken meanwhile. */
-async function staysHeld(
-  page: Page,
-  net: { commands: unknown[] },
-  allowed = 0,
-): Promise<void> {
-  for (let sample = 0; sample < 12; sample += 1) {
-    await page.evaluate(() => window.dispatchEvent(new Event("online")));
-    expect((await outboxState(page))?.kind).toBe("stopped");
-    expect(net.commands).toHaveLength(allowed);
-    await page.waitForTimeout(50);
-  }
-}
-/**
- * Nothing is sent while the page is observed, however the dispatcher is woken meanwhile, and the dispatcher ends up stopped. Unlike
- * `staysHeld` it does not assert the state at every sample: after a person's retry the dispatcher passes through `waiting` while the retry
- * resumes it (a transient of the retry, not a send), and the case is about what is sent.
- */
-async function staysUnsent(
-  page: Page,
-  net: { commands: unknown[] },
-  allowed = 0,
-): Promise<void> {
-  for (let sample = 0; sample < 12; sample += 1) {
-    await page.evaluate(() => window.dispatchEvent(new Event("online")));
-    expect(net.commands).toHaveLength(allowed);
-    await page.waitForTimeout(50);
-  }
-  await expect
-    .poll(async () => (await outboxState(page))?.kind, { timeout: 10_000 })
-    .toBe("stopped");
-  expect(net.commands).toHaveLength(allowed);
-}
+// `staysHeld` and `staysUnsent` (the twelve-reconnect observations of revisions 28 to 31) are in `./data-compat-observation`: ADAPTED, WEB-14a
+// revision 14 (R21), separately labelled for the reviewer. They dispatched `online` and read the state at once, which since WEB-14a's
+// reconnect guard reads the compatibility hold (`held / compat_unconfirmed`), not the stop. Each reconnect's `/health` check is now held
+// and observed, then answered `supported`, and the EXACT stop, its raw facts and the commands sent are compared throughout.
 /** The facade's own write of `id` fails by `mechanism`, `armed` times: the stop is recorded by the facade, the other writer. */
 async function facadeStop(
   page: Page,
@@ -1225,5 +1208,245 @@ test.describe("E-O10 (revision 31, R50): an older successful write delivered aft
     expect(net.commands).toHaveLength(1);
     expect(net.commands[0]?.body).toContain('"label":"saved"');
     recordEvidence(info, "r50-control-before", { sent: net.commands.length });
+  });
+});
+
+/**
+ * R21 (WEB-14a revision 14): a reconnect's compatibility check is not a recovery, and it does not mask one, in a real engine.
+ *
+ * WEB-14a made every `online` event withdraw the page's `supported` answer until a check asked after it answers (`revalidate` in
+ * `src/session/session.ts`); the dispatcher holds queued writes meanwhile (`held / compat_unconfirmed`). The independent review of revision 13
+ * found the stop observers of these specs reading that hold as if it were the stop (R21). The cases here qualify the corrected observation
+ * (`./data-compat-observation`): the stop with no event at all (the positive control the reconnect observations are compared with); a
+ * check that fails, and the next one that answers; two reconnects whose checks overlap; and, with NO stop, a draft that the held check
+ * holds and the fresh answer sends exactly once, including a claim that was made before the reconnect and is given back by the step that
+ * issues the request. FIXTURE evidence: the `/health` answers are scripted and held by the spec, the dispatcher is the fixture's test
+ * leader, and the stop's faults are the spec's (see E-O10 above).
+ */
+test.describe("R21 (WEB-14a revision 14): a reconnect's compatibility check is not a recovery, in a real engine", () => {
+  const FAST = { intervals: [10, 25, 50], timeout: 10_000 };
+  /** The R46 schedule above: the facade records the stop while the dispatcher's queue read is held; the dispatcher then stands stopped. */
+  async function stoppedPage(context: BrowserContext, mechanism: Mechanism) {
+    const { net, page } = await boot(context);
+    await context.setOffline(true);
+    expect((await enqueue(page, A, "r", "original"))?.kind).toBe("queued");
+    await page.evaluate(() =>
+      window.__atlasData?.holdOutboxPlan("data.readDispatchWindow"),
+    );
+    await context.setOffline(false);
+    await untilHeld(page);
+    await facadeStop(page, mechanism, A, "r");
+    await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+    await untilState(page, "stopped");
+    const base = await stopSnapshot(page);
+    expect(base.compat).toBe("supported");
+    expect(base.facts.queued).toHaveLength(1);
+    return { net, page, base };
+  }
+  /** Twelve samples 50 ms apart: compatibility and state exactly as given, the stop's facts as `base`, and nothing sent. */
+  async function observe(
+    page: Page,
+    net: { commands: unknown[] },
+    base: StopSnapshot,
+    expected: { compat: string; state: unknown },
+    sent = 0,
+  ): Promise<StopSnapshot[]> {
+    const samples: StopSnapshot[] = [];
+    for (let sample = 0; sample < 12; sample += 1) {
+      const s = await stopSnapshot(page);
+      samples.push(s);
+      expect(s.compat, `sample ${sample + 1}`).toBe(expected.compat);
+      expect(s.state, `sample ${sample + 1}`).toEqual(expected.state);
+      expect(s.facts, `sample ${sample + 1}`).toEqual(base.facts);
+      expect(net.commands, `sample ${sample + 1}`).toHaveLength(sent);
+      await page.waitForTimeout(50);
+    }
+    return samples;
+  }
+  /** The person's retry lifts the stop: the original draft goes out exactly once and the stop's records are gone. */
+  async function retriedOnce(
+    page: Page,
+    net: { commands: Array<{ key: string | null; body: string }> },
+  ) {
+    await page.evaluate((id) => window.__atlasData?.retryOutbox(id), A);
+    await untilStatus(page, A, "acknowledged");
+    await untilWarning(page, false, false);
+    expect(net.commands.map((c) => c.key)).toEqual([A]);
+    expect(net.commands[0]?.body).toContain('"label":"original"');
+    expect(await streaks(page)).toEqual({});
+    expect(await markers(page)).toEqual([]);
+  }
+
+  for (const mechanism of MECHANISMS)
+    test(`R21: ${mechanism}: no event (control): the stop stands exactly as recorded and nothing is sent for 600 ms, and the retry sends the original once`, async ({
+      context,
+    }, info) => {
+      const { net, page, base } = await stoppedPage(context, mechanism);
+      const samples = await observe(page, net, base, {
+        compat: "supported",
+        state: base.state,
+      });
+      recordEvidence(info, `r21-no-event-${mechanism}`, {
+        base,
+        last: samples.at(-1),
+      });
+      await retriedOnce(page, net);
+    });
+
+  const FAILURES: Array<{ name: string; answer: HealthAnswer }> = [
+    { name: "a server error (503)", answer: { kind: "status", status: 503 } },
+    { name: "a failed request", answer: { kind: "abort" } },
+  ];
+  for (const failure of FAILURES)
+    test(`R21: streak: a reconnect's check that ends in ${failure.name} keeps the writes held and the stop exactly as recorded; the next reconnect's supported answer leaves the stop standing, and only the retry sends`, async ({
+      context,
+    }, info) => {
+      const { net, page, base } = await stoppedPage(context, "streak");
+      const gate = await healthGate(page);
+      await reconnectHeld(page, gate);
+      await gate.release(failure.answer);
+      await expect
+        .poll(async () => (await stopSnapshot(page)).compat, FAST)
+        .toBe("unreachable");
+      const failed = await observe(page, net, base, {
+        compat: "unreachable",
+        state: COMPAT_HELD,
+      });
+      // The next reconnect asks again at once (the paced retry is 30 s away); an `unreachable` answer is not withdrawn, it is replaced.
+      gate.hold();
+      await page.evaluate(() => window.dispatchEvent(new Event("online")));
+      await expect.poll(() => gate.pending(), FAST).toBe(1);
+      const asking = await stopSnapshot(page);
+      expect(asking.compat).toBe("unreachable");
+      expect(asking.state).toEqual(COMPAT_HELD);
+      expect(asking.facts).toEqual(base.facts);
+      await supportReturns(page, gate);
+      await expect
+        .poll(async () => (await stopSnapshot(page)).state, FAST)
+        .toEqual(base.state);
+      const supported = await observe(page, net, base, {
+        compat: "supported",
+        state: base.state,
+      });
+      recordEvidence(info, `r21-failed-check-${failure.answer.kind}`, {
+        base,
+        failed: failed.at(-1),
+        supported: supported.at(-1),
+        requests: gate.requests(),
+      });
+      await retriedOnce(page, net);
+    });
+
+  test("R21: streak: two reconnects overlap: the supported answer to the check asked before the second is dropped, only the check asked after it restores support, and the stop stands throughout", async ({
+    context,
+  }, info) => {
+    const { net, page, base } = await stoppedPage(context, "streak");
+    const gate = await healthGate(page);
+    await reconnectHeld(page, gate);
+    const asked = gate.requests();
+    // The second reconnect while the first check is in flight: it asks nothing at once (one check at a time) and marks a rerun.
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await page.waitForTimeout(100);
+    expect(gate.requests()).toBe(asked);
+    expect(gate.pending()).toBe(1);
+    // The first check answers `supported`: it was asked before the latest reconnect, so it is dropped, and the rerun is asked.
+    await gate.answerOldest(SUPPORTED);
+    await expect.poll(() => gate.pending(), FAST).toBe(1);
+    expect(gate.requests()).toBe(asked + 1);
+    const stale = await observe(page, net, base, {
+      compat: "unknown",
+      state: COMPAT_HELD,
+    });
+    await supportReturns(page, gate);
+    await expect
+      .poll(async () => (await stopSnapshot(page)).state, FAST)
+      .toEqual(base.state);
+    const supported = await observe(page, net, base, {
+      compat: "supported",
+      state: base.state,
+    });
+    recordEvidence(info, "r21-stale-check", {
+      base,
+      stale: stale.at(-1),
+      supported: supported.at(-1),
+      requests: gate.requests(),
+    });
+    await retriedOnce(page, net);
+  });
+
+  test("R21: control: with NO stop, a reconnect's held check holds a new draft unsent, and the fresh supported answer sends it exactly once", async ({
+    context,
+  }, info) => {
+    const { net, page } = await boot(context);
+    const gate = await healthGate(page);
+    await expect
+      .poll(async () => (await stopSnapshot(page)).compat, FAST)
+      .toBe("supported");
+    await reconnectHeld(page, gate);
+    expect((await enqueue(page, A, "r", "original"))?.kind).toBe("queued");
+    for (let sample = 0; sample < 12; sample += 1) {
+      const s = await stopSnapshot(page);
+      expect(s.compat).toBe("unknown");
+      expect(s.state).toEqual(COMPAT_HELD);
+      expect(net.commands).toHaveLength(0);
+      expect(await statusOf(page, A)).toBe("queued");
+      await page.waitForTimeout(50);
+    }
+    await supportReturns(page, gate);
+    await untilStatus(page, A, "acknowledged");
+    expect(net.commands.map((c) => c.key)).toEqual([A]);
+    expect(net.commands[0]?.body).toContain('"label":"original"');
+    recordEvidence(info, "r21-no-stop-held-check", {
+      requests: gate.requests(),
+      sent: net.commands.map((c) => c.key),
+    });
+  });
+
+  test("R21: control: with NO stop, a claim made before the reconnect is given back by the step that issues the request while the check is held, and the draft is sent exactly once after the fresh supported answer", async ({
+    context,
+  }, info) => {
+    const { net, page } = await boot(context);
+    const gate = await healthGate(page);
+    await context.setOffline(true);
+    expect((await enqueue(page, A, "r", "original"))?.kind).toBe("queued");
+    await page.evaluate(() =>
+      window.__atlasData?.holdOutboxPlan("data.markInFlight"),
+    );
+    await context.setOffline(false);
+    await untilHeld(page);
+    // The claim landed (its answer is held): the draft is in flight and nothing is sent yet.
+    await untilStatus(page, A, "in_flight");
+    expect(net.commands).toHaveLength(0);
+    // The reconnect: its check is held, so compatibility is unknown when the claim's answer reaches the step that issues the request.
+    gate.hold();
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect.poll(() => gate.pending(), FAST).toBe(1);
+    expect((await stopSnapshot(page)).compat).toBe("unknown");
+    await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+    await expect
+      .poll(() => statusOf(page, A), {
+        ...FAST,
+        message: "R21: the claim is given back while the check is held",
+      })
+      .toBe("queued");
+    await expect
+      .poll(async () => (await stopSnapshot(page)).state, FAST)
+      .toEqual(COMPAT_HELD);
+    for (let sample = 0; sample < 12; sample += 1) {
+      const s = await stopSnapshot(page);
+      expect(s.compat).toBe("unknown");
+      expect(s.state).toEqual(COMPAT_HELD);
+      expect(net.commands).toHaveLength(0);
+      expect(await statusOf(page, A)).toBe("queued");
+      await page.waitForTimeout(50);
+    }
+    await supportReturns(page, gate);
+    await untilStatus(page, A, "acknowledged");
+    expect(net.commands.map((c) => c.key)).toEqual([A]);
+    expect(net.commands[0]?.body).toContain('"label":"original"');
+    recordEvidence(info, "r21-no-stop-claim-given-back", {
+      requests: gate.requests(),
+      sent: net.commands.map((c) => c.key),
+    });
   });
 });

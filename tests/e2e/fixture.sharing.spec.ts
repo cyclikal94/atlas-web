@@ -847,6 +847,11 @@ test.describe("E-SH7: keyboard only (A12)", () => {
     await dialog.getByRole("textbox", { name: "Exact username" }).focus();
     await page.keyboard.type("jamie");
     await page.keyboard.press("Enter");
+    // The lookup is answered asynchronously: wait for its result before Tabbing to it (WEB-14a revision 14: the Tab loop ran out before
+    // the answer in one Chromium run; forced with a delayed lookup, deterministic). Waiting is not an input: the case stays keyboard-only.
+    await expect(
+      dialog.getByRole("button", { name: "Choose: jamie" }),
+    ).toBeVisible();
     await focusOn(/^Choose: jamie$/);
     await page.keyboard.press("Enter");
     await focusOn(/^Replace policy$/);

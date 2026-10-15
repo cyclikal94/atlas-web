@@ -242,13 +242,26 @@ test.describe("D-P8: declared-then-probe with the real adapter", () => {
       ],
     });
     expect(otherIncarnation).toEqual(["failed", "failed"]);
-    // Not admitted (the account was closed for a deletion or left): nothing is opened.
+    // Not admitted (the account was closed for a deletion or left): nothing is opened, so nothing is saved.
     const closed = await run({
       incarnationId: incarnationId as string,
       admitted: false,
-      calls: [{ kind: "save", tab: "t4", text: "y" }, { kind: "list" }],
+      calls: [{ kind: "save", tab: "t4", text: "y" }],
     });
-    expect(closed).toEqual(["failed", "[]"]);
+    expect(closed).toEqual(["failed"]);
+    // ADAPTED, WEB-14a revision 14 (separately labelled for the reviewer): nothing is read either. Revision 1 expected the list to answer
+    // "[]" here; revision 7 (R15) made a recovery read that cannot reach the store REJECT (unavailable), never answer an empty list, and
+    // this native case was not brought along (the complete fixture selection had not run since). The intent is kept: a connection that is
+    // not admitted opens nothing and certifies nothing.
+    const closedList = await run({
+      incarnationId: incarnationId as string,
+      admitted: false,
+      calls: [{ kind: "list" }],
+    }).then(
+      (answers) => `answered ${JSON.stringify(answers)}`,
+      (error: Error) => error.message,
+    );
+    expect(closedList).toMatch(/store failure: closed/);
     // A database that does not exist is never created.
     const missing = crypto.randomUUID();
     const absent = await run({
@@ -289,6 +302,7 @@ test.describe("D-P8: declared-then-probe with the real adapter", () => {
       answers,
       otherIncarnation,
       closed,
+      closedList,
       absent,
       contract,
     });
