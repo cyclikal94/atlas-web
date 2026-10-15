@@ -1,5 +1,5 @@
-import { useEffect, useSyncExternalStore } from "react";
-import { useAnnouncer } from "../components/ui/announcer";
+import { useEffect, useRef, useSyncExternalStore } from "react";
+import { type Announcement, useAnnouncer } from "../components/ui/announcer";
 import { Button } from "../components/ui/button";
 import { authFeedback } from "../features/authentication/feedback";
 import { MessageText } from "../features/authentication/MessageText";
@@ -34,21 +34,41 @@ export function SessionNotices() {
   );
   const first = notices[0]?.id;
   const latest = feedback[feedback.length - 1];
+  /** What each shown notice announced, by notice: a dismissed notice retracts it (an announcement made since is kept). */
+  const announced = useRef(new Map<string, Announcement>());
   // biome-ignore lint/correctness/useExhaustiveDependencies: announce once per notice, not per announcer identity
   useEffect(() => {
-    if (first) announcer.announce(REMAINED_SIGNED_IN);
+    if (first)
+      announced.current.set(
+        `notice:${first}`,
+        announcer.announce(REMAINED_SIGNED_IN),
+      );
   }, [first]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: announce once per fact, not per announcer identity
   useEffect(() => {
     if (!latest) return;
-    announcer.announce(
-      latest.kind === "superseded"
-        ? SUPERSEDED_BANNER.message
-        : latest.kind === "lock_wait"
-          ? LOCK_WAIT_BANNER.heading
-          : textOf(latest.message),
+    announced.current.set(
+      `feedback:${latest.id}`,
+      announcer.announce(
+        latest.kind === "superseded"
+          ? SUPERSEDED_BANNER.message
+          : latest.kind === "lock_wait"
+            ? LOCK_WAIT_BANNER.heading
+            : textOf(latest.message),
+      ),
     );
   }, [latest?.id]);
+  useEffect(() => {
+    const shown = new Set([
+      ...notices.map((notice) => `notice:${notice.id}`),
+      ...feedback.map((item) => `feedback:${item.id}`),
+    ]);
+    for (const [key, announcement] of announced.current)
+      if (!shown.has(key)) {
+        announced.current.delete(key);
+        announcement.retract();
+      }
+  }, [notices, feedback]);
   if (notices.length === 0 && feedback.length === 0) return null;
   return (
     <section

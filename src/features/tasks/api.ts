@@ -1,4 +1,3 @@
-import type { CacheRow } from "../../data";
 import { recogniseAtlasError } from "../../lib/api-client/problem";
 import { type Session, StampedRequestError } from "../../session";
 import {
@@ -9,7 +8,6 @@ import {
   parseJournalPage,
   parseOccurrencePage,
   parsePresets,
-  parseResourcePage,
   parseTaskDetail,
   type TaskDetail,
   type TaskPreset,
@@ -66,7 +64,6 @@ export interface TasksApi {
     progressId: string,
     after: number,
   ): Promise<TasksResult<ProgressJournal>>;
-  listProgress(occurrenceId: string): Promise<TasksResult<CacheRow[]>>;
   /** `POST /task-access-commands` with the caller's key and the canonical body of one attempt. */
   enrol(
     command: EnrolCommand,
@@ -237,12 +234,6 @@ export function createTasksApi(
         "/progress/{id}/entries",
         { path: { id: progressId }, query: { after, limit: 200 } },
         parseJournalPage,
-      ),
-    listProgress: (occurrenceId) =>
-      get(
-        "/progress",
-        { query: { parent_id: occurrenceId, limit: 200 } },
-        (body) => parseResourcePage(body)?.items ?? null,
       ),
     enrol: async (command, key) =>
       offline() ??

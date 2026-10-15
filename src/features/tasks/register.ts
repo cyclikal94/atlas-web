@@ -17,9 +17,10 @@ import {
   reviseTask,
 } from "./model/commands";
 import {
+  PROGRESS_PAGE,
   parseDefinition,
   parseEvidence,
-  parseResourcePage,
+  parseProgressPage,
   parseTaskDetail,
 } from "./model/contract";
 import { evaluate } from "./model/evaluate";
@@ -169,7 +170,14 @@ function streamOf(
   ].find((id) => id !== occurrenceId);
 }
 
-/** Progress-level kinds: my stream from `GET /progress?parent_id=<occurrence>`, matched by its id. */
+/**
+ * Progress-level kinds: my stream from `GET /progress?parent_id=<occurrence>`, matched by its id. The collection is paged (R19, review of
+ * 15 October 2026): the endpoint orders an occurrence's visible streams by id, so mine can be on any page. Walk the pages one at a time,
+ * following each page's cursor, and stop at my stream; it is absent (`inaccessible`) only once a valid page ENDS the collection. A refusal
+ * or an error of any page is that page's answer, and a page that is not one of this collection (`parseProgressPage`: a missing, repeated
+ * or backward cursor among them) is `indeterminate`, never absence and never another request. Only the page in hand is kept. The data
+ * layer seals the whole walk; a scope that ended (the dialog closed, the account changed) sends nothing more and answers nothing.
+ */
 async function readProgressCurrent(
   draft: DraftWithCommand,
   io: CurrentReadIo,
@@ -177,19 +185,27 @@ async function readProgressCurrent(
   const command = commandOf(draft);
   const occurrence = command?.occurrence_id;
   const stream = streamOf(draft, occurrence);
-  if (typeof occurrence !== "string" || stream === undefined)
-    return { kind: "failed", reason: "unavailable" };
-  const { status, body } = await readJson(
-    io,
-    `/progress?parent_id=${encodeURIComponent(occurrence)}&limit=200`,
-  );
-  if (status !== 200) return failedFor(status);
-  const page = parseResourcePage(body);
-  if (page === null) return { kind: "indeterminate" };
-  const row = page.items.find((item) => item.id === stream);
-  return row === undefined
-    ? { kind: "failed", reason: "inaccessible" }
-    : { kind: "loaded", value: row };
+  const ended: CurrentRead = { kind: "failed", reason: "unavailable" };
+  if (typeof occurrence !== "string" || stream === undefined) return ended;
+  let after: string | null = null;
+  for (;;) {
+    if (io.signal.aborted) return ended;
+    const { status, body } = await readJson(
+      io,
+      `/progress?parent_id=${encodeURIComponent(occurrence)}&limit=${PROGRESS_PAGE}${
+        after === null ? "" : `&after=${encodeURIComponent(after)}`
+      }`,
+    );
+    if (io.signal.aborted) return ended;
+    if (status !== 200) return failedFor(status);
+    const page = parseProgressPage(body, occurrence, after);
+    if (page === null) return { kind: "indeterminate" };
+    const row = page.items.find((item) => item.id === stream);
+    if (row !== undefined) return { kind: "loaded", value: row };
+    if (page.next_after === null)
+      return { kind: "failed", reason: "inaccessible" };
+    after = page.next_after;
+  }
 }
 
 /**

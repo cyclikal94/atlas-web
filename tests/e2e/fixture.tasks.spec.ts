@@ -3478,3 +3478,186 @@ test.describe("E-T25: offline, a fix known only from the full history waits; a r
       });
     });
 });
+
+// ---- revision 7 (review 7 of 15 October 2026, R19) ----------------------------------------------------------------------------------
+
+/**
+ * E-T26 (R19, design assessment P10): the queue's conflict dialog for a version-checked "Mark done", through the PRODUCTION tree, data
+ * env and task registration. `GET /progress?parent_id=<occurrence>` is served as the released endpoint pages it (ids in order, 200 a page,
+ * the last id of a full page as `next_after`), with 200 other streams before mine: mine is on the SECOND page. The dialog's "Currently
+ * saved" is my stream at version 7, and "Resend as a new operation" queues ONE replacement on 7 (sent with a new key). Control: a
+ * collection that ends without mine is a failed read, and nothing is queued. A reload keeps the durable operation, sends nothing by
+ * itself, and the reopened dialog walks again from the first page.
+ */
+test.describe("E-T26: the conflict dialog finds my stream on a later page of /progress (A10, A14, A17; R19 of revision 7)", () => {
+  const others = Array.from(
+    { length: 200 },
+    (_, i) =>
+      `00000000-0000-4000-8000-${(i + 1).toString(16).padStart(12, "0")}`,
+  );
+  async function conflictOnSync(
+    context: BrowserContext,
+    n: number,
+    mine: "second-page" | "absent",
+  ) {
+    const a = buildTask({ n, title: "Brush your teeth" });
+    // A precondition of the arrangement: every other stream comes BEFORE mine in the endpoint's order.
+    expect(others.every((id) => id < a.progressId)).toBe(true);
+    const { page, net } = await setup(context, todayRoute(), [a]);
+    // Served AFTER the stub and the task reads (a later route wins), before the dialog that asks for it.
+    const asked: Array<string | null> = [];
+    await context.route(
+      (url) => url.pathname === `${API}/progress`,
+      async (route) => {
+        const url = new URL(route.request().url());
+        const after = url.searchParams.get("after");
+        asked.push(after);
+        expect(url.searchParams.get("parent_id")).toBe(a.occurrenceId);
+        expect(url.searchParams.get("limit")).toBe("200");
+        const all = [...others, ...(mine === "absent" ? [] : [a.progressId])];
+        const items = all
+          .filter((id) => after === null || id > after)
+          .slice(0, 200);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: items.map((id) => ({
+              id,
+              kind: "progress",
+              parent_id: a.occurrenceId,
+              label: id === a.progressId ? "My progress, as saved" : "Other",
+              value: {},
+              version: 7,
+              can_edit: id === a.progressId,
+            })),
+            next_after: items.length === 200 ? items.at(-1) : null,
+          }),
+        });
+      },
+    );
+    await goOfflineAtBoundary(page);
+    await rowOf(page, a.occurrenceId)
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    // Meanwhile my stream moved on the server: the record is refused on its version.
+    net.commandScript.push(() => conflict("conflict"));
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => [d.kind, d.status]))
+      .toEqual([["record", "version_conflict"]]);
+    await navigateInApp(page, "/sync?tab=conflicts");
+    return { a, page, net, asked };
+  }
+  const openDetails = async (page: Page) => {
+    await page
+      .getByRole("button", { name: /^Details: Progress entry/ })
+      .click({ timeout: 30_000 });
+    return page.getByRole("dialog");
+  };
+
+  test("mine on the second page: version 7 is shown, and the replacement is queued and sent on 7", async ({
+    context,
+  }) => {
+    const { a, page, net, asked } = await conflictOnSync(
+      context,
+      60,
+      "second-page",
+    );
+    const dialog = await openDetails(page);
+    const current = dialog.locator('[data-compare="current"]');
+    await expect(current).toContainText("My progress, as saved");
+    await expect(current).toContainText("version 7");
+    expect(asked).toEqual([null, others[199]]);
+    await dialog
+      .getByRole("button", { name: "Resend as a new operation" })
+      .click();
+    await expect(dialog).toHaveCount(0);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => [d.kind, d.status]))
+      .toEqual([["record", "queued"]]);
+    await send(page);
+    await expect.poll(() => net.commands.length).toBe(2);
+    const [first, resent] = net.commands.map(
+      (c) =>
+        (JSON.parse(c.body) as { command: Record<string, unknown> }).command,
+    );
+    expect(resent).toMatchObject({
+      kind: "record",
+      occurrence_id: a.occurrenceId,
+      expected_version: 7,
+      evidence: { kind: "checkbox", complete: true },
+    });
+    expect(resent?.entry_id).not.toBe(first?.entry_id);
+    expect(net.commands[1]?.key).not.toBe(net.commands[0]?.key);
+  });
+
+  test("control: a collection that ends without mine is a failed read; nothing is queued", async ({
+    context,
+  }) => {
+    const { page, net, asked } = await conflictOnSync(context, 61, "absent");
+    const dialog = await openDetails(page);
+    await expect(dialog.locator('[data-compare="current"]')).toContainText(
+      "Couldn't load the current state of this item to compare.",
+    );
+    // The first page was full, so the end was established by the second (empty) page.
+    expect(asked).toEqual([null, others[199]]);
+    await expect(
+      dialog.getByRole("button", { name: "Resend as a new operation" }),
+    ).toBeDisabled();
+    expect((await draftsOf(page)).map((d) => d.status)).toEqual([
+      "version_conflict",
+    ]);
+    expect(net.commands).toHaveLength(1);
+  });
+
+  test("closed, the page reloaded: the operation is kept and nothing is sent by itself; reopened, the dialog walks again from the first page", async ({
+    context,
+  }) => {
+    const { page, net, asked } = await conflictOnSync(
+      context,
+      62,
+      "second-page",
+    );
+    const [queued] = await draftsOf(page);
+    if (queued === undefined) throw new Error("setup: no queued operation");
+    // The dialog names the durable operation by its reference (the first eight hex digits of its local id, as `xxxx-xxxx`).
+    const hex = queued.local_id.replace(/-/g, "").slice(0, 8);
+    const reference = `ref ${hex.slice(0, 4)}-${hex.slice(4)}`;
+    let dialog = await openDetails(page);
+    await expect(dialog.locator('[data-compare="current"]')).toContainText(
+      "version 7",
+    );
+    await expect(dialog).toContainText(reference);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    // A reload: nothing of this page's memory survives; the queued operation does.
+    await page.goto(
+      `/__session?route=${encodeURIComponent("/sync?tab=conflicts")}`,
+    );
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await page.waitForFunction(() => window.__atlasData !== undefined);
+    await expect(page.getByRole("tab", { selected: true })).toHaveText(
+      /Needs a decision · 1/,
+      { timeout: 30_000 },
+    );
+    asked.length = 0;
+    dialog = await openDetails(page);
+    await expect(dialog.locator('[data-compare="current"]')).toContainText(
+      "version 7",
+    );
+    await expect(dialog).toContainText(reference);
+    expect(asked).toEqual([null, others[199]]);
+    // Nothing was sent or queued by itself: the one refused send, still the one operation needing a decision.
+    expect(net.commands).toHaveLength(1);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("tab", { selected: true })).toHaveText(
+      /Needs a decision · 1/,
+    );
+  });
+});

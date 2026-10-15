@@ -18670,6 +18670,210 @@ export const UNIT = [
         "    if (j !== null && (false as boolean))",
       ),
   },
+  {
+    id: "MU-2195",
+    title:
+      "WEB-10a R19: the current read looks at the first page of the progress collection only (a later page's stream is 'inaccessible')",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /on the (second|third) page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (page.next_after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+        '    if (page.next_after === null || after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+  {
+    id: "MU-2196",
+    title:
+      "WEB-10a R19: the walk does not send the page's cursor (it asks for the first page again)",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /on the (second|third) page/,
+    patch: (t) =>
+      sub(
+        t,
+        '        after === null ? "" : `&after=${encodeURIComponent(after)}`',
+        '        after === null ? "" : ""',
+      ),
+  },
+  {
+    id: "MU-2197",
+    title:
+      "WEB-10a R19: a FULL page without a cursor is taken as the end of the collection (absence)",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /full page with no cursor/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (out.length === PROGRESS_PAGE ? next !== last : next !== null)",
+        "  if (out.length !== PROGRESS_PAGE && next !== null)",
+      ),
+  },
+  {
+    id: "MU-2198",
+    title: "WEB-10a R19: a later page's error is taken as the stream's absence",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /later page answers (401|429|500|503): error/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (status !== 200) return failedFor(status);",
+        '    if (status !== 200)\n      return after === null\n        ? failedFor(status)\n        : { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+  {
+    id: "MU-2199",
+    title:
+      "WEB-10a R19: the page's ids are not checked to follow the cursor in the endpoint's order (a repeated or backward cursor is followed)",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect:
+      /repeated cursor|goes back before the cursor|out of the endpoint's order/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (last !== null && !(row.id > last))",
+        "      (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-2200",
+    title: "WEB-10a R19: a page is asked for after the read's scope ended",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /aborted before the first page/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (;;) {\n    if (io.signal.aborted) return ended;\n",
+        "  for (;;) {\n",
+      ),
+  },
+  {
+    id: "MU-2201",
+    title:
+      "WEB-10a R19: a page that arrived after the read's scope ended is still answered",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /HOLDS mine is held/,
+    patch: (t) =>
+      sub(t, "    );\n    if (io.signal.aborted) return ended;\n", "    );\n"),
+  },
+  {
+    id: "MU-2202",
+    title:
+      "WEB-10a R19: a projection of another kind is taken as my progress stream",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /projection of another kind/,
+    patch: (t) => sub(t, '      row.kind !== "progress" ||\n', ""),
+  },
+  {
+    id: "MU-2203",
+    title:
+      "WEB-10a R19: a projection of another occurrence is taken as my progress stream",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /projection of another occurrence/,
+    patch: (t) => sub(t, "      row.parent_id !== occurrenceId ||\n", ""),
+  },
+  {
+    id: "MU-2204",
+    title: "WEB-10a R19: the walk goes on past the page that holds my stream",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /LAST row of a full page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (row !== undefined) return { kind: "loaded", value: row };',
+        '    if (row !== undefined && page.next_after === null)\n      return { kind: "loaded", value: row };',
+      ),
+  },
+  {
+    id: "MU-2206",
+    title:
+      "WEB-10a rev 7 (live region): an earlier announcement's retraction erases a later message",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /never erases the later one|later notice's announcement survives/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (owners.current.get(region) !== announcement) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2207",
+    title:
+      "WEB-10a rev 7 (live region): a retraction does not cancel the announcement's pending frame",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /withdrawn before its frame|Dismiss BEFORE the frame/,
+    patch: (t) =>
+      sub(
+        t,
+        "          owners.current.delete(region);\n          cancel(region);\n",
+        "          owners.current.delete(region);\n",
+      ),
+  },
+  {
+    id: "MU-2208",
+    title:
+      "WEB-10a rev 7 (live region): a retraction leaves the announcement's written text",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /withdrawn after its frame|the failed order/,
+    patch: (t) =>
+      sub(
+        t,
+        '          cancel(region);\n          region.textContent = "";\n        },',
+        "          cancel(region);\n        },",
+      ),
+  },
+  {
+    id: "MU-2209",
+    title:
+      "WEB-10a rev 7 (live region): dismissing a notice does not withdraw its announcement",
+    file: "src/app/SessionNotices.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /the failed order|Dismiss BEFORE the frame/,
+    patch: (t) => sub(t, "        announcement.retract();\n", ""),
+  },
+  {
+    id: "MU-2210",
+    title:
+      "WEB-10a rev 7 (live region): a retraction owns the region by TEXT, not by announcement (it erases a later announcement of the same words)",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /ownership is the announcement, not its text/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (owners.current.get(region) !== announcement) return;\n",
+        "          if (\n            owners.current.get(region) !== announcement &&\n            region.textContent !== message\n          )\n            return;\n",
+      ),
+  },
 ];
 
 /**
@@ -21742,6 +21946,21 @@ export const ENGINE = [
         t,
         "      live(by) && sel.current === mine && versionRef.current === version;",
         "      live(by) && sel.current === mine;",
+      ),
+  },
+  {
+    id: "MU-2205",
+    title:
+      "WEB-10a N-T26: (REAL ENGINE) the conflict dialog's current read looks at the first page of /progress only",
+    file: "src/features/tasks/register.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T26:.*mine on the second page",
+    expect: /E-T26:/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (page.next_after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+        '    if (page.next_after === null || after === null)\n      return { kind: "failed", reason: "inaccessible" };',
       ),
   },
 ];

@@ -719,20 +719,39 @@ export function parseTaskDetail(value: unknown): TaskDetail | null {
   return { task, execution, materialisation };
 }
 
-/** A page of `GET /progress` (`ResourcePage`): the projections, or null. */
-export function parseResourcePage(
+/** The most projections one page of `GET /progress` holds at `limit=200` (the released endpoint's maximum). */
+export const PROGRESS_PAGE = 200;
+
+/**
+ * One page of `GET /progress?parent_id=<occurrence>&limit=200[&after=<after>]` (`ResourcePage`), or null when it is not what the released
+ * endpoint answers to that request (R19). The endpoint orders the visible streams by id (byte order: ids are lower-case UUIDs), returns only
+ * those after `after`, and names the last id of a FULL page as `next_after`; a page that is not full ends the collection with `null`. So a
+ * page whose cursor is missing, repeats or goes back, an empty or short page with a cursor, a full page without one, or a projection of
+ * another kind or occurrence is not a page of this collection: it can neither prove that a stream is absent nor lead to another request.
+ */
+export function parseProgressPage(
   value: unknown,
+  occurrenceId: string,
+  after: string | null,
 ): { items: CacheRow[]; next_after: string | null } | null {
-  if (!isObject(value)) return null;
+  if (!isObject(value) || !keysAre(value, ["items", "next_after"])) return null;
   const items = value.items;
-  if (!Array.isArray(items)) return null;
+  if (!Array.isArray(items) || items.length > PROGRESS_PAGE) return null;
   const out: CacheRow[] = [];
+  let last = after;
   for (const raw of items) {
     const row = parseProjection(raw);
-    if (row === null) return null;
+    if (
+      row === null ||
+      row.kind !== "progress" ||
+      row.parent_id !== occurrenceId ||
+      (last !== null && !(row.id > last))
+    )
+      return null;
     out.push(row);
+    last = row.id;
   }
-  const next = value.next_after ?? null;
-  if (next !== null && !isUuid(next)) return null;
+  const next = value.next_after;
+  if (out.length === PROGRESS_PAGE ? next !== last : next !== null) return null;
   return { items: out, next_after: next as string | null };
 }

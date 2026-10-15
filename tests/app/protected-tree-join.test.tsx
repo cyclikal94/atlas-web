@@ -6,7 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createProtectedTree } from "../../src/app/protected-tree";
 import { NEUTRAL_COPY } from "../../src/components/ui/neutral-state";
 import { authFeedback } from "../../src/features/authentication/feedback";
@@ -89,6 +89,94 @@ describe("notices about a sign-in that finished while an account displays", () =
     expect(
       screen.queryByText(NEUTRAL_COPY["1c.superseded"].message),
     ).toBeNull();
+  });
+
+  /**
+   * Kieran's decision of 15 October 2026 (WEB-10a revision 7; review 7's retained superseded-notice live-region race): dismissing a
+   * notice also withdraws its announcement. The announcer writes on the NEXT animation frame; here that frame is held and released at
+   * chosen points (no elapsed-time dependence: the race was a frame that came due during Testing Library's drain), and the banner and the
+   * polite live region are observed separately. The original test above is unchanged.
+   */
+  describe("T1/T2 (revision 7): the announcement belongs to its notice", () => {
+    let frames: Array<FrameRequestCallback | null> = [];
+    beforeEach(() => {
+      frames = [];
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+        frames.push(cb);
+        return frames.length;
+      });
+      vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
+        frames[id - 1] = null;
+      });
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+    const runFrames = () =>
+      act(() => {
+        for (const cb of frames.splice(0)) cb?.(performance.now());
+      });
+    const MESSAGE = NEUTRAL_COPY["1c.superseded"].message;
+    const polite = () =>
+      document.querySelector('[aria-live="polite"]') as HTMLElement;
+    const banner = (kind: string) =>
+      document.querySelector(`[data-notice="feedback-${kind}"]`);
+    const dismiss = (kind: string) =>
+      fireEvent.click(
+        (banner(kind) as HTMLElement).querySelector("button") as HTMLElement,
+      );
+    async function shown() {
+      history.replaceState(null, "", "/today");
+      mount();
+      await screen.findByRole("main", { hidden: true });
+      runFrames();
+      act(() => authFeedback.add({ kind: "superseded" }));
+      expect(banner("superseded")).not.toBeNull();
+    }
+
+    test("the frame wrote the announcement BEFORE Dismiss (the failed order): Dismiss removes the banner and withdraws the announcement", async () => {
+      await shown();
+      runFrames();
+      expect(polite().textContent).toBe(MESSAGE);
+      dismiss("superseded");
+      expect(banner("superseded")).toBeNull();
+      expect(polite().textContent).toBe("");
+      expect(screen.queryByText(MESSAGE)).toBeNull();
+    });
+
+    test("Dismiss BEFORE the frame: the dismissed notice is never announced", async () => {
+      await shown();
+      dismiss("superseded");
+      expect(banner("superseded")).toBeNull();
+      runFrames();
+      expect(polite().textContent).toBe("");
+    });
+
+    test("a later notice's announcement survives dismissing the earlier notice", async () => {
+      await shown();
+      runFrames();
+      act(() =>
+        authFeedback.add({
+          kind: "message",
+          tone: "info",
+          message: { id: "sso_linked" },
+        }),
+      );
+      runFrames();
+      expect(polite().textContent).toBe(MESSAGE_TEXT.sso_linked);
+      dismiss("superseded");
+      runFrames();
+      expect(banner("superseded")).toBeNull();
+      expect(banner("message")).not.toBeNull();
+      expect(polite().textContent).toBe(MESSAGE_TEXT.sso_linked);
+    });
+
+    test("control: a notice that is not dismissed keeps its announcement", async () => {
+      await shown();
+      runFrames();
+      expect(polite().textContent).toBe(MESSAGE);
+      expect(banner("superseded")).not.toBeNull();
+    });
   });
 
   test("linking single sign-on says so", async () => {

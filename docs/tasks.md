@@ -286,6 +286,20 @@ clean-retirement control (A's held read answered while A stays open: B watched t
 qualification cases (a card naming another account fails after one click; clicks that never take effect stop at three) are added. The helper,
 its three-click bound, its identity assertion, the 20 s deadline and zero retries are unchanged.
 
+38. **The current read of a progress-level kind walks the whole collection (R19; revision 7, design assessment C1–C4).** `GET /progress?parent_id=`
+    is paged by the released endpoint (ids in order, 200 a page, `next_after` the last id of a FULL page, null otherwise), so my stream can be on
+    any page. `readProgressCurrent` (`record`, `exclude`) asks page after page, following each page's own cursor, stops at my stream, and says
+    `inaccessible` only when a valid page ends the collection without it. A page that is not one of this collection (`parseProgressPage`: a
+    missing or extra member, ids out of order or not after the cursor, a full page without a cursor or a short page with one, another kind or
+    occurrence) is `indeterminate`: never absence, never another request. A later page's refusal or error is that page's answer. Only the page in
+    hand is kept; there is no page cap; the data layer seals the whole walk, and a scope that ended sends nothing more. The unused
+    `TasksApi.listProgress`, which dropped the cursor, is removed.
+39. **Kieran's decisions WEB10A-ANNOUNCEMENT-NAVIGATION-R43-20261015 (revision 7).** D1: dismissing a notice withdraws its own announcement
+    (the shared announcer's `announce` returns an `Announcement` whose `retract` cancels its pending frame and clears its text only while it
+    still owns the region, so a later message, even with the same words, is kept; speech already delivered cannot be undone). D2: the public
+    production spec leaves a page before going online (a labelled readiness correction) and keeps a deliberate case in which the online
+    re-check of the sign-in record — a read — is interrupted by navigation without any write. D3: the historical R43 double closure is an
+    accepted diagnostic risk owned by WEB-17 (its exact-one assertion unchanged); HF-1's own pre-beta verification is separate and unchanged.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream

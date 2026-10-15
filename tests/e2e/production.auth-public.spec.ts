@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { test } from "./auth-helpers";
+import { provokedIdbWarnings, test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
 import { expect, pressTab, runAxe } from "./helpers";
 import { expectPaintedContrast } from "./surface-checks";
@@ -210,9 +210,13 @@ for (const scheme of ["dark", "light"] as const) {
         const stub = new AuthStub();
         await stub.install(context);
         for (const [width, height] of WIDTHS) {
-          // A FRESH document each time: a fragment-only navigation does not reload the page.
-          await context.setOffline(false);
+          // A FRESH document each time: a fragment-only navigation does not reload the page. READINESS CORRECTION (WEB-10a revision 7,
+          // Kieran's decision of 15 October 2026; labelled for review): the previous page is left BEFORE the browser goes online. Going
+          // online first started that page's online re-check of the sign-in record (an IndexedDB read) and the navigation at once
+          // aborted it, which Firefox reports as a console warning (review 7's retained join-offline failure). That interruption is
+          // now a case of its own below ("going online and leaving at once"), not a side effect of this loop's reset.
           await page.goto("about:blank");
+          await context.setOffline(false);
           await page.setViewportSize({ width, height });
           await surface.open(page, stub);
           const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
@@ -296,6 +300,138 @@ for (const scheme of ["dark", "light"] as const) {
     }
   });
 }
+
+/**
+ * WEB-10a revision 7 (review 7's retained Firefox join-offline warning; Kieran's decision of 15 October 2026): the interruption the
+ * width loop used to cause by accident, made deliberate and deterministic. On `online` the join page re-checks the sign-in record
+ * (`evaluate` → `readRecords`, a `readwrite` transaction of `atlas-auth` that writes nothing). Here that transaction is HELD OPEN (the
+ * test keeps issuing `count()` reads on it) and the page is left at once: the transaction is aborted by the navigation, it made no write
+ * request (so, IndexedDB being atomic, nothing durable changed), and the next page boots and shows the form. Firefox's console warning
+ * for exactly that abort is declared as provoked; any other warning still fails.
+ */
+test.describe("join-offline: going online and leaving at once", () => {
+  test("the interrupted online re-check is a read: no write request, and the next page boots normally", async ({
+    page,
+    context,
+    provokes,
+  }, info) => {
+    provokes("idb-navigation-abort");
+    // Reported as they happen (a binding called during `pagehide` is lost in Chromium): created, each write request, completed/aborted.
+    const reports: Array<{ kind: string; id: number; held?: boolean }> = [];
+    await context.exposeBinding("__authTxReport", (_source, report) => {
+      reports.push(report);
+    });
+    await context.addInitScript(() => {
+      const w = window as unknown as {
+        __authTxReport?: (report: object) => void;
+        __holdNextAuthTx?: boolean;
+      };
+      const ids = new Map<IDBTransaction, number>();
+      let next = 0;
+      const transaction = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (
+        this: IDBDatabase,
+        ...args: Parameters<typeof transaction>
+      ) {
+        const tx = transaction.apply(this, args);
+        if (this.name !== "atlas-auth") return tx;
+        const held = w.__holdNextAuthTx === true;
+        if (held) w.__holdNextAuthTx = false;
+        next += 1;
+        const id = next;
+        ids.set(tx, id);
+        const done = () => w.__authTxReport?.({ kind: "done", id });
+        tx.addEventListener("complete", done);
+        tx.addEventListener("abort", done);
+        if (held) {
+          // Kept active by reads of its own: the test's hold, not the application's.
+          const store = tx.objectStore(tx.objectStoreNames[0] as string);
+          const spin = () => {
+            store.count().onsuccess = spin;
+          };
+          spin();
+        }
+        w.__authTxReport?.({ kind: "created", id, held });
+        return tx;
+      } as typeof transaction;
+      for (const name of ["put", "add", "delete", "clear"] as const) {
+        const original = IDBObjectStore.prototype[name] as (
+          ...a: unknown[]
+        ) => IDBRequest;
+        (IDBObjectStore.prototype as unknown as Record<string, unknown>)[name] =
+          function (this: IDBObjectStore, ...a: unknown[]) {
+            const id = ids.get(this.transaction);
+            if (id !== undefined) w.__authTxReport?.({ kind: "write", id });
+            return original.apply(this, a);
+          };
+      }
+    });
+    const stub = new AuthStub();
+    await stub.install(context);
+    await readyJoin(page, stub, null);
+    const offlineReason = page.getByText(
+      "Creating an account needs a connection.",
+    );
+    await context.setOffline(true);
+    await offlineReason.waitFor();
+    // Ordinary going online (no navigation; the positive control the hand-off keeps): the explanation goes, the form can be sent again,
+    // and every sign-in-record transaction the page made since completes with no write request.
+    const sinceOnline = reports.length;
+    await context.setOffline(false);
+    await expect(offlineReason).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Create account" }),
+    ).toBeEnabled();
+    await expect
+      .poll(() => {
+        const made = reports
+          .slice(sinceOnline)
+          .filter((r) => r.kind === "created");
+        return (
+          made.length > 0 &&
+          made.every((c) =>
+            reports.some((r) => r.kind === "done" && r.id === c.id),
+          )
+        );
+      })
+      .toBe(true);
+    expect(
+      reports.slice(sinceOnline).filter((r) => r.kind === "write"),
+    ).toEqual([]);
+    await context.setOffline(true);
+    await offlineReason.waitFor();
+    await page.evaluate(() => {
+      (window as unknown as { __holdNextAuthTx?: boolean }).__holdNextAuthTx =
+        true;
+    });
+    await context.setOffline(false);
+    // Barrier: the online re-check's transaction exists and is held open.
+    await expect
+      .poll(() => reports.some((r) => r.kind === "created" && r.held))
+      .toBe(true);
+    const held = reports.find((r) => r.kind === "created" && r.held)
+      ?.id as number;
+    const before = reports.length;
+    await page.goto("about:blank");
+    const atLeave = reports.slice(0, before);
+    const open = atLeave
+      .filter((r) => r.kind === "created")
+      .map((r) => r.id)
+      .filter((id) => !atLeave.some((r) => r.kind === "done" && r.id === id));
+    // The held transaction was still open when the page was left, and no transaction open then had made a write request.
+    expect(open).toContain(held);
+    expect(
+      reports.filter((r) => r.kind === "write" && open.includes(r.id)),
+    ).toEqual([]);
+    // The next page boots and works: the form, and offline the same explanation.
+    await readyJoin(page, stub, null);
+    await context.setOffline(true);
+    await page.getByText("Creating an account needs a connection.").waitFor();
+    await context.setOffline(false);
+    if (info.project.name === "production-firefox")
+      expect(provokedIdbWarnings(info.testId)).toBeGreaterThan(0);
+  });
+});
 
 test.describe("modes the design pass checks beyond width and theme", () => {
   test("forced colours and reduced motion keep the sign-in and join surfaces usable", async ({

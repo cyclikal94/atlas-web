@@ -261,10 +261,6 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
       count("readJournal");
       return { ok: true, value: { entries: [], next_after: null } };
     },
-    listProgress: async () => {
-      count("listProgress");
-      return { ok: true, value: [] };
-    },
     enrol: async () => {
       count("enrol");
       return { ok: false, kind: "uncertain" };

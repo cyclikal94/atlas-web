@@ -84,54 +84,71 @@ const cache = new EvidenceCache(
   join(root, ".agtx/evidence/validation-reuse"),
   before,
 );
-const temporary = mkdtempSync(
-  join(process.platform === "darwin" ? "/private/tmp" : "/tmp", "atlas-v-"),
-);
-json(join(runDir, "temporary.json"), {
-  path: temporary,
-  owner_pid: process.pid,
-});
 const records = [];
-const proc = processes(root);
-let stepTemporary = temporary;
-const executing = {
-  ...proc,
-  run: (command, args, env) =>
-    proc.run(command, args, {
-      ...env,
-      TMPDIR: stepTemporary,
-      TMP: stepTemporary,
-      TEMP: stepTemporary,
-    }),
-};
-// AR-20261006: managed Atlas campaigns route eligible batches automatically.
-// Outside agtx the normal standalone/local validation path is unchanged.
-let router = null;
-const contextFile = join(root, ".agtx/delivery-context.json");
-if (existsSync(contextFile)) {
-  const context = JSON.parse(readFileSync(contextFile, "utf8"));
-  if (!context.orchestrator)
-    throw new Error("Managed validation context has no orchestrator");
-  const { createRouter } = await import(
-    pathToFileURL(
-      join(context.orchestrator, "scripts/test_runners/validation-routing.mjs"),
-    ).href
-  );
-  router = createRouter({ root, runDir, proc: executing, throughput: true });
-}
+let temporary = null;
+let proc = null;
 let interrupted = false;
 let failed = false;
 let failureReason = null;
 let fatal = null;
-json(join(runDir, "inputs.json"), before);
-json(join(runDir, "requested-plan.json"), requestedPlan);
-json(join(runDir, "plan.json"), plan);
-json(join(runDir, "output-mapping.json"), campaign.outputs);
-console.log(`Validation evidence: ${runDir}`);
-console.log(
-  "One campaign: qualification passes directly into focused checks; final/profiling remain deferred unless --final is supplied.",
-);
 try {
+  // Honour an explicitly supplied allocation root. Invalid/empty roots refuse;
+  // only standalone invocations without TMPDIR use the platform default.
+  const suppliedRoot = process.env.TMPDIR;
+  if (suppliedRoot !== undefined && !suppliedRoot.trim())
+    throw new Error("The supplied TMPDIR is empty; no validation step was run");
+  temporary = mkdtempSync(
+    join(
+      suppliedRoot === undefined
+        ? process.platform === "darwin"
+          ? "/private/tmp"
+          : "/tmp"
+        : resolve(suppliedRoot),
+      "atlas-v-",
+    ),
+  );
+  proc = processes(root);
+  json(join(runDir, "temporary.json"), {
+    path: temporary,
+    owner_pid: process.pid,
+  });
+  let stepTemporary = temporary;
+  const executing = {
+    ...proc,
+    run: (command, args, env) =>
+      proc.run(command, args, {
+        ...env,
+        TMPDIR: stepTemporary,
+        TMP: stepTemporary,
+        TEMP: stepTemporary,
+      }),
+  };
+  // AR-20261006: managed Atlas campaigns route eligible batches automatically.
+  // Outside agtx the normal standalone/local validation path is unchanged.
+  let router = null;
+  const contextFile = join(root, ".agtx/delivery-context.json");
+  if (existsSync(contextFile)) {
+    const context = JSON.parse(readFileSync(contextFile, "utf8"));
+    if (!context.orchestrator)
+      throw new Error("Managed validation context has no orchestrator");
+    const { createRouter } = await import(
+      pathToFileURL(
+        join(
+          context.orchestrator,
+          "scripts/test_runners/validation-routing.mjs",
+        ),
+      ).href
+    );
+    router = createRouter({ root, runDir, proc: executing, throughput: true });
+  }
+  json(join(runDir, "inputs.json"), before);
+  json(join(runDir, "requested-plan.json"), requestedPlan);
+  json(join(runDir, "plan.json"), plan);
+  json(join(runDir, "output-mapping.json"), campaign.outputs);
+  console.log(`Validation evidence: ${runDir}`);
+  console.log(
+    "One campaign: qualification passes directly into focused checks; final/profiling remain deferred unless --final is supplied.",
+  );
   for (const stage of stages) {
     for (const step of sequence.filter((s) => s.stage === stage)) {
       if (!full && ["final", "profiling"].includes(stage)) {
@@ -251,9 +268,12 @@ try {
         reason: failureReason ?? fatal ?? "interrupted",
       });
   }
-  interrupted = proc.cancelled;
-  await proc.close();
-  rmSync(temporary, { recursive: true, force: true });
+  interrupted = proc?.cancelled ?? false;
+  try {
+    await proc?.close();
+  } finally {
+    if (temporary !== null) rmSync(temporary, { recursive: true, force: true });
+  }
 }
 const after = fingerprint(root);
 const unchanged = before.sha256 === after.sha256;
