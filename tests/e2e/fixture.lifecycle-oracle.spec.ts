@@ -2597,6 +2597,1113 @@ test.describe("Q1 (revision 7): a type change and another window's field cannot 
 });
 
 /**
+ * WEB-08c revision 8 (R5-A of review 8; design assessment S1-S10, S12, S14 and Q2): an operation that runs the application's handlers
+ * and then a default action is an INTERVAL. Every schedule is made in ONE JavaScript task with no await, mark or timeout between the
+ * exposure and the default action; its native preconditions are asserted (the exposure happened, the default action did or did not
+ * change the value) before the oracle's verdict. Each structural route is qualified ON ITS OWN: an insertion through the route under test
+ * is removed through a route the recorder does not order (a same-origin window WITHOUT a recorder, its subframe document witnessed and
+ * so not required), and a removal through the route under test follows such an unordered insertion.
+ */
+const R8_MARKER = "review-eight-account-marker";
+const R8_KINDS = ["input", "textarea"] as const;
+type R8Kind = (typeof R8_KINDS)[number];
+const R8_REVIEW_MODES = [
+  "safe-reset",
+  "cancel-reset-control",
+  "kept-control",
+  "reset-inserts",
+] as const;
+const R8_INSERT_ROUTES = [
+  "append-child",
+  "insert-before",
+  "replace-child",
+  "append",
+  "prepend",
+  "replace-children",
+  "before",
+  "after",
+  "replace-with",
+  "insert-adjacent",
+  "range-insert",
+  "fragment-container",
+  "table-caption",
+] as const;
+const R8_REMOVE_ROUTES = [
+  "remove",
+  "remove-child",
+  "replace-child",
+  "replace-children",
+  "text-content",
+  "inner-html",
+  "outer-html",
+  "range-delete",
+] as const;
+const R8_FIELD_EXPECTED = {
+  // S2: activation of a connected form's reset button by script; the review's detached button (engine-aware precondition).
+  "connected-click-inserts": ["marker"],
+  "connected-dispatch-inserts": ["marker"],
+  "connected-click-cancelled": ["marker"],
+  "connected-click-safe": [],
+  "detached-button-click": ["marker"],
+  // S3: a target-phase handler after the window's capture, propagation stopped.
+  "target-handler-stopped": ["marker"],
+  // S4: values changed inside the handler.
+  "safe-then-marker": ["marker"],
+  "marker-then-safe": [],
+  "marker-safe-marker": ["marker", "marker"],
+  // S5: participants that change inside the operation.
+  "created-in-handler": ["marker"],
+  "removed-from-form": [],
+  "associated-by-attribute": ["marker"],
+  "other-form-reset": ["marker"],
+  "reset-callback-moves-field": ["marker"],
+  // S6: nested operations.
+  "nested-dispatch": ["marker"],
+  "nested-dispatch-safe": [],
+  "nested-same-form-reset": ["marker"],
+  // S7: a conversion that exposes and throws.
+  "conversion-throws": ["marker"],
+  // S8: each structural route on its own (and every route's safe twin).
+  ...Object.fromEntries(
+    R8_INSERT_ROUTES.map((route) => [`insert-${route}`, ["marker"]]),
+  ),
+  "insert-routes-safe": [],
+  ...Object.fromEntries(
+    R8_REMOVE_ROUTES.map((route) => [`removal-${route}`, ["marker"]]),
+  ),
+  "removal-routes-safe": [],
+  // S9: a scripted edit whose handler removes the edited field and moves the focus.
+  "exec-handler-moves-focus": ["marker", "marker"],
+  // S10: another window's form, reset through its own prototype; its handler shows it here and then in the donor.
+  "donor-form-reset-moves": ["marker", "marker"],
+  // S14: an unordered insertion inside the interval: incomplete, never clean (and its safe twin).
+  "unordered-insert": [],
+  "unordered-insert-safe": [],
+  // S14: an unordered reveal inside a SCRIPTED connected reset (no checkpoint before the default action), input only.
+  "connected-unordered-reveal": [],
+  "connected-unordered-reveal-safe": [],
+  // S14: an unordered write to a field already judged as shown (no record left): asked at the mark, while still shown.
+  "unordered-write-shown": [],
+  "unordered-write-shown-safe": [],
+} as Record<string, readonly string[]>;
+const R8_SCHEDULES = Object.keys(R8_FIELD_EXPECTED);
+/** Incomplete (never clean, never a substitute for a positive detection on a supported route). */
+const R8_INCOMPLETE = new Set([
+  "unordered-insert",
+  "connected-unordered-reveal",
+  "unordered-write-shown",
+]);
+const R8_INPUT_ONLY = new Set([
+  "connected-unordered-reveal",
+  "connected-unordered-reveal-safe",
+]);
+/** Left SHOWN until the mark (removed after it): the question is asked while the field is in the document. */
+const R8_LEFT_SHOWN = new Set([
+  "unordered-write-shown",
+  "unordered-write-shown-safe",
+]);
+const R8_SHOWN_IN_DONOR = new Set(["donor-form-reset-moves"]);
+/** The value the native default action leaves (otherwise ""). */
+const R8_AFTER: Record<string, string> = {
+  "connected-click-cancelled": R8_MARKER,
+  "removed-from-form": R8_MARKER,
+  "conversion-throws": R8_MARKER,
+  "exec-handler-moves-focus": R8_MARKER,
+  "connected-unordered-reveal-safe": "",
+  "unordered-write-shown": R8_MARKER,
+  "unordered-write-shown-safe": "Also safe",
+};
+const R8_UNORDERED_REASON =
+  "a field's value was changed by a route that is not ordered (its value at a record is unknown)";
+
+const injectR8 = (page: Page, kind: R8Kind, schedule: string, marker: string) =>
+  page.evaluate(
+    async ({ kind, k, m }) => {
+      const body = document.body;
+      const facts: Record<string, unknown> = {};
+      const make = () =>
+        document.createElement(kind) as HTMLInputElement | HTMLTextAreaElement;
+      /** Every container this schedule makes is tagged: what remains of them at the end is counted (and must be nothing). */
+      const tagged = <T extends Element>(el: T) => {
+        el.setAttribute("data-review-eight", "");
+        return el;
+      };
+      const detached = (value: string) => {
+        const form = tagged(document.createElement("form"));
+        const field = make();
+        field.value = value;
+        form.append(field);
+        return { form, field };
+      };
+      const loadFrame = async (name?: string) => {
+        const frame = document.createElement("iframe");
+        frame.hidden = true;
+        if (name) frame.name = name;
+        const loaded = new Promise<void>((resolve) =>
+          frame.addEventListener("load", () => resolve(), { once: true }),
+        );
+        body.append(frame);
+        await loaded;
+        return {
+          frame,
+          win: frame.contentWindow as Window & typeof globalThis,
+        };
+      };
+      /** A same-origin window WITHOUT a recorder: its own DOM methods are routes the recorder does not order. */
+      const offRealm = async () => {
+        const { frame, win } = await loadFrame("__display_oracle_off__");
+        const wrapped = Symbol.for("atlas.displayOracle.wrapped");
+        const append = win.Node.prototype.appendChild;
+        const remove = win.Node.prototype.removeChild;
+        const setAttribute = win.Element.prototype.setAttribute;
+        facts.unordered =
+          !(append as unknown as Record<symbol, unknown>)[wrapped] &&
+          !(remove as unknown as Record<symbol, unknown>)[wrapped] &&
+          !(setAttribute as unknown as Record<symbol, unknown>)[wrapped] &&
+          !("__displayOracle" in win);
+        return {
+          frame,
+          win,
+          insert: (parent: Node, child: Node) => append.call(parent, child),
+          removeChild: (parent: Node, child: Node) =>
+            remove.call(parent, child),
+        };
+      };
+      const exposed = (field: HTMLInputElement | HTMLTextAreaElement) => {
+        facts.seen = [field.isConnected, field.value];
+      };
+      const insertBy = (
+        route: string,
+        form: HTMLFormElement,
+        host: {
+          holder: HTMLElement;
+          anchor: HTMLElement;
+          table: HTMLTableElement;
+        },
+      ): [Node, Node] => {
+        switch (route) {
+          case "append-child":
+            body.appendChild(form);
+            return [body, form];
+          case "insert-before":
+            body.insertBefore(form, body.firstChild);
+            return [body, form];
+          case "replace-child": {
+            const placeholder = tagged(document.createElement("span"));
+            host.holder.append(placeholder);
+            host.holder.replaceChild(form, placeholder);
+            return [host.holder, form];
+          }
+          case "append":
+            body.append(form);
+            return [body, form];
+          case "prepend":
+            body.prepend(form);
+            return [body, form];
+          case "replace-children":
+            host.holder.replaceChildren(form);
+            return [host.holder, form];
+          case "before":
+            host.anchor.before(form);
+            return [host.holder, form];
+          case "after":
+            host.anchor.after(form);
+            return [host.holder, form];
+          case "replace-with": {
+            const placeholder = tagged(document.createElement("span"));
+            host.holder.append(placeholder);
+            placeholder.replaceWith(form);
+            return [host.holder, form];
+          }
+          case "insert-adjacent":
+            host.anchor.insertAdjacentElement("afterend", form);
+            return [host.holder, form];
+          case "range-insert": {
+            const range = document.createRange();
+            range.selectNodeContents(host.holder);
+            range.collapse(false);
+            range.insertNode(form);
+            return [host.holder, form];
+          }
+          case "fragment-container": {
+            const box = tagged(document.createElement("div"));
+            box.append(form);
+            const fragment = document.createDocumentFragment();
+            fragment.append(box);
+            host.holder.append(fragment);
+            return [host.holder, box];
+          }
+          case "table-caption": {
+            const caption = tagged(document.createElement("caption"));
+            caption.append(form);
+            host.table.caption = caption;
+            return [host.table, caption];
+          }
+        }
+        throw new Error(`no insertion route ${route}`);
+      };
+      const removeBy = (
+        route: string,
+        form: HTMLFormElement,
+        holder: HTMLElement,
+      ) => {
+        switch (route) {
+          case "remove":
+            form.remove();
+            return;
+          case "remove-child":
+            holder.removeChild(form);
+            return;
+          case "replace-child":
+            holder.replaceChild(tagged(document.createElement("span")), form);
+            return;
+          case "replace-children":
+            holder.replaceChildren();
+            return;
+          case "text-content":
+            holder.textContent = "";
+            return;
+          case "inner-html":
+            holder.innerHTML = "";
+            return;
+          case "outer-html":
+            holder.outerHTML = "<span data-review-eight></span>";
+            return;
+          case "range-delete": {
+            const range = document.createRange();
+            range.selectNodeContents(holder);
+            range.deleteContents();
+            return;
+          }
+        }
+        throw new Error(`no removal route ${route}`);
+      };
+      const hosts = () => {
+        const holder = tagged(document.createElement("div"));
+        const anchor = tagged(document.createElement("span"));
+        holder.append(anchor);
+        const table = tagged(document.createElement("table"));
+        body.append(holder, table);
+        return { holder, anchor, table };
+      };
+      const cleanup: Array<() => void> = [];
+      if (k.startsWith("insert-")) {
+        const off = await offRealm();
+        cleanup.push(() => off.frame.remove());
+        const routes =
+          k === "insert-routes-safe"
+            ? [
+                "append-child",
+                "insert-before",
+                "replace-child",
+                "append",
+                "prepend",
+                "replace-children",
+                "before",
+                "after",
+                "replace-with",
+                "insert-adjacent",
+                "range-insert",
+                "fragment-container",
+                "table-caption",
+              ]
+            : [k.slice("insert-".length)];
+        const results: unknown[] = [];
+        for (const route of routes) {
+          const host = hosts();
+          const { form, field } = detached(
+            k === "insert-routes-safe" ? "Safe" : m,
+          );
+          form.addEventListener("reset", () => {
+            const [parent, child] = insertBy(route, form, host);
+            exposed(field);
+            off.removeChild(parent, child);
+          });
+          form.reset();
+          results.push([route, facts.seen, field.value]);
+          host.holder.remove();
+          host.table.remove();
+        }
+        facts.routes = results;
+        facts.after = (results.at(-1) as unknown[])[2];
+      } else if (k.startsWith("removal-")) {
+        const off = await offRealm();
+        cleanup.push(() => off.frame.remove());
+        const routes =
+          k === "removal-routes-safe"
+            ? [
+                "remove",
+                "remove-child",
+                "replace-child",
+                "replace-children",
+                "text-content",
+                "inner-html",
+                "outer-html",
+                "range-delete",
+              ]
+            : [k.slice("removal-".length)];
+        const results: unknown[] = [];
+        for (const route of routes) {
+          const holder = tagged(document.createElement("div"));
+          body.append(holder);
+          const { form, field } = detached(
+            k === "removal-routes-safe" ? "Safe" : m,
+          );
+          form.addEventListener("reset", () => {
+            off.insert(holder, form);
+            exposed(field);
+            removeBy(route, form, holder);
+          });
+          form.reset();
+          results.push([route, facts.seen, field.value, field.isConnected]);
+          if (holder.isConnected) holder.remove();
+          // The replacement `outer-html` leaves (tagged).
+          for (const left of Array.from(
+            document.querySelectorAll("span[data-review-eight]"),
+          ))
+            left.remove();
+        }
+        facts.routes = results;
+        facts.after = (results.at(-1) as unknown[])[2];
+      } else
+        switch (k) {
+          case "connected-click-inserts":
+          case "connected-dispatch-inserts":
+          case "connected-click-cancelled":
+          case "connected-click-safe": {
+            const form = tagged(document.createElement("form"));
+            const button = document.createElement("button");
+            button.type = "reset";
+            form.append(button);
+            body.append(form);
+            const field = make();
+            field.value = k === "connected-click-safe" ? "Safe" : m;
+            button.addEventListener("click", (event) => {
+              form.append(field);
+              exposed(field);
+              if (k === "connected-click-cancelled") event.preventDefault();
+            });
+            if (k === "connected-dispatch-inserts")
+              button.dispatchEvent(
+                new MouseEvent("click", { bubbles: true, cancelable: true }),
+              );
+            else button.click();
+            facts.after = field.value;
+            form.remove();
+            break;
+          }
+          case "detached-button-click": {
+            // The review's own route: a DETACHED form's reset button (Firefox runs no activation behaviour for it).
+            const { form, field } = detached(m);
+            const button = document.createElement("button");
+            button.type = "reset";
+            form.append(button);
+            button.addEventListener("click", () => {
+              body.append(form);
+              exposed(field);
+              form.remove();
+            });
+            button.click();
+            facts.after = field.value;
+            break;
+          }
+          case "target-handler-stopped": {
+            const form = tagged(document.createElement("form"));
+            body.append(form);
+            const field = make();
+            field.value = m;
+            form.addEventListener("reset", (event) => {
+              event.stopPropagation();
+              form.append(field);
+              exposed(field);
+            });
+            form.reset();
+            facts.after = field.value;
+            form.remove();
+            break;
+          }
+          case "safe-then-marker":
+          case "marker-then-safe":
+          case "marker-safe-marker": {
+            const { form, field } = detached(
+              k === "safe-then-marker" ? "Safe" : m,
+            );
+            form.addEventListener("reset", () => {
+              if (k === "safe-then-marker") field.value = m;
+              if (k === "marker-then-safe") field.value = "Safe";
+              body.append(form);
+              exposed(field);
+              if (k === "marker-safe-marker") {
+                field.value = "Safe";
+                field.value = m;
+              }
+              form.remove();
+            });
+            form.reset();
+            facts.after = field.value;
+            break;
+          }
+          case "created-in-handler": {
+            const form = tagged(document.createElement("form"));
+            let made: HTMLInputElement | HTMLTextAreaElement | null = null;
+            form.addEventListener("reset", () => {
+              made = make();
+              made.value = m;
+              form.append(made);
+              body.append(form);
+              exposed(made);
+              form.remove();
+            });
+            form.reset();
+            facts.after = (made as HTMLInputElement | null)?.value;
+            break;
+          }
+          case "removed-from-form": {
+            const { form, field } = detached(m);
+            form.addEventListener("reset", () => form.removeChild(field));
+            form.reset();
+            facts.after = field.value;
+            facts.member = field.parentNode === form;
+            break;
+          }
+          case "associated-by-attribute": {
+            const owner = tagged(document.createElement("form"));
+            owner.id = "review-eight-owner";
+            body.append(owner);
+            const field = make();
+            field.value = m;
+            field.setAttribute("form", "review-eight-owner");
+            owner.addEventListener("reset", () => {
+              body.append(field);
+              exposed(field);
+              facts.associated = field.form === owner;
+            });
+            owner.reset();
+            facts.after = field.value;
+            field.remove();
+            owner.remove();
+            break;
+          }
+          case "other-form-reset": {
+            const a = detached("Safe");
+            const b = detached(m);
+            b.form.addEventListener("reset", () => {
+              body.append(b.form);
+              exposed(b.field);
+              b.form.remove();
+            });
+            a.form.addEventListener("reset", () => b.form.reset());
+            a.form.reset();
+            facts.both = [a.field.value, b.field.value];
+            facts.after = b.field.value;
+            break;
+          }
+          case "reset-callback-moves-field": {
+            const { form, field } = detached(m);
+            const name = `review-eight-fac-${Math.random().toString(36).slice(2)}`;
+            customElements.define(
+              name,
+              class extends HTMLElement {
+                static formAssociated = true;
+                formResetCallback() {
+                  facts.callback = field.value;
+                  field.remove();
+                }
+              },
+            );
+            form.append(document.createElement(name));
+            form.addEventListener("reset", () => {
+              body.append(form);
+              exposed(field);
+              form.remove();
+            });
+            form.reset();
+            facts.after = field.value;
+            facts.movedOut = field.parentNode === null;
+            // Shown again with the value the reset left: the operation's reference for it must be that value (complete, clean).
+            body.append(field);
+            field.remove();
+            break;
+          }
+          case "nested-dispatch":
+          case "nested-dispatch-safe": {
+            const { form, field } = detached(
+              k === "nested-dispatch" ? m : "Safe",
+            );
+            const relay = document.createElement("span");
+            relay.addEventListener("expose", () => {
+              body.append(form);
+              exposed(field);
+              form.remove();
+            });
+            form.addEventListener("reset", () =>
+              relay.dispatchEvent(new Event("expose")),
+            );
+            form.reset();
+            facts.after = field.value;
+            break;
+          }
+          case "nested-same-form-reset": {
+            // The instrumented realm and a realm with no recorder must see the same native reset recursion.
+            const count = (f: HTMLFormElement, onFirst: () => void) => {
+              let events = 0;
+              f.addEventListener("reset", () => {
+                events += 1;
+                if (events === 1) onFirst();
+              });
+              f.reset();
+              return events;
+            };
+            const { form, field } = detached(m);
+            facts.events = count(form, () => {
+              body.append(form);
+              exposed(field);
+              form.reset();
+              form.remove();
+            });
+            facts.after = field.value;
+            const off = await offRealm();
+            const nativeForm = off.win.document.createElement("form");
+            const nativeField = off.win.document.createElement(kind);
+            nativeField.value = "x";
+            nativeForm.append(nativeField);
+            facts.nativeEvents = count(nativeForm, () => nativeForm.reset());
+            facts.nativeAfter = nativeField.value;
+            off.frame.remove();
+            break;
+          }
+          case "conversion-throws": {
+            const { form, field } = detached(m);
+            const bad = {
+              toString() {
+                body.append(form);
+                exposed(field);
+                form.remove();
+                throw new Error("conversion refused");
+              },
+            };
+            try {
+              field.value = bad as unknown as string;
+            } catch (error) {
+              facts.error = (error as Error).message;
+            }
+            facts.after = field.value;
+            break;
+          }
+          case "exec-handler-moves-focus": {
+            const edited = make();
+            edited.value = "Safe";
+            const other = make();
+            body.append(edited, other);
+            edited.focus();
+            edited.select();
+            edited.addEventListener("input", () => {
+              exposed(edited);
+              edited.remove();
+              other.focus();
+            });
+            facts.exec = document.execCommand("insertText", false, m);
+            facts.after = edited.value;
+            facts.focusMoved = document.activeElement === other;
+            // Shown again: judged with the value the scripted edit left (complete).
+            body.append(edited);
+            edited.remove();
+            other.remove();
+            break;
+          }
+          case "donor-form-reset-moves": {
+            const { frame, win } = await loadFrame();
+            const form = win.document.createElement("form");
+            const field = win.document.createElement(kind);
+            field.value = m;
+            form.append(field);
+            document.adoptNode(form);
+            facts.foreign = !(form instanceof HTMLFormElement);
+            form.addEventListener("reset", () => {
+              body.append(form);
+              exposed(field);
+              win.document.body.append(form);
+              facts.inDonor =
+                form.ownerDocument === win.document && form.isConnected;
+              win.document.body.removeChild(form);
+            });
+            form.reset();
+            facts.after = field.value;
+            // Shown again in the donor, which owns it now: its reference is the value the reset left (complete, clean).
+            win.document.body.append(form);
+            facts.reshown = [form.isConnected, field.value];
+            win.document.body.removeChild(form);
+            frame.remove();
+            break;
+          }
+          case "connected-unordered-reveal":
+          case "connected-unordered-reveal-safe": {
+            const off = await offRealm();
+            const setAttribute = off.win.Element.prototype.setAttribute;
+            const form = tagged(document.createElement("form"));
+            const field = document.createElement("input");
+            field.type = "password";
+            field.value = k === "connected-unordered-reveal" ? m : "Safe";
+            form.append(field);
+            body.append(form);
+            form.addEventListener("reset", () => {
+              setAttribute.call(field, "type", "text");
+              facts.revealed = field.type;
+            });
+            form.reset();
+            facts.after = field.value;
+            form.remove();
+            off.frame.remove();
+            break;
+          }
+          case "unordered-write-shown":
+          case "unordered-write-shown-safe": {
+            const off = await offRealm();
+            const field = make();
+            field.id = "review-eight-shown";
+            field.value = "Safe";
+            body.append(field);
+            const proto =
+              kind === "input"
+                ? off.win.HTMLInputElement.prototype
+                : off.win.HTMLTextAreaElement.prototype;
+            const set = Object.getOwnPropertyDescriptor(proto, "value")
+              ?.set as (v: string) => void;
+            facts.unordered =
+              facts.unordered === true &&
+              !(set as unknown as Record<symbol, unknown>)[
+                Symbol.for("atlas.displayOracle.wrapped")
+              ];
+            set.call(field, k === "unordered-write-shown" ? m : "Also safe");
+            facts.after = field.value;
+            off.frame.remove();
+            break;
+          }
+          case "unordered-insert":
+          case "unordered-insert-safe": {
+            const off = await offRealm();
+            const { form, field } = detached(
+              k === "unordered-insert" ? m : "Safe",
+            );
+            form.addEventListener("reset", () => {
+              off.insert(body, form);
+              exposed(field);
+              off.removeChild(body, form);
+            });
+            form.reset();
+            facts.after = field.value;
+            off.frame.remove();
+            break;
+          }
+          default:
+            throw new Error(`no schedule ${k}`);
+        }
+      for (const done of cleanup) done();
+      const root = document.getElementById("protected-root") as HTMLElement;
+      return {
+        inert: root.hasAttribute("inert"),
+        children: root.childNodes.length,
+        fields: document.querySelectorAll(
+          "input, textarea, iframe, [data-review-eight]",
+        ).length,
+        facts,
+      };
+    },
+    { kind, k: schedule, m: marker },
+  );
+
+test.describe("Q1 (revision 8): a handler's exposure inside a reset, an activation or a dispatch survives the default action (S1-S10, S12, S14)", () => {
+  for (const kind of R8_KINDS)
+    for (const mode of R8_REVIEW_MODES)
+      test(`R8 review probe ${kind} ${mode}`, async ({ context }, info) => {
+        // The review's own schedule and assertions (its `click-reset-inserts` route is the engine-aware "detached-button-click" below).
+        const oracle = await installDisplayOracle(context, {
+          markers: [R8_MARKER],
+        });
+        const { page, release } = await r7Held(context);
+        expect(oracle.violations()).toEqual([]);
+        const observed = await page.evaluate(
+          ({ kind, mode, marker }) => {
+            const form = document.createElement("form");
+            const field = document.createElement(kind) as
+              | HTMLInputElement
+              | HTMLTextAreaElement;
+            field.value = mode === "safe-reset" ? "Safe" : marker;
+            form.append(field);
+            const seen: Array<{ connected: boolean; value: string }> = [];
+            const expose = () => {
+              document.body.append(form);
+              seen.push({ connected: field.isConnected, value: field.value });
+              form.remove();
+            };
+            if (mode === "kept-control") expose();
+            else {
+              form.addEventListener("reset", (event) => {
+                expose();
+                if (mode === "cancel-reset-control") event.preventDefault();
+              });
+              form.reset();
+            }
+            return {
+              seen,
+              after: { connected: field.isConnected, value: field.value },
+            };
+          },
+          { kind, mode, marker: R8_MARKER },
+        );
+        expect(observed.seen).toEqual([
+          {
+            connected: true,
+            value: mode === "safe-reset" ? "Safe" : R8_MARKER,
+          },
+        ]);
+        if (mode !== "cancel-reset-control" && mode !== "kept-control")
+          expect(observed.after.value).toBe("");
+        await oracle.mark(page, "after reset");
+        const coverage = await oracle.coverage();
+        await info.attach("reset-coverage", {
+          body: JSON.stringify(
+            { kind, mode, observed, coverage, log: await oracle.log(page) },
+            null,
+            2,
+          ),
+          contentType: "application/json",
+        });
+        release();
+        await displayed(page);
+        expect(await fencesOf(page)).toEqual([]);
+        expect(coverage.missing).toEqual([]);
+        expect(coverage.incomplete).toEqual([]);
+        if (mode === "safe-reset") expect(coverage.violations).toEqual([]);
+        else
+          expect(
+            coverage.violations.filter((v) => v.kind === "marker").length,
+            "reset must retain marker exposure during its own event/default-action interval",
+          ).toBeGreaterThan(0);
+      });
+
+  for (const kind of R8_KINDS)
+    for (const schedule of R8_SCHEDULES.filter(
+      (s) => kind === "input" || !R8_INPUT_ONLY.has(s),
+    )) {
+      const expected = R8_FIELD_EXPECTED[schedule] as readonly string[];
+      const incomplete = R8_INCOMPLETE.has(schedule);
+      test(`R8 field ${kind} ${schedule}: ${incomplete ? "incomplete, never clean" : expected.length ? `reported as ${expected.join(",")} while fenced` : "control, nothing reported"}`, async ({
+        context,
+        browserName,
+      }, info) => {
+        const oracle = await installDisplayOracle(context, {
+          markers: [R8_MARKER],
+        });
+        const { page, release } = await r7Held(context);
+        expect(oracle.violations(), "precondition: nothing yet").toEqual([]);
+        const { facts, ...after } = await injectR8(
+          page,
+          kind,
+          schedule,
+          R8_MARKER,
+        );
+        await info.attach("facts", {
+          body: JSON.stringify(facts, null, 2),
+          contentType: "application/json",
+        });
+        expect(after).toEqual({
+          inert: true,
+          children: 0,
+          fields: R8_LEFT_SHOWN.has(schedule) ? 1 : 0,
+        });
+        // Native preconditions: the exposure happened, and the default action did (or, natively, did not) change the value.
+        const exposure =
+          expected.length === 0 && !incomplete ? "Safe" : R8_MARKER;
+        if (facts.seen !== undefined)
+          expect(
+            facts.seen,
+            "shown, with this value, inside the operation",
+          ).toEqual([true, exposure]);
+        const detachedButton = schedule === "detached-button-click";
+        expect(
+          facts.after,
+          detachedButton && browserName === "firefox"
+            ? "Firefox runs no activation behaviour for a detached form's reset button (measured, revision 6): the value stays"
+            : "the value the native default action left",
+        ).toBe(
+          detachedButton && browserName === "firefox"
+            ? R8_MARKER
+            : (R8_AFTER[schedule] ?? ""),
+        );
+        if (Array.isArray(facts.routes))
+          for (const [route, seen, value] of facts.routes as Array<
+            [string, unknown, string]
+          >) {
+            expect(seen, route).toEqual([
+              true,
+              schedule.endsWith("-safe") ? "Safe" : R8_MARKER,
+            ]);
+            expect(value, route).toBe("");
+          }
+        if ("unordered" in facts)
+          expect(
+            facts.unordered,
+            "the other window has no recorder: its routes are unordered",
+          ).toBe(true);
+        if (schedule === "removed-from-form") expect(facts.member).toBe(false);
+        if (schedule === "associated-by-attribute")
+          expect(facts.associated).toBe(true);
+        if (schedule === "other-form-reset")
+          expect(facts.both).toEqual(["", ""]);
+        if (schedule === "reset-callback-moves-field")
+          expect(
+            [facts.callback, facts.movedOut],
+            "the reset callback ran after the reset and moved the field out",
+          ).toEqual(["", true]);
+        if (schedule === "nested-same-form-reset") {
+          expect(
+            facts.events,
+            "the instrumented realm keeps the native reset recursion",
+          ).toBe(facts.nativeEvents);
+          expect(facts.nativeAfter).toBe("");
+        }
+        if (schedule === "conversion-throws")
+          expect(facts.error).toBe("conversion refused");
+        if (schedule === "exec-handler-moves-focus")
+          expect([facts.exec, facts.focusMoved]).toEqual([true, true]);
+        if (schedule === "donor-form-reset-moves") {
+          expect([facts.foreign, facts.inDonor]).toEqual([true, true]);
+          expect(facts.reshown).toEqual([true, ""]);
+        }
+        if (schedule.startsWith("connected-unordered-reveal"))
+          expect(facts.revealed).toBe("text");
+        expect(await fencesOf(page)).toHaveLength(1);
+        await oracle.mark(page, "after the schedule");
+        if (R8_LEFT_SHOWN.has(schedule))
+          await page.locator("#review-eight-shown").evaluate((n) => n.remove());
+        await expect
+          .poll(() => oracle.violations().map((v) => v.kind), {
+            timeout: 5_000,
+          })
+          .toEqual([...expected]);
+        const main = await page.evaluate(
+          () =>
+            (window as unknown as { __displayOracle: { doc: string } })
+              .__displayOracle.doc,
+        );
+        for (const v of oracle.violations()) {
+          if (v.doc === main) {
+            expect(v.record?.settled).toBe(ACCOUNT);
+            expect(v.record?.fences[ACCOUNT] ?? 0).toBeGreaterThan(0);
+          } else {
+            expect(
+              R8_SHOWN_IN_DONOR.has(schedule),
+              "only a schedule that shows the field IN the donor reports there",
+            ).toBe(true);
+            expect(v.record).toBe(null);
+          }
+        }
+        if (R8_SHOWN_IN_DONOR.has(schedule))
+          expect(
+            new Set(oracle.violations().map((v) => v.doc)).size,
+            "one here, one in the donor",
+          ).toBe(2);
+        release();
+        await displayed(page);
+        expect(oracle.violations().map((v) => v.kind)).toEqual([...expected]);
+        const coverage = await oracle.coverage();
+        await info.attach("coverage", {
+          body: JSON.stringify(coverage, null, 2),
+          contentType: "application/json",
+        });
+        expect(coverage.missing, JSON.stringify(coverage.documents)).toEqual(
+          [],
+        );
+        if (incomplete) {
+          expect(coverage.violations).toEqual([]);
+          expect(
+            coverage.incomplete,
+            "the unordered interval is reported",
+          ).toEqual([expect.stringContaining(R8_UNORDERED_REASON)]);
+          await expect(oracle.assertClean(`R8 ${schedule}`)).rejects.toThrow();
+        } else {
+          expect(coverage.incomplete).toEqual([]);
+          if (expected.length === 0)
+            await oracle.assertClean(`R8 ${kind} ${schedule}`);
+        }
+      });
+    }
+
+  // Genuine activation: the person's click (Playwright's trusted input), handlers and default action in one task with no wrapper.
+  // Measured (revision 8, all three engines): a trusted event's listeners run with an empty script stack, so a microtask checkpoint
+  // follows EACH listener and the recorder's own observer callback judges what a handler did before the default action runs; an
+  // unordered reveal inside such a handler is therefore REPORTED here (its incomplete outcome is reachable only where no checkpoint
+  // intervenes: the scripted reset's S14 case above, and the explicit jsdom history).
+  const GENUINE = {
+    "genuine-click-inserts": { kinds: R8_KINDS, value: R8_MARKER },
+    "genuine-click-safe": { kinds: R8_KINDS, value: "Safe" },
+    "genuine-unordered-reveal": { kinds: ["input"] as const, value: R8_MARKER },
+    "genuine-unordered-reveal-safe": {
+      kinds: ["input"] as const,
+      value: "Safe",
+    },
+  } as const;
+  for (const [schedule, { kinds, value }] of Object.entries(GENUINE))
+    for (const kind of kinds)
+      test(`R8 genuine ${kind} ${schedule}: ${value === R8_MARKER ? "reported while fenced" : "control, nothing reported"}`, async ({
+        context,
+      }, info) => {
+        const oracle = await installDisplayOracle(context, {
+          markers: [R8_MARKER],
+        });
+        const { page, release } = await r7Held(context);
+        const reveal = schedule.startsWith("genuine-unordered-reveal");
+        const setup = await page.evaluate(
+          async ({ kind, value, reveal }) => {
+            const facts: Record<string, unknown> = {};
+            const form = document.createElement("form");
+            form.id = "review-eight-genuine";
+            form.setAttribute(
+              "style",
+              "position:fixed;top:0;left:0;z-index:2147483647;background:white",
+            );
+            const button = document.createElement("button");
+            button.type = "reset";
+            button.id = "review-eight-genuine-reset";
+            button.textContent = "Reset";
+            form.append(button);
+            const field = document.createElement(kind) as
+              | HTMLInputElement
+              | HTMLTextAreaElement;
+            (window as unknown as { __r8: unknown }).__r8 = { field, facts };
+            if (reveal) {
+              // A password field holding the value, revealed inside the reset by a window WITHOUT a recorder (unordered).
+              const frame = document.createElement("iframe");
+              frame.hidden = true;
+              frame.name = "__display_oracle_off__";
+              const loaded = new Promise<void>((resolve) =>
+                frame.addEventListener("load", () => resolve(), { once: true }),
+              );
+              document.body.append(frame);
+              await loaded;
+              const win = frame.contentWindow as Window & typeof globalThis;
+              const setAttribute = win.Element.prototype.setAttribute;
+              facts.unordered = !("__displayOracle" in win);
+              (field as HTMLInputElement).type = "password";
+              field.value = value;
+              form.append(field);
+              form.addEventListener("reset", () =>
+                setAttribute.call(field, "type", "text"),
+              );
+              (
+                window as unknown as { __r8: Record<string, unknown> }
+              ).__r8.frame = frame;
+            } else {
+              field.value = value;
+              button.addEventListener("click", (event) => {
+                facts.trusted = event.isTrusted;
+                form.append(field);
+                facts.seen = [field.isConnected, field.value];
+              });
+            }
+            document.body.append(form);
+            return facts;
+          },
+          { kind, value, reveal },
+        );
+        if (reveal) expect(setup.unordered).toBe(true);
+        await page.locator("#review-eight-genuine-reset").click();
+        const facts = await page.evaluate(() => {
+          const r8 = (
+            window as unknown as {
+              __r8: {
+                field: HTMLInputElement;
+                facts: Record<string, unknown>;
+                frame?: HTMLIFrameElement;
+              };
+            }
+          ).__r8;
+          const result: Record<string, unknown> = {
+            ...r8.facts,
+            after: r8.field.value,
+            type: r8.field.type,
+          };
+          document.getElementById("review-eight-genuine")?.remove();
+          r8.frame?.remove();
+          return result;
+        });
+        await info.attach("facts", {
+          body: JSON.stringify(facts, null, 2),
+          contentType: "application/json",
+        });
+        expect(facts.after, "the genuine activation reset the field").toBe("");
+        if (reveal) expect(facts.type).toBe("text");
+        else {
+          expect(facts.trusted, "the person's click").toBe(true);
+          expect(facts.seen).toEqual([true, value]);
+        }
+        await oracle.mark(page, "after the genuine reset");
+        const expected = value === R8_MARKER ? ["marker"] : ([] as string[]);
+        await expect
+          .poll(() => oracle.violations().map((v) => v.kind), {
+            timeout: 5_000,
+          })
+          .toEqual(expected);
+        release();
+        await displayed(page);
+        const coverage = await oracle.coverage();
+        expect(coverage.missing).toEqual([]);
+        expect(coverage.incomplete).toEqual([]);
+        expect(coverage.violations.map((v) => v.kind)).toEqual(expected);
+        if (expected.length === 0) await oracle.assertClean(`R8 ${schedule}`);
+      });
+
+  test("R8 S12 a document that shows the field inside its reset and is CLOSED at once: its violation is retained or its evidence incomplete, never clean", async ({
+    context,
+  }) => {
+    const oracle = await installDisplayOracle(context, {
+      markers: [R8_MARKER],
+    });
+    await context.route("**/review-eight-retire", (route) =>
+      route.fulfill({
+        contentType: "text/html; charset=utf-8",
+        body: '<!doctype html><html><head><meta charset="utf-8"><title>Atlas</title></head><body>Safe</body></html>',
+      }),
+    );
+    const page = await context.newPage();
+    await page.goto("/review-eight-retire");
+    const doc = await page.evaluate(
+      () =>
+        (window as unknown as { __displayOracle: { doc: string } })
+          .__displayOracle.doc,
+    );
+    const seen = await page.evaluate((marker) => {
+      const form = document.createElement("form");
+      const field = document.createElement("input");
+      field.value = marker;
+      form.append(field);
+      let shown: unknown = null;
+      form.addEventListener("reset", () => {
+        document.body.append(form);
+        shown = [field.isConnected, field.value];
+        form.remove();
+      });
+      form.reset();
+      return [shown, field.value];
+    }, R8_MARKER);
+    expect(seen).toEqual([[true, R8_MARKER], ""]);
+    await page.close();
+    const coverage = await oracle.coverage();
+    const retained = coverage.violations.some(
+      (v) => v.doc === doc && v.kind === "marker",
+    );
+    const accounted = coverage.incomplete.some((x) => x.includes(doc));
+    expect(
+      retained || accounted,
+      `the closed document's exposure: ${JSON.stringify(coverage)}`,
+    ).toBe(true);
+    expect(coverage.missing).toEqual([]);
+    await expect(oracle.assertClean("R8 S12")).rejects.toThrow();
+  });
+});
+
+/**
  * WEB-08c revision 6 (R5-B of the review of 15 October 2026; design assessment P2/P3, N1-N7): the EXPECTED documents are the host's
  * journal of committed generations. The review's three schedules are first, with its own route-fulfilled documents and assertions (the
  * committed predecessor is held loading behind a stylesheet and verified `loading` with no oracle; the probe never waits for a load).

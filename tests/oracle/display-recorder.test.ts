@@ -750,7 +750,14 @@ describe("D1-D5 (revision 6, R5-A): a field's property-only value is judged when
   test("D5: a trusted edit with no beforeinput in the very task that inserted its field is incomplete (its value at insertion is unknown)", () => {
     const r = recorder();
     const field = r.doc.createElement("input");
-    r.doc.body.append(field);
+    // Revision 8 adaptation (labelled): the insertion is made through jsdom's own implementation (an UNORDERED structural route, as a
+    // window with no recorder would make it), because an ordered `append` is now judged when it returns (see the next case).
+    (
+      idl.implForWrapper(r.doc.body) as unknown as {
+        appendChild(node: unknown): unknown;
+      }
+    ).appendChild(idl.implForWrapper(field));
+    expect(field.isConnected).toBe(true);
     typeInto(field, "typed", { beforeinput: false });
     expect(r.limits()).toEqual([
       "a field was edited with no beforeinput in the task that inserted it (its value at insertion is unknown)",
@@ -761,6 +768,17 @@ describe("D1-D5 (revision 6, R5-A): a field's property-only value is judged when
     k.oracle.flush();
     typeInto(settled, "typed", { beforeinput: false });
     expect(k.limits(), "control: the insertion was judged earlier").toEqual([]);
+  });
+  test("D5 (revision 8): an insertion through an ORDERED route is judged when it returns, so the same edit leaves nothing unknown", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.value = MARKER;
+    r.doc.body.append(field);
+    typeInto(field, "typed", { beforeinput: false });
+    expect(r.kinds(), "judged with the value it had at insertion").toEqual([
+      "marker",
+    ]);
+    expect(r.limits()).toEqual([]);
   });
   test("D5: the person's entry gives no exemption to another field", () => {
     const r = recorder();
@@ -1282,6 +1300,435 @@ describe("R7 R1-R4/X1: a field from ANOTHER window is read natively and observed
   });
 });
 
+/**
+ * WEB-08c revision 8 (R5-A of review 8; design assessment P1-P4, S1-S14): an operation that runs the application's handlers and then a
+ * default action is an INTERVAL. What a handler shows is judged before the default action can change it; what cannot be ordered inside
+ * the interval is incomplete; references are refreshed only after what is queued is judged. jsdom limits (native-only schedules in
+ * `fixture.lifecycle-oracle.spec.ts`): no `execCommand`, no activation of a DETACHED form's reset button, and no suppression of a form's
+ * reset inside its own reset handler. jsdom's own `reset()` (its implementation, reached through no wrapper) fires the trusted reset event
+ * a genuine activation fires; jsdom's own `appendChild`/`setAttributeNS` are routes the recorder does not order (as a window without one).
+ */
+describe("R8 S1-S14: a handler's exposure inside a reset, an activation or a dispatch survives the default action", () => {
+  type Field = HTMLInputElement | HTMLTextAreaElement;
+  const make = (r: ReturnType<typeof recorder>, tag: "input" | "textarea") =>
+    r.doc.createElement(tag) as Field;
+  type Impl = {
+    appendChild(node: unknown): unknown;
+    removeChild(node: unknown): unknown;
+    setAttributeNS(ns: string | null, name: string, value: string): void;
+    reset(): void;
+  };
+  const impl = (node: unknown) => idl.implForWrapper(node) as unknown as Impl;
+  /** A structural route the recorder does not order (jsdom's own implementation). */
+  const unorderedInsert = (parent: Node, child: Node) =>
+    impl(parent).appendChild(impl(child));
+  const unorderedRemove = (parent: Node, child: Node) =>
+    impl(parent).removeChild(impl(child));
+  /** A reset no wrapper sees: the trusted event and the default action, as a person's activation of a reset button makes them. */
+  const genuineReset = (form: HTMLFormElement) => impl(form).reset();
+  const detachedForm = (
+    r: ReturnType<typeof recorder>,
+    tag: "input" | "textarea",
+    value: string,
+  ) => {
+    const form = r.doc.createElement("form");
+    const field = make(r, tag);
+    field.value = value;
+    form.append(field);
+    return { form, field };
+  };
+
+  for (const tag of ["input", "textarea"] as const) {
+    test(`S1 ${tag}: the review's probe: a detached form's reset handler shows it and removes it; the reset then empties it: reported`, () => {
+      const r = recorder();
+      const { form, field } = detachedForm(r, tag, MARKER);
+      const seen: Array<[boolean, string]> = [];
+      form.addEventListener("reset", () => {
+        r.doc.body.append(form);
+        seen.push([field.isConnected, field.value]);
+        form.remove();
+      });
+      form.reset();
+      expect(seen, "native precondition: shown with the marker").toEqual([
+        [true, MARKER],
+      ]);
+      expect(field.value, "native precondition: the reset emptied it").toBe("");
+      expect(r.kinds()).toEqual(["marker"]);
+      expect(r.limits()).toEqual([]);
+    });
+    test(`S1 ${tag}: controls: a safe value is clean; a cancelled reset and an exposure with no reset are reported`, () => {
+      const safe = recorder();
+      const s = detachedForm(safe, tag, "Safe");
+      s.form.addEventListener("reset", () => {
+        safe.doc.body.append(s.form);
+        s.form.remove();
+      });
+      s.form.reset();
+      expect(s.field.value).toBe("");
+      expect(safe.kinds()).toEqual([]);
+      expect(safe.limits()).toEqual([]);
+      const cancelled = recorder();
+      const c = detachedForm(cancelled, tag, MARKER);
+      c.form.addEventListener("reset", (event) => {
+        cancelled.doc.body.append(c.form);
+        c.form.remove();
+        event.preventDefault();
+      });
+      c.form.reset();
+      expect(c.field.value, "a cancelled reset changes nothing").toBe(MARKER);
+      expect(cancelled.kinds()).toEqual(["marker"]);
+      expect(cancelled.limits()).toEqual([]);
+      const kept = recorder();
+      const k = detachedForm(kept, tag, MARKER);
+      kept.doc.body.append(k.form);
+      k.form.remove();
+      expect(kept.kinds()).toEqual(["marker"]);
+    });
+    test(`S2 ${tag}: a connected form's reset button activated by click() and by a dispatched click; the handler's insertion is reported`, () => {
+      for (const how of ["click()", "dispatched click"] as const) {
+        for (const value of [MARKER, "Safe"]) {
+          const r = recorder();
+          const form = r.doc.createElement("form");
+          const button = r.doc.createElement("button");
+          button.type = "reset";
+          form.append(button);
+          r.doc.body.append(form);
+          const field = make(r, tag);
+          field.value = value;
+          button.addEventListener("click", () => form.append(field));
+          if (how === "click()") button.click();
+          else
+            button.dispatchEvent(
+              new r.win.MouseEvent("click", {
+                bubbles: true,
+                cancelable: true,
+              }),
+            );
+          expect(field.value, `${how}: the activation reset it`).toBe("");
+          expect(r.kinds(), `${how} ${value}`).toEqual(
+            value === MARKER ? ["marker"] : [],
+          );
+          expect(r.limits(), how).toEqual([]);
+        }
+      }
+    });
+    test(`S2 ${tag}: control: a click whose activation is cancelled leaves the value; the exposure is still reported once`, () => {
+      const r = recorder();
+      const form = r.doc.createElement("form");
+      const button = r.doc.createElement("button");
+      button.type = "reset";
+      form.append(button);
+      r.doc.body.append(form);
+      const field = make(r, tag);
+      field.value = MARKER;
+      button.addEventListener("click", (event) => {
+        form.append(field);
+        event.preventDefault();
+      });
+      button.click();
+      expect(field.value).toBe(MARKER);
+      expect(r.kinds()).toEqual(["marker"]);
+      expect(r.limits()).toEqual([]);
+    });
+    test(`S3 ${tag}: a handler AFTER the window's capture (target phase, propagation stopped or not) shows a field the reset empties: reported`, () => {
+      for (const stop of [false, true]) {
+        for (const genuine of [false, true]) {
+          const r = recorder();
+          const form = r.doc.createElement("form");
+          r.doc.body.append(form);
+          const field = make(r, tag);
+          field.value = MARKER;
+          form.addEventListener("reset", (event) => {
+            if (stop) event.stopPropagation();
+            form.append(field);
+          });
+          if (genuine) genuineReset(form);
+          else form.reset();
+          const label = `stop=${stop} genuine=${genuine}`;
+          expect(field.value, label).toBe("");
+          expect(r.kinds(), label).toEqual(["marker"]);
+          expect(r.limits(), label).toEqual([]);
+          // The reference settles after the dispatch: the emptied field moved again is complete and clean.
+          field.remove();
+          r.doc.body.append(field);
+          expect(r.kinds(), label).toEqual(["marker"]);
+          expect(r.limits(), label).toEqual([]);
+        }
+      }
+    });
+    test(`S4 ${tag}: values changed inside the handler are judged in order (no entry snapshot, no final equality)`, () => {
+      const schedules: Array<[string, string, (f: Field) => void, string[]]> = [
+        [
+          "safe → marker → shown",
+          "Safe",
+          (f) => {
+            f.value = MARKER;
+          },
+          ["marker"],
+        ],
+        [
+          "marker → safe → shown",
+          MARKER,
+          (f) => {
+            f.value = "Safe";
+          },
+          [],
+        ],
+      ];
+      for (const [label, initial, before, expected] of schedules) {
+        const r = recorder();
+        const { form, field } = detachedForm(r, tag, initial);
+        form.addEventListener("reset", () => {
+          before(field);
+          r.doc.body.append(form);
+          form.remove();
+        });
+        form.reset();
+        expect(field.value, label).toBe("");
+        expect(r.kinds(), label).toEqual(expected);
+        expect(r.limits(), label).toEqual([]);
+      }
+      const r = recorder();
+      const { form, field } = detachedForm(r, tag, MARKER);
+      form.addEventListener("reset", () => {
+        r.doc.body.append(form);
+        field.value = "Safe";
+        field.value = MARKER;
+        form.remove();
+      });
+      form.reset();
+      expect(r.kinds(), "marker → safe → marker while shown").toEqual([
+        "marker",
+        "marker",
+      ]);
+      expect(r.limits()).toEqual([]);
+    });
+    test(`S5 ${tag}: participants that change inside the handler (created, removed, associated by attribute, another form)`, () => {
+      // Created in the handler.
+      const created = recorder();
+      const form = created.doc.createElement("form");
+      let made: Field | null = null;
+      form.addEventListener("reset", () => {
+        made = make(created, tag);
+        made.value = MARKER;
+        form.append(made);
+        created.doc.body.append(form);
+        form.remove();
+      });
+      form.reset();
+      expect((made as Field | null)?.value, "created and reset").toBe("");
+      expect(created.kinds()).toEqual(["marker"]);
+      expect(created.limits()).toEqual([]);
+      // Removed from the form before the reset: never shown (clean), not reset, and judged with its true value when shown later.
+      const removed = recorder();
+      const r = detachedForm(removed, tag, MARKER);
+      r.form.addEventListener("reset", () => r.form.removeChild(r.field));
+      r.form.reset();
+      expect(r.field.value, "not a participant of the reset").toBe(MARKER);
+      expect(removed.kinds()).toEqual([]);
+      removed.doc.body.append(r.field);
+      expect(removed.kinds()).toEqual(["marker"]);
+      expect(removed.limits()).toEqual([]);
+      // Associated by its form attribute when the handler shows it.
+      const associated = recorder();
+      const owner = associated.doc.createElement("form");
+      owner.id = "owner";
+      associated.doc.body.append(owner);
+      const field = make(associated, tag);
+      field.value = MARKER;
+      field.setAttribute("form", "owner");
+      owner.addEventListener("reset", () => associated.doc.body.append(field));
+      owner.reset();
+      expect(field.value, "associated by its attribute, reset").toBe("");
+      expect(associated.kinds()).toEqual(["marker"]);
+      expect(associated.limits()).toEqual([]);
+      // Another (detached) form reset by this one's handler.
+      const other = recorder();
+      const a = detachedForm(other, tag, "Safe");
+      const b = detachedForm(other, tag, MARKER);
+      b.form.addEventListener("reset", () => {
+        other.doc.body.append(b.form);
+        b.form.remove();
+      });
+      a.form.addEventListener("reset", () => b.form.reset());
+      a.form.reset();
+      expect([a.field.value, b.field.value]).toEqual(["", ""]);
+      expect(other.kinds()).toEqual(["marker"]);
+      expect(other.limits()).toEqual([]);
+    });
+    test(`S6 ${tag}: nested operations: a dispatch inside a reset exposes; the inner exposure stands after both default actions`, () => {
+      const r = recorder();
+      const { form, field } = detachedForm(r, tag, MARKER);
+      const relay = r.doc.createElement("span");
+      relay.addEventListener("expose", () => {
+        r.doc.body.append(form);
+        form.remove();
+      });
+      form.addEventListener("reset", () =>
+        relay.dispatchEvent(new r.win.Event("expose")),
+      );
+      form.reset();
+      expect(field.value).toBe("");
+      expect(r.kinds()).toEqual(["marker"]);
+      expect(r.limits()).toEqual([]);
+      const twin = recorder();
+      const t = detachedForm(twin, tag, "Safe");
+      const relayTwin = twin.doc.createElement("span");
+      relayTwin.addEventListener("expose", () => {
+        twin.doc.body.append(t.form);
+        t.form.remove();
+      });
+      t.form.addEventListener("reset", () =>
+        relayTwin.dispatchEvent(new twin.win.Event("expose")),
+      );
+      t.form.reset();
+      expect(twin.kinds(), "safe twin").toEqual([]);
+      expect(twin.limits()).toEqual([]);
+    });
+    test(`S7 ${tag}: a conversion that shows the field and then throws: the exposure stands, the native error is kept`, () => {
+      const r = recorder();
+      const { form, field } = detachedForm(r, tag, MARKER);
+      const bad = {
+        toString() {
+          r.doc.body.append(form);
+          form.remove();
+          throw new r.win.Error("conversion refused");
+        },
+      };
+      expect(() => {
+        field.value = bad as unknown as string;
+      }).toThrow("conversion refused");
+      expect(field.value).toBe(MARKER);
+      expect(r.kinds()).toEqual(["marker"]);
+      expect(r.limits()).toEqual([]);
+    });
+    test(`S10 ${tag}: another window's form, reset through the donor's prototype; its handler shows it here, then in the donor`, () => {
+      const r = recorder();
+      const donor = donorWindow(true);
+      const form = donor.doc.createElement("form");
+      const field = donor.doc.createElement(tag) as Field;
+      field.value = MARKER;
+      form.append(field);
+      r.doc.adoptNode(form);
+      expect(form instanceof r.win.HTMLFormElement, "a foreign prototype").toBe(
+        false,
+      );
+      form.addEventListener("reset", () => {
+        r.doc.body.append(form);
+        donor.doc.body.append(form);
+        donor.doc.body.removeChild(form);
+      });
+      form.reset();
+      expect(field.value).toBe("");
+      expect(field.ownerDocument).toBe(donor.doc);
+      const donorFlush = (donor.win as unknown as Win).__displayOracle.flush();
+      expect(r.kinds(), "shown here").toEqual(["marker"]);
+      expect(
+        donorFlush.violations.map((v) => v.kind),
+        "then there",
+      ).toEqual(["marker"]);
+      expect(r.limits()).toEqual([]);
+      expect(donorFlush.limits).toEqual([]);
+      // Each document's reference is the field's value now: shown again in either, it is clean and complete.
+      r.doc.body.append(form);
+      expect(r.kinds()).toEqual(["marker"]);
+      expect(r.limits()).toEqual([]);
+    });
+    test(`S14 ${tag}: an UNORDERED insertion inside the reset interval is incomplete, never clean; its safe twin is complete and clean`, () => {
+      for (const value of [MARKER, "Safe"]) {
+        const r = recorder();
+        const { form, field } = detachedForm(r, tag, value);
+        form.addEventListener("reset", () => {
+          unorderedInsert(r.doc.body, form);
+          unorderedRemove(r.doc.body, form);
+        });
+        form.reset();
+        expect(field.value).toBe("");
+        expect(r.kinds(), value).toEqual([]);
+        expect(r.limits(), value).toEqual(
+          value === MARKER
+            ? [
+                "a field's value was changed by a route that is not ordered (its value at a record is unknown)",
+              ]
+            : [],
+        );
+      }
+    });
+  }
+
+  test("S3/S14 genuine reset: an unordered reveal inside its handler is incomplete (the reference is kept until the dispatch ends); safe twin clean", () => {
+    for (const value of [MARKER, "Safe"]) {
+      const r = recorder();
+      const form = r.doc.createElement("form");
+      const field = r.doc.createElement("input");
+      field.type = "password";
+      field.value = value;
+      form.append(field);
+      r.doc.body.append(form);
+      form.addEventListener("reset", () =>
+        impl(field).setAttributeNS(null, "type", "text"),
+      );
+      genuineReset(form);
+      expect([field.type, field.value]).toEqual(["text", ""]);
+      expect(r.kinds(), value).toEqual([]);
+      expect(r.limits(), value).toEqual(
+        value === MARKER
+          ? [
+              "a field's value was changed by a route that is not ordered (its value at a record is unknown)",
+            ]
+          : [],
+      );
+    }
+  });
+  test("S3 genuine reset: the reference settles when the dispatch has ended (a later ordered reveal of the emptied field is clean)", () => {
+    const r = recorder();
+    const form = r.doc.createElement("form");
+    const field = r.doc.createElement("input");
+    field.type = "password";
+    field.value = MARKER;
+    form.append(field);
+    r.doc.body.append(form);
+    genuineReset(form);
+    expect(field.value).toBe("");
+    field.type = "text";
+    expect(r.kinds()).toEqual([]);
+    expect(r.limits()).toEqual([]);
+  });
+  test("S3 a script-dispatched reset event has no default action: nothing is held for it", () => {
+    const r = recorder();
+    const form = r.doc.createElement("form");
+    const field = r.doc.createElement("input");
+    field.type = "password";
+    field.value = MARKER;
+    form.append(field);
+    r.doc.body.append(form);
+    form.dispatchEvent(new r.win.Event("reset", { cancelable: true }));
+    expect(field.value).toBe(MARKER);
+    field.type = "text";
+    expect(r.kinds(), "revealed").toEqual(["marker"]);
+    expect(r.limits()).toEqual([]);
+  });
+  test("bounds: operations nested over the limit are incomplete", () => {
+    const r = recorder({ limits: { operations: 2 } });
+    const forms = [0, 1, 2].map(() => r.doc.createElement("form"));
+    forms[0]?.addEventListener("reset", () => forms[1]?.reset());
+    forms[1]?.addEventListener("reset", () => forms[2]?.reset());
+    forms[0]?.reset();
+    expect(r.limits()).toEqual(["operations nested over 2 deep"]);
+  });
+  test("U1 (revision 8): an unordered change AFTER an ordered insertion was judged is asked at collection: incomplete when it decides", () => {
+    const r = recorder();
+    const field = r.doc.createElement("textarea");
+    field.value = "Safe";
+    r.doc.body.append(field);
+    expect(r.limits(), "judged when inserted").toEqual([]);
+    idl.implForWrapper(field).value = MARKER;
+    expect(r.limits()).toEqual([
+      "a field's value was changed by a route that is not ordered (its value at a record is unknown)",
+    ]);
+  });
+});
+
 describe("S7: authority only from this document's COMPLETED transaction, with earlier DOM judged first", () => {
   test("a fence-clearing write that aborts authorises nothing", () => {
     const r = recorder();
@@ -1331,7 +1778,11 @@ describe("Bounds and unobserved routes are incomplete, never clean", () => {
   });
   test("a batch over the record limit", () => {
     const r = recorder({ limits: { records: 3 } });
-    for (let i = 0; i < 5; i += 1) r.doc.body.append(r.doc.createElement("i"));
+    // Revision 8 adaptation (labelled): appends are judged one by one when each returns, so the batch is made of attribute records
+    // (an element's own attributes are not an ordered route).
+    const holder = r.doc.createElement("div");
+    r.doc.body.append(holder);
+    for (let i = 0; i < 5; i += 1) holder.setAttribute("title", `Safe ${i}`);
     expect(r.limits()).toEqual(["batch over 3 records"]);
   });
   test("a shadow root", () => {

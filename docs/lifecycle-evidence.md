@@ -201,6 +201,47 @@ visibility, no paint); an argument conversion of `innerHTML`/`innerText` on a te
 (only incomplete if it then decides a verdict); same-origin windows are the only ones a page can adopt from, and a donor document is judged by its own
 recorder or reported incomplete.
 
+**Revision 8 (R5-A of review 8, 15 October 2026; design assessment of the same day, P1-P5).** Revision 7's route list was an inventory of
+ENTRANCES, and ordering before a call is not ordering of the call. Review 8 showed, in all three engines, that a detached form whose `reset`
+handler inserted it (showing a property-only marker) and removed it again was reported clean: the reset's default action then emptied the field
+without a setter, and the reference was refreshed to the empty value before the queued records were judged. Revision 7's statements that "every
+route" is ordered and its reset mutant (R6-M4, which exposes BEFORE the reset) are left above as history; they did not cover exposure made inside
+the operation. The correction, in `display-recorder.ts`, treats an operation that runs application code and then a default action (a reset, a
+button's activation, a dispatched event, a scripted edit, a write whose conversion runs code) as an INTERVAL: (1) every structural route, in the
+same document or not (`appendChild`, `insertBefore`, `replaceChild`, `removeChild`, `append`/`prepend`/`replaceChildren`/`moveBefore`,
+`before`/`after`/`replaceWith`/`remove`, `insertAdjacentElement`/`insertAdjacentHTML`/`insertAdjacentText`, `Range.insertNode`/`surroundContents`/
+`deleteContents`/`extractContents`, the `innerHTML`/`outerHTML`/`innerText`/`outerText`/`textContent` setters of an element, `setHTMLUnsafe`, a
+table's `caption`/`tHead`/`tFoot` and the document's `body`) judges what was queued before it and its OWN records as soon as it returns, while the
+values it exposed are still the values; (2) no operation refreshes a field's reference before the records still queued are judged (an ambiguity
+that decides a verdict is incomplete); (3) an operation's participants are its fields at entry and exit and every field touched inside it (nested
+operations included), each refreshed by the recorder of the document that owns it at the end; (4) a trusted reset's reference is kept until the
+event's dispatch has ended (its default action has then run or was cancelled), instead of being dropped when the event is captured; (5) an arriving
+field's reference is its value on arrival; (6) a property write reconciles on an exceptional exit and keeps the native error; (7) a shown field whose
+value differs from its reference with no record left to judge it at is asked about at the test's mark and at collection (incomplete when it decides).
+A textarea's `innerText` now converts as `[LegacyNullToEmptyString]` before its ordering point. Measured in Chromium, Firefox and WebKit: a TRUSTED
+event's listeners run with an empty script stack, so a microtask checkpoint follows each listener and the recorder's own observer judges a handler's
+records before the default action (an unordered reveal inside a genuine reset is REPORTED); Firefox runs no activation behaviour for a detached
+form's reset button (its value stays: an applicability fact, not a detection). Qualified on explicit histories (`tests/oracle/display-recorder.test.ts`,
+"R8": S1 the review's probe for input and textarea and its controls, S2 click and dispatched activation with cancelled and safe twins, S3 handlers
+after the capture with propagation stopped and a reset no wrapper sees, S4 values changed inside the handler, S5 created, removed,
+attribute-associated and other-form participants, S6 nested dispatch, S7 a throwing conversion, S10 another window's form, S14 unordered routes
+inside the interval, settlement, the nesting bound and the collection's question; jsdom has no `execCommand`, no detached-button activation and no
+reset-recursion suppression, so those are native-only), and natively in three engines ("Q1 (revision 8)": review 8's reset probe modes with their
+assertions, then the S2-S10/S12/S14 matrix for both field interfaces with each native precondition asserted: thirteen insertion routes each judged
+at its own return (the field then removed through a route the recorder does not order, a same-origin window without a recorder) and eight removal
+routes each judging an unordered insertion before it, with safe twins; a form-associated custom element's `formResetCallback`; same-form reset
+recursion compared with a realm without a recorder; `execCommand` whose handler removes the field and moves the focus; genuine activations by a
+trusted click; a document closed right after its reset). Semantic mutants R8-M1 to R8-M9 each remove one protection (judgement of structural
+routes at their return, as review 8's defect; of insertions only; judgement before refresh; entry and touched participants; a trusted reset's
+reference until its dispatch ends; the question at the mark and collection; the uncertainty report; the reference on arrival; settlement by the
+owning document). The earlier mutants are kept with their intent; because every structural call is now judged when it returns, eleven of them
+(R5-M1, R5-M2, R6-M3, R6-M4, R7-M1, R7-M2, R7-M3, R7-M6, R7-M9, R7-M10, R7-M11) are re-declared with that per-call judgement removed as well (and
+R7-M6 also the adoption's), so their schedules' records accumulate as they do through any unordered route; without it they were not caught (the
+author's diagnostic campaign, kept). Stated residuals, in addition to revision 7's: an unordered change (an engine's autofill
+or restoration, a window without a recorder) to a field that is shown and then hidden again before any mark or collection is not seen; an
+`innerHTML` conversion on a textarea, or of `execCommand`, that changes the document is still not ordered (incomplete only if it decides);
+`moveBefore` is wrapped where an engine has it but is not natively qualified. DOM evidence remains a conservative proxy, not human perception or AT.
+
 **Retained work** is compared WHOLE (drafts, command bodies, pending effects, unfinished forms; canonical JSON) at every boundary before the display;
 replay is allowed only after it (T24 E).
 
