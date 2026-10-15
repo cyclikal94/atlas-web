@@ -48,6 +48,16 @@
 // own summary; a failure to write it (other than "it already exists") is an evidence failure found AFTER the summary was published, so
 // the summary is concluded and published once more with it (never a pass); only when that cannot be published either is
 // summary-error.json written and the reaper left to reconcile.
+//
+// Review r15 H4j (revision 16): what the REAPER observes (a committed record it could not read when a stack-end was journalled, a
+// damaged journal line) reached no verdict on a normal release: the summary was already published, the reaper's end was ignored and
+// the runner exited 0. Now (observer.mjs) the runner journals a barrier after each stack's end and waits, bounded, for the reaper's
+// receipt (`observer.json`) before the schedule may launch anything else; every failure the receipt returns joins the run-level
+// failure latch and stops the run. The terminal procedure takes one more barrier after joining the run's work and before its terminal
+// summary (which records the barrier it covers); without that receipt it does not release (the reaper reconciles once this process has
+// gone). After the release it waits, bounded, for the reaper's terminal receipt and end, and a failure there (an observed failure the
+// summary did not have, no terminal receipt, a non-zero exit, a signal, no end within the bound) is a run error, published once more,
+// and a non-zero exit. Qualification: `barrier_ms` and `release_wait_ms` (faults.mjs).
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -73,6 +83,7 @@ import {
 } from "./docker-resources.mjs";
 import { createFaults } from "./faults.mjs";
 import { freePort } from "./free-port.mjs";
+import { awaitReceipt } from "./observer.mjs";
 import { createOidcProvider } from "./oidc-provider.mjs";
 import {
   cleanupFailed,
@@ -230,6 +241,43 @@ function runError(reason) {
   evidenceErrors.push(reason);
   journal({ type: "run-error", reason });
 }
+// Revision 16 (review r15 H4j): the reaper's barriers (observer.mjs). `barriers` is the newest journalled; BARRIER_MS bounds each wait.
+let barriers = 0;
+const BARRIER_MS = faults.spec.barrier_ms ?? 10_000;
+/**
+ * Join what the reaper has observed so far: journal a barrier and wait, bounded, for its receipt. Every failure the receipt returns is a
+ * run error; one the run did not have yet, or a receipt that could not be had, stops the run (nothing more is launched). Returns
+ * { joined, barrier } (`joined`: the receipt answered this barrier). With the reaper already lost or the journal closed there is nothing
+ * to wait for (both are already the run's failure or hand-over).
+ */
+async function observe(why) {
+  if (!reaper?.pid || reaperLost || released)
+    return { joined: false, barrier: null };
+  barriers += 1;
+  const id = barriers;
+  journal({ type: "barrier", id, invocation: invocation.id });
+  const answer = await awaitReceipt(runDir, {
+    invocation: invocation.id,
+    barrier: id,
+    ms: BARRIER_MS,
+    ended: reaperEnded,
+  });
+  const found =
+    answer.state === "covered"
+      ? answer.receipt.errors
+      : [
+          `the reaper's observations could not be joined (${why}): ${answer.error}`,
+        ];
+  const fresh = found.filter((error) => !evidenceErrors.includes(error));
+  for (const error of fresh) runError(error);
+  if (fresh.length > 0) {
+    const reason = `the reaper observed an evidence failure: ${fresh[0]}`;
+    if (!owner.latched) console.error(`\nSTOPPING: ${reason}`);
+    for (const error of fresh) console.error(`ERROR: ${error}`);
+    owner.stop(reason);
+  }
+  return { joined: answer.state === "covered", barrier: id };
+}
 let lastBackend = null;
 let signalled = null;
 let planning = null; // the discovery's abort controller while the run is being planned
@@ -270,6 +318,18 @@ reaper.once("exit", (code, signal) =>
     `the reaper exited (${signal ?? code}) before the run released it`,
   ),
 );
+// Revision 16 (review r15 H4j): how the reaper ended, kept from its spawn (an end before anyone waits is not lost), consumed after the
+// release whatever the release state.
+const reaperEnded = new Promise((resolveEnd) => {
+  reaper.once("exit", (code, signal) => resolveEnd({ code, signal }));
+  reaper.once("error", (error) =>
+    resolveEnd({
+      code: null,
+      signal: null,
+      error: String(error?.message ?? error),
+    }),
+  );
+});
 if (reaper.pid) owner.exclude(reaper.pid);
 journal({ type: "hello", invocation: invocation.id, evidence });
 // Who this run is, from its first moment (a run killed before its first summary is still identifiable by its mark).
@@ -822,6 +882,9 @@ async function launch(browser, stack, index, expected) {
     journal({ type: "stack-end", browser, index, seq: record.seq });
   await faults.at("stack:ended", runStop.signal).catch(() => undefined);
   current = null;
+  // Revision 16 (review r15 H4j): what the reaper observed of this stack (its read of the committed record) is joined before the
+  // schedule can launch anything else.
+  await observe(`after integration-${browser} ${record.stack ?? "base"}`);
   return record;
 }
 
@@ -910,6 +973,8 @@ function copySummary(text) {
 let finishing = null;
 // Review r9 H4e: how long the terminal procedure waits for the run's own work (the schedule finishing its current stack) to end.
 const JOIN_MS = faults.spec.join_ms ?? 15_000;
+// Revision 16: how long, after its release, the terminal procedure waits for the reaper to end (5 s, as before).
+const RELEASE_WAIT_MS = faults.spec.release_wait_ms ?? 5000;
 /** Has `work` ended within JOIN_MS? (No work: nothing to join.) */
 async function joined(work) {
   if (!work) return true;
@@ -972,6 +1037,14 @@ function finish(code, extra = {}) {
     // Qualification boundary (revision 10): the finaliser has settled the current stack; the run's work has not been joined.
     await faults.at("finish:settled", runStop.signal).catch(() => undefined);
     const quiescent = await joined(running);
+    // Revision 16 (review r15 H4j): every observation of the reaper's up to now joins the run before its terminal summary. Without its
+    // receipt nothing is released (the reaper reconciles once this process has gone); with the reaper lost there is nothing to join (a
+    // failure already).
+    const observer =
+      quiescent && !serve && !reaperLost
+        ? await observe("before the terminal summary")
+        : { joined: false, barrier: null };
+    const observerSettled = observer.joined || reaperLost !== null || serve;
     // Every planned stack has a record, even when the fallback finaliser ends a run whose schedule never got there.
     if (planned)
       for (const browser of browsers)
@@ -1026,7 +1099,14 @@ function finish(code, extra = {}) {
         ...extra,
         outcome,
         cleanup_failed: cleanupFailed,
-        terminal: { quiescent, observations: frontier },
+        terminal: {
+          quiescent,
+          observations: frontier,
+          // Revision 16: the reaper's barrier this summary covers (a recovery requires its receipt).
+          observer: observer.joined
+            ? { barrier: observer.barrier, receipt: "observer.json" }
+            : null,
+        },
       });
       try {
         const text = writeSummary(true, terminalSummary());
@@ -1064,7 +1144,7 @@ function finish(code, extra = {}) {
       }
     };
     let result = await publish();
-    if (result.written && quiescent) {
+    if (result.written && quiescent && observerSettled) {
       // Release the reaper last: the run's work has ended, so it has nothing to finish and waits for nothing more.
       released = true;
       try {
@@ -1074,28 +1154,70 @@ function finish(code, extra = {}) {
       } catch {
         // already gone: recorded as lost
       }
-      if (reaper?.exitCode === null && reaper.signalCode === null)
-        await Promise.race([
-          new Promise((r) => reaper.once("exit", r)),
-          new Promise((r) => setTimeout(r, 5000)),
+      // Revision 16 (review r15 H4j): how the reaper ended its release is evidence of the run: its terminal receipt (every failure it
+      // observed) and its exit, each bounded. An end not yet seen, a missing receipt, a signal or a non-zero exit the receipt does not
+      // explain is a failure; so is an observed failure the terminal summary did not have.
+      const known = evidenceErrors.length;
+      if (!reaperLost) {
+        const ended = await Promise.race([
+          reaperEnded,
+          new Promise((r) => setTimeout(() => r(null), RELEASE_WAIT_MS)),
         ]);
+        const terminalReceipt = await awaitReceipt(runDir, {
+          invocation: invocation.id,
+          barrier: observer.barrier ?? 0,
+          phase: "released",
+          ms: ended === null ? 0 : BARRIER_MS,
+          ended: reaperEnded,
+        });
+        const found =
+          terminalReceipt.state === "covered"
+            ? terminalReceipt.receipt.errors
+            : [
+                `the reaper's terminal receipt could not be had: ${terminalReceipt.error}`,
+              ];
+        for (const error of found)
+          if (!evidenceErrors.includes(error)) evidenceErrors.push(error);
+        const explained =
+          terminalReceipt.state === "covered" &&
+          terminalReceipt.receipt.errors.length > 0;
+        const status =
+          ended === null
+            ? `the reaper had not ended ${RELEASE_WAIT_MS} ms after its release`
+            : ended.error
+              ? `the reaper failed after its release: ${ended.error}`
+              : ended.signal
+                ? `the reaper was ended by ${ended.signal} after its release`
+                : ended.code !== 0 && !explained
+                  ? `the reaper ended its release with exit ${ended.code}`
+                  : null;
+        if (status !== null && !evidenceErrors.includes(status))
+          evidenceErrors.push(status);
+      }
+      for (const error of evidenceErrors.slice(known))
+        console.error(`ERROR: after the release: ${error}`);
       // Nothing can observe after the join. Should anything have, the terminal summary did not cover it: a failure, published again.
       if (observed !== result.frontier) {
         const reason = `${observed - result.frontier} stack observation(s) came after the terminal summary was published`;
         if (!evidenceErrors.includes(reason)) evidenceErrors.push(reason);
-        result = await publish();
       }
+      if (evidenceErrors.length > known || observed !== result.frontier)
+        result = await publish();
     } else {
       // Review r8 H4d: a summary that could not be written is not "nothing left to finish"; review r9 H4e: nor is work that could not be
       // joined. The journal ends WITHOUT a release, so the reaper reconciles the summary with the committed records and its
       // checkpoints (or records why it could not) once this process is gone.
-      if (!quiescent) {
+      if (!quiescent || !observerSettled) {
         console.error(
-          `ERROR: the run's own work did not end within ${JOIN_MS} ms of its terminal summary; the reaper reconciles its evidence`,
+          !quiescent
+            ? `ERROR: the run's own work did not end within ${JOIN_MS} ms of its terminal summary; the reaper reconciles its evidence`
+            : "ERROR: the reaper's observations could not be joined before the terminal summary; the reaper reconciles its evidence",
         );
         journal({
           type: "handover",
-          reason: "the runner's own work could not be joined",
+          reason: !quiescent
+            ? "the runner's own work could not be joined"
+            : "the reaper's observations could not be joined",
         });
       }
       released = true;
@@ -1109,6 +1231,7 @@ function finish(code, extra = {}) {
       result.cleanupFailed ||
       !result.written ||
       !quiescent ||
+      !observerSettled ||
       evidenceErrors.length > 0 ||
       reaperLost !== null;
     process.exit(code === 0 && failedRun ? 1 : code);

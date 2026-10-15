@@ -53,6 +53,18 @@
 //                 attempt and read everything it decides from, writes <run dir>/faults/reaper-hold-inputs-<n>.reached and waits for
 //                 reaper-hold-inputs-<n>.release (at most the reaper's deadline) before it publishes: two recoveries of one run can be
 //                 held to overlap exactly there
+//
+// Revision 16 (review r15 H4j; observer.mjs). Read by the runner:
+//
+//   barrier_ms       how long the runner waits for the reaper's receipt of a barrier (default 10 s)
+//   release_wait_ms  how long, after its release, the runner waits for the reaper to end (default 5 s)
+//   lose_journal     may also name "barrier" (the barrier never reaches the reaper, so its receipt never comes)
+//
+// Read by the REAPER: `reaper_publish_fail` may also name "observer.json" (its n-th receipt, counting barriers and the terminal
+// receipt), and
+//
+//   reaper_release   how the reaper ends a release after its terminal receipt: "exit" (status 3), "kill" (SIGKILL to itself) or
+//                    "linger" (it stays for its deadline first)
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cancelled } from "./ownership.mjs";

@@ -69,6 +69,14 @@
 // makes it one of its evidence failures; on a release this process publishes nothing (the runner's terminal summary is the evidence)
 // and says it on stderr.
 //
+// Review r15 H4j (revision 16): on a release that failure still reached no verdict (the runner had published its summary and ignored
+// how this process ended). Now what this process observes is returned to the runner through a durable receipt (observer.mjs,
+// `<run dir>/observer.json`): the runner journals a `barrier` after each stack's end and before its terminal summary, and this process,
+// having handled every line before it, publishes every failure it has observed (an acknowledgement read, a damaged journal line, a
+// barrier of another invocation, a receipt it could not publish). On a release it publishes the terminal receipt and exits 1 when it
+// holds any failure; the runner consumes that receipt and the exit. A recovery reads the receipt too (`completeSummary`). Qualification
+// seam `reaper_release` ("exit", "kill", "linger"): how this process ends after its terminal receipt (faults.mjs).
+//
 //   node scripts/integration/reaper.mjs <run dir> <token> <runner pid>      (journal on stdin; started by run.mjs, never by hand)
 import { execFileSync, spawn } from "node:child_process";
 import {
@@ -88,6 +96,7 @@ import {
   LABEL_INVOCATION,
 } from "./docker-resources.mjs";
 import { readEvidence, SHAPES } from "./evidence-inputs.mjs";
+import { OBSERVER_FILE, receiptText } from "./observer.mjs";
 import {
   cleanupFailed,
   judge,
@@ -131,10 +140,13 @@ const ORDER_WAIT_MS = Number(process.env.ATLAS_REAPER_ORDER_WAIT_MS ?? 30_000);
 // that cannot be read applies no fault (this process's clean-up must not depend on it) and is said on stderr.
 let publishFaults = {};
 let holdInputs = [];
+// Revision 16: `reaper_release`.
+let releaseFault = null;
 try {
   const spec = JSON.parse(process.env.ATLAS_INTEGRATION_FAULTS || "{}");
   publishFaults = spec?.reaper_publish_fail ?? {};
   holdInputs = spec?.reaper_hold_inputs ?? [];
+  releaseFault = spec?.reaper_release ?? null;
 } catch (error) {
   process.stderr.write(
     `reaper: ATLAS_INTEGRATION_FAULTS could not be read, no publication fault applies: ${String(error?.message ?? error)}\n`,
@@ -204,6 +216,8 @@ const journal = {
   // Review r10 H4f (revision 11): non-empty lines that are not a journal message (torn, not JSON, not an object with a type): what they
   // said is unknown, which is an evidence failure of a take-over, never "nothing was said".
   damaged: [],
+  // Revision 16 (review r15 H4j): barriers that do not belong to this journal (another invocation), as evidence failures.
+  protocol: [],
   handover: null,
   evidence: null,
 };
@@ -218,7 +232,8 @@ const isMessage = (m) =>
     (m.record !== null &&
       typeof m.record === "object" &&
       !Array.isArray(m.record))) &&
-  (m.type !== "run-error" || typeof m.reason === "string");
+  (m.type !== "run-error" || typeof m.reason === "string") &&
+  (m.type !== "barrier" || Number.isInteger(m.id));
 let released = null;
 let taking = null;
 /**
@@ -243,6 +258,59 @@ const unreadableAcknowledgements = () =>
       (a) =>
         `the committed record of ${a.key} could not be read when its stack-end was journalled: ${a.unreadable}`,
     );
+/** Review r10 H4f: damaged journal lines, as one evidence failure (what they said is unknown). */
+const damagedError = () =>
+  `${journal.damaged.length} journal line(s) could not be read, so what they said is unknown (the first: ${JSON.stringify(journal.damaged[0])})`;
+// Revision 16 (review r15 H4j): the newest barrier answered, and the receipts this process could not publish.
+let barrier = 0;
+const receiptErrors = [];
+/** Every failure this process has observed of the run's evidence, as returned to the runner (cumulative: it never shrinks). */
+const observerErrors = () =>
+  unique([
+    ...unreadableAcknowledgements(),
+    ...(journal.damaged.length > 0 ? [damagedError()] : []),
+    ...journal.protocol,
+    ...receiptErrors,
+  ]);
+/** Publish the receipt of what this process observed up to `barrier` (observer.mjs); a failure to is kept as one more failure. */
+function publishReceipt(phase) {
+  try {
+    publishOutput(
+      OBSERVER_FILE,
+      receiptText({
+        invocation: journal.invocation ?? "unknown",
+        barrier,
+        phase,
+        errors: observerErrors(),
+        acknowledged: journal.acknowledged.length,
+        damaged: journal.damaged.length,
+      }),
+    );
+    return true;
+  } catch (error) {
+    const reason = `${OBSERVER_FILE} could not be published (${phase} ${barrier}): ${String(error?.message ?? error)}`;
+    if (!receiptErrors.includes(reason)) receiptErrors.push(reason);
+    say(`evidence NOT written: ${reason}`);
+    return false;
+  }
+}
+/**
+ * Revision 16 (review r15 H4j): the end of a release. The terminal receipt carries every failure observed; this process exits 1 when
+ * there is any (also when the receipt itself could not be published), so its status agrees with what the runner consumes.
+ */
+function endRelease() {
+  publishReceipt("released");
+  if (releaseFault === "kill") process.kill(process.pid, "SIGKILL");
+  if (releaseFault === "exit") process.exit(3);
+  if (releaseFault === "linger") block(DEADLINE_MS);
+  const errors = observerErrors();
+  if (errors.length > 0) {
+    say(
+      `released with ${errors.length} observed evidence failure(s) (${join(runDir, OBSERVER_FILE)})`,
+    );
+    process.exit(1);
+  }
+}
 
 const lines = createInterface({ input: process.stdin });
 lines.on("line", (line) => {
@@ -302,6 +370,14 @@ lines.on("line", (line) => {
     if (!journal.runErrors.includes(m.reason)) journal.runErrors.push(m.reason);
   } else if (m.type === "handover") {
     journal.handover = m.reason ?? "handed over";
+  } else if (m.type === "barrier") {
+    // Revision 16: every line before this one has been handled (its reads included); answer with all that was observed.
+    if (m.invocation !== journal.invocation) {
+      const reason = `a journal barrier named invocation ${m.invocation ?? "(none)"}, not this journal's ${journal.invocation ?? "(none)"}`;
+      if (!journal.protocol.includes(reason)) journal.protocol.push(reason);
+    }
+    barrier = Math.max(barrier, m.id);
+    publishReceipt("barrier");
   } else if (m.type === "released") released = m;
 });
 lines.on("close", () => {
@@ -309,6 +385,8 @@ lines.on("close", () => {
   if (released)
     for (const error of unique(unreadableAcknowledgements()))
       say(`after the release (the runner's summary is the evidence): ${error}`);
+  // Revision 16 (review r15 H4j): the terminal receipt, and exit 1 with any observed failure.
+  if (released) endRelease();
   if (released) process.exit(0);
   void takeOver("the runner ended without releasing its journal");
 });
@@ -497,6 +575,9 @@ function finish(result) {
   // Revision 15 (design assessment r14 C3/Q9): what this process could not read when a stack-end was journalled stays a failure, also
   // when its later read of the same record succeeds.
   evidenceErrors.push(...unique(unreadableAcknowledgements()));
+  // Revision 16 (review r15 H4j): and a barrier of another invocation, a receipt it could not publish.
+  for (const error of [...journal.protocol, ...receiptErrors])
+    if (!evidenceErrors.includes(error)) evidenceErrors.push(error);
   // Review r12 H4g (revision 13): first this recovery's place in the run's order of recoveries (it never overtakes an earlier one that
   // may still be running), then everything the earlier ones established, before anything is decided or replaced.
   let attempt = null;
@@ -769,15 +850,18 @@ function completeSummary(result, evidenceErrors, history = EMPTY) {
     SHAPES.summaryError,
   );
   const planIn = read("plan.json", "the run's plan.json", SHAPES.plan);
+  // Revision 16 (review r15 H4j): what the reaper of this run returned to the runner (this process's own, or an earlier reaper's).
+  const observerIn = read(
+    OBSERVER_FILE,
+    "the reaper's observer.json",
+    SHAPES.observer,
+  );
   const { records: durable, errors: unreadable } = readStackRecords(runDir);
   for (const input of [summaryIn, invocationIn, failedIn, planIn])
     if (input.state === "unreadable") evidenceErrors.push(input.error);
   for (const e of unreadable)
     evidenceErrors.push(`a stack record could not be read: ${e}`);
-  if (journal.damaged.length > 0)
-    evidenceErrors.push(
-      `${journal.damaged.length} journal line(s) could not be read, so what they said is unknown (the first: ${JSON.stringify(journal.damaged[0])})`,
-    );
+  if (journal.damaged.length > 0) evidenceErrors.push(damagedError());
   // The runner writes summary-error.json only when it could not publish its summary: that is an evidence failure of the run, whether
   // or not the file can be read, and the stacks it could not publish are evidence too.
   const failed = failedIn.state === "present" ? failedIn.value : null;
@@ -797,6 +881,30 @@ function completeSummary(result, evidenceErrors, history = EMPTY) {
               : { run_dir: runDir },
           stacks: [],
         };
+  // Revision 16: a receipt that cannot be read, of another invocation, or missing or older than the barrier the runner's summary says it
+  // covered, is an evidence failure; one from before revision 16 (no barrier in the summary, no receipt) is not.
+  if (observerIn.state === "unreadable") evidenceErrors.push(observerIn.error);
+  const invocationId =
+    journal.invocation ??
+    (invocationIn.state === "present" ? invocationIn.value.id : null);
+  const observer =
+    observerIn.state === "present" &&
+    (invocationId === null || observerIn.value.invocation === invocationId)
+      ? observerIn.value
+      : null;
+  if (observerIn.state === "present" && observer === null)
+    evidenceErrors.push(
+      `the reaper's observer.json names invocation ${observerIn.value.invocation}, not ${invocationId}`,
+    );
+  const coveredBarrier = summary.terminal?.observer?.barrier;
+  if (
+    Number.isInteger(coveredBarrier) &&
+    observerIn.state !== "unreadable" &&
+    (observerIn.state === "absent" || observerIn.value.barrier < coveredBarrier)
+  )
+    evidenceErrors.push(
+      `the runner's summary covers the reaper's barrier ${coveredBarrier}, but observer.json ${observerIn.state === "absent" ? "is missing" : `answers only barrier ${observerIn.value.barrier}`}`,
+    );
   const planned = planIn.state === "present" ? planIn.value : null;
   let planUnknown = planIn.state === "unreadable";
   if (planIn.state === "absent" && summary.selection) {
@@ -814,6 +922,9 @@ function completeSummary(result, evidenceErrors, history = EMPTY) {
     ...history.runErrors,
     ...history.errors,
   ]);
+  // Revision 16: and every failure the reaper's receipt returned to the runner.
+  for (const error of observer?.errors ?? [])
+    if (!runErrors.includes(error)) runErrors.push(error);
   // The summary's records, then every committed record and every record of summary-error.json, joined by observation.
   const byKey = new Map();
   const put = (r) => {

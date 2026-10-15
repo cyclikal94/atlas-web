@@ -2780,7 +2780,11 @@ test("H4i neighbour (design assessment C3/Q9): a committed record that cannot be
         label,
       );
     }
-    // A release: the runner published its summary; this process publishes nothing and exits 0, and says what it could not read.
+    // A release: the runner published its summary; this process publishes no recovery output, and says what it could not read.
+    // ADAPTED, labelled (revision 16, review r15 H4j): revision 15 asserted exit 0 for the release in BOTH cells and nothing more, which
+    // let an observed read failure reach no verdict. The old intent (a release publishes no summary/reaper.json, the read site is the
+    // acknowledgement's, the failure is said on stderr) is kept; the release now also publishes its terminal receipt (observer.json)
+    // with the failure, and exits 1 when it holds one (0 in the healthy control).
     const releasedDir = mkdtempSync(
       join(tmpdir(), "atlas-reaper-h4i-release-"),
     );
@@ -2798,12 +2802,21 @@ test("H4i neighbour (design assessment C3/Q9): a committed record that cannot be
       evidence: releasedDir,
       execArgv: releasedFault.execArgv,
     });
-    assert.equal(rel.code, 0, `${label}: release: ${rel.log}`);
+    assert.equal(rel.code, faulty ? 1 : 0, `${label}: release: ${rel.log}`);
     assert.equal(
       existsSync(join(releasedRun, "reaper.json")),
       false,
-      `${label}: release publishes nothing`,
+      `${label}: release publishes no recovery output`,
     );
+    assert.equal(
+      existsSync(join(releasedRun, "summary.json")),
+      false,
+      `${label}: release publishes no summary`,
+    );
+    const receipt = readOutput(join(releasedRun, "observer.json"), label);
+    assert.equal(receipt?.phase, "released", label);
+    if (faulty) assert.match(joined(receipt?.errors), ACK, label);
+    else assert.deepEqual(receipt?.errors, [], label);
     assert.deepEqual(
       releasedFault.reads().map((x) => [x.site, x.failed]),
       [["committedSettled", faulty]],
@@ -2815,5 +2828,438 @@ test("H4i neighbour (design assessment C3/Q9): a committed record that cannot be
         /after the release \(the runner's summary is the evidence\): the committed record of chromium-0 could not be read when its stack-end was journalled: EIO/,
       );
     else assert.doesNotMatch(rel.log, /after the release/);
+  }
+});
+
+// ---- review r15 H4j (revision 16): what the reaper observes reaches the runner, also on a normal release -----------------------------
+import { awaitReceipt } from "./observer.mjs";
+
+// The invocation `reapIn` journals, so a later recovery of the same run reads the receipt as this run's.
+const INV16 = "inv-h4d";
+const ACK16 =
+  /the committed record of chromium-0 could not be read when its stack-end was journalled: EIO: injected transient read failure 1/;
+/** A run folder whose stack chromium-0 has a committed settled record; returns { runDir, seq }. */
+function settledRun(t) {
+  const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4j-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const runDir = join(dir, "run");
+  mkdirSync(runDir);
+  const store = createStackStore(runDir);
+  store.commit({ ...name0, outcome: "running", obs: 1 }, "started");
+  const { seq } = store.commit(
+    { ...name0, ...PASSED_SETTLED, cleanup: { ok: true }, obs: 2 },
+    "settled",
+  );
+  return { runDir, seq };
+}
+const stackEnd16 = (seq) => [
+  { type: "stack", browser: "chromium", index: 0, stack: "base" },
+  {
+    type: "judged",
+    browser: "chromium",
+    index: 0,
+    seq,
+    obs: 2,
+    record: { ...PASSED_SETTLED, cleanup: { ok: true } },
+  },
+  { type: "stack-end", browser: "chromium", index: 0, seq },
+];
+/**
+ * A reaper whose journal stays open (as the runner's does while a run goes on): `send` journals a message, `raw` a line as it is,
+ * `receipt(n, phase)` waits (bounded) for its receipt as the runner does, `release()` ends the journal with a release, and `closed` is
+ * how it ended. A case that ends without a release leaves it to be killed.
+ */
+async function liveReaper(t, runDir, { execArgv = [], env = {} } = {}) {
+  const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((r) => gone.once("exit", r));
+  const reaper = spawn(
+    process.execPath,
+    [
+      ...execArgv,
+      join(here, "reaper.mjs"),
+      runDir,
+      `ATLAS_TEST_${Date.now()}`,
+      String(gone.pid),
+    ],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ATLAS_INTEGRATION_FAULTS: "", ...env },
+    },
+  );
+  let log = "";
+  reaper.stdout.on("data", (d) => {
+    log += d;
+  });
+  reaper.stderr.on("data", (d) => {
+    log += d;
+  });
+  const closed = new Promise((r) =>
+    reaper.once("close", (code, signal) => r({ code, signal })),
+  );
+  t.after(() => {
+    try {
+      reaper.kill("SIGKILL");
+    } catch {
+      // gone
+    }
+  });
+  const raw = (line) => reaper.stdin.write(`${line}\n`);
+  const send = (m) => raw(JSON.stringify(m));
+  send({ type: "hello", invocation: INV16, evidence: dirname(runDir) });
+  return {
+    send,
+    raw,
+    receipt: (barrier, phase = "barrier", ms = 10_000) =>
+      awaitReceipt(runDir, { invocation: INV16, barrier, phase, ms }),
+    release: () => {
+      reaper.stdin.end(`${JSON.stringify({ type: "released", ok: true })}\n`);
+      return closed;
+    },
+    abandon: () => {
+      reaper.stdin.end();
+      return closed;
+    },
+    closed,
+    log: () => log,
+  };
+}
+const barrier16 = (id, invocation = INV16) => ({
+  type: "barrier",
+  id,
+  invocation,
+});
+
+test("H4j: a barrier returns the acknowledgement read's failure, cumulatively, and the release ends with it (control: healthy)", async (t) => {
+  for (const faulty of [false, true]) {
+    const label = faulty
+      ? "the acknowledgement's read fails"
+      : "healthy (control)";
+    const { runDir, seq } = settledRun(t);
+    const fault = readFault(
+      t,
+      stackFile(runDir, "chromium", 0),
+      faulty ? [1] : [],
+    );
+    const r = await liveReaper(t, runDir, { execArgv: fault.execArgv });
+    for (const m of stackEnd16(seq)) r.send(m);
+    r.send(barrier16(1));
+    const first = await r.receipt(1);
+    assert.equal(first.state, "covered", `${label}: ${first.error} ${r.log()}`);
+    assert.deepEqual(
+      fault.reads().map((x) => [x.site, x.failed]),
+      [["committedSettled", faulty]],
+      `${label}: the acknowledgement read was reached before the barrier was answered`,
+    );
+    if (faulty) assert.match(joined(first.receipt.errors), ACK16, label);
+    else assert.deepEqual(first.receipt.errors, [], label);
+    // A later barrier with nothing new still returns everything observed (a receipt never has fewer).
+    r.send(barrier16(2));
+    const second = await r.receipt(2);
+    assert.equal(second.state, "covered", label);
+    assert.deepEqual(second.receipt.errors, first.receipt.errors, label);
+    const end = await r.release();
+    assert.equal(end.code, faulty ? 1 : 0, `${label}: ${r.log()}`);
+    const terminal = readOutput(join(runDir, "observer.json"), label);
+    assert.equal(terminal.phase, "released", label);
+    assert.equal(terminal.barrier, 2, label);
+    assert.equal(terminal.invocation, INV16, label);
+    assert.deepEqual(terminal.errors, first.receipt.errors, label);
+    // A release still publishes no recovery output.
+    assert.equal(existsSync(join(runDir, "reaper.json")), false, label);
+    assert.equal(existsSync(join(runDir, "summary.json")), false, label);
+  }
+});
+
+test("H4j: a damaged journal line, a malformed barrier and a barrier of another invocation are failures a release returns (control: none)", async (t) => {
+  const cells = [
+    ["healthy (control)", (r) => r.send(barrier16(1)), null],
+    [
+      "a damaged line",
+      (r) => {
+        r.raw("{ torn journal line");
+        r.send(barrier16(1));
+      },
+      /1 journal line\(s\) could not be read, so what they said is unknown \(the first: "\{ torn journal line"\)/,
+    ],
+    [
+      "a barrier without a number",
+      (r) => {
+        r.send({ type: "barrier", invocation: INV16 });
+        r.send(barrier16(1));
+      },
+      /1 journal line\(s\) could not be read/,
+    ],
+    [
+      "a barrier of another invocation",
+      (r) => r.send(barrier16(1, "inv-other")),
+      /a journal barrier named invocation inv-other, not this journal's inv-h4d/,
+    ],
+  ];
+  for (const [label, act, error] of cells) {
+    const { runDir } = settledRun(t);
+    const r = await liveReaper(t, runDir);
+    act(r);
+    const answer = await r.receipt(1);
+    assert.equal(answer.state, "covered", `${label}: ${r.log()}`);
+    if (error) assert.match(joined(answer.receipt.errors), error, label);
+    else assert.deepEqual(answer.receipt.errors, [], label);
+    const end = await r.release();
+    assert.equal(end.code, error ? 1 : 0, `${label}: ${r.log()}`);
+    const terminal = readOutput(join(runDir, "observer.json"), label);
+    if (error) assert.match(joined(terminal.errors), error, label);
+    else assert.deepEqual(terminal.errors, [], label);
+  }
+});
+
+test("H4j: a receipt that cannot be published leaves its barrier unanswered and fails the release; so does a terminal receipt that cannot be", async (t) => {
+  // The first receipt fails (the n-th publication of observer.json, faults.mjs): the runner's wait is not answered; the next receipt
+  // says why, and the release exits 1.
+  {
+    const { runDir } = settledRun(t);
+    const r = await liveReaper(t, runDir, {
+      env: faults({ reaper_publish_fail: { "observer.json": [1] } }),
+    });
+    r.send(barrier16(1));
+    const missing = await r.receipt(1, "barrier", 1000);
+    assert.equal(missing.state, "failed", r.log());
+    assert.match(missing.error, /did not answer barrier 1 within 1000 ms/);
+    assert.equal(
+      existsSync(
+        join(runDir, "faults", "reaper-publish-observer-json-1.failed"),
+      ),
+      true,
+      "the first publication was attempted and failed",
+    );
+    r.send(barrier16(2));
+    const next = await r.receipt(2);
+    assert.equal(next.state, "covered", r.log());
+    assert.match(
+      joined(next.receipt.errors),
+      /observer\.json could not be published \(barrier 1\): injected failure publishing observer\.json \(attempt 1\)/,
+    );
+    const end = await r.release();
+    assert.equal(end.code, 1, r.log());
+  }
+  // The terminal receipt fails: the file stays the barrier's receipt (never `released`), the release exits 1 and says why.
+  {
+    const { runDir } = settledRun(t);
+    const r = await liveReaper(t, runDir, {
+      env: faults({ reaper_publish_fail: { "observer.json": [2] } }),
+    });
+    r.send(barrier16(1));
+    assert.equal((await r.receipt(1)).state, "covered", r.log());
+    const end = await r.release();
+    assert.equal(end.code, 1, r.log());
+    const left = readOutput(join(runDir, "observer.json"), "terminal failed");
+    assert.equal(left.phase, "barrier");
+    assert.deepEqual(left.errors, []);
+    assert.match(
+      r.log(),
+      /evidence NOT written: observer\.json could not be published \(released 1\)/,
+    );
+  }
+});
+
+test("H4j qualification seam reaper_release: exit, kill and linger end a release as named (control: a clean release exits 0)", async (t) => {
+  for (const [how, expect] of [
+    [null, { code: 0, signal: null }],
+    ["exit", { code: 3, signal: null }],
+    ["kill", { code: null, signal: "SIGKILL" }],
+    ["linger", { code: 0, signal: null }],
+  ]) {
+    const { runDir } = settledRun(t);
+    const r = await liveReaper(t, runDir, {
+      env: {
+        ...(how ? faults({ reaper_release: how }) : {}),
+        ATLAS_REAPER_DEADLINE_MS: "1500",
+      },
+    });
+    r.send(barrier16(1));
+    assert.equal((await r.receipt(1)).state, "covered", r.log());
+    const started = Date.now();
+    const end = await r.release();
+    assert.deepEqual(end, expect, `${how}: ${r.log()}`);
+    if (how === "linger") assert.ok(Date.now() - started >= 1400, "it stayed");
+    // The terminal receipt is published before the seam acts.
+    assert.equal(
+      readOutput(join(runDir, "observer.json"), String(how)).phase,
+      "released",
+    );
+  }
+});
+
+test("H4j: a recovery joins the receipt's failures, and a summary covering a barrier needs its receipt (control: receipt present, legacy run without one)", async (t) => {
+  const covering = (barrier) =>
+    finishedSummary([settled0], {
+      terminal: {
+        quiescent: true,
+        observations: 1,
+        observer: { barrier, receipt: "observer.json" },
+      },
+    });
+  const write = (value) => (runDir) =>
+    writeFileSync(
+      join(runDir, "observer.json"),
+      typeof value === "string" ? value : JSON.stringify(value),
+    );
+  const receipt = (fields = {}) => ({
+    schema: 1,
+    invocation: "inv-h4d",
+    barrier: 2,
+    phase: "released",
+    errors: [],
+    ...fields,
+  });
+  const cells = [
+    ["receipt present (control)", covering(2), write(receipt()), null],
+    [
+      "legacy run: no barrier, no receipt (control)",
+      finishedSummary([settled0]),
+      () => undefined,
+      null,
+    ],
+    [
+      "receipt missing",
+      covering(2),
+      () => undefined,
+      /the runner's summary covers the reaper's barrier 2, but observer\.json is missing/,
+    ],
+    [
+      "receipt older than the summary covers",
+      covering(2),
+      write(receipt({ barrier: 1, phase: "barrier" })),
+      /the runner's summary covers the reaper's barrier 2, but observer\.json answers only barrier 1/,
+    ],
+    [
+      "receipt unreadable",
+      covering(2),
+      write("{ torn"),
+      /the reaper's observer\.json could not be read/,
+    ],
+    [
+      "receipt of another invocation",
+      covering(2),
+      write(receipt({ invocation: "inv-other" })),
+      /the reaper's observer\.json names invocation inv-other, not inv-h4d/,
+    ],
+    [
+      "receipt returned a failure the summary does not have",
+      covering(2),
+      write(receipt({ errors: ["observed: EIO at the acknowledgement"] })),
+      /^observed: EIO at the acknowledgement$/m,
+    ],
+  ];
+  for (const [label, summary, prepare, error] of cells) {
+    const r = await reapFinished(t, {
+      summary,
+      messages: C3_MESSAGES,
+      prepare,
+    });
+    if (error) {
+      assert.equal(
+        r.code,
+        label.startsWith("receipt returned") ? 0 : 1,
+        `${label}: ${r.log}`,
+      );
+      assert.equal(r.summary?.outcome, "failed", `${label}: ${r.log}`);
+      assert.match(joined(r.summary?.evidence_errors), error, label);
+      assert.match(joined(r.reaped?.run_evidence_errors), error, label);
+    } else {
+      assert.equal(r.code, 0, `${label}: ${r.log}`);
+      assert.equal(r.summary?.outcome, "passed", `${label}: ${r.log}`);
+      assert.deepEqual(r.summary?.evidence_errors, [], label);
+    }
+  }
+});
+
+test("H4j: a runner lost after the reaper returned a failure and before its summary had it: the take-over's summary has it", async (t) => {
+  const { runDir, seq } = settledRun(t);
+  writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN0));
+  writeFileSync(
+    join(runDir, "summary.json"),
+    JSON.stringify({
+      schema: 3,
+      invocation: { finished: false },
+      outcome: "running",
+      stacks: [],
+    }),
+  );
+  const fault = readFault(t, stackFile(runDir, "chromium", 0), [1]);
+  const r = await liveReaper(t, runDir, { execArgv: fault.execArgv });
+  for (const m of stackEnd16(seq)) r.send(m);
+  r.send(barrier16(1));
+  const answer = await r.receipt(1);
+  assert.equal(answer.state, "covered", r.log());
+  assert.match(joined(answer.receipt.errors), ACK16);
+  // The journal ends without a release (the runner is gone): a take-over.
+  const end = await r.abandon();
+  assert.equal(end.code, 1, r.log());
+  const summary = readOutput(join(runDir, "summary.json"), "take-over");
+  assert.equal(summary.outcome, "failed", r.log());
+  assert.match(joined(summary.evidence_errors), ACK16);
+  assert.match(
+    joined(
+      readOutput(join(runDir, "reaper.json"), "take-over").evidence_errors,
+    ),
+    ACK16,
+  );
+  // A second recovery of the run (a fresh process, nothing journalled) still finds it (the first recovery's record and the receipt).
+  const again16 = await reapIn(runDir, { evidence: dirname(runDir) });
+  assert.equal(again16.summary?.outcome, "failed", again16.log);
+  assert.match(joined(again16.summary?.evidence_errors), ACK16);
+});
+
+test("H4j: a receipt that could not be published and a barrier of another invocation are failures of a take-over too (control: neither)", async (t) => {
+  for (const [label, env, act, error] of [
+    ["healthy (control)", {}, (r) => r.send(barrier16(1)), null],
+    [
+      "the receipt could not be published",
+      faults({ reaper_publish_fail: { "observer.json": [1] } }),
+      (r) => r.send(barrier16(1)),
+      /observer\.json could not be published \(barrier 1\)/,
+    ],
+    [
+      "a barrier of another invocation",
+      {},
+      (r) => r.send(barrier16(1, "inv-other")),
+      /a journal barrier named invocation inv-other/,
+    ],
+  ]) {
+    const { runDir } = settledRun(t);
+    writeFileSync(join(runDir, "plan.json"), JSON.stringify(PLAN0));
+    writeFileSync(
+      join(runDir, "summary.json"),
+      JSON.stringify({
+        schema: 3,
+        invocation: { finished: false },
+        outcome: "running",
+        stacks: [],
+      }),
+    );
+    const r = await liveReaper(t, runDir, { env });
+    act(r);
+    // Wait until the barrier was handled (answered, or its publication attempted).
+    assert.ok(
+      await until(
+        () =>
+          existsSync(join(runDir, "observer.json")) ||
+          existsSync(join(runDir, "faults")),
+      ),
+      label,
+    );
+    const end = await r.abandon();
+    const reaped = readOutput(join(runDir, "reaper.json"), label);
+    if (error) {
+      assert.equal(end.code, 1, `${label}: ${r.log()}`);
+      assert.match(joined(reaped.evidence_errors), error, label);
+      assert.match(
+        joined(readOutput(join(runDir, "summary.json"), label).evidence_errors),
+        error,
+        label,
+      );
+    } else {
+      assert.equal(end.code, 0, `${label}: ${r.log()}`);
+      assert.deepEqual(reaped.evidence_errors, [], label);
+    }
   }
 });

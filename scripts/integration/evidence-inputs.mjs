@@ -120,6 +120,22 @@ export const SHAPES = {
         "`recovery_history` is not a recovery history",
       ],
     ]),
+  // Revision 16 (review r15 H4j): the reaper's receipt of what it observed (`observer.json`, observer.mjs).
+  observer: (v) =>
+    first([
+      [isObject(v), "it is not a JSON object"],
+      [v?.schema === 1, "`schema` is not 1"],
+      [isString(v?.invocation), "`invocation` is not an invocation id"],
+      [
+        Number.isInteger(v?.barrier) && v.barrier >= 0,
+        "`barrier` is not a barrier number",
+      ],
+      [
+        v?.phase === "barrier" || v?.phase === "released",
+        "`phase` is not `barrier` or `released`",
+      ],
+      [listOf(v?.errors, isString), "`errors` is not a list of reasons"],
+    ]),
   // Revision 13: a recovery attempt's claim (who holds the attempt number).
   claim: (v) =>
     first([
