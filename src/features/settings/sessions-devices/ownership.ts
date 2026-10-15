@@ -5,7 +5,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { type Identity, type Session, useSession } from "../../../session";
@@ -111,36 +110,91 @@ export function DismissalScopeProvider({
 }
 
 /**
+ * The interactions owned by one component, across its effect's setups and cleanups (WEB-08d revision 17, after review r16: a press
+ * in the moment between a component's first render and its effects lost its outcome under React StrictMode).
+ *
+ * A GENUINE unmount ends every interaction still open, at once (the screen was left, or the tree replaced). In development, React
+ * StrictMode disconnects a just-mounted component's effects once, right after their FIRST setup and in the same turn, and reconnects
+ * them; that simulated unmount must not end what a press began before the effects ran. So only the first cleanup, and only in the
+ * turn of the first setup, DETACHES the interactions instead: none is current (nothing is retried, nothing is shown) until the end of
+ * that turn; a reconnect in the turn attaches them again, and without one they end then. Every later cleanup ends them at once, in the
+ * same turn or later; production React never simulates an unmount, so there every cleanup ends them at once. Dismissal and a change of
+ * identity are unaffected (`end()` and the identity check act directly). Two development-only residuals, recorded in the revision-17
+ * report: StrictMode also simulates an unmount when a Suspense boundary reveals hidden content, which ends them as before this change;
+ * and outside StrictMode a genuine unmount in the turn of the first setup withdraws one microtask late (none is current at once).
+ */
+export interface InteractionLifetime {
+  /** Tracks an interaction for this component; the one returned is not current while detached. */
+  adopt(interaction: Interaction): Interaction;
+  /** The effect's setup: attaches, and returns the cleanup. */
+  connect(): () => void;
+}
+
+export function interactionLifetime(
+  development: boolean = import.meta.env.DEV,
+): InteractionLifetime {
+  const open = new Set<Interaction>();
+  let detached = false;
+  let setups = 0;
+  const endAll = () => {
+    for (const interaction of [...open]) interaction.end();
+    open.clear();
+  };
+  return {
+    adopt: (inner) => {
+      const interaction: Interaction = {
+        id: inner.id,
+        scope: inner.scope,
+        withdraw: inner.withdraw,
+        current: () => !detached && inner.current(),
+        end: inner.end,
+      };
+      open.add(interaction);
+      interaction.withdraw.addEventListener(
+        "abort",
+        () => open.delete(interaction),
+        { once: true },
+      );
+      return interaction;
+    },
+    connect: () => {
+      detached = false;
+      setups += 1;
+      const first = setups === 1;
+      let sameTurn = true;
+      queueMicrotask(() => {
+        sameTurn = false;
+      });
+      return () => {
+        if (!development || !first || !sameTurn) return endAll();
+        detached = true;
+        queueMicrotask(() => {
+          if (detached) endAll();
+        });
+      };
+    },
+  };
+}
+
+/**
  * Interactions owned by one component: each begins in an event handler, and every one still open ends when the component unmounts
  * (the screen was left, or the tree replaced), or when the dialog it sits in is dismissed (`DismissalScopeProvider`). Nothing begins
- * in an effect, so StrictMode's second mount revives nothing.
+ * in an effect, so StrictMode's second mount revives nothing; and its simulated unmount ends nothing (`interactionLifetime`).
  */
 export function useInteractions(): { begin(): Interaction } {
   const session = useSession();
   const dismissal = useContext(ScopeContext);
-  const open = useRef(new Set<Interaction>());
-  useEffect(() => {
-    const owned = open.current;
-    return () => {
-      for (const interaction of owned) interaction.end();
-      owned.clear();
-    };
-  }, []);
+  const [lifetime] = useState(() => interactionLifetime());
+  useEffect(() => lifetime.connect(), [lifetime]);
   return useMemo(
     () => ({
       begin: () => {
-        const interaction = beginInteraction(session);
-        open.current.add(interaction);
-        interaction.withdraw.addEventListener(
-          "abort",
-          () => open.current.delete(interaction),
-          { once: true },
-        );
+        const interaction = lifetime.adopt(beginInteraction(session));
         dismissal?.track(interaction);
         return interaction;
       },
     }),
-    [session, dismissal],
+    [session, dismissal, lifetime],
   );
 }
 

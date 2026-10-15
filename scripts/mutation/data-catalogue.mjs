@@ -17093,15 +17093,15 @@ export const UNIT = [
   {
     id: "MU-1656",
     title:
-      "WEB-08d A3 (revision 2): leaving the screen does not end its interactions (a sign-out refused before sending is tried again)",
+      "WEB-08d A3 (revision 2): leaving the screen does not end its interactions (a sign-out refused before sending is tried again) (re-anchored r17: the unmount's end is interactionLifetime's endAll)",
     file: "src/features/settings/sessions-devices/ownership.ts",
     tests: ["tests/features/settings/interaction-ownership.test.tsx"],
     expect: /then the screen left: not tried again/,
     patch: (t) =>
       sub(
         t,
-        "      for (const interaction of owned) interaction.end();",
-        "      void owned;",
+        "  const endAll = () => {\n    for (const interaction of [...open]) interaction.end();",
+        "  const endAll = () => {\n    void open;",
       ),
   },
   {
@@ -17454,6 +17454,108 @@ export const UNIT = [
     expect:
       /completes after a later edit keeps the dialog|an edit away and back is still a later draft|a not_sent retry keeps the submitted payload/,
     patch: (t) => sub(t, "            revision.current += 1;\n", ""),
+  },
+  {
+    id: "MU-1685",
+    title:
+      "WEB-08d revision 17: every cleanup ends the interactions at once again (StrictMode's simulated unmount ends a press made before the effects ran)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
+    expect:
+      /a press before the component's effects ran keeps its interaction|StrictMode's simulated unmount/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!development || !first || !sameTurn) return endAll();\n",
+        "        return endAll();\n",
+      ),
+  },
+  {
+    id: "MU-1686",
+    title:
+      "WEB-08d revision 17: a genuine unmount in the turn of the first setup never ends its interactions",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
+    expect: /a genuine unmount in the turn of the first setup/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (detached) endAll();\n",
+        "          if (false) endAll();\n",
+      ),
+  },
+  {
+    id: "MU-1687",
+    title:
+      "WEB-08d revision 17: a detached interaction is still current (an old answer could be shown or retried until the end of the turn)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
+    expect: /a genuine unmount in the turn of the first setup/,
+    patch: (t) =>
+      sub(
+        t,
+        "        current: () => !detached && inner.current(),\n",
+        "        current: () => inner.current(),\n",
+      ),
+  },
+  {
+    id: "MU-1688",
+    title:
+      "WEB-08d revision 17: production defers the end of a cleanup in its setup's turn as development does",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
+    expect: /production \(no simulated unmount\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!development || !first || !sameTurn) return endAll();\n",
+        "        if (!first || !sameTurn) return endAll();\n",
+      ),
+  },
+  {
+    id: "MU-1689",
+    title:
+      "WEB-08d revision 17: every cleanup in a setup's turn is taken for StrictMode's simulated one (a genuine same-turn unmount after its pass is deferred)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
+    expect:
+      /after StrictMode's pass, a genuine unmount in the same turn ends them at once|a genuine unmount ends the interaction at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!development || !first || !sameTurn) return endAll();\n",
+        "        if (!development || !sameTurn) return endAll();\n",
+      ),
+  },
+  {
+    id: "MU-1690",
+    title:
+      "WEB-08d revision 17: a genuine unmount in a later turn is deferred too (its interactions are not ended at once)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
+    expect:
+      /a cleanup in a later turn than its setup|a genuine unmount ends the interaction at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!development || !first || !sameTurn) return endAll();\n",
+        "        if (!development || !first) return endAll();\n",
+      ),
+  },
+  {
+    id: "MU-1691",
+    title:
+      "WEB-08d revision 17: a reconnect does not attach the interactions again (StrictMode's pass leaves them detached and they end)",
+    file: "src/features/settings/sessions-devices/ownership.ts",
+    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
+    expect:
+      /StrictMode's simulated unmount|a press before the component's effects ran keeps its interaction/,
+    patch: (t) =>
+      sub(
+        t,
+        "      detached = false;\n      setups += 1;\n",
+        "      setups += 1;\n",
+      ),
   },
 ];
 
