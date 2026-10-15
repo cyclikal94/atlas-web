@@ -31,6 +31,11 @@ export interface Generations {
   dark(on: boolean): Promise<void>;
   health(body: unknown | { status: number }): Promise<void>;
   identity(value: { account: string; session: string } | null): Promise<void>;
+  /**
+   * Revision 13 (F-8): holds every identity read (`browser-sessions/current`) unanswered (`true`), or answers every held one and stops
+   * holding (`false`). Answers how many were held when it was called.
+   */
+  holdIdentity(on: boolean): Promise<number>;
   log(): Promise<LogEntry[]>;
   clearLog(): Promise<void>;
   /** The files of a built generation, by path, with their SHA-256 (dist-pwa/generations.json). */
@@ -107,6 +112,9 @@ async function startGenerations(
     identity: async (value) => {
       await post("/identity", value === null ? "" : JSON.stringify(value));
     },
+    holdIdentity: async (on) =>
+      ((await post(`/identity/hold?on=${on ? 1 : 0}`)) as { held: number })
+        .held,
     log: async () =>
       (await (
         await fetch(`${urls.control}/log`, { method: "GET" })

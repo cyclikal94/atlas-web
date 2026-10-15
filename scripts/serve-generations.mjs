@@ -24,6 +24,9 @@
 //   POST /dark?on=1|0             destroy every connection (the server is unreachable) or serve again
 //   POST /health                  the body of `/health`: JSON in the request body, or `?status=<code>` for an error status
 //   POST /identity                the stub identity read, `{"account": ..., "session": ...}` (an empty body: none, the backend's 404)
+//   POST /identity/hold?on=1|0    hold every identity read (`browser-sessions/current`) unanswered from now on, or answer every held one
+//                                 as the stub stands and stop holding; answers {"hold", "held"} (WEB-14a revision 13, F-8: a page's
+//                                 session check that does not finish, in every engine: Playwright's WebKit routing misses this page's request)
 //   GET  /log                     every request served so far: [{ "method", "path", "at", "status" }]
 //   POST /log/clear
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -82,8 +85,27 @@ let health = { status: 200, body: { status: "ok", api_version: "0.28.0" } };
 let dark = false;
 /** The stub identity read (`GET /api/experimental/v1/browser-sessions/current`), or null for the backend's 404. */
 let identity = null;
+/** While true, identity reads wait in `heldReads` (each answers when released, or never if its page went away). */
+let holdIdentity = false;
+const heldReads = [];
 const log = [];
 const sockets = new Set();
+
+/** The stub identity read's answer, as the stub stands when it is answered (none now: the backend's 404). */
+const answerIdentity = (answer) => {
+  if (identity === null)
+    return answer(404, { "Cache-Control": "no-store" }, "");
+  return answer(
+    200,
+    { "content-type": "application/json", "Cache-Control": "no-store" },
+    JSON.stringify({
+      account_id: identity.account,
+      session_id: identity.session,
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+      csrf_token: `csrf.${identity.session}`,
+    }),
+  );
+};
 
 const send = (response, status, headers, body) => {
   response.writeHead(status, { ...HEADERS, ...headers });
@@ -124,17 +146,13 @@ const app = createServer((request, response) => {
   if (
     path === "/api/experimental/v1/browser-sessions/current" &&
     identity !== null
-  )
-    return answer(
-      200,
-      { "content-type": "application/json", "Cache-Control": "no-store" },
-      JSON.stringify({
-        account_id: identity.account,
-        session_id: identity.session,
-        expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-        csrf_token: `csrf.${identity.session}`,
-      }),
-    );
+  ) {
+    if (!holdIdentity) return answerIdentity(answer);
+    heldReads.push(() => {
+      if (!response.destroyed) answerIdentity(answer);
+    });
+    return;
+  }
   // The profile read and the device mirror, as a healthy backend answers them for the stub identity.
   if (path === "/api/experimental/v1/me" && identity !== null)
     return answer(
@@ -246,6 +264,12 @@ const control = createServer((request, response) => {
       case "/identity":
         identity = body ? JSON.parse(body) : null;
         return done({ identity });
+      case "/identity/hold": {
+        holdIdentity = url.searchParams.get("on") === "1";
+        const held = heldReads.length;
+        if (!holdIdentity) for (const release of heldReads.splice(0)) release();
+        return done({ hold: holdIdentity, held });
+      }
       case "/log":
         return done(log);
       case "/log/clear":

@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from "@playwright/test";
+import { untilTreeSettled } from "./data-sync-helpers";
 import {
   BANNER,
   build,
@@ -43,6 +44,22 @@ const formReady = (page: Page) =>
     "data-ready",
     "true",
   );
+/**
+ * Revision 13 (F-8; review of 15 October 2026, R20). A page that has just booted is not settled when its form first shows what it restored:
+ * the identity reads its boot starts in the OTHER pages of the account can close its own protected tree for a session check a few
+ * milliseconds later (WEB-08c HF-1, WEB-09a R43). In the original failure (Firefox) C's form was ready and showed ORIGINAL, then C showed
+ * `1e.checking` and `1e.interrupted_online` with its tree torn down before the flush began. A form whose tree is torn down has no database
+ * to save to, so that save fails, as it must (covered on purpose in the revision-13 case below). A case that needs a newly booted peer's
+ * save to SUCCEED first waits until the pages already open, and then the peer, have settled by what each page shows (`untilTreeSettled`:
+ * booted, bound, no request lease of any page left in the record, nothing changing; the order of WEB-09a's `withSettledOutboxPeers`, so
+ * the other pages' reactions to the boot are over), then for the peer's form.
+ */
+async function settledPeer(page: Page, others: Page[]): Promise<void> {
+  for (const settling of [...others, page])
+    await untilTreeSettled(settling, { account: "acct-a" });
+  await displayed(page);
+  await formReady(page);
+}
 
 /** The rows of the account's `form_recovery` store, read through the data harness on a page of its own. */
 async function recoveryRows(
@@ -1707,7 +1724,7 @@ async function restorers(
   let peer: Page | null = null;
   if (options.peer) {
     peer = await openApp(context, world);
-    await formReady(peer);
+    await settledPeer(peer, [first]);
     await expect(title(peer)).toHaveValue(ORIGINAL);
     await quiet(peer);
   }
@@ -2167,7 +2184,7 @@ test.describe("revision 6, R13: the update hands the form to the next page of th
       let peer: Page | null = null;
       if (act.name !== "no other tab") {
         peer = await openApp(context, generations);
-        await formReady(peer);
+        await settledPeer(peer, [first]);
         await expect(title(peer)).toHaveValue(ORIGINAL);
         await act.run(peer);
       }
@@ -2309,6 +2326,128 @@ const failHandoffRows = (page: Page) =>
     };
   });
 
+// ---- revision 13 ------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 13 (F-8; review of 15 October 2026, R20 `recovery-peer-save-unexplained-failure`). C's flush in the revision-6 case "C saves it
+ * unchanged" once answered `["failed"]` in Firefox: the original trace shows C's tree torn down for a session check (`1e.checking`, then
+ * `1e.interrupted_online`) before the flush began, and the diagnosis (`.agtx/evidence/WEB-14a/revision-13/f8`) reproduced exactly that
+ * answer with C's tree held closed: the save never reaches the store, because a form no mount shows has no database while the account is
+ * not displayed (`flushSession`: no pinned target). Here that closure is FORCED after C has settled, in every engine: every identity read
+ * waits (`holdIdentity`), D boots and goes away while its read waits, so its request lease is left unresolved and every displayed page of
+ * the account closes its tree and checks the session with a read that waits too. The save fails closed: nothing written or removed, the
+ * tab is not reloaded, the input is kept; once the session check finishes and C is shown again, its save lands and A2 still restores
+ * ORIGINAL with nothing submitted. FIXTURE evidence.
+ */
+test.describe("revision 13, F-8: a peer whose tree is closed for a session check when it saves", () => {
+  // `typed`: C first types input of its own that is in no copy (PEER), so what C shows again can only be its own kept input, never a
+  // copy read back from the store (which holds ORIGINAL); unchanged: exactly F-8's case.
+  for (const typed of [false, true])
+    test(`C's save ${typed ? "of input it typed " : ""}fails while its tree is closed: nothing written or removed, input kept, no reload; once shown again it saves; A2 restores ORIGINAL`, async ({
+      context,
+      generations,
+    }) => {
+      const first = await updatedAndHeld(context, generations);
+      const peer = await openApp(context, generations);
+      await settledPeer(peer, [first]);
+      await expect(title(peer)).toHaveValue(ORIGINAL);
+      const mine = typed ? PEER : ORIGINAL;
+      if (typed) await title(peer).fill(PEER);
+      await mark(peer);
+      await generations.holdIdentity(true);
+      const away = await context.newPage();
+      await navigate(
+        away,
+        `${generations.url}/__session?${new URLSearchParams({ sticky: "1", route: "/today" })}`,
+      );
+      // D's identity read is waiting: D's kernel has issued a request whose lease stands in the record, and the server holds a read. (A
+      // fetch count is not enough: D's first fetch is `/health`, before any lease; revision-13 attempt 1, WebKit, closed D that early.)
+      await expect
+        .poll(
+          async () =>
+            (await generations.holdIdentity(true)) > 0 &&
+            (await away.evaluate(async () => {
+              const session = (
+                window as unknown as {
+                  __atlasFixture?: {
+                    session?: {
+                      trace: Array<{
+                        event: string;
+                        data?: { lease?: string };
+                      }>;
+                      readRecords(): Promise<unknown>;
+                    };
+                  };
+                }
+              ).__atlasFixture?.session;
+              if (!session) return false;
+              const issued = session.trace
+                .filter((entry) => entry.event === "request.issued")
+                .map((entry) => entry.data?.lease)
+                .filter((lease): lease is string => typeof lease === "string");
+              const records = (await session.readRecords()) as {
+                auth_state?: { leases?: Record<string, unknown> };
+              };
+              const standing = records.auth_state?.leases ?? {};
+              return issued.some((lease) => lease in standing);
+            })),
+        )
+        .toBe(true);
+      // C is the page in front (visible), so it watches D's lease whatever an engine does with a background page.
+      await peer.bringToFront();
+      expect(await peer.evaluate(() => document.visibilityState)).toBe(
+        "visible",
+      );
+      await away.close();
+      const shown = (page: Page) =>
+        page.evaluate(() => ({
+          tree:
+            document.getElementById("protected-root")?.childElementCount ?? 0,
+          neutral:
+            document
+              .querySelector("[data-neutral-state]")
+              ?.getAttribute("data-neutral-state") ?? null,
+        }));
+      // C's tree is torn down for the session check, as in the original trace.
+      await expect
+        .poll(() => shown(peer))
+        .toEqual({ tree: 0, neutral: "1e.interrupted_online" });
+      expect(await flushAll(peer)).toEqual(["failed"]);
+      // Nothing of C's was written and nothing removed: A's ordinary copy and the hand-off stand as they were. C was not reloaded.
+      expect((await liveCopies(context, generations)).sort()).toEqual([
+        ["handoff", ORIGINAL],
+        ["ordinary", ORIGINAL],
+      ]);
+      expect(await marked(peer)).toBe(true);
+      // The session check finishes: C is shown again with its input, and its save lands.
+      expect(await generations.holdIdentity(false)).toBeGreaterThan(0);
+      await displayed(peer);
+      await formReady(peer);
+      await expect(title(peer)).toHaveValue(mine);
+      expect(await marked(peer)).toBe(true);
+      expect(await flushAll(peer)).toEqual(["saved"]);
+      // C's own copy holds what it showed (A's ordinary copy, the source it restored, is replaced by it); the hand-off is untouched.
+      expect((await liveCopies(context, generations)).sort()).toEqual([
+        ["handoff", ORIGINAL],
+        ["ordinary", mine],
+      ]);
+      await releaseNext(first);
+      await bindForm(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+      await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+      expect(await flushAll(first)).toEqual(["saved"]);
+      expect(
+        (await liveCopies(context, generations)).filter(
+          ([where]) => where === "handoff",
+        ),
+      ).toEqual([]);
+    });
+});
+
 test.describe("revision 7, R6: 'Discard and reload anyway' after a save that failed part of the way discards what it wrote", () => {
   type Leg = {
     name: string;
@@ -2423,7 +2562,7 @@ test.describe("revision 7, R13: a successor that cannot read the hand-off says s
           sessionStorage.setItem("atlas-fixture-fail-handoff-read", "1"),
         );
       const peer = await openApp(context, generations);
-      await formReady(peer);
+      await settledPeer(peer, [first]);
       await expect(title(peer)).toHaveValue(ORIGINAL);
       await title(peer).fill(PEER);
       expect(await flushAll(peer)).toEqual(["saved"]);
