@@ -18091,11 +18091,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/Controls.tsx",
     tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
     expect: /E1: .*activated twice/,
+    // Re-anchored in revision 10 (R22): the pending rule now lives in `blocked`, which disables every enrolment control (same mechanism).
     patch: (t) =>
       sub(
         t,
-        "            {!env.writable || pending ? (",
-        "            {!env.writable ? (",
+        "    : pending\n      ? CONTROLS_COPY.sending\n      : null;\n",
+        "    : null;\n",
       ),
   },
   {
@@ -18907,6 +18908,140 @@ export const UNIT = [
         t,
         "    for (const id of shown) if (!seen.has(id)) seen.set(id, null);\n",
         "",
+      ),
+  },
+  {
+    id: "MU-2213",
+    title:
+      "WEB-10a rev 10 (R22): an enrolment change omits initial_policy (the server then resolves the current progress defaults)",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: |Q2: |Q5: /,
+    patch: (t) =>
+      sub(
+        t,
+        "    initial_policy: copyPolicy(change.policy ?? base.policy),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2214",
+    title:
+      "WEB-10a rev 10 (R22): Leave and the consent send a private policy instead of the audience that was read",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*(Leave keeps|consent alone)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    initial_policy: copyPolicy(change.policy ?? base.policy),\n",
+        "    initial_policy: copyPolicy(change.policy ?? { grants: [], exclude_accounts: [] }),\n",
+      ),
+  },
+  {
+    id: "MU-2215",
+    title: "WEB-10a rev 10 (R22): a command's policy loses its exclusions",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "  exclude_accounts: [...policy.exclude_accounts],\n",
+        "  exclude_accounts: [],\n",
+      ),
+  },
+  {
+    id: "MU-2216",
+    title:
+      "WEB-10a rev 10 (R22): rejoining sends expected_version 0 instead of the enrolment's current version",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining/,
+    patch: (t) =>
+      sub(
+        t,
+        "    expected_version: base.version,\n",
+        "    expected_version: change.active === true ? 0 : base.version,\n",
+      ),
+  },
+  {
+    id: "MU-2217",
+    title:
+      "WEB-10a rev 10 (R22): the primary-household default is offered with edit access whatever the template says",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q2: .*version 0|Q3\/Q8: .*the first Join keeps/,
+    patch: (t) =>
+      sub(t, "        edit: template.edit,\n", "        edit: true,\n"),
+  },
+  {
+    id: "MU-2218",
+    title:
+      "WEB-10a rev 10 (R22, C3): the captured attempt keeps the caller's live object, not a frozen copy of its body",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q3\/Q8: .*the sent command/,
+    patch: (t) =>
+      sub(
+        t,
+        "    command: frozen(JSON.parse(body)) as EnrolCommand,\n",
+        "    command,\n",
+      ),
+  },
+  {
+    id: "MU-2219",
+    title:
+      "WEB-10a rev 10 (R22, C2): an unreadable default audience is shown as Private and Join can send it",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q2: .*the default can't be read/,
+    patch: (t) =>
+      sub(
+        t,
+        '            : { status: "failed" },\n',
+        '            : { status: "ready", policy: { grants: [], exclude_accounts: [] } },\n',
+      ),
+  },
+  {
+    id: "MU-2220",
+    title:
+      "WEB-10a rev 10 (R22, F1): joining implies the consent instead of asking it",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining|X3: /,
+    patch: (t) =>
+      sub(
+        t,
+        "  const [consent, setConsent] = useState<boolean | null>(null);\n",
+        "  const [consent, setConsent] = useState<boolean | null>(true);\n",
+      ),
+  },
+  {
+    id: "MU-2221",
+    title:
+      "WEB-10a rev 10 (R22): rejoining starts from a private audience instead of the one last used",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const [policy, setPolicy] = useState(() => copyPolicy(seed));\n",
+        "  const [policy, setPolicy] = useState(() =>\n    copyPolicy({ grants: [], exclude_accounts: [] }),\n  );\n",
+      ),
+  },
+  {
+    id: "MU-2222",
+    title: "WEB-10a rev 10 (R22): Cancel of the audience editor saves the edit",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*control: Cancel/,
+    patch: (t) =>
+      sub(
+        t,
+        '              <Button variant="quiet" onClick={() => setDraft(null)}>\n',
+        '              <Button variant="quiet" onClick={() => change({ policy: draft })}>\n',
       ),
   },
 ];
@@ -21856,10 +21991,11 @@ export const ENGINE = [
         sub(
           t,
           "    const mine = startEnrolment(env.identity, taskId, command, env.newId);\n    if (mine === null) return;",
-          '    const mine = {\n      key: env.newId(),\n      body: "",\n      command,\n      phase: "pending" as const,\n    };',
+          '    const mine = {\n      key: env.newId(),\n      body: JSON.stringify(command),\n      command,\n      phase: "pending" as const,\n    };',
         ),
-        "            {!env.writable || pending ? (",
-        "            {!env.writable ? (",
+        // Re-expressed in revision 10 (R22): the pending rule now lives in `blocked` (every enrolment control), and the body is sent.
+        "    : pending\n      ? CONTROLS_COPY.sending\n      : null;\n",
+        "    : null;\n",
       ),
   },
   {

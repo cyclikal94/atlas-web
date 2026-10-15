@@ -5,10 +5,10 @@
     "css_gzip": 30720,
     "fonts": 256000
   },
-  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010-WEB12A (approved by Kieran on 10 October 2026; approval/fixture-budget-20261010.json and delivery/handoffs/web12a-fixture-budget-20261010.md in the orchestrator), WEB-12a revision 4 only: the measured candidate's fixture initial JavaScript was 241,870 bytes, 326 above the R61 ceiling 241,544 (the R10 defaults-source correction +310, the policy editor's DA-P1 fix +20, the fixture harness +10). The dist-fixture baseline was re-recorded on that candidate (initial JavaScript 241,870, CSS 7,059, fonts 83,736) and its initial JavaScript ceiling set to 266,057 (floor of 241,870 x 1.10). A one-off adjustment for this measured candidate, not authority for later resets; WEB-09c owns the reasoned successor ceiling (FB-20261010). Production baseline, shared provisional ceilings and tolerance are unchanged.",
+  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010-WEB12A (approved by Kieran on 10 October 2026; approval/fixture-budget-20261010.json and delivery/handoffs/web12a-fixture-budget-20261010.md in the orchestrator), WEB-12a revision 4 only: the measured candidate's fixture initial JavaScript was 241,870 bytes, 326 above the R61 ceiling 241,544 (the R10 defaults-source correction +310, the policy editor's DA-P1 fix +20, the fixture harness +10). The dist-fixture baseline was re-recorded on that candidate (initial JavaScript 241,870, CSS 7,059, fonts 83,736) and its initial JavaScript ceiling set to 266,057 (floor of 241,870 x 1.10). A one-off adjustment for this measured candidate, not authority for later resets; WEB-09c owns the reasoned successor ceiling (FB-20261010). Production baseline, shared provisional ceilings and tolerance are unchanged. WEB-10a revision 10 (R22), authorised by Kieran on 15 October 2026 in the WEB-10a Running session (answer to the author's budget question; no orchestrator approval record exists for it yet): the approved enrolment audience chooser reuses WEB-12a's sharing editor parts from the lazy task screen, and the shell's first load must export those parts to it (cross-chunk export names only; the chooser's code is in the lazy screens chunk). The measured candidate's fixture initial JavaScript was 266,122 bytes (HEAD f830b87 built 266,054 to 266,056), 65 above the FB-20261010 ceiling 266,057. The dist-fixture initial JavaScript baseline was set to that measurement (CSS and fonts baselines unchanged) and its ceiling to 266,150, the figure the decision named. A one-off adjustment for this candidate, not authority for later resets; WEB-09c still owns the reasoned successor ceiling. Production baseline, shared provisional ceilings and tolerance are unchanged.",
   "provisional_by_build": {
     "dist-fixture": {
-      "initial_js_gzip": 266057
+      "initial_js_gzip": 266150
     }
   },
   "tolerance": 0.1,
@@ -19,7 +19,7 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 241870,
+      "initial_js_gzip": 266122,
       "css_gzip": 7059,
       "fonts": 83736
     }

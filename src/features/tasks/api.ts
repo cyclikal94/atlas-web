@@ -1,3 +1,4 @@
+import type { Policy } from "../../data";
 import { recogniseAtlasError } from "../../lib/api-client/problem";
 import { type Session, StampedRequestError } from "../../session";
 import {
@@ -44,12 +45,18 @@ export interface DailyQuery {
   limit: number;
 }
 
+/**
+ * The COMPLETE enrolment (revision 10, R22): `initial_policy` is never omitted. The server reads an omitted policy as "resolve my CURRENT
+ * progress defaults" and replaces the enrolment's audience with it (task `states.md` R2/F1), so every Join, Leave, consent or audience
+ * change carries the audience the person reviewed: unchanged unless they chose another one. Build it with `enrolCommand`.
+ */
 export interface EnrolCommand {
   kind: "enrol";
   task_id: string;
   expected_version: number;
   active: boolean;
   aggregate_consent: boolean;
+  initial_policy: Policy;
 }
 
 export interface TasksApi {

@@ -1,6 +1,8 @@
 import { useEffect, useId, useReducer, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
-import type { CacheRow } from "../../../data";
+import { type CacheRow, type Policy, useSharingDefaults } from "../../../data";
+// The sharing feature's public chooser, from its own module (see `sharing/index.ts`).
+import { AudienceChooser } from "../../sharing/AudienceChooser";
 import type { TaskActions } from "../actions";
 import type { EnrolCommand } from "../api";
 import * as copy from "../copy";
@@ -16,7 +18,13 @@ import {
   startEnrolment,
   subscribeEnrolment,
 } from "../memory";
+import { canonicalBody } from "../model/attempt";
 import { type Enrolment, parseProgressState } from "../model/contract";
+import {
+  copyPolicy,
+  enrolCommand,
+  progressDefaultPolicy,
+} from "../model/enrolment";
 import { jointLine } from "../model/row-state";
 import type { RowModel } from "../view";
 
@@ -56,6 +64,39 @@ export const CONTROLS_COPY = {
   loading: "Loading your settings",
   sending: "Sending your change…",
   saved: "Saved.",
+  joinConsent: "Count your contribution in the shared total?",
+  consentYes: "Yes, include my contribution",
+  consentNo: "No, leave my contribution out of the shared total",
+  chooseConsent: "Choose whether to count your contribution first",
+  audienceHeading: "Who sees your progress from now on",
+  audienceNote:
+    "This applies to days from now on. A day already started keeps its own sharing (Who sees my progress).",
+  defaultAudience: "This starts from your default sharing.",
+  lastAudience: "This starts from the sharing you had before.",
+  defaultLoading: "Loading your default sharing",
+  defaultFailed: "Your default sharing couldn't be loaded.",
+  audienceUnknown: "Who would see your progress isn't known yet",
+  changeAudience: "Change…",
+  saveAudience: "Save sharing",
+  cancel: "Cancel",
+  noChange: "Nothing has changed",
+  /** Who an enrolment's policy names (no household names or members: the editor shows those). */
+  audienceLine: (policy: Policy): string => {
+    const households = policy.grants.filter(
+      (g) => g.kind === "household",
+    ).length;
+    const people = policy.grants.length - households;
+    const reach = [
+      households > 0
+        ? `${households} household${households === 1 ? "" : "s"}`
+        : "",
+      people > 0 ? `${people} ${people === 1 ? "person" : "people"}` : "",
+    ].filter(Boolean);
+    const excluded = policy.exclude_accounts.length;
+    return reach.length === 0
+      ? "only you"
+      : `you and ${reach.join(" and ")}${excluded > 0 ? `, ${excluded} excluded` : ""}`;
+  },
 } as const;
 
 /** Close/Reopen (`resolve`) and Exclude/Undo (`exclude`), Q21's closure row. No confirmation dialogs (none drawn). Both queue offline. */
@@ -277,10 +318,17 @@ export function Participation({
 
 /**
  * "Your settings" (enrolment, D-10a-7; revision 4, R11): online-only, ONE attempt per body. The attempt is taken synchronously before the
- * request (`startEnrolment`, page memory): while it is pending Join/Leave and the consent are disabled with a reason, and a repeated
- * activation sends nothing. An uncertain answer keeps the exact command and key for Try again (never resent on its own). Every answer, and
- * the end of a pending attempt seen after a remount, reads the enrolment again; a read asked before a change was sent is not shown, and one
+ * request (`startEnrolment`, page memory): while it is pending every control here is disabled with a reason, and a repeated activation
+ * sends nothing. An uncertain answer keeps the exact command and key for Try again (never resent on its own). Every answer, and the end
+ * of a pending attempt seen after a remount, reads the enrolment again; a read asked before a change was sent is not shown, and one
  * answered while a change is pending never replaces what is shown (both may predate the change).
+ *
+ * Revision 10 (R22; task `states.md` R2/F1): every change sends the COMPLETE enrolment (`enrolCommand`), its audience included, so Leave
+ * and the consent keep the audience that was read. Joining (first time or again) asks the aggregate-consent question explicitly and shows
+ * the audience the new progress will have, to keep or change, before Join: the current default sharing the first time (read for the
+ * purpose; unknown is never shown as Private), the audience last used when rejoining. Enrolled, "Change…" edits the audience with its own
+ * Save and Cancel. A choice belongs to the enrolment version it was made on: once another version is shown it is dropped (never rebased),
+ * and the person sees the new state; a stale version is refused by the server (`expected_version`).
  */
 function EnrolmentSettings({ taskId }: { taskId: string }) {
   const env = useTasksEnv();
@@ -341,7 +389,8 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
     const mine = startEnrolment(env.identity, taskId, command, env.newId);
     if (mine === null) return;
     sent.current += 1;
-    const result = await env.api.enrol(mine.command, mine.key);
+    // The captured body is what is sent, byte for byte, now and on Try again (R22: its policy too).
+    const result = await env.api.enrol(JSON.parse(mine.body), mine.key);
     const definite =
       result.ok ||
       (result.kind !== "uncertain" &&
@@ -358,17 +407,20 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
     else if (definite) setState("refused");
     else if (result.kind !== "closed") setState("idle");
   };
-  const change = (next: { active: boolean; aggregate_consent: boolean }) => {
+  const change = (next: {
+    active?: boolean;
+    aggregate_consent?: boolean;
+    policy?: Policy;
+  }) => {
     if (enrolment === null) return;
-    void send({
-      kind: "enrol",
-      task_id: taskId,
-      expected_version: enrolment.version,
-      active: next.active,
-      aggregate_consent: next.aggregate_consent,
-    });
+    void send(enrolCommand(taskId, enrolment, next));
   };
   const uncertain = attempt?.phase === "uncertain" ? attempt : null;
+  const blocked = !env.writable
+    ? copy.NOT_WRITABLE
+    : pending
+      ? CONTROLS_COPY.sending
+      : null;
   return (
     <section
       className="flex flex-col gap-2"
@@ -400,44 +452,31 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
         <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.loading}</p>
       ) : (
         <div className="flex flex-col gap-2">
-          <span>
-            {!env.writable || pending ? (
-              <Button
-                disabled
-                reason={
-                  !env.writable ? copy.NOT_WRITABLE : CONTROLS_COPY.sending
-                }
-              >
-                {enrolment.active ? CONTROLS_COPY.leave : CONTROLS_COPY.join}
-              </Button>
-            ) : (
-              <Button
-                onClick={() =>
-                  change({
-                    active: !enrolment.active,
-                    aggregate_consent: enrolment.aggregate_consent,
-                  })
-                }
-              >
-                {enrolment.active ? CONTROLS_COPY.leave : CONTROLS_COPY.join}
-              </Button>
-            )}
-          </span>
-          <label className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
-            <input
-              type="checkbox"
-              checked={enrolment.aggregate_consent}
-              disabled={!env.writable || pending}
-              onChange={() =>
-                change({
-                  active: enrolment.active,
-                  aggregate_consent: !enrolment.aggregate_consent,
-                })
-              }
-              className="size-[15px]"
+          {enrolment.active ? (
+            <Enrolled
+              key={enrolment.version}
+              enrolment={enrolment}
+              blocked={blocked}
+              change={change}
             />
-            {CONTROLS_COPY.consent}
-          </label>
+          ) : enrolment.version === 0 ? (
+            <FirstJoin
+              blocked={blocked}
+              join={(consent, policy) =>
+                change({ active: true, aggregate_consent: consent, policy })
+              }
+            />
+          ) : (
+            <JoinForm
+              key={enrolment.version}
+              seed={enrolment.policy}
+              note={CONTROLS_COPY.lastAudience}
+              blocked={blocked}
+              join={(consent, policy) =>
+                change({ active: true, aggregate_consent: consent, policy })
+              }
+            />
+          )}
           {uncertain !== null ? (
             <span
               className="flex flex-wrap items-center gap-2"
@@ -465,5 +504,253 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
         </div>
       )}
     </section>
+  );
+}
+
+/** A disabled control with why, or the enabled one. */
+function Act({
+  blocked,
+  onClick,
+  children,
+  ...rest
+}: {
+  blocked: string | null;
+  onClick(): void;
+  children: string;
+  variant?: "quiet" | "primary";
+  "data-enrol-act"?: string;
+}) {
+  return blocked !== null ? (
+    <Button {...rest} disabled reason={blocked}>
+      {children}
+    </Button>
+  ) : (
+    <Button {...rest} onClick={onClick}>
+      {children}
+    </Button>
+  );
+}
+
+/** Enrolled: Leave, the consent and the audience, each resending everything it does not change. */
+function Enrolled({
+  enrolment,
+  blocked,
+  change,
+}: {
+  enrolment: Enrolment;
+  blocked: string | null;
+  change(next: {
+    active?: boolean;
+    aggregate_consent?: boolean;
+    policy?: Policy;
+  }): void;
+}) {
+  // The audience being edited ("Change…"), from this version's policy; null when the editor is closed (Cancel sends nothing).
+  const [draft, setDraft] = useState<Policy | null>(null);
+  const unchanged =
+    draft !== null && canonicalBody(draft) === canonicalBody(enrolment.policy);
+  return (
+    <>
+      <span>
+        <Act
+          blocked={blocked}
+          data-enrol-act="leave"
+          onClick={() => change({ active: false })}
+        >
+          {CONTROLS_COPY.leave}
+        </Act>
+      </span>
+      <label className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
+        <input
+          type="checkbox"
+          checked={enrolment.aggregate_consent}
+          disabled={blocked !== null}
+          onChange={() =>
+            change({ aggregate_consent: !enrolment.aggregate_consent })
+          }
+          className="size-[15px]"
+        />
+        {CONTROLS_COPY.consent}
+      </label>
+      <div className="flex flex-col gap-2" data-enrol-audience="">
+        <p className="text-[13px] text-ink-1">
+          {CONTROLS_COPY.audienceHeading}:{" "}
+          {CONTROLS_COPY.audienceLine(enrolment.policy)}
+        </p>
+        <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.audienceNote}</p>
+        {draft === null ? (
+          <span>
+            <Act
+              variant="quiet"
+              blocked={blocked}
+              onClick={() => setDraft(copyPolicy(enrolment.policy))}
+            >
+              {CONTROLS_COPY.changeAudience}
+            </Act>
+          </span>
+        ) : (
+          <>
+            <AudienceChooser
+              policy={draft}
+              onChange={setDraft}
+              disabled={blocked !== null}
+            />
+            <span className="flex flex-wrap items-center gap-2">
+              <Button variant="quiet" onClick={() => setDraft(null)}>
+                {CONTROLS_COPY.cancel}
+              </Button>
+              <Act
+                variant="primary"
+                blocked={blocked ?? (unchanged ? CONTROLS_COPY.noChange : null)}
+                data-enrol-act="save-audience"
+                onClick={() => change({ policy: draft })}
+              >
+                {CONTROLS_COPY.saveAudience}
+              </Act>
+            </span>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+type Seed =
+  | { status: "loading" }
+  | { status: "failed" }
+  | { status: "ready"; policy: Policy };
+
+/**
+ * The first Join (version 0): the read enrolment's empty policy is a placeholder, not an audience. The audience offered is the CURRENT
+ * default sharing for progress, from a defaults snapshot asked for when this opened; until it is known nothing can be joined, and a failed
+ * read says so with Try again (never shown as Private).
+ */
+function FirstJoin({
+  blocked,
+  join,
+}: {
+  blocked: string | null;
+  join(consent: boolean, policy: Policy): void;
+}) {
+  const defaults = useSharingDefaults();
+  const source = useRef(defaults);
+  source.current = defaults;
+  const [seed, setSeed] = useState<Seed>({ status: "loading" });
+  const [round, setRound] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one snapshot read per opening or Try again
+  useEffect(() => {
+    let live = true;
+    setSeed({ status: "loading" });
+    const { acquire, boundary } = source.current;
+    void acquire(boundary()).then((got) => {
+      if (live)
+        setSeed(
+          got.outcome === "fetched"
+            ? { status: "ready", policy: progressDefaultPolicy(got.record) }
+            : { status: "failed" },
+        );
+    });
+    return () => {
+      live = false;
+    };
+  }, [round]);
+  if (seed.status === "ready")
+    return (
+      <JoinForm
+        seed={seed.policy}
+        note={CONTROLS_COPY.defaultAudience}
+        blocked={blocked}
+        join={join}
+      />
+    );
+  return (
+    <>
+      {seed.status === "loading" ? (
+        <p className="text-[12.5px] text-ink-2">
+          {CONTROLS_COPY.defaultLoading}
+        </p>
+      ) : (
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="text-[12.5px] text-ink-2">
+            {CONTROLS_COPY.defaultFailed}
+          </span>
+          <Button variant="quiet" onClick={() => setRound((n) => n + 1)}>
+            {copy.TRY_AGAIN}
+          </Button>
+        </span>
+      )}
+      <span>
+        <Button disabled reason={CONTROLS_COPY.audienceUnknown}>
+          {CONTROLS_COPY.join}
+        </Button>
+      </span>
+    </>
+  );
+}
+
+/** Joining: the explicit consent choice and the audience (seeded, kept or changed), then Join with both. */
+function JoinForm({
+  seed,
+  note,
+  blocked,
+  join,
+}: {
+  seed: Policy;
+  note: string;
+  blocked: string | null;
+  join(consent: boolean, policy: Policy): void;
+}) {
+  const legend = useId();
+  const [consent, setConsent] = useState<boolean | null>(null);
+  const [policy, setPolicy] = useState(() => copyPolicy(seed));
+  const choice = (value: boolean, label: string) => (
+    <label className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
+      <input
+        type="radio"
+        name={legend}
+        checked={consent === value}
+        disabled={blocked !== null}
+        onChange={() => setConsent(value)}
+        className="size-[15px]"
+      />
+      {label}
+    </label>
+  );
+  return (
+    <>
+      <fieldset className="flex flex-col" data-enrol-consent="">
+        <legend id={legend} className="text-[13px] text-ink-1">
+          {CONTROLS_COPY.joinConsent}
+        </legend>
+        {choice(true, CONTROLS_COPY.consentYes)}
+        {choice(false, CONTROLS_COPY.consentNo)}
+      </fieldset>
+      <div className="flex flex-col gap-2" data-enrol-audience="">
+        <p className="text-[13px] text-ink-1">
+          {CONTROLS_COPY.audienceHeading}
+        </p>
+        <p className="text-[12.5px] text-ink-2">
+          {note} {CONTROLS_COPY.audienceNote}
+        </p>
+        <AudienceChooser
+          policy={policy}
+          onChange={setPolicy}
+          disabled={blocked !== null}
+        />
+      </div>
+      <span>
+        <Act
+          blocked={
+            blocked ?? (consent === null ? CONTROLS_COPY.chooseConsent : null)
+          }
+          data-enrol-act="join"
+          onClick={() => {
+            if (consent !== null) join(consent, policy);
+          }}
+        >
+          {CONTROLS_COPY.join}
+        </Act>
+      </span>
+    </>
   );
 }

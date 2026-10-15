@@ -251,6 +251,21 @@ Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its re
     corrected since, then save the fix." with "Check again" (a check from the entry's own place in the journal, keeping the open fix) — and
     the input is kept. A pending correction of the entry by me does not block a newer value (R3). A check answered after the connection went
     opens nothing. The history shows `data-stream-version` and `data-journal-version` for native barriers.
+38. **Every enrolment change sends the complete enrolment, its audience explicit (R22; revision 10, design assessment C1–C5; task
+    `states.md` R2/F1).** `enrol` replaces the whole enrolment, and an omitted `initial_policy` is read by the server as "resolve my CURRENT
+    progress defaults", which would silently replace a private or custom audience (and the progress generated from then on would follow it).
+    So `EnrolCommand.initial_policy` is required and every command is built by `enrolCommand` from the enrolment as read with only the
+    person's change applied: Leave and the consent keep the audience; "Change…" edits the audience (WEB-12a's `AudienceChooser`, Save and
+    Cancel; Cancel sends nothing) and keeps active and the consent. Aggregate consent and who can read progress are independent: neither
+    sets the other, and Private is an explicit empty policy. Joining asks the consent explicitly (no choice implied; Join waits for it) and
+    shows the audience first: rejoining starts from the audience last used, the first Join (version 0, whose read policy is only a
+    placeholder) from the CURRENT default for progress, from a defaults snapshot asked for when the form opened (`progressDefaultPolicy`,
+    resolved as the server resolves it); a default that cannot be read is said so with "Try again", never shown as Private, and Join cannot
+    send. A choice belongs to the enrolment version it was made on: when another version is shown it is dropped and the new state is shown
+    for review (never rebased); a stale version is refused by `expected_version`. The attempt (decision 35) captures a frozen copy of the
+    canonical body, nested policy included, and that body is what is sent, now and on "Try again", whatever changed since (the read, the
+    defaults, the object the request was built from). The audience applies to days from now on; "Who sees my progress" still edits a day's
+    own progress. The chooser is imported from `sharing/AudienceChooser` (not the barrel, whose editors are in the shell's first load).
 
 Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
 `enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
@@ -262,6 +277,10 @@ full history); unit MU-2152…MU-2155, MU-2157…MU-2168 and real-engine MU-2169
 answer is held), E-T21 (another tab commits while the fix is open and its re-read is held), E-T22 (the other tab's hint late and twice),
 E-T23 (a 404, a remounting 403 and a reload end the transient state; the queued correction stays), E-T24/E-T25 (review 6's witnesses);
 unit MU-2171…MU-2190 and real-engine MU-2191…MU-2194; MU-2045/2046/2083/2138/2153 re-expressed (same intent).
+Revision 10 (R22): `enrolment-policy.test.tsx` (Q1–Q5, Q8, X3), `enrolment-attempt.test.tsx` adapted (labelled: Join first chooses the
+consent), native E-T16 adapted and E-T27 (the wire body keeps a shared audience and exclusion), released-backend I-T23 (a consent change in
+the UI keeps a private audience, so another reader of the task cannot read progress generated afterwards; with an explicitly shared control);
+unit MU-2213…MU-2222; MU-2143 re-anchored (same mechanism).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -352,6 +371,7 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 5: after "This history isn't available to you." the "Full history" button is offered again; "Back to recent entries" (or a refusal) closes a fix of an entry known only from the full history, and opening that entry's fix again restores what was typed; offline, or while the full history is being read again for a newer version, such an entry offers no "Fix this entry" | `/tasks/<id>` → Full history (jsdom `journal-ownership.test.tsx`, native E-T18/E-T19) |
 | Revision 6: an open fix whose Save waits says why: "This fix can be saved once you're online again.", "This fix can be saved once the full history is up to date.", "Check whether this entry was corrected since, then save the fix." with "Check again" (and "Checking whether this entry was corrected" while it runs); what was typed survives every "Back to recent entries" or refusal until Cancel or a save | `/tasks/<id>` → Full history → Fix this entry (jsdom `journal-save-authority.test.tsx`, `journal-drafts.test.tsx`, native E-T21/E-T24/E-T25) |
 | Revision 4: enrolment "Sending your change…" (the disabled reason while a change is pending) and "Try again" beside "Couldn't confirm the change. Try again." | `/tasks/<id>` of a shared task (jsdom `enrolment-attempt.test.tsx`, native E-T16) |
+| Revision 10: joining asks "Count your contribution in the shared total?" ("Yes, include my contribution" / "No, leave my contribution out of the shared total"; Join waits with "Choose whether to count your contribution first"), then "Who sees your progress from now on" with "This starts from your default sharing." (first Join) or "This starts from the sharing you had before." (rejoining) and "This applies to days from now on. A day already started keeps its own sharing (Who sees my progress)."; the default loading/unreadable lines "Loading your default sharing" / "Your default sharing couldn't be loaded." with "Try again" (Join's reason: "Who would see your progress isn't known yet"); enrolled: "Who sees your progress from now on: only you" (or "you and 1 household and 2 people, 1 excluded"), "Change…", the chooser's "Only me (private)", "Cancel" and "Save sharing" ("Nothing has changed" while unchanged) | `/tasks/<id>` of a shared task (jsdom `enrolment-policy.test.tsx`, native E-T16/E-T27) |
 | Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 
 ## Escalation E-1 (material, not blocking WEB-10a)

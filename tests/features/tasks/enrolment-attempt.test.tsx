@@ -3,6 +3,14 @@
  * with one Idempotency-Key, owned synchronously before the request: a repeated activation while it is pending sends nothing, an uncertain
  * answer keeps the exact command and key for Try again, a remount keeps the pending attempt, another identity never sees it, a read answered
  * while a change is pending is not shown, and a reload (fresh page memory) resends nothing. Composed through the production task detail.
+ *
+ * ADAPTATION, revision 10 (R22; task `states.md` R2/F1): joining now asks the aggregate-consent question explicitly before Join (the
+ * approved interface), so a Join here first chooses "Yes" (`chooseConsent`), the consent these cases' enrolments held; and while the
+ * enrolment is not active the consent is that choice, not a checkbox. Each old assertion keeps its intent: a disabled checkbox while pending
+ * maps to the disabled consent choice; "the stale read is not shown" is observed on what the read would change on screen (an active
+ * enrolment's Leave and checkbox), its stale state now an ACTIVE enrolment so that showing it is visible. Every command now carries the
+ * policy that was read (`initial_policy`). The pre-adaptation file and its failing run are kept in
+ * `.agtx/evidence/web10a-revision-10/pre-adaptation/`.
  */
 import {
   act,
@@ -111,6 +119,24 @@ const consent = () =>
   within(settings() as HTMLElement).getByRole("checkbox", {
     name: CONTROLS_COPY.consent,
   }) as HTMLInputElement;
+/** The consent CHECKBOX of an active enrolment, or null (not enrolled: the consent is a choice made with Join). */
+const checkbox = () =>
+  settings() === null
+    ? null
+    : (within(settings() as HTMLElement).queryByRole("checkbox", {
+        name: CONTROLS_COPY.consent,
+      }) as HTMLInputElement | null);
+/** The join form's "Yes" consent choice. */
+const yes = () =>
+  within(settings() as HTMLElement).getByRole("radio", {
+    name: CONTROLS_COPY.consentYes,
+  }) as HTMLInputElement;
+/** Joining asks the consent explicitly (R22 adaptation): "Yes", the consent these cases' enrolments held. */
+async function chooseConsent() {
+  await act(async () => {
+    fireEvent.click(yes());
+  });
+}
 const button = (name: string) => {
   const section = settings();
   return section === null
@@ -130,22 +156,29 @@ describe("E1: a change while another is pending sends nothing", () => {
   const cases: Array<{
     name: string;
     initial: Enrolment;
+    before?(): Promise<void>;
     act(): HTMLElement | null;
+    /** The consent control that must be disabled while pending (the join form's choice when not enrolled). */
+    consentControl(): HTMLInputElement;
   }> = [
     {
       name: "Join",
       initial: { version: 1, active: false, aggregate_consent: true },
+      before: chooseConsent,
       act: () => button(CONTROLS_COPY.join),
+      consentControl: yes,
     },
     {
       name: "Leave",
       initial: { version: 1, active: true, aggregate_consent: true },
       act: () => button(CONTROLS_COPY.leave),
+      consentControl: consent,
     },
     {
       name: "the consent",
       initial: { version: 1, active: true, aggregate_consent: true },
       act: () => consent(),
+      consentControl: consent,
     },
   ];
   for (const c of cases)
@@ -154,6 +187,7 @@ describe("E1: a change while another is pending sends nothing", () => {
       SLOW,
       async () => {
         const { t, sent } = await mounted(c.initial);
+        await c.before?.();
         const first = c.act();
         expect(first).not.toBeNull();
         // Twice before any render (a double press: the second one meets the control as it was), then once more as it is now.
@@ -168,7 +202,7 @@ describe("E1: a change while another is pending sends nothing", () => {
           button(CONTROLS_COPY.join) ?? button(CONTROLS_COPY.leave);
         expect((toggle as HTMLButtonElement).disabled).toBe(true);
         expect(settings()?.textContent).toContain(CONTROLS_COPY.sending);
-        expect(consent().disabled).toBe(true);
+        expect(c.consentControl().disabled).toBe(true);
         await act(async () =>
           sent[0]?.release({ ok: true, value: { revision: 2 } }),
         );
@@ -186,6 +220,7 @@ describe("E1: a change while another is pending sends nothing", () => {
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       expect(sent).toHaveLength(1);
       expect(sent[0]?.command).toEqual({
@@ -194,6 +229,7 @@ describe("E1: a change while another is pending sends nothing", () => {
         expected_version: 1,
         active: true,
         aggregate_consent: true,
+        initial_policy: POLICY,
       });
       set({ version: 2, active: true, aggregate_consent: true });
       await act(async () =>
@@ -219,6 +255,7 @@ describe("E2: an uncertain change is retried exactly", () => {
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       // Meanwhile the change committed elsewhere (or this one did): the next read shows version 2.
       set({ version: 2, active: false, aggregate_consent: false });
@@ -250,6 +287,7 @@ describe("E2: an uncertain change is retried exactly", () => {
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       set({ version: 2, active: false, aggregate_consent: true });
       await act(async () =>
@@ -258,6 +296,7 @@ describe("E2: an uncertain change is retried exactly", () => {
       await t.settle();
       expect(settings()?.textContent).toContain(CONTROLS_COPY.enrolRefused);
       expect(button(copy.TRY_AGAIN)).toBeNull();
+      await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       expect(sent).toHaveLength(2);
       expect(sent[1]?.key).not.toBe(sent[0]?.key);
@@ -276,6 +315,7 @@ describe("E3: the attempt's owner across a remount, another identity and a read 
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       // The protected tree is remounted (an ordinary 403 elsewhere does this): the detail mounts again.
       await act(async () => {
@@ -314,9 +354,13 @@ describe("E3: the attempt's owner across a remount, another identity and a read 
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       t.rerender(tasksEnv(api, { identity: `${OTHER}:1`, accountId: ME }));
       await t.until(() => button(CONTROLS_COPY.join) !== null);
+      // Adapted (R22): the other identity's Join waits only for its own consent choice, never for the first identity's attempt.
+      expect(settings()?.textContent).not.toContain(CONTROLS_COPY.sending);
+      await chooseConsent();
       expect((button(CONTROLS_COPY.join) as HTMLButtonElement).disabled).toBe(
         false,
       );
@@ -348,6 +392,7 @@ describe("E3: the attempt's owner across a remount, another identity and a read 
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(e.t, button(CONTROLS_COPY.join));
       expect(e.sent).toHaveLength(1);
       // Asked while the change is pending, answered while it still is, with another state.
@@ -357,7 +402,8 @@ describe("E3: the attempt's owner across a remount, another identity and a read 
       await e.t.settle();
       expect(button(CONTROLS_COPY.join)).not.toBeNull();
       expect(button(CONTROLS_COPY.leave)).toBeNull();
-      expect(consent().checked).toBe(true);
+      // Adapted (R22): not enrolled, so no consent checkbox at all (the stale active enrolment would show one, unchecked).
+      expect(checkbox()).toBeNull();
     },
   );
 
@@ -370,9 +416,11 @@ describe("E3: the attempt's owner across a remount, another identity and a read 
         active: false,
         aggregate_consent: true,
       });
-      // Asked before the change, with the consent off at the server then.
-      e.set({ version: 1, active: false, aggregate_consent: false });
+      // Asked before the change, with the consent off at the server then. Adapted (R22): an ACTIVE state, so showing it would be seen
+      // (a not-enrolled state with another consent looks the same before Join).
+      e.set({ version: 1, active: true, aggregate_consent: false });
       const read = await heldRead(e);
+      await chooseConsent();
       await press(e.t, button(CONTROLS_COPY.join));
       // The change answers, then (before the screen renders) the old read answers; the read that follows the change stays held.
       await act(async () => {
@@ -382,7 +430,9 @@ describe("E3: the attempt's owner across a remount, another identity and a read 
         await ticks();
       });
       await e.t.settle();
-      expect(consent().checked).toBe(true);
+      // Adapted (R22): still the not-enrolled state shown before the change (the read that follows it is held).
+      expect(button(CONTROLS_COPY.leave)).toBeNull();
+      expect(checkbox()).toBeNull();
     },
   );
 
@@ -395,10 +445,12 @@ describe("E3: the attempt's owner across a remount, another identity and a read 
         active: false,
         aggregate_consent: true,
       });
-      e.set({ version: 1, active: false, aggregate_consent: false });
+      // Adapted (R22): an active state, so that it is visibly shown.
+      e.set({ version: 1, active: true, aggregate_consent: false });
       const read = await heldRead(e);
       await act(async () => read.release());
       await e.t.settle();
+      expect(button(CONTROLS_COPY.leave)).not.toBeNull();
       expect(consent().checked).toBe(false);
     },
   );
@@ -414,6 +466,7 @@ describe("E4: a reload resends nothing", () => {
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(first.t, button(CONTROLS_COPY.join));
       await act(async () =>
         first.sent[0]?.release({ ok: false, kind: "uncertain" }),
@@ -431,6 +484,7 @@ describe("E4: a reload resends nothing", () => {
       await second.t.settle();
       expect(second.sent).toHaveLength(0);
       expect(document.querySelector("[data-enrolment-uncertain]")).toBeNull();
+      await chooseConsent();
       await press(second.t, button(CONTROLS_COPY.join));
       expect(second.sent).toHaveLength(1);
       expect(second.sent[0]?.key).not.toBe(first.sent[0]?.key);
@@ -448,6 +502,7 @@ describe("E4b: after a reload, a failed read of the enrolment is not permission 
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(first.t, button(CONTROLS_COPY.join));
       await act(async () =>
         first.sent[0]?.release({ ok: false, kind: "uncertain" }),
@@ -523,6 +578,7 @@ describe("X2: the pending change is accessible (jsdom layer; no manual assistive
         active: false,
         aggregate_consent: true,
       });
+      await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       const join = button(CONTROLS_COPY.join) as HTMLButtonElement;
       expect(join.disabled).toBe(true);

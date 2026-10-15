@@ -11,6 +11,7 @@ import {
   DataEnvProvider,
   type DraftRow,
 } from "../../../src/data";
+import type { ReadResult } from "../../../src/data/engine/identity-task";
 import { createQuotaGuard } from "../../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../../src/data/engine/sync-channel";
 import { accountDatabaseName } from "../../../src/data/model/schema";
@@ -21,6 +22,7 @@ import {
   createKeyDerivers,
   createValueValidators,
 } from "../../../src/data/scan/validate";
+import { SharingEnvProvider } from "../../../src/features/sharing";
 import type { TasksApi, TasksResult } from "../../../src/features/tasks/api";
 import {
   type TasksEnv,
@@ -45,6 +47,11 @@ import type { Identity, Store } from "../../../src/session";
 import { DataTestWorld } from "../data/env";
 import { cacheRow } from "../data/rows";
 import { bytesOf, pageJson } from "../data/sync-pages";
+import {
+  type FakeSharingApi,
+  fakeSharingApi,
+  sharingEnv,
+} from "../sharing/fake-api";
 
 /**
  * The task screens' world (FIXTURE evidence): the PRODUCTION data controller, plans and outbox over the double of IndexedDB, the app's own
@@ -292,6 +299,7 @@ export interface Mounted {
   world: DataTestWorld;
   data: DataEnv;
   api: FakeApi;
+  sharing: FakeSharingApi;
   router: ReturnType<typeof createAppRouter>;
   settle(): Promise<void>;
   /** Settles until `ready()` holds (the cache walk and related reads take several turns), at most 20 rounds. */
@@ -352,6 +360,10 @@ export async function mountTasks(options: {
   database?: boolean;
   /** The cache's state as the sync state records it (revision 2: `invalid` hides cache-sourced content behind the gate). */
   cacheStatus?: "valid" | "invalid";
+  /** The sharing client the audience chooser reads households and the directory through (revision 10, R22); a default double. */
+  sharing?: FakeSharingApi;
+  /** `GET /defaults/snapshot` (revision 10, R22: the first Join's default audience). Absent: the defaults are never read. */
+  defaultsSnapshot?: () => Promise<ReadResult<unknown>>;
 }): Promise<Mounted> {
   assertNoOpenActScope("mountTasks");
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
@@ -403,8 +415,12 @@ export async function mountTasks(options: {
     currentDeviceId: async () => ({ kind: "closed" }),
     onOnline: () => () => undefined,
     channel,
+    ...(options.defaultsSnapshot
+      ? { readDefaultsSnapshot: options.defaultsSnapshot }
+      : {}),
   });
   const api = options.api ?? fakeApi();
+  const sharing = options.sharing ?? fakeSharingApi();
   const router = createAppRouter({ initialPath: options.path });
   const tree = (env: TasksEnv) => (
     <ProtectedProviders>
@@ -416,7 +432,16 @@ export async function mountTasks(options: {
       >
         <DataEnvProvider env={data}>
           <TasksEnvProvider value={env}>
-            <RouterProvider router={router} />
+            <SharingEnvProvider
+              value={sharingEnv(sharing, {
+                accountId: env.accountId,
+                identity: env.identity,
+                online: env.online,
+                writable: env.writable,
+              })}
+            >
+              <RouterProvider router={router} />
+            </SharingEnvProvider>
           </TasksEnvProvider>
         </DataEnvProvider>
       </ShellEnvProvider>
@@ -436,6 +461,7 @@ export async function mountTasks(options: {
     world,
     data,
     api,
+    sharing,
     router,
     settle,
     until: async (ready) => {

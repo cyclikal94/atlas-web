@@ -52,7 +52,7 @@ import {
  * TASK-7; I-T13 stale progress version; I-T14 enrolment; I-T15 corrections and the journal (TASK-12/12a); I-T17 defaults review; I-T18
  * Vienna gap and fold. Revision 1: I-T19 task edit in the UI and the task's sharing editor; I-T20 record and correction in the UI and the
  * progress sharing editor; I-T21 a version conflict resent from /sync and a record after it; I-T22 a rebuilt first Anyone record keeps its
- * defaults guard.
+ * defaults guard. Revision 10: I-T23 a consent change in the UI keeps a private enrolment audience for progress generated afterwards (R22).
  */
 const API = "/api/experimental/v1";
 
@@ -1987,6 +1987,182 @@ test.describe("I-T22: the first record of an Anyone task, rebuilt, keeps its def
       );
       expect(unguarded.status, JSON.stringify(unguarded.body)).toBe(200);
     } finally {
+      await other.close();
+    }
+  });
+});
+
+test.describe("I-T23: a consent change made in the UI keeps a private enrolment audience; progress generated afterwards stays private (A15, A16; R22 of revision 10)", () => {
+  test("the creator's progress defaults grant another reader of the task, the creator changes only the consent in the UI: the enrolment stays private and that reader cannot read the next day's progress; control: an explicitly shared audience is readable", async ({
+    context,
+    browser,
+  }) => {
+    const { page, id } = await bootAs(context, main);
+    const other = await browser.newContext();
+    type Grant = { kind: "account" | "household"; id: string; edit: boolean };
+    type Policy = { grants: Grant[]; exclude_accounts: string[] };
+    type Enrolled = {
+      version: number;
+      active: boolean;
+      aggregate_consent: boolean;
+      policy: Policy;
+    };
+    const PRIVATE: Policy = { grants: [], exclude_accounts: [] };
+    let restore: (() => Promise<void>) | null = null;
+    try {
+      const b = await apiAs(other, "frank");
+      const reader: Policy = {
+        grants: [{ kind: "account", id: b.id.account_id, edit: false }],
+        exclude_accounts: [],
+      };
+      // A daily Everyone task that B can read, started yesterday, so today's occurrence is generated after the change.
+      const definition = def(
+        { participation: "everyone" },
+        {
+          start_date: addDays(today(), -1),
+          repeat: { frequency: "daily", interval: 1 },
+        },
+      );
+      const made = await makeTask(page, id, definition, {
+        grants: [{ kind: "account", id: b.id.account_id, edit: false }],
+      });
+      const enrolment = async () => {
+        const read = await call(
+          page,
+          id,
+          "GET",
+          `/tasks/${made.taskId}/enrolment`,
+        );
+        expect(read.status, JSON.stringify(read.body)).toBe(200);
+        return read.body as Enrolled;
+      };
+      // Precondition: the creator's enrolment is private, made so explicitly (the account's defaults may name a household).
+      const created = await enrolment();
+      if (JSON.stringify(created.policy) !== JSON.stringify(PRIVATE))
+        expect(
+          (
+            await access(page, id, {
+              kind: "enrol",
+              task_id: made.taskId,
+              expected_version: created.version,
+              active: created.active,
+              aggregate_consent: created.aggregate_consent,
+              initial_policy: PRIVATE,
+            })
+          ).status,
+        ).toBe(200);
+      const before = await enrolment();
+      expect(before.policy).toEqual(PRIVATE);
+      expect(before.active).toBe(true);
+      // The creator's progress defaults now grant B: an enrol that omitted its policy would take them.
+      const setProgressDefault = async (template: unknown) => {
+        const templates = (await call(page, id, "GET", "/defaults/templates"))
+          .body as { progress: { version: number; template: unknown } };
+        const moved = await call(
+          page,
+          id,
+          "POST",
+          "/management-commands",
+          {
+            commands: [
+              {
+                kind: "set_defaults",
+                household_id: null,
+                resource_kind: "progress",
+                expected_version: templates.progress.version,
+                template,
+              },
+            ],
+          },
+          crypto.randomUUID(),
+        );
+        expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+        return templates.progress;
+      };
+      const original = await setProgressDefault({
+        kind: "explicit",
+        policy: reader,
+      });
+      restore = async () => {
+        await setProgressDefault(
+          original.version > 0 ? original.template : null,
+        );
+      };
+      // The consent alone, changed in the task detail.
+      await untilCached(page, id.account_id, made.taskId);
+      await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+      const settings = page.locator("[data-enrolment]");
+      const consent = settings.getByRole("checkbox", {
+        name: "Count me in the shared total",
+      });
+      await expect(consent).toBeEnabled({ timeout: 60_000 });
+      await expect(consent).toBeChecked({ checked: before.aggregate_consent });
+      await consent.click();
+      await expect(settings).toContainText("Saved.", { timeout: 30_000 });
+      const after = await enrolment();
+      expect(after).toEqual({
+        version: before.version + 1,
+        active: true,
+        aggregate_consent: !before.aggregate_consent,
+        policy: PRIVATE,
+      });
+      // Today's occurrence is generated now, from the enrolment as it stands: B (who can read the task) cannot read the creator's progress.
+      const materialise = async (through: string) => {
+        const out = await call(
+          page,
+          id,
+          "POST",
+          "/task-commands",
+          {
+            command: {
+              kind: "materialise",
+              task_id: made.taskId,
+              through_date: through,
+              limit: 16,
+            },
+          },
+          crypto.randomUUID(),
+        );
+        expect(out.status, JSON.stringify(out.body)).toBe(200);
+      };
+      const visibleToB = async (date: string) => {
+        const occ = await occurrenceId(
+          made.taskId,
+          slotKey(definition.schedule, date),
+        );
+        const mine = await progressId(occ, id.account_id);
+        const read = await call(
+          b.page,
+          b.id,
+          "GET",
+          `/progress?parent_id=${occ}&limit=200`,
+        );
+        expect(read.status, JSON.stringify(read.body)).toBe(200);
+        return (read.body as { items: Array<{ id: string }> }).items.some(
+          (row) => row.id === mine,
+        );
+      };
+      await materialise(today());
+      expect(await visibleToB(today())).toBe(false);
+      // Control: the same reader setup with an explicitly SHARED audience (sent as the UI's audience editor would): tomorrow's progress,
+      // generated after it, is readable by B. So the private result above is the audience, not an unreadable setup.
+      expect(
+        (
+          await access(page, id, {
+            kind: "enrol",
+            task_id: made.taskId,
+            expected_version: after.version,
+            active: true,
+            aggregate_consent: after.aggregate_consent,
+            initial_policy: reader,
+          })
+        ).status,
+      ).toBe(200);
+      const tomorrow = addDays(today(), 1);
+      await materialise(tomorrow);
+      expect(await visibleToB(tomorrow)).toBe(true);
+    } finally {
+      await restore?.();
       await other.close();
     }
   });

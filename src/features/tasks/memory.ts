@@ -22,7 +22,8 @@ export interface JointAnswer {
  * The enrolment change of one task this page is sending or could not confirm (revision 4, R11; design assessment C4), per identity: taken
  * SYNCHRONOUSLY before the request is made, so a second activation while it is `pending` sends nothing (never a second key for the same
  * change), and kept through a remount of the protected tree. `uncertain` (no definite answer: it may have committed) keeps the exact
- * command and key: Try again resends them unchanged. A definite answer ends it. Page memory only: a reload starts with none and never
+ * command and key: Try again resends them unchanged (the command is a frozen copy of the canonical body, its policy included: revision 10,
+ * R22). A definite answer ends it. Page memory only: a reload starts with none and never
  * resends anything (the next change is a new attempt, read against the enrolment read again).
  */
 export interface EnrolmentAttempt {
@@ -125,6 +126,14 @@ export const enrolmentAttemptOf = (
   taskId: string,
 ): EnrolmentAttempt | null => memoryOf(identity).enrolment.get(taskId) ?? null;
 
+const frozen = <T>(value: T): T => {
+  if (typeof value === "object" && value !== null) {
+    for (const item of Object.values(value)) frozen(item);
+    Object.freeze(value);
+  }
+  return value;
+};
+
 /**
  * Takes the attempt for `command` before anything is sent: null while another one of the task is pending (nothing is sent). The same body
  * as an uncertain attempt keeps its key; any other body is a new attempt with a new key (it replaces the uncertain one).
@@ -142,7 +151,8 @@ export function startEnrolment(
   const attempt: EnrolmentAttempt = {
     key: held !== undefined && held.body === body ? held.key : newKey(),
     body,
-    command,
+    // Captured whole (R22): a copy of the body, nested policy included, frozen, so nothing the caller still holds can change it.
+    command: frozen(JSON.parse(body)) as EnrolCommand,
     phase: "pending",
   };
   bounded(memory.enrolment, taskId, attempt);

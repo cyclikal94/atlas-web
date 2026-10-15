@@ -2329,20 +2329,24 @@ test.describe("E-T16: an enrolment change pressed again while it is pending send
       exact: true,
     });
     try {
+      // Adapted in revision 10 (R22; states.md R2/F1): joining asks the consent explicitly first; "Yes" is the consent this enrolment held.
+      await settings
+        .getByRole("radio", { name: "Yes, include my contribution" })
+        .check();
       await expect(join).toBeEnabled();
       await join.dblclick();
       await expect.poll(() => calls.length).toBe(1);
       await expect(join).toBeDisabled();
       await expect(settings).toContainText("Sending your change…");
+      // Adapted in revision 10 (R22): not enrolled, the consent is the join form's choice (the checkbox is an enrolled person's).
       await expect(
-        settings.getByRole("checkbox", {
-          name: "Count me in the shared total",
-        }),
+        settings.getByRole("radio", { name: "Yes, include my contribution" }),
       ).toBeDisabled();
-      // Once more, through the page itself: a disabled control dispatches nothing, and the owner refuses a second attempt anyway.
+      // Once more, through the page itself: a disabled control dispatches nothing, and the owner refuses a second attempt anyway. Adapted
+      // in revision 10: Join is named by its own attribute (the audience chooser's buttons now come before it in the section).
       await page.evaluate(() =>
         document
-          .querySelector<HTMLButtonElement>("[data-enrolment] button")
+          .querySelector<HTMLButtonElement>('[data-enrol-act="join"]')
           ?.click(),
       );
       await page.waitForTimeout(0);
@@ -2360,7 +2364,96 @@ test.describe("E-T16: an enrolment change pressed again while it is pending send
       expected_version: 1,
       active: true,
     });
+    // Revision 10 (R22): the audience read is sent explicitly (here the private one), never left for the server's defaults.
+    expect(JSON.parse(calls[0]?.body ?? "{}").command.initial_policy).toEqual({
+      grants: [],
+      exclude_accounts: [],
+    });
   });
+});
+
+test.describe("E-T27: Leave and the consent resend the audience that was read (A15, A16; R22 of revision 10)", () => {
+  for (const act of ["consent", "leave"] as const)
+    test(`${act}: the wire body carries the complete enrolment, its shared audience and exclusion unchanged`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 44,
+        title: "Shared audience",
+        participation: "everyone",
+      });
+      const policy = {
+        grants: [
+          {
+            kind: "household",
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            edit: false,
+          },
+          {
+            kind: "account",
+            id: "22222222-2222-4222-8222-222222222222",
+            edit: true,
+          },
+        ],
+        exclude_accounts: ["33333333-3333-4333-8333-333333333333"],
+      };
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await context.route(
+        `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+        (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              version: 3,
+              active: true,
+              aggregate_consent: true,
+              policy,
+            }),
+          }),
+      );
+      const bodies: string[] = [];
+      await context.route(
+        "**/api/experimental/v1/task-access-commands",
+        async (route) => {
+          bodies.push(route.request().postData() ?? "");
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ revision: 4 }),
+          });
+        },
+      );
+      await seedSettled(context);
+      const page = await bootAt(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      );
+      await cacheTasks(page, net, [task]);
+      const settings = page.locator("[data-enrolment]");
+      await expect(
+        settings.getByRole("button", { name: "Leave this task", exact: true }),
+      ).toBeEnabled();
+      if (act === "consent")
+        await settings
+          .getByRole("checkbox", { name: "Count me in the shared total" })
+          .click();
+      else
+        await settings
+          .getByRole("button", { name: "Leave this task", exact: true })
+          .click();
+      await expect.poll(() => bodies.length).toBe(1);
+      expect(JSON.parse(bodies[0] ?? "{}").command).toEqual({
+        kind: "enrol",
+        task_id: task.taskId,
+        expected_version: 3,
+        active: act === "consent",
+        aggregate_consent: act !== "consent",
+        initial_policy: policy,
+      });
+    });
 });
 
 test.describe("E-T17: another tab commits while the task detail's read is between its stages (A1, A18; R9 of revision 4, D7)", () => {
