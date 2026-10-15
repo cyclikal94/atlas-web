@@ -49,6 +49,15 @@ import {
  */
 const browserNavigate = (url: string) => location.assign(url);
 
+/**
+ * Focus returns to the control that opened the flow only when the flow CLOSES (R10 of the review of 15 October 2026). Moving between
+ * its steps (a row chosen, Back) replaces one dialog with the next, which has already taken focus; the step that closed must not pull
+ * it back, whether or not the page behind is inert by then.
+ */
+const returnOnlyOnClose = (event: Event) => {
+  if (switchFlow.get().stage !== "closed") event.preventDefault();
+};
+
 /** The current account's unsynced work as the queue counts it: waiting to send, plus what needs a decision before it can. */
 function useCurrentWaiting(): number | null {
   const summary = useQueueSummary();
@@ -150,6 +159,7 @@ export function SwitchPicker({
       title={SWITCH_COPY.title}
       initialFocusSelector="[data-switch-list], [data-switch-loading]"
       returnFocusRef={{ current: switchFlow.returnFocus() }}
+      onCloseAutoFocus={returnOnlyOnClose}
     >
       <div className="flex flex-col gap-4" data-switch-picker="">
         <p
@@ -355,6 +365,7 @@ export function SwitchSignIn({
       title={title}
       syncControl={false}
       returnFocusRef={{ current: switchFlow.returnFocus() }}
+      onCloseAutoFocus={returnOnlyOnClose}
       initialFocusSelector={
         name ? 'input[name="password"]' : 'input[name="username"]'
       }

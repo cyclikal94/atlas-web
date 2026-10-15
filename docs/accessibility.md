@@ -56,6 +56,12 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Remove is described by its consequence.** The "signs you out everywhere" paragraph has an id and every Remove control (enabled, "Removing…", or disabled with its reason) lists it in `aria-describedby`, on the mobile sheet and the desktop dialog. A disabled control's own reason is read first. axe does not check this association, so `tests/e2e/fixture.auth-settings.spec.ts` asserts the accessible description at 320 and 1280 px.
 - **A refusal that arrives after "Finishing sign-in"** is shown by the sign-in form that mounts next (the heading is focused as for any new state, and the message is a `role="alert"` inserted after the form appears, so it is announced once).
 
+## What WEB-08c built in (the account switcher's focus)
+
+- **Closing the switcher returns focus to an entry control that is still there.** From the rail's account control or Settings' "Switch account", focus returns to that control. On mobile the account control sits in the More sheet, which closes as the switcher opens (two sheets are never stacked), so the switcher returns focus to **More** instead (R10 of the review of 15 October 2026; the shell hands the sheet's own return target to the slot, `ShellSlotState.returnFocus`).
+- **Moving between the switcher's steps keeps focus in the step that follows.** Choosing a row puts focus in the credential step's first empty field; "Cancel — stay as …" puts it back on the list. The step that closed returns focus only when the whole flow has closed, so it never pulls focus out of its successor, whether or not the page behind is already inert.
+- Automated in `tests/app/switcher-focus-return.test.tsx` (jsdom, the production composition) and `tests/e2e/production.switcher-focus.spec.ts` (production build, three engines, desktop and a 390 × 844 viewport). Neither is evidence from a physical phone or a screen reader.
+
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
 For each core journey (open the app, move between destinations, open Appearance and change it, open the More sheet, read the sync status, reach a compatibility screen):
@@ -64,6 +70,7 @@ For each core journey (open the app, move between destinations, open Appearance 
 - [ ] Focus is always visible and never lost to `<body>` after an action.
 - [ ] Every control has a name, role and state that match what is shown.
 - [ ] Dialogs announce their title, keep focus inside, close on Escape and return focus.
+- [ ] The account switcher, opened from the rail, from Settings and from the More sheet on a phone: Escape, Close and "Cancel — stay as …" each leave focus on a visible control (More, on a phone), never on `<body>`.
 - [ ] Sync changes are announced once, at the right politeness, and a new conflict interrupts.
 - [ ] A locked or gated screen announces nothing about any account (WEB-08).
 - [ ] WEB-08b journeys: sign in with a wrong and then the right password; reach "Reconnect to keep going" and sign in again; open an invitation link, read the preview, create an account, and read the lost-response state; start single sign-on and return from the provider; open "Signing in", change the password and read the unconfirmed state; with "Signing in" open, switch the device offline and back, and read the reason beside each of Change password, Remove and Link single sign-on; open "Signing in" within a minute of signing in, leave it open for five minutes and note what a screen reader and keyboard focus do when Remove and Link become unavailable; the refusal on each form is announced once and focus lands on the right field.

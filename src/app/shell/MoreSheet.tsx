@@ -23,7 +23,8 @@ export function MoreSheet({
 }) {
   const env = useShellEnv();
   const sync = useSyncStatus();
-  const account = renderSlot(env.accountSlot, false);
+  // The account control's dialog returns focus to More, not to the control, which closes with this sheet (R10).
+  const account = renderSlot(env.accountSlot, false, returnFocusRef);
   // Choosing a destination hands focus to that destination (the page heading), so it is not pulled back to More.
   const chose = useRef(false);
   const choose = () => {

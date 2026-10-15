@@ -1,3 +1,4 @@
+import type { RefObject } from "react";
 import { openSwitcher } from "../features/switch/entry";
 import { slotLabel } from "../features/switch/switch-labels";
 
@@ -11,13 +12,20 @@ export function AccountSlot({
   label,
   account,
   collapsed,
+  returnFocus,
 }: {
   label: string;
   /** The displayed account the label was verified for: the flow opens for it, and only it. */
   account: string;
   collapsed: boolean;
+  /**
+   * Where the switcher returns focus when this control closes with the sheet it sits in (the mobile More sheet: the More button).
+   * Without it the control itself is the return target (R10 of the review of 15 October 2026).
+   */
+  returnFocus?: RefObject<HTMLElement | null>;
 }) {
-  const open = (trigger: HTMLElement) => openSwitcher(account, trigger);
+  const open = (trigger: HTMLElement) =>
+    openSwitcher(account, returnFocus?.current ?? trigger);
   if (collapsed)
     return (
       <button

@@ -11,7 +11,11 @@ import { ProtectedProviders } from "./providers";
 import { focusWhenPresent, returnDestination } from "./return-destination";
 import { createAppRouter } from "./router";
 import { SessionNotices } from "./SessionNotices";
-import { type ShellEnv, ShellEnvProvider } from "./shell/env";
+import {
+  type ShellEnv,
+  ShellEnvProvider,
+  type ShellSlotState,
+} from "./shell/env";
 
 type AppRouter = ReturnType<typeof createAppRouter>;
 
@@ -56,11 +60,12 @@ function ShellFromData({
       ...(label === null || account === null
         ? {}
         : {
-            accountSlot: ({ collapsed }: { collapsed: boolean }) => (
+            accountSlot: ({ collapsed, returnFocus }: ShellSlotState) => (
               <AccountSlot
                 label={label}
                 account={account}
                 collapsed={collapsed}
+                returnFocus={returnFocus}
               />
             ),
           }),
