@@ -162,6 +162,45 @@ page's surplus document; a lost commit; a held predecessor report; evidence nami
 semantic mutants R6-M1 to R6-M15 beside the eighteen of revision 5, each caught after its control on an isolated copy. Both reviews' own probes pass
 unchanged.
 
+**Revision 7 (R5-A of review 7, 15 October 2026; design assessment of the same day, P1-P4).** Revision 6's statement above that EVERY route that
+changes a field's value is an ordering boundary was wrong, and review 7 showed two counterexamples in all three engines: a native TYPE change (by the
+property or an attribute) erased a value an insertion had already shown, without the value setter, so the insertion was judged with the erased value;
+and an input ADOPTED from another same-origin window kept that window's prototypes, so the recorder read it as empty. The correction, in
+`display-recorder.ts`: a field's value is read through this window's NATIVE accessors applied to the node (they accept a node of another same-origin
+window, measured in the three engines), never by asking which prototype it has, and attributes through the native `getAttributeNS` (by namespace, so a
+namespaced look-alike `type` neither conceals nor reveals); a read that fails is UNKNOWN (incomplete), never an empty value. Each document carries a
+test-only recorder SERVICE on its Document object (under a `Symbol.for` key, which every realm of the agent shares); the prototype wrappers are
+installed once per realm and act for the document that owns the node NOW, so another window's field, written through its own window's setter (or a
+borrowed one), is observed by the document it was adopted into, also after that window was removed or closed. Only observation passes this way: no
+`atlas-auth` record or episode ever crosses documents. Before a node moves into another document (explicitly by `adoptNode`, or implicitly by any
+insertion route: `appendChild`, `insertBefore`, `replaceChild`, `append`/`prepend`/`replaceChildren`, `before`/`after`/`replaceWith`,
+`insertAdjacentElement`, `Range.insertNode`/`surroundContents`) the SOURCE document's records are judged first, under its own record. The routes now
+ORDERED before their native side effect: the value routes of revision 6; the input's `type` and its sanitising constraints (`min`, `max`, `step`,
+`multiple`) by property; every attribute method of a field (`setAttribute`, `setAttributeNS`, `removeAttribute`, `removeAttributeNS`,
+`toggleAttribute`, `setAttributeNode`, `setAttributeNodeNS`, `removeAttributeNode`); an attached attribute node's `value`, `nodeValue` and
+`textContent`; the `NamedNodeMap` setters and removers (the map's element is the one whose `attributes` returned it). Their string arguments are
+converted once, before the ordering point, as natively; the property-only routes keep the native conversion and judge records made during it with the
+value the field had before the write. Routes represented by HISTORY (mutation records): attribute and text changes, including a non-dirty textarea's
+text. Uncertainty is explicit: the value each field had at its last ordered change is kept, and a field judged with a DIFFERENT live value was changed
+by a route the recorder does not order (an engine's autofill or restoration, an edit with no `beforeinput`, a non-dirty textarea's text changed by
+a route other than `textContent`); where that difference decides whether an account marker was shown, the evidence is INCOMPLETE, never clean. A
+field from a window without a recorder is incomplete when adopted or shown. HF-14 does not travel: what the person typed in another document is that
+document's; once adopted it is judged as the application's. Unchanged: the topology replay, the document ledger and commit journal, the authority
+boundary, the title, root and accessible-name judgements. Qualified on explicit histories (`tests/oracle/display-recorder.test.ts`, "R7": every type
+route and its safe control, removal reveals, the namespaced look-alike, container and detached schedules, an unordered change that decides the verdict
+and one that does not, argument conversion counts and native errors, conversion that inserts the field before the write; separate jsdom windows for
+adoption of inputs and textareas, writes after adoption through the donor's own setter, `setRangeText` and a borrowed setter, foreign attributes and
+concealment, the donor's own pending exposure, a field moved back, a closed donor window, a window without a recorder, and HF-14 across windows), and
+natively in three engines ("Q1 (revision 7)": review 7's six type and three realm probes with their own assertions, then 38 schedules of the same
+families with a loaded same-origin iframe or a closed popup as the donor and each native precondition asserted, and a window whose recorder is off).
+Semantic mutants R7-M1 to R7-M11 remove one protection each (type-property ordering, attribute-method ordering, attribute-node and NamedNodeMap
+ordering, the cross-window reader, realm-independent attributes, dispatch to the owning document, the donor's lifetime, the unobserved-realm report,
+the source drain, conversion before the ordering point, judgement of records made during a write's conversion); the earlier mutants are kept, five of
+them re-anchored to the moved code (R6-M2, R6-M3, R6-M4, R6-M6, OR-5). Stated residuals: DOM evidence is still a conservative proxy (no CSS
+visibility, no paint); an argument conversion of `innerHTML`/`innerText` on a textarea, or of `execCommand`, that changes the document is not ordered
+(only incomplete if it then decides a verdict); same-origin windows are the only ones a page can adopt from, and a donor document is judged by its own
+recorder or reported incomplete.
+
 **Retained work** is compared WHOLE (drafts, command bodies, pending effects, unfinished forms; canonical JSON) at every boundary before the display;
 replay is allowed only after it (T24 E).
 

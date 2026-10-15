@@ -1844,6 +1844,759 @@ test.describe("Q1 (revision 6): a field's property-only value is judged when it 
 });
 
 /**
+ * WEB-08c revision 7 (review 7 R5-A of 15 October 2026; design assessment T1-T3, R1-R4, X1, U1-U2, A1; Q2): two boundaries the revision-6
+ * field model missed, in Chromium, Firefox and WebKit. (1) A native TYPE change erases a value an insertion had already shown, without the
+ * value setter: every route to the type (its property, each attribute method, an attached attribute node, the NamedNodeMap) is ordered
+ * before its side effect. (2) A field ADOPTED from another window keeps that window's prototypes: it is read through native accessors, and
+ * its later writes reach the document that owns it now through the recorder service on that Document, even after the donor window is gone.
+ *
+ * The review's nine probes are first, with their own setup and assertions (`leaderPage` held on `delta-0`, the field's exact state at
+ * insertion and after, visibility, the three coverage arrays). Then the bounded route/realm/lifetime matrix: one decisive schedule per route
+ * and boundary, both field interfaces where they apply, and the type × realm composition (X1). Each injection runs in ONE task while the
+ * production session's recovery read is held, and ends with the fields removed; the journey then completes.
+ */
+const R7_MARKER = "review-seven-account-marker";
+const R7_TYPE_MODES = [
+  "safe-before-insert",
+  "kept-control",
+  "value-clear-control",
+  "type-property-number",
+  "type-attribute-number",
+  "type-property-file",
+] as const;
+const R7_REALM_MODES = ["safe-adopt", "marker-import", "marker-adopt"] as const;
+async function r7Held(context: Parameters<typeof fencedWithCursor>[0]) {
+  const net = await fencedWithCursor(context);
+  const hold = held();
+  net.answer = async (call) => {
+    if (call.cursor === "delta-0") await hold.promise;
+    return deltaPage(
+      [],
+      call.cursor === "delta-0" ? "delta-1" : (call.cursor ?? "x"),
+    );
+  };
+  const page = await leaderPage(context, net, "one");
+  await expect.poll(() => net.calls.length).toBe(1);
+  expect(await fencesOf(page)).toHaveLength(1);
+  await expect(page.locator("#protected-root")).toHaveAttribute("inert", "");
+  return { page, release: hold.release };
+}
+
+/** The donor (another same-origin window's document) and the matrix's injections. */
+const R7_FIELD_EXPECTED = {
+  // T2: every route to the type, and the routes that remove it.
+  "type-namespace-null": ["marker"],
+  "type-attribute-node-value": ["marker"],
+  "type-attribute-node-nodevalue": ["marker"],
+  "type-attribute-node-textcontent": ["marker"],
+  "type-set-attribute-node": ["marker"],
+  "type-named-item": ["marker"],
+  "type-textarea-unaffected": ["marker"],
+  "reveal-remove-attribute": ["marker"],
+  "reveal-toggle-attribute": ["marker"],
+  "reveal-remove-named-item": ["marker"],
+  "lookalike-does-not-conceal": ["marker"],
+  "lookalike-does-not-reveal": [],
+  // T3: topology and side effects.
+  "container-dismantled-then-type": ["marker"],
+  "sanitised-while-detached": [],
+  // R1: a field from another window (a loaded same-origin about:blank iframe).
+  "donor-adopt-input": ["marker"],
+  "donor-implicit-input": ["marker"],
+  "donor-adopt-textarea": ["marker"],
+  "donor-implicit-textarea": ["marker"],
+  "donor-safe": [],
+  "donor-import": ["marker"],
+  // R2: writes after adoption.
+  "donor-write-setter": ["marker"],
+  "donor-write-range-text": ["marker"],
+  "donor-write-borrowed-setter": ["marker"],
+  "donor-write-nested": ["marker"],
+  // R3: the foreign element's attributes and concealment.
+  "donor-aria-label": ["marker"],
+  "donor-password-revealed": ["marker"],
+  "donor-password-kept": [],
+  // R4: the donor's lifetime and two owners.
+  "donor-removed-then-write": ["marker"],
+  "popup-closed-then-write": ["marker"],
+  "donor-pending-then-transfer": ["marker", "marker"],
+  "moved-back": ["marker", "marker"],
+  "moved-safely": [],
+  // X1: type × realm.
+  "donor-type-number": ["marker"],
+  "donor-type-number-safe": [],
+  "donor-set-attribute-type": ["marker"],
+  // U2: argument conversion that changes the document, and transparency.
+  "conversion-inserts-before-value": ["marker"],
+  "conversion-inserts-before-type": ["marker"],
+  transparency: [],
+} as const satisfies Record<string, readonly string[]>;
+type R7Field = keyof typeof R7_FIELD_EXPECTED;
+/** The schedules that also show the marker inside the donor's own document (judged there, under its own record). */
+const R7_SHOWN_IN_DONOR = new Set<R7Field>([
+  "donor-pending-then-transfer",
+  "moved-back",
+]);
+const injectR7 = (page: Page, kind: R7Field, marker: string) =>
+  page.evaluate(
+    async ({ k, m }) => {
+      const body = document.body;
+      const facts: Record<string, unknown> = {};
+      /** This window's own value setter (borrowed: called on another window's field, or on a wrong receiver). */
+      const nativeValueSetter = () =>
+        (
+          Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            "value",
+          ) as PropertyDescriptor
+        ).set as (v: string) => void;
+      /** A loaded same-origin about:blank iframe: a separate Window (its own prototypes), its document enrolled by its own recorder. */
+      const donorFrame = async (name?: string) => {
+        const frame = document.createElement("iframe");
+        frame.hidden = true;
+        if (name) frame.name = name;
+        const loaded = new Promise<void>((resolve) =>
+          frame.addEventListener("load", () => resolve(), { once: true }),
+        );
+        body.append(frame);
+        await loaded;
+        const win = frame.contentWindow as Window & typeof globalThis;
+        return { frame, win, doc: win.document };
+      };
+      const precondition = (field: Element, win: typeof globalThis) => {
+        facts.foreignPrototype =
+          !(field instanceof HTMLElement) &&
+          Object.getPrototypeOf(field) !== HTMLInputElement.prototype &&
+          Object.getPrototypeOf(field) !== HTMLTextAreaElement.prototype &&
+          (field instanceof win.HTMLInputElement ||
+            field instanceof win.HTMLTextAreaElement ||
+            field instanceof win.HTMLElement);
+        facts.owner = field.ownerDocument === document;
+        facts.connected = field.isConnected;
+      };
+      const typed = (field: HTMLInputElement) => {
+        field.setAttribute("type", "text");
+        field.value = m;
+        body.append(field);
+      };
+      const type = (doc: Document = document) => {
+        const field = doc.createElement("input");
+        return field;
+      };
+      switch (k) {
+        case "type-namespace-null": {
+          const field = type();
+          typed(field);
+          field.setAttributeNS(null, "type", "number");
+          facts.after = field.value;
+          field.remove();
+          break;
+        }
+        case "type-attribute-node-value":
+        case "type-attribute-node-nodevalue":
+        case "type-attribute-node-textcontent": {
+          const field = type();
+          typed(field);
+          const attr = field.getAttributeNode("type") as Attr;
+          if (k === "type-attribute-node-value") attr.value = "number";
+          else if (k === "type-attribute-node-nodevalue")
+            attr.nodeValue = "number";
+          else attr.textContent = "number";
+          facts.after = field.value;
+          field.remove();
+          break;
+        }
+        case "type-set-attribute-node":
+        case "type-named-item": {
+          const field = type();
+          typed(field);
+          const attr = document.createAttribute("type");
+          attr.value = "number";
+          if (k === "type-set-attribute-node") field.setAttributeNode(attr);
+          else field.attributes.setNamedItem(attr);
+          facts.after = field.value;
+          field.remove();
+          break;
+        }
+        case "type-textarea-unaffected": {
+          // A textarea has no type state: its own `type` attribute changes nothing, and the value inserted stays judged.
+          const field = document.createElement("textarea");
+          field.value = m;
+          body.append(field);
+          field.setAttribute("type", "number");
+          facts.after = field.value;
+          field.value = "";
+          field.remove();
+          break;
+        }
+        case "reveal-remove-attribute":
+        case "reveal-toggle-attribute":
+        case "reveal-remove-named-item": {
+          const field = type();
+          field.setAttribute("type", "password");
+          field.value = m;
+          body.append(field);
+          if (k === "reveal-remove-attribute") field.removeAttribute("type");
+          else if (k === "reveal-toggle-attribute")
+            field.toggleAttribute("type");
+          else field.attributes.removeNamedItem("type");
+          facts.after = field.type;
+          field.setAttribute("type", "password");
+          field.remove();
+          break;
+        }
+        case "lookalike-does-not-conceal": {
+          const field = type();
+          field.setAttributeNS("urn:atlas-lookalike", "type", "password");
+          field.value = m;
+          body.append(field);
+          facts.after = field.type;
+          field.remove();
+          break;
+        }
+        case "lookalike-does-not-reveal": {
+          const field = type();
+          field.type = "password";
+          field.value = m;
+          body.append(field);
+          field.setAttributeNS("urn:atlas-lookalike", "type", "text");
+          facts.after = field.type;
+          field.remove();
+          break;
+        }
+        case "container-dismantled-then-type": {
+          const outer = document.createElement("div");
+          const field = type();
+          field.value = m;
+          outer.append(field);
+          body.append(outer);
+          outer.replaceChildren();
+          field.type = "number";
+          facts.after = field.value;
+          outer.remove();
+          break;
+        }
+        case "sanitised-while-detached": {
+          const field = type();
+          field.value = m;
+          field.type = "number";
+          body.append(field);
+          facts.after = field.value;
+          field.remove();
+          break;
+        }
+        case "donor-adopt-input":
+        case "donor-implicit-input":
+        case "donor-adopt-textarea":
+        case "donor-implicit-textarea":
+        case "donor-safe":
+        case "donor-import": {
+          const donor = await donorFrame();
+          const original = donor.doc.createElement(
+            k.endsWith("textarea") ? "textarea" : "input",
+          );
+          original.value = k === "donor-safe" ? "Safe" : m;
+          const field =
+            k === "donor-import"
+              ? document.importNode(original, true)
+              : k.startsWith("donor-adopt")
+                ? document.adoptNode(original)
+                : original;
+          body.append(field);
+          if (k === "donor-import")
+            facts.localCopy = field instanceof HTMLElement;
+          else precondition(field, donor.win);
+          facts.value = field.value;
+          field.remove();
+          donor.frame.remove();
+          break;
+        }
+        case "donor-write-setter":
+        case "donor-write-range-text":
+        case "donor-write-borrowed-setter":
+        case "donor-write-nested": {
+          const donor = await donorFrame();
+          const holder = donor.doc.createElement("div");
+          const field = donor.doc.createElement("input");
+          holder.append(field);
+          field.value = "Safe";
+          body.append(k === "donor-write-nested" ? holder : field);
+          precondition(field, donor.win);
+          if (k === "donor-write-range-text")
+            field.setRangeText(m, 0, field.value.length);
+          else if (k === "donor-write-borrowed-setter")
+            nativeValueSetter().call(field, m);
+          else field.value = m;
+          facts.value = field.value;
+          field.value = "Safe";
+          holder.remove();
+          field.remove();
+          donor.frame.remove();
+          break;
+        }
+        case "donor-aria-label": {
+          const donor = await donorFrame();
+          const button = donor.doc.createElement("button");
+          button.setAttribute("aria-label", m);
+          body.append(button);
+          precondition(button, donor.win);
+          button.remove();
+          donor.frame.remove();
+          break;
+        }
+        case "donor-password-revealed":
+        case "donor-password-kept": {
+          const donor = await donorFrame();
+          const field = donor.doc.createElement("input");
+          field.type = "password";
+          field.value = m;
+          body.append(field);
+          precondition(field, donor.win);
+          if (k === "donor-password-revealed") {
+            field.type = "text";
+            field.type = "password";
+          }
+          field.remove();
+          donor.frame.remove();
+          break;
+        }
+        case "donor-removed-then-write": {
+          const donor = await donorFrame();
+          const field = donor.doc.createElement("input");
+          body.append(field);
+          precondition(field, donor.win);
+          donor.frame.remove();
+          facts.donorGone = donor.frame.contentWindow === null;
+          field.value = m;
+          field.value = "";
+          field.remove();
+          break;
+        }
+        case "popup-closed-then-write": {
+          const popup = window.open("", "_blank") as Window & typeof globalThis;
+          const field = popup.document.createElement("input");
+          body.append(field);
+          precondition(field, popup);
+          popup.close();
+          facts.donorGone = popup.closed;
+          field.value = m;
+          field.value = "";
+          field.remove();
+          break;
+        }
+        case "donor-pending-then-transfer": {
+          // Shown in the donor first (its own recorder, its own record), then moved and sanitised in the same task.
+          const donor = await donorFrame();
+          const field = donor.doc.createElement("input");
+          field.value = m;
+          donor.doc.body.append(field);
+          body.append(field);
+          field.type = "number";
+          facts.after = field.value;
+          field.remove();
+          donor.frame.remove();
+          break;
+        }
+        case "moved-back":
+        case "moved-safely": {
+          const donor = await donorFrame();
+          const field = donor.doc.createElement("input");
+          field.value = "Safe";
+          body.append(field);
+          if (k === "moved-back") field.value = m;
+          donor.doc.body.append(field);
+          field.value = "Safe";
+          field.remove();
+          donor.frame.remove();
+          break;
+        }
+        case "donor-type-number":
+        case "donor-type-number-safe":
+        case "donor-set-attribute-type": {
+          const donor = await donorFrame();
+          const field = donor.doc.createElement("input");
+          field.value = k === "donor-type-number-safe" ? "Safe" : m;
+          body.append(field);
+          precondition(field, donor.win);
+          if (k === "donor-set-attribute-type")
+            field.setAttribute("type", "number");
+          else field.type = "number";
+          facts.after = field.value;
+          field.remove();
+          donor.frame.remove();
+          break;
+        }
+        case "conversion-inserts-before-value": {
+          const field = type();
+          field.value = m;
+          field.value = {
+            toString() {
+              body.append(field);
+              return "";
+            },
+          } as unknown as string;
+          facts.after = field.value;
+          field.remove();
+          break;
+        }
+        case "conversion-inserts-before-type": {
+          const field = type();
+          field.value = m;
+          field.type = {
+            toString() {
+              body.append(field);
+              return "number";
+            },
+          } as unknown as string;
+          facts.after = field.value;
+          field.remove();
+          break;
+        }
+        case "transparency": {
+          const field = type();
+          body.append(field);
+          const calls: string[] = [];
+          const as = (text: string) =>
+            ({
+              toString() {
+                calls.push(text);
+                return text;
+              },
+            }) as unknown as string;
+          field.type = as("search");
+          field.setAttribute(as("min"), as("1"));
+          field.setAttributeNS(as(""), as("max"), as("9"));
+          field.value = as("v");
+          (field.getAttributeNode("min") as Attr).value = as("2");
+          const errors: string[] = [];
+          const name = (run: () => void) => {
+            try {
+              run();
+              errors.push("none");
+            } catch (error) {
+              errors.push((error as Error).name);
+            }
+          };
+          let converted = 0;
+          name(() =>
+            (field.setAttribute as (n: unknown) => void)({
+              toString() {
+                converted += 1;
+                return "type";
+              },
+            }),
+          );
+          name(() => {
+            field.type = Symbol("x") as unknown as string;
+          });
+          name(() =>
+            nativeValueSetter().call(document.createElement("div"), "x"),
+          );
+          facts.calls = calls;
+          facts.state = [field.type, field.min, field.max, field.value];
+          facts.errors = errors;
+          facts.converted = converted;
+          field.remove();
+          break;
+        }
+      }
+      const root = document.getElementById("protected-root") as HTMLElement;
+      return {
+        inert: root.hasAttribute("inert"),
+        children: root.childNodes.length,
+        fields: document.querySelectorAll("input, textarea, iframe").length,
+        facts,
+      };
+    },
+    { k: kind, m: marker },
+  );
+
+test.describe("Q1 (revision 7): a type change and another window's field cannot hide an exposure (T1-T3, R1-R4, X1, U2)", () => {
+  for (const mode of R7_TYPE_MODES)
+    test(`R7 review probe type ${mode}`, async ({ context }, info) => {
+      const oracle = await installDisplayOracle(context, {
+        markers: [R7_MARKER],
+      });
+      const { page, release } = await r7Held(context);
+      expect(oracle.violations()).toEqual([]);
+      const observed = await page.evaluate(
+        ({ mode, marker }) => {
+          const input = document.createElement("input");
+          input.id = "review-seven-prefill";
+          input.value = marker;
+          if (mode === "safe-before-insert") input.value = "Safe";
+          document.body.append(input);
+          const atInsertion = {
+            connected: input.isConnected,
+            value: input.value,
+            type: input.type,
+          };
+          if (mode === "value-clear-control") input.value = "";
+          if (mode === "type-property-number") input.type = "number";
+          if (mode === "type-attribute-number")
+            input.setAttribute("type", "number");
+          if (mode === "type-property-file") input.type = "file";
+          return {
+            atInsertion,
+            after: {
+              connected: input.isConnected,
+              value: input.value,
+              type: input.type,
+            },
+          };
+        },
+        { mode, marker: R7_MARKER },
+      );
+      expect(observed.atInsertion).toEqual({
+        connected: true,
+        value: mode === "safe-before-insert" ? "Safe" : R7_MARKER,
+        type: "text",
+      });
+      if (mode.startsWith("type-")) expect(observed.after.value).toBe("");
+      await oracle.mark(page, "after ordered exposure");
+      const coverage = await oracle.coverage();
+      await info.attach("field-coverage", {
+        body: JSON.stringify(
+          { mode, observed, coverage, log: await oracle.log(page) },
+          null,
+          2,
+        ),
+        contentType: "application/json",
+      });
+      await page.locator("#review-seven-prefill").evaluate((n) => n.remove());
+      release();
+      await displayed(page);
+      expect(await fencesOf(page)).toEqual([]);
+      expect(coverage.missing).toEqual([]);
+      expect(coverage.incomplete).toEqual([]);
+      if (mode === "safe-before-insert")
+        expect(coverage.violations).toEqual([]);
+      else
+        expect(
+          coverage.violations.filter((v) => v.kind === "marker").length,
+          "a later native type sanitisation must not erase the earlier property-only exposure",
+        ).toBeGreaterThan(0);
+    });
+
+  for (const mode of R7_REALM_MODES)
+    test(`R7 review probe realm ${mode}`, async ({ context }, info) => {
+      const oracle = await installDisplayOracle(context, {
+        markers: [R7_MARKER],
+      });
+      const { page, release } = await r7Held(context);
+      expect(oracle.violations()).toEqual([]);
+      const observed = await page.evaluate(
+        async ({ mode, marker }) => {
+          const frame = document.createElement("iframe");
+          frame.id = "review-seven-donor";
+          frame.hidden = true;
+          const loaded = new Promise<void>((resolve) =>
+            frame.addEventListener("load", () => resolve(), { once: true }),
+          );
+          document.body.append(frame);
+          await loaded;
+          const donor = frame.contentDocument as Document;
+          const original = donor.createElement("input");
+          original.value = mode === "safe-adopt" ? "Safe" : marker;
+          const input = (
+            mode === "marker-import"
+              ? document.importNode(original, true)
+              : document.adoptNode(original)
+          ) as HTMLInputElement;
+          input.id = "review-seven-prefill";
+          document.body.append(input);
+          return {
+            connected: input.isConnected,
+            value: input.value,
+            owner: input.ownerDocument === document,
+            localPrototype: input instanceof HTMLInputElement,
+          };
+        },
+        { mode, marker: R7_MARKER },
+      );
+      expect(observed.connected).toBe(true);
+      expect(observed.owner).toBe(true);
+      expect(observed.value).toBe(mode === "safe-adopt" ? "Safe" : R7_MARKER);
+      // The review's precondition: a genuinely foreign prototype when adopted (not a same-realm document's field).
+      expect(observed.localPrototype).toBe(mode === "marker-import");
+      await expect(page.locator("#review-seven-prefill")).toBeVisible();
+      await expect(page.locator("#review-seven-prefill")).toHaveValue(
+        observed.value,
+      );
+      await oracle.mark(page, "after ordered exposure");
+      const coverage = await oracle.coverage();
+      await info.attach("field-coverage", {
+        body: JSON.stringify(
+          { mode, observed, coverage, log: await oracle.log(page) },
+          null,
+          2,
+        ),
+        contentType: "application/json",
+      });
+      await page.locator("#review-seven-prefill").evaluate((n) => n.remove());
+      release();
+      await displayed(page);
+      expect(await fencesOf(page)).toEqual([]);
+      expect(coverage.missing).toEqual([]);
+      expect(coverage.incomplete).toEqual([]);
+      if (mode === "safe-adopt") expect(coverage.violations).toEqual([]);
+      else
+        expect(
+          coverage.violations.filter((v) => v.kind === "marker").length,
+          "a property-only marker in an adopted input must be detected by its destination recorder",
+        ).toBeGreaterThan(0);
+    });
+
+  for (const kind of Object.keys(R7_FIELD_EXPECTED) as R7Field[]) {
+    const expected: readonly string[] = R7_FIELD_EXPECTED[kind];
+    test(`R7 field ${kind}: ${expected.length ? `reported as ${expected.join(",")} while fenced` : "control, nothing reported"}`, async ({
+      context,
+    }, info) => {
+      const oracle = await installDisplayOracle(context, {
+        markers: [R7_MARKER],
+      });
+      const { page, release } = await r7Held(context);
+      expect(oracle.violations(), "precondition: nothing yet").toEqual([]);
+      const { facts, ...after } = await injectR7(page, kind, R7_MARKER);
+      await info.attach("facts", {
+        body: JSON.stringify(facts, null, 2),
+        contentType: "application/json",
+      });
+      expect(after).toEqual({ inert: true, children: 0, fields: 0 });
+      // Each schedule's native precondition, asserted (a route that did not happen is never counted as covered).
+      if ("foreignPrototype" in facts)
+        expect(
+          [facts.foreignPrototype, facts.owner, facts.connected],
+          "another window's node, owned by this document, connected",
+        ).toEqual([true, true, true]);
+      if (kind.startsWith("type-") && kind !== "type-textarea-unaffected")
+        expect(facts.after, "the native type change erased the value").toBe("");
+      if (kind === "type-textarea-unaffected")
+        expect(facts.after).toBe(R7_MARKER);
+      if (kind.startsWith("reveal-")) expect(facts.after).toBe("text");
+      if (kind === "lookalike-does-not-conceal")
+        expect(facts.after).toBe("text");
+      if (kind === "lookalike-does-not-reveal")
+        expect(facts.after).toBe("password");
+      if (
+        kind === "container-dismantled-then-type" ||
+        kind === "sanitised-while-detached" ||
+        kind === "donor-pending-then-transfer" ||
+        kind.startsWith("donor-type-") ||
+        kind === "donor-set-attribute-type" ||
+        kind.startsWith("conversion-")
+      )
+        expect(facts.after, "sanitised").toBe("");
+      if (kind.startsWith("donor-write-")) expect(facts.value).toBe(R7_MARKER);
+      if (kind === "donor-import") expect(facts.localCopy).toBe(true);
+      if (
+        kind === "donor-removed-then-write" ||
+        kind === "popup-closed-then-write"
+      )
+        expect(facts.donorGone, "the donor window is gone").toBe(true);
+      if (kind === "transparency") {
+        expect(facts.calls).toEqual([
+          "search",
+          "min",
+          "1",
+          "",
+          "max",
+          "9",
+          "v",
+          "2",
+        ]);
+        expect(facts.state).toEqual(["search", "2", "9", "v"]);
+        expect(facts.errors).toEqual(["TypeError", "TypeError", "TypeError"]);
+        expect(facts.converted, "a missing argument converts nothing").toBe(0);
+      }
+      expect(await fencesOf(page)).toHaveLength(1);
+      await oracle.mark(page, "after the injection");
+      await expect
+        .poll(() => oracle.violations().map((v) => v.kind), {
+          timeout: 5_000,
+        })
+        .toEqual([...expected]);
+      const main = await page.evaluate(
+        () =>
+          (window as unknown as { __displayOracle: { doc: string } })
+            .__displayOracle.doc,
+      );
+      // A1: an exposure in THIS document is judged under its own fenced record; one in the donor under the donor's own (no record).
+      for (const v of oracle.violations()) {
+        if (v.doc === main) {
+          expect(v.record?.settled).toBe(ACCOUNT);
+          expect(v.record?.fences[ACCOUNT] ?? 0).toBeGreaterThan(0);
+        } else {
+          expect(
+            R7_SHOWN_IN_DONOR.has(kind),
+            "only a schedule that shows the field IN the donor reports there",
+          ).toBe(true);
+          expect(v.record).toBe(null);
+        }
+      }
+      if (R7_SHOWN_IN_DONOR.has(kind))
+        expect(
+          new Set(oracle.violations().map((v) => v.doc)).size,
+          "one in the donor, one here",
+        ).toBe(2);
+      release();
+      await displayed(page);
+      expect(oracle.violations().map((v) => v.kind)).toEqual([...expected]);
+      const coverage = await oracle.coverage();
+      expect(coverage.missing, JSON.stringify(coverage.documents)).toEqual([]);
+      expect(coverage.incomplete).toEqual([]);
+      if (expected.length === 0) await oracle.assertClean(`R7 ${kind}`);
+    });
+  }
+
+  test("R7 U1 a field from a window WITHOUT a recorder is reported incomplete when adopted (never silently clean)", async ({
+    context,
+  }) => {
+    const oracle = await installDisplayOracle(context, {
+      markers: [R7_MARKER],
+    });
+    const { page, release } = await r7Held(context);
+    const facts = await page.evaluate(async () => {
+      const frame = document.createElement("iframe");
+      frame.hidden = true;
+      // The qualification seam: this window's recorder does not install (its witness still does).
+      frame.name = "__display_oracle_off__";
+      const loaded = new Promise<void>((resolve) =>
+        frame.addEventListener("load", () => resolve(), { once: true }),
+      );
+      document.body.append(frame);
+      await loaded;
+      const win = frame.contentWindow as Window & typeof globalThis;
+      const field = win.document.createElement("input");
+      field.value = "Safe";
+      document.body.append(field);
+      const result = {
+        foreign: !(field instanceof HTMLInputElement),
+        recorder: "__displayOracle" in win,
+      };
+      field.remove();
+      frame.remove();
+      return result;
+    });
+    expect(facts).toEqual({ foreign: true, recorder: false });
+    await oracle.mark(page, "after the adoption");
+    release();
+    await displayed(page);
+    const coverage = await oracle.coverage();
+    expect(coverage.violations).toEqual([]);
+    expect(
+      coverage.incomplete.some((x) =>
+        x.includes(
+          "a field from a realm with no recorder was adopted (its writes are not ordered)",
+        ),
+      ),
+      JSON.stringify(coverage.incomplete),
+    ).toBe(true);
+    await expect(oracle.assertClean("R7 U1")).rejects.toThrow();
+  });
+});
+
+/**
  * WEB-08c revision 6 (R5-B of the review of 15 October 2026; design assessment P2/P3, N1-N7): the EXPECTED documents are the host's
  * journal of committed generations. The review's three schedules are first, with its own route-fulfilled documents and assertions (the
  * committed predecessor is held loading behind a stylesheet and verified `loading` with no oracle; the probe never waits for a load).

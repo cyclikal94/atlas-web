@@ -18,6 +18,11 @@
  * their added/removed nodes and sibling anchors); the records are then replayed forwards and each one is judged with the node values,
  * parentage, connectedness, root and title membership and id references of that moment. A subtree inserted and dismantled in one task is
  * judged with the descendants it had when it was inserted; a title text node is judged as title content while it was in `<title>`.
+ *
+ * Revision 7 (R5-A of review 7): nodes are read through NATIVE accessors (a field or element adopted from another window keeps that window's
+ * prototypes), every route to a field's type is ordered before its native side effect, and each document's recorder is a SERVICE on its
+ * Document that the wrappers of any same-origin realm reach through the node's owner (see "the recorder service" below). An unknown value, an
+ * unordered change that decides a verdict, or a field of a window without a recorder is INCOMPLETE, never clean.
  */
 
 export interface RecorderLimits {
@@ -177,8 +182,9 @@ export function oracleScript(config: RecorderConfig): void {
     return;
   const LIMITS = config.limits;
   /**
-   * This recorder's OWN document. Its wrappers sit on prototypes the Window keeps when a later document reuses it (Firefox runs no init
-   * script for that document): they pass through for any other document, and the test reports such a document as unobserved.
+   * This recorder's OWN document. The prototype wrappers (below) are installed once per realm and act for the document that OWNS the node
+   * they are called on (revision 7), whichever realm installed them; a later document that reuses this Window (Firefox runs no init script
+   * for it) has no recorder service, so they pass through for it and the test reports that document as unobserved.
    */
   const own = document;
   const mine = () => document === own;
@@ -293,77 +299,235 @@ export function oracleScript(config: RecorderConfig): void {
     "Sign in · Atlas",
     "Join · Atlas",
   ]);
+
+  // ---- realm-independent native readers (revision 7, R5-A/realm of the review of 15 October 2026; design assessment P1) ----
   /**
-   * Form fields (revision 6, R5-A of the review of 15 October 2026). A text field's `value` PROPERTY can show text that no attribute or
-   * child node holds: written while the field is detached, copied with it by `cloneNode`/`importNode`, or kept when it is adopted. Such a
+   * A node keeps the prototypes of the realm (Window) that created it when it is adopted into another document (measured in Chromium,
+   * Firefox and WebKit: `instanceof` the destination's interfaces is false). So nothing here asks `instanceof` or which prototype a node
+   * has: the readers are this realm's NATIVE getters and methods, captured before any wrapper, applied to the node (an interface's own
+   * native accessors accept a node of that interface from any same-origin realm, measured in all three engines). A read that fails is
+   * UNKNOWN, never an empty value.
+   */
+  const SERVICE = Symbol.for("atlas.displayOracle.service");
+  const WRAPPED = Symbol.for("atlas.displayOracle.wrapped");
+  const XHTML = "http://www.w3.org/1999/xhtml";
+  const getterOf = (proto: object | undefined, name: string) =>
+    (proto ? Object.getOwnPropertyDescriptor(proto, name)?.get : undefined) ??
+    null;
+  const NATIVE = {
+    inputValue: getterOf(
+      typeof HTMLInputElement === "undefined"
+        ? undefined
+        : HTMLInputElement.prototype,
+      "value",
+    ),
+    textareaValue: getterOf(
+      typeof HTMLTextAreaElement === "undefined"
+        ? undefined
+        : HTMLTextAreaElement.prototype,
+      "value",
+    ),
+    inputType: getterOf(
+      typeof HTMLInputElement === "undefined"
+        ? undefined
+        : HTMLInputElement.prototype,
+      "type",
+    ),
+    nodeType: getterOf(Node.prototype, "nodeType"),
+    ownerDocument: getterOf(Node.prototype, "ownerDocument"),
+    namespaceURI: getterOf(Element.prototype, "namespaceURI"),
+    localName: getterOf(Element.prototype, "localName"),
+    getAttributeNS: Element.prototype.getAttributeNS,
+  };
+  /** The node type of a NODE (null for anything else; no getter of the value itself runs). */
+  const nodeTypeOf = (value: unknown): number | null => {
+    if (
+      value === null ||
+      (typeof value !== "object" && typeof value !== "function")
+    )
+      return null;
+    try {
+      return NATIVE.nodeType ? (NATIVE.nodeType.call(value) as number) : null;
+    } catch {
+      return null;
+    }
+  };
+  /** The document a node belongs to NOW (a document is its own). */
+  const docOf = (value: unknown): Document | null => {
+    const type = nodeTypeOf(value);
+    if (type === null) return null;
+    if (type === 9) return value as Document;
+    try {
+      return (NATIVE.ownerDocument?.call(value) as Document | null) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const fieldKind = (node: unknown): "input" | "textarea" | null => {
+    if (nodeTypeOf(node) !== 1) return null;
+    try {
+      if (NATIVE.namespaceURI?.call(node) !== XHTML) return null;
+      const name = NATIVE.localName?.call(node);
+      return name === "input" || name === "textarea" ? name : null;
+    } catch {
+      return null;
+    }
+  };
+  const isField = (node: unknown): node is HTMLInputElement =>
+    fieldKind(node) !== null;
+  type FieldState =
+    | { known: true; value: string }
+    | { known: false; reason: string };
+  /** A field's value BEFORE an operation whose argument conversion changed the document: the records made then are judged with it. */
+  const overrides = new Map<Node, string>();
+  const readField = (field: Node): FieldState => {
+    if (overrides.has(field))
+      return { known: true, value: overrides.get(field) as string };
+    const kind = fieldKind(field);
+    const get =
+      kind === "input"
+        ? NATIVE.inputValue
+        : kind === "textarea"
+          ? NATIVE.textareaValue
+          : null;
+    if (!get)
+      return {
+        known: false,
+        reason: kind ? `no native ${kind} value getter` : "not a form field",
+      };
+    try {
+      return { known: true, value: String(get.call(field) ?? "") };
+    } catch (error) {
+      return {
+        known: false,
+        reason: `the native value getter refused it (${String(error).slice(0, 120)})`,
+      };
+    }
+  };
+  const typeOf = (field: Node): string => {
+    if (fieldKind(field) !== "input") return "textarea";
+    try {
+      return String(NATIVE.inputType?.call(field) ?? "text").toLowerCase();
+    } catch {
+      // Unreadable: judged as shown (the conservative side).
+      return "text";
+    }
+  };
+  const isWrapped = (fn: unknown) =>
+    typeof fn === "function" &&
+    (fn as unknown as Record<symbol, unknown>)[WRAPPED] === true;
+  const mark = <T extends object>(fn: T): T => {
+    Object.defineProperty(fn, WRAPPED, { value: true });
+    return fn;
+  };
+  /** Whether the realm that made this field has the recorder's ordered routes (its prototype's value setter is one of ours). */
+  const instrumented = (field: Node): boolean => {
+    let proto = Object.getPrototypeOf(field) as object | null;
+    for (let i = 0; proto !== null && i < 64; i += 1) {
+      const d = Object.getOwnPropertyDescriptor(proto, "value");
+      if (d) return isWrapped(d.set);
+      proto = Object.getPrototypeOf(proto) as object | null;
+    }
+    return false;
+  };
+
+  /**
+   * Form fields (revisions 6 and 7, R5-A). A text field's `value` PROPERTY can show text that no attribute or child node holds: written
+   * while the field is detached, copied with it by `cloneNode`/`importNode`, kept when it is adopted (from another window too). Such a
    * value is judged when the field BECOMES visible: when it is inserted (`judgeInserted`) and when its type stops concealing it (password
    * to text), as well as when it is written into a connected field.
    *
    * What a record of a batch is judged with is the field's value AT that record. Every route that changes a field's value is an ordered
-   * boundary: the records queued before it are judged first (with the value as it still is), then the change happens. The wrapped routes
-   * are the `value`, `defaultValue`, `valueAsNumber` and `valueAsDate` setters, `setRangeText`, `stepUp`/`stepDown`, `form.reset()`, a
-   * reset by its event (a reset button), `click()` and `dispatchEvent` (a reset button's activation in a detached form) and `execCommand`;
-   * native editing is preceded by `beforeinput`. So when a batch is judged, a field's live value is its value at every record of the batch;
-   * a value that follows the `value` attribute or the textarea's text (a field the page never wrote) is judged through that attribute or
-   * text as it was at the record. An edit with no `beforeinput` in the very task that inserted the field cannot be ordered: INCOMPLETE.
+   * operation: the records queued before it are judged first (with the value as it still is), then the change happens. Revision 7 adds
+   * the routes whose NATIVE side effect changes the value without the value setter: the type (and the constraint attributes `min`, `max`,
+   * `step`, `multiple`) through its property, every attribute method of the element (`setAttribute`, `setAttributeNS`, `removeAttribute`,
+   * `removeAttributeNS`, `toggleAttribute`, `setAttributeNode`, `setAttributeNodeNS`, `removeAttributeNode`), an attached attribute node's
+   * `value`/`nodeValue`/`textContent`, and the `NamedNodeMap` setters and removers. Their string arguments are converted ONCE, before the
+   * records are judged (a conversion that changes the document happens before the operation, as natively). The property-only routes
+   * (`value`, `valueAsNumber`, `valueAsDate`, `setRangeText`, `stepUp`/`stepDown`) keep the native conversion; records made during it are
+   * judged with the value the field had before the operation. `defaultValue`, `form.reset()`, a reset by its event, `click()`,
+   * `dispatchEvent` and `execCommand` stay ordered as in revision 6, and native editing is preceded by `beforeinput`.
    *
-   * HF-14 (revision 4), now provenance per element: what the PERSON entered is not something the application disclosed. Only a TRUSTED
+   * Uncertainty is explicit: each field's value at its last ordered change is kept (`known`); a field judged with a DIFFERENT live value
+   * was changed by a route that is not ordered, and if that difference decides whether an account marker was shown, the evidence is
+   * INCOMPLETE. A field that cannot be read, or whose realm has no recorder, is INCOMPLETE when it is shown (never an empty value).
+   *
+   * HF-14 (revision 4), provenance per element: what the PERSON entered is not something the application disclosed. Only a TRUSTED
    * `input` event (the engine's own editing, not one a script dispatched, not one inside a scripted `execCommand`) records the entered
    * value, after draining the records queued before it; the same value written back afterwards (React mirrors it into the property and the
    * attribute) is not judged. Any application write of a different value, or a reset, ends that exemption: it is never a permanent safe
-   * string, and another field never shares it.
+   * string, and another field (a copy, or the same field in another document's recorder) never shares it.
    */
   const entered = new WeakMap<Node, string>();
   const editing = new WeakSet<Node>();
+  const known = new WeakMap<Node, string>();
   const CONCEALED = new Set(["hidden", "password", "file"]);
-  const valueGetters = new Map<object, (this: Node) => unknown>();
-  const isField = (node: unknown): node is HTMLInputElement =>
-    node !== null &&
-    typeof node === "object" &&
-    ((node as Node).nodeName === "INPUT" ||
-      (node as Node).nodeName === "TEXTAREA");
-  const liveValue = (field: Node): string => {
-    const proto = Object.getPrototypeOf(field) as object | null;
-    for (const [owner, get] of valueGetters)
-      if (
-        proto === owner ||
-        (proto && Object.prototype.isPrototypeOf.call(owner, proto))
-      )
-        return String(get.call(field) ?? "");
-    return "";
+  /** After an ORDERED change: the field's value now is the reference for every later record. */
+  const note = (field: Node): FieldState => {
+    const state = readField(field);
+    if (state.known) known.set(field, state.value);
+    else known.delete(field);
+    return state;
   };
-  /** The value a field shows when the page never wrote its property: its `value` attribute, or a textarea's text (live). */
-  const followed = (field: Node): string[] => {
-    const raw =
-      field.nodeName === "TEXTAREA"
-        ? (field.textContent ?? "")
-        : ((field as Element).getAttribute("value") ?? "");
-    const line = raw.replace(/[\r\n]/g, "");
-    return [raw, raw.replace(/\r\n?/g, "\n"), line, line.trim()];
-  };
-  /** The property-only text a field shows with the given type (null: none, concealed, or what the person entered). */
-  const fieldText = (field: Node, type: string | null): string | null => {
-    if (!isField(field)) return null;
-    if (field.nodeName === "INPUT" && CONCEALED.has((type ?? "").toLowerCase()))
-      return null;
-    const value = liveValue(field);
-    if (value === "" || entered.get(field) === value) return null;
-    return followed(field).includes(value) ? null : value;
-  };
-  const typeOf = (field: HTMLInputElement) =>
-    field.nodeName === "INPUT" ? field.type : "textarea";
   /** After a write the application made: its effect is judged when the field is visible; the person's exemption ends if it changed. */
-  const written = (field: HTMLInputElement, judge: boolean) => {
-    const value = liveValue(field);
+  const written = (field: Node, judge: boolean) => {
+    const state = note(field);
+    if (!state.known) {
+      entered.delete(field);
+      if (judge)
+        incomplete(`a written field's value is unknown (${state.reason})`);
+      return;
+    }
+    const value = state.value;
     if (entered.has(field) && entered.get(field) !== value)
       entered.delete(field);
+    let connectedNow = false;
+    try {
+      connectedNow = field.isConnected;
+    } catch {
+      connectedNow = true;
+    }
     if (
       judge &&
-      field.isConnected &&
-      !CONCEALED.has(typeOf(field).toLowerCase()) &&
+      connectedNow &&
+      !CONCEALED.has(typeOf(field)) &&
       entered.get(field) !== value
     )
       checkMarkers(value, `${where(field)} [value property]`);
+  };
+  /** The fields a form operation (a reset, a button's activation) can change. */
+  const formFields = (target: unknown): Node[] => {
+    const out: Node[] = [];
+    const add = (form: unknown) => {
+      try {
+        for (const el of Array.from(
+          (form as HTMLFormElement | null)?.elements ?? [],
+        ))
+          if (isField(el)) out.push(el);
+      } catch {
+        // Not a form: nothing to add.
+      }
+    };
+    if (isField(target)) out.push(target);
+    if (nodeTypeOf(target) === 1) {
+      let name: unknown = null;
+      try {
+        name = NATIVE.localName?.call(target);
+      } catch {
+        name = null;
+      }
+      if (name === "form") add(target);
+      else {
+        let form: unknown = null;
+        try {
+          form = (target as HTMLButtonElement).form;
+        } catch {
+          form = null;
+        }
+        if (form) add(form);
+      }
+    }
+    return out;
   };
   /** Set while a scripted `execCommand` runs: the `input` events it fires are the script's, not the person's. */
   let scripted = 0;
@@ -397,14 +561,22 @@ export function oracleScript(config: RecorderConfig): void {
         incomplete(
           "a field was edited with no beforeinput in the task that inserted it (its value at insertion is unknown)",
         );
+      // Judged with the value each field had at its last ordered change: an edit with no beforeinput is not one.
       handle(records);
       if (!field) return;
       editing.delete(field);
       // The person's edit is theirs. A scripted `execCommand` edit is the application's: judged like any other write. A dispatched
       // event changes no value (a value it "confirms" was judged when it was written).
       if (scripted > 0) written(field, true);
-      else if (event.isTrusted) entered.set(field, liveValue(field));
-      else if (entered.get(field) !== liveValue(field)) entered.delete(field);
+      else if (event.isTrusted) {
+        const state = note(field);
+        if (state.known) entered.set(field, state.value);
+        else entered.delete(field);
+      } else {
+        const state = readField(field);
+        if (!state.known || entered.get(field) !== state.value)
+          entered.delete(field);
+      }
     },
     true,
   );
@@ -413,10 +585,11 @@ export function oracleScript(config: RecorderConfig): void {
     (event) => {
       if (!mine()) return;
       drain();
-      for (const el of Array.from(
-        (event.target as HTMLFormElement | null)?.elements ?? [],
-      ))
+      // The reset happens after this event: the fields' next values are what the reset leaves (no stale reference survives it).
+      for (const el of formFields(event.target)) {
         entered.delete(el);
+        known.delete(el);
+      }
     },
     true,
   );
@@ -451,18 +624,22 @@ export function oracleScript(config: RecorderConfig): void {
     return v.children;
   };
   const attrKey = (ns: string | null, name: string) => `${ns ?? ""}|${name}`;
+  /** An attribute (by namespace and local name, as a record names it) through the NATIVE reader: any realm's element (revision 7). */
   const attrOf = (node: Node, ns: string | null, name: string) => {
     const v = at(node);
     const key = attrKey(ns, name);
-    if (!v.attrs.has(key))
-      v.attrs.set(
-        key,
-        node instanceof Element
-          ? ns
-            ? node.getAttributeNS(ns, name)
-            : node.getAttribute(name)
-          : null,
-      );
+    if (!v.attrs.has(key)) {
+      let value: string | null = null;
+      if (nodeTypeOf(node) === 1)
+        try {
+          value = NATIVE.getAttributeNS.call(node, ns, name);
+        } catch (error) {
+          incomplete(
+            `an attribute could not be read (${String(error).slice(0, 120)})`,
+          );
+        }
+      v.attrs.set(key, value);
+    }
     return v.attrs.get(key) ?? null;
   };
   const setAttr = (
@@ -555,6 +732,57 @@ export function oracleScript(config: RecorderConfig): void {
     if (episode !== null) return;
     for (const word of config.markers)
       if (text.includes(word)) violate("marker", `${where}: "${word}"`);
+  };
+  const markerIn = (text: string | null) =>
+    text !== null && config.markers.some((word) => text.includes(word));
+  /** What a field shows when the page never wrote its property, AS IT WAS at this record: its `value` attribute, or a textarea's text. */
+  const followedAt = (field: Node): string[] => {
+    const raw =
+      fieldKind(field) === "textarea"
+        ? childrenOf(field)
+            .filter((n) => n.nodeType === 3)
+            .map((n) => dataOf(n))
+            .join("")
+        : (attrOf(field, null, "value") ?? "");
+    const line = raw.replace(/[\r\n]/g, "");
+    return [raw, raw.replace(/\r\n?/g, "\n"), line, line.trim()];
+  };
+  /**
+   * The property-only text a field shows at this record with the given type (null: none, concealed, what the person entered, or what its
+   * attribute/text at this record already shows). An unknown value, an unobserved realm, or an unordered change that decides the verdict
+   * is INCOMPLETE (and contributes nothing it could be mistaken for).
+   */
+  const fieldText = (field: Node, type: string | null): string | null => {
+    const kind = fieldKind(field);
+    if (kind === null) return null;
+    if (kind === "input" && CONCEALED.has((type ?? "").toLowerCase()))
+      return null;
+    const state = readField(field);
+    if (!state.known) {
+      incomplete(`a shown field's value is unknown (${state.reason})`);
+      return null;
+    }
+    if (!instrumented(field)) {
+      incomplete(
+        "a field from a realm with no recorder was shown (its writes are not ordered)",
+      );
+      return null;
+    }
+    const shown = (value: string) =>
+      value === "" ||
+      entered.get(field) === value ||
+      followedAt(field).includes(value)
+        ? null
+        : value;
+    const now = shown(state.value);
+    const before = overrides.has(field) ? undefined : known.get(field);
+    if (before === undefined || before === state.value || episode !== null)
+      return now;
+    if (markerIn(now) === markerIn(shown(before))) return now;
+    incomplete(
+      "a field's value was changed by a route that is not ordered (its value at a record is unknown)",
+    );
+    return null;
   };
   /** The title is judged on the value it HAD at each event, never on the title as it is now. */
   let suppressTitle: string | null = null;
@@ -692,7 +920,7 @@ export function oracleScript(config: RecorderConfig): void {
             if (episode !== null) push({ op: "episode.close", reason: "gate" });
             episode = null;
           }
-        } else if (!ns && name === "type" && target.nodeName === "INPUT") {
+        } else if (!ns && name === "type" && fieldKind(target) === "input") {
           // R5-A: a type that stops concealing a field (password → text) shows its property-only value at this record.
           const was = (r.oldValue ?? "").toLowerCase();
           if (!CONCEALED.has(was)) continue;
@@ -795,169 +1023,6 @@ export function oracleScript(config: RecorderConfig): void {
     attributeFilter: [...GATES, ...NAMED, "id", "type"],
   });
 
-  // ---- writes that no mutation record shows ----
-  const titleDescriptor = Object.getOwnPropertyDescriptor(
-    Document.prototype,
-    "title",
-  );
-  if (titleDescriptor?.set) {
-    const setTitle = titleDescriptor.set;
-    Object.defineProperty(Document.prototype, "title", {
-      ...titleDescriptor,
-      set(this: Document, value: string) {
-        if (this !== own || !mine()) {
-          setTitle.call(this, value);
-          return;
-        }
-        drain();
-        const text = String(value);
-        checkTitle(text, "document.title");
-        setTitle.call(this, value);
-        // The setter's own records are replayed like any other (the model needs them); only a title check of exactly the value
-        // already judged is not counted twice. Every other judgement of these records stands.
-        suppressTitle = text;
-        suppressed = 0;
-        try {
-          handle(observer.takeRecords());
-        } finally {
-          suppressTitle = null;
-        }
-        push({ op: "title.setter", suppressed });
-      },
-    });
-  }
-  // A form field's value routes (S6; R5-A): each is an ordered boundary (the records before it are judged first), and the application's
-  // write is judged by its actual effect when the field is visible. Native coercion, return values and thrown errors are the engine's own.
-  const ours = (target: unknown) =>
-    (target as Node | null)?.ownerDocument === own && mine();
-  const wrapSetter = (proto: object, name: string, judge: boolean | null) => {
-    const descriptor = Object.getOwnPropertyDescriptor(proto, name);
-    if (!descriptor?.set || !descriptor.get) {
-      // Without the value property no field could be judged; an absent optional route changes nothing to order.
-      if (name === "value")
-        incomplete("a form field's value property cannot be observed");
-      return;
-    }
-    const set = descriptor.set;
-    if (name === "value")
-      valueGetters.set(proto, descriptor.get as (this: Node) => unknown);
-    Object.defineProperty(proto, name, {
-      ...descriptor,
-      set(this: HTMLInputElement, value: unknown) {
-        if (!ours(this)) {
-          set.call(this, value);
-          return;
-        }
-        drain();
-        set.call(this, value);
-        if (judge !== null) written(this, judge);
-      },
-    });
-  };
-  const wrapMethod = (proto: object, name: string, judge: boolean) => {
-    const original = (proto as Record<string, unknown>)[name];
-    if (typeof original !== "function") return;
-    Object.defineProperty(proto, name, {
-      configurable: true,
-      writable: true,
-      value: function (this: HTMLInputElement, ...args: unknown[]) {
-        if (!ours(this)) return original.apply(this, args);
-        drain();
-        const result = original.apply(this, args);
-        written(this, judge);
-        return result;
-      },
-    });
-  };
-  for (const proto of [
-    typeof HTMLInputElement === "undefined" ? null : HTMLInputElement.prototype,
-    typeof HTMLTextAreaElement === "undefined"
-      ? null
-      : HTMLTextAreaElement.prototype,
-  ]) {
-    if (!proto) continue;
-    wrapSetter(proto, "value", true);
-    // The default value is an attribute (input) or the text (textarea): its records are judged; only the order and the exemption here.
-    wrapSetter(proto, "defaultValue", false);
-    wrapMethod(proto, "setRangeText", true);
-    if (proto !== HTMLInputElement.prototype) continue;
-    wrapSetter(proto, "valueAsNumber", true);
-    wrapSetter(proto, "valueAsDate", true);
-    wrapMethod(proto, "stepUp", true);
-    wrapMethod(proto, "stepDown", true);
-  }
-  /** Ordering boundaries for routes that change field values as a DEFAULT ACTION or a side effect (no field setter is called). */
-  const boundary = (
-    owner: object | undefined,
-    name: string,
-    after?: (self: unknown) => void,
-  ) => {
-    const original = owner && (owner as Record<string, unknown>)[name];
-    if (typeof original !== "function") return;
-    Object.defineProperty(owner as object, name, {
-      configurable: true,
-      writable: true,
-      value: function (this: unknown, ...args: unknown[]) {
-        if (!mine()) return original.apply(this, args);
-        drain();
-        try {
-          return original.apply(this, args);
-        } finally {
-          after?.(this);
-        }
-      },
-    });
-  };
-  // `form.reset()` resets detached forms too (no event reaches the window then); the person's exemption ends for its fields.
-  boundary(
-    typeof HTMLFormElement === "undefined"
-      ? undefined
-      : HTMLFormElement.prototype,
-    "reset",
-    (form) => {
-      for (const el of Array.from((form as HTMLFormElement).elements ?? []))
-        entered.delete(el);
-    },
-  );
-  // A reset (or other) button activated in a detached form: by `click()` or a dispatched click.
-  boundary(
-    typeof HTMLElement === "undefined" ? undefined : HTMLElement.prototype,
-    "click",
-  );
-  boundary(
-    typeof EventTarget === "undefined" ? undefined : EventTarget.prototype,
-    "dispatchEvent",
-  );
-  // A scripted edit of the focused field: ordered, and its `input` events are not the person's.
-  if (typeof Document !== "undefined" && Document.prototype.execCommand) {
-    const execCommand = Document.prototype.execCommand;
-    Document.prototype.execCommand = function (
-      this: Document,
-      ...args: Parameters<Document["execCommand"]>
-    ) {
-      if (this !== own || !mine()) return execCommand.apply(this, args);
-      drain();
-      scripted += 1;
-      try {
-        return execCommand.apply(this, args);
-      } finally {
-        scripted -= 1;
-      }
-    } as Document["execCommand"];
-  }
-  // A shadow tree is outside what the observer sees: its content would be unobserved, so the evidence is incomplete.
-  if (typeof Element !== "undefined" && Element.prototype.attachShadow) {
-    const attachShadow = Element.prototype.attachShadow;
-    Element.prototype.attachShadow = function (
-      this: Element,
-      ...args: Parameters<Element["attachShadow"]>
-    ) {
-      if (this.ownerDocument === own && mine())
-        incomplete("a shadow root was attached (its content is not observed)");
-      return attachShadow.apply(this, args);
-    } as Element["attachShadow"];
-  }
-
   // ---- the durable boundary: every atlas-auth transaction of this page ----
   type TxInfo = { id: number; mode: string; read: unknown; written: unknown };
   const txs = new WeakMap<IDBTransaction, TxInfo>();
@@ -986,61 +1051,513 @@ export function oracleScript(config: RecorderConfig): void {
       tx: id,
     };
   };
-  if (typeof IDBDatabase !== "undefined") {
-    const transaction = IDBDatabase.prototype.transaction;
-    IDBDatabase.prototype.transaction = function (
-      this: IDBDatabase,
-      ...args: Parameters<IDBDatabase["transaction"]>
-    ) {
-      const tx = transaction.apply(this, args);
-      if (this.name === "atlas-auth" && mine()) {
-        const info: TxInfo = {
-          id: ++txIds,
-          mode: String(args[1] ?? "readonly"),
-          read: null,
-          written: null,
-        };
-        txs.set(tx, info);
-        tx.addEventListener("complete", () => {
-          // Causal order: every DOM change made before this completion is judged under the record that held until now.
-          drain();
-          const summary = (info.written ?? info.read) as typeof record;
-          if (summary) {
-            record = summary;
-            push({ op: "auth.commit", tx: info.id, record: summary });
+
+  // ---- this document's recorder SERVICE (revision 7, design assessment P2/P3) ----
+  /**
+   * What the prototype wrappers of ANY same-origin realm ask of the document that owns the node they act on. Only observation: draining,
+   * judging, ordering, incompleteness. No authority (the `atlas-auth` record, the episode) ever passes between documents. It lives on the
+   * Document object itself under a registry symbol (`Symbol.for` is shared by every realm of the agent), so a node adopted from another
+   * window, or written through another window's prototype, reaches the recorder of the document it belongs to NOW, and a donor window
+   * that has gone (removed, navigated, closed) does not take that observation with it.
+   */
+  const service = {
+    document: own,
+    drain,
+    incomplete,
+    /** A property-only write (no record of its own): ordered; records made DURING it (its argument conversion) are judged with the value
+     * the field had before it; the write itself is judged by its actual effect. */
+    operate(field: Node, run: () => unknown, judge: boolean) {
+      drain();
+      const before = readField(field);
+      const result = run();
+      const during = observer.takeRecords();
+      if (during.length > 0) {
+        const after = readField(field);
+        if (before.known && after.known && before.value !== after.value) {
+          overrides.set(field, before.value);
+          try {
+            handle(during);
+          } finally {
+            overrides.delete(field);
           }
-        });
-        tx.addEventListener("abort", () => {
-          drain();
-          push({ op: "auth.abort", tx: info.id });
-        });
+        } else handle(during);
       }
-      return tx;
-    } as IDBDatabase["transaction"];
-    const getAll = IDBObjectStore.prototype.getAll;
-    IDBObjectStore.prototype.getAll = function (
-      this: IDBObjectStore,
-      ...args: Parameters<IDBObjectStore["getAll"]>
-    ) {
-      const request = getAll.apply(this, args);
-      const info = txs.get(this.transaction);
+      written(field, judge);
+      return result;
+    },
+    /** An operation whose native side effect can change a field's value (its arguments are already converted): ordered before it. */
+    change(field: Node, run: () => unknown) {
+      drain();
+      try {
+        return run();
+      } finally {
+        written(field, false);
+      }
+    },
+    /** An operation that can change other fields as a default action (a reset, a button's activation): ordered, its fields re-read. */
+    around(run: () => unknown, fields: () => Node[], reset: boolean) {
+      drain();
+      try {
+        return run();
+      } finally {
+        for (const field of fields()) {
+          if (reset) entered.delete(field);
+          written(field, false);
+        }
+      }
+    },
+    /** Nodes moving INTO this document from another (explicit or implicit adoption): ordered; their fields observed from now on. */
+    adopt(fields: Node[], run: () => unknown) {
+      drain();
+      const result = run();
+      for (const field of fields) {
+        if (!instrumented(field))
+          incomplete(
+            "a field from a realm with no recorder was adopted (its writes are not ordered)",
+          );
+        note(field);
+      }
+      return result;
+    },
+    title(value: unknown, set: (text: string) => void) {
+      drain();
+      // Converted ONCE (as the native setter would): the value judged is the value set.
+      const text = `${value}`;
+      checkTitle(text, "document.title");
+      set(text);
+      // The setter's own records are replayed like any other (the model needs them); only a title check of exactly the value
+      // already judged is not counted twice. Every other judgement of these records stands.
+      suppressTitle = text;
+      suppressed = 0;
+      try {
+        handle(observer.takeRecords());
+      } finally {
+        suppressTitle = null;
+      }
+      push({ op: "title.setter", suppressed });
+    },
+    /** A scripted edit: ordered, and its `input` events are not the person's. */
+    exec(run: () => unknown, fields: () => Node[]) {
+      drain();
+      scripted += 1;
+      try {
+        return run();
+      } finally {
+        scripted -= 1;
+        for (const field of fields()) written(field, false);
+      }
+    },
+    begin(tx: IDBTransaction, mode: unknown) {
+      const info: TxInfo = {
+        id: ++txIds,
+        mode: String(mode ?? "readonly"),
+        read: null,
+        written: null,
+      };
+      txs.set(tx, info);
+      tx.addEventListener("complete", () => {
+        // Causal order: every DOM change made before this completion is judged under the record that held until now.
+        drain();
+        const summary = (info.written ?? info.read) as typeof record;
+        if (summary) {
+          record = summary;
+          push({ op: "auth.commit", tx: info.id, record: summary });
+        }
+      });
+      tx.addEventListener("abort", () => {
+        drain();
+        push({ op: "auth.abort", tx: info.id });
+      });
+    },
+    read(tx: IDBTransaction, request: IDBRequest) {
+      const info = txs.get(tx);
       if (info)
         request.addEventListener("success", () => {
           info.read = summarise(request.result as unknown[], info.id);
         });
-      return request;
-    } as IDBObjectStore["getAll"];
-    const put = IDBObjectStore.prototype.put;
-    IDBObjectStore.prototype.put = function (
-      this: IDBObjectStore,
-      ...args: Parameters<IDBObjectStore["put"]>
-    ) {
-      const info = txs.get(this.transaction);
-      if (info && args[1] === "auth_state")
-        info.written = summarise([args[0]], info.id);
-      return put.apply(this, args);
-    } as IDBObjectStore["put"];
-  }
+    },
+    put(tx: IDBTransaction, value: unknown, key: unknown) {
+      const info = txs.get(tx);
+      if (info && key === "auth_state")
+        info.written = summarise([value], info.id);
+    },
+  };
+  type Service = typeof service;
+  Object.defineProperty(own, SERVICE, {
+    value: service,
+    enumerable: false,
+    configurable: true,
+  });
+  const serviceOf = (target: unknown): Service | null => {
+    if (target === null || typeof target !== "object") return null;
+    let s: Service | undefined;
+    try {
+      s = (target as Record<symbol, Service | undefined>)[SERVICE];
+    } catch {
+      return null;
+    }
+    return s && s.document === target ? s : null;
+  };
+  /** The recorder of the document that owns `target` now (a node), or null. */
+  const serviceFor = (target: unknown) => serviceOf(docOf(target));
+  /** The recorder of this realm's CURRENT document (for operations that belong to no node). */
+  const current = () => serviceOf(document);
+
+  // ---- the realm's ordered routes (installed once per realm; each acts for the node's own document) ----
+  type Around = (
+    self: unknown,
+    args: unknown[],
+    call: (args: unknown[]) => unknown,
+  ) => unknown;
+  const setter = (
+    proto: object | undefined,
+    name: string,
+    around: (self: unknown, value: unknown, set: (v: unknown) => void) => void,
+    missing?: string,
+  ) => {
+    const d = proto ? Object.getOwnPropertyDescriptor(proto, name) : undefined;
+    if (!d?.set) {
+      // Without the value property no field could be judged; an absent optional route changes nothing to order.
+      if (missing) incomplete(missing);
+      return;
+    }
+    if (isWrapped(d.set)) return;
+    const set = d.set;
+    Object.defineProperty(proto as object, name, {
+      ...d,
+      set: mark(function (this: unknown, value: unknown) {
+        around(this, value, (v) => set.call(this, v));
+      }),
+    });
+  };
+  const method = (proto: object | undefined, name: string, around: Around) => {
+    const d = proto ? Object.getOwnPropertyDescriptor(proto, name) : undefined;
+    const original = d?.value as ((...args: unknown[]) => unknown) | undefined;
+    if (typeof original !== "function" || isWrapped(original)) return;
+    Object.defineProperty(proto as object, name, {
+      ...d,
+      value: mark(function (this: unknown, ...args: unknown[]) {
+        return around(this, args, (a) => original.apply(this, a));
+      }),
+    });
+  };
+  /** WebIDL DOMString / nullable DOMString conversion, done once by the wrapper (the native setter then receives a string). */
+  const S = (v: unknown) => `${v}`;
+  const NS = (v: unknown) => (v === null || v === undefined ? null : `${v}`);
+  type Kind = "S" | "NS" | "-";
+  /** Converts the arguments an operation would convert, in order; with fewer than it requires it throws natively before converting any. */
+  const convert = (args: unknown[], kinds: Kind[], required: number) =>
+    args.length < required
+      ? args
+      : args.map((a, i) =>
+          kinds[i] === "S" ? S(a) : kinds[i] === "NS" ? NS(a) : a,
+        );
+  const property = (judge: boolean) =>
+    ((self, args, call) => {
+      const s = isField(self) ? serviceFor(self) : null;
+      if (!s) return call(args);
+      return s.operate(self as Node, () => call(args), judge);
+    }) as Around;
+  /** A property-only setter (the value, `valueAsNumber`, `valueAsDate`): the native conversion is kept. */
+  const propertySet = (
+    self: unknown,
+    value: unknown,
+    set: (v: unknown) => void,
+  ) => {
+    property(true)(self, [value], (a) => {
+      set(a[0]);
+    });
+  };
+  const converting =
+    (kind: Kind) =>
+    (self: unknown, value: unknown, set: (v: unknown) => void) => {
+      const s = isField(self) ? serviceFor(self) : null;
+      if (!s) {
+        set(value);
+        return;
+      }
+      const v = kind === "S" ? S(value) : kind === "NS" ? NS(value) : value;
+      s.change(self as Node, () => set(v));
+    };
+  const ownerOf = (attr: unknown): unknown => {
+    try {
+      return (attr as Attr).ownerElement;
+    } catch {
+      return null;
+    }
+  };
+  /** Nodes (and the fields inside them) about to move INTO the document of `destination`: each source drained first. */
+  const moving = (
+    destination: unknown,
+    nodes: unknown[],
+    call: () => unknown,
+  ) => {
+    const target = docOf(destination);
+    let foreign: Node[] | null = null;
+    for (const node of nodes) {
+      const from = docOf(node);
+      if (from !== null && from !== target && nodeTypeOf(node) !== 9) {
+        foreign ??= [];
+        foreign.push(node as Node);
+      }
+    }
+    if (!foreign) return call();
+    const fields: Node[] = [];
+    for (const node of foreign) {
+      serviceFor(node)?.drain();
+      if (isField(node)) fields.push(node);
+      const type = nodeTypeOf(node);
+      if (type === 1 || type === 11)
+        try {
+          for (const found of Array.from(
+            (node as ParentNode).querySelectorAll("input,textarea"),
+          ))
+            if (fields.length < LIMITS.subtree) fields.push(found);
+        } catch {
+          // Not searchable: its own fields are judged when shown.
+        }
+    }
+    const s = serviceOf(target);
+    return s ? s.adopt(fields, call) : call();
+  };
+  const all: Around = (self, args, call) =>
+    moving(self, args, () => call(args));
+  const first: Around = (self, args, call) =>
+    moving(self, [args[0]], () => call(args));
+  const on = (ctor: unknown) =>
+    typeof ctor === "function"
+      ? ((ctor as { prototype?: object }).prototype ?? undefined)
+      : undefined;
+  const install = () => {
+    const input = on(
+      typeof HTMLInputElement === "undefined" ? undefined : HTMLInputElement,
+    );
+    const textarea = on(
+      typeof HTMLTextAreaElement === "undefined"
+        ? undefined
+        : HTMLTextAreaElement,
+    );
+    // The value routes (S6; R5-A): ordered, judged by their actual effect when the field is visible; native conversion, return values
+    // and thrown errors are the engine's own.
+    for (const proto of [input, textarea]) {
+      if (!proto) continue;
+      setter(
+        proto,
+        "value",
+        propertySet,
+        "a form field's value property cannot be observed",
+      );
+      method(proto, "setRangeText", property(true));
+      // The default value is an attribute (input) or the text (textarea): its records are judged; here only the order and the exemption.
+      setter(proto, "defaultValue", converting("S"));
+    }
+    if (input) {
+      setter(input, "valueAsNumber", propertySet);
+      setter(input, "valueAsDate", propertySet);
+      method(input, "stepUp", property(true));
+      method(input, "stepDown", property(true));
+      // Revision 7 (R5-A/type): the type and the constraints whose change runs the value sanitisation algorithm.
+      setter(
+        input,
+        "type",
+        converting("S"),
+        "a field's type cannot be ordered",
+      );
+      for (const name of ["min", "max", "step"])
+        setter(input, name, converting("S"));
+      setter(input, "multiple", converting("-"));
+    }
+    // Every attribute route of a field's element (revision 7): ordered before the native side effect.
+    const element = on(typeof Element === "undefined" ? undefined : Element);
+    const ATTRIBUTE: Array<[string, Kind[], number]> = [
+      ["setAttribute", ["S", "S"], 2],
+      ["setAttributeNS", ["NS", "S", "S"], 3],
+      ["removeAttribute", ["S"], 1],
+      ["removeAttributeNS", ["NS", "S"], 2],
+      ["toggleAttribute", ["S", "-"], 1],
+      ["setAttributeNode", ["-"], 1],
+      ["setAttributeNodeNS", ["-"], 1],
+      ["removeAttributeNode", ["-"], 1],
+    ];
+    for (const [name, kinds, required] of ATTRIBUTE)
+      method(element, name, (self, args, call) => {
+        const s = isField(self) ? serviceFor(self) : null;
+        if (!s) return call(args);
+        const converted = convert(args, kinds, required);
+        return s.change(self as Node, () => call(converted));
+      });
+    // An attribute node attached to a field: its value by `value`, `nodeValue` or `textContent` (and a textarea's text by `textContent`).
+    setter(
+      on(typeof Attr === "undefined" ? undefined : Attr),
+      "value",
+      (self, value, set) => converting("S")(ownerOf(self), value, set),
+    );
+    for (const name of ["nodeValue", "textContent"])
+      setter(on(Node), name, (self, value, set) =>
+        converting("NS")(
+          nodeTypeOf(self) === 2 ? ownerOf(self) : self,
+          value,
+          set,
+        ),
+      );
+    // A NamedNodeMap knows no element: the element whose `attributes` returned it.
+    const maps = new WeakMap<object, unknown>();
+    const attributes = element
+      ? Object.getOwnPropertyDescriptor(element, "attributes")
+      : undefined;
+    if (attributes?.get && !isWrapped(attributes.get)) {
+      const get = attributes.get;
+      Object.defineProperty(element as object, "attributes", {
+        ...attributes,
+        get: mark(function (this: unknown) {
+          const map = get.call(this) as unknown;
+          if (map !== null && typeof map === "object") maps.set(map, this);
+          return map;
+        }),
+      });
+    }
+    const NAMED_MAP: Array<[string, Kind[], number]> = [
+      ["setNamedItem", ["-"], 1],
+      ["setNamedItemNS", ["-"], 1],
+      ["removeNamedItem", ["S"], 1],
+      ["removeNamedItemNS", ["NS", "S"], 2],
+    ];
+    for (const [name, kinds, required] of NAMED_MAP)
+      method(
+        on(typeof NamedNodeMap === "undefined" ? undefined : NamedNodeMap),
+        name,
+        (self, args, call) => {
+          const field = maps.get(self as object);
+          const s = isField(field) ? serviceFor(field) : null;
+          if (!s) return call(args);
+          const converted = convert(args, kinds, required);
+          return s.change(field as Node, () => call(converted));
+        },
+      );
+    // Ordering boundaries for routes that change field values as a DEFAULT ACTION or a side effect (no field setter is called).
+    method(
+      on(typeof HTMLFormElement === "undefined" ? undefined : HTMLFormElement),
+      "reset",
+      (self, args, call) => {
+        // `form.reset()` resets detached forms too (no event reaches the window then); the person's exemption ends for its fields.
+        const s = serviceFor(self) ?? current();
+        if (!s) return call(args);
+        return s.around(
+          () => call(args),
+          () => formFields(self),
+          true,
+        );
+      },
+    );
+    // A reset (or other) button activated in a detached form: by `click()` or a dispatched click.
+    const activation: Around = (self, args, call) => {
+      const s = serviceFor(self) ?? current();
+      if (!s) return call(args);
+      return s.around(
+        () => call(args),
+        () => formFields(self),
+        false,
+      );
+    };
+    method(
+      on(typeof HTMLElement === "undefined" ? undefined : HTMLElement),
+      "click",
+      activation,
+    );
+    method(
+      on(typeof EventTarget === "undefined" ? undefined : EventTarget),
+      "dispatchEvent",
+      activation,
+    );
+    const documentProto = on(
+      typeof Document === "undefined" ? undefined : Document,
+    );
+    method(documentProto, "execCommand", (self, args, call) => {
+      const s = serviceOf(self);
+      if (!s) return call(args);
+      return s.exec(
+        () => call(args),
+        () => {
+          try {
+            const active = (self as Document).activeElement;
+            return isField(active) ? [active] : [];
+          } catch {
+            return [];
+          }
+        },
+      );
+    });
+    // Writes that no mutation record shows: the title.
+    setter(documentProto, "title", (self, value, set) => {
+      const s = serviceOf(self);
+      if (!s) set(value);
+      else s.title(value, set);
+    });
+    // A shadow tree is outside what the observer sees: its content would be unobserved, so the evidence is incomplete.
+    method(element, "attachShadow", (self, args, call) => {
+      serviceFor(self)?.incomplete(
+        "a shadow root was attached (its content is not observed)",
+      );
+      return call(args);
+    });
+    // Adoption, explicit and implicit (every insertion route a node of another document can take): the source first (revision 7).
+    method(documentProto, "adoptNode", first);
+    const node = on(typeof Node === "undefined" ? undefined : Node);
+    for (const name of ["appendChild", "insertBefore", "replaceChild"])
+      method(node, name, first);
+    for (const proto of [
+      element,
+      documentProto,
+      on(
+        typeof DocumentFragment === "undefined" ? undefined : DocumentFragment,
+      ),
+    ])
+      for (const name of ["append", "prepend", "replaceChildren"])
+        method(proto, name, all);
+    for (const proto of [
+      element,
+      on(typeof CharacterData === "undefined" ? undefined : CharacterData),
+      on(typeof DocumentType === "undefined" ? undefined : DocumentType),
+    ])
+      for (const name of ["before", "after", "replaceWith"])
+        method(proto, name, all);
+    method(element, "insertAdjacentElement", (self, args, call) =>
+      moving(self, [args[1]], () => call(args)),
+    );
+    for (const name of ["insertNode", "surroundContents"])
+      method(
+        on(typeof Range === "undefined" ? undefined : Range),
+        name,
+        (self, args, call) => {
+          let start: unknown = null;
+          try {
+            start = (self as Range).startContainer;
+          } catch {
+            start = null;
+          }
+          return moving(start, [args[0]], () => call(args));
+        },
+      );
+    // The durable boundary: the atlas-auth transactions of this realm's CURRENT document.
+    if (typeof IDBDatabase !== "undefined") {
+      method(IDBDatabase.prototype, "transaction", (self, args, call) => {
+        const tx = call(args) as IDBTransaction;
+        if ((self as IDBDatabase).name === "atlas-auth")
+          current()?.begin(tx, args[1]);
+        return tx;
+      });
+      method(IDBObjectStore.prototype, "getAll", (self, args, call) => {
+        const request = call(args) as IDBRequest;
+        current()?.read((self as IDBObjectStore).transaction, request);
+        return request;
+      });
+      method(IDBObjectStore.prototype, "put", (self, args, call) => {
+        current()?.put((self as IDBObjectStore).transaction, args[0], args[1]);
+        return call(args);
+      });
+    }
+  };
+  install();
 
   // ---- annotations: the fixture harness's kernel trace, when there is one ----
   let fixture: unknown;

@@ -774,6 +774,514 @@ describe("D1-D5 (revision 6, R5-A): a field's property-only value is judged when
   });
 });
 
+/**
+ * WEB-08c revision 7 (review 7 R5-A of 15 October 2026; design assessment P1-P3, Q1, T1-T3/R1-R4/X1/U1-U2): the model of the two missing
+ * boundaries. A native TYPE change (any of its routes) can erase a value an insertion had already shown, without the value setter; and a
+ * field ADOPTED from another window keeps that window's prototypes. Separate jsdom windows are separate realms (their own interfaces and
+ * prototypes; `instanceof` the other's is false), which is what these cases need: a same-realm detached document is not one. Native
+ * delivery, conversion and adoption in Chromium, Firefox and WebKit are qualified in `fixture.lifecycle-oracle.spec.ts`.
+ */
+type Field = HTMLInputElement | HTMLTextAreaElement;
+/** A same-origin window with (instrumented) or without the witness and recorder. */
+function donorWindow(instrumented: boolean) {
+  const dom = new JSDOM(HTML, {
+    url: "https://atlas.test/blank",
+    runScripts: "outside-only",
+  });
+  const win = dom.window as unknown as Win & { close(): void };
+  const reports: Array<Record<string, unknown>> = [];
+  win.__displayOracleReport = (r) => {
+    reports.push(r as Record<string, unknown>);
+  };
+  win.__displayOracleWitness = () => undefined;
+  if (instrumented) {
+    win.eval(FAKE_IDB);
+    win.eval(`(${witnessScript})(${JSON.stringify(EVIDENCE_COOKIE)})`);
+    win.eval(
+      `(${oracleScript})(${JSON.stringify({ markers: [MARKER], limits: DEFAULT_LIMITS })})`,
+    );
+  }
+  return { win, doc: win.document, reports };
+}
+const sanitising = () => {
+  const probe = donorWindow(false).doc.createElement("input");
+  probe.value = "abc";
+  probe.type = "number";
+  return probe.value === "";
+};
+
+describe("R7 T1-T3: a native type change is ordered before it erases the value an insertion showed", () => {
+  test("precondition: jsdom sanitises the value when the type becomes number (as Chromium, Firefox and WebKit do)", () => {
+    expect(sanitising()).toBe(true);
+  });
+  const ROUTES: Record<string, (f: HTMLInputElement, doc: Document) => void> = {
+    "type property (number)": (f) => {
+      f.type = "number";
+    },
+    "type property (file)": (f) => {
+      f.type = "file";
+    },
+    setAttribute: (f) => f.setAttribute("type", "number"),
+    "setAttributeNS(null)": (f) => f.setAttributeNS(null, "type", "number"),
+    "attribute node value": (f) => {
+      (f.getAttributeNode("type") as Attr).value = "number";
+    },
+    "attribute node nodeValue": (f) => {
+      (f.getAttributeNode("type") as Attr).nodeValue = "number";
+    },
+    "attribute node textContent": (f) => {
+      (f.getAttributeNode("type") as Attr).textContent = "number";
+    },
+    setAttributeNode: (f, doc) => {
+      const attr = doc.createAttribute("type");
+      attr.value = "number";
+      f.setAttributeNode(attr);
+    },
+    "NamedNodeMap setNamedItem": (f, doc) => {
+      const attr = doc.createAttribute("type");
+      attr.value = "number";
+      f.attributes.setNamedItem(attr);
+    },
+  };
+  for (const [route, change] of Object.entries(ROUTES)) {
+    test(`T1/T2 ${route}: inserted with the marker, then the type erases it in the same task: reported`, () => {
+      const r = recorder();
+      const field = r.doc.createElement("input");
+      field.setAttribute("type", "text");
+      field.value = MARKER;
+      r.doc.body.append(field);
+      change(field, r.doc);
+      expect(field.value, "the native side effect happened").toBe("");
+      expect(r.kinds()).toEqual(["marker"]);
+      expect(r.limits()).toEqual([]);
+    });
+    test(`T1/T2 ${route}: made safe while DETACHED, inserted, then the type changed: clean (control)`, () => {
+      const r = recorder();
+      const field = r.doc.createElement("input");
+      field.setAttribute("type", "text");
+      field.value = MARKER;
+      field.value = "Safe";
+      r.doc.body.append(field);
+      change(field, r.doc);
+      expect(r.kinds()).toEqual([]);
+      expect(r.limits()).toEqual([]);
+    });
+  }
+  test("T1 controls: the marker kept is reported; cleared through the value setter is reported once", () => {
+    for (const clear of [false, true]) {
+      const r = recorder();
+      const field = r.doc.createElement("input");
+      field.value = MARKER;
+      r.doc.body.append(field);
+      if (clear) field.value = "";
+      expect(r.kinds(), clear ? "cleared" : "kept").toEqual(["marker"]);
+    }
+  });
+  const REVEAL: Record<string, (f: HTMLInputElement, doc: Document) => void> = {
+    removeAttribute: (f) => f.removeAttribute("type"),
+    "removeAttributeNS(null)": (f) => f.removeAttributeNS(null, "type"),
+    toggleAttribute: (f) => {
+      f.toggleAttribute("type");
+    },
+    removeAttributeNode: (f) => {
+      f.removeAttributeNode(f.getAttributeNode("type") as Attr);
+    },
+    "NamedNodeMap removeNamedItem": (f) => {
+      f.attributes.removeNamedItem("type");
+    },
+    "NamedNodeMap removeNamedItemNS": (f) => {
+      f.attributes.removeNamedItemNS(null, "type");
+    },
+  };
+  for (const [route, reveal] of Object.entries(REVEAL))
+    test(`T2 ${route}: a password field's marker revealed by removing its type is reported; still concealed it is clean`, () => {
+      const r = recorder();
+      const field = r.doc.createElement("input");
+      field.setAttribute("type", "password");
+      field.value = MARKER;
+      r.doc.body.append(field);
+      expect(r.kinds(), "concealed").toEqual([]);
+      reveal(field, r.doc);
+      expect(field.type).toBe("text");
+      expect(r.kinds()).toEqual(["marker"]);
+    });
+  test("T2 lookalike: a NAMESPACED `type` attribute neither conceals nor reveals (the field's type is the null-namespace attribute)", () => {
+    const r = recorder();
+    const shown = r.doc.createElement("input");
+    shown.setAttributeNS("urn:x", "type", "password");
+    shown.value = MARKER;
+    r.doc.body.append(shown);
+    expect(shown.type).toBe("text");
+    expect(r.kinds(), "a text field with a lookalike is shown").toEqual([
+      "marker",
+    ]);
+    const k = recorder();
+    const hidden = k.doc.createElement("input");
+    hidden.type = "password";
+    hidden.value = MARKER;
+    k.doc.body.append(hidden);
+    hidden.setAttributeNS("urn:x", "type", "text");
+    expect(hidden.type).toBe("password");
+    expect(k.kinds(), "a lookalike does not reveal").toEqual([]);
+  });
+  test("T3 a container inserted with the field, dismantled, then the type changed: the insertion stands", () => {
+    const r = recorder();
+    const outer = r.doc.createElement("div");
+    const field = r.doc.createElement("input");
+    field.value = MARKER;
+    outer.append(field);
+    r.doc.body.append(outer);
+    outer.replaceChildren();
+    field.type = "number";
+    outer.remove();
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+  test("T3 never exposed: a field changed and sanitised while detached, inserted afterwards, is clean (control)", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.value = MARKER;
+    field.type = "number";
+    r.doc.body.append(field);
+    expect(r.kinds()).toEqual([]);
+    expect(r.limits()).toEqual([]);
+  });
+});
+
+describe("R7 U1-U2: unknown values are incomplete; the instrumentation converts each argument once and keeps native errors", () => {
+  test("U1 an UNORDERED change (no route the recorder orders) that decides the verdict is incomplete, never clean", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.value = "Safe";
+    r.doc.body.append(field);
+    // The engine changes the value with no script route and no event (as autofill or a restoration could).
+    idl.implForWrapper(field).value = MARKER;
+    expect(r.kinds()).toEqual([]);
+    expect(r.limits()).toEqual([
+      "a field's value was changed by a route that is not ordered (its value at a record is unknown)",
+    ]);
+  });
+  test("U1 control: an unordered change between two safe values decides nothing (clean, complete)", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.value = "Safe";
+    r.doc.body.append(field);
+    idl.implForWrapper(field).value = "Also safe";
+    expect(r.kinds()).toEqual([]);
+    expect(r.limits()).toEqual([]);
+  });
+  test("U2 argument conversion runs exactly once per argument, in order, for every converting route", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    r.doc.body.append(field);
+    const calls: string[] = [];
+    const as = (text: string) => ({
+      toString() {
+        calls.push(text);
+        return text;
+      },
+    });
+    field.type = as("search") as unknown as string;
+    field.setAttribute(
+      as("min") as unknown as string,
+      as("1") as unknown as string,
+    );
+    field.setAttributeNS(
+      as("") as unknown as string,
+      as("max") as unknown as string,
+      as("9") as unknown as string,
+    );
+    field.value = as("v") as unknown as string;
+    field.defaultValue = as("d") as unknown as string;
+    (field.getAttributeNode("min") as Attr).value = as(
+      "2",
+    ) as unknown as string;
+    expect(calls).toEqual([
+      "search",
+      "min",
+      "1",
+      "",
+      "max",
+      "9",
+      "v",
+      "d",
+      "2",
+    ]);
+    expect([field.type, field.min, field.max, field.value]).toEqual([
+      "search",
+      "2",
+      "9",
+      "v",
+    ]);
+  });
+  test("U2 native errors are the engine's: a missing argument converts nothing; a symbol is a TypeError; a wrong receiver is refused", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    /** The error's name (the jsdom window's own TypeError is not this realm's). */
+    const thrown = (run: () => void) => {
+      try {
+        run();
+      } catch (error) {
+        return (error as Error).name;
+      }
+      return null;
+    };
+    let converted = 0;
+    const name = {
+      toString() {
+        converted += 1;
+        return "type";
+      },
+    };
+    expect(
+      thrown(() => (field.setAttribute as (n: unknown) => void)(name)),
+    ).toBe("TypeError");
+    expect(converted).toBe(0);
+    expect(
+      thrown(() => {
+        field.type = Symbol("x") as unknown as string;
+      }),
+    ).toBe("TypeError");
+    const set = Object.getOwnPropertyDescriptor(
+      r.win.HTMLInputElement.prototype,
+      "value",
+    )?.set as (v: unknown) => void;
+    expect(thrown(() => set.call(r.doc.createElement("div"), "x"))).toBe(
+      "TypeError",
+    );
+    expect(r.kinds()).toEqual([]);
+    expect(r.limits()).toEqual([]);
+  });
+  test("U2 a conversion that inserts the field before the property write clears it: judged with the value it had then", () => {
+    for (const value of [MARKER, "Safe"]) {
+      const r = recorder();
+      const field = r.doc.createElement("input");
+      field.value = value;
+      field.value = {
+        toString() {
+          r.doc.body.append(field);
+          return "";
+        },
+      } as unknown as string;
+      expect(field.value).toBe("");
+      expect(r.kinds(), value).toEqual(value === MARKER ? ["marker"] : []);
+      expect(r.limits()).toEqual([]);
+    }
+  });
+  test("U2 a conversion that inserts the field before its type sanitises it: judged with the value it had then", () => {
+    const r = recorder();
+    const field = r.doc.createElement("input");
+    field.value = MARKER;
+    field.type = {
+      toString() {
+        r.doc.body.append(field);
+        return "number";
+      },
+    } as unknown as string;
+    expect(field.value).toBe("");
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+});
+
+describe("R7 R1-R4/X1: a field from ANOTHER window is read natively and observed by the document that owns it now", () => {
+  for (const tag of ["input", "textarea"] as const)
+    for (const how of ["adoptNode", "implicit"] as const) {
+      test(`R1 ${tag} ${how}: a prefilled field from another window, inserted: reported (with its foreign prototype)`, () => {
+        const r = recorder();
+        const donor = donorWindow(true);
+        const field = donor.doc.createElement(tag) as Field;
+        field.value = MARKER;
+        const moved = how === "adoptNode" ? r.doc.adoptNode(field) : field;
+        r.doc.body.append(moved);
+        expect(moved.ownerDocument).toBe(r.doc);
+        expect(
+          moved instanceof
+            (tag === "input"
+              ? r.win.HTMLInputElement
+              : r.win.HTMLTextAreaElement),
+          "the destination's prototype is not the field's",
+        ).toBe(false);
+        expect(moved.value).toBe(MARKER);
+        expect(r.kinds()).toEqual(["marker"]);
+        expect(r.limits()).toEqual([]);
+      });
+      test(`R1 ${tag} ${how}: a safe field from another window is clean; an imported marker copy is reported (controls)`, () => {
+        const r = recorder();
+        const donor = donorWindow(true);
+        const safe = donor.doc.createElement(tag) as Field;
+        safe.value = "Safe";
+        r.doc.body.append(how === "adoptNode" ? r.doc.adoptNode(safe) : safe);
+        expect(r.kinds()).toEqual([]);
+        const original = donor.doc.createElement(tag) as Field;
+        original.value = MARKER;
+        r.doc.body.append(r.doc.importNode(original, true));
+        expect(r.kinds()).toEqual(["marker"]);
+        expect(r.limits()).toEqual([]);
+      });
+    }
+  test("R2 writes after adoption, through the donor's own prototypes (setter, setRangeText, a reset) and a borrowed destination setter: each reported", () => {
+    const writes: Record<string, (f: HTMLInputElement, doc: Document) => void> =
+      {
+        "value setter": (f) => {
+          f.value = MARKER;
+          f.value = "Safe";
+        },
+        setRangeText: (f) => {
+          f.setRangeText(MARKER, 0, f.value.length);
+          f.value = "Safe";
+        },
+        "destination setter borrowed": (f, doc) => {
+          const set = Object.getOwnPropertyDescriptor(
+            (doc.defaultView as Window & typeof globalThis).HTMLInputElement
+              .prototype,
+            "value",
+          )?.set as (v: string) => void;
+          set.call(f, MARKER);
+          set.call(f, "Safe");
+        },
+        "in a nested subtree": (f) => {
+          f.value = MARKER;
+          f.value = "";
+        },
+      };
+    for (const [how, write] of Object.entries(writes)) {
+      const r = recorder();
+      const donor = donorWindow(true);
+      const holder = donor.doc.createElement("div");
+      const field = donor.doc.createElement("input");
+      holder.append(field);
+      field.value = "Safe";
+      r.doc.body.append(how === "in a nested subtree" ? holder : field);
+      expect(r.kinds(), `${how}: safe so far`).toEqual([]);
+      write(field, r.doc);
+      expect(r.kinds(), how).toEqual(["marker"]);
+      expect(r.limits(), how).toEqual([]);
+    }
+  });
+  test("R2 control: a reset of an adopted form is ordered and leaves no stale reference (its default text is judged as text; complete)", () => {
+    const r = recorder();
+    const donor = donorWindow(true);
+    const form = donor.doc.createElement("form");
+    const field = donor.doc.createElement("textarea");
+    form.append(field);
+    field.value = "Safe";
+    r.doc.body.append(form);
+    field.defaultValue = MARKER;
+    expect(r.kinds(), "the default text itself is shown").toEqual(["marker"]);
+    form.reset();
+    expect(field.value).toBe(MARKER);
+    expect(r.limits()).toEqual([]);
+  });
+  test("R3 foreign attributes: an adopted element's accessible name and an adopted password field revealed are judged like local ones", () => {
+    const r = recorder();
+    const donor = donorWindow(true);
+    const label = donor.doc.createElement("button");
+    label.setAttribute("aria-label", MARKER);
+    r.doc.body.append(label);
+    expect(r.kinds(), "aria-label").toEqual(["marker"]);
+    const field = donor.doc.createElement("input");
+    field.type = "password";
+    field.value = MARKER;
+    r.doc.body.append(field);
+    expect(r.kinds(), "still concealed").toEqual(["marker"]);
+    field.type = "text";
+    expect(r.kinds(), "revealed").toEqual(["marker", "marker"]);
+    const safe = donor.doc.createElement("button");
+    safe.setAttribute("aria-label", "Safe");
+    r.doc.body.append(safe);
+    expect(r.kinds(), "a safe label").toEqual(["marker", "marker"]);
+  });
+  test("R4 the donor's pending exposure stays the donor's; the destination judges its own insertion before the sanitisation", () => {
+    const r = recorder();
+    const donor = donorWindow(true);
+    const field = donor.doc.createElement("input");
+    field.value = MARKER;
+    donor.doc.body.append(field);
+    r.doc.body.append(field);
+    field.type = "number";
+    expect(field.value).toBe("");
+    const donorKinds = (donor.win as unknown as Win).__displayOracle
+      .flush()
+      .violations.map((v) => v.kind);
+    expect(donorKinds, "shown in the donor first").toEqual(["marker"]);
+    expect(r.kinds(), "then in the destination").toEqual(["marker"]);
+  });
+  test("R4 moved back: the destination's exposure stands and the donor judges its own later insertion", () => {
+    const r = recorder();
+    const donor = donorWindow(true);
+    const field = donor.doc.createElement("input");
+    field.value = "Safe";
+    r.doc.body.append(field);
+    field.value = MARKER;
+    donor.doc.body.append(field);
+    field.value = "Safe";
+    expect(r.kinds()).toEqual(["marker"]);
+    const donorKinds = (donor.win as unknown as Win).__displayOracle
+      .flush()
+      .violations.map((v) => v.kind);
+    expect(donorKinds).toEqual(["marker"]);
+  });
+  test("R4 the donor window closed: later writes to its adopted field still reach the destination", () => {
+    const r = recorder();
+    const donor = donorWindow(true);
+    const field = donor.doc.createElement("input");
+    r.doc.body.append(field);
+    donor.win.close();
+    field.value = MARKER;
+    field.value = "";
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+  test("X1 type × realm: a foreign prefilled field inserted, then sanitised by its own window's type setter: reported; safe twin clean", () => {
+    for (const value of [MARKER, "Safe"]) {
+      const r = recorder();
+      const donor = donorWindow(true);
+      const field = donor.doc.createElement("input");
+      field.value = value;
+      r.doc.body.append(field);
+      field.type = "number";
+      expect(field.value).toBe("");
+      expect(r.kinds(), value).toEqual(value === MARKER ? ["marker"] : []);
+      expect(r.limits()).toEqual([]);
+    }
+  });
+  test("X1 attribute route: the same through the foreign element's setAttribute", () => {
+    const r = recorder();
+    const donor = donorWindow(true);
+    const field = donor.doc.createElement("input");
+    field.value = MARKER;
+    r.doc.body.append(field);
+    field.setAttribute("type", "number");
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+  test("R1 a field from a window WITHOUT a recorder is incomplete when adopted (its writes cannot be ordered), never silently clean", () => {
+    const r = recorder();
+    const donor = donorWindow(false);
+    const field = donor.doc.createElement("input");
+    field.value = "Safe";
+    r.doc.body.append(field);
+    expect(r.limits()).toContain(
+      "a field from a realm with no recorder was adopted (its writes are not ordered)",
+    );
+    expect(r.limits()).toContain(
+      "a field from a realm with no recorder was shown (its writes are not ordered)",
+    );
+  });
+  test("U1 HF-14 does not travel: what the person typed in another window is the application's disclosure once adopted", () => {
+    const r = recorder();
+    const donor = donorWindow(true);
+    const field = donor.doc.createElement("input");
+    donor.doc.body.append(field);
+    typeInto(field, MARKER);
+    expect(
+      (donor.win as unknown as Win).__displayOracle
+        .flush()
+        .violations.map((v) => v.kind),
+      "the person's own entry in its own document",
+    ).toEqual([]);
+    r.doc.body.append(field);
+    expect(r.kinds()).toEqual(["marker"]);
+  });
+});
+
 describe("S7: authority only from this document's COMPLETED transaction, with earlier DOM judged first", () => {
   test("a fence-clearing write that aborts authorises nothing", () => {
     const r = recorder();
