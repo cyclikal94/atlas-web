@@ -68,7 +68,7 @@ describe("registration and the banner", () => {
     expect(first.reloads + late.reloads).toBe(0);
   });
 
-  test("dismissed until the next return to the page; the update is never cancelled", async () => {
+  test("dismissed until the next return to the page (or navigation, below); the update is never cancelled", async () => {
     const origin = new FakeOrigin();
     const tab = await origin.tab().start();
     await origin.installNew(2);
@@ -79,6 +79,137 @@ describe("registration and the banner", () => {
       tab.emit(signal);
       expect(tab.state).toEqual({ kind: "available", dismissed: false });
     }
+  });
+});
+
+/**
+ * Revision 17 (R24; WEB-04 wireframe 6): a dismissed banner reappears on the next natural navigation, not only on a return to the page.
+ * The router side (only rendered navigations to another address are told) is `tests/app/update-navigation.test.tsx`.
+ */
+describe("a dismissed banner and in-app navigation (R24)", () => {
+  /** Everything a navigation must NOT do: no check, report, save, discard, freeze, channel message, skip-waiting or reload. */
+  const sideEffects = (tab: Tab, form: FakeForm, waiting: FakeWorker) => ({
+    checks: tab.registration.updates,
+    reports: reports(tab.registration.active as never),
+    saves: form.saves,
+    discards: form.discards,
+    freezes: form.freezes,
+    sent: tab.channel.sent.length,
+    skipWaitings: skipWaitings(waiting),
+    reloads: tab.reloads,
+  });
+
+  test("available: hidden until a navigation, which brings it back and does nothing else; without one it stays hidden", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    form.dirty = true;
+    const waiting = await origin.installNew(2);
+    tab.actions?.notNow();
+    expect(tab.state).toEqual({ kind: "available", dismissed: true });
+    // The control: time, a check and a report change nothing while there is no navigation and no return.
+    await origin.clock.advance(UPDATE_CHECK_INTERVAL_MS);
+    expect(tab.state).toEqual({ kind: "available", dismissed: true });
+    const before = sideEffects(tab, form, waiting);
+    const published = tab.states.length;
+    tab.navigate();
+    expect(tab.state).toEqual({ kind: "available", dismissed: false });
+    expect(tab.states.length).toBe(published + 1);
+    await origin.clock.advance(FLUSH_MAX_MS);
+    expect(sideEffects(tab, form, waiting)).toEqual(before);
+    expect(form.dirty).toBe(true);
+    // Shown already: another navigation publishes nothing.
+    tab.navigate();
+    expect(tab.states.length).toBe(published + 1);
+    // Dismissed again, it stays dismissed until the next navigation.
+    tab.actions?.notNow();
+    expect(tab.state).toEqual({ kind: "available", dismissed: true });
+    tab.navigate();
+    expect(tab.state).toEqual({ kind: "available", dismissed: false });
+  });
+
+  test("updated elsewhere: brought back by this tab's navigation, never by another tab's; this tab still never reloads", async () => {
+    const origin = new FakeOrigin();
+    const acting = await origin.tab().start();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    const waiting = await origin.installNew(2);
+    acting.actions?.accept();
+    await origin.clock.advance(FLUSH_START_GRACE_MS);
+    await origin.activate(waiting);
+    expect(acting.reloads).toBe(1);
+    expect(tab.state).toEqual({ kind: "updated_elsewhere", dismissed: false });
+    tab.actions?.notNow();
+    expect(tab.state).toEqual({ kind: "updated_elsewhere", dismissed: true });
+    // Another tab's navigation is its own.
+    acting.navigate();
+    expect(tab.state).toEqual({ kind: "updated_elsewhere", dismissed: true });
+    const before = sideEffects(tab, form, waiting);
+    tab.navigate();
+    expect(tab.state).toEqual({ kind: "updated_elsewhere", dismissed: false });
+    await origin.clock.advance(ACTIVATION_FALLBACK_MS);
+    expect(sideEffects(tab, form, waiting)).toEqual(before);
+    expect(tab.reloads).toBe(0);
+  });
+
+  test("a navigation before the dismissal does not undo it; with nothing to offer, a navigation shows nothing", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    tab.navigate();
+    expect(tab.state).toEqual({ kind: "none" });
+    const published = tab.states.length;
+    await origin.installNew(2);
+    tab.navigate();
+    tab.actions?.notNow();
+    expect(tab.state).toEqual({ kind: "available", dismissed: true });
+    expect(tab.states.length).toBe(published + 2);
+  });
+
+  test("saving and a failed save keep their place and their choices: a navigation neither retries, reloads nor hides them", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    const form = tab.form();
+    form.dirty = true;
+    form.result = "hold";
+    const waiting = await origin.installNew(2);
+    tab.actions?.notNow();
+    tab.actions?.accept();
+    await flush();
+    expect(tab.state).toEqual({ kind: "saving" });
+    expect(form.frozen).toBe(true);
+    tab.navigate();
+    expect(tab.state).toEqual({ kind: "saving" });
+    expect(form.saves).toBe(1);
+    expect(form.frozen).toBe(true);
+    form.release("failed");
+    await origin.clock.advance(FLUSH_MAX_MS * 2);
+    expect(tab.state).toEqual({ kind: "save_failed", refused: false });
+    tab.actions?.notNow();
+    tab.navigate();
+    await origin.clock.advance(FLUSH_MAX_MS * 2);
+    expect(tab.state).toEqual({ kind: "save_failed", refused: false });
+    expect(form.saves).toBe(1);
+    expect(form.dirty).toBe(true);
+    expect(skipWaitings(waiting)).toBe(0);
+    expect(tab.reloads).toBe(0);
+    // The person's own choice still works as before.
+    form.result = "saved";
+    tab.actions?.retrySave();
+    await origin.clock.advance(FLUSH_START_GRACE_MS);
+    expect(skipWaitings(waiting)).toBe(1);
+  });
+
+  test("data superseded stays; a disposed coordinator stops listening", async () => {
+    const origin = new FakeOrigin();
+    const tab = await origin.tab().start();
+    await origin.installNew(2);
+    tab.actions?.notNow();
+    expect(tab.navigationListeners.size).toBe(1);
+    tab.supersede();
+    tab.navigate();
+    expect(tab.state).toEqual({ kind: "data_superseded" });
+    tab.coordinator?.dispose();
+    expect(tab.navigationListeners.size).toBe(0);
   });
 });
 

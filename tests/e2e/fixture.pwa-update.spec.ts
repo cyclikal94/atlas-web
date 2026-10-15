@@ -1,3 +1,4 @@
+import type { Page } from "@playwright/test";
 import {
   BANNER,
   build,
@@ -23,8 +24,8 @@ import {
  * the `pwa-fixture` build and the production composition on `/__session`. FIXTURE evidence (no backend; the generation server's stubs).
  *
  * Three tabs on generation A; B is deployed and ONE tab checks for it. Every tab shows the banner (including the two that did not check),
- * none reloads on its own, a dismissed banner comes back on the next return to the page, accepting in one tab reloads that tab only onto
- * B, and the others say "Atlas updated in another tab" until each reloads itself.
+ * none reloads on its own, a dismissed banner comes back on the next return to the page or in-app navigation (revision 17, R24), accepting
+ * in one tab reloads that tab only onto B, and the others say "Atlas updated in another tab" until each reloads itself.
  */
 test.describe("P-U1/P-U2: the update banner across tabs", () => {
   test("every tab is told; nothing reloads unasked; only the accepting tab reloads onto B; the others say it was updated elsewhere", async ({
@@ -87,6 +88,86 @@ test.describe("P-U1/P-U2: the update banner across tabs", () => {
     await expect.poll(() => build(second)).toBe("b");
     expect(await marked(third)).toBe(true);
     await expect(updateRegion(third).getByText(BANNER.elsewhere)).toBeVisible();
+  });
+
+  test("R24: a dismissed banner comes back on the next in-app navigation, in the same document, for both variants", async ({
+    context,
+    generations,
+  }) => {
+    // WEB-04 wireframe 6: a dismissed banner reappears on the next natural navigation or app focus (revision 17, R24). The focus path is
+    // the test above; here no focus is dispatched, and the page stays the same document throughout (`mark`).
+    const frames = (page: Page) =>
+      page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          ),
+      );
+    const primary = (page: Page) =>
+      page.getByRole("navigation", { name: "Primary" });
+    await seedAccount(context, generations);
+    const acting = await openApp(context, generations, { form: false });
+    await workerActive(acting);
+    await reloadQuietly(acting);
+    const tab = await openApp(context, generations, { form: false });
+    await tab.bringToFront();
+    await mark(tab);
+    await generations.serve("fixture-b");
+    await checkForUpdate(tab);
+    const available = updateRegion(tab).getByText(BANNER.available);
+    await expect(available).toBeVisible();
+
+    await tab.getByRole("button", { name: "Not now" }).click();
+    await expect(available).toBeHidden();
+    // The control: a click on the destination already shown is no navigation, and the banner stays dismissed.
+    await primary(tab)
+      .getByRole("link", { name: "Today", exact: true })
+      .click();
+    await frames(tab);
+    await expect(available).toBeHidden();
+    await primary(tab)
+      .getByRole("link", { name: "Tasks", exact: true })
+      .click();
+    await expect(
+      tab.getByRole("heading", { level: 1, name: "Tasks", exact: true }),
+    ).toBeVisible();
+    await expect(available).toBeVisible();
+    expect(await marked(tab)).toBe(true);
+
+    // Another tab accepts: this one is updated elsewhere, dismisses that too, and only its own navigation brings it back.
+    await mark(acting);
+    await quiet(acting);
+    await acting.getByRole("button", { name: "Reload", exact: true }).click();
+    await expect.poll(() => marked(acting).catch(() => false)).toBe(false);
+    await displayed(acting);
+    await expect.poll(() => build(acting)).toBe("b");
+    await tab.bringToFront();
+    const elsewhere = updateRegion(tab).getByText(BANNER.elsewhere);
+    await expect(elsewhere).toBeVisible();
+    await tab.getByRole("button", { name: "Not now" }).click();
+    await expect(elsewhere).toBeHidden();
+    // The acting tab navigates (a DOM click: Playwright's own click could bring that tab to the front, and this one back later).
+    await acting.evaluate(() =>
+      document
+        .querySelector<HTMLAnchorElement>(
+          'nav[aria-label="Primary"] a[href="/people"]',
+        )
+        ?.click(),
+    );
+    await expect(
+      acting.getByRole("heading", { level: 1, name: "People", exact: true }),
+    ).toBeVisible();
+    await frames(tab);
+    await expect(elsewhere).toBeHidden();
+    await primary(tab)
+      .getByRole("link", { name: "People", exact: true })
+      .click();
+    await expect(
+      tab.getByRole("heading", { level: 1, name: "People", exact: true }),
+    ).toBeVisible();
+    await expect(elsewhere).toBeVisible();
+    expect(await marked(tab)).toBe(true);
+    expect(await build(tab)).toBe("a");
   });
 
   test("a version already waiting when a tab opens is shown there at once, and the worker sent no backend request", async ({

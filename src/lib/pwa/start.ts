@@ -7,6 +7,7 @@ import {
   type RegistrationLike,
   startAppUpdates,
 } from "./coordinator";
+import { onNavigation } from "./navigation";
 import { UPDATE_CHANNEL } from "./protocol";
 import { onDataSuperseded } from "./signals";
 import { appUpdates } from "./store";
@@ -68,6 +69,7 @@ export function startBrowserAppUpdates(session: Session): AppUpdateCoordinator {
     forms: pageFormRegistry,
     compat: session.compat,
     onDataSuperseded,
+    onNavigation,
     reload: () => location.reload(),
     publish: (state, actions) => appUpdates.set(state, actions),
   });

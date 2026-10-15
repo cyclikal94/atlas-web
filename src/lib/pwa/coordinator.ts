@@ -54,6 +54,8 @@ import type { AppUpdatesActions, UpdateState } from "./store";
  *    restored from and its own hand-off: never another page's.
  *  - A FORM WHOSE LOOK COULD NOT READ THE STORE (revision 7, R13: `unresolved`) does not know what was left to it; "Reload" asks it to look
  *    again once, and a save's reload waits until it has read the store (otherwise `save_failed`: retry, or discard and reload anyway).
+ *  - "Not now" hides the first two banners until the next in-app navigation or return to the page (wireframe 6; revision 17, R24). It never
+ *    cancels the update, and a navigation does nothing else: no save, report, check or reload.
  *  - It NEVER reloads on its own: only `accept`, `retrySave`, `discardAndReload` and `reloadAnyway` lead to `reload()`.
  *
  * It also checks for updates: at start (registration), on `online`, on a return to the page at most every `UPDATE_CHECK_VISIBLE_MIN_MS`,
@@ -143,6 +145,8 @@ export interface UpdateCoordinatorDeps {
   };
   /** The data layer's supersession signal (D-P8). */
   onDataSuperseded(listener: () => void): () => void;
+  /** The page's completed in-app navigations (`navigation.ts`, revision 17, R24): a dismissed banner comes back, and nothing else. */
+  onNavigation(listener: () => void): () => void;
   reload(): void;
   publish(state: UpdateState, actions: AppUpdatesActions): void;
 }
@@ -726,12 +730,19 @@ export function startAppUpdates(
   };
 
   // ---- triggers ------------------------------------------------------------------------------------------------------------------
-  const returned = (): void => {
-    // A dismissed banner reappears on the next return to the page; a frozen tab that missed the change finds out by reporting.
+  /**
+   * A dismissed banner reappears on the next natural navigation or return to the page (WEB-04 wireframe 6). Only the dismissal ends: an
+   * update the page does not have is not invented, and what a save or a failure shows (`busy`) keeps its place over it.
+   */
+  const redisplay = (): void => {
     if (dismissed) {
       dismissed = false;
       publish();
     }
+  };
+  const returned = (): void => {
+    // A frozen tab that missed the change finds out by reporting.
+    redisplay();
     report();
     void checkForUpdate();
   };
@@ -740,6 +751,8 @@ export function startAppUpdates(
     deps.page.on("focus", returned),
     deps.page.on("pageshow", returned),
     deps.page.on("online", () => void checkForUpdate(true)),
+    // Revision 17 (R24): an in-app navigation only brings a dismissed banner back. It is not a return to the page: no report, no check.
+    deps.onNavigation(redisplay),
     deps.onDataSuperseded(() => {
       if (superseded) return;
       superseded = true;

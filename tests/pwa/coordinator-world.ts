@@ -14,6 +14,7 @@ import {
   type PortLike,
   type RegistrationLike,
   startAppUpdates,
+  type UpdateCoordinatorDeps,
   type WorkerLike,
 } from "../../src/lib/pwa/coordinator";
 import type {
@@ -388,6 +389,8 @@ export class Tab {
   private compatListeners = new Set<Listener>();
   private signals = new Map<PageSignal, Set<Listener>>();
   private supersededListeners = new Set<Listener>();
+  /** Revision 17 (R24): the coordinator's navigation listeners, and how often a check or a report followed (none may). */
+  readonly navigationListeners = new Set<Listener>();
   coordinator: AppUpdateCoordinator | null = null;
 
   constructor(
@@ -405,7 +408,15 @@ export class Tab {
     this.channel = new FakeChannel(origin.bus);
   }
 
-  async start(): Promise<this> {
+  /**
+   * `production` (revision 17, R24): the page's real navigation signal instead of `navigate()`, and the real update store as well as
+   * `states`, for a test that composes the coordinator with the router and the banner.
+   */
+  async start(
+    production: Partial<
+      Pick<UpdateCoordinatorDeps, "onNavigation" | "publish">
+    > = {},
+  ): Promise<this> {
     const origin = this.origin;
     this.coordinator = startAppUpdates({
       container: this.container,
@@ -438,12 +449,19 @@ export class Tab {
         this.supersededListeners.add(listener);
         return () => this.supersededListeners.delete(listener);
       },
+      onNavigation:
+        production.onNavigation ??
+        ((listener) => {
+          this.navigationListeners.add(listener);
+          return () => this.navigationListeners.delete(listener);
+        }),
       reload: () => {
         this.reloads += 1;
       },
       publish: (state, actions) => {
         this.states.push(state);
         this.actions = actions;
+        production.publish?.(state, actions);
       },
     });
     await this.coordinator.registration();
@@ -463,6 +481,10 @@ export class Tab {
   }
   supersede(): void {
     for (const listener of [...this.supersededListeners]) listener();
+  }
+  /** Revision 17 (R24): the router of this tab rendered another destination. */
+  navigate(): void {
+    for (const listener of [...this.navigationListeners]) listener();
   }
   form(context = "task-edit:/tasks/1"): FakeForm {
     const form = new FakeForm(context);

@@ -45,9 +45,10 @@ old worker in the instant another tab's activation runs.
 
 Per tab: `none`, `available` (a newer version is installed and waiting), `updated_elsewhere` (another tab applied a newer one; this tab still
 runs the older), `saving`, `save_failed` (`refused` while signing out), `discard_failed` (revision 1, below), `reloading`, `data_superseded`
-(below). The banner is in the shell
-(`AppUpdateBanner`) and in the neutral root (`NeutralUpdateBanner`, signed out). It is dismissible until the next return to the page, never
-takes focus, is announced once, and NEVER reloads on its own:
+(below). The banner is in the shell (`AppUpdateBanner`) and in the neutral root (`NeutralUpdateBanner`, signed out). It is dismissible
+until the next in-app navigation (the router rendered a destination with a different address: a link, a programmatic navigation or a
+history step; `src/lib/pwa/navigation.ts`, revision 17, R24) or return to the page. It never takes focus, is announced once, and NEVER
+reloads on its own:
 
 - "A new version of Atlas is available. [Reload]" / "Atlas updated in another tab. [Reload here]" (wireframe 6). With a recoverable form
   open it is Q4 state 1 ("Save and reload"); a failed save is state 2 ("Retry save" / "Discard and reload anyway"), the form stays open and

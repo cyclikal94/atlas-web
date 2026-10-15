@@ -26,6 +26,7 @@ import {
   type AppUpdateCoordinator,
   startAppUpdates,
 } from "../../src/lib/pwa/coordinator";
+import { onNavigation } from "../../src/lib/pwa/navigation";
 import { appUpdates, type UpdateState } from "../../src/lib/pwa/store";
 import {
   AppUpdateBanner,
@@ -218,6 +219,7 @@ async function start(forms = [CONTEXT]): Promise<App> {
       supersede = listener;
       return () => {};
     },
+    onNavigation,
     reload: () => {
       reloads += 1;
     },

@@ -20430,6 +20430,158 @@ export const UNIT = [
     patch: (t) =>
       sub(t, "  const away = !form.isConnected;", "  const away = true;"),
   },
+  {
+    id: "MU-1965",
+    title:
+      "WEB-14a revision 17 (R24, the reviewed defect): the coordinator does not listen to in-app navigation",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/pwa/coordinator.test.ts",
+      "tests/app/update-navigation.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /available: hidden until a navigation, which brings it back|a link: the destination renders and the banner is back/,
+    patch: (t) => sub(t, "    deps.onNavigation(redisplay),\n", ""),
+  },
+  {
+    id: "MU-1966",
+    title:
+      "WEB-14a revision 17 (R24, I2: the production bridge bypassed): the router's navigations are never raised (NavigationSignal not mounted)",
+    file: "src/app/root-route.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a link: the destination renders and the banner is back|a programmatic navigation, a history step/,
+    patch: (t) => sub(t, "      <NavigationSignal />\n", ""),
+  },
+  {
+    id: "MU-1967",
+    title:
+      "WEB-14a revision 17 (R24, I1): a navigation brings back only 'available', never 'updated elsewhere'",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/pwa/coordinator.test.ts",
+      "tests/app/update-navigation.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /updated elsewhere: brought back by this tab's navigation|updated in another tab: this tab's navigation brings it back/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const redisplay = (): void => {\n    if (dismissed) {\n",
+        "  const redisplay = (): void => {\n    if (dismissed && !elsewhere) {\n",
+      ),
+  },
+  {
+    id: "MU-1968",
+    title:
+      "WEB-14a revision 17 (R24, I5/S7): every router render is a navigation (first load, same-address reload and remount included)",
+    file: "src/app/shell/NavigationSignal.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /without a navigation it stays dismissed|none for a first load|replaced before it rendered/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (event.fromLocation && event.hrefChanged) noteNavigation();",
+        "noteNavigation();",
+      ),
+  },
+  {
+    id: "MU-1969",
+    title:
+      "WEB-14a revision 17 (R24, S5): a render of the same address counts as a navigation (hrefChanged ignored)",
+    file: "src/app/shell/NavigationSignal.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /without a navigation it stays dismissed|none for a first load/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (event.fromLocation && event.hrefChanged) noteNavigation();",
+        "if (event.fromLocation) noteNavigation();",
+      ),
+  },
+  {
+    id: "MU-1970",
+    title:
+      "WEB-14a revision 17 (R24, I3): a navigation is taken for a return to the page (a report and an update check)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /available: hidden until a navigation, which brings it back and does nothing else|updated elsewhere: brought back by this tab's navigation/,
+    patch: (t) =>
+      sub(
+        t,
+        "    deps.onNavigation(redisplay),\n",
+        "    deps.onNavigation(returned),\n",
+      ),
+  },
+  {
+    id: "MU-1971",
+    title:
+      "WEB-14a revision 17 (R24, I3): a navigation accepts the update (saves, freezes and reloads unasked)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /available: hidden until a navigation, which brings it back and does nothing else|updated elsewhere: brought back by this tab's navigation/,
+    patch: (t) =>
+      sub(
+        t,
+        "    deps.onNavigation(redisplay),\n",
+        "    deps.onNavigation(() => {\n      redisplay();\n      actions.accept();\n    }),\n",
+      ),
+  },
+  {
+    id: "MU-1972",
+    title:
+      "WEB-14a revision 17 (R24, I4/S12): a navigation clears a save in progress or its failure",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saving and a failed save keep their place and their choices/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const redisplay = (): void => {\n",
+        "  const redisplay = (): void => {\n    busy = null;\n    publish();\n",
+      ),
+  },
+  {
+    id: "MU-1973",
+    title:
+      "WEB-14a revision 17 (R24, I5/S7): the router subscription is never removed (a remount or StrictMode adds another)",
+    file: "src/app/shell/NavigationSignal.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /StrictMode and a new tree: one signal per navigation/,
+    patch: (t) =>
+      sub(
+        t,
+        '    () =>\n      router.subscribe("onRendered", (event) => {\n        if (event.fromLocation && event.hrefChanged) noteNavigation();\n      }),\n',
+        '    () => {\n      router.subscribe("onRendered", (event) => {\n        if (event.fromLocation && event.hrefChanged) noteNavigation();\n      });\n    },\n',
+      ),
+  },
+  {
+    id: "MU-1974",
+    title:
+      "WEB-14a revision 17 (R24, I5): a disposed coordinator keeps listening to navigation",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a disposed coordinator stops listening/,
+    patch: (t) =>
+      sub(
+        t,
+        "    deps.onNavigation(redisplay),\n",
+        "    (deps.onNavigation(redisplay), () => {}),\n",
+      ),
+  },
 ];
 
 /**

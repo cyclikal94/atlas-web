@@ -16,7 +16,8 @@ import { useSyncExternalStore } from "react";
  *  - `reloading`: this tab is reloading onto the newer version.
  *  - `data_superseded`: another tab's newer version upgraded this account's local database, which this tab no longer reads or writes.
  *
- * `dismissed` hides the banner of the first two until the next return to the page; it never cancels the update. Nothing here reloads.
+ * `dismissed` hides the banner of the first two until the next in-app navigation or return to the page (WEB-04 wireframe 6; revision 17,
+ * R24); it never cancels the update. Nothing here reloads.
  */
 export type UpdateState =
   | { kind: "none" }
@@ -40,7 +41,7 @@ export interface AppUpdatesActions {
   discardAndReload(): void;
   /** "Reload anyway" after `discard_failed`: reload knowing an earlier copy of the form may be restored. */
   reloadAnyway(): void;
-  /** "Not now" / the close button: hidden until the next return to the page. */
+  /** "Not now" / the close button: hidden until the next in-app navigation or return to the page. */
   notNow(): void;
 }
 

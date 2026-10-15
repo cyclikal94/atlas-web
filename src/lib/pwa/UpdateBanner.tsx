@@ -20,9 +20,10 @@ import {
 
 /**
  * The service-worker update banner (WEB-04 wireframe 6; WEB-14a D-P4/D-P5). Persistent, dismissible ("Not now" / the close button) until
- * the next return to the page, never auto-reloading, and never taking focus. The wording of the first two variants is the wireframe's;
- * the rest are PROPOSED (no accepted wireframe has them). With an open recoverable form, the "available" variant is WEB-07's Q4 state 1
- * (`UpdatePrompt`: "we'll save your unfinished form first"), and a failed save is its state 2 (`RecoveryBanner`).
+ * the next in-app navigation or return to the page (revision 17, R24), never auto-reloading, and never taking focus. The wording of the
+ * first two variants is the wireframe's; the rest are PROPOSED (no accepted wireframe has them). With an open recoverable form, the
+ * "available" variant is WEB-07's Q4 state 1 (`UpdatePrompt`: "we'll save your unfinished form first"), and a failed save is its state 2
+ * (`RecoveryBanner`).
  */
 export const AVAILABLE_TEXT = "A new version of Atlas is available.";
 export const ELSEWHERE_TEXT = "Atlas updated in another tab.";
