@@ -1,12 +1,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import {
   ACCOUNTS,
   bootHarness,
   expect,
-  ORIGIN,
   type ProxyRule,
   proxy,
   type RawSession,
@@ -14,6 +11,7 @@ import {
   rawSignIn as rawSignInUnpaced,
   records,
   signIn as signInUnpaced,
+  stackFile,
   swapCookie,
   test,
   untilRecord,
@@ -32,11 +30,8 @@ const API = "/api/experimental/v1";
 
 // The released backend allows 10 password attempts per account in a fixed 60 s window (and 120 requests per source). These specs sign in
 // far more often than that, so EVERY sign-in here (in a page or raw) first waits until fewer than 8 attempts of that account are less
-// than a minute old. The ledger is a file keyed by the stack's port (a failed test restarts the worker, which would lose memory).
-const LEDGER = join(
-  tmpdir(),
-  `atlas-signin-ledger-${new URL(ORIGIN || "http://x").port}.json`,
-);
+// than a minute old. The ledger is a file of the stack's own state (a failed test restarts the worker, which would lose memory).
+const LEDGER = stackFile("atlas-signin-ledger.json");
 async function budget(who: Who): Promise<void> {
   for (;;) {
     let all: Record<string, number[]> = {};
@@ -74,10 +69,7 @@ const rawSignIn = async (who: Who, deviceId?: string) => {
 // asked for more than a few sign-ins in a minute and a test almost never waits for the budget below. The rotation counter is a file for
 // the same reason as the ledger.
 const ROTATION: Who[] = ["alice", "carol", "dave", "erin"];
-const ROTATION_FILE = join(
-  tmpdir(),
-  `atlas-account-rotation-${new URL(ORIGIN || "http://x").port}.txt`,
-);
+const ROTATION_FILE = stackFile("atlas-account-rotation.txt");
 let main: Who = "alice";
 const me = (): Who => main;
 test.beforeEach(async ({ context }, info) => {

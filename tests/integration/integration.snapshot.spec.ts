@@ -1,17 +1,15 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import {
   expect,
   exposeSession,
-  ORIGIN,
   proxy,
   type RawSession,
   raw,
   rawSignIn as rawSignInUnpaced,
   records,
   signIn as signInUnpaced,
+  stackFile,
   test,
   untilHeld,
   untilRecord,
@@ -39,10 +37,7 @@ import {
 const API = "/api/experimental/v1";
 
 // The released backend throttles password sign-ins (10 per account per minute): the same paced ledger as the data specs, keyed by stack.
-const LEDGER = join(
-  tmpdir(),
-  `atlas-signin-ledger-${new URL(ORIGIN || "http://x").port}.json`,
-);
+const LEDGER = stackFile("atlas-signin-ledger.json");
 async function budget(who: Who): Promise<void> {
   for (;;) {
     let all: Record<string, number[]> = {};
@@ -75,10 +70,7 @@ const rawSignIn = async (who: Who) => {
   return rawSignInUnpaced(who);
 };
 const ROTATION: Who[] = ["alice", "carol", "dave", "erin"];
-const ROTATION_FILE = join(
-  tmpdir(),
-  `atlas-snapshot-rotation-${new URL(ORIGIN || "http://x").port}.txt`,
-);
+const ROTATION_FILE = stackFile("atlas-snapshot-rotation.txt");
 let main: Who = "alice";
 test.beforeEach(async ({ context }, info) => {
   void context;

@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type BrowserContext,
   test as base,
@@ -51,6 +53,19 @@ const CONTROL = process.env.ATLAS_INTEGRATION_CONTROL ?? "";
 export const ORIGIN = process.env.ATLAS_INTEGRATION_URL ?? "";
 export const BACKEND = process.env.ATLAS_INTEGRATION_BACKEND ?? "";
 export const API = `${ORIGIN}/api/experimental/v1`;
+
+/**
+ * A file of THIS stack's helper state: a spec's sign-in ledger or account rotation (WEB-14a revision 15, review R22).
+ * scripts/integration/run.mjs gives every stack a fresh directory that is removed with its backend, so pacing survives a Playwright
+ * worker restart within the stack and a later stack never inherits it, even on a reused port. Without that directory (a
+ * `--serve` exploration run by hand) it falls back to TMPDIR, keyed by the preview's port as before.
+ */
+export function stackFile(name: string): string {
+  const dir = process.env.ATLAS_INTEGRATION_STATE_DIR;
+  if (dir) return join(dir, name);
+  const port = new URL(ORIGIN || "http://x").port;
+  return join(tmpdir(), name.replace(/(\.[a-z]+)$/, `-${port}$1`));
+}
 
 export interface ProxyRule {
   id?: string;

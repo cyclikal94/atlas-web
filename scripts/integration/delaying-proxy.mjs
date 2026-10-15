@@ -37,7 +37,14 @@ function rewritten(rule, body) {
   };
 }
 
-export function createProxy({ upstream, port = 0, controlPort = 0 }) {
+// `observe` (WEB-14a revision 15, R22): told of every UPSTREAM answer (the backend's own status, before any rule rewrites it), so the
+// runner can record a stack's demand on the backend's sign-in throttle. The test-visible `log` is reset by every test; this is not.
+export function createProxy({
+  upstream,
+  port = 0,
+  controlPort = 0,
+  observe = () => undefined,
+}) {
   const target = new URL(upstream);
   const log = [];
   const rules = [];
@@ -93,6 +100,12 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
               status: upstreamRes.statusCode,
             });
             entry.status = upstreamRes.statusCode;
+            observe({
+              method: entry.method,
+              path: new URL(entry.path, "http://x").pathname,
+              status: upstreamRes.statusCode,
+              at: entry.at,
+            });
             const body = Buffer.concat(chunks);
             const deliver = (override) => {
               // The client may have given up (its own time-out) long before a buffered request was released.

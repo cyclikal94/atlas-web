@@ -1,15 +1,13 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import {
   ACCOUNTS,
   bootHarness,
   expect,
   exposeSession,
-  ORIGIN,
   proxy,
   signIn as signInUnpaced,
+  stackFile,
   test,
   untilView,
   type Who,
@@ -30,11 +28,8 @@ import {
  */
 const API = "/api/experimental/v1";
 
-// Sign-in pacing shared with integration.data.spec.ts (the same ledger file per stack): at most 8 attempts per account a minute.
-const LEDGER = join(
-  tmpdir(),
-  `atlas-signin-ledger-${new URL(ORIGIN || "http://x").port}.json`,
-);
+// The sign-in pacing of integration.data.spec.ts, in this stack's own ledger: at most 8 attempts per account a minute.
+const LEDGER = stackFile("atlas-signin-ledger.json");
 async function budget(who: Who): Promise<void> {
   for (;;) {
     let all: Record<string, number[]> = {};
@@ -59,10 +54,7 @@ async function budget(who: Who): Promise<void> {
   }
 }
 const ROTATION: Who[] = ["alice", "carol", "dave", "erin"];
-const ROTATION_FILE = join(
-  tmpdir(),
-  `atlas-account-rotation-${new URL(ORIGIN || "http://x").port}.txt`,
-);
+const ROTATION_FILE = stackFile("atlas-account-rotation.txt");
 let main: Who = "alice";
 test.beforeEach(async ({ context }, info) => {
   void context;

@@ -2,13 +2,18 @@
 // Part C (plan 14): run the integration specs against the RELEASED backend, on a disposable SQLite database, behind the delaying
 // proxy, with the fixture-only session harness page served by `vite preview --mode fixture`.
 //
-//   node scripts/integration/run.mjs [--serve] [--postgres] [--oidc on|off] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [--app <dir>] [-- <playwright args>]
+//   node scripts/integration/run.mjs [--serve] [--postgres] [--oidc on|off] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [--stacks <names>] [--app <dir>] [-- <playwright args>]
 //
 //   default   for each browser: start a FRESH stack, run Playwright's `integration-<browser>` project, stop everything; exit non-zero if any failed.
-//             With no --grep the project runs in separate stacks per browser (see STACKS): the suite exceeds what one stack's backend allows.
+//             With no --grep the project runs in separate stacks per browser (scripts/integration/stacks.mjs): the suite exceeds what one
+//             stack's backend allows. Revision 15 (R22, R23): every discovered case is in exactly one stack (checked before any backend
+//             starts), each stack's own result is judged after its clean-up, and the first stack that is not a complete pass stops the
+//             schedule (scripts/integration/schedule.mjs). `--evidence` must not hold this invocation's files already.
 //   --serve   start everything and print the URLs; run until interrupted (for exploring; nothing is run)
 //   --app     serve this built directory instead of dist-fixture (WEB-14a: `dist-pwa/fixture-a`, the fixture entry WITH the service worker,
 //             for I-U2); the specs see it as ATLAS_INTEGRATION_APP. The default is unchanged.
+//   --stacks  a comma-separated subset of the default stacks (stacks.mjs DEFAULT_STACKS), run in their usual order; the summary is
+//             marked partial and is never a complete suite
 //   --oidc    for a NARROWED run only (--grep or Playwright arguments): whether the stack configures the stub OpenID Connect provider
 //             (default on). The default suite decides per stack (WEB-08b: STACKS below).
 //
@@ -17,6 +22,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -31,22 +37,26 @@ import { createProxy } from "./delaying-proxy.mjs";
 import { freePort } from "./free-port.mjs";
 import { createOidcProvider } from "./oidc-provider.mjs";
 import { startPostgresBackend } from "./postgres-backend.mjs";
+import { playwrightLister, runIntegration } from "./schedule.mjs";
+import { planStacks, stackArgs } from "./stacks.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
+// The runner's own options come before `--`; everything after it is Playwright's (revision 15: a `--grep` meant for Playwright is no
+// longer also read as the runner's).
+const own = args.includes("--") ? args.slice(0, args.indexOf("--")) : args;
 // `--evidence <dir>` keeps a measurement run (pnpm profile:session) from overwriting the integration evidence.
-const evidenceFlag = args.indexOf("--evidence");
+const evidenceFlag = own.indexOf("--evidence");
 const evidence = resolve(
   root,
   evidenceFlag >= 0
-    ? (args[evidenceFlag + 1] ?? "")
+    ? (own[evidenceFlag + 1] ?? "")
     : ".agtx/evidence/WEB-08a/integration",
 );
-mkdirSync(evidence, { recursive: true });
-const flag = (name) => args.includes(name);
+const flag = (name) => own.includes(name);
 const value = (name, fallback) => {
-  const at = args.indexOf(name);
-  return at >= 0 ? args[at + 1] : fallback;
+  const at = own.indexOf(name);
+  return at >= 0 ? own[at + 1] : fallback;
 };
 const serve = flag("--serve");
 const postgres = flag("--postgres");
@@ -57,59 +67,25 @@ const passthrough = args.includes("--")
   ? args.slice(args.indexOf("--") + 1)
   : [];
 // The backend throttles password sign-ins per source (a fixed window of 60 s: at most 120 requests, and 10 attempts per account),
-// and every spec of a stack signs in from the same loopback address. One stack that runs the whole suite therefore exhausts the
-// window and the last specs are refused with 429 (this happened when I-14e was added, before it had its own stack). The suite is
-// split over fresh stacks: the base cases, I-14e, the I-14d cases of revision 11, data cases, and the WEB-08b groups below.
-// A run the caller has narrowed (`--grep`, or Playwright arguments
-// after `--` such as a spec file or a config) is one stack, as before: the caller chose what runs.
-// WEB-08b adds stacks that each run a group of specs: the ordering traces, registration and the browser OIDC round trip consume
-// sign-ins, invitations and provider flows, and some need a stack WITHOUT single sign-on configured (I-28b). `oidc` says whether the
-// stack starts the stub provider and configures the backend with it.
+// and every spec of a stack signs in from the same loopback address, so the suite is split over fresh stacks (stacks.mjs
+// DEFAULT_STACKS). A run the caller has narrowed (`--grep`, or Playwright arguments after `--` such as a spec file or a config) is
+// one stack, as before: the caller chose what runs. `oidc` says whether the stack starts the stub provider and configures the
+// backend with it. WEB-14a: I-U1 is in the data stack; I-U2 is a separate command with --app dist-pwa/fixture-a (stacks.mjs SEPARATE).
 const oidcFlag = value("--oidc", "on") !== "off";
-const NARROWED = grep || passthrough.length > 0;
-const STACKS = NARROWED
-  ? [
-      {
-        suffix: "",
-        args: grep ? ["--grep", grep] : [],
-        oidc: oidcFlag && !postgres,
-      },
-    ]
-  : [
-      {
-        suffix: "",
-        args: [
-          "--grep-invert",
-          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|U)[0-9]|I-2[0-9]|I-30",
-        ],
-        oidc: false,
-      },
-      { suffix: "-i14e", args: ["--grep", "I-14e"], oidc: false },
-      {
-        suffix: "-i14d",
-        args: ["--grep", "I-14d \\(revision 11\\)"],
-        oidc: false,
-      },
-      {
-        suffix: "-data",
-        args: ["tests/integration/integration.data.spec.ts"],
-        oidc: false,
-      },
-      { suffix: "-traces", args: ["--grep", "I-20|I-22|I-23"], oidc: false },
-      {
-        suffix: "-registration",
-        args: ["--grep", "I-24|I-25|I-26"],
-        oidc: false,
-      },
-      {
-        suffix: "-oidc",
-        args: ["--grep", "I-21|I-27|I-28a"],
-        oidc: true,
-      },
-      { suffix: "-oidc-off", args: ["--grep", "I-28b"], oidc: false },
-      { suffix: "-settings", args: ["--grep", "I-29|I-30"], oidc: false },
-    ];
-// WEB-14a: I-U1 is in the data stack. I-U2 runs separately with --app dist-pwa/fixture-a; without it the case skips.
+// `--stacks a,b`: only these default stacks, in their usual order (a labelled partial run; see stacks.mjs planStacks).
+const only = value("--stacks", "").split(",").filter(Boolean);
+const {
+  narrowed,
+  partial,
+  manifest,
+  stacks: STACKS,
+} = planStacks({
+  grep,
+  passthrough,
+  oidc: oidcFlag,
+  postgres,
+  only,
+});
 
 const children = [];
 let tmp = "";
@@ -118,6 +94,10 @@ let proxy = null;
 let lastBackend = null;
 let extraCleanup = null;
 let provider = null;
+// R22: what the backend answered this stack (the proxy's `observe`), for its throttle record.
+let exchanges = [];
+// R23: the first SIGINT/SIGTERM. The stack in progress is stopped and cleaned up, its partial result kept, and nothing else starts.
+let interrupted = null;
 
 const listening = (port) =>
   new Promise((resolveCheck) => {
@@ -129,42 +109,105 @@ const listening = (port) =>
     socket.once("error", () => resolveCheck(false));
   });
 
-async function cleanup() {
-  for (const child of children)
-    if (child.exitCode === null) child.kill("SIGTERM");
-  await new Promise((r) => setTimeout(r, 300));
-  for (const child of children)
-    if (child.exitCode === null) child.kill("SIGKILL");
-  if (proxy) await proxy.stop().catch(() => undefined);
-  if (provider) await provider.stop().catch(() => undefined);
-  if (extraCleanup) {
-    const left = extraCleanup();
-    console.error(
-      `clean-up (containers, network, images added by this run): ${JSON.stringify(left)}`,
-    );
-    extraCleanup = null;
-  }
-  if (tmp) rmSync(tmp, { recursive: true, force: true });
-  const still = [];
-  for (const port of ports) if (await listening(port)) still.push(port);
-  if (still.length > 0)
-    console.error(`WARNING: a listener remains on port(s) ${still.join(", ")}`);
-  else
-    console.error(
-      `clean-up: no listener remains on ${ports.join(", ")}; ${tmp} removed`,
-    );
-  // The next engine gets a fresh stack and a fresh list.
-  children.length = 0;
-  ports.length = 0;
-  proxy = null;
-  provider = null;
-  tmp = "";
+const exited = (child) => child.exitCode !== null || child.signalCode !== null;
+
+/**
+ * Stop everything this stack started (Playwright included) and check its ports are free. Idempotent: a clean-up already in progress
+ * is joined, not repeated. Returns the problems found; a problem fails the stack (R23), it is not only a warning.
+ */
+let cleaning = null;
+function cleanup() {
+  cleaning ??= (async () => {
+    const problems = [];
+    for (const child of children) if (!exited(child)) child.kill("SIGTERM");
+    for (let i = 0; i < 50 && children.some((c) => !exited(c)); i += 1)
+      await new Promise((r) => setTimeout(r, 100));
+    for (const child of children) if (!exited(child)) child.kill("SIGKILL");
+    for (let i = 0; i < 20 && children.some((c) => !exited(c)); i += 1)
+      await new Promise((r) => setTimeout(r, 100));
+    const alive = children.filter((c) => !exited(c)).map((c) => c.pid);
+    if (alive.length > 0)
+      problems.push(`process(es) still running: ${alive.join(", ")}`);
+    if (proxy)
+      await proxy
+        .stop()
+        .catch((e) => problems.push(`proxy stop: ${String(e?.message ?? e)}`));
+    if (provider)
+      await provider
+        .stop()
+        .catch((e) =>
+          problems.push(`provider stop: ${String(e?.message ?? e)}`),
+        );
+    if (extraCleanup) {
+      try {
+        const left = extraCleanup();
+        console.error(
+          `clean-up (containers, network, images added by this run): ${JSON.stringify(left)}`,
+        );
+        if ((left?.images_added_and_left ?? []).length > 0)
+          problems.push(
+            `images added by this run remain: ${left.images_added_and_left.join(", ")}`,
+          );
+      } catch (e) {
+        problems.push(`container clean-up: ${String(e?.message ?? e)}`);
+      }
+      extraCleanup = null;
+    }
+    try {
+      if (tmp) rmSync(tmp, { recursive: true, force: true });
+    } catch (e) {
+      problems.push(`could not remove ${tmp}: ${String(e?.message ?? e)}`);
+    }
+    const still = [];
+    for (const port of ports) if (await listening(port)) still.push(port);
+    if (still.length > 0) {
+      console.error(
+        `WARNING: a listener remains on port(s) ${still.join(", ")}`,
+      );
+      problems.push(`a listener remains on port(s) ${still.join(", ")}`);
+    } else
+      console.error(
+        `clean-up: no listener remains on ${ports.join(", ")}; ${tmp} removed`,
+      );
+    // The next stack gets a fresh stack and a fresh list.
+    children.length = 0;
+    ports.length = 0;
+    proxy = null;
+    provider = null;
+    tmp = "";
+    return { problems };
+  })().finally(() => {
+    cleaning = null;
+  });
+  return cleaning;
 }
-process.on("SIGINT", () => cleanup().finally(() => process.exit(130)));
-process.on("SIGTERM", () => cleanup().finally(() => process.exit(143)));
+
+// The first signal: stop the stack in progress (Playwright is asked to interrupt, so it still writes its partial result), let the
+// schedule clean up, record it and mark the rest not run. A second signal, or a schedule that has not finished 120 s later, cleans
+// up and exits at once.
+const onSignal = (signal) => {
+  const code = signal === "SIGINT" ? 130 : 143;
+  if (interrupted) {
+    cleanup().finally(() => process.exit(code));
+    return;
+  }
+  interrupted = signal;
+  console.error(
+    `\n${signal}: stopping the stack in progress; nothing else starts`,
+  );
+  for (const child of children)
+    if (!exited(child)) child.kill(child.playwright ? "SIGINT" : "SIGTERM");
+  setTimeout(
+    () => cleanup().finally(() => process.exit(code)),
+    120_000,
+  ).unref();
+};
+process.on("SIGINT", () => onSignal("SIGINT"));
+process.on("SIGTERM", () => onSignal("SIGTERM"));
 
 async function waitFor(url, label, tries = 80) {
   for (let i = 0; i < tries; i += 1) {
+    if (interrupted) throw new Error(`interrupted by ${interrupted}`);
     try {
       const response = await fetch(url);
       if (response.ok || response.status < 500) return;
@@ -176,7 +219,20 @@ async function waitFor(url, label, tries = 80) {
   throw new Error(`${label} did not become ready at ${url}`);
 }
 
+/** One stack: prepare it, run its specs and return Playwright's exit. A throw carries the phase it failed in (prepare or spawn). */
 async function main(browser, stack) {
+  exchanges = [];
+  try {
+    return await stackRun(browser, stack);
+  } catch (error) {
+    throw Object.assign(
+      error instanceof Error ? error : new Error(String(error)),
+      { phase: error?.phase ?? "prepare", exchanges },
+    );
+  }
+}
+
+async function stackRun(browser, stack) {
   // alice to erin: the earlier specs. frank to quinn: WEB-08b (ordering traces, sign-in surface, Settings, single sign-on), each
   // spec using its own account so no spec depends on another's side effects or on a sign-in throttle another has used up.
   const names = [
@@ -200,6 +256,9 @@ async function main(browser, stack) {
   ];
   const invitations = [];
   tmp = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "atlas-integration-"));
+  // R22: the specs' sign-in ledger and account rotation live as long as THIS stack (removed with it), never keyed by a reusable port.
+  const state = join(tmp, "state");
+  mkdirSync(state);
   const [backendPort, previewPort, proxyPort, controlPort] = [
     await freePort(),
     await freePort(),
@@ -302,6 +361,7 @@ async function main(browser, stack) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     children.push(server);
+    server.once("error", (e) => (serverLog += `\nspawn: ${e.message}`));
     let serverLog = "";
     server.stdout.on("data", (d) => (serverLog += d));
     server.stderr.on("data", (d) => (serverLog += d));
@@ -323,6 +383,7 @@ async function main(browser, stack) {
     upstream: `http://127.0.0.1:${backendPort}`,
     port: proxyPort,
     controlPort,
+    observe: (exchange) => exchanges.push(exchange),
   });
   const urls = await proxy.start();
   const preview = spawn(
@@ -346,7 +407,10 @@ async function main(browser, stack) {
     },
   );
   children.push(preview);
+  let previewError = null;
+  preview.once("error", (e) => (previewError = e));
   await waitFor(`${origin}/`, "preview");
+  if (previewError) throw previewError;
 
   const env = {
     ...process.env,
@@ -367,6 +431,7 @@ async function main(browser, stack) {
     ATLAS_INTEGRATION_BACKEND_REVISION: JSON.stringify(revision),
     ATLAS_E2E_BROWSERS: browser === "chromium" ? "" : "all",
     ATLAS_INTEGRATION_APP: app,
+    ATLAS_INTEGRATION_STATE_DIR: state,
   };
   if (serve) {
     console.error(
@@ -378,17 +443,16 @@ async function main(browser, stack) {
   }
 
   // 5. The specs.
-  const projectArgs = ["--project", `integration-${browser}`];
-  const grepArgs = stack.args;
+  if (interrupted) throw new Error(`interrupted by ${interrupted}`);
   const run = spawn(
     process.execPath,
     [
       join(root, "node_modules/@playwright/test/cli.js"),
       "test",
-      ...projectArgs,
+      `--project=integration-${browser}`,
       "--reporter=list,json",
-      ...grepArgs,
-      ...passthrough,
+      ...stackArgs(stack),
+      ...stack.passthrough,
     ],
     {
       cwd: root,
@@ -402,62 +466,69 @@ async function main(browser, stack) {
       stdio: "inherit",
     },
   );
-  return new Promise((resolveRun) =>
-    run.on("exit", (code) => resolveRun(code ?? 1)),
-  );
+  // Owned like every other process of the stack: clean-up stops it too, and a signal asks it to interrupt (it still reports).
+  run.playwright = true;
+  children.push(run);
+  return new Promise((resolveRun, rejectRun) => {
+    run.once("error", (error) =>
+      rejectRun(Object.assign(error, { phase: "spawn" })),
+    );
+    run.once("exit", (code, signal) =>
+      resolveRun({ exitCode: code ?? 1, signal, exchanges }),
+    );
+  });
 }
 
-// One fresh stack per engine: the specs that change an account (password, logout, retirement, device capacity) must not leave
-// the next engine's run with accounts they have used up.
-let status = 0;
-const summary = {
-  layer: postgres
-    ? "integration (PostgreSQL repeat): the session module and its production adapters in a real engine against the RELEASED backend CONTAINER IMAGE on a disposable PostgreSQL, behind the delaying proxy, for the specs selected by --grep only; NOT the WEB-08c lifecycle traces on a rendered cache, NOT real Safari or a real device, NOT assistive technology, NOT the unmodified Compose or Ingress arrangement"
-    : "integration: the session module and its production adapters in a real engine against the RELEASED backend on a disposable SQLite database, behind the delaying proxy; NOT the WEB-08c lifecycle traces on a rendered cache, NOT real Safari or a real device, NOT assistive technology, NOT PostgreSQL",
-  generated_at: new Date().toISOString(),
-  engines: {},
-};
-for (const browser of browsers) {
-  // `--serve` starts one stack and never returns, so only the first is ever started.
-  for (const stack of serve ? STACKS.slice(0, 1) : STACKS) {
-    console.error(
-      `\n=== integration-${browser}${stack.suffix ? ` (${stack.suffix.slice(1)})` : ""} ===`,
-    );
-    try {
-      status = (await main(browser, stack)) || status;
-    } catch (error) {
-      console.error(String(error?.stack ?? error));
-      status = 1;
-    } finally {
-      await cleanup();
-    }
+const layer = postgres
+  ? "integration (PostgreSQL repeat): the session module and its production adapters in a real engine against the RELEASED backend CONTAINER IMAGE on a disposable PostgreSQL, behind the delaying proxy, for the specs selected by --grep only; NOT the WEB-08c lifecycle traces on a rendered cache, NOT real Safari or a real device, NOT assistive technology, NOT the unmodified Compose or Ingress arrangement"
+  : "integration: the session module and its production adapters in a real engine against the RELEASED backend on a disposable SQLite database, behind the delaying proxy; NOT the WEB-08c lifecycle traces on a rendered cache, NOT real Safari or a real device, NOT assistive technology, NOT PostgreSQL";
+
+if (serve) {
+  // `--serve` starts one stack and never returns: nothing is run, judged or recorded.
+  mkdirSync(evidence, { recursive: true });
+  try {
+    await main(browsers[0], STACKS[0]);
+  } catch (error) {
+    console.error(String(error?.stack ?? error));
+    await cleanup();
+    process.exit(1);
   }
-  // One entry per engine: the statistics of its stacks added together.
-  const merged = {};
-  let missing = false;
-  for (const stack of STACKS) {
-    try {
-      const result = JSON.parse(
-        readFileSync(
-          join(evidence, `results-${browser}${stack.suffix}.json`),
-          "utf8",
-        ),
-      );
-      for (const [key, number] of Object.entries(result.stats))
-        if (typeof number === "number")
-          merged[key] = (merged[key] ?? 0) + number;
-    } catch {
-      missing = true;
-    }
-  }
-  summary.engines[browser] = missing
-    ? "no result file (a run did not get as far as Playwright)"
-    : merged;
 }
-summary.backend = lastBackend;
-if (!serve)
-  writeFileSync(
-    join(evidence, "summary.json"),
-    `${JSON.stringify(summary, null, 2)}\n`,
-  );
+
+// One fresh stack per stack and engine: the specs that change an account (password, logout, retirement, device capacity) must not
+// leave the next stack with accounts, sessions or a throttle they have used up.
+const status = await runIntegration({
+  options: {
+    browsers,
+    stacks: STACKS,
+    manifest,
+    partial,
+    narrowed,
+    evidence,
+    env: process.env,
+    app,
+    layer,
+  },
+  deps: {
+    list: playwrightLister({
+      root,
+      browsers,
+      dir: join(evidence, "discovery"),
+      env: process.env,
+    }),
+    execute: (stack, browser) => main(browser, stack),
+    cleanup,
+    readReport: (file) =>
+      existsSync(file) ? readFileSync(file, "utf8") : null,
+    exists: existsSync,
+    write: (file, text) => {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, text);
+    },
+    now: () => Date.now(),
+    log: (message) => console.error(message),
+    interrupted: () => interrupted,
+    backend: () => lastBackend,
+  },
+});
 process.exit(status);
