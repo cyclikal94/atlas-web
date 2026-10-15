@@ -10,6 +10,7 @@ import {
 import {
   ACCOUNT,
   bootSession,
+  identityReadsOf,
   startOutbox,
   untilTreeSettled,
   uuid,
@@ -86,17 +87,24 @@ async function enqueueAtBoundary(
 }
 
 /**
- * Another page with its own running outbox (no dispatcher: it never sends) over the same database and `localStorage`. With `holdMs` the
- * peer's FIRST identity read is answered that much later (a named latency injection, `bootSession`'s `holdIdentityReadMs`, R43): the
+ * Another page with its own running outbox (no dispatcher: it never sends) over the same database and `localStorage`. With `held` the
+ * peer's FIRST identity read is answered `held.ms` later (a named latency injection, `bootSession`'s `holdIdentityReadMs`, R43): the
  * schedule a loaded machine gives the stub's answer, which makes the first page's tree dispose and mount again about a third of the time.
+ *
+ * WEB-08c revision 11 (R12): a peer booting within 30 s of the session's shared confirmation adopts it and makes no identity read
+ * (HF1-SHARED-CONFIRMATION-20261013), so from WEB-08c revision 2 to revision 10 H4's and H5's hold was never applied. The held peer now
+ * boots with the confirmation removed through `held.through` (the first page) and verifies identity itself, and `bootSession` fails the
+ * set-up unless that read was held by exactly `held.ms`.
  */
 async function anotherOutbox(
   context: BrowserContext,
-  holdMs = 0,
+  held?: { ms: number; through: Page },
 ): Promise<Page> {
   const page = await bootSession(
     context,
-    holdMs > 0 ? { holdIdentityReadMs: holdMs } : {},
+    held === undefined
+      ? {}
+      : { holdIdentityReadMs: held.ms, verifyThrough: held.through },
   );
   await untilTreeSettled(page, { connections: 0 });
   await startOutbox(page, ACCOUNT, { start: false });
@@ -213,11 +221,12 @@ test.describe("E-H1 (revision 33, R57): the readiness of a page's harness outbox
   }, info) => {
     const { page } = await boot(context);
     const readiness: OutboxReadiness[] = [];
-    await withSettledOutboxPeers(
-      () => anotherOutbox(context, 150),
+    const peer = await withSettledOutboxPeers(
+      () => anotherOutbox(context, { ms: 150, through: page }),
       [page],
       readiness,
     );
+    const injection = identityReadsOf(peer);
     await context.setOffline(true);
     const { outcome, before } = await enqueueAtBoundary(
       page,
@@ -227,7 +236,16 @@ test.describe("E-H1 (revision 33, R57): the readiness of a page's harness outbox
     );
     expect(outcome).toMatchObject({ kind: "queued" });
     expect(before).toMatchObject({ live: true, sameService: true });
+    // WEB-08c revision 11 (R12): the peer verified identity itself and its first identity read was held (the set-up fails otherwise).
+    expect(
+      {
+        removed: injection?.confirmationRemoved,
+        first: injection?.heldMs[0],
+      },
+      "the peer verified identity itself and its first identity read was held",
+    ).toEqual({ removed: true, first: 150 });
     recordEvidence(info, "h4-peer-boot-held", {
+      exercisedInjection: injection,
       rebound: readiness[0]?.rebound,
       before: readiness[0]?.before,
       after: readiness[0]?.after,
@@ -245,7 +263,8 @@ test.describe("E-H1 (revision 33, R57): the readiness of a page's harness outbox
     context,
   }, info) => {
     const { page } = await boot(context);
-    await anotherOutbox(context, 150);
+    const peer = await anotherOutbox(context, { ms: 150, through: page });
+    const injection = identityReadsOf(peer);
     await untilTreeSettled(page, { connections: 2 });
     const tree = await outboxBinding(page);
     const readiness = await untilOutboxBound(page);
@@ -257,7 +276,16 @@ test.describe("E-H1 (revision 33, R57): the readiness of a page's harness outbox
       expect(readiness.rebound).toBe(false);
     }
     expect(readiness.after).toMatchObject({ live: true, sameService: true });
+    // WEB-08c revision 11 (R12): the peer verified identity itself and its first identity read was held (the set-up fails otherwise).
+    expect(
+      {
+        removed: injection?.confirmationRemoved,
+        first: injection?.heldMs[0],
+      },
+      "the peer verified identity itself and its first identity read was held",
+    ).toEqual({ removed: true, first: 150 });
     recordEvidence(info, "h5-diagnosis", {
+      exercisedInjection: injection,
       endedByTreeOnlyReadiness: tree !== null && !tree.live,
       binding: tree,
       readiness,

@@ -9,6 +9,7 @@ import {
   bootSession,
   confirmationAge,
   dataPage,
+  identityReadsOf,
   type Lifetime,
   readLifetime,
   recordLifetime,
@@ -1037,7 +1038,11 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
     bClockOffsetMs = 0,
     /** R28, revision 17: the estimate lags like the browser's (`estimateLagsWrites`), and both guards have the page's monotonic clock. */
     extra: { estimateLagsWrites?: boolean; quotaMonotonic?: boolean } = {},
-    /** R43, revision 24: page B's first identity read is answered this much later (a named latency injection; see `bootSession`). */
+    /**
+     * R43, revision 24: page B's first identity read is answered this much later (a named latency injection; see `bootSession`). WEB-08c
+     * revision 11 (R12): B then boots with the shared confirmation removed through page A, so that it makes that read, and the set-up fails
+     * if it did not.
+     */
     boot: { holdBIdentityReadMs?: number } = {},
   ) => {
     await stubNetwork(context);
@@ -1049,11 +1054,14 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
     const a = await bootSession(context);
     await recordLifetime(a);
     settled.aBooted = await untilTreeSettled(a, { connections: 0 });
-    const b = await bootSession(context, {
-      ...(boot.holdBIdentityReadMs === undefined
+    // WEB-08c revision 11 (R12): a held B verifies identity itself (the shared confirmation is removed through A just before B boots), and
+    // `bootSession` fails the set-up unless B's first identity read was held by exactly that much.
+    const b = await bootSession(
+      context,
+      boot.holdBIdentityReadMs === undefined
         ? {}
-        : { holdIdentityReadMs: boot.holdBIdentityReadMs }),
-    });
+        : { holdIdentityReadMs: boot.holdBIdentityReadMs, verifyThrough: a },
+    );
     await recordLifetime(b);
     settled.bBooted = await untilTreeSettled(b, { connections: 0 });
     // B's boot made A check its session and remount its tree: A is read again, now that the last boot has happened.
@@ -2494,12 +2502,20 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
    * the first save is queued, and the set-up's own check (nothing closed a registry after its outbox started) holds. The old order's
    * failure is probabilistic, so this is a CONTROL of the order and not a measurement of the old one: the measurement is the
    * campaign in the evidence, and `R43 race` below states the condition under which the old order closes the registry.
+   *
+   * WEB-08c revision 11 (R12, review 11): from WEB-08c revision 2 until this revision these cases did NOT have that schedule. Page B booted
+   * within 30 s of the session's shared confirmation (HF1-SHARED-CONFIRMATION-20261013), adopted it and made no identity read, so the hold was
+   * never applied (the reviewer's counter in the route: `[]` in every engine) and A was never made to check; they passed on an unperturbed
+   * set-up. B now verifies identity itself (the confirmation is removed through A just before B boots, the record as the version the hold was
+   * measured on left it), the set-up fails unless B's first identity read was held by exactly `hold`, and the injection that ran is in the
+   * evidence (`exercisedInjection`). Every other assertion is unchanged. The negative control after these cases keeps the confirmation and
+   * requires the set-up to fail.
    */
   for (const hold of [30, 80, 300])
     test(`R43: with page B's first identity read held ${hold} ms (the schedule that closed the old order's registry in about a third of its runs), the set-up keeps both outboxes: the first save is queued and nothing closed either registry`, async ({
       context,
     }, info) => {
-      const { a, lifetime, settled } = await twoPages(
+      const { a, b, lifetime, settled } = await twoPages(
         context,
         FLOOR + 1_200_000,
         0,
@@ -2508,17 +2524,75 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
       );
       const first = await enqueue(a, bigSave("one", 41));
       const at = await lifetime();
+      const injection = identityReadsOf(b);
       recordEvidence(info, `r43-held-identity-read-${hold}`, {
         namedInjection: `page B's first identity read (GET /browser-sessions/current) is answered ${hold} ms late`,
+        exercisedInjection: injection,
         settled,
         first,
         lifetime: at,
       });
+      // WEB-08c revision 11 (R12): the schedule named above is the one B had (the set-up already fails otherwise; stated here for the case).
+      expect(
+        {
+          removed: injection?.confirmationRemoved,
+          first: injection?.heldMs[0],
+        },
+        "page B verified identity itself and its first identity read was held",
+      ).toEqual({ removed: true, first: hold });
       expect(first?.kind).toBe("queued");
       expect(at.a.closes).toEqual([]);
       expect(at.b.closes).toEqual([]);
       expect(at.a.latch).toBe("open");
     });
+
+  /**
+   * WEB-08c revision 11 (R12): the DETECTOR's negative control. The held cases' first steps with the shared confirmation KEPT: page B boots
+   * within the interval of the confirmation A's boot recorded, adopts it and makes no identity read, so a hold asked of its route is never
+   * applied. That is the schedule the held cases and the race silently had from WEB-08c revision 2 to revision 10; `bootSession` must now fail
+   * such a set-up, saying the named injection was not exercised, and its record must show no identity read of B at all.
+   */
+  test("R43 (WEB-08c revision 11): a held identity read that the boot never makes fails the set-up: with the shared confirmation kept, page B adopts it, makes no identity read, and `bootSession` says the named injection was not exercised", async ({
+    context,
+  }, info) => {
+    await stubNetwork(context);
+    await serveIdentityReads(context);
+    await seedSettled(context);
+    const a = await bootSession(context);
+    await untilTreeSettled(a, { connections: 0 });
+    const confirmationAgeAtB = await confirmationAge(a);
+    const before = new Set(context.pages());
+    const failure = await bootSession(context, {
+      holdIdentityReadMs: 80,
+      verifyThrough: "confirmation kept",
+    }).then(
+      () => null,
+      (error: Error) => error.message,
+    );
+    const b = context.pages().find((page) => !before.has(page));
+    const injection = b === undefined ? undefined : identityReadsOf(b);
+    recordEvidence(info, "r43-held-read-not-exercised", {
+      confirmationAgeAtB,
+      failure,
+      injection,
+    });
+    expect(
+      confirmationAgeAtB,
+      "precondition: B boots within the interval of the session's shared confirmation",
+    ).not.toBeNull();
+    expect(confirmationAgeAtB as number | null).toBeLessThan(
+      DEFAULT_CONFIG.resumeVerificationMinIntervalMs,
+    );
+    expect(failure).toMatch(
+      /the named latency injection was not exercised: the page's first identity read was to be held 80 ms, and the page made no identity read/,
+    );
+    expect(injection).toEqual({
+      requestedMs: 80,
+      confirmationRemoved: null,
+      confirmationAgeBeforeBoot: null,
+      heldMs: [],
+    });
+  });
 
   /**
    * R43 race (revision 24): the condition under which the OLD order (page A boots, its outbox starts, page B boots at once) closes A's
@@ -2530,6 +2604,11 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
    * abandoned and closes nothing (R35). With B's first identity read held 80 ms the schedule gives each outcome (about a third of the
    * sequences close the registry in Firefox), so the implication is exercised on whatever the engine does; the assertion does not depend on
    * how often. This is the OLD order, kept here only as the control that pins the condition: nothing else in this spec boots a page after an outbox started.
+   *
+   * WEB-08c revision 11 (R12, review 11): as with the held set-up above, B had adopted the shared confirmation since WEB-08c revision 2 and made
+   * no identity read, so no sequence had the 80 ms hold or a check of A, and the implication held vacuously (no look, no flip, no closure).
+   * B now boots with the confirmation removed through A and the boot fails unless its first identity read was held 80 ms; the implication
+   * and its assertions are unchanged.
    */
   for (const sequence of [1, 2, 3, 4])
     test(`R43 race (sequence ${sequence}): in the old order, with page B's first identity read held 80 ms, page A's registry is closed, and its first save refused, if and only if A's tree look had completed before A's view left \`displaying\``, async ({
@@ -2549,7 +2628,12 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
         originLedger: true,
       });
       const outboxAt = Date.now();
-      const b = await bootSession(context, { holdIdentityReadMs: 80 });
+      // WEB-08c revision 11 (R12): B verifies identity itself (the shared confirmation is removed through A, as the record of the version
+      // the race was measured on), and the boot fails unless B's first identity read was held 80 ms.
+      const b = await bootSession(context, {
+        holdIdentityReadMs: 80,
+        verifyThrough: a,
+      });
       await recordLifetime(b);
       const age2 = await b.evaluate(() => performance.now());
       if (age2 < 1_500) await b.waitForTimeout(1_500 - age2);
@@ -2577,9 +2661,11 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
       const completedBeforeTheFlip =
         flip !== null && done !== null && done <= flip;
       const closed = facts.closes.filter(([ms]) => ms >= since);
+      const injection = identityReadsOf(b);
       recordEvidence(info, `r43-race-${sequence}`, {
         namedInjection:
           "page B's first identity read (GET /browser-sessions/current) is answered 80 ms late",
+        exercisedInjection: injection,
         engineRunsTheCheck: runsTheCheck(info),
         first,
         msAfterTheOutbox: {
@@ -2591,6 +2677,14 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
         closedAfterTheOutboxStarted: closed,
         lifetimeOfA: facts,
       });
+      // WEB-08c revision 11 (R12): the schedule named above is the one B had (the boot already fails otherwise; stated here for the case).
+      expect(
+        {
+          removed: injection?.confirmationRemoved,
+          first: injection?.heldMs[0],
+        },
+        "page B verified identity itself and its first identity read was held",
+      ).toEqual({ removed: true, first: 80 });
       // The condition, in every sequence of every engine.
       expect(
         closed.length > 0,
