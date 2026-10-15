@@ -310,10 +310,10 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 8; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 9; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 8);
+  assert.equal(evidence.CONTRACT_VERSION, 9);
   assert.equal(device.DEVICE_SCHEMA, 4);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
@@ -1577,8 +1577,8 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 
 // ---- versions -----------------------------------------------------------------------------------------------------------------------
 
-test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11) and 7 (revision 12) are not evidence of version 8", (t) => {
-  for (const version of [3, 4, 5, 6, 7]) {
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12) and 8 (revision 13) are not evidence of version 9", (t) => {
+  for (const version of [3, 4, 5, 6, 7, 8]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1591,7 +1591,7 @@ test("case: stages recorded under contract versions 3 (review 9's Air request), 
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 8`),
+          .includes(`recorded under contract ${version}, not 9`),
       ),
     );
   }
@@ -1856,9 +1856,13 @@ const msAt = (line) => Number(String(line).split("ms")[0]);
 const shiftAfter = (v, k, delta) => {
   for (const e of v.samples.slice(k + 1)) {
     e.mark.from += delta;
-    e.read.to += delta;
+    // Revision 14: a draft witness has a timing read and a completion read (and record positions, which trace lines do not move).
+    if (e.read) e.read.to += delta;
+    if (e.timing) e.timing.to += delta;
+    if (e.completion) e.completion.to += delta;
     for (const key of Object.keys(e.selected))
-      if (key !== "request") e.selected[key] += delta;
+      if (["start", "commit", "end", "send", "answer"].includes(key))
+        e.selected[key] += delta;
   }
 };
 /** Sets sample `k` of each named series of `engine` to `values[name]`. */
@@ -1886,9 +1890,16 @@ test("control R13-K1: the complete programme's sync and draft witnesses resolve 
     p4.samples.some((e) => e.lines.some((l) => l.includes('"coalesced":true'))),
   );
   assert.ok(p4.samples.some((e) => e.read.to > e.selected.end + 1));
-  assert.equal(
-    readJson(draftFile(dir, "webkit")).method,
-    "draft-request-sample/1",
+  // Revision 14 (adapted from `draft-request-sample/1`): the draft witness is version 2; some receipts removed their row (absent).
+  const drafts = readJson(draftFile(dir, "webkit"));
+  assert.equal(drafts.method, "draft-request-sample/2");
+  assert.ok(
+    drafts.samples.some(
+      (e) => e.completion.row.kind === "absent" && e.records[5].removed,
+    ),
+  );
+  assert.ok(
+    drafts.samples.some((e) => e.completion.row.status === "acknowledged"),
   );
   assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), []);
   // The throttled P-10 witness: a lapsed commit still ends ONE request's processing (latency needs no written page).
@@ -2223,8 +2234,15 @@ test("case R13-D1 (DA-N1): a draft whose first send got no answer and was sent a
     ln(sendB, "data.outbox_send", { resend: true }),
     e.lines[1],
   ];
-  e.read.to += 1;
-  e.selected = { send: e.mark.from, answer: e.mark.from + 2, request: 0 };
+  // Revision 14 adaptation: the witness's timing and completion reads both move with the inserted line.
+  e.timing.to += 1;
+  e.completion.to += 1;
+  e.selected = {
+    ...e.selected,
+    send: e.mark.from,
+    answer: e.mark.from + 2,
+    request: 0,
+  };
   shiftAfter(v, 0, 1);
   writeFileSync(draftFile(dir, "chromium"), `${JSON.stringify(v, null, 2)}\n`);
   const r0 = e.resources[0];
@@ -2235,7 +2253,7 @@ test("case R13-D1 (DA-N1): a draft whose first send got no answer and was sent a
     "P-4 draft stamping_ms": r0.requestStart - sendA,
     "P-4 draft request_ms": r0.responseEnd - r0.requestStart,
     "P-4 draft record_ms": answer - r0.responseEnd,
-    "P-4 draft total_ms": e.read.done - e.mark.t0,
+    "P-4 draft total_ms": e.timing.done - e.mark.t0,
     [DRAFT_P10U]: r0.responseEnd - r0.requestStart,
   };
   assert.ok(values["P-4 draft stamping_ms"] - (r0.requestStart - sendB) === 92);
@@ -2292,29 +2310,34 @@ test("case R13-D2 (DA-N1): the draft witness's other relations: a draft waiting 
         }),
       /2 \/commands requests lie inside the operation/,
     ],
+    // Revision 14 adaptations of revision 13's "not settled" and "another draft settled": the completion is now the receipt's own
+    // record, so the first is a receipt whose result was never delivered (pending, never complete) and the second a receipt record of
+    // another draft.
     [
-      "not settled",
+      "receipt not completed",
       (e) => {
-        e.settled.status = "in_flight";
+        e.records.pop();
+        e.completion.log_to -= 1;
       },
-      /the draft's outcome was not recorded/,
+      /^pending: the draft's receipt transaction has not completed/,
+      "pending",
     ],
     [
-      "another draft settled",
+      "another draft's receipt",
       (e) => {
-        e.settled.local_id = "00000000-0000-4000-8000-000000000000";
+        e.records[5].local_id = "00000000-0000-4000-8000-000000000000";
       },
-      /the draft's outcome was not recorded/,
+      /another draft's dispatch \(data\.admitReceipt\) was recorded during the sample/,
     ],
     [
       "read before answer",
       (e) => {
-        e.read.done = msAt(e.lines[1]) - 5;
+        e.timing.done = msAt(e.lines[1]) - 5;
       },
       /the sample was read before its answer/,
     ],
   ];
-  for (const [label, edit, reason] of cases) {
+  for (const [label, edit, reason, status = "invalid"] of cases) {
     const dir = `${scratch(t)}-${label.replace(/ /g, "-")}`;
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     writeComplete(dir);
@@ -2326,7 +2349,9 @@ test("case R13-D2 (DA-N1): the draft witness's other relations: a draft waiting 
     assert.deepEqual(unsatisfied(r), ids, label);
     assert.match(
       reasons(cell(r, "P-4 draft stamping_ms[firefox]")),
-      new RegExp(`sample 9: its operation is invalid: ${reason.source}`),
+      new RegExp(
+        `sample 9: its operation is ${status}: ${reason.source.replace(/^\^?(pending: )?/, "")}`,
+      ),
       label,
     );
   }
@@ -2350,10 +2375,12 @@ test("control R13-K2 (the released backend's first real-writer run): a draft rea
   const v = readJson(draftFile(dir, "webkit"));
   const e = v.samples[11];
   const answer = msAt(e.lines[1]);
-  e.read.done = answer - 0.3;
-  e.read.at = e.read.done;
+  e.timing.done = answer - 0.3;
+  e.timing.at = e.timing.done;
   writeFileSync(draftFile(dir, "webkit"), `${JSON.stringify(v, null, 2)}\n`);
-  rebind(dir, "webkit", 11, { "P-4 draft total_ms": e.read.done - e.mark.t0 });
+  rebind(dir, "webkit", 11, {
+    "P-4 draft total_ms": e.timing.done - e.mark.t0,
+  });
   assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), []);
 });
 
@@ -2388,5 +2415,377 @@ test("case R13-C5 (DA-R2-B): two samples' values exchanged with their selections
     new RegExp(
       `sample 0: ${stamp(draft[1])} is not its operation's stamping_ms \\(${stamp(draft[0])}\\)`,
     ),
+  );
+});
+
+// ---- revision 14 (review 14 R2, design assessment DA-R14-A/B/C, Q6): a draft sample is complete only by its own dispatch's receipt ------
+// Each case edits ONE draft witness of a complete programme (`draft-request-sample/2`). The review's schedules change only completion
+// evidence, so every timing value, summary and hash stays exactly as the writer computed it: only the completion relation can refuse it.
+// Every series that rests on the sample (the six P-4 draft segments and P-10's unthrottled draft reuse) must be named with the reason.
+
+const draftIds = (engine) =>
+  [...DRAFT_P4, DRAFT_P10U].map((n) => `${n}[${engine}]`).sort();
+/** Moves every later sample's dispatch record positions by `delta` (records were inserted into sample `k`). */
+const shiftLogAfter = (v, k, delta) => {
+  for (const e of v.samples.slice(k + 1)) {
+    e.mark.log_from += delta;
+    e.timing.log_to += delta;
+    e.completion.log_to += delta;
+    for (const r of e.records) {
+      r.seq += delta;
+      if (r.of !== undefined) r.of += delta;
+    }
+    for (const key of ["claim", "issued", "receipt", "received"])
+      e.selected[key] += delta;
+  }
+};
+const draftRefusal = (dir, engine, k, reason, status = "invalid") => {
+  const r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), draftIds(engine));
+  for (const id of [
+    `P-4 draft stamping_ms[${engine}]`,
+    `P-4 draft total_ms[${engine}]`,
+    `${DRAFT_P10U}[${engine}]`,
+  ])
+    assert.match(
+      reasons(cell(r, id)),
+      new RegExp(`sample ${k}: its operation is ${status}: ${reason.source}`),
+      id,
+    );
+  assert.equal(r.complete, false);
+};
+
+test("case R14-C1 (review 14 R2): the review's schedules with their timing values unchanged: an unreadable completion read, a replacement page with an empty queue, and a failed receipt followed by a resend whose receipt was admitted are each refused in every draft series; desktop support is withheld and both validator modes refuse", (t) => {
+  const cases = [
+    [
+      "unreadable",
+      (v) => {
+        v.samples[0].completion.row = {
+          kind: "error",
+          problem: "Error: independent injected queue read failure",
+        };
+      },
+      /the completion read failed: Error: independent injected queue read failure/,
+    ],
+    [
+      "replacement page",
+      (v) => {
+        const e = v.samples[0];
+        e.completion.identity_after = {
+          ...e.completion.identity_after,
+          page: "replacement-page",
+          time_origin: e.completion.identity_after.time_origin + 100_000,
+        };
+        e.completion.row = { kind: "absent" };
+      },
+      /the page was reloaded or replaced during the sample \(after the completion read: page, time_origin\)/,
+    ],
+    [
+      "retry after answer",
+      (v) => {
+        const e = v.samples[0];
+        const L = e.local_id;
+        const base = e.records[0];
+        const failed = e.records[5];
+        delete failed.inner;
+        delete failed.removed;
+        Object.assign(failed, { outer: "failed", reason: "abort" });
+        const answer = msAt(e.lines[1]);
+        const seq = failed.seq + 1;
+        const at = failed.at + 250;
+        const commit = {
+          dispatcher: 1,
+          run: 1,
+          service: 2,
+          local_id: L,
+          epoch: 3,
+        };
+        const request = {
+          dispatcher: 1,
+          run: 1,
+          key: L,
+          path: e.resources[0].name,
+        };
+        e.records.push(
+          {
+            seq,
+            at: failed.at + 0.2,
+            event: "write_begin",
+            dispatcher: 1,
+            run: 1,
+            service: 2,
+            plan: "data.recordLocalWriteOutcome",
+            local_id: null,
+          },
+          {
+            seq: seq + 1,
+            at: failed.at + 1,
+            event: "write_end",
+            of: seq,
+            dispatcher: 1,
+            run: 1,
+            service: 2,
+            plan: "data.recordLocalWriteOutcome",
+            local_id: null,
+            outer: "ran",
+          },
+          { seq: seq + 2, at, event: "request_begin", ...request },
+          {
+            seq: seq + 3,
+            at: at + 8,
+            event: "request_end",
+            of: seq + 2,
+            outer: "response",
+            http: 200,
+            ...request,
+          },
+          {
+            seq: seq + 4,
+            at: at + 9.5,
+            event: "commit_begin",
+            plan: "data.admitReceipt",
+            ...commit,
+          },
+          {
+            seq: seq + 5,
+            at: at + 12,
+            event: "commit_end",
+            of: seq + 4,
+            plan: "data.admitReceipt",
+            outer: "applied",
+            inner: "admitted",
+            removed: false,
+            ...commit,
+          },
+        );
+        e.lines.push(
+          ln(Math.round(at), "data.outbox_send", { resend: true }),
+          ln(Math.round(at + 9), "data.outbox_answer", { kind: "receipt" }),
+        );
+        e.resources.push({
+          ...e.resources[0],
+          startTime: at + 0.5,
+          requestStart: at + 1,
+          responseEnd: at + 8,
+        });
+        e.completion.to += 2;
+        e.completion.log_to += 6;
+        e.completion.at = at + 13;
+        e.completion.row = { kind: "row", local_id: L, status: "acknowledged" };
+        assert.ok(base.seq === e.mark.log_from && answer < at);
+        shiftAfter(v, 0, 2);
+        shiftLogAfter(v, 0, 6);
+      },
+      /the draft's receipt transaction was not applied \(failed\/abort\)/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/ /g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    const before = readFileSync(join(dir, "measurements.jsonl"), "utf8");
+    editJson(draftFile(dir, "chromium"), edit);
+    // Completion evidence only: no series value, summary or hash changed.
+    assert.equal(readFileSync(join(dir, "measurements.jsonl"), "utf8"), before);
+    draftRefusal(dir, "chromium", 0, reason);
+    refusedEndToEnd(dir);
+  }
+});
+
+test("case R14-C2 (DA-R14-A/B/C): the receipt's actual result, the actor and epoch of the dispatch, the binding at the completion read, the row's corroboration and the evidence's integrity each refuse the sample with their own reason", (t) => {
+  const cases = [
+    [
+      "applied noop",
+      (e) => {
+        delete e.records[5].removed;
+        Object.assign(e.records[5], { inner: "noop", reason: "not_in_flight" });
+      },
+      /the draft's receipt was not admitted \(noop\/not_in_flight\)/,
+    ],
+    [
+      "dropped",
+      (e) => {
+        delete e.records[5].inner;
+        delete e.records[5].removed;
+        Object.assign(e.records[5], {
+          outer: "dropped",
+          reason: "identity_changed",
+        });
+      },
+      /the draft's receipt transaction was not applied \(dropped\/identity_changed\)/,
+    ],
+    [
+      "restarted before the completion read",
+      (e) => {
+        e.completion.identity_before = {
+          ...e.completion.identity_before,
+          run: 2,
+        };
+        e.completion.identity_after = {
+          ...e.completion.identity_after,
+          run: 2,
+        };
+      },
+      /the dispatcher was rebuilt, restarted or stopped during the sample \(before the completion read: run\)/,
+    ],
+    [
+      "service replaced during the completion read",
+      (e) => {
+        e.completion.identity_after = {
+          ...e.completion.identity_after,
+          service: 7,
+          current_service: 7,
+        };
+      },
+      /the account service ended or was replaced during the sample \(after the completion read: service, current_service\)/,
+    ],
+    [
+      "another dispatcher's receipt",
+      (e) => {
+        e.records[4].dispatcher = 2;
+        e.records[5].dispatcher = 2;
+      },
+      /the receipt was made by another dispatcher, run or service than the sample's/,
+    ],
+    [
+      "receipt at another epoch",
+      (e) => {
+        e.records[4].epoch = 4;
+        e.records[5].epoch = 4;
+      },
+      /the dispatch was captured at another epoch than the sample's/,
+    ],
+    [
+      "bare absent",
+      (e) => {
+        e.records[5].removed = false;
+        e.completion.row = { kind: "absent" };
+      },
+      /the draft's row is gone though its receipt kept it: no recorded relation explains the removal/,
+    ],
+    [
+      "removed but present",
+      (e) => {
+        e.records[5].removed = true;
+        e.completion.row = {
+          kind: "row",
+          local_id: e.local_id,
+          status: "acknowledged",
+        };
+      },
+      /the receipt removed the draft's row but the completion read found it \(acknowledged\)/,
+    ],
+    [
+      "unrecognised read",
+      (e) => {
+        e.completion.row = { kind: "unread" };
+      },
+      /the completion read returned no recognised result/,
+    ],
+    [
+      "another draft waiting",
+      (e) => {
+        e.completion.waiting = 1;
+      },
+      /another draft was waiting at the completion read/,
+    ],
+    [
+      "unobserved",
+      (e) => {
+        e.identities.before = { ...e.identities.before, observing: false };
+      },
+      /the sample's dispatcher was not observed/,
+    ],
+    [
+      "trimmed",
+      (e) => {
+        e.completion.log_first = e.mark.log_from + 1;
+      },
+      /dispatch records of the sample were trimmed from the log/,
+    ],
+    [
+      "gap in the records",
+      (e) => {
+        e.records[2].seq += 100;
+      },
+      /its dispatch records are not contiguous from the mark to the completion read/,
+    ],
+    [
+      "request unseen by the timing read",
+      (e) => {
+        e.timing.requests = 0;
+      },
+      /its timing read did not see its request/,
+    ],
+    [
+      "enqueue refused",
+      (e) => {
+        e.enqueue = { kind: "refused", local_id: null };
+      },
+      /the sample's draft was not enqueued \(refused\)/,
+    ],
+    [
+      "claim refused",
+      (e) => {
+        e.records[1].inner = "stopped";
+      },
+      /the claim did not claim the draft \(applied\/stopped\)/,
+    ],
+    [
+      "selection moved",
+      (e) => {
+        e.selected.received -= 1;
+      },
+      null,
+      "selection",
+    ],
+  ];
+  for (const [label, edit, reason, kind] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/ /g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editJson(draftFile(dir, "webkit"), (v) => edit(v.samples[7]));
+    if (kind === "selection") {
+      const r = contract.resolveEvidence(dir);
+      assert.deepEqual(unsatisfied(r), draftIds("webkit"), label);
+      assert.match(
+        reasons(cell(r, "P-4 draft request_ms[webkit]")),
+        /sample 7: its recorded selection is not the operation its witness shows/,
+        label,
+      );
+      continue;
+    }
+    try {
+      draftRefusal(dir, "webkit", 7, reason);
+    } catch (error) {
+      error.message = `${label}: ${error.message}`;
+      throw error;
+    }
+  }
+});
+
+test("case R14-C3: version-8 draft support (`draft-request-sample/1`) is refused; a mark before the previous sample's completion (its dispatch records) overlaps it", (t) => {
+  let dir = scratch(t);
+  writeComplete(dir);
+  editJson(draftFile(dir, "firefox"), (v) => {
+    v.method = "draft-request-sample/1";
+  });
+  let r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), draftIds("firefox"));
+  assert.match(
+    reasons(cell(r, "P-4 draft claim_ms[firefox]")),
+    /samples\/P-4\.draft\.firefox\.json is not draft-request-sample\/2/,
+  );
+  dir = `${scratch(t)}-overlap`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeComplete(dir);
+  editJson(draftFile(dir, "firefox"), (v) => {
+    v.samples[4].mark.log_from = v.samples[3].completion.log_to - 1;
+  });
+  r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), draftIds("firefox"));
+  assert.match(
+    reasons(cell(r, "P-4 draft enqueue_ms[firefox]")),
+    /sample 4: it overlaps the previous sample's operation/,
   );
 });

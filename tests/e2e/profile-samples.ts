@@ -11,13 +11,15 @@
  *         bytes, applied AND committed, and the end `data.sync_next` recording idle (`p2SampleProblems`), else the sample fails;
  *   P-4   (revision 13, review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1) a sync sample is the FIRST real step after a mark that one
  *         page call set and triggered while no step was open, closed by that step's own end; a draft sample is the first send after the
- *         enqueue and the first answer after it. Each sample keeps its whole bounded witness (page and engine identity, the contiguous trace
- *         slice, every request entry) and the selection is derived from it by the pure rules of scripts/lib/profile-sample-rules.mjs, which
- *         the evidence contract applies again. Revision 12's `readSyncSample`/`syncSample` took the first real tick, the first commit
+ *         enqueue and the first answer after it, and (revision 14, review 14 R2, DA-R14-A/B/C) its completion is the observed dispatcher's
+ *         own admitted receipt of that draft, read with the binding checked across every await. Each sample keeps its whole bounded
+ *         witness (page, engine or dispatcher identity, the contiguous trace slice, the dispatch records, every request entry) and the
+ *         selection is derived from it by the pure rules of scripts/lib/profile-sample-rules.mjs, which the evidence contract applies again. Revision 12's `readSyncSample`/`syncSample` took the first real tick, the first commit
  *         anywhere after it and an end after that: an earlier step that ended without a request donated its start to a later request.
  *
  * The page functions run IN THE PAGE (Playwright serialises them): they refer to nothing outside their own bodies.
  */
+
 import {
   pageCommitted,
   traceEvent,
@@ -27,6 +29,7 @@ import {
   DRAFT_WITNESS_METHOD,
   type DraftSelected,
   type DraftValues,
+  draftBindingChange,
   draftWitnessSelection,
   type RequestEntry,
   SYNC_WITNESS_METHOD,
@@ -34,6 +37,10 @@ import {
   type SyncValues,
   syncWitnessSelection,
 } from "../../scripts/lib/profile-sample-rules.mjs";
+import type {
+  DispatchIdentity,
+  DispatchRecord,
+} from "../../src/fixture/data-harness/main";
 
 export const P2_SAMPLE_METHOD = "p2-sample/1";
 export const SYNC_SAMPLE_METHOD = SYNC_WITNESS_METHOD;
@@ -330,51 +337,136 @@ export async function collectSyncSamples(
   return { samples, values, failure: null };
 }
 
-// ---- P-4 draft: one send, its answer and its request per sample (revision 13, DA-N1) ----------------------------------------------------
+// ---- P-4 draft: one send, its answer, its request and its own completion per sample (revision 14; review 14 R2, DA-R14-A/B/C) ---------
+//
+// Revision 13 froze the send/answer/request at the answer and then polled the queue separately, unfenced: a read that threw became the
+// status `unreadable: …`, a replacement page's empty queue `absent`, and a row a later retry acknowledged closed the first attempt; the
+// rule accepted every status but queued/in_flight. Production emits `data.outbox_answer` before it awaits the receipt transaction, so the
+// answer is not the end of the operation. Here the harness outbox runs with `observeDispatch` (src/fixture/data-harness/dispatch-observer.ts)
+// and a sample is: the dispatch identity read before and after the queue read (a change refuses, nothing enqueued) and after the enqueue;
+// the timing read, unchanged; then, once the observed dispatcher's receipt for THAT local ID has delivered its result (or anything else is
+// recorded), one call that reads the identity, the row through the bound service and the identity again, and copies the outbox trace,
+// the dispatch records and the `/commands` entries from the mark to that moment.
 
+/** A dispatch identity as a page function reads it: the harness's, with the page's time origin. */
+export type DispatchIdentityRead = DispatchIdentity & { time_origin: number };
 export interface DraftMark {
   page: string;
   time_origin: number;
-  /** The outbox trace position of the first line the sample may own. */
+  /** The outbox trace position, and the dispatch record sequence number, of the first line or record the sample may own. */
   from: number;
+  log_from: number;
   /** Drafts queued or in flight when the sample began (0: the page call refuses otherwise). */
   waiting: number;
   /** The enqueue's start and end (`performance.now()`). */
   t0: number;
   t1: number;
 }
-export interface DraftWitness {
+export interface DraftPrepared {
   local_id: string | null;
-  enqueued: string;
+  account: string;
+  enqueue: { kind: string; local_id: string | null };
+  identities: {
+    before: DispatchIdentityRead;
+    queued: DispatchIdentityRead;
+    enqueued: DispatchIdentityRead;
+  };
   mark: DraftMark;
-  read: SampleRead & { done: number };
-  lines: string[];
-  resources: RequestEntry[];
-  /** The draft's row once its outcome was recorded (`absent` once it is gone); null until read. */
-  settled: { local_id: string | null; status: string } | null;
 }
+/** The page call refused before anything was enqueued: why, and the identities it read. */
+export interface DraftRefused {
+  refused: string;
+  identities: Partial<DraftPrepared["identities"]>;
+}
+/** The timing read (revision 13's observation, unchanged in readiness and values): what it saw, where, and its own time `done`. */
+export interface DraftTiming {
+  identity: DispatchIdentityRead | null;
+  to: number;
+  log_to: number;
+  at: number;
+  done: number;
+  /** The `/commands` entries it saw. */
+  requests: number;
+  resource_entries: number;
+}
+export type DraftRow =
+  | { kind: "row"; local_id: string; status: string }
+  | { kind: "absent" }
+  | { kind: "error"; problem: string };
+export interface DraftCompletion {
+  identity_before: DispatchIdentityRead | null;
+  identity_after: DispatchIdentityRead | null;
+  /** The draft's row through the bound service, and how many OTHER drafts were queued or in flight there (-1: not read). */
+  row: DraftRow;
+  waiting: number;
+  at: number;
+  to: number;
+  log_first: number;
+  log_to: number;
+  resource_entries: number;
+}
+export interface DraftClose {
+  completion: DraftCompletion;
+  /** The outbox trace from the mark to the completion read, contiguous (position `mark.from + i`). */
+  lines: string[];
+  /** The dispatch records from the mark to the completion read (sequence `mark.log_from + i`). */
+  records: DispatchRecord[];
+  /** Every `/commands` ResourceTiming entry in the buffer at the completion read. */
+  resources: RequestEntry[];
+}
+export type DraftWitness = DraftPrepared & { timing: DraftTiming } & DraftClose;
 export type DraftSampleEntry = { index: number } & DraftWitness & {
     selected: DraftSelected;
   };
 
 /**
- * In the page: while any draft is queued or in flight, null (nothing enqueued). Otherwise clears ResourceTiming, marks the outbox trace and
- * enqueues ONE draft creating `person`, timing the enqueue.
+ * In the page: the dispatch identity before and after the queue read; while any draft is queued or in flight, null (nothing enqueued); a
+ * changed identity, an unreadable queue or an unobserved dispatcher refuses. Otherwise clears ResourceTiming, marks the outbox trace and the
+ * dispatch records and enqueues ONE draft creating `person`, timing the enqueue, and reads the identity again.
  */
 export async function prepareDraftSample(arg: {
   account: string;
   person: string;
   n: number;
-}): Promise<Pick<DraftWitness, "local_id" | "enqueued" | "mark"> | null> {
+}): Promise<DraftPrepared | DraftRefused | null> {
   const data = window.__atlasData;
   if (!data) throw new Error("no data harness");
-  const rows = await data.queue(arg.account);
+  const before = {
+    ...data.dispatchIdentity(),
+    time_origin: performance.timeOrigin,
+  };
+  if (!before.observing)
+    return {
+      refused:
+        "the harness outbox's dispatcher is not observed (observeDispatch)",
+      identities: { before },
+    };
+  let rows: Array<{ status: string }>;
+  try {
+    rows = await data.queue(arg.account);
+  } catch (error) {
+    return {
+      refused: `the queue could not be read: ${String(error).slice(0, 200)}`,
+      identities: { before },
+    };
+  }
+  const queued = {
+    ...data.dispatchIdentity(),
+    time_origin: performance.timeOrigin,
+  };
+  if (JSON.stringify(queued) !== JSON.stringify(before))
+    return {
+      refused:
+        "the dispatch binding changed during the queue read: nothing was enqueued",
+      identities: { before, queued },
+    };
   const waiting = rows.filter(
     (r) => r.status === "queued" || r.status === "in_flight",
   ).length;
   if (waiting > 0) return null;
   performance.clearResourceTimings();
   const from = data.outboxTrace.length;
+  const logFrom = data.dispatchNext();
   const t0 = performance.now();
   const out = await data.enqueue({
     endpoint: "/commands",
@@ -394,13 +486,20 @@ export async function prepareDraftSample(arg: {
     },
   });
   const t1 = performance.now();
+  const enqueued = {
+    ...data.dispatchIdentity(),
+    time_origin: performance.timeOrigin,
+  };
   return {
     local_id: out.localId ?? null,
-    enqueued: out.kind,
+    account: arg.account,
+    enqueue: { kind: out.kind, local_id: out.localId ?? null },
+    identities: { before, queued, enqueued },
     mark: {
       page: data.page,
       time_origin: performance.timeOrigin,
       from,
+      log_from: logFrom,
       waiting,
       t0,
       t1,
@@ -409,13 +508,13 @@ export async function prepareDraftSample(arg: {
 }
 
 /**
- * In the page: the draft sample's witness once an answer follows the first send after the mark (and a `/commands` entry that began with it
- * is visible), at once on a second send, a failed step, a page change or `force`. Else null. `done` is the observation's own time.
+ * In the page: the timing read, once an answer follows the first send after the mark (and a `/commands` entry that began with it is
+ * visible), at once on a second send, a failed step, a page change or `force`. Else null. `done` is the observation's own time.
  */
 export function readDraftSample(arg: {
   mark: DraftMark;
   force: boolean;
-}): Omit<DraftWitness, "local_id" | "enqueued" | "settled"> | null {
+}): DraftTiming | null {
   const { mark } = arg;
   const data = window.__atlasData;
   const trace = data?.outboxTrace ?? [];
@@ -448,36 +547,126 @@ export function readDraftSample(arg: {
   if (!ready) return null;
   const now = performance.now();
   return {
-    mark,
-    read: {
-      page: data?.page ?? null,
-      time_origin: performance.timeOrigin,
-      epochs: [],
-      generation: null,
-      to: trace.length,
-      at: now,
-      done: now,
-      resource_entries: entries.length,
-    },
-    lines: trace.slice(mark.from),
-    resources: commands.map((e) => ({
-      name: new URL(e.name).pathname,
-      startTime: e.startTime,
-      requestStart: e.requestStart,
-      responseEnd: e.responseEnd,
-    })),
+    identity: data
+      ? { ...data.dispatchIdentity(), time_origin: performance.timeOrigin }
+      : null,
+    to: trace.length,
+    log_to: data?.dispatchNext() ?? 0,
+    at: now,
+    done: now,
+    requests: commands.length,
+    resource_entries: entries.length,
   };
 }
 
-/** In the page: the status of the draft's row (`absent` once it is gone). */
-export async function draftStatus(arg: {
-  account: string;
-  localId: string;
-}): Promise<string> {
+/**
+ * In the page: true once the sample can be closed: the observed dispatcher's receipt of `local_id` has delivered its result, or anything
+ * the sample cannot contain has happened (an identity change, a trimmed log, a failed or non-receipt commit, a writer run, a lifecycle
+ * record, a request error, another draft's record, a further send, answer or failed step). Else null (still running).
+ */
+export function draftCompletionReady(arg: {
+  mark: DraftMark;
+  local_id: string;
+  expected: DispatchIdentityRead;
+}): true | null {
+  const data = window.__atlasData;
+  if (!data) return true;
+  const now = {
+    ...data.dispatchIdentity(),
+    time_origin: performance.timeOrigin,
+  };
+  if (JSON.stringify(now) !== JSON.stringify(arg.expected)) return true;
+  const first = data.dispatchFirst();
+  if (first > arg.mark.log_from) return true;
+  const log = data.dispatchLog;
+  for (let i = arg.mark.log_from - first; i < log.length; i += 1) {
+    const r = log[i];
+    if (!r) continue;
+    const subject = r.event.startsWith("request_") ? r.key : r.local_id;
+    if (subject !== arg.local_id) return true;
+    if (r.event === "commit_end")
+      if (r.plan === "data.admitReceipt" || r.outer !== "applied") return true;
+    if (r.event === "request_end" && r.outer !== "response") return true;
+    if (
+      r.event !== "commit_begin" &&
+      r.event !== "commit_end" &&
+      r.event !== "commit_gated" &&
+      r.event !== "request_begin" &&
+      r.event !== "request_end"
+    )
+      return true;
+  }
+  const trace = data.outboxTrace;
+  let sends = 0;
+  let answers = 0;
+  for (let t = arg.mark.from; t < trace.length; t += 1) {
+    const name = (trace[t] ?? "").split(" ")[1];
+    if (name === "data.outbox_step_failed") return true;
+    if (name === "data.outbox_send") sends += 1;
+    if (name === "data.outbox_answer") answers += 1;
+  }
+  return sends > 1 || answers > 1 ? true : null;
+}
+
+/**
+ * In the page: the completion read. The identity, the draft's row through the BOUND service (a rejection is a recorded read failure, never
+ * absence), the identity again, then, synchronously, the outbox trace, the dispatch records and the `/commands` entries from the mark.
+ */
+export async function closeDraftSample(arg: {
+  mark: DraftMark;
+  local_id: string;
+}): Promise<DraftClose> {
   const data = window.__atlasData;
   if (!data) throw new Error("no data harness");
-  const rows = await data.queue(arg.account);
-  return rows.find((r) => r.local_id === arg.localId)?.status ?? "absent";
+  const identityBefore = {
+    ...data.dispatchIdentity(),
+    time_origin: performance.timeOrigin,
+  };
+  let row: DraftRow;
+  let waiting = -1;
+  try {
+    const read = await data.boundDraft(arg.local_id);
+    row = read.row
+      ? { kind: "row", local_id: read.row.local_id, status: read.row.status }
+      : { kind: "absent" };
+    waiting = read.waiting;
+  } catch (error) {
+    row = { kind: "error", problem: String(error).slice(0, 200) };
+  }
+  const identityAfter = {
+    ...data.dispatchIdentity(),
+    time_origin: performance.timeOrigin,
+  };
+  const trace = data.outboxTrace;
+  const entries = performance.getEntriesByType(
+    "resource",
+  ) as PerformanceResourceTiming[];
+  const first = data.dispatchFirst();
+  return {
+    completion: {
+      identity_before: identityBefore,
+      identity_after: identityAfter,
+      row,
+      waiting,
+      at: performance.now(),
+      to: trace.length,
+      log_first: first,
+      log_to: data.dispatchNext(),
+      resource_entries: entries.length,
+    },
+    lines: trace.slice(arg.mark.from),
+    records: data.dispatchLog
+      .slice(Math.max(0, arg.mark.log_from - first))
+      .map((r) => ({ ...r })),
+    resources: entries
+      .filter((e) => new URL(e.name).pathname.endsWith("/commands"))
+      .map((e) => ({
+        name: new URL(e.name).pathname,
+        startTime: e.startTime,
+        requestStart: e.requestStart,
+        responseEnd: e.responseEnd,
+      })),
+  };
 }
 
 const pause = (ms: number) =>
@@ -485,8 +674,8 @@ const pause = (ms: number) =>
 
 /**
  * The P-4 draft collector (the P-10 unthrottled draft series reuses its request values). Each sample: one page call that waits for an
- * empty queue and enqueues, one observation of the send/answer/request, then the draft's own outcome from the queue (its completion is the
- * recorded outcome, never the answer event alone); the rule's selection. The first incomplete sample stops the collection.
+ * empty queue and enqueues (refusing on a changed binding), the timing read of the send/answer/request, then the completion read once the
+ * observed dispatcher's own receipt has delivered its result; the rule's selection. The first incomplete sample stops the collection.
  */
 export async function collectDraftSamples(
   page: SamplePage,
@@ -504,7 +693,7 @@ export async function collectDraftSamples(
       values,
       failure: { index: i, warmup: i < o.warmup, problem, witness },
     });
-    let prepared: Awaited<ReturnType<typeof prepareDraftSample>> = null;
+    let prepared: DraftPrepared | DraftRefused | null = null;
     const until = Date.now() + o.timeout;
     try {
       for (;;) {
@@ -527,19 +716,33 @@ export async function collectDraftSamples(
         `another draft was still waiting after ${o.timeout} ms`,
         null,
       );
-    let read: Omit<DraftWitness, "local_id" | "enqueued" | "settled">;
+    if ("refused" in prepared) return failed(prepared.refused, prepared);
+    // The enqueue awaited: a facade, dispatcher, service or session that changed meanwhile is not the sample's (nothing more is read).
+    const moved = draftBindingChange(
+      prepared.identities.before,
+      prepared.identities.enqueued,
+      "after the enqueue",
+    );
+    if (moved) return failed(moved, prepared);
+    const localId = prepared.local_id;
+    if (localId === null)
+      return failed(
+        `the sample's draft was not enqueued (${prepared.enqueue.kind})`,
+        prepared,
+      );
+    let timing: DraftTiming;
     try {
-      read = await page.poll(
+      timing = await page.poll(
         readDraftSample,
         { mark: prepared.mark, force: false },
         o,
       );
     } catch {
       try {
-        read = (await page.run(readDraftSample, {
+        timing = (await page.run(readDraftSample, {
           mark: prepared.mark,
           force: true,
-        })) as typeof read;
+        })) as DraftTiming;
       } catch (error) {
         return failed(
           `the sample could not be read (${String(error).slice(0, 200)})`,
@@ -547,29 +750,32 @@ export async function collectDraftSamples(
         );
       }
     }
-    let status = "unread";
-    if (prepared.local_id !== null) {
-      const by = Date.now() + o.timeout;
-      try {
-        for (;;) {
-          status = await page.run(draftStatus, {
-            account: o.account,
-            localId: prepared.local_id,
-          });
-          if (!["queued", "in_flight"].includes(status) || Date.now() > by)
-            break;
-          await pause(o.polling);
-        }
-      } catch (error) {
-        status = `unreadable: ${String(error).slice(0, 120)}`;
-      }
+    try {
+      await page.poll(
+        draftCompletionReady,
+        {
+          mark: prepared.mark,
+          local_id: localId,
+          expected: prepared.identities.enqueued,
+        },
+        o,
+      );
+    } catch {
+      // The time-out: the completion read below records what stood then (a receipt still running is pending, never complete).
     }
-    const witness: DraftWitness = {
-      local_id: prepared.local_id,
-      enqueued: prepared.enqueued,
-      ...read,
-      settled: { local_id: prepared.local_id, status },
-    };
+    let closed: DraftClose;
+    try {
+      closed = await page.run(closeDraftSample, {
+        mark: prepared.mark,
+        local_id: localId,
+      });
+    } catch (error) {
+      return failed(
+        `the sample's completion could not be read (${String(error).slice(0, 200)})`,
+        { ...prepared, timing },
+      );
+    }
+    const witness: DraftWitness = { ...prepared, timing, ...closed };
     const s = draftWitnessSelection(witness);
     if (s.status !== "complete" || !s.selected || !s.values)
       return failed(

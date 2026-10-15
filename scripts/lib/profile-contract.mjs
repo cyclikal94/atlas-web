@@ -1324,9 +1324,19 @@ function p2SupportProblems(ev, engine, shape, metric, samples, row) {
 /**
  * The common frame of a per-sample support file (revision 13, review 13 R2; contract version 8): its method, its engine (the series'), its
  * stamp (the series row's stage, invocation and collection test), no recorded failure, one entry per sample after the warm-ups, in order,
- * each mark at or after the previous sample's read, and one page instance and time origin for the whole file.
+ * each mark at or after the previous sample's read, and one page instance and time origin for the whole file. `closeOf` names the read that
+ * ends a sample: a sync sample's read; a draft sample's completion read (revision 14, contract version 9), whose dispatch record position
+ * the next mark must also follow.
  */
-function supportFrameProblems(ev, file, method, samples, row, engine) {
+function supportFrameProblems(
+  ev,
+  file,
+  method,
+  samples,
+  row,
+  engine,
+  closeOf = (e) => e.read,
+) {
   const entry = ev.readJson(file);
   if (!entry.present || entry.error || !isObj(entry.value))
     return {
@@ -1367,7 +1377,12 @@ function supportFrameProblems(ev, file, method, samples, row, engine) {
     return { problems: [`${file} records another warm-up count`] };
   for (const [k, e] of v.samples.entries()) {
     const where = `sample ${k}`;
-    if (!isObj(e) || e.index !== warmup + k || !isObj(e.mark) || !isObj(e.read))
+    if (
+      !isObj(e) ||
+      e.index !== warmup + k ||
+      !isObj(e.mark) ||
+      !isObj(closeOf(e))
+    )
       return { problems: [`${where}: its support is malformed`] };
     if (
       e.mark.page !== v.samples[0].mark.page ||
@@ -1376,7 +1391,13 @@ function supportFrameProblems(ev, file, method, samples, row, engine) {
       return {
         problems: [`${where}: it was collected on another page instance`],
       };
-    if (k > 0 && !(e.mark.from >= v.samples[k - 1].read?.to))
+    const previous = k > 0 ? closeOf(v.samples[k - 1]) : null;
+    if (
+      k > 0 &&
+      (!(e.mark.from >= previous?.to) ||
+        (previous?.log_to !== undefined &&
+          !(e.mark.log_from >= previous.log_to)))
+    )
       return {
         problems: [`${where}: it overlaps the previous sample's operation`],
       };
@@ -1432,9 +1453,12 @@ function syncSupportProblems(ev, file, segment, samples, row, engine) {
 
 /**
  * The P-4 draft series (and P-10's unthrottled draft requests) against their per-sample witnesses (revision 13, design assessment DA-N1;
- * contract version 8, `draft-request-sample/1`): no draft waiting at the mark, one first send after the enqueue, its first answer with no
- * second send or failed step between, the one `/commands` entry inside them and the draft's recorded outcome, re-derived with the
- * writers' rule. A first attempt that got no answer never donates its send time.
+ * contract version 9, `draft-request-sample/2`, revision 14, review 14 R2, DA-R14-A/B/C): no draft waiting at the mark, one first send after
+ * the enqueue, its answer (a receipt) with no second send or failed step, the one `/commands` entry inside them, and completion by the
+ * observed dispatcher's own applied/admitted receipt of that draft (same dispatcher, run, service and epoch; nothing else recorded or traced
+ * up to the completion read; the binding unchanged across every await; the row through the bound service corroborating), re-derived with
+ * the writers' rule. Each mark follows the previous completion read. A first attempt that got no answer never donates its send time, and
+ * no later attempt, replacement page or unreadable read completes one.
  */
 function draftSupportProblems(ev, file, segment, samples, row, engine) {
   const { problems, v } = supportFrameProblems(
@@ -1444,6 +1468,7 @@ function draftSupportProblems(ev, file, segment, samples, row, engine) {
     samples,
     row,
     engine,
+    (e) => (isObj(e) ? e.completion : null),
   );
   if (problems.length) return problems;
   for (const [k, e] of v.samples.entries()) {

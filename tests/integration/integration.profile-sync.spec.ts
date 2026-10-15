@@ -82,16 +82,21 @@ async function signedIn(page: Page) {
 }
 
 /** The fixture test leader (outbox and sync) over a fixture-seeded snapshot. */
-async function leader(page: Page, account: string, startSync: boolean) {
+async function leader(
+  page: Page,
+  account: string,
+  startSync: boolean,
+  observeDispatch = false,
+) {
   await page.evaluate((a) => window.__atlasData?.prepareAccount(a), account);
   await page.evaluate(
-    async ({ a, s }) => {
+    async ({ a, s, o }) => {
       const data = window.__atlasData;
       if (!data) throw new Error("no data harness");
-      await data.startOutbox(a, { start: true });
+      await data.startOutbox(a, { start: true, observeDispatch: o });
       if (s) await data.startSync(a);
     },
-    { a: account, s: startSync },
+    { a: account, s: startSync, o: observeDispatch },
   );
 }
 
@@ -167,10 +172,13 @@ test("P-4: what the page does around ONE draft submission, against the real back
   const engine = engineOf(info);
   const page = await bootHarness(context);
   const id = await signedIn(page);
-  await leader(page, id.account_id, false);
+  // Revision 14 (review 14 R2, design assessment DA-R14-A/B/C): the outbox's dispatcher is observed (fixture-only `observeDispatch`).
+  await leader(page, id.account_id, false, true);
   // Revision 13 (design assessment DA-N1): one page call enqueues once the queue holds no waiting draft; one observation reads the send,
-  // its answer and the `/commands` entries; the draft's recorded outcome closes the sample. A first attempt that got no answer (not sent,
-  // aborted) followed by a second send fails the sample: it never donates its send time.
+  // its answer and the `/commands` entries. A first attempt that got no answer (not sent, aborted) followed by a second send fails the
+  // sample: it never donates its send time. Revision 14: the sample is closed by the observed dispatcher's OWN admitted receipt of that
+  // draft (same dispatcher, run, service and epoch, nothing else recorded), read with the binding checked across every await, never by a
+  // later queue status.
   const c = await collectDraftSamples(samplePageOf(page), {
     warmup: WARMUP,
     samples: SAMPLES,
@@ -199,7 +207,7 @@ test("P-4: what the page does around ONE draft submission, against the real back
   const extra = {
     warmup: WARMUP,
     method:
-      "enqueue = the strict enqueue transaction; claim = enqueue complete to the dispatcher's send event (wake, window read, markInFlight); stamping = send event to requestStart (lease cover write, issue); request = the real backend on loopback; record = responseEnd to the answer event (the release checks and the outcome transaction); total = the enqueue's start to the observation that read the answer and its request. Each sample is one send, its answer and its one /commands request (draft-request-sample/1). Trace times are rounded to 1 ms.",
+      "enqueue = the strict enqueue transaction; claim = enqueue complete to the dispatcher's send event (wake, window read, markInFlight); stamping = send event to requestStart (lease cover write, issue); request = the real backend on loopback; record = responseEnd to the answer event (reading and classifying the response body; production emits the answer event BEFORE it awaits the receipt transaction, so that transaction is not inside record or total); total = the enqueue's start to the observation that read the answer and its request. Each sample is one send, its answer (a receipt) and its one /commands request, completed by the same dispatcher's applied/admitted receipt transaction of that draft, which is evidence of completion, not a timing endpoint (draft-request-sample/2). Trace times are rounded to 1 ms.",
   };
   record("P-4 draft enqueue_ms", engine, enqueue, extra);
   record("P-4 draft claim_ms", engine, claim, extra);

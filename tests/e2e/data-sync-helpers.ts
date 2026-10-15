@@ -577,6 +577,8 @@ export async function startOutbox(
     estimateLagsWrites?: boolean;
     /** FIXTURE clock injection (R28, revision 17): the guard has the page's monotonic clock, so a clock offset is a STEP of the wall clock. */
     quotaMonotonic?: boolean;
+    /** FIXTURE (WEB-09c revision 14): the dispatcher's commits, requests and lifecycle are recorded (`dispatchLog`). */
+    observeDispatch?: boolean;
   } = {},
 ): Promise<void> {
   await page.evaluate(

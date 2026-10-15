@@ -122,6 +122,13 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > pre-issue instead of 2), and that its three selected lines let no consumer see the end in between; the design assessment also found the P-4 draft path
 > taking the FIRST send of a retried draft. Revision 13 retains each sample's bounded witness and derives the operation from it in the writer and again in
 > the consumer (contract version 8, below). No measurement was taken under version 7, and no figure here changes.
+>
+> **Status after review 14 (revision 14, 15 October 2026).** Review 14 found revision 13's P-4 draft sample closed on a later, unfenced queue read: any
+> status but queued/in-flight passed, so a read that threw, a replacement page's empty queue and a row a later retry acknowledged each completed the first
+> attempt and supported the desktop decision (synthetic actual-collector diagnostics; no Air programme ran on revision 13). Production emits the answer event
+> BEFORE it awaits the receipt transaction, so the answer is not the end of the operation. Revision 14 closes each draft sample on the observed dispatcher's
+> own admitted receipt of that draft, with the binding checked across every await (contract version 9, below). No measurement was taken under version 8,
+> and no figure here changes.
 
 ## Read this first
 
@@ -518,7 +525,7 @@ From revision 3 (review 3 R2; contract version 2) a cell is complete only when i
 * the device page's file is a protocol's, in plan order, with a terminal state and planned count that agree with it, and every run carries its path's figures
   (schema 4: an engine run carries the observation its outcome was classified from and the cache it left, both judged as a cold run's are);
 * P-2's scan and commit series are recomputed from their per-sample support (contract version 7), and the P-4/P-10 sync segments and the P-4
-  draft segments from each sample's bounded witness (contract version 8, below);
+  draft segments from each sample's bounded witness (contract version 8; the draft witness's completion evidence, version 9, below);
 * every row lies in the lines its stage sealed; malformed nested evidence is a named finding of its cell, never a crash or an empty success.
 
 From revision 9 (review 9 R2; contract version 4) every admitted or refused P-11 and P-W2 cold run carries the one observation it was classified from
@@ -579,11 +586,30 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   ignored. Warm-ups follow the same rule; the first incomplete sample stops the collection and is written, with its witness, into the support file
   (`failure`) before the test fails. P-4 draft: one page call waits for an empty queue, marks and enqueues; the sample is the first send
   (`resend: false`) after the enqueue, its first answer with no second send or failed step between, the one `/commands` entry inside them and the draft's
-  own recorded outcome (`draft-request-sample/1`, `samples/P-4.draft.<engine>.json`); a first attempt that got no answer (not sent, aborted) never donates
+  own recorded outcome (`draft-request-sample/1`, `samples/P-4.draft.<engine>.json`; its completion rule is superseded by revision 14, below); a first attempt that got no answer (not sent, aborted) never donates
   its send. The draft total runs to the observation that read the answer (its line's 1 ms rounding allowed). The contract re-derives every selection from
   the witness with the writers' own rule (`scripts/lib/profile-sample-rules.mjs`), binds each file to its series' engine, stage, invocation and test, and
   recomputes every value; segment definitions are unchanged. Version-7 evidence resolves incomplete and stays history. Limits: ResourceTiming carries no
   request identity, so uniqueness is established by the bounded window (cleared at the mark, no open step, one draft in the queue), not by a request key.
+* **A draft sample is complete only by its own dispatch's receipt (revision 14; contract version 9).** The P-4 draft caller starts the fixture outbox with
+  `observeDispatch` (`src/fixture/data-harness/dispatch-observer.ts`, a lazy fixture-only chunk): the dispatcher's own commits (claim, receipt, outcome)
+  with their ACTUAL outer and inner results, its writer runs, its stamped requests by `Idempotency-Key` and its lifecycle are recorded with a monotone
+  sequence, the dispatcher serial and start count and the service serial captured from the actor at the call. The wrappers return the production promises
+  unchanged and only append to a bounded log (measured overhead at most about 4 microseconds per wrapped call in Firefox, under 1 in Chromium and WebKit;
+  three wrapped calls per sample). The witness (`draft-request-sample/2`) carries the dispatch identity (page, time origin, account and epoch, service
+  serial and liveness, dispatcher serial, start count, running) read before and after the queue read (a change refuses before anything is enqueued), after
+  the enqueue, at the timing read and on both sides of the completion read; the enqueue's result; the timing read (unchanged: the observation that read the
+  answer and its request; `done` is its time); and the completion read, made once the observed receipt has delivered its result: the row read through the
+  bound service, then the outbox trace, the dispatch records and the `/commands` entries from the mark. Rule: the identity is complete and unchanged; the
+  outbox trace up to the completion read is one first send and one answer of kind `receipt` (a non-receipt answer is outside the measured healthy
+  population, a further send, answer or failed step is invalid); the dispatch records are exactly the claim of that draft (applied/claimed), one request
+  keyed by it with a response, and one `data.admitReceipt` of it, applied/admitted, all by the sample's dispatcher, start and service at its epoch, and
+  nothing else (another draft's dispatch, an unclaim, a failure record, a local-write outcome, a lifecycle change or a second request is invalid); a
+  receipt still running, or gated before its transaction is admitted, is pending, never complete; the row corroborates (`removed` means gone, otherwise
+  `acknowledged`; a read failure, another waiting draft or a contradiction is invalid, never absence); exactly one `/commands` entry since the mark, inside
+  [send, answer] and seen by the timing read. Each mark follows the previous completion read. Segments unchanged: `record` ends at the answer event and so
+  does NOT include the receipt transaction (the method text says so); completion time is evidence, not an endpoint. Version-8 draft support resolves
+  incomplete and stays history.
 * **Device results are schema 4 (revision 12; schema 3 below is its predecessor).** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
   admitted run's figures must equal; W5 and killed attempts carry none. Schema 4 adds the run's own observation (made by the page with the same cold

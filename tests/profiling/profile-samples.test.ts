@@ -4,10 +4,11 @@ import {
   syncWitnessSelection,
 } from "../../scripts/lib/profile-sample-rules.mjs";
 import {
+  closeDraftSample,
   collectDraftSamples,
   collectSyncSamples,
-  type DraftMark,
-  draftStatus,
+  type DraftWitness,
+  draftCompletionReady,
   p2SampleProblems,
   prepareDraftSample,
   prepareSyncSample,
@@ -52,6 +53,25 @@ interface HarnessDouble {
   outbox: string[];
   rows: Array<{ local_id: string; status: string }>;
   onEnqueue: (localId: string) => void;
+  /** Revision 14: the dispatch identity (`dispatchIdentity`), the observed dispatcher's records and the bound service's row read. */
+  identity: {
+    page: string;
+    account: string | null;
+    identity_account: string | null;
+    epoch: number | null;
+    service: number | null;
+    incarnation: string | null;
+    live: boolean;
+    current_service: number | null;
+    dispatcher: number | null;
+    run: number | null;
+    running: boolean;
+    observing: boolean;
+  };
+  log: Array<Record<string, unknown> & { seq: number }>;
+  logFirst: number;
+  seq: number;
+  onBoundDraft: () => void | Promise<void>;
 }
 let harness: HarnessDouble;
 let clears = 0;
@@ -67,6 +87,24 @@ beforeEach(() => {
     outbox: [],
     rows: [],
     onEnqueue: () => {},
+    identity: {
+      page: "page-1",
+      account: "a",
+      identity_account: "a",
+      epoch: 3,
+      service: 2,
+      incarnation: "inc-1",
+      live: true,
+      current_service: 2,
+      dispatcher: 1,
+      run: 1,
+      running: true,
+      observing: true,
+    },
+    log: [],
+    logFirst: 0,
+    seq: 0,
+    onBoundDraft: () => {},
   };
   (window as unknown as { __atlasData: unknown }).__atlasData = {
     get engineTrace() {
@@ -93,6 +131,26 @@ beforeEach(() => {
       harness.rows.push({ local_id: localId, status: "queued" });
       harness.onEnqueue(localId);
       return { kind: "queued", localId };
+    },
+    dispatchIdentity() {
+      return { ...harness.identity };
+    },
+    get dispatchLog() {
+      return harness.log;
+    },
+    dispatchFirst: () => harness.log[0]?.seq ?? harness.seq,
+    dispatchNext: () => harness.seq,
+    async boundDraft(localId: string) {
+      await harness.onBoundDraft();
+      const row = harness.rows.find((r) => r.local_id === localId);
+      return {
+        row: row ? { ...row } : null,
+        waiting: harness.rows.filter(
+          (r) =>
+            r.local_id !== localId &&
+            (r.status === "queued" || r.status === "in_flight"),
+        ).length,
+      };
     },
   };
   vi.spyOn(performance, "getEntriesByType").mockImplementation(
@@ -190,7 +248,8 @@ describe("P-2: the sample's own page (selectP2Sample, p2SampleProblems)", () => 
 });
 
 // ---- P-4/P-10 (revision 13; review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1, Q1/Q2/Q4) ----------------------------------------------
-// The page functions (`prepareSyncSample`, `readSyncSample`, `prepareDraftSample`, `readDraftSample`, `draftStatus`), the shared rule
+// The page functions (`prepareSyncSample`, `readSyncSample`, `prepareDraftSample`, `readDraftSample`, `draftCompletionReady`,
+// `closeDraftSample`; revision 13's `draftStatus` was replaced in revision 14), the shared rule
 // (scripts/lib/profile-sample-rules.mjs) and the collectors both integration writers call, over the harness double above. Every expected
 // value is written here from the production order (sync-engine.ts `tick`: a non-coalesced `data.sync_tick`, the step's request and
 // commit, then `data.sync_next`; a gate or a failed step ends a step with no request; outbox-dispatcher.ts: `data.outbox_send` before the
@@ -209,7 +268,8 @@ const inPage = {
   readSyncSample: isolated(readSyncSample),
   prepareDraftSample: isolated(prepareDraftSample),
   readDraftSample: isolated(readDraftSample),
-  draftStatus: isolated(draftStatus),
+  draftCompletionReady: isolated(draftCompletionReady),
+  closeDraftSample: isolated(closeDraftSample),
 };
 
 const mark = (): SyncMark => {
@@ -628,171 +688,866 @@ describe("P-4/P-10 sync: the shared collector both writers call (Q2)", () => {
   });
 });
 
-describe("P-4 draft: one send, its answer and its request per sample (Q4, DA-N1)", () => {
+// ---- P-4 draft (revision 14; review 14 R2, design assessment DA-R14-A/B/C, Q1-Q5) -----------------------------------------------------------
+// The actual page functions (rebuilt from their source text) and collector over the harness double, now with a dispatch identity, the
+// observed dispatcher's records and the bound service's row read. Every schedule writes the dispatcher's acts in production order
+// (outbox-dispatcher.ts `attempt`/`answer`: the claim commit, `data.outbox_send`, the stamped request keyed by the local ID, its response,
+// `data.outbox_answer`, THEN the receipt commit, whose result arrives later) and every expected value and problem is stated here by hand.
+// Revision 13's three draft cases are carried as labelled adaptations: its healthy control is Q1's control (the completion is now the
+// receipt record, not a later queue status), its aborted-then-resent case keeps its expected problem, and its "outcome never recorded"
+// case is the pending receipt below.
+describe("P-4 draft: one send, its answer, its request and its own completion per sample (revision 14, Q1-Q5)", () => {
   let clock = 0;
+  let lastRequest = -1;
+  let lastReceipt = -1;
+  let enqueues = 0;
+  const COMMANDS = "http://127.0.0.1:4100/api/experimental/v1/commands";
+  const PATH = "/api/experimental/v1/commands";
   beforeEach(() => {
     actions = [];
-    clock = 5_000;
+    clock = 0;
+    enqueues = 0;
     vi.spyOn(performance, "now").mockImplementation(() => clock);
   });
-  const dispatched = (
-    localId: string,
-    sends: Array<{ at: number; answered: boolean }>,
-  ) => {
-    const out: Array<() => void> = [];
-    for (const [k, send] of sends.entries()) {
-      out.push(() => {
-        clock = send.at;
-        harness.outbox.push(
-          `${send.at}ms data.outbox_send ${JSON.stringify({ resend: k > 0 })}`,
-        );
-      });
-      if (!send.answered) continue;
-      out.push(() => {
-        resources.push({
-          name: "http://127.0.0.1:4100/api/experimental/v1/commands",
-          startTime: send.at + 1.5,
-          requestStart: send.at + 2,
-          responseEnd: send.at + 10,
-        });
-        clock = send.at + 11;
-        harness.outbox.push(
-          `${send.at + 11}ms data.outbox_answer ${JSON.stringify({ kind: "receipt" })}`,
-        );
-      });
-    }
-    out.push(() => {
-      clock += 1;
+  /** A record of the observed dispatcher: the actor (dispatcher, run, service, epoch) as the identity says NOW unless given. */
+  const rec = (event: string, fields: Record<string, unknown>) => {
+    const seq = harness.seq;
+    harness.seq += 1;
+    harness.log.push({
+      seq,
+      at: clock,
+      event,
+      dispatcher: harness.identity.dispatcher,
+      run: harness.identity.run,
+      ...fields,
     });
-    out.push(() => {
-      const row = harness.rows.find((r) => r.local_id === localId);
-      if (row) row.status = "acknowledged";
-    });
-    return out;
+    return seq;
   };
-
-  it("control: one enqueue (1.5 ms), send at +8.5, request 8, answer: enqueue 1.5, claim 8.5, stamping 2, request 8, record 1; the draft's recorded outcome closes it", async () => {
-    let next = 5_010;
+  const actor = () => ({
+    service: harness.identity.service,
+    epoch: harness.identity.epoch,
+  });
+  /** The dispatcher's acts on draft `id`, one step each (a step is what happens between two observations). */
+  const act = {
+    claim:
+      (id: string, at: number, end = at + 0.5) =>
+      () => {
+        clock = at;
+        const of = rec("commit_begin", {
+          plan: "data.markInFlight",
+          local_id: id,
+          ...actor(),
+        });
+        clock = end;
+        rec("commit_end", {
+          of,
+          plan: "data.markInFlight",
+          local_id: id,
+          ...actor(),
+          outer: "applied",
+          inner: "claimed",
+        });
+        const row = harness.rows.find((r) => r.local_id === id);
+        if (row) row.status = "in_flight";
+      },
+    send:
+      (id: string, at: number, resend = false) =>
+      () => {
+        clock = at;
+        harness.outbox.push(
+          `${at}ms data.outbox_send ${JSON.stringify({ resend })}`,
+        );
+        lastRequest = rec("request_begin", { key: id, path: PATH });
+      },
+    respond:
+      (
+        id: string,
+        r: { startTime: number; requestStart: number; responseEnd: number },
+      ) =>
+      () => {
+        resources.push({ name: COMMANDS, ...r });
+        clock = r.responseEnd + 0.1;
+        rec("request_end", {
+          of: lastRequest,
+          key: id,
+          path: PATH,
+          outer: "response",
+          http: 200,
+        });
+      },
+    abort: (id: string, at: number) => () => {
+      clock = at;
+      rec("request_end", {
+        of: lastRequest,
+        key: id,
+        path: PATH,
+        outer: "error",
+        error: "TypeError",
+      });
+    },
+    /** The answer line, then (synchronously, as production) the receipt commit's call; the clock then stands at `then`. */
+    answer:
+      (id: string, at: number, then = at + 0.05, kind = "receipt") =>
+      () => {
+        clock = at;
+        harness.outbox.push(
+          `${at}ms data.outbox_answer ${JSON.stringify({ kind })}`,
+        );
+        clock = at + 0.05;
+        lastReceipt = rec("commit_begin", {
+          plan: "data.admitReceipt",
+          local_id: id,
+          ...actor(),
+        });
+        clock = then;
+      },
+    receipt:
+      (
+        id: string,
+        at: number,
+        result: Record<string, unknown> = {
+          outer: "applied",
+          inner: "admitted",
+          removed: false,
+        },
+      ) =>
+      () => {
+        clock = at;
+        rec("commit_end", {
+          of: lastReceipt,
+          plan: "data.admitReceipt",
+          local_id: id,
+          ...actor(),
+          ...result,
+        });
+        if (result.outer !== "applied" || result.inner !== "admitted") return;
+        const at_ = harness.rows.findIndex((r) => r.local_id === id);
+        if (result.removed === true) harness.rows.splice(at_, 1);
+        else if (at_ >= 0)
+          harness.rows[at_] = { local_id: id, status: "acknowledged" };
+      },
+  };
+  /** A healthy dispatch of `id` from `base` (the enqueue ends at base + 1): send +9, request +10/+11/+19, answer +20, receipt +30. */
+  const healthy = (id: string, base: number) => [
+    act.claim(id, base + 4),
+    act.send(id, base + 9),
+    act.respond(id, {
+      startTime: base + 10,
+      requestStart: base + 11,
+      responseEnd: base + 19,
+    }),
+    act.answer(id, base + 20, base + 21),
+    act.receipt(id, base + 30),
+  ];
+  /** Each enqueue: the clock moves one millisecond and `schedule(localId, base)` supplies the dispatcher's steps. */
+  const enqueueWith = (
+    schedule: (localId: string, base: number) => Array<() => void>,
+  ) => {
     (
       window as unknown as { __atlasData: { enqueue: unknown } }
     ).__atlasData.enqueue = async () => {
+      enqueues += 1;
       const localId = `draft-${harness.rows.length + 1}`;
       harness.rows.push({ local_id: localId, status: "queued" });
-      clock += 1.5;
-      const send = next;
-      next += 100;
-      actions.push(...dispatched(localId, [{ at: send, answered: true }]));
+      const base = clock;
+      clock += 1;
+      actions.push(...schedule(localId, base));
       return { kind: "queued", localId };
     };
-    clock = 5_000;
-    const c = await collectDraftSamples(scripted(), {
-      ...OPTIONS,
-      warmup: 1,
-      samples: 2,
-      account: "a",
-      person: () => "p",
-    });
-    expect(c.failure).toBeNull();
-    expect(c.samples.map((e) => [e.index, e.settled])).toEqual([
-      [1, { local_id: "draft-2", status: "acknowledged" }],
-      [2, { local_id: "draft-3", status: "acknowledged" }],
-    ]);
-    for (const v of c.values) {
-      expect(v.enqueue_ms).toBe(1.5);
-      expect(v.stamping_ms).toBe(2);
-      expect(v.request_ms).toBe(8);
-      expect(v.record_ms).toBe(1);
-    }
-    expect(draftWitnessSelection(c.samples[0]).selected).toEqual(
-      c.samples[0]?.selected,
-    );
+  };
+  /** The page as Playwright drives it: `poll` observes, then lets one step happen; `run` runs the function once. */
+  const driven = (limit = 60): SamplePage => ({
+    async poll(fn, arg, o) {
+      const page = isolated(fn);
+      for (let n = 0; n < limit; n += 1) {
+        const out = page(arg);
+        if (out !== null) return out;
+        await Promise.resolve();
+        actions.shift()?.();
+      }
+      throw new Error(`Timeout ${o.timeout}ms exceeded`);
+    },
+    async run(fn, arg) {
+      return await isolated(fn)(arg);
+    },
   });
+  const OPT = {
+    timeout: 30_000,
+    polling: 5,
+    account: "a",
+    person: () => "p",
+  };
+  const one = (page: SamplePage = driven()) =>
+    collectDraftSamples(page, { ...OPT, warmup: 0, samples: 1 });
+  const witness = (c: Awaited<ReturnType<typeof one>>) =>
+    (c.samples[0] ?? c.failure?.witness) as DraftWitness;
 
-  it("case (DA-N1): enqueue at 1-2, send A at 10 not sent (no answer), send B at 100, request 102-110, answer 111: the sample fails as sent again; 92 ms is never its stamping time", async () => {
-    (
-      window as unknown as { __atlasData: { enqueue: unknown } }
-    ).__atlasData.enqueue = async () => {
-      harness.rows.push({ local_id: "draft-1", status: "queued" });
-      clock = 2;
-      actions.push(
-        ...dispatched("draft-1", [
-          { at: 10, answered: false },
-          { at: 100, answered: true },
-        ]),
-      );
-      return { kind: "queued", localId: "draft-1" };
+  it("Q1 control: enqueue 1-2, send 10, request 11/12/20, answer 21, timing read 22, receipt completes 40, completion read 41: values 1/8/2/8/1/21; completion is evidence, not an endpoint", async () => {
+    enqueueWith((id) => [
+      act.claim(id, 5),
+      act.send(id, 10),
+      act.respond(id, { startTime: 11, requestStart: 12, responseEnd: 20 }),
+      act.answer(id, 21, 22),
+      act.receipt(id, 40),
+    ]);
+    harness.onBoundDraft = () => {
+      clock = 41;
     };
     clock = 1;
-    const c = await collectDraftSamples(scripted(), {
-      ...OPTIONS,
+    const c = await one();
+    expect(c.failure).toBeNull();
+    expect(c.values).toEqual([
+      {
+        enqueue_ms: 1,
+        claim_ms: 8,
+        stamping_ms: 2,
+        request_ms: 8,
+        record_ms: 1,
+        total_ms: 21,
+      },
+    ]);
+    const w = witness(c);
+    expect(w.timing.done).toBe(22);
+    expect(w.completion.at).toBe(41);
+    expect(w.records.at(-1)).toMatchObject({
+      event: "commit_end",
+      plan: "data.admitReceipt",
+      at: 40,
+      outer: "applied",
+      inner: "admitted",
+    });
+    expect(w.completion.row).toEqual({
+      kind: "row",
+      local_id: "draft-1",
+      status: "acknowledged",
+    });
+    expect(c.samples[0]?.selected).toEqual({
+      send: 0,
+      answer: 1,
+      request: 0,
+      claim: 0,
+      issued: 2,
+      receipt: 4,
+      received: 5,
+    });
+    expect(draftWitnessSelection(w).selected).toEqual(c.samples[0]?.selected);
+  });
+
+  it("Q1/Q2 control: warm-ups and samples each close on their own receipt; a receipt that removed the row (admitted, removed) is complete with the row absent; each mark follows the previous completion read", async () => {
+    let n = 0;
+    enqueueWith((id, base) => {
+      n += 1;
+      const steps = healthy(id, base);
+      if (n === 3)
+        steps[4] = act.receipt(id, base + 30, {
+          outer: "applied",
+          inner: "admitted",
+          removed: true,
+        });
+      return steps;
+    });
+    const c = await collectDraftSamples(driven(), {
+      ...OPT,
+      warmup: 1,
+      samples: 3,
+    });
+    expect(c.failure).toBeNull();
+    expect(c.samples.map((e) => [e.index, e.completion.row.kind])).toEqual([
+      [1, "row"],
+      [2, "absent"],
+      [3, "row"],
+    ]);
+    for (const [k, e] of c.samples.entries()) {
+      expect(c.values[k]).toEqual({
+        enqueue_ms: 1,
+        claim_ms: 8,
+        stamping_ms: 2,
+        request_ms: 8,
+        record_ms: 1,
+        total_ms: 21,
+      });
+      if (k > 0) {
+        const previous = c.samples[k - 1]?.completion;
+        expect(e.mark.from).toBeGreaterThanOrEqual(previous?.to ?? 0);
+        expect(e.mark.log_from).toBeGreaterThanOrEqual(previous?.log_to ?? 0);
+      }
+    }
+    expect(enqueues).toBe(4);
+  });
+
+  it("Q1 case: a receipt still running at the time-out is pending (never complete); the witness keeps the call; nothing further is enqueued", async () => {
+    enqueueWith((id, base) => healthy(id, base).slice(0, 4));
+    const c = await collectDraftSamples(driven(12), {
+      ...OPT,
+      timeout: 40,
       warmup: 0,
-      samples: 1,
-      account: "a",
-      person: () => "p",
+      samples: 3,
     });
     expect(c.values).toEqual([]);
     expect(c.failure).toMatchObject({
       index: 0,
-      problem:
-        "the draft was sent again before an answer: a first attempt that got no answer cannot donate its send",
+      problem: "the draft's receipt transaction has not completed within 40 ms",
     });
-    expect(
-      (c.failure?.witness as { lines: string[] } | undefined)?.lines,
-    ).toHaveLength(2);
+    expect(witness(c).records.at(-1)).toMatchObject({
+      event: "commit_begin",
+      plan: "data.admitReceipt",
+    });
+    expect(enqueues).toBe(1);
   });
 
-  it("case: a draft still waiting from before is waited for (nothing enqueued meanwhile); a draft whose outcome is never recorded fails; an answer with no visible request keeps the page polling", async () => {
-    harness.rows.push({ local_id: "old", status: "in_flight" });
-    actions.push(
-      () => {},
-      () => {
-        harness.rows[0] = { local_id: "old", status: "acknowledged" };
-      },
+  it("Q1/Q4 case (review 14): answer A, its receipt transaction FAILS, the draft is resent and B's receipt admitted: the sample is invalid at A's failed receipt, also when read after B; B never completes it and the totals never move", async () => {
+    for (const late of [false, true]) {
+      harness.rows = [];
+      harness.outbox = [];
+      harness.log = [];
+      harness.seq = 0;
+      resources = [];
+      actions = [];
+      enqueueWith((id, base) => [
+        ...healthy(id, base).slice(0, 4),
+        act.receipt(id, base + 25, { outer: "failed", reason: "abort" }),
+        () => {
+          rec("write_begin", {
+            plan: "data.recordLocalWriteOutcome",
+            local_id: null,
+            service: harness.identity.service,
+          });
+        },
+        act.send(id, base + 300, true),
+        act.respond(id, {
+          startTime: base + 301,
+          requestStart: base + 302,
+          responseEnd: base + 310,
+        }),
+        act.answer(id, base + 311),
+        act.receipt(id, base + 320),
+      ]);
+      // A late completion read: every later step has happened before the row is read.
+      harness.onBoundDraft = late
+        ? () => {
+            for (let step = actions.shift(); step; step = actions.shift())
+              step();
+          }
+        : () => {};
+      clock = 1;
+      const c = await one();
+      expect(c.values).toEqual([]);
+      expect(c.failure?.problem).toBe(
+        "the draft's receipt transaction was not applied (failed/abort)",
+      );
+      const w = witness(c);
+      expect(w.timing.done).toBe(22);
+      if (late) {
+        expect(w.completion.row).toMatchObject({ status: "acknowledged" });
+        expect(w.lines).toHaveLength(4);
+        expect(w.resources).toHaveLength(2);
+      }
+    }
+  });
+
+  it("Q2 cases: the receipt's actual result decides: dropped, applied/noop, failed are invalid with their own reason; a row contradicting the receipt, a read failure, a row still queued or another draft waiting are invalid; nothing is taken as absence", async () => {
+    const cases: Array<
+      [string, (id: string, base: number) => Array<() => void>, string]
+    > = [
+      [
+        "dropped",
+        (id, base) => [
+          ...healthy(id, base).slice(0, 4),
+          act.receipt(id, base + 30, {
+            outer: "dropped",
+            reason: "unverified",
+          }),
+        ],
+        "the draft's receipt transaction was not applied (dropped/unverified)",
+      ],
+      [
+        "noop",
+        (id, base) => [
+          ...healthy(id, base).slice(0, 4),
+          act.receipt(id, base + 30, {
+            outer: "applied",
+            inner: "noop",
+            reason: "not_in_flight",
+          }),
+        ],
+        "the draft's receipt was not admitted (noop/not_in_flight)",
+      ],
+      [
+        "kept but gone",
+        (id, base) => [
+          ...healthy(id, base),
+          () => {
+            harness.rows = harness.rows.filter((r) => r.local_id !== id);
+          },
+        ],
+        "the draft's row is gone though its receipt kept it: no recorded relation explains the removal",
+      ],
+      [
+        "removed but present",
+        (id, base) => [
+          ...healthy(id, base).slice(0, 4),
+          act.receipt(id, base + 30, {
+            outer: "applied",
+            inner: "admitted",
+            removed: true,
+          }),
+          () => {
+            harness.rows.push({ local_id: id, status: "acknowledged" });
+          },
+        ],
+        "the receipt removed the draft's row but the completion read found it (acknowledged)",
+      ],
+      [
+        "still queued",
+        (id, base) => [
+          ...healthy(id, base),
+          () => {
+            const row = harness.rows.find((r) => r.local_id === id);
+            if (row) row.status = "queued";
+          },
+        ],
+        "the completion read found the draft queued, not acknowledged",
+      ],
+      [
+        "another waiting",
+        (id, base) => [
+          ...healthy(id, base),
+          () => {
+            harness.rows.push({ local_id: "intruder", status: "queued" });
+          },
+        ],
+        "another draft was waiting at the completion read",
+      ],
+    ];
+    for (const [label, schedule, problem] of cases) {
+      harness.rows = [];
+      harness.outbox = [];
+      harness.log = [];
+      harness.seq = 0;
+      resources = [];
+      actions = [];
+      enqueueWith(schedule);
+      // Whatever the schedule still holds happens before the row is read.
+      harness.onBoundDraft = () => {
+        for (let step = actions.shift(); step; step = actions.shift()) step();
+      };
+      const c = await one();
+      expect(c.failure?.problem, label).toBe(problem);
+      expect(c.values, label).toEqual([]);
+    }
+    // The row read fails (review 14's unreadable queue): a recorded read failure with its diagnostic, never `absent`.
+    harness.rows = [];
+    harness.outbox = [];
+    harness.log = [];
+    harness.seq = 0;
+    resources = [];
+    actions = [];
+    enqueueWith(healthy);
+    harness.onBoundDraft = () => {
+      throw new Error("independent injected queue read failure");
+    };
+    const c = await one();
+    expect(c.failure?.problem).toBe(
+      "the completion read failed: Error: independent injected queue read failure",
     );
+    expect(witness(c).completion.row).toEqual({
+      kind: "error",
+      problem: "Error: independent injected queue read failure",
+    });
+  });
+
+  it("Q3 cases: the binding is checked at every await: a change during the queue read refuses with nothing enqueued; during the enqueue fails at once; between the timing and completion reads, or during the completion read, fails with what changed", async () => {
+    // During the queue read: the dispatcher is rebuilt; nothing is enqueued.
+    const queue = (window as unknown as { __atlasData: { queue: unknown } })
+      .__atlasData;
+    const realQueue = queue.queue as () => Promise<unknown>;
+    queue.queue = async () => {
+      harness.identity = { ...harness.identity, dispatcher: 2, run: 1 };
+      return realQueue();
+    };
+    enqueueWith(healthy);
+    let c = await one();
+    expect(c.failure?.problem).toBe(
+      "the dispatch binding changed during the queue read: nothing was enqueued",
+    );
+    expect(enqueues).toBe(0);
+    queue.queue = realQueue;
+    const reset = () => {
+      harness.identity = {
+        ...harness.identity,
+        page: "page-1",
+        dispatcher: 1,
+        run: 1,
+        running: true,
+        service: 2,
+        current_service: 2,
+        live: true,
+        epoch: 3,
+        account: "a",
+        identity_account: "a",
+      };
+      harness.rows = [];
+      harness.outbox = [];
+      harness.log = [];
+      harness.seq = 0;
+      resources = [];
+      actions = [];
+    };
+    // During the enqueue: the account's service is replaced.
+    reset();
     (
       window as unknown as { __atlasData: { enqueue: unknown } }
     ).__atlasData.enqueue = async () => {
-      harness.rows.push({ local_id: "draft-2", status: "queued" });
-      clock += 1;
-      actions.push(
-        ...dispatched("draft-2", [{ at: clock + 5, answered: true }]).slice(
-          0,
-          -1,
-        ),
-      );
-      return { kind: "queued", localId: "draft-2" };
+      enqueues += 1;
+      harness.identity = {
+        ...harness.identity,
+        service: 3,
+        current_service: 3,
+      };
+      harness.rows.push({ local_id: "draft-1", status: "queued" });
+      return { kind: "queued", localId: "draft-1" };
     };
-    const c = await collectDraftSamples(scripted(), {
-      ...OPTIONS,
-      polling: 1,
-      timeout: 40,
-      warmup: 0,
-      samples: 1,
-      account: "a",
-      person: () => "p",
-    });
-    expect(c.failure?.problem).toBe("the draft's outcome was not recorded");
-    expect(
-      (c.failure?.witness as { mark: DraftMark } | undefined)?.mark.waiting,
-    ).toBe(0);
-    // The page function itself: an answer whose /commands entry is not yet visible is not read.
-    for (const row of harness.rows) row.status = "acknowledged";
+    c = await one();
+    expect(c.failure?.problem).toBe(
+      "the account service ended or was replaced during the sample (after the enqueue: service, current_service)",
+    );
+    // Refused at once: nothing is observed or read for a draft the sample no longer owns.
+    expect(c.failure?.witness).not.toHaveProperty("timing");
+    expect(c.failure?.witness).not.toHaveProperty("completion");
+    const between: Array<[string, () => void, string]> = [
+      [
+        "page replaced",
+        () => {
+          harness.identity = { ...harness.identity, page: "page-2" };
+        },
+        "the page was reloaded or replaced during the sample (before the completion read: page)",
+      ],
+      [
+        "dispatcher restarted",
+        () => {
+          harness.identity = { ...harness.identity, run: 2 };
+        },
+        "the dispatcher was rebuilt, restarted or stopped during the sample (before the completion read: run)",
+      ],
+      [
+        "service ended",
+        () => {
+          harness.identity = { ...harness.identity, live: false };
+        },
+        "the account service ended or was replaced during the sample (before the completion read: live)",
+      ],
+      [
+        "epoch",
+        () => {
+          harness.identity = { ...harness.identity, epoch: 4 };
+        },
+        "the account or its epoch changed during the sample (before the completion read: epoch)",
+      ],
+      [
+        "account A, B, A",
+        () => {
+          // Back on account A, but through a new service object: equal account strings do not hide the change.
+          harness.identity = {
+            ...harness.identity,
+            service: 5,
+            current_service: 5,
+          };
+        },
+        "the account service ended or was replaced during the sample (before the completion read: service, current_service)",
+      ],
+    ];
+    for (const [label, change, problem] of between) {
+      reset();
+      enqueueWith((id, base) => [
+        ...healthy(id, base).slice(0, 4),
+        change,
+        act.receipt(id, base + 30),
+      ]);
+      harness.onBoundDraft = () => {};
+      c = await one();
+      expect(c.failure?.problem, label).toBe(problem);
+    }
+    // During the completion read: the dispatcher is stopped while the row is being read.
+    reset();
+    enqueueWith(healthy);
+    harness.onBoundDraft = async () => {
+      await Promise.resolve();
+      harness.identity = { ...harness.identity, running: false };
+    };
+    c = await one();
+    expect(c.failure?.problem).toBe(
+      "the dispatcher was rebuilt, restarted or stopped during the sample (after the completion read: running)",
+    );
+    // An OLD completion delivered after the replacement: the receipt result comes from dispatcher 1 while dispatcher 2 is bound.
+    reset();
+    enqueueWith((id, base) => [
+      ...healthy(id, base).slice(0, 4),
+      () => {
+        harness.identity = { ...harness.identity, dispatcher: 2, run: 1 };
+        rec("dispatcher_built", { dispatcher: 2, run: 0 });
+      },
+      () => {
+        clock = base + 30;
+        rec("commit_end", {
+          of: lastReceipt,
+          plan: "data.admitReceipt",
+          local_id: id,
+          dispatcher: 1,
+          run: 1,
+          service: 2,
+          epoch: 3,
+          outer: "applied",
+          inner: "admitted",
+          removed: false,
+        });
+      },
+    ]);
+    harness.onBoundDraft = () => {};
+    c = await one();
+    expect(c.failure?.problem).toBe(
+      "the dispatcher was rebuilt, restarted or stopped during the sample (before the completion read: dispatcher)",
+    );
+    expect(c.values).toEqual([]);
+  });
+
+  it("Q4 cases: another draft's dispatch, a second answer, a further request or send, an earlier sample's late receipt inside the sample, a non-receipt answer and an aborted first attempt (revision 13's case) never yield a value", async () => {
+    const cases: Array<
+      [string, (id: string, base: number) => Array<() => void>, string]
+    > = [
+      [
+        "another draft claimed",
+        (id, base) => [
+          ...healthy(id, base).slice(0, 4),
+          act.claim("intruder", base + 22),
+          act.receipt(id, base + 30),
+        ],
+        "another draft's dispatch (data.markInFlight) was recorded during the sample",
+      ],
+      [
+        "second answer",
+        (id, base) => [
+          ...healthy(id, base).slice(0, 4),
+          () => {
+            harness.outbox.push(
+              `${base + 22}ms data.outbox_answer {"kind":"receipt"}`,
+            );
+          },
+          act.receipt(id, base + 30),
+        ],
+        "a second answer followed the sample's answer",
+      ],
+      [
+        "further request",
+        (id, base) => [
+          ...healthy(id, base).slice(0, 4),
+          act.send(id, base + 22, true),
+          act.receipt(id, base + 30),
+        ],
+        "the draft was requested again during the sample: a later attempt cannot complete the sample's",
+      ],
+      [
+        "earlier sample's late receipt",
+        (id, base) => [
+          () => {
+            rec("commit_end", {
+              of: 0,
+              plan: "data.admitReceipt",
+              local_id: "earlier",
+              ...actor(),
+              outer: "applied",
+              inner: "admitted",
+              removed: false,
+            });
+          },
+          ...healthy(id, base),
+        ],
+        "another draft's dispatch (data.admitReceipt) was recorded during the sample",
+      ],
+      [
+        "conflict answer",
+        (id, base) => [
+          ...healthy(id, base).slice(0, 3),
+          act.answer(id, base + 20, base + 21, "conflict"),
+          act.receipt(id, base + 30),
+        ],
+        "the draft's answer was conflict, not a receipt: outside the measured population",
+      ],
+      [
+        "aborted then resent (revision 13's DA-N1 case, adapted)",
+        (id, base) => [
+          act.claim(id, base + 4),
+          act.send(id, base + 9),
+          act.abort(id, base + 12),
+          act.send(id, base + 100, true),
+          act.respond(id, {
+            startTime: base + 101,
+            requestStart: base + 102,
+            responseEnd: base + 110,
+          }),
+          act.answer(id, base + 111),
+          act.receipt(id, base + 120),
+        ],
+        "the draft was sent again before an answer: a first attempt that got no answer cannot donate its send",
+      ],
+    ];
+    for (const [label, schedule, problem] of cases) {
+      harness.rows = [];
+      harness.outbox = [];
+      harness.log = [];
+      harness.seq = 0;
+      resources = [];
+      actions = [];
+      enqueueWith(schedule);
+      harness.onBoundDraft = () => {
+        for (let step = actions.shift(); step; step = actions.shift()) step();
+      };
+      const c = await one();
+      expect(c.failure?.problem, label).toBe(problem);
+      expect(c.values, label).toEqual([]);
+    }
+  });
+
+  it("Q5 cases: an unobserved dispatcher refuses; a trimmed record log, a full resource buffer, an entry outside the send and answer, a request no observation saw, a warm-up's failure and a completion read that rejects stop the collection with the witness kept", async () => {
+    harness.identity = { ...harness.identity, observing: false };
+    enqueueWith(healthy);
+    let c = await one();
+    expect(c.failure?.problem).toBe(
+      "the harness outbox's dispatcher is not observed (observeDispatch)",
+    );
+    expect(enqueues).toBe(0);
+    harness.identity = { ...harness.identity, observing: true };
+    const cases: Array<[string, () => void, string]> = [
+      [
+        "trimmed",
+        () => {
+          harness.log.splice(0, 1);
+        },
+        "dispatch records of the sample were trimmed from the log",
+      ],
+      [
+        "buffer full",
+        () => {
+          resources.push(
+            ...Array.from({ length: 249 }, (_, i) => ({
+              name: `http://127.0.0.1:4100/asset-${i}.js`,
+              startTime: 1,
+              requestStart: 1,
+              responseEnd: 2,
+            })),
+          );
+        },
+        "the resource-timing buffer was full: requests may be missing",
+      ],
+      [
+        "entry outside",
+        () => {
+          const r = resources.find((e) => e.name === COMMANDS);
+          if (r) r.responseEnd += 40;
+        },
+        "a /commands request overlaps the sample's operation without lying inside it",
+      ],
+    ];
+    for (const [label, edit, problem] of cases) {
+      harness.rows = [];
+      harness.outbox = [];
+      harness.log = [];
+      harness.seq = 0;
+      resources = [];
+      actions = [];
+      enqueueWith(healthy);
+      harness.onBoundDraft = edit;
+      c = await one();
+      expect(c.failure?.problem, label).toBe(problem);
+    }
+    // A warm-up's failure is the run's (no sample kept, nothing enqueued after it).
+    harness.rows = [];
+    harness.outbox = [];
+    harness.log = [];
+    harness.seq = 0;
+    resources = [];
     actions = [];
-    const m = (
-      await inPage.prepareDraftSample({ account: "a", person: "q", n: 1 })
-    )?.mark as DraftMark | undefined;
-    expect(m).toBeDefined();
-    if (!m) return;
+    enqueues = 0;
+    enqueueWith((id, base) => [
+      ...healthy(id, base).slice(0, 4),
+      act.receipt(id, base + 30, { outer: "failed", reason: "error" }),
+    ]);
+    harness.onBoundDraft = () => {};
+    // A short time-out: a collector that went on after the failed warm-up would wait for the still-in-flight draft and fail by
+    // assertion (another draft still waiting at sample 1), never by the test's own time-out.
+    c = await collectDraftSamples(driven(), {
+      ...OPT,
+      timeout: 40,
+      warmup: 2,
+      samples: 2,
+    });
+    expect(c.failure).toMatchObject({ index: 0, warmup: true });
+    expect(c.samples).toEqual([]);
+    expect(enqueues).toBe(1);
+    // The completion read rejects (the page's context was destroyed): the sample fails with its mark, enqueue and timing read kept.
+    harness.rows = [];
+    harness.outbox = [];
+    harness.log = [];
+    harness.seq = 0;
+    resources = [];
+    actions = [];
+    enqueueWith(healthy);
+    clock = 0;
+    const page = driven();
+    c = await one({
+      poll: page.poll,
+      run: async (fn, arg) => {
+        if ((fn as unknown) === closeDraftSample)
+          throw new Error("Execution context was destroyed");
+        return page.run(fn, arg);
+      },
+    });
+    expect(c.failure?.problem).toBe(
+      "the sample's completion could not be read (Error: Execution context was destroyed)",
+    );
+    expect(
+      (c.failure?.witness as { timing?: { done: number } } | null)?.timing
+        ?.done,
+    ).toBe(21);
+  });
+
+  it("the page functions themselves: an answer whose /commands entry is not yet visible is not read; the completion is not ready while the receipt runs and is ready at once on an identity change or another draft's record", async () => {
+    enqueueWith(() => []);
+    const prepared = await inPage.prepareDraftSample({
+      account: "a",
+      person: "q",
+      n: 1,
+    });
+    if (!prepared || "refused" in prepared) throw new Error("not prepared");
+    const { mark } = prepared;
     harness.outbox.push(
       `${Math.ceil(clock) + 2}ms data.outbox_send {"resend":false}`,
     );
     harness.outbox.push(
       `${Math.ceil(clock) + 9}ms data.outbox_answer {"kind":"receipt"}`,
     );
-    resources = [];
-    expect(inPage.readDraftSample({ mark: m, force: false })).toBeNull();
-    expect(await inPage.draftStatus({ account: "a", localId: "nope" })).toBe(
-      "absent",
-    );
+    expect(inPage.readDraftSample({ mark, force: false })).toBeNull();
+    const ready = () =>
+      inPage.draftCompletionReady({
+        mark,
+        local_id: prepared.local_id as string,
+        expected: prepared.identities.enqueued,
+      });
+    rec("commit_begin", {
+      plan: "data.admitReceipt",
+      local_id: prepared.local_id,
+      ...actor(),
+    });
+    expect(ready()).toBeNull();
+    rec("commit_begin", {
+      plan: "data.markInFlight",
+      local_id: "other",
+      ...actor(),
+    });
+    expect(ready()).toBe(true);
+    harness.log.pop();
+    harness.seq -= 1;
+    expect(ready()).toBeNull();
+    harness.identity = { ...harness.identity, epoch: 9 };
+    expect(ready()).toBe(true);
   });
 });

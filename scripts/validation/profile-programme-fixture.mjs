@@ -36,7 +36,9 @@
 // Revision 13 (review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1; contract version 8): the P-4/P-10 sync support is each sample's
 // whole bounded witness (`sync-request-sample/2`: mark, page/engine identity, contiguous trace slice with a wake inside some steps and a
 // later step's start after some reads, every `/sync` entry, selected references), and the P-4 draft series carry the same kind of
-// support (`samples/P-4.draft.<engine>.json`, `draft-request-sample/1`); every series is computed here from the generated times.
+// support (`samples/P-4.draft.<engine>.json`); every series is computed here from the generated times. Revision 14 (review 14 R2; contract
+// version 9): the draft support is `draft-request-sample/2` (dispatch identity at every await, the observed dispatcher's claim, keyed
+// request and admitted receipt, the completion read through the bound service), never a fabricated status.
 //
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
@@ -1433,7 +1435,28 @@ export function writeProgramme(
     const COMMANDS_PATH = "/api/experimental/v1/commands";
     const drafts = [];
     {
+      // Revision 14 (review 14 R2, contract version 9): each witness carries the dispatch identity read at every await, the observed
+      // dispatcher's records (claim → keyed request → admitted receipt, same dispatcher/run/service/epoch) and the completion read; some
+      // receipts remove the row (absent), the rest keep it acknowledged, as `admitReceipt` decides.
+      const ACCOUNT_ID = "00000000-0000-4000-8000-0000000000a4";
+      const identity = {
+        page: PAGE,
+        account: ACCOUNT_ID,
+        identity_account: ACCOUNT_ID,
+        epoch: 3,
+        service: 2,
+        incarnation: `synthetic-incarnation-${engine}`,
+        live: true,
+        current_service: 2,
+        dispatcher: 1,
+        run: 1,
+        running: true,
+        observing: true,
+        time_origin: ORIGIN,
+      };
+      const by = { dispatcher: 1, run: 1 };
       let from = 60;
+      let logFrom = 2;
       let at = 9_000.125;
       for (let k = 0; k < 300; k += 1) {
         const v = (seg) => sampleOf(`P-4 draft ${seg}|${engine}`, k, 1);
@@ -1444,27 +1467,101 @@ export function writeProgramme(
         const responseEnd = requestStart + 2 + v("request_ms");
         const answer = Math.ceil(responseEnd) + 1 + (k % 2);
         const done = answer + 0.6 + (k % 3) * 0.1;
+        const receiptEnd = answer + 1.5 + (k % 3) * 0.2;
+        const closed = receiptEnd + 0.5;
+        const removed = k % 5 === 0;
         const lines = [
           `${send}ms data.outbox_send ${JSON.stringify({ resend: false })}`,
           `${answer}ms data.outbox_answer ${JSON.stringify({ kind: "receipt" })}`,
         ];
         const local = `00000000-0000-4000-8000-${(700_000 + k).toString(16).padStart(12, "0")}`;
+        const commit = { ...by, service: 2, local_id: local, epoch: 3 };
+        const request = { ...by, key: local, path: COMMANDS_PATH };
+        const records = [
+          {
+            event: "commit_begin",
+            at: t1 + 0.2,
+            plan: "data.markInFlight",
+            ...commit,
+          },
+          {
+            event: "commit_end",
+            at: send - 0.4,
+            plan: "data.markInFlight",
+            of: logFrom,
+            outer: "applied",
+            inner: "claimed",
+            ...commit,
+          },
+          { event: "request_begin", at: send + 0.05, ...request },
+          {
+            event: "request_end",
+            at: responseEnd + 0.1,
+            of: logFrom + 2,
+            outer: "response",
+            http: 200,
+            ...request,
+          },
+          {
+            event: "commit_begin",
+            at: answer + 0.05,
+            plan: "data.admitReceipt",
+            ...commit,
+          },
+          {
+            event: "commit_end",
+            at: receiptEnd,
+            plan: "data.admitReceipt",
+            of: logFrom + 4,
+            outer: "applied",
+            inner: "admitted",
+            removed,
+            ...commit,
+          },
+        ].map((r, i) => ({ seq: logFrom + i, ...r }));
         drafts.push({
           index: 20 + k,
           local_id: local,
-          enqueued: "queued",
-          mark: { page: PAGE, time_origin: ORIGIN, from, waiting: 0, t0, t1 },
-          read: {
+          account: ACCOUNT_ID,
+          enqueue: { kind: "queued", local_id: local },
+          identities: {
+            before: identity,
+            queued: identity,
+            enqueued: identity,
+          },
+          mark: {
             page: PAGE,
             time_origin: ORIGIN,
-            epochs: [],
-            generation: null,
+            from,
+            log_from: logFrom,
+            waiting: 0,
+            t0,
+            t1,
+          },
+          timing: {
+            identity,
             to: from + lines.length,
+            log_to: logFrom + 5,
             at: done,
             done,
+            requests: 1,
+            resource_entries: 1,
+          },
+          completion: {
+            identity_before: identity,
+            identity_after: identity,
+            row: removed
+              ? { kind: "absent" }
+              : { kind: "row", local_id: local, status: "acknowledged" },
+            waiting: 0,
+            at: closed,
+            to: from + lines.length,
+            log_first: 0,
+            log_to: logFrom + records.length,
             resource_entries: 1,
           },
           lines,
+          records,
           resources: [
             {
               name: COMMANDS_PATH,
@@ -1473,18 +1570,23 @@ export function writeProgramme(
               responseEnd,
             },
           ],
-          settled: {
-            local_id: local,
-            status: k % 2 ? "absent" : "acknowledged",
+          selected: {
+            send: from,
+            answer: from + 1,
+            request: 0,
+            claim: logFrom,
+            issued: logFrom + 2,
+            receipt: logFrom + 4,
+            received: logFrom + 5,
           },
-          selected: { send: from, answer: from + 1, request: 0 },
         });
         from += lines.length + 1;
-        at = done + 5 + (k % 7);
+        logFrom += records.length;
+        at = closed + 5 + (k % 7);
       }
     }
     json(`samples/P-4.draft.${engine}.json`, {
-      method: "draft-request-sample/1",
+      method: "draft-request-sample/2",
       engine,
       warmup: 20,
       samples: drafts,
@@ -1517,7 +1619,7 @@ export function writeProgramme(
       engine,
       draftTitle,
       "P-4 draft total_ms",
-      drafts.map((e) => e.read.done - e.mark.t0),
+      drafts.map((e) => e.timing.done - e.mark.t0),
       draftExtra,
     );
     series(
@@ -2007,7 +2109,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 8,
+      contract_version: 9,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

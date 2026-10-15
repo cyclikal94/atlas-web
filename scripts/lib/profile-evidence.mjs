@@ -74,9 +74,15 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * the contiguous trace slice to the read and every `/sync` entry), from which the consumer derives again the FIRST real step after the
  * mark, closed by its own end, and its one request; the P-4 draft series (and P-10's unthrottled draft requests) are bound the same way
  * (`samples/P-4.draft.<engine>.json`, `draft-request-sample/1`: one send, its answer, its one `/commands` request and the draft's recorded
- * outcome). Version 7 evidence (no Air request was recorded under it) resolves incomplete and stays history, unchanged.
+ * outcome). Version 7 evidence (no Air request was recorded under it) resolves incomplete and stays history, unchanged. Version 9 (WEB-09c
+ * revision 14, review 14 R2, design assessment DA-R14-A/B/C): the P-4 draft support is `draft-request-sample/2`, whose completion is the
+ * observed dispatcher's OWN applied/admitted receipt of the sample's draft (its claim, its one keyed request and its receipt, by the same
+ * dispatcher, run, service and epoch, with nothing else recorded or traced up to the completion read), with the dispatch binding equal
+ * before and after every await and the row read through the bound service as corroboration; each mark follows the previous sample's
+ * completion read. Version 8's draft support closed a sample on any later queue status but queued/in_flight; version 8 evidence (no Air
+ * request was recorded under it) resolves incomplete and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 8;
+export const CONTRACT_VERSION = 9;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [
