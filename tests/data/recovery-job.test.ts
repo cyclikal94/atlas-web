@@ -1200,7 +1200,13 @@ describe("review cycle 2: a request refused before it was sent is an explicit ad
       w.script.push(new StampedRequestError("not_sent"));
     w.script.push(w.page_(finalSnap([1])));
     await w.bindJob();
-    await w.advance(120_000);
+    // Waiting for the paced attempt is no probe loop: the first ten seconds ask the admission probe a handful of times (8), never once a
+    // millisecond (WEB-08d revision 17: a job that re-probes every millisecond is an assertion failure here, before the long wait, not
+    // a run that exhausts the test's time under load). The two waits are the original 120 s.
+    const probed = w.probes.length;
+    await w.advance(10_000);
+    expect(w.probes.length - probed).toBeLessThanOrEqual(30);
+    await w.advance(110_000);
     expect(w.requests).toHaveLength(PACE + 5);
     expect(w.sync().cache_status).toBe("valid");
   });
