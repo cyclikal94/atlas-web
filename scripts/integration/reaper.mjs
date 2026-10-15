@@ -38,9 +38,20 @@
 // process's own reads, commits and writes, a damaged journal line included) and an established failure or clean-up failure is never
 // relabelled as less. A failure found after the summary was written (its parent copy, reaper.json) publishes it once more.
 //
+// Revision 12 (review r11 design assessment C3): a qualification seam for that bounded republication. Only when
+// ATLAS_INTEGRATION_FAULTS names `reaper_publish_fail: { "<summary.json|reaper.json>": [n, ...] }` (faults.mjs; no maintained caller
+// sets it) does the n-th publication attempt of that output fail after its complete sibling was written, recorded first as
+// `<run dir>/faults/reaper-publish-<output>-<n>.failed`. The attempt is chosen by destination and ordinal, never by time.
+//
 //   node scripts/integration/reaper.mjs <run dir> <token> <runner pid>      (journal on stdin; started by run.mjs, never by hand)
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -76,6 +87,41 @@ import {
 const [runDir, token, runnerPidText] = process.argv.slice(2);
 const runnerPid = Number(runnerPidText);
 const DEADLINE_MS = Number(process.env.ATLAS_REAPER_DEADLINE_MS ?? 120_000);
+// Revision 12: `reaper_publish_fail` of ATLAS_INTEGRATION_FAULTS (see the header). A specification that cannot be read applies no fault
+// (this process's clean-up must not depend on it) and is said on stderr.
+let publishFaults = {};
+try {
+  publishFaults =
+    JSON.parse(process.env.ATLAS_INTEGRATION_FAULTS ?? "{}")
+      ?.reaper_publish_fail ?? {};
+} catch (error) {
+  process.stderr.write(
+    `reaper: ATLAS_INTEGRATION_FAULTS could not be read, no publication fault applies: ${String(error?.message ?? error)}\n`,
+  );
+}
+const publishAttempts = new Map();
+/** Publish `<run dir>/<name>` atomically; the n-th attempt fails when `reaper_publish_fail` names it. */
+function publishOutput(name, text) {
+  const n = (publishAttempts.get(name) ?? 0) + 1;
+  publishAttempts.set(name, n);
+  const injected = (publishFaults[name] ?? []).includes(n);
+  publishAtomically(join(runDir, name), text, {
+    fail: injected
+      ? () => {
+          const faults = join(runDir, "faults");
+          mkdirSync(faults, { recursive: true });
+          writeFileSync(
+            join(
+              faults,
+              `reaper-publish-${name.replaceAll(/[^a-z0-9-]/gi, "-")}-${n}.failed`,
+            ),
+            `${Date.now()}\n`,
+          );
+          throw new Error(`injected failure publishing ${name} (attempt ${n})`);
+        }
+      : null,
+  });
+}
 // Its output goes to the runner's own stdout/stderr, which may be gone: a write that fails is not an error of the clean-up.
 process.stdout.on("error", () => undefined);
 process.stderr.on("error", () => undefined);
@@ -393,7 +439,7 @@ function finish(result) {
     let text = null;
     try {
       text = `${JSON.stringify(draft.render(evidenceErrors.slice(0, known)), null, 2)}\n`;
-      publishAtomically(join(runDir, "summary.json"), text);
+      publishOutput("summary.json", text);
       covering.summary = known;
       return text;
     } catch (error) {
@@ -405,10 +451,7 @@ function finish(result) {
     const known = evidenceErrors.length;
     result.evidence_errors = evidenceErrors.slice(0, known);
     try {
-      publishAtomically(
-        join(runDir, "reaper.json"),
-        `${JSON.stringify(result, null, 2)}\n`,
-      );
+      publishOutput("reaper.json", `${JSON.stringify(result, null, 2)}\n`);
       covering.reaper = known;
     } catch (error) {
       evidenceErrors.push(`reaper.json: ${String(error?.message ?? error)}`);

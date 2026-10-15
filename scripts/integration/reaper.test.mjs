@@ -367,6 +367,7 @@ async function reapDead(
     summary = true,
     evidence = null,
     raw = [],
+    env = {},
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "atlas-reaper-h4d-"));
@@ -394,13 +395,18 @@ async function reapDead(
   prepare(runDir);
   // Revision 10: `messages` may be computed by the preparation (the journal of commits it made).
   const sent = typeof messages === "function" ? messages() : messages;
-  return reapIn(runDir, { messages: sent, evidence: evidence ?? dir, raw });
+  return reapIn(runDir, {
+    messages: sent,
+    evidence: evidence ?? dir,
+    raw,
+    env,
+  });
 }
 /**
  * Revision 11: a reaper whose runner is already gone, over an EXISTING run directory (a second recovery of the same run), given
  * `messages` (and `raw` journal lines after them, sent as they are); `evidence` is the parent folder the hello names.
  */
-async function reapIn(runDir, { messages = [], evidence, raw = [] }) {
+async function reapIn(runDir, { messages = [], evidence, raw = [], env = {} }) {
   const sent = messages;
   const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
   await new Promise((r) => gone.once("exit", r));
@@ -414,6 +420,8 @@ async function reapIn(runDir, { messages = [], evidence, raw = [] }) {
     ],
     {
       stdio: ["pipe", "pipe", "pipe"],
+      // Revision 12: a qualification seam of the reaper (`reaper_publish_fail`) is given by the case, never inherited.
+      env: { ...process.env, ATLAS_INTEGRATION_FAULTS: "", ...env },
     },
   );
   let log = "";
@@ -1582,5 +1590,101 @@ test("H4f: a covered terminal summary still takes every read failure of this pro
   assert.match(
     (r.summary?.evidence_errors ?? []).join("\n"),
     /the run's plan\.json could not be read/,
+  );
+});
+
+// Revision 12 (review r11 design assessment C3): the SECOND reaper.json publication. The parent copy fails (a file where its folder
+// should be: ENOTDIR), so the reaper publishes reaper.json with that failure and then republishes the summary; the seam makes exactly
+// that republication (summary.json, attempt 2) fail. Its failure is found after reaper.json was written, so reaper.json is published
+// once more with it. Chosen by destination and ordinal (`reaper_publish_fail`), each injected failure recorded before it is thrown.
+const C3_MESSAGES = [
+  STACK0,
+  {
+    type: "judged",
+    browser: "chromium",
+    index: 0,
+    seq: 1,
+    obs: 1,
+    record: settled0,
+  },
+];
+const reapC3 = async (t, fail) => {
+  const parent = mkdtempSync(join(tmpdir(), "atlas-reaper-c3-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const notFolder = join(parent, "not-a-folder");
+  writeFileSync(notFolder, "");
+  const r = await reapFinished(t, {
+    summary: finishedSummary([settled0]),
+    messages: C3_MESSAGES,
+    evidence: notFolder,
+    env: {
+      ATLAS_INTEGRATION_FAULTS: JSON.stringify({ reaper_publish_fail: fail }),
+    },
+  });
+  const failedAt = (output, n) =>
+    existsSync(
+      join(
+        r.runDir,
+        "faults",
+        `reaper-publish-${output.replaceAll(".", "-")}-${n}.failed`,
+      ),
+    );
+  return { ...r, failedAt };
+};
+
+test("C3: a failure of the summary's republication is published in a second reaper.json; exit 1 and stderr say it", async (t) => {
+  const r = await reapC3(t, { "summary.json": [2] });
+  // The boundary was reached: the republication was attempted and failed (an unreached seam is never a result).
+  assert.equal(r.failedAt("summary.json", 2), true, r.log);
+  assert.equal(r.failedAt("reaper.json", 1), false);
+  assert.equal(r.code, 1, r.log);
+  const errors = (r.reaped?.evidence_errors ?? []).join("\n");
+  assert.match(errors, /the parent summary\.json copy could not be written/);
+  assert.match(
+    errors,
+    /^summary\.json: injected failure publishing summary\.json \(attempt 2\)$/m,
+  );
+  assert.match(
+    r.log,
+    /evidence NOT written: summary\.json: injected failure publishing summary\.json \(attempt 2\)/,
+  );
+  // The bounded design's stated limit, kept visible: the summary whose republication failed still holds its first text, written before
+  // any failure was known; reaper.json, stderr and the exit code carry the failure.
+  assert.equal(r.summary?.outcome, "passed");
+  assert.deepEqual(r.summary?.evidence_errors, []);
+});
+
+test("C3 controls: the seam is inert when its attempt is never reached; a failed second reaper.json leaves stderr and exit 1", async (t) => {
+  // Attempt 3 of summary.json never happens: the run is the existing parent-copy failure (summary republished failed, one reaper.json).
+  const inert = await reapC3(t, { "summary.json": [3] });
+  assert.equal(inert.failedAt("summary.json", 3), false, inert.log);
+  assert.equal(inert.code, 1, inert.log);
+  assert.equal(inert.summary?.outcome, "failed", inert.log);
+  assert.match(
+    (inert.summary?.evidence_errors ?? []).join("\n"),
+    /the parent summary\.json copy could not be written/,
+  );
+  assert.doesNotMatch(
+    (inert.reaped?.evidence_errors ?? []).join("\n"),
+    /^summary\.json: /m,
+  );
+  // Persistent write failure: the second reaper.json publication fails too. reaper.json keeps its first text (the copy failure only);
+  // stderr and the exit code are the last channel and name both failures. No output is written a third time.
+  const both = await reapC3(t, { "summary.json": [2], "reaper.json": [2] });
+  assert.equal(both.failedAt("summary.json", 2), true, both.log);
+  assert.equal(both.failedAt("reaper.json", 2), true, both.log);
+  assert.equal(both.failedAt("reaper.json", 3), false);
+  assert.equal(both.code, 1, both.log);
+  assert.doesNotMatch(
+    (both.reaped?.evidence_errors ?? []).join("\n"),
+    /^summary\.json: /m,
+  );
+  assert.match(
+    both.log,
+    /evidence NOT written: summary\.json: injected failure publishing summary\.json \(attempt 2\)/,
+  );
+  assert.match(
+    both.log,
+    /evidence NOT written: reaper\.json: injected failure publishing reaper\.json \(attempt 2\)/,
   );
 });

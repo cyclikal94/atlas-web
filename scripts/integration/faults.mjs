@@ -40,6 +40,12 @@
 //   lose_journal  (revision 11) journal messages of the named types ("run-error") are not sent to the reaper, each recorded as reached
 //                 (`journal:lost:<type>`): the runner's journal is not acknowledged, so a runner killed before the pipe was flushed
 //                 loses what it last journalled, and the reaper must decide from what it can read
+//
+// Revision 12 (review r11 design assessment C3), read by the REAPER (reaper.mjs), which inherits the runner's environment:
+//
+//   reaper_publish_fail  { "summary.json": [n, ...], "reaper.json": [n, ...] }: the n-th attempt of the reaper to publish that output
+//                 fails after its complete sibling was written (the output keeps what it held), recorded first as
+//                 <run dir>/faults/reaper-publish-<output>-<n>.failed: the bounded republication can be held to one exact attempt
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cancelled } from "./ownership.mjs";
