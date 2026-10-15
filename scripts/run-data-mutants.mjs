@@ -26,7 +26,13 @@ import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  catalogueProblems,
+  completionProblems,
+  selectionProblems,
+} from "./lib/mutation-inventory.mjs";
 import { ENGINE, UNIT } from "./mutation/data-catalogue.mjs";
+import { EXPECTED_ENGINE, EXPECTED_UNIT } from "./mutation/expected.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -41,8 +47,17 @@ const only = value("--only", "").split(",").filter(Boolean);
 const jobs = Number(value("--jobs", "3"));
 const check = flag("--check");
 
-const EXPECTED_UNIT = 1269;
-const EXPECTED_ENGINE = 191;
+// The inventory first, in every mode (WEB-10a revision 11, R24): a catalogue whose count is not the one expected, a duplicate id or an
+// unknown `--only` id fails here, before any patch, control or mutant runs.
+const inventory = [
+  ...catalogueProblems(UNIT, EXPECTED_UNIT),
+  ...catalogueProblems(ENGINE, EXPECTED_ENGINE, "engine"),
+  ...selectionProblems(UNIT, only),
+];
+if (inventory.length > 0) {
+  for (const problem of inventory) console.error(`INVENTORY ${problem}`);
+  process.exit(1);
+}
 
 const selected = UNIT.filter((m) => only.length === 0 || only.includes(m.id));
 mkdirSync(outDir, { recursive: true });
@@ -241,8 +256,15 @@ const legacyCrashOnly = results.filter(
 const survived = results.filter(
   (r) => !r.caught && !legacyCrashOnly.includes(r),
 );
-const countOk =
-  only.length > 0 || results.length + unapplied.length === EXPECTED_UNIT;
+// Every selected mutant accounted for exactly once (run, or its patch failed), the whole catalogue when nothing was selected (R24).
+const inventoryProblems = completionProblems({
+  catalogue: UNIT,
+  expected: EXPECTED_UNIT,
+  only,
+  ran: results.map((r) => r.id),
+  unapplied: unapplied.map((p) => p.mutant.id),
+});
+const countOk = inventoryProblems.length === 0;
 const summary = {
   layer: "L1a/L1b (vitest, patched copies, unmutated control per test set)",
   expected_unit_mutants: EXPECTED_UNIT,
@@ -254,6 +276,7 @@ const summary = {
   survived: survived.map((r) => r.id),
   controls: controlResults,
   count_ok: countOk,
+  inventory_problems: inventoryProblems,
   engine_catalogue: ENGINE.map((m) => ({
     id: m.id,
     title: m.title,

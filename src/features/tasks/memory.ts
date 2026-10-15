@@ -33,10 +33,32 @@ export interface EnrolmentAttempt {
   phase: "pending" | "uncertain";
 }
 
+/**
+ * The change CYCLE of one task's enrolment (revision 11, R23; design assessment C1/C2): from the moment a change is admitted until a read
+ * asked after its answer is accepted, the enrolment is not edited or changed again (`sending`, then `reading`). An answer is not the
+ * current state (a receipt is a revision, not the enrolment), so the read that follows it ends the cycle; a later change starts the next
+ * `generation`. Reads are numbered: only one asked after the latest change was answered, and newer than the one shown, is the current
+ * state. Page memory, per identity, like the attempt: an ordinary remount keeps it, a reload or another identity starts without it.
+ */
+export interface EnrolmentCycle {
+  generation: number;
+  phase: "sending" | "reading" | "done";
+  asked: number;
+  shown: number;
+}
+
+/** What a read was asked under: the latest change then, whether it had been answered, and the read's number. */
+export interface EnrolmentRead {
+  generation: number;
+  after: boolean;
+  seq: number;
+}
+
 interface IdentityMemory {
   refused: Map<string, "forbidden" | "not_found">;
   joint: Map<string, JointAnswer>;
   enrolment: Map<string, EnrolmentAttempt>;
+  cycles: Map<string, EnrolmentCycle>;
 }
 
 const LIMIT = 2_000;
@@ -47,7 +69,12 @@ function memoryOf(identity: string): IdentityMemory {
   if (memory === undefined) {
     // Only the displayed identity is kept: an earlier one's answers are never shown under another (and are dropped here).
     memories.clear();
-    memory = { refused: new Map(), joint: new Map(), enrolment: new Map() };
+    memory = {
+      refused: new Map(),
+      joint: new Map(),
+      enrolment: new Map(),
+      cycles: new Map(),
+    };
     memories.set(identity, memory);
   }
   return memory;
@@ -121,6 +148,67 @@ export function subscribeEnrolment(listener: () => void): () => void {
   return () => enrolmentListeners.delete(listener);
 }
 
+function cycleOf(memory: IdentityMemory, taskId: string): EnrolmentCycle {
+  let cycle = memory.cycles.get(taskId);
+  if (cycle === undefined) {
+    cycle = { generation: 0, phase: "done", asked: 0, shown: 0 };
+    bounded(memory.cycles, taskId, cycle);
+  }
+  return cycle;
+}
+
+/** The change of the task being sent or confirmed (nothing can be edited or changed meanwhile), or null. */
+export function enrolmentLock(
+  identity: string,
+  taskId: string,
+): { phase: "sending" | "reading"; generation: number } | null {
+  const cycle = memoryOf(identity).cycles.get(taskId);
+  return cycle === undefined || cycle.phase === "done"
+    ? null
+    : { phase: cycle.phase, generation: cycle.generation };
+}
+
+/** Numbers a read of the enrolment as it is asked. */
+export function askEnrolment(identity: string, taskId: string): EnrolmentRead {
+  const cycle = cycleOf(memoryOf(identity), taskId);
+  cycle.asked += 1;
+  return {
+    generation: cycle.generation,
+    after: cycle.phase !== "sending",
+    seq: cycle.asked,
+  };
+}
+
+/**
+ * What the answer to `read` is: `current` (asked after the latest change was answered, nothing admitted since, and newer than the read
+ * shown: the enrolment as it is), `early` (asked while that change was being sent: it may predate it) or `outdated` (a change was
+ * admitted after it was asked, a newer read was shown, or the identity is gone). `accept` (a successful current read) records it as shown
+ * and ends that change's cycle; a failed read is only judged.
+ */
+export function answerEnrolment(
+  identity: string,
+  taskId: string,
+  read: EnrolmentRead,
+  accept: boolean,
+): "current" | "early" | "outdated" {
+  const cycle = memories.get(identity)?.cycles.get(taskId);
+  if (
+    cycle === undefined ||
+    read.generation !== cycle.generation ||
+    read.seq <= cycle.shown
+  )
+    return "outdated";
+  if (!read.after) return "early";
+  if (accept) {
+    cycle.shown = read.seq;
+    if (cycle.phase === "reading") {
+      cycle.phase = "done";
+      enrolmentChanged();
+    }
+  }
+  return "current";
+}
+
 export const enrolmentAttemptOf = (
   identity: string,
   taskId: string,
@@ -135,8 +223,9 @@ const frozen = <T>(value: T): T => {
 };
 
 /**
- * Takes the attempt for `command` before anything is sent: null while another one of the task is pending (nothing is sent). The same body
- * as an uncertain attempt keeps its key; any other body is a new attempt with a new key (it replaces the uncertain one).
+ * Takes the attempt for `command` before anything is sent: null while another change of the task is pending or not yet confirmed by a
+ * read (its cycle; nothing is sent). The same body as an uncertain attempt keeps its key; any other body is a new attempt with a new key
+ * (it replaces the uncertain one).
  */
 export function startEnrolment(
   identity: string,
@@ -146,7 +235,10 @@ export function startEnrolment(
 ): EnrolmentAttempt | null {
   const memory = memoryOf(identity);
   const held = memory.enrolment.get(taskId);
-  if (held?.phase === "pending") return null;
+  const cycle = cycleOf(memory, taskId);
+  if (held?.phase === "pending" || cycle.phase !== "done") return null;
+  cycle.generation += 1;
+  cycle.phase = "sending";
   const body = canonicalBody(command);
   const attempt: EnrolmentAttempt = {
     key: held !== undefined && held.body === body ? held.key : newKey(),
@@ -160,7 +252,10 @@ export function startEnrolment(
   return attempt;
 }
 
-/** The answer to `attempt`: only the attempt still held for the displayed identity is settled (another identity's is gone). */
+/**
+ * The answer to `attempt`: only the attempt still held for the displayed identity is settled (another identity's is gone). Its cycle then
+ * waits for a read asked after it (`reading`).
+ */
 export function settleEnrolment(
   identity: string,
   taskId: string,
@@ -172,6 +267,8 @@ export function settleEnrolment(
   if (outcome === "uncertain")
     memory.enrolment.set(taskId, { ...attempt, phase: "uncertain" });
   else memory.enrolment.delete(taskId);
+  const cycle = memory.cycles.get(taskId);
+  if (cycle?.phase === "sending") cycle.phase = "reading";
   enrolmentChanged();
 }
 

@@ -18082,7 +18082,14 @@ export const UNIT = [
     file: "src/features/tasks/memory.ts",
     tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
     expect: /E1: /,
-    patch: (t) => sub(t, '  if (held?.phase === "pending") return null;\n', ""),
+    // Re-anchored in revision 11 (R23): the attempt owner now also refuses a change while the previous one is unconfirmed (its cycle);
+    // the same refusal, removed whole.
+    patch: (t) =>
+      sub(
+        t,
+        '  if (held?.phase === "pending" || cycle.phase !== "done") return null;\n',
+        "",
+      ),
   },
   {
     id: "MU-2143",
@@ -18092,10 +18099,11 @@ export const UNIT = [
     tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
     expect: /E1: .*activated twice/,
     // Re-anchored in revision 10 (R22): the pending rule now lives in `blocked`, which disables every enrolment control (same mechanism).
+    // Re-anchored in revision 11 (R23): `blocked` names the lock (sending, then confirming); the whole rule removed.
     patch: (t) =>
       sub(
         t,
-        "    : pending\n      ? CONTROLS_COPY.sending\n      : null;\n",
+        '    : lock?.phase === "sending"\n      ? CONTROLS_COPY.sending\n      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n',
         "    : null;\n",
       ),
   },
@@ -18134,26 +18142,24 @@ export const UNIT = [
     file: "src/features/tasks/detail/Controls.tsx",
     tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
     expect: /read answered while a change is pending/,
+    // Re-anchored in revision 11 (R23): a read that is not the current state is shown only when nothing is (the same rule).
     patch: (t) =>
       sub(
         t,
-        "          pendingNow && shown !== null ? shown : result.value,",
-        "          result.value,",
+        "        } else setEnrolment((shown) => shown ?? value);",
+        "        } else setEnrolment(value);",
       ),
   },
   {
     id: "MU-2147",
     title:
       "WEB-10a R11 (rev 4, E3): an enrolment read asked before a change and answered just after it is shown",
-    file: "src/features/tasks/detail/Controls.tsx",
+    // Re-anchored in revision 11 (R23): a read asked before the latest change was admitted is now judged by the change's generation in
+    // page memory (it was the mount's own count of changes sent); the same rule removed.
+    file: "src/features/tasks/memory.ts",
     tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
     expect: /read asked before a change/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!live || asked !== sent.current) return;",
-        "      if (!live) return;",
-      ),
+    patch: (t) => sub(t, "    read.generation !== cycle.generation ||\n", ""),
   },
   {
     id: "MU-2148",
@@ -18162,11 +18168,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/Controls.tsx",
     tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
     expect: /remounted while pending|next change after the answer/,
+    // Re-anchored in revision 11 (R23): the read follows the change's answer as recorded in page memory (`reading`), not a pending edge.
     patch: (t) =>
       sub(
         t,
-        "    if (wasPending.current && !pending) setReload((n) => n + 1);",
-        "    if (wasPending.current && !pending) void 0;",
+        "    if (reading !== 0 && reading !== readFor.current) setReload((n) => n + 1);",
+        "    if (reading !== 0 && reading !== readFor.current) void 0;",
       ),
   },
   {
@@ -19011,10 +19018,11 @@ export const UNIT = [
     tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
     expect: /Q1: .*rejoining|X3: /,
     patch: (t) =>
+      // Re-anchored in revision 11 (R23): the join form's choices live in the settings' draft; no choice made is the consent `null`.
       sub(
         t,
-        "  const [consent, setConsent] = useState<boolean | null>(null);\n",
-        "  const [consent, setConsent] = useState<boolean | null>(true);\n",
+        "  const consent = draft?.consent ?? null;\n",
+        "  const consent = draft?.consent ?? true;\n",
       ),
   },
   {
@@ -19025,10 +19033,11 @@ export const UNIT = [
     tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
     expect: /Q1: .*rejoining/,
     patch: (t) =>
+      // Re-anchored in revision 11 (R23): the rejoin form's seed is passed by the settings (the draft starts from it).
       sub(
         t,
-        "  const [policy, setPolicy] = useState(() => copyPolicy(seed));\n",
-        "  const [policy, setPolicy] = useState(() =>\n    copyPolicy({ grants: [], exclude_accounts: [] }),\n  );\n",
+        "            joinForm(enrolment, enrolment.policy, CONTROLS_COPY.lastAudience)\n",
+        "            joinForm(\n              enrolment,\n              { grants: [], exclude_accounts: [] },\n              CONTROLS_COPY.lastAudience,\n            )\n",
       ),
   },
   {
@@ -19038,10 +19047,184 @@ export const UNIT = [
     tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
     expect: /Q1: .*control: Cancel/,
     patch: (t) =>
+      // Re-anchored in revision 11 (R23): Cancel is an Act (frozen while a change is sent or confirmed) that discards the draft.
       sub(
         t,
-        '              <Button variant="quiet" onClick={() => setDraft(null)}>\n',
-        '              <Button variant="quiet" onClick={() => change({ policy: draft })}>\n',
+        '              <Act variant="quiet" blocked={blocked} onClick={cancel}>\n',
+        '              <Act\n                variant="quiet"\n                blocked={blocked}\n                onClick={() => save(draft)}\n              >\n',
+      ),
+  },
+  {
+    id: "MU-2223",
+    title:
+      "WEB-10a rev 11 (R23): an open directory lookup's Choose stays enabled while the caller sends its policy",
+    file: "src/features/sharing/DirectoryLookup.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1: /,
+    patch: (t) =>
+      sub(
+        t,
+        "            {...(blocked\n              ? { disabled: true, reason: blocked }\n              : { onClick: () => onChoose(entry) })}\n",
+        "            onClick={() => onChoose(entry)}\n",
+      ),
+  },
+  {
+    id: "MU-2224",
+    title:
+      "WEB-10a rev 11 (R23): an enrolment change's answer ends its cycle (the read that follows is not awaited)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S2: /,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (cycle?.phase === "sending") cycle.phase = "reading";\n',
+        '  if (cycle?.phase === "sending") cycle.phase = "done";\n',
+      ),
+  },
+  {
+    id: "MU-2225",
+    title:
+      "WEB-10a rev 11 (R23): an audience/consent edit is admitted when it happens without asking whether a change owns the settings",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S5: .*Choose, one turn/,
+    patch: (t) =>
+      sub(
+        t,
+        "    env.writable && enrolmentLock(env.identity, taskId) === null;\n",
+        "    env.writable;\n",
+      ),
+  },
+  {
+    id: "MU-2226",
+    title:
+      "WEB-10a rev 11 (R23): a read showing another version drops a draft whose later edits were never sent",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S8: a draft with edits/,
+    patch: (t) =>
+      sub(
+        t,
+        "            d !== null && d.base.version !== value.version && !unsent(d)\n",
+        "            d !== null && d.base.version !== value.version\n",
+      ),
+  },
+  {
+    id: "MU-2227",
+    title:
+      "WEB-10a rev 11 (R23): a read asked while the change was being sent is taken as the current state",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read answered while a change is pending/,
+    patch: (t) => sub(t, '  if (!read.after) return "early";\n', ""),
+  },
+  {
+    id: "MU-2228",
+    title:
+      "WEB-10a rev 11 (R23): a read asked after the answer is not taken as current, so the change's cycle never ends (frozen for ever)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1\/S2 controls: /,
+    patch: (t) =>
+      sub(
+        t,
+        '    after: cycle.phase !== "sending",\n',
+        '    after: cycle.phase === "done",\n',
+      ),
+  },
+  {
+    id: "MU-2229",
+    title:
+      "WEB-10a rev 11 (DA-1): an offline retry is taken as a definite answer (the uncertain attempt's body and key are forgotten)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S8\/DA-1: .*Try again finds the page offline/,
+    patch: (t) =>
+      sub(t, '  "invalid",\n]);\n', '  "invalid",\n  "offline",\n]);\n'),
+  },
+  {
+    id: "MU-2230",
+    title:
+      "WEB-10a rev 11 (R23, I8): Leave and the consent proceed beside an unsaved audience edit (their answer then drops it)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S4: .*an unsaved edit/,
+    patch: (t) =>
+      sub(
+        t,
+        "    blocked ??\n    (draft !== null && unsent(draft) ? CONTROLS_COPY.finishFirst : null);\n",
+        "    blocked;\n",
+      ),
+  },
+  {
+    id: "MU-2231",
+    title:
+      "WEB-10a rev 11 (R23): a failed read after the answer ends the change's cycle (the settings are free on no current state)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S9: .*the follow-up read is closed/,
+    patch: (t) =>
+      sub(
+        t,
+        "answerEnrolment(env.identity, taskId, read, result.ok)",
+        "answerEnrolment(env.identity, taskId, read, true)",
+      ),
+  },
+  {
+    id: "MU-2233",
+    title:
+      "WEB-10a rev 11 (R23): the settings are frozen while a change is sent but not while its read is awaited",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S2: |S3: /,
+    patch: (t) =>
+      sub(
+        t,
+        "      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n",
+        "      : null;\n",
+      ),
+  },
+  {
+    id: "MU-2234",
+    title:
+      "WEB-10a rev 11 (R23, S5): the audience editor's Cancel stays enabled while its change is sent or confirmed",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S3: /,
+    patch: (t) =>
+      sub(
+        t,
+        '              <Act variant="quiet" blocked={blocked} onClick={cancel}>\n',
+        '              <Act variant="quiet" blocked={null} onClick={cancel}>\n',
+      ),
+  },
+  {
+    id: "MU-2235",
+    title:
+      "WEB-10a rev 11 (R24): the expected unit count is left behind when the catalogue grows (revision 10's 1,269)",
+    file: "scripts/mutation/expected.mjs",
+    tests: ["tests/static/mutation-inventory.test.ts"],
+    expect: /maintained catalogue agrees/,
+    patch: (t) =>
+      sub(
+        t,
+        /export const EXPECTED_UNIT = \d+;/,
+        "export const EXPECTED_UNIT = 1269;",
+      ),
+  },
+  {
+    id: "MU-2236",
+    title:
+      "WEB-10a rev 11 (R23): a draft's edits are not marked as sent when its change is admitted (its own answer then leaves it kept as unsaved)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1\/S2 controls: /,
+    patch: (t) =>
+      sub(
+        t,
+        "now !== null && now.base === d.base ? { ...now, sent: d.edits } : now,",
+        "now,",
       ),
   },
 ];
@@ -19054,6 +19237,12 @@ export const UNIT = [
  * of a fallback that no longer exists has nothing to patch; what each of them stood for is covered by the mutant named beside it.
  */
 export const RETIRED = [
+  {
+    id: "MU-2232",
+    why: "(WEB-10a revision 11, R23 S13) an unsaved enrolment draft shown under another identity: the draft's own owner check was removed as unreachable. The qualification run (`.agtx/evidence/web10a-revision-11/validation/runs/2026-10-15T20-43-03.594Z-612cc000`) found the mutant SURVIVED S13 with no failure at all, because the task detail's complete read belongs to one identity (`useTaskDetail`'s scope): another identity remounts the settings and drops the draft before it could be shown. A guard no composed schedule can reach is not kept, so there is no anchor (`draft?.owner === owner`) to patch",
+    replacedBy:
+      "enrolment-ownership S13 (asserts the composed behaviour) and the detail's identity-scoped read (its existing coherence mutants)",
+  },
   {
     id: "MU-1207",
     why: '(WEB-09b review cycle 1, R8) an activation in recovery mode deletes the finished receipts it released: the recovery-mode activation no longer does any receipt bookkeeping (the approved brief: the recovery touches no draft, `pending_effects` or outbox entry), so there is no deletion of it to switch on and the anchor (`deletes: input.mode !== "recovery"` of `reconcileReceipts`) does not exist',
@@ -21990,11 +22179,12 @@ export const ENGINE = [
       sub(
         sub(
           t,
-          "    const mine = startEnrolment(env.identity, taskId, command, env.newId);\n    if (mine === null) return;",
+          "    const mine = startEnrolment(env.identity, taskId, command, env.newId);\n    if (mine === null) return false;",
           '    const mine = {\n      key: env.newId(),\n      body: JSON.stringify(command),\n      command,\n      phase: "pending" as const,\n    };',
         ),
         // Re-expressed in revision 10 (R22): the pending rule now lives in `blocked` (every enrolment control), and the body is sent.
-        "    : pending\n      ? CONTROLS_COPY.sending\n      : null;\n",
+        // Re-anchored in revision 11 (R23): `send` reports whether it sent, and `blocked` names the lock (sending, then confirming).
+        '    : lock?.phase === "sending"\n      ? CONTROLS_COPY.sending\n      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n',
         "    : null;\n",
       ),
   },

@@ -2600,6 +2600,376 @@ test.describe("E-T27: Leave and the consent resend the audience that was read (A
     });
 });
 
+/**
+ * A server that keeps one enrolment for E-T29..E-T31 (revision 11, R23): a stale `expected_version` is refused (409); a key seen before
+ * replays its first receipt without applying anything (the backend's same-key receipt rule); `hold` keeps the next command or the next
+ * enrolment read until released; `lose` commits the next command and then drops its answer (a network error).
+ */
+async function enrolmentServer(
+  context: import("@playwright/test").BrowserContext,
+  taskId: string,
+  initial: Record<string, unknown>,
+) {
+  const s = {
+    state: { ...initial } as Record<string, unknown> & { version: number },
+    bodies: [] as Array<{ key: string; command: Record<string, unknown> }>,
+    receipts: new Map<string, number>(),
+    holdCommand: null as null | Promise<void>,
+    holdRead: null as null | Promise<void>,
+    lose: false,
+    reads: 0,
+  };
+  await context.route(
+    `**/api/experimental/v1/tasks/${taskId}/enrolment`,
+    async (route) => {
+      s.reads += 1;
+      const asked = JSON.stringify(s.state);
+      if (s.holdRead !== null) await s.holdRead;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: asked,
+      });
+    },
+  );
+  await context.route(
+    "**/api/experimental/v1/task-access-commands",
+    async (route) => {
+      const key = route.request().headers()["idempotency-key"] ?? "";
+      const command = JSON.parse(route.request().postData() ?? "{}")
+        .command as Record<string, unknown>;
+      s.bodies.push({ key, command });
+      if (s.holdCommand !== null) await s.holdCommand;
+      const replay = s.receipts.get(key);
+      if (replay !== undefined)
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ revision: replay }),
+        });
+      if (command.expected_version !== s.state.version)
+        return route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "conflict",
+            message: "m",
+            request_id: "11111111-1111-4111-8111-111111111111",
+            details: [],
+          }),
+        });
+      s.state = {
+        version: s.state.version + 1,
+        active: command.active,
+        aggregate_consent: command.aggregate_consent,
+        policy: command.initial_policy,
+      };
+      const revision = 20 + s.bodies.length;
+      s.receipts.set(key, revision);
+      if (s.lose) {
+        s.lose = false;
+        return route.abort("failed");
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ revision }),
+      });
+    },
+  );
+  return s;
+}
+
+/** A promise and the function that ends it (a held answer). */
+function gate(): { held: Promise<void>; release(): void } {
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { held, release };
+}
+
+const SHARED_AUDIENCE = {
+  grants: [
+    {
+      kind: "account",
+      id: "22222222-2222-4222-8222-222222222222",
+      edit: false,
+    },
+  ],
+  exclude_accounts: [] as string[],
+};
+const PRIVATE_AUDIENCE = { grants: [], exclude_accounts: [] };
+
+test.describe("E-T29: while an audience change is sent and confirmed, an open directory lookup cannot choose (A15, A16; R23 of revision 11, S1/S2)", () => {
+  test("Save sharing with the lookup open: Choose is disabled with why (pointer and keyboard), through the answer and the read that follows; the read ends it", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 46,
+      title: "Frozen lookup",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await context.route("**/api/experimental/v1/households", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      }),
+    );
+    await context.route("**/api/experimental/v1/directory**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { id: "33333333-3333-4333-8333-333333333333", username: "reader" },
+        ]),
+      }),
+    );
+    await seedSettled(context);
+    const page = await bootAt(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+    );
+    await cacheTasks(page, net, [task]);
+    const settings = page.locator("[data-enrolment]");
+    await settings
+      .getByRole("button", { name: "Change…", exact: true })
+      .click();
+    await settings
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    await settings
+      .getByRole("button", { name: "+ Add account grant", exact: true })
+      .click();
+    await settings.getByLabel("Name", { exact: true }).fill("rea");
+    await settings.getByRole("button", { name: "Search", exact: true }).click();
+    const choose = settings.getByRole("button", {
+      name: "Choose: reader",
+      exact: true,
+    });
+    await expect(choose).toBeEnabled();
+    const command = gate();
+    const read = gate();
+    s.holdCommand = command.held;
+    try {
+      // Save sharing is outside the lookup view: the lookup stays open while the change is sent.
+      await settings
+        .getByRole("button", { name: "Save sharing", exact: true })
+        .click();
+      await expect.poll(() => s.bodies.length).toBe(1);
+      await expect(choose).toBeDisabled();
+      await expect(settings).toContainText("Sending your change…");
+      // Keyboard: the focused (disabled) control does nothing.
+      await choose.focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Space");
+      // The answer arrives; the read that follows is held: still frozen, with the reason.
+      s.holdRead = read.held;
+      const readsBefore = s.reads;
+      command.release();
+      await expect.poll(() => s.reads).toBeGreaterThan(readsBefore);
+      await expect(choose).toBeDisabled();
+      await expect(settings).toContainText("Checking your settings…");
+      await choose.click({ force: true });
+    } finally {
+      command.release();
+      read.release();
+    }
+    await expect(
+      settings.getByRole("button", { name: "Change…", exact: true }),
+    ).toBeEnabled();
+    await expect(settings).toContainText(
+      "Who sees your progress from now on: only you",
+    );
+    expect(s.bodies).toHaveLength(1);
+    expect(s.bodies[0]?.command.initial_policy).toEqual(PRIVATE_AUDIENCE);
+    expect(s.state.policy).toEqual(PRIVATE_AUDIENCE);
+    await expect(
+      settings.locator(
+        '[data-grant="account"][data-principal="33333333-3333-4333-8333-333333333333"]',
+      ),
+    ).toHaveCount(0);
+  });
+});
+
+test.describe("E-T30: two tabs read the same enrolment, the other winner order: B commits first, A's audience change is refused (A15, A16; R23 of revision 11, S10)", () => {
+  test("B's consent wins at version 2; A's Save sharing at version 2 is refused, nothing overwritten, nothing kept; A's next change keeps B's consent", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 47,
+      title: "Other order",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const b = await bootAt(context, path);
+    const inA = a.locator("[data-enrolment]");
+    const inB = b.locator("[data-enrolment]");
+    const consentB = inB.getByRole("checkbox", {
+      name: "Count me in the shared total",
+    });
+    await expect(consentB).toBeEnabled();
+    // A opens its editor and makes the audience private (not saved yet).
+    await inA.getByRole("button", { name: "Change…", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    // B wins: its consent change commits version 3, keeping the shared audience.
+    await consentB.click();
+    await expect.poll(() => s.state.version).toBe(3);
+    // A saves at version 2: refused; the server keeps B's state.
+    await inA
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(inA).toContainText(
+      "This change wasn't accepted. The latest settings are shown.",
+    );
+    expect(s.bodies).toHaveLength(2);
+    expect(s.bodies[1]?.command).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 2,
+      active: true,
+      aggregate_consent: true,
+      initial_policy: PRIVATE_AUDIENCE,
+    });
+    expect(s.state).toEqual({
+      version: 3,
+      active: true,
+      aggregate_consent: false,
+      policy: SHARED_AUDIENCE,
+    });
+    // A read again: B's state is shown; the refused draft is not kept or rebased.
+    const consentA = inA.getByRole("checkbox", {
+      name: "Count me in the shared total",
+    });
+    await expect(consentA).not.toBeChecked();
+    await expect(inA.locator("[data-enrol-kept]")).toHaveCount(0);
+    await expect(inA.locator("[data-audience-chooser]")).toHaveCount(0);
+    await expect(inA).toContainText(
+      "Who sees your progress from now on: you and 1 person",
+    );
+    await inA
+      .getByRole("button", { name: "Leave this task", exact: true })
+      .click();
+    await expect.poll(() => s.bodies.length).toBe(3);
+    expect(s.bodies[2]?.command).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 3,
+      active: false,
+      aggregate_consent: false,
+      initial_policy: SHARED_AUDIENCE,
+    });
+  });
+});
+
+test.describe("E-T31: A's change commits but its answer is lost; B changes after it; A's exact retry is replayed, overwrites nothing, and a reload resends nothing (A15, A16; R23 of revision 11, S11/S12)", () => {
+  test("A Leave (answer lost) -> B Join -> A Try again (same key, receipt replayed) shows B's state; a reload of A sends nothing", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 48,
+      title: "Lost answer",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const inA = a.locator("[data-enrolment]");
+    await expect(
+      inA.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    s.lose = true;
+    await inA
+      .getByRole("button", { name: "Leave this task", exact: true })
+      .click();
+    await expect(inA).toContainText("Couldn't confirm the change. Try again.");
+    expect(s.state).toMatchObject({ version: 3, active: false });
+    // B reads version 3 (not enrolled) and joins with the private audience: version 4.
+    const b = await bootAt(context, path);
+    const inB = b.locator("[data-enrolment]");
+    await inB
+      .getByRole("radio", { name: "Yes, include my contribution" })
+      .check();
+    await inB
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    await inB
+      .getByRole("button", { name: "Join this task", exact: true })
+      .click();
+    await expect.poll(() => s.state.version).toBe(4);
+    // A's Try again is the exact attempt: same key and body; the server replays its receipt and applies nothing.
+    // (The uncertain change's Try again; the chooser's household list has its own.)
+    await inA
+      .locator("[data-enrolment-uncertain]")
+      .getByRole("button", { name: "Try again", exact: true })
+      .click();
+    await expect.poll(() => s.bodies.length).toBe(3);
+    expect(s.bodies[2]).toEqual(s.bodies[0]);
+    await expect(inA).toContainText("Saved.");
+    expect(s.state).toEqual({
+      version: 4,
+      active: true,
+      aggregate_consent: true,
+      policy: PRIVATE_AUDIENCE,
+    });
+    // A's read after the replayed answer shows B's state, not its own submitted body.
+    await expect(
+      inA.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    await expect(inA).toContainText(
+      "Who sees your progress from now on: only you",
+    );
+    // A reload of A resends nothing.
+    const before = s.bodies.length;
+    // (As E-T7e reloads: through the fixture's session entry; the cache in IndexedDB survives, page memory does not.)
+    await a.goto(`/__session?route=${encodeURIComponent(path)}`);
+    await a.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await a.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(
+      a
+        .locator("[data-enrolment]")
+        .getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    expect(s.bodies).toHaveLength(before);
+  });
+});
+
 test.describe("E-T17: another tab commits while the task detail's read is between its stages (A1, A18; R9 of revision 4, D7)", () => {
   for (const between of [true, false])
     test(`between=${between}: tab A never shows the new title with the old day (or the reverse); it ends on what B committed`, async ({

@@ -26,11 +26,14 @@ export function DirectoryLookup({
   purpose,
   onChoose,
   onBack,
+  blocked,
 }: {
   /** What the choice is for, as the heading's description ("Add account grant", "Add exclusion"). */
   purpose: string;
   onChoose(entry: DirectoryEntry): void;
   onBack(): void;
+  /** Why nothing can be chosen now (the caller is saving), or nothing: each Choose then says so. */
+  blocked?: string | null;
 }) {
   const env = useSharingEnv();
   const announcer = useAnnouncer();
@@ -126,7 +129,12 @@ export function DirectoryLookup({
             <Button type="submit">{copy.LOOKUP_SEARCH_BUTTON}</Button>
           )}
         </form>
-        <Results found={search} onChoose={onChoose} exact={false} />
+        <Results
+          found={search}
+          onChoose={onChoose}
+          blocked={blocked}
+          exact={false}
+        />
       </section>
       <section
         aria-labelledby={`${ids.exact}-h`}
@@ -165,7 +173,7 @@ export function DirectoryLookup({
             <Button type="submit">{copy.LOOKUP_EXACT_BUTTON}</Button>
           )}
         </form>
-        <Results found={precise} onChoose={onChoose} exact />
+        <Results found={precise} onChoose={onChoose} blocked={blocked} exact />
       </section>
     </section>
   );
@@ -175,10 +183,12 @@ function Results({
   found,
   onChoose,
   exact,
+  blocked,
 }: {
   found: Found;
   onChoose(entry: DirectoryEntry): void;
   exact: boolean;
+  blocked?: string | null;
 }) {
   if (found.status === "idle") return null;
   if (found.status === "busy")
@@ -213,7 +223,9 @@ function Results({
           </span>
           <Button
             aria-label={`${copy.LOOKUP_CHOOSE}: ${entry.username}`}
-            onClick={() => onChoose(entry)}
+            {...(blocked
+              ? { disabled: true, reason: blocked }
+              : { onClick: () => onChoose(entry) })}
           >
             {copy.LOOKUP_CHOOSE}
           </Button>

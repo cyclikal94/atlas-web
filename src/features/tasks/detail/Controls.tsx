@@ -1,4 +1,11 @@
-import { useEffect, useId, useReducer, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import { type CacheRow, type Policy, useSharingDefaults } from "../../../data";
 // The sharing feature's public chooser, from its own module (see `sharing/index.ts`).
@@ -9,7 +16,11 @@ import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { momentLabel } from "../format";
 import {
+  answerEnrolment,
+  askEnrolment,
+  type EnrolmentAttempt,
   enrolmentAttemptOf,
+  enrolmentLock,
   forgetRefusal,
   type JointAnswer,
   noteIfRefused,
@@ -63,6 +74,12 @@ export const CONTROLS_COPY = {
   enrolUnavailable: "Your settings for this task aren't available.",
   loading: "Loading your settings",
   sending: "Sending your change…",
+  confirming: "Checking your settings…",
+  finishFirst: "Save or cancel the sharing change first",
+  keptDraft:
+    "Not saved: your settings changed after you started this change, so it can't be sent. Discard it to change the settings shown.",
+  discard: "Discard this change",
+  discardFirst: "Discard the unsaved change first",
   saved: "Saved.",
   joinConsent: "Count your contribution in the shared total?",
   consentYes: "Yes, include my contribution",
@@ -317,24 +334,66 @@ export function Participation({
 }
 
 /**
+ * The definite answers to a change: they end its attempt. Anything else (no answer, not sent, offline, closed) may leave an earlier send
+ * of the same body unresolved, so its command and key are kept for Try again (revision 11, design assessment DA-1: a retry found offline
+ * says nothing about whether the first send committed).
+ */
+const DEFINITE: ReadonlySet<string> = new Set([
+  "conflict",
+  "operation_conflict",
+  "forbidden",
+  "not_found",
+  "invalid",
+]);
+
+/**
+ * An unsaved change of the enrolment (revision 11, R23): made to `base`, the enrolment read when it began, whose version is the command's
+ * guard (it is never moved onto another version). Held by the settings, not by a child keyed by version, so a hidden form (offline, a
+ * failed read) keeps it. `edits` counts the edits accepted; `sent` is that count when it was last sent (null: never).
+ */
+interface Draft {
+  base: Enrolment;
+  policy: Policy;
+  /** The join form's consent choice; null until chosen (an enrolled person's audience edit has none). */
+  consent: boolean | null;
+  edits: number;
+  sent: number | null;
+}
+
+/** Edits accepted since the draft was last sent (or at all). */
+const unsent = (draft: Draft): boolean => draft.edits > (draft.sent ?? 0);
+
+type Change = {
+  active?: boolean;
+  aggregate_consent?: boolean;
+  policy?: Policy;
+};
+
+/**
  * "Your settings" (enrolment, D-10a-7; revision 4, R11): online-only, ONE attempt per body. The attempt is taken synchronously before the
- * request (`startEnrolment`, page memory): while it is pending every control here is disabled with a reason, and a repeated activation
- * sends nothing. An uncertain answer keeps the exact command and key for Try again (never resent on its own). Every answer, and the end
- * of a pending attempt seen after a remount, reads the enrolment again; a read asked before a change was sent is not shown, and one
- * answered while a change is pending never replaces what is shown (both may predate the change).
+ * request (`startEnrolment`, page memory), and a repeated activation sends nothing. An uncertain answer keeps the exact command and key for
+ * Try again (never resent on its own). A read asked before a change was answered is never the current state: it is shown only when
+ * nothing is (disabled).
  *
  * Revision 10 (R22; task `states.md` R2/F1): every change sends the COMPLETE enrolment (`enrolCommand`), its audience included, so Leave
  * and the consent keep the audience that was read. Joining (first time or again) asks the aggregate-consent question explicitly and shows
  * the audience the new progress will have, to keep or change, before Join: the current default sharing the first time (read for the
  * purpose; unknown is never shown as Private), the audience last used when rejoining. Enrolled, "Change…" edits the audience with its own
- * Save and Cancel. A choice belongs to the enrolment version it was made on: once another version is shown it is dropped (never rebased),
- * and the person sees the new state; a stale version is refused by the server (`expected_version`).
+ * Save and Cancel.
+ *
+ * Revision 11 (R23; design assessment C1-C3): a change owns the settings from the moment it is admitted until a read asked AFTER its answer
+ * is accepted (the change's cycle, page memory): meanwhile nothing here is edited, chosen (an open directory lookup included) or sent, and
+ * every edit is admitted when it happens, not only by a disabled control. So the answer and the read that follows can only end the edits
+ * that were sent. A failed read leaves the cycle open, with its Try again (a read, never a send). A draft lives here: sent and answered, it
+ * ends with the version it made (or was refused at); one with edits not yet sent is never dropped by a read, nor moved onto another
+ * version: it is kept, unsaved, until it is discarded. Leave and the consent wait while an audience edit is unsaved.
  */
 function EnrolmentSettings({ taskId }: { taskId: string }) {
   const env = useTasksEnv();
   const heading = useId();
   const readKey = `enrolment:${taskId}`;
   const [enrolment, setEnrolment] = useState<Enrolment | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [state, setState] = useState<
     "idle" | "loading" | "unavailable" | "refused" | "saved"
   >("idle");
@@ -342,9 +401,7 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
   const [, changed] = useReducer((n: number) => n + 1, 0);
   useEffect(() => subscribeEnrolment(changed), []);
   const attempt = enrolmentAttemptOf(env.identity, taskId);
-  const pending = attempt?.phase === "pending";
-  // Changes sent by this mount: a read asked before the latest one may predate it.
-  const sent = useRef(0);
+  const lock = enrolmentLock(env.identity, taskId);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -352,12 +409,13 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       mounted.current = false;
     };
   }, []);
-  // A pending attempt that ended (here or before a remount) is followed by a read.
-  const wasPending = useRef(pending);
+  // A change answered (here, or before a remount: then the mount's read is the one) is followed by a read.
+  const reading = lock?.phase === "reading" ? lock.generation : 0;
+  const readFor = useRef(reading);
   useEffect(() => {
-    if (wasPending.current && !pending) setReload((n) => n + 1);
-    wasPending.current = pending;
-  }, [pending]);
+    if (reading !== 0 && reading !== readFor.current) setReload((n) => n + 1);
+    readFor.current = reading;
+  }, [reading]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-read after a change or a retry
   useEffect(() => {
     if (!env.online) return;
@@ -366,36 +424,39 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       return;
     }
     let live = true;
-    const asked = sent.current;
+    const read = askEnrolment(env.identity, taskId);
     setState((s) => (s === "saved" || s === "refused" ? s : "loading"));
     void env.api.readEnrolment(taskId).then((result) => {
       noteIfRefused(env.identity, readKey, result);
-      if (!live || asked !== sent.current) return;
-      // While a change is pending a read may predate it: it never replaces what is shown (a screen mounted meanwhile shows it, disabled).
-      const pendingNow =
-        enrolmentAttemptOf(env.identity, taskId)?.phase === "pending";
+      if (!live) return;
+      const answer = answerEnrolment(env.identity, taskId, read, result.ok);
       if (result.ok) {
-        setEnrolment((shown) =>
-          pendingNow && shown !== null ? shown : result.value,
-        );
+        const value = result.value;
+        if (answer === "current") {
+          // The current state ends a draft whose edits were all sent (the version they made, or were refused at); unsent edits stay.
+          setDraft((d) =>
+            d !== null && d.base.version !== value.version && !unsent(d)
+              ? null
+              : d,
+          );
+          setEnrolment(value);
+        } else setEnrolment((shown) => shown ?? value);
         setState((s) => (s === "loading" ? "idle" : s));
-      } else if (result.kind !== "closed") setState("unavailable");
+      } else if (result.kind !== "closed" && answer !== "outdated")
+        setState("unavailable");
     });
     return () => {
       live = false;
     };
   }, [env.api, env.online, env.identity, taskId, reload]);
-  const send = async (command: EnrolCommand) => {
-    const mine = startEnrolment(env.identity, taskId, command, env.newId);
-    if (mine === null) return;
-    sent.current += 1;
+  // Admitted only while nothing is being sent or confirmed, checked when it happens: a control rendered before a change was sent can
+  // still be pressed in the same turn.
+  const admitted = () =>
+    env.writable && enrolmentLock(env.identity, taskId) === null;
+  const deliver = async (mine: EnrolmentAttempt) => {
     // The captured body is what is sent, byte for byte, now and on Try again (R22: its policy too).
     const result = await env.api.enrol(JSON.parse(mine.body), mine.key);
-    const definite =
-      result.ok ||
-      (result.kind !== "uncertain" &&
-        result.kind !== "not_sent" &&
-        result.kind !== "closed");
+    const definite = result.ok || DEFINITE.has(result.kind);
     settleEnrolment(
       env.identity,
       taskId,
@@ -407,20 +468,76 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
     else if (definite) setState("refused");
     else if (result.kind !== "closed") setState("idle");
   };
-  const change = (next: {
-    active?: boolean;
-    aggregate_consent?: boolean;
-    policy?: Policy;
-  }) => {
-    if (enrolment === null) return;
-    void send(enrolCommand(taskId, enrolment, next));
+  /** Sends `command` if its attempt is taken (nothing of the task pending or unconfirmed): true when it was. */
+  const send = (command: EnrolCommand): boolean => {
+    const mine = startEnrolment(env.identity, taskId, command, env.newId);
+    if (mine === null) return false;
+    void deliver(mine);
+    return true;
+  };
+  // A draft never outlives its identity or task: the detail's read belongs to one identity and task (`useTaskDetail`'s scope), so either
+  // changing remounts these settings and the draft with them (revision 11 S13).
+  const held = draft;
+  const stale =
+    held !== null &&
+    enrolment !== null &&
+    held.base.version !== enrolment.version;
+  /** An edit of the draft for `base` (made from `seed` if there is none yet); a kept draft of another version is never edited. */
+  const edit = (
+    base: Enrolment,
+    seed: Policy,
+    next: { policy?: Policy; consent?: boolean },
+  ) => {
+    if (!admitted()) return;
+    setDraft((d) => {
+      if (d !== null && d.base.version !== base.version) return d;
+      const from: Draft = d ?? {
+        base,
+        policy: copyPolicy(seed),
+        consent: null,
+        edits: 0,
+        sent: null,
+      };
+      return { ...from, ...next, edits: from.edits + 1 };
+    });
+  };
+  /** Sends the draft's change; admitted, the edits it carries are `sent` (an edit after them would stay unsaved). */
+  const submit = (d: Draft, change: Change) => {
+    if (send(enrolCommand(taskId, d.base, change)))
+      setDraft((now) =>
+        now !== null && now.base === d.base ? { ...now, sent: d.edits } : now,
+      );
+  };
+  const discard = () => {
+    if (admitted()) setDraft(null);
   };
   const uncertain = attempt?.phase === "uncertain" ? attempt : null;
   const blocked = !env.writable
     ? copy.NOT_WRITABLE
-    : pending
+    : lock?.phase === "sending"
       ? CONTROLS_COPY.sending
-      : null;
+      : lock !== null
+        ? CONTROLS_COPY.confirming
+        : null;
+  // While a draft of an earlier version is kept, it is discarded before anything else is changed.
+  const actions = blocked ?? (stale ? CONTROLS_COPY.discardFirst : null);
+  const joinForm = (shown: Enrolment, seed: Policy, note: string) => (
+    <JoinForm
+      seed={seed}
+      note={note}
+      draft={stale ? null : held}
+      blocked={actions}
+      edit={(next) => edit(shown, seed, next)}
+      join={(d) => {
+        if (d.consent !== null)
+          submit(d, {
+            active: true,
+            aggregate_consent: d.consent,
+            policy: d.policy,
+          });
+      }}
+    />
+  );
   return (
     <section
       className="flex flex-col gap-2"
@@ -452,30 +569,37 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
         <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.loading}</p>
       ) : (
         <div className="flex flex-col gap-2">
+          {stale && held !== null ? (
+            <KeptDraft draft={held} blocked={blocked} discard={discard} />
+          ) : null}
           {enrolment.active ? (
             <Enrolled
-              key={enrolment.version}
               enrolment={enrolment}
-              blocked={blocked}
-              change={change}
+              draft={stale ? null : held}
+              blocked={actions}
+              open={() => {
+                if (admitted())
+                  setDraft({
+                    base: enrolment,
+                    policy: copyPolicy(enrolment.policy),
+                    consent: null,
+                    edits: 0,
+                    sent: null,
+                  });
+              }}
+              edit={(policy) => edit(enrolment, enrolment.policy, { policy })}
+              cancel={discard}
+              save={(d) => submit(d, { policy: d.policy })}
+              change={(next) => send(enrolCommand(taskId, enrolment, next))}
             />
           ) : enrolment.version === 0 ? (
             <FirstJoin
-              blocked={blocked}
-              join={(consent, policy) =>
-                change({ active: true, aggregate_consent: consent, policy })
+              form={(seed) =>
+                joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)
               }
             />
           ) : (
-            <JoinForm
-              key={enrolment.version}
-              seed={enrolment.policy}
-              note={CONTROLS_COPY.lastAudience}
-              blocked={blocked}
-              join={(consent, policy) =>
-                change({ active: true, aggregate_consent: consent, policy })
-              }
-            />
+            joinForm(enrolment, enrolment.policy, CONTROLS_COPY.lastAudience)
           )}
           {uncertain !== null ? (
             <span
@@ -486,12 +610,13 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
                 {CONTROLS_COPY.enrolFailed}
               </span>
               {env.writable ? (
-                <Button
+                <Act
                   variant="quiet"
+                  blocked={blocked}
                   onClick={() => void send(uncertain.command)}
                 >
                   {copy.TRY_AGAIN}
-                </Button>
+                </Act>
               ) : null}
             </span>
           ) : state === "refused" ? (
@@ -534,26 +659,36 @@ function Act({
 /** Enrolled: Leave, the consent and the audience, each resending everything it does not change. */
 function Enrolled({
   enrolment,
+  draft,
   blocked,
+  open,
+  edit,
+  cancel,
+  save,
   change,
 }: {
   enrolment: Enrolment;
+  /** The audience being edited ("Change…"), or null when the editor is closed. */
+  draft: Draft | null;
   blocked: string | null;
-  change(next: {
-    active?: boolean;
-    aggregate_consent?: boolean;
-    policy?: Policy;
-  }): void;
+  open(): void;
+  edit(policy: Policy): void;
+  cancel(): void;
+  save(draft: Draft): void;
+  change(next: Change): void;
 }) {
-  // The audience being edited ("Change…"), from this version's policy; null when the editor is closed (Cancel sends nothing).
-  const [draft, setDraft] = useState<Policy | null>(null);
   const unchanged =
-    draft !== null && canonicalBody(draft) === canonicalBody(enrolment.policy);
+    draft !== null &&
+    canonicalBody(draft.policy) === canonicalBody(enrolment.policy);
+  // An unsaved audience edit is saved or cancelled first: never sent with Leave or the consent, nor lost to their answer.
+  const others =
+    blocked ??
+    (draft !== null && unsent(draft) ? CONTROLS_COPY.finishFirst : null);
   return (
     <>
       <span>
         <Act
-          blocked={blocked}
+          blocked={others}
           data-enrol-act="leave"
           onClick={() => change({ active: false })}
         >
@@ -564,7 +699,7 @@ function Enrolled({
         <input
           type="checkbox"
           checked={enrolment.aggregate_consent}
-          disabled={blocked !== null}
+          disabled={others !== null}
           onChange={() =>
             change({ aggregate_consent: !enrolment.aggregate_consent })
           }
@@ -580,30 +715,26 @@ function Enrolled({
         <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.audienceNote}</p>
         {draft === null ? (
           <span>
-            <Act
-              variant="quiet"
-              blocked={blocked}
-              onClick={() => setDraft(copyPolicy(enrolment.policy))}
-            >
+            <Act variant="quiet" blocked={blocked} onClick={open}>
               {CONTROLS_COPY.changeAudience}
             </Act>
           </span>
         ) : (
           <>
             <AudienceChooser
-              policy={draft}
-              onChange={setDraft}
-              disabled={blocked !== null}
+              policy={draft.policy}
+              onChange={edit}
+              blocked={blocked}
             />
             <span className="flex flex-wrap items-center gap-2">
-              <Button variant="quiet" onClick={() => setDraft(null)}>
+              <Act variant="quiet" blocked={blocked} onClick={cancel}>
                 {CONTROLS_COPY.cancel}
-              </Button>
+              </Act>
               <Act
                 variant="primary"
                 blocked={blocked ?? (unchanged ? CONTROLS_COPY.noChange : null)}
                 data-enrol-act="save-audience"
-                onClick={() => change({ policy: draft })}
+                onClick={() => save(draft)}
               >
                 {CONTROLS_COPY.saveAudience}
               </Act>
@@ -615,6 +746,40 @@ function Enrolled({
   );
 }
 
+/** A draft with unsent edits of an earlier version: shown as it was, never sent onto the version shown; discarding it is explicit. */
+function KeptDraft({
+  draft,
+  blocked,
+  discard,
+}: {
+  draft: Draft;
+  blocked: string | null;
+  discard(): void;
+}) {
+  return (
+    <div className="flex flex-col gap-2" data-enrol-kept="">
+      <p className="text-[12.5px] text-conflict-text">
+        {CONTROLS_COPY.keptDraft}
+      </p>
+      {draft.consent === null ? null : (
+        <p className="text-[13px] text-ink-1">
+          {draft.consent ? CONTROLS_COPY.consentYes : CONTROLS_COPY.consentNo}
+        </p>
+      )}
+      <AudienceChooser
+        policy={draft.policy}
+        onChange={() => undefined}
+        blocked={CONTROLS_COPY.keptDraft}
+      />
+      <span>
+        <Act variant="quiet" blocked={blocked} onClick={discard}>
+          {CONTROLS_COPY.discard}
+        </Act>
+      </span>
+    </div>
+  );
+}
+
 type Seed =
   | { status: "loading" }
   | { status: "failed" }
@@ -623,15 +788,9 @@ type Seed =
 /**
  * The first Join (version 0): the read enrolment's empty policy is a placeholder, not an audience. The audience offered is the CURRENT
  * default sharing for progress, from a defaults snapshot asked for when this opened; until it is known nothing can be joined, and a failed
- * read says so with Try again (never shown as Private).
+ * read says so with Try again (never shown as Private). A draft already begun keeps its own audience whatever is read here.
  */
-function FirstJoin({
-  blocked,
-  join,
-}: {
-  blocked: string | null;
-  join(consent: boolean, policy: Policy): void;
-}) {
+function FirstJoin({ form }: { form(seed: Policy): ReactNode }) {
   const defaults = useSharingDefaults();
   const source = useRef(defaults);
   source.current = defaults;
@@ -654,15 +813,7 @@ function FirstJoin({
       live = false;
     };
   }, [round]);
-  if (seed.status === "ready")
-    return (
-      <JoinForm
-        seed={seed.policy}
-        note={CONTROLS_COPY.defaultAudience}
-        blocked={blocked}
-        join={join}
-      />
-    );
+  if (seed.status === "ready") return form(seed.policy);
   return (
     <>
       {seed.status === "loading" ? (
@@ -692,17 +843,21 @@ function FirstJoin({
 function JoinForm({
   seed,
   note,
+  draft,
   blocked,
+  edit,
   join,
 }: {
   seed: Policy;
   note: string;
+  /** The choices made so far, or null (nothing chosen: the seed, and no consent). */
+  draft: Draft | null;
   blocked: string | null;
-  join(consent: boolean, policy: Policy): void;
+  edit(next: { policy?: Policy; consent?: boolean }): void;
+  join(draft: Draft): void;
 }) {
   const legend = useId();
-  const [consent, setConsent] = useState<boolean | null>(null);
-  const [policy, setPolicy] = useState(() => copyPolicy(seed));
+  const consent = draft?.consent ?? null;
   const choice = (value: boolean, label: string) => (
     <label className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
       <input
@@ -710,7 +865,7 @@ function JoinForm({
         name={legend}
         checked={consent === value}
         disabled={blocked !== null}
-        onChange={() => setConsent(value)}
+        onChange={() => edit({ consent: value })}
         className="size-[15px]"
       />
       {label}
@@ -733,9 +888,9 @@ function JoinForm({
           {note} {CONTROLS_COPY.audienceNote}
         </p>
         <AudienceChooser
-          policy={policy}
-          onChange={setPolicy}
-          disabled={blocked !== null}
+          policy={draft?.policy ?? seed}
+          onChange={(policy) => edit({ policy })}
+          blocked={blocked}
         />
       </div>
       <span>
@@ -745,7 +900,7 @@ function JoinForm({
           }
           data-enrol-act="join"
           onClick={() => {
-            if (consent !== null) join(consent, policy);
+            if (draft !== null) join(draft);
           }}
         >
           {CONTROLS_COPY.join}

@@ -23,7 +23,11 @@ export function mutantRedirect(root, mutantDirectory) {
       if (!resolved || resolved.external) return resolved;
       const path = resolved.id.split("?")[0] ?? resolved.id;
       const rel = relative(root, path);
-      if (rel.startsWith("src/") && existsSync(join(mutant, rel)))
+      // Source files, and (WEB-10a revision 11, R24: MU-2235) the catalogue's own expected counts; no other mutant patches `scripts/`.
+      if (
+        (rel.startsWith("src/") || rel.startsWith("scripts/mutation/")) &&
+        existsSync(join(mutant, rel))
+      )
         return join(mutant, rel);
       return resolved;
     },

@@ -8,7 +8,6 @@ import { SharingBoundary, useSharingEnv } from "./env";
 import { knownMembership, useMembership } from "./membership";
 import { effectiveAudience, labelsFrom } from "./model/audience";
 import {
-  emptyPolicy,
   type PolicyAction,
   type PolicyRefusal,
   reducePolicy,
@@ -24,11 +23,14 @@ const ONLY_ME = "Only me (private)";
  * enrolment). The same presentation as WF-SHARING-04 (the effective audience, the grant and exclusion editor, the directory lookup) over a
  * policy the CALLER owns: every edit is handed to `onChange`, and nothing is read or sent about any resource's policy here. Only the
  * households you are in are read (`GET /households`, for names and the household picker).
+ *
+ * `blocked` (revision 11, R23): why nothing can be edited now (the caller is sending or confirming its policy), or null. It holds everywhere
+ * in the chooser, an open directory lookup included (its Choose buttons say why), and is checked again when an edit happens.
  */
 export interface AudienceChooserProps {
   policy: Policy;
   onChange(policy: Policy): void;
-  disabled: boolean;
+  blocked: string | null;
 }
 
 export function AudienceChooser(props: AudienceChooserProps) {
@@ -39,7 +41,8 @@ export function AudienceChooser(props: AudienceChooserProps) {
   );
 }
 
-function Chooser({ policy, onChange, disabled }: AudienceChooserProps) {
+function Chooser({ policy, onChange, blocked }: AudienceChooserProps) {
+  const disabled = blocked !== null;
   const env = useSharingEnv();
   const [membership, retryMembership] = useMembership({
     enabled: env.online,
@@ -56,6 +59,7 @@ function Chooser({ policy, onChange, disabled }: AudienceChooserProps) {
     [known, learnt],
   );
   const dispatch = (action: PolicyAction) => {
+    if (disabled) return;
     const next = reducePolicy({ policy, refused: null }, action, env.accountId);
     setRefused(next.refused);
     if (next.policy !== policy) onChange(next.policy);
@@ -69,7 +73,9 @@ function Chooser({ policy, onChange, disabled }: AudienceChooserProps) {
             : copy.ADD_EXCLUSION.slice(2)
         }
         onBack={() => setView("edit")}
+        blocked={blocked}
         onChoose={(entry) => {
+          if (disabled) return;
           setLearnt((all) => [...all, [entry.id, entry.username]]);
           dispatch(
             view === "grant"
@@ -98,7 +104,12 @@ function Chooser({ policy, onChange, disabled }: AudienceChooserProps) {
         <span>
           <Button
             variant="quiet"
-            onClick={() => dispatch({ type: "reset", policy: emptyPolicy() })}
+            onClick={() =>
+              dispatch({
+                type: "reset",
+                policy: { grants: [], exclude_accounts: [] },
+              })
+            }
           >
             {ONLY_ME}
           </Button>
