@@ -19,6 +19,7 @@ import { installMatchMedia } from "../../helpers/match-media";
 import {
   type CalendarWorld,
   calendarWorld,
+  DB,
   sourceRow,
   type WireReply,
 } from "../../support/calendars";
@@ -607,33 +608,97 @@ describe("a late answer belongs to the form that sent it (S10, S13)", () => {
     await waitFor(() => expect(polite()).toBe(copy.LINKED));
   });
 
+  /**
+   * WEB-08d revision 20 (review r19 C1): the FIRST `not_sent` answer is held until the waiting change is durable and Manage shows its
+   * guard, then released. Without that order the 50 ms retries ran while the change was still being written (legal admissions, before
+   * the guard), and they counted against the one admission this test allows. The total still counts from the original press; only
+   * the order is fixed. The change is written with its commit prompt and, separately, with its commit held by the engine; the control
+   * (nothing queued) is released at the same point and keeps asking.
+   */
   test("a Remove waiting to be sent is not admitted again once the source has a waiting change (S13); its control keeps asking", async () => {
     const pause = (ms: number) =>
       act(() => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    for (const queued of [false, true]) {
+    const notSent = (): WireReply => ({
+      throws: new StampedRequestError("not_sent"),
+    });
+    const removeOf = (dialog: HTMLElement) =>
+      within(dialog).getByRole("button", { name: copy.REMOVE });
+    const submitOf = (dialog: HTMLElement) =>
+      within(dialog).getByRole("button", { name: copy.REMOVE_SUBMIT });
+    for (const schedule of ["nothing queued", "commit", "held commit"]) {
+      const queued = schedule !== "nothing queued";
       const w = await calendarWorld({ cache: [sourceRow()] });
       const dialog = await openManage(w);
-      w.replies.set(
-        "/calendar-commands",
-        Array.from({ length: 12 }, () => ({
-          throws: new StampedRequestError("not_sent"),
-        })),
-      );
-      press(dialog, copy.REMOVE);
-      press(dialog, copy.REMOVE_SUBMIT);
-      expect(commands(w)).toHaveLength(1);
-      if (queued)
-        await enqueue(
-          w,
-          configureSourceRequest(sourceRow(), {
-            timezone: "UTC",
-            enabled: true,
+      let release: (reply: WireReply) => void = () => undefined;
+      w.replies.set("/calendar-commands", [
+        {
+          wait: new Promise<WireReply>((resolve) => {
+            release = resolve;
           }),
-        );
-      await pause(500);
-      if (queued) expect(commands(w)).toHaveLength(1);
-      else expect(commands(w).length).toBeGreaterThan(2);
-      cleanup();
+        },
+        ...Array.from({ length: 12 }, notSent),
+      ]);
+      try {
+        expect(reasonOf(removeOf(dialog)), schedule).toBeUndefined();
+        press(dialog, copy.REMOVE);
+        press(dialog, copy.REMOVE_SUBMIT);
+        expect(commands(w), schedule).toHaveLength(1);
+        await w.settle();
+        expect(reasonOf(submitOf(dialog)), schedule).toBe("Working…");
+        if (queued) {
+          if (schedule === "held commit")
+            w.world.idb.inject({
+              match: (tx) => tx.label === "data.enqueueDraft",
+              mode: "stall_commit",
+              times: 1,
+            });
+          let localId = "";
+          await act(async () => {
+            const outcome = w.env.outbox()?.enqueue(
+              configureSourceRequest(sourceRow(), {
+                timezone: "UTC",
+                enabled: true,
+              }),
+            );
+            if (schedule === "held commit") {
+              await waitFor(() =>
+                expect(w.world.idb.hasStalledCommit(DB)).toBe(true),
+              );
+              // Not durable yet: no row, and nothing has been admitted while the commit is outstanding.
+              expect(w.rows("drafts"), schedule).toHaveLength(0);
+              expect(w.world.idb.completeStalled(DB), schedule).toBe(true);
+            }
+            const result = await outcome;
+            if (result?.kind !== "queued") throw new Error("setup: not queued");
+            localId = result.localId;
+          });
+          await w.settle();
+          // The change is durable and Manage shows it before the held answer is released.
+          expect(
+            configures(w).map(({ draft }) => draft.local_id),
+            schedule,
+          ).toEqual([localId]);
+          await waitFor(() =>
+            expect(reasonOf(removeOf(dialog))).toBe(copy.WAITING_CHANGES_FIRST),
+          );
+        } else {
+          // Control: no waiting change, so Manage still allows Remove at the same point.
+          expect(reasonOf(removeOf(dialog)), schedule).toBeUndefined();
+        }
+        expect(commands(w), schedule).toHaveLength(1);
+        await act(async () => release(notSent()));
+        await pause(500);
+        if (queued) {
+          expect(commands(w), schedule).toHaveLength(1);
+          // The released answer was consumed and the attempt ended: the control now gives the guard, not "Working…".
+          expect(reasonOf(submitOf(dialog)), schedule).toBe(
+            copy.WAITING_CHANGES_FIRST,
+          );
+        } else expect(commands(w).length, schedule).toBeGreaterThan(2);
+      } finally {
+        release(notSent());
+        cleanup();
+      }
     }
   });
 });
