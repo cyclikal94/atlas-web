@@ -864,10 +864,10 @@ test.describe("I-O3: queued writes wait for a supported server", () => {
 });
 
 // ---- I-U1 (WEB-14a, D-P9): the server's API version changes UNDER an open, signed-in page ----------------------------------------------
-// The real backend answers `/health` with `api_version` 0.28.0; the proxy rewrites the field (mismatched) or deletes it (missing) while the
+// The real backend answers `/health` with `api_version` 0.29.0; the proxy rewrites the field (mismatched) or deletes it (missing) while the
 // page is open and its dispatcher runs. The pause legs' version field is therefore PROXY-SUPPLIED (labelled); the rest of the stack is real.
 test.describe("I-U1: a server version that changes under an open page pauses and resumes sending without a reload", () => {
-  test("mismatched (proxy-rewritten 0.29.0): a reconnect re-checks, the draft is kept and NOT sent; the server back in range and another reconnect send it exactly once", async ({
+  test("mismatched (proxy-rewritten 0.30.0): a reconnect re-checks, the draft is kept and NOT sent; the server back in range and another reconnect send it exactly once", async ({
     context,
   }) => {
     const page = await bootHarness(context);
@@ -880,13 +880,13 @@ test.describe("I-U1: a server version that changes under an open page pauses and
       method: "GET",
       path: "/health",
       action: "rewrite_json",
-      set: { api_version: "0.29.0" },
+      set: { api_version: "0.30.0" },
     });
     // A reconnect: the session asks `/health` again (before WEB-14a it asked only after an `unreachable` answer).
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect
       .poll(() => page.evaluate(() => window.__s.compat.get()))
-      .toMatchObject({ status: "unsupported", version: "0.29.0" });
+      .toMatchObject({ status: "unsupported", version: "0.30.0" });
     await expect
       .poll(() => dispatcherState(page))
       .toMatchObject({ kind: "paused", reason: "compat_unsupported" });
@@ -975,10 +975,10 @@ test.describe("I-U1 (revision 1, R1): a draft queued offline waits for the recon
       "supported" | "unsupported" | "missing",
     ]
   > = [
-    ["matching (the real 0.28.0)", {}, "supported"],
+    ["matching (the real 0.29.0)", {}, "supported"],
     [
-      "mismatched (proxy-supplied 0.29.0)",
-      { set: { api_version: "0.29.0" } },
+      "mismatched (proxy-supplied 0.30.0)",
+      { set: { api_version: "0.30.0" } },
       "unsupported",
     ],
     ["missing (proxy-deleted field)", { delete: ["api_version"] }, "missing"],

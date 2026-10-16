@@ -601,8 +601,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 164,
-        passed: 158,
+        planned_cases: 177,
+        passed: 171,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -1214,6 +1214,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-i14e",
     "-i14d",
     "-data",
+    "-calendar",
     "-traces",
     "-registration",
     "-oidc",
