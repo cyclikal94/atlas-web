@@ -1,16 +1,20 @@
-import { mkdirSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { provokedIdbWarnings, test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
 import { expect, pressTab, runAxe } from "./helpers";
-import { expectPaintedContrast } from "./surface-checks";
+import {
+  expectPaintedContrast,
+  recordPaintedContrast,
+  surfaceScreenshot,
+} from "./surface-checks";
 
 /**
  * WEB-08b, A2 / A3 / A4 (Layer A, rendered): the PUBLIC surfaces (sign-in, join) in the production build, in a real engine, with
  * a stubbed network, at 320, 390, 768 and 1280 px in dark and light: no horizontal scroll, axe clean INCLUDING colour contrast in
- * real layout, 44 px targets, a visible focus ring, the heading as the focus target. Screenshots (Chromium) go to
- * .agtx/evidence/WEB-08b/design/. This is design and accessibility evidence only: it is not Kieran's visual or copy sign-off,
- * not assistive-technology evidence and not integration evidence.
+ * real layout, 44 px targets, a visible focus ring, the heading as the focus target. Screenshots (Chromium) and the painted-contrast
+ * records belong to this invocation and test (`surfaceScreenshot`, `recordPaintedContrast`: review 14's R27); the historical
+ * `.agtx/evidence/WEB-08b/design/` folder is no longer written. This is design and accessibility evidence only: it is not Kieran's
+ * visual or copy sign-off, not assistive-technology evidence and not integration evidence.
  */
 const WIDTHS: Array<[number, number]> = [
   [320, 640],
@@ -18,7 +22,6 @@ const WIDTHS: Array<[number, number]> = [
   [768, 1024],
   [1280, 800],
 ];
-const EVIDENCE = ".agtx/evidence/WEB-08b/design";
 const PASSWORD = "correct-horse-battery-9271";
 
 interface Surface {
@@ -288,13 +291,12 @@ for (const scheme of ["dark", "light"] as const) {
             ).toBeTruthy();
           }
 
-          if (engine === "chromium") {
-            mkdirSync(`${EVIDENCE}/chromium`, { recursive: true });
-            await page.screenshot({
-              path: `${EVIDENCE}/chromium/${surface.name}-${width}-${scheme}.png`,
-              fullPage: true,
+          if (engine === "chromium")
+            await surfaceScreenshot(page, testInfo, {
+              name: surface.name,
+              width,
+              scheme,
             });
-          }
         }
       });
     }
@@ -534,7 +536,7 @@ for (const scheme of ["dark", "light"] as const) {
     test("sign-in and join: the input border is field-edge at 3:1 or better, and the primary action text is 4.5:1 or better", async ({
       page,
       context,
-    }) => {
+    }, info) => {
       const stub = new AuthStub();
       await stub.install(context);
       await page.goto("/");
@@ -552,12 +554,11 @@ for (const scheme of ["dark", "light"] as const) {
         scheme,
         `join (${scheme})`,
       );
-      mkdirSync(EVIDENCE, { recursive: true });
-      const { appendFileSync } = await import("node:fs");
-      appendFileSync(
-        `${EVIDENCE}/painted-contrast.jsonl`,
-        `${JSON.stringify({ scheme, engine: test.info().project.name, signIn, join })}\n`,
-      );
+      recordPaintedContrast(info, scheme, {
+        engine: info.project.name,
+        signIn,
+        join,
+      });
     });
   });
 }

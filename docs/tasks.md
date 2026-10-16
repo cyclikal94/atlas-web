@@ -329,6 +329,13 @@ Revision 13 (R26): `enrolment-focus.test.tsx` (F1–F6: the first consent Yes/No
 grant's permission and a consent choice with the directory lookup open, each keeping the same connected control focussed with nothing sent;
 rejoining, enrolled and rerender controls; no defaults snapshot asked for once begun), native E-T34 (real Tab, Option+Tab in WebKit, and Space
 in three engines, with rejoin controls); unit MU-2251…MU-2253 and real-engine MU-2254; MU-2243 re-anchored (same intent).
+Revision 14 (review 14's R27 `production-browser-evidence-overwrite`, design assessment DA-H1; harness only, no product change): the
+production public surfaces' Chromium screenshots and painted-contrast records, and the Settings fixture's screenshots through
+`checkSurface`, are claimed per invocation and test (`surfaceScreenshot`/`recordPaintedContrast` in `tests/e2e/surface-checks.ts`, on
+`evidence-run.ts`'s exclusive claims) instead of the fixed `.agtx/evidence/WEB-08b/design/`, now historical; every assertion unchanged.
+`tests/static/browser-evidence-writers.test.ts` (no fixed evidence destination, append or literal screenshot path in `tests/e2e`,
+profiling producers exempt) and `scripts/validation/design-evidence.test.mjs` (two and concurrent invocations, projects, repeats, a
+failed attempt, report discovery and a sentinel historical folder, through Playwright).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
