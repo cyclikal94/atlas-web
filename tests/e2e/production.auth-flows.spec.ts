@@ -4,6 +4,14 @@ import { AuthStub } from "./auth-stub";
 import { expect } from "./helpers";
 
 /**
+ * WEB-14a revision 19, labelled HARNESS ADAPTATION (Kieran, 15 October 2026): the production build registers the app's service worker
+ * (WEB-14a), and Playwright WebKit does not apply `context.route` to requests a worker passes on, so the AuthStub never answered there
+ * and most WebKit cases failed (also on the unmodified revision-18 candidate). These specs test the authentication surfaces, not the
+ * worker: they run without it. The worker in the production build is covered by production.pwa.spec.ts and production.offline.spec.ts.
+ */
+test.use({ serviceWorkers: "block" });
+
+/**
  * WEB-08b, Layer B in a REAL ENGINE: the production build, the production IndexedDB, Web Locks and BroadcastChannel, and a
  * STUBBED network (`tests/e2e/auth-stub.ts`). It shows the module behaves as specified in Chromium, Firefox and WebKit: the
  * URL fragment is stripped before the first request, registration and the OIDC round trip complete, and the ordering traces

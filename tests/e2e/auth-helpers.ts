@@ -22,6 +22,9 @@ export const test = base.extend<{
       page.on("console", (message) => {
         if (message.type() !== "error" && message.type() !== "warning") return;
         const text = message.text();
+        // Playwright's own notice when a spec runs with `serviceWorkers: "block"` (WEB-14a revision 19): not the application's.
+        if (text === "Service Worker registration blocked by Playwright")
+          return;
         const allowed = allowedByTest.get(info.testId) ?? new Set();
         const status = /status of (\d{3})/.exec(text)?.[1];
         if (status && allowed.has(Number(status))) return;

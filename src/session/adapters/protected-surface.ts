@@ -59,27 +59,43 @@ export function createProtectedSurface(
 
   const root = () => getProtectedRoot(doc);
 
-  /** Focus generation: a newer mount, lift or unmount cancels a pending focus. */
+  /** Focus generation: a newer mount, lift, gate or unmount cancels a pending focus. */
   let focusToken = 0;
+  /**
+   * The heading is a FALLBACK (revision 19, R27): it never overrides focus that something in the tree has already placed (a restored
+   * form's first field, an update action, a dialog, the person), whether that happened before this mount's attempt or while it waited for
+   * the router to render the heading. Every attempt checks that first, and a focus into the tree meanwhile ends the wait even if the focused
+   * control has gone since.
+   */
   const focusHeading = () => {
     const token = ++focusToken;
+    const tree = root();
+    let claimed = false;
+    const claim = () => {
+      claimed = true;
+    };
+    tree.addEventListener("focusin", claim);
     const attempt = (framesLeft: number) => {
-      if (token !== focusToken || !mounted) return;
-      const heading = root().querySelector<HTMLElement>("h1");
-      if (heading) {
-        if (!heading.hasAttribute("tabindex")) heading.tabIndex = -1;
-        heading.focus();
+      const active = doc.activeElement;
+      if (
+        token !== focusToken ||
+        !mounted ||
+        claimed ||
+        (active !== doc.body && tree.contains(active)) ||
+        framesLeft < 0
+      ) {
+        tree.removeEventListener("focusin", claim);
         return;
       }
-      // The router renders its route after the synchronous commit: wait for the heading (bounded), unless the person
-      // has already moved focus somewhere inside the tree.
-      const active = doc.activeElement;
-      const moved =
-        active instanceof HTMLElement &&
-        active !== doc.body &&
-        root().contains(active);
-      if (framesLeft > 0 && !moved)
+      const heading = tree.querySelector<HTMLElement>("h1");
+      if (!heading) {
+        // The router renders its route after the synchronous commit: wait for the heading (bounded).
         win.requestAnimationFrame(() => attempt(framesLeft - 1));
+        return;
+      }
+      tree.removeEventListener("focusin", claim);
+      if (!heading.hasAttribute("tabindex")) heading.tabIndex = -1;
+      heading.focus();
     };
     attempt(120);
   };
@@ -90,6 +106,8 @@ export function createProtectedSurface(
       applyGate(protectedRoot);
       setNeutralTitle(doc);
       deps.liveRegions.clearAll();
+      // A pending heading focus is the tree's: the gate owns focus now (revision 19, R27).
+      focusToken += 1;
       // Focus leaves the protected tree, so an open tooltip or menu that closes on blur does.
       const active = doc.activeElement;
       if (active instanceof HTMLElement && protectedRoot.contains(active))
@@ -149,8 +167,11 @@ export function createProtectedSurface(
                 element.getAttribute("data-focus-key") === position.focusKey,
             ) ?? null)
           : null;
-        if (target) target.focus();
-        else focusHeading();
+        if (target) {
+          // The person's own place wins over a heading focus still pending from an earlier mount (revision 19, R27).
+          focusToken += 1;
+          target.focus();
+        } else focusHeading();
         win.scrollTo(position.scrollX, position.scrollY);
       } else {
         focusHeading();

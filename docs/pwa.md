@@ -47,8 +47,35 @@ Per tab: `none`, `available` (a newer version is installed and waiting), `update
 runs the older), `saving`, `save_failed` (`refused` while signing out), `discard_failed` (revision 1, below), `reloading`, `data_superseded`
 (below). The banner is in the shell (`AppUpdateBanner`) and in the neutral root (`NeutralUpdateBanner`, signed out). It is dismissible
 until the next in-app navigation (the router rendered a destination with a different address: a link, a programmatic navigation or a
-history step; `src/lib/pwa/navigation.ts`, revision 17, R24) or return to the page. It never takes focus, is announced once, and NEVER
-reloads on its own:
+history step; `src/lib/pwa/navigation.ts`, revision 17, R24) or return to the page. It is announced once and NEVER reloads on its own.
+Focus (revision 19, R26/R27; `src/lib/form-recovery/focus.ts`; form-recovery-reload.html "Focus order"):
+
+| Presentation | Where focus goes |
+| --- | --- |
+| A plain notice (no recoverable form open; "updated elsewhere"; "Saving…"; "Reloading…"; superseded data) | Nowhere: it is announced, focus stays where it is |
+| Q4 state 1, the prompt appears (a recoverable form is open) | "Save and reload" |
+| Q4 state 2, a failed save, on either surface | "Retry save" |
+| A refused save (only "Discard and reload anyway" is offered) | The banner region itself, never the destructive choice |
+| A discard that failed | "Try again" |
+| Q4 state 3, a restored form | Its first field (`RecoveryBanner`'s `firstFieldRef`), also after "Discard instead" |
+| A choice made in the banner whose button goes ("Save and reload", "Retry save", "Discard and reload anyway", "Try again", "Reload anyway") | The banner region, until a failure focuses its own action (or the page reloads) |
+| "Not now" or the close button, used from the banner | Where the prompt took focus from, when that is still on the same surface and focusable; otherwise the surface's page heading |
+
+A presentation takes focus ONCE: a change of what the update state says is a new presentation; a re-render, a remount of the shell, the move
+of a failure to the neutral root or the same state published again is not. Each of these is a focus REQUEST (revision 20): pending until
+its target really became the active element. Behind the session gate (`inert` and its modal dialog), an app dialog or a form's hold the
+browser refuses focus, and the gate usually lifts an existing tree without another render, so a pending request is attempted again
+whenever the document's eligibility can have changed (an `inert`, `open`, `hidden` or `disabled` attribute or the node tree changed: one
+MutationObserver, kept only while a request is pending, run at the microtask checkpoint after the step that changed the document; no timer
+or polling). A request belongs to the component that made it, so an unmount (another account, another route, the shell going) withdraws it.
+Where both surfaces hold one for the same failure, the shell's goes first. An app dialog's return of focus to its opener yields to focus
+placed since it closed. Focus never chooses anything: no action, save, discard or reload follows from it. DA-F1 (Kieran, 15 October 2026):
+a restored form's first field wins over a state-1 prompt of the same arrival, in either order, until the next in-app navigation; the prompt
+waits while a restored field in the page is still pending. DA-F2 (Kieran, 16 October 2026, approval
+`FIXTURE-BUDGETS-FOCUS-PRECEDENCE-20261016`): a failure of the person's save or discard cancels a restored-field request still pending, so
+the failure's recovery action has focus and the older request never takes it later. The protected surface's heading focus after a mount and RouteFocus's heading focus after a
+navigation are fallbacks: focus placed in the tree meanwhile (a restored field, an update action, the person) is kept, and the session gate,
+an unmount or another account's tree ends a pending one.
 
 - "A new version of Atlas is available. [Reload]" / "Atlas updated in another tab. [Reload here]" (wireframe 6). With a recoverable form
   open it is Q4 state 1 ("Save and reload"); a failed save is state 2 ("Retry save" / "Discard and reload anyway"), the form stays open and
@@ -179,6 +206,8 @@ cases 2-3 against a backend whose version really varies stays with BE-B2 and WEB
 const port = useFormRecoveryPort(); // src/data: the displayed account's store, or null while it has no open database
 const recovery = useRecoverableForm({ formContext: `task-edit:${path}`, allow, formRef, port });
 // render <RecoveryBanner state={{ kind: "restored", onDiscard: recovery.discard, disabled: recovery.locked }} firstFieldRef={...} />
+// revision 19: firstFieldRef is the field focus goes to on restore (Q4 state 3); render it with the restored form. A screen with several
+// restored forms passes the one it means: mount order chooses nothing for it.
 // offer recovery.alternatives (other copies, newest first) with recovery.restoreAlternative(tabInstanceId), disabled while recovery.locked
 // revision 6: an alternative with isHandoff(copy) also offers "Discard this copy": recovery.discardAlternative(tabInstanceId)
 // submitting (revision 2): take a ticket BEFORE sending; none while an update reload is prepared (send nothing then)

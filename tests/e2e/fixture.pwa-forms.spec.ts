@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import { untilTreeSettled } from "./data-sync-helpers";
+import { pressTab } from "./helpers";
 import {
   BANNER,
   build,
@@ -3193,5 +3194,288 @@ test.describe("revision 11, R18: a field associated from outside the form is the
         (row) => !row.terminal && "place" in row.fields,
       ),
     ).toEqual([]);
+  });
+});
+
+/**
+ * WEB-14a revision 19, R26/R27 and DA-F1 (form-recovery-reload.html "Focus order"; design assessment Q5/Q6/Q13, S1-S4/S16): the Q4 focus
+ * transitions through the REAL update (worker, coordinator, recovery store, reload, restoring page) in each engine. The independent
+ * reviewer's probe (`.agtx/evidence/review-r18-20261015/update-focus.spec.ts`) is promoted here with its requirement assertions as hard
+ * assertions; keyboard traversal uses the platform's own Tab (`pressTab`: Option-Tab in macOS WebKit). DA-F1 (Kieran, 15 October 2026):
+ * the restored field wins over a state-1 prompt of the same arrival, in either order. FIXTURE evidence (no backend).
+ */
+test.describe("revision 19, R26/R27: Q4 focus through the real update", () => {
+  const save = (page: Page) =>
+    updateRegion(page).getByRole("button", { name: "Save and reload" });
+
+  /** One tab on A, controlled, its form ready; Title holds `text` and has focus. */
+  async function oneTab(
+    context: BrowserContext,
+    world: Generations,
+    text: string,
+  ): Promise<Page> {
+    await seedAccount(context, world);
+    const page = await openApp(context, world);
+    await workerActive(page);
+    await reloadQuietly(page);
+    await displayed(page);
+    await formReady(page);
+    await title(page).fill(text);
+    await title(page).focus();
+    await expect(title(page)).toBeFocused();
+    await mark(page);
+    return page;
+  }
+
+  test("state 1: the prompt appearing while Title has focus moves it to 'Save and reload'; nothing is chosen; 'Not now' by keyboard gives Title its focus back", async ({
+    context,
+    generations,
+  }) => {
+    const page = await oneTab(context, generations, "Unfinished input");
+    await generations.serve("fixture-b");
+    await checkForUpdate(page);
+    await expect(save(page)).toBeVisible();
+    await expect(
+      save(page),
+      "Approved Q4 state 1 primary action focus",
+    ).toBeFocused();
+    expect(await marked(page)).toBe(true);
+    await expect(title(page)).toHaveValue("Unfinished input");
+    await pressTab(page);
+    await expect(
+      updateRegion(page).getByRole("button", { name: "Not now" }),
+    ).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(updateRegion(page)).toHaveCount(0);
+    await expect(
+      title(page),
+      "'Not now' returns focus to where the prompt took it from",
+    ).toBeFocused();
+    await expect(title(page)).toHaveValue("Unfinished input");
+    expect(await marked(page)).toBe(true);
+  });
+
+  test("state 2 then 3: 'Save and reload' by keyboard fails once: 'Retry save' has focus; Enter on it saves, reloads onto B, restores the input unsubmitted with focus in its first field", async ({
+    context,
+    generations,
+  }) => {
+    const page = await oneTab(
+      context,
+      generations,
+      "Keep this unfinished input",
+    );
+    await failRecoveryWrites(page, 1_000);
+    await generations.serve("fixture-b");
+    await checkForUpdate(page);
+    await expect(save(page)).toBeFocused();
+    await page.keyboard.press("Enter");
+    const retry = updateRegion(page).getByRole("button", {
+      name: "Retry save",
+    });
+    await expect(retry).toBeVisible();
+    await expect(
+      retry,
+      "Approved Q4 state 2 recovery-action focus after a failed accepted save",
+    ).toBeFocused();
+    expect(await marked(page)).toBe(true);
+    await expect(title(page)).toHaveValue("Keep this unfinished input");
+    await expect(title(page)).toBeEditable();
+    await failRecoveryWrites(page, 0);
+    await quiet(page);
+    await expect(retry).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+    await displayed(page);
+    await formReady(page);
+    expect(await build(page)).toBe("b");
+    await expect(title(page)).toHaveValue("Keep this unfinished input");
+    await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+      "data-submitted",
+      "0",
+    );
+    await expect(restoredBanner(page)).toContainText(RESTORED);
+    await expect(
+      title(page),
+      "Approved Q4 state 3: focus in the restored form's first field",
+    ).toBeFocused();
+  });
+
+  test("refused (the account is being signed out): focus is at the banner, not on its only, destructive, choice", async ({
+    context,
+    generations,
+  }) => {
+    const page = await oneTab(context, generations, "Signing out");
+    const other = await context.newPage();
+    await navigate(other, `${generations.url}/__data`);
+    await other.waitForFunction(() => window.__atlasData !== undefined);
+    await other.evaluate(async () => {
+      const data = window.__atlasData;
+      if (!data) throw new Error("no data harness");
+      data.setIdentity("acct-a");
+      await data.open("acct-a");
+      await data.markClosing("acct-a");
+      data.close("acct-a");
+    });
+    await other.close();
+    await page.bringToFront();
+    await generations.serve("fixture-b");
+    await checkForUpdate(page);
+    await expect(save(page)).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(updateRegion(page).getByText(SAVE_REFUSED)).toBeVisible();
+    await expect(
+      updateRegion(page),
+      "A refused save focuses its banner, not its destructive choice",
+    ).toBeFocused();
+    await expect(
+      updateRegion(page).getByRole("button", {
+        name: "Discard and reload anyway",
+      }),
+    ).not.toBeFocused();
+    await expect(title(page)).toHaveValue("Signing out");
+    expect(await marked(page)).toBe(true);
+  });
+
+  for (const order of ["restored first", "prompt first"] as const)
+    test(`DA-F1, ${order}: the page B brought restores the form while C waits; the restored field keeps focus over the state-1 prompt${order === "restored first" ? "; after 'Not now' and a navigation the prompt takes it" : ""}`, async ({
+      context,
+      generations,
+    }) => {
+      const page = await oneTab(context, generations, "Carry this input");
+      await generations.serve("fixture-b");
+      await checkForUpdate(page);
+      await expect(save(page)).toBeFocused();
+      if (order === "prompt first") await holdNextDocument(page);
+      await quiet(page);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+      await displayed(page);
+      expect(await build(page)).toBe("b");
+      if (order === "restored first") {
+        await formReady(page);
+        await expect(title(page)).toHaveValue("Carry this input");
+        await expect(title(page)).toBeFocused();
+        await generations.serve("fixture-c");
+        await checkForUpdate(page);
+        await expect(save(page)).toBeVisible();
+        await expect(
+          title(page),
+          "DA-F1: the restored field keeps focus over a prompt of the same arrival",
+        ).toBeFocused();
+        // The next presentation after a navigation is not this arrival: the prompt takes focus as usual.
+        await updateRegion(page)
+          .getByRole("button", { name: "Not now" })
+          .click();
+        await expect(updateRegion(page)).toHaveCount(0);
+        await page
+          .getByRole("navigation", { name: "Primary" })
+          .getByRole("link", { name: "Tasks", exact: true })
+          .click();
+        await expect(save(page)).toBeVisible();
+        await expect(save(page)).toBeFocused();
+      } else {
+        // B's page is held before its recovery read; C is installed and waiting: the prompt appears first and takes focus.
+        await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+          "data-port",
+          "none",
+        );
+        await generations.serve("fixture-c");
+        await checkForUpdate(page);
+        await expect(save(page)).toBeFocused();
+        await releaseNext(page);
+        await formReady(page);
+        await expect(title(page)).toHaveValue("Carry this input");
+        await expect(
+          title(page),
+          "DA-F1: the restore that completes after the prompt takes focus to its first field",
+        ).toBeFocused();
+      }
+      await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+    });
+});
+
+/**
+ * WEB-14a revision 20, R26 (review of 15-16 October 2026; design assessment Q1, S4): the same-tree gate schedule through the REAL session
+ * kernel and the real update. The page is hidden (visibility overridden and `visibilitychange` dispatched, as `fixture.session-gate.spec.ts`
+ * does: a real hidden window per engine is not available), so the session's level-0 step closes the gate over the mounted shell; B is then
+ * found while the gate is closed, and the prompt renders behind it. When the page is shown again the session's `act` lifts the SAME tree
+ * (no render of its own) and only then may focus move: to "Save and reload". The focus-probe harness (`fixture.update-focus-gate.spec.ts`) covers the other schedules with the adapter
+ * driven directly. FIXTURE evidence (no backend).
+ */
+test.describe("revision 20, R26: Q4 focus across the real session gate in the real update", () => {
+  const setVisibility = (page: Page, state: "hidden" | "visible") =>
+    page.evaluate((next) => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => next,
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, state);
+  const gateHeading = (page: Page) =>
+    page.getByRole("heading", { name: "Checking your account" });
+
+  test("the prompt found while the hidden page's gate is closed focuses 'Save and reload' when the session lifts the same shell; nothing is chosen", async ({
+    context,
+    generations,
+  }) => {
+    await seedAccount(context, generations);
+    const page = await openApp(context, generations);
+    await workerActive(page);
+    await reloadQuietly(page);
+    await displayed(page);
+    await formReady(page);
+    await title(page).fill("Behind the gate");
+    await title(page).focus();
+    await mark(page);
+    await title(page).evaluate((field) => {
+      (field as unknown as { __sameTree: boolean }).__sameTree = true;
+    });
+    await setVisibility(page, "hidden");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            document.getElementById("protected-root")?.hasAttribute("inert") ===
+            true,
+        ),
+      )
+      .toBe(true);
+    await expect(gateHeading(page)).toBeFocused();
+    await generations.serve("fixture-b");
+    await checkForUpdate(page);
+    // The prompt is in the gated (inert, aria-hidden) shell: read from the DOM, not the accessibility tree.
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Array.from(
+            document.querySelectorAll(
+              '#protected-root section[aria-label="Update"] button',
+            ),
+            (button) => button.textContent,
+          ),
+        ),
+      )
+      .toContain("Save and reload");
+    await expect(
+      gateHeading(page),
+      "the gate keeps focus while closed",
+    ).toBeFocused();
+    await setVisibility(page, "visible");
+    await displayed(page);
+    await expect(
+      updateRegion(page).getByRole("button", { name: "Save and reload" }),
+      "Q4 state 1 after the session lifts the same tree",
+    ).toBeFocused();
+    expect(
+      await title(page).evaluate(
+        (field) => (field as unknown as { __sameTree?: boolean }).__sameTree,
+      ),
+      "the same tree: not remounted",
+    ).toBe(true);
+    expect(await marked(page)).toBe(true);
+    await expect(title(page)).toHaveValue("Behind the gate");
   });
 });

@@ -6,6 +6,14 @@ import { expect, pressTab, runAxe } from "./helpers";
 import { expectPaintedContrast } from "./surface-checks";
 
 /**
+ * WEB-14a revision 19, labelled HARNESS ADAPTATION (Kieran, 15 October 2026): the production build registers the app's service worker
+ * (WEB-14a), and Playwright WebKit does not apply `context.route` to requests a worker passes on, so the AuthStub never answered there
+ * and most WebKit cases failed (also on the unmodified revision-18 candidate). These specs test the authentication surfaces, not the
+ * worker: they run without it. The worker in the production build is covered by production.pwa.spec.ts and production.offline.spec.ts.
+ */
+test.use({ serviceWorkers: "block" });
+
+/**
  * WEB-08b, A2 / A3 / A4 (Layer A, rendered): the PUBLIC surfaces (sign-in, join) in the production build, in a real engine, with
  * a stubbed network, at 320, 390, 768 and 1280 px in dark and light: no horizontal scroll, axe clean INCLUDING colour contrast in
  * real layout, 44 px targets, a visible focus ring, the heading as the focus target. Screenshots (Chromium) go to

@@ -269,7 +269,12 @@ describe("R19 (S1): every update state, on both surfaces", () => {
 });
 
 describe("R19 (S15): the neutral root's announcements follow the state", () => {
-  test("'Saving…' is replaced by the failure, which is announced once (a re-render repeats nothing), and focus is not moved", async () => {
+  /**
+   * Revision 19 (R26) adaptation, labelled: this test asserted "focus is not moved" for the failure too. Its intent (a message is announced
+   * through the live region, not by moving focus) is kept for the plain "Saving…" notice; a failure of the person's own act now focuses its
+   * recovery action (form-recovery-reload.html, state 2: "focus moves to Retry save"), once per presentation, and only there.
+   */
+  test("'Saving…' is announced without moving focus; the failure replacing it is announced once (a re-render or an equal publication repeats nothing) and focuses its recovery action once", async () => {
     const announce = vi.spyOn(neutralLiveRegion, "announce");
     const { rerender } = render(surface("neutral"));
     const region = screen.getByRole("status");
@@ -277,21 +282,30 @@ describe("R19 (S15): the neutral root's announcements follow the state", () => {
     act(() => appUpdates.set({ kind: "saving" }, spies()));
     await frame();
     expect(region).toHaveTextContent(SAVING_TEXT);
+    expect(document.activeElement).toBe(focused);
     act(() => appUpdates.set({ kind: "save_failed", refused: false }));
     await frame();
     expect(region).toHaveTextContent(NEUTRAL_SAVE_FAILED_TEXT);
-    expect(document.activeElement).toBe(focused);
+    expect(screen.getByRole("button", { name: "Retry save" })).toHaveFocus();
+    // The person moves on; nothing below takes focus back for the same failure.
+    const elsewhere = document.body.appendChild(
+      document.createElement("button"),
+    );
+    elsewhere.focus();
     const count = announce.mock.calls.length;
     rerender(surface("neutral"));
-    // The coordinator publishes an equal state again (a new object): nothing new to say.
+    // The coordinator publishes an equal state again (a new object): nothing new to say, and focus stays where the person put it.
     act(() => appUpdates.set({ kind: "save_failed", refused: false }));
     await frame();
     expect(announce.mock.calls.length).toBe(count);
     expect(region).toHaveTextContent(NEUTRAL_SAVE_FAILED_TEXT);
-    // The discard then fails: that is announced in its place.
+    expect(elsewhere).toHaveFocus();
+    // The discard then fails: that is announced in its place, and is a new presentation, whose first choice takes focus.
     act(() => appUpdates.set({ kind: "discard_failed" }));
     await frame();
     expect(region).toHaveTextContent(NEUTRAL_DISCARD_FAILED_TEXT);
+    expect(screen.getByRole("button", { name: "Try again" })).toHaveFocus();
+    elsewhere.remove();
   });
 
   test("a failure already there when the neutral banner loads (the gate came after it) is announced as it arrives", async () => {

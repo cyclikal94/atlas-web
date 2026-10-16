@@ -12,9 +12,7 @@ import {
   mountProtectedTree,
 } from "../protected-surface/gate";
 import { SessionProvider } from "../session";
-import { ControlsGallery } from "./ControlsGallery";
 import { type FixtureData, fixtureData } from "./data-env";
-import { GateGallery } from "./GateGallery";
 import { mountNeutralPage } from "./neutral-page";
 import { fixtureSession } from "./session-double";
 import type { SessionHarness } from "./session-harness/main";
@@ -173,18 +171,21 @@ if (location.pathname === "/__neutral") {
   // The real lifecycle (WEB-08a) decides when the boot gate goes; the fixture clears it and lifts the gate at once.
   document.getElementById("neutral-root")?.replaceChildren();
   liftGate(root);
-  mountProtectedTree(
-    root,
-    <ProtectedProviders>
-      {location.pathname === "/__controls" ? (
-        <ControlsGallery />
-      ) : location.pathname === "/__gate" ? (
+  const mount = (page: ReactNode) =>
+    mountProtectedTree(root, <ProtectedProviders>{page}</ProtectedProviders>);
+  // The two gallery pages are loaded on their own (WEB-14a revision 19, Kieran 15 October 2026): they are not the shell, so the initial
+  // chunk this build measures (A2) carries only the shell. The shell itself is still mounted at once.
+  if (location.pathname === "/__controls")
+    void import("./ControlsGallery").then(({ ControlsGallery }) =>
+      mount(<ControlsGallery />),
+    );
+  else if (location.pathname === "/__gate")
+    void import("./GateGallery").then(({ GateGallery }) =>
+      mount(
         <DataEnvProvider env={data.env}>
           <GateGallery />
-        </DataEnvProvider>
-      ) : (
-        <FixtureApp />
-      )}
-    </ProtectedProviders>,
-  );
+        </DataEnvProvider>,
+      ),
+    );
+  else mount(<FixtureApp />);
 }

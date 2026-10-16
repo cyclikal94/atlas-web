@@ -1,6 +1,7 @@
-import { type RefObject, useEffect, useRef } from "react";
+import { type RefObject, useEffect } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
+import { useRestoredFocus } from "./focus";
 
 /**
  * Recovery banners for form-recovery-reload.html, states 2 and 3. They never submit anything and never
@@ -32,7 +33,10 @@ export type RecoveryBannerState =
 
 export interface RecoveryBannerProps {
   state: RecoveryBannerState;
-  /** The form's first field. On restore, focus returns here, never to the banner. */
+  /**
+   * The form's first field. On restore, focus goes here, never to the banner (state 3; it also wins over a state-1 prompt of the same
+   * arrival, `focus.ts`), and here again after "Discard instead". Render it with the restored form, or no field is focused.
+   */
   firstFieldRef?: RefObject<HTMLElement | null>;
 }
 
@@ -53,7 +57,6 @@ export const RESTORED_TEXT =
 
 export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
   const { announce } = useAnnouncer();
-  const focused = useRef(false);
   const kind = state.kind;
 
   useEffect(() => {
@@ -71,11 +74,9 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
     );
   }, [kind, announce]);
 
-  useEffect(() => {
-    if (kind !== "restored" || focused.current) return;
-    focused.current = true;
-    firstFieldRef?.current?.focus();
-  }, [kind, firstFieldRef]);
+  // State 3 (revisions 19 and 20, R27): a request until the field really has focus, attempted again when it can take it (`focus.ts`): a
+  // banner mounted behind the session gate focuses its field once the gate lifts.
+  useRestoredFocus(kind === "restored", firstFieldRef);
 
   if (state.kind === "save-failed") {
     return (
@@ -163,7 +164,15 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
             Discard instead
           </Button>
         ) : (
-          <Button variant="quiet" onClick={state.onDiscard}>
+          <Button
+            variant="quiet"
+            onClick={(event) => {
+              // The banner goes with the copy: the person continues in the form they were reviewing (revision 19).
+              const used = event.currentTarget === document.activeElement;
+              state.onDiscard();
+              if (used) firstFieldRef?.current?.focus();
+            }}
+          >
             Discard instead
           </Button>
         )}

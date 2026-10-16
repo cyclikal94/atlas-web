@@ -20582,6 +20582,551 @@ export const UNIT = [
         "    (deps.onNavigation(redisplay), () => {}),\n",
       ),
   },
+  {
+    id: "MU-1975",
+    title:
+      "WEB-14a revision 19 (R26, I1/S1): the state-1 prompt never takes focus",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/app/update-route-focus.test.tsx",
+    ],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a form is open and Title has focus: 'Save and reload' takes focus|'Save and reload' keeps focus over the route's heading/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (request.kind === "prompt") {\n',
+        '  if (request.kind === "prompt") return false;\n  if (request.kind === "prompt") {\n',
+      ),
+  },
+  {
+    id: "MU-1976",
+    title:
+      "WEB-14a revision 19 (R26, I1/S2): a failure never focuses its recovery action",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /failed \(Retry save\)|focuses its recovery action once|a discard that failed focuses 'Try again'/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const target = request.target();\n  if (!target || !eligible(target)) return false;\n",
+        '  if (request.kind === "failure") return false;\n  const target = request.target();\n  if (!target || !eligible(target)) return false;\n',
+      ),
+  },
+  {
+    id: "MU-1977",
+    title:
+      "WEB-14a revision 19 (R26, I7/S13): a refused save focuses its only, destructive, choice",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a refused save offers only a destructive choice/,
+    patch: (t) =>
+      sub(
+        t,
+        '        kind === "refused"\n          ? section.current\n          : section.current?.querySelector("button"),\n',
+        '        section.current?.querySelector("button"),\n',
+      ),
+  },
+  {
+    id: "MU-1978",
+    title:
+      "WEB-14a revision 19 (R26/R27, I6/S15): focus counts as placed although the target never took it",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/lib/form-recovery.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a target that could not take focus is not counted|a first field that could not take focus is not counted/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return !!target && target.ownerDocument.activeElement === target;\n",
+        "  return !!target;\n",
+      ),
+  },
+  {
+    id: "MU-1979",
+    title:
+      "WEB-14a revision 19 (R26, I6): a presentation takes focus again on every render and remount",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts. Two sites: the hook and the attempt both check the presentation.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /one presentation: a re-render, a remount of the shell and an equal publication|the same presentation does not take focus again|an equal publication repeats nothing/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (!kind || placed?.at === presentation) return;\n",
+          "    if (!kind) return;\n",
+        ),
+        '  if (request.kind !== "restored" && placed?.at === request.at) {\n',
+        "  if (false) {\n",
+      ),
+  },
+  {
+    id: "MU-1980",
+    title:
+      "WEB-14a revision 19 (R26, I6): an equal state published again is taken for a new presentation",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /one presentation: a re-render, a remount of the shell and an equal publication|an equal publication repeats nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (next !== shown) presentation += 1;\n",
+        "  presentation += 1;\n",
+      ),
+  },
+  {
+    id: "MU-1981",
+    title:
+      "WEB-14a revision 19 (DA-F1): the state-1 prompt takes focus from the restored field of the same arrival",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restored first, then the prompt appears: the field keeps focus/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (restored("done") || restored("pending")) return false;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-1982",
+    title:
+      "WEB-14a revision 19 (DA-F1): a navigation does not end the restored arrival (the prompt never takes focus again)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /after a navigation the prompt's next presentation takes it/,
+    patch: (t) =>
+      sub(
+        t,
+        "onNavigation(() => {\n  arrivals += 1;\n});\n",
+        "onNavigation(() => {});\n",
+      ),
+  },
+  {
+    id: "MU-1983",
+    title:
+      "WEB-14a revision 19 (DA-F1): a restore that focused its field is not noted (the prompt of the same arrival takes focus)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restored first, then the prompt appears: the field keeps focus/,
+    patch: (t) => sub(t, "    request.arrival = arrivals;\n", ""),
+  },
+  {
+    id: "MU-1984",
+    title:
+      "WEB-14a revision 19 (R26, I7/S13): a choice that removes its button leaves focus on the body",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /focus kept at the banner|keeps focus at the banner/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!dismissed) {\n    section.focus();\n    return;\n  }\n",
+        "  if (!dismissed) return;\n",
+      ),
+  },
+  {
+    id: "MU-1985",
+    title:
+      "WEB-14a revision 19 (R26, S14): 'Not now' does not return focus to where the prompt took it from",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Not now' returns focus to the field the prompt took it from/,
+    patch: (t) =>
+      sub(t, "    back instanceof HTMLElement &&\n", "    false &&\n"),
+  },
+  {
+    id: "MU-1986",
+    title:
+      "WEB-14a revision 19 (R26, I7/S14): with nowhere to return to, 'Not now' leaves focus on the body",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /focus goes to the surface's page heading|focus goes to the page heading, not the body/,
+    patch: (t) => sub(t, "  focus(heading);\n}\n", "}\n"),
+  },
+  {
+    id: "MU-1987",
+    title:
+      "WEB-14a revision 19 (R26, I2/S14): 'Not now' moves focus the person put elsewhere",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a pointer that leaves focus elsewhere/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!section?.contains(section.ownerDocument.activeElement)) return;\n",
+        "  if (!section) return;\n",
+      ),
+  },
+  {
+    id: "MU-1988",
+    title:
+      "WEB-14a revision 19 (R27, I6/S15): the restored field's focus is counted done before it is placed",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // Re-anchored in revision 20 (same intent): RecoveryBanner now registers a request (useRestoredFocus), so the restored request is counted done at registration.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a first field that could not take focus is not counted as focused/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const made: Request = { kind, target, at, state: "pending" };\n',
+        '  const made: Request = {\n    kind,\n    target,\n    at,\n    state: kind === "restored" ? "done" : "pending",\n  };\n',
+      ),
+  },
+  {
+    id: "MU-1989",
+    title:
+      "WEB-14a revision 19 (S14): 'Discard instead' leaves focus on the body, not in the form",
+    file: "src/lib/form-recovery/RecoveryBanner.tsx",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard instead' used from the keyboard leaves focus in the form/,
+    patch: (t) =>
+      sub(t, "              if (used) firstFieldRef?.current?.focus();\n", ""),
+  },
+  {
+    id: "MU-1990",
+    title:
+      "WEB-14a revision 19 (R26, I7): the shell banner's choices do not keep focus at the banner",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /focus kept at the banner|keeps focus at the banner|'Not now' returns focus to the field/,
+    patch: (t) =>
+      sub(t, '    keepFocus(section.current, choice.act === "notNow");\n', ""),
+  },
+  {
+    id: "MU-1991",
+    title:
+      "WEB-14a revision 19 (R26, I2): the shell banner's plain notices take focus",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a plain notice \(no form open\) never takes focus/,
+    patch: (t) =>
+      sub(
+        t,
+        '    prompt ? "prompt" : focusKind(state, notice),\n',
+        '    prompt ? "prompt" : "failure",\n',
+      ),
+  },
+  {
+    id: "MU-1992",
+    title:
+      "WEB-14a revision 19 (R26, S11/S12): the neutral root's failures never focus their recovery action",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /focuses its recovery action once|a new one does|S12: 'Reload to update' on the compatibility screen fails to save/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const { section, run } = useBanner(state, focusKind(state, notice));\n",
+        "  const { section, run } = useBanner(state, null);\n",
+      ),
+  },
+  {
+    id: "MU-1993",
+    title:
+      "WEB-14a revision 19 (R27): the reviewed defect restored: the heading attempt focuses the heading before checking for focus placed in the tree",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /restored field focus is retained when the delayed route heading arrives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        claimed ||\n        (active !== doc.body && tree.contains(active)) ||\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1994",
+    title:
+      "WEB-14a revision 19 (R27, I4): a claim whose control has gone is forgotten (the heading takes focus later)",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a claim ends the wait even when the claimed control has gone/,
+    patch: (t) => sub(t, "        claimed ||\n", ""),
+  },
+  {
+    id: "MU-1995",
+    title:
+      "WEB-14a revision 19 (R27, I4): focus placed in the tree before the first attempt is overridden by a heading already there",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /focus already placed in the tree before the FIRST attempt/,
+    patch: (t) =>
+      sub(t, "        (active !== doc.body && tree.contains(active)) ||\n", ""),
+  },
+  {
+    id: "MU-1996",
+    title:
+      "WEB-14a revision 19 (R27, I3/I5/S7): the gate does not end a pending heading focus",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the gate closes while it waits/,
+    patch: (t) =>
+      sub(
+        t,
+        "      // A pending heading focus is the tree's: the gate owns focus now (revision 19, R27).\n      focusToken += 1;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-1997",
+    title:
+      "WEB-14a revision 19 (R27, I4/S10): RouteFocus's frame overrides focus placed after the navigation resolved",
+    file: "src/app/shell/RouteFocus.tsx",
+    tests: ["tests/app/update-route-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /'Save and reload' keeps focus over the route's heading|a field focused after the navigation resolved/,
+    patch: (t) => sub(t, "        if (claimed) return;\n", ""),
+  },
+  {
+    id: "MU-1998",
+    title:
+      "WEB-14a revision 20 (R26/R27, I2/C3, S3/S4/S6/S9): a refused request is never attempted again (no wake-up when the surface becomes eligible)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /S4: the prompt published while the existing shell is gated|S3: a prompt already published|S6: a restored banner mounted behind the gate|S9: /,
+    patch: (t) => sub(t, "  if (waiting && !observer) {\n", "  if (false) {\n"),
+  },
+  {
+    id: "MU-1999",
+    title:
+      "WEB-14a revision 20 (R26/R27, I1): an attempt the browser refused is counted as fulfilled",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/lib/form-recovery.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a target that could not take focus is not counted|a first field that could not take focus/,
+    patch: (t) =>
+      sub(t, "  if (!focus(target)) return false;\n", "  focus(target);\n"),
+  },
+  {
+    id: "MU-2000",
+    title:
+      "WEB-14a revision 20 (I3, S4/S14/S15/S17): a target inside an inert gate, hold or dialog background is focused",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /S4: the prompt published while the existing shell is gated|S14: a restored field held|S15: an app dialog's inert background|S17: the gate closes again/,
+    patch: (t) => sub(t, '  !target.closest("[inert]") &&\n', ""),
+  },
+  {
+    id: "MU-2001",
+    title:
+      "WEB-14a revision 20 (I3, S10): a target behind the modal gate dialog is focused",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /S10: a neutral-root failure behind the open modal gate dialog|S11: a failure pending on both surfaces/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (dialog) => !dialog.contains(target) && modal(dialog),\n",
+        "    () => false,\n",
+      ),
+  },
+  {
+    id: "MU-2002",
+    title:
+      "WEB-14a revision 20 (I4/I12, S18/S21): an unmounted owner does not withdraw its request (it is watched for ever)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S18\/S21: an owner unmounted while its request waits/,
+    patch: (t) => sub(t, "    requests.delete(made);\n", ""),
+  },
+  {
+    id: "MU-2003",
+    title:
+      "WEB-14a revision 20 (DA-F2, S30): a later save failure does not cancel a restored-field request still pending",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S30, DA-F2/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '  if (kind === "failure" || kind === "refused") cancel("restored");\n',
+          "",
+        ),
+        '    if (request.kind !== "prompt") cancel("restored");\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2004",
+    title:
+      "WEB-14a revision 20 (DA-F1, S14): the prompt does not wait for a restored field held in the page",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /S14, DA-F1: a state-1 prompt waits while a restored field in the page is held/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (restored("done") || restored("pending")) return false;\n',
+        '    if (restored("done")) return false;\n',
+      ),
+  },
+  {
+    id: "MU-2005",
+    title:
+      "WEB-14a revision 20 (S11): the neutral root goes before the shell when both hold a pending failure",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S11: a failure pending on both surfaces/,
+    patch: (t) =>
+      sub(
+        t,
+        '  (request.target()?.closest("#neutral-root") ? 1 : 0);\n',
+        '  (request.target()?.closest("#neutral-root") ? -1 : 0);\n',
+      ),
+  },
+  {
+    id: "MU-2006",
+    title:
+      "WEB-14a revision 20 (S15): an app dialog returning focus to its opener takes it from the recovery action placed since",
+    file: "src/components/ui/dialog.tsx",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the dialog keeps focus while open; when it closes the failure's 'Retry save' takes focus/,
+    patch: (t) =>
+      sub(
+        t,
+        "              !content?.contains(active)\n",
+        "              false\n",
+      ),
+  },
+  {
+    id: "MU-2007",
+    title:
+      "WEB-14a revision 20 (S16): a restored field given by a different ref is not attempted until the document changes",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a first field that could not take focus is not counted as focused; the field given next is focused/,
+    patch: (t) => sub(t, "  useEffect(reconcile, [field]);\n", ""),
+  },
+  {
+    id: "MU-2008",
+    title:
+      "WEB-14a revision 20 (I5, S21): loaded after a publication, the module takes that state for a new presentation at its next equal publication",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /I5: a banner loaded after the state was published/,
+    patch: (t) =>
+      sub(
+        t,
+        "let shown = JSON.stringify(appUpdates.get());\n",
+        'let shown = "";\n',
+      ),
+  },
+  {
+    id: "MU-2009",
+    title:
+      "WEB-14a revision 20 (S10): the close of a modal dialog is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S10: a neutral-root failure behind the open modal gate dialog/,
+    patch: (t) =>
+      sub(
+        t,
+        '      attributeFilter: ["inert", "open", "hidden", "disabled"],\n',
+        '      attributeFilter: ["inert", "hidden", "disabled"],\n',
+      ),
+  },
+  {
+    id: "MU-2010",
+    title:
+      "WEB-14a revision 20 (S16): a target rendered later is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S16: a restored field rendered after its banner/,
+    patch: (t) =>
+      sub(t, "      childList: true,\n", "      childList: false,\n"),
+  },
+  {
+    id: "MU-2011",
+    title:
+      "WEB-14a revision 20 (I5, S11): a presentation focused on one surface is focused again by its other pending surface (no check at the attempt)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S11: a failure pending on both surfaces/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (request.kind !== "restored" && placed?.at === request.at) {\n    request.state = "done";\n    return false;\n  }\n',
+        "",
+      ),
+  },
 ];
 
 /**

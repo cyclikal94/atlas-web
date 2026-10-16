@@ -293,6 +293,53 @@ describe("RecoveryBanner", () => {
     expect((await axe(container)).violations).toEqual([]);
   });
 
+  test("state 3 (WEB-14a revision 19, R27/S15): a first field that could not take focus is not counted as focused; the field given next is focused", () => {
+    const missing = createRef<HTMLInputElement>();
+    const firstFieldRef = createRef<HTMLInputElement>();
+    const banner = (ref: typeof missing) =>
+      withAnnouncer(
+        <>
+          <RecoveryBanner
+            state={{ kind: "restored", onDiscard: () => {} }}
+            firstFieldRef={ref}
+          />
+          <input ref={firstFieldRef} aria-label="Title" />
+        </>,
+      );
+    const { rerender } = render(banner(missing));
+    expect(screen.getByLabelText("Title")).not.toHaveFocus();
+    rerender(banner(firstFieldRef));
+    expect(screen.getByLabelText("Title")).toHaveFocus();
+    // Once focused, the same restore never takes focus back (the person moves on).
+    const other = document.body.appendChild(document.createElement("button"));
+    other.focus();
+    rerender(banner(missing));
+    rerender(banner(firstFieldRef));
+    expect(other).toHaveFocus();
+    other.remove();
+  });
+
+  test("state 3 (WEB-14a revision 19): 'Discard instead' used from the keyboard leaves focus in the form, on its first field", () => {
+    const firstFieldRef = createRef<HTMLInputElement>();
+    const onDiscard = vi.fn();
+    render(
+      withAnnouncer(
+        <>
+          <RecoveryBanner
+            state={{ kind: "restored", onDiscard }}
+            firstFieldRef={firstFieldRef}
+          />
+          <input ref={firstFieldRef} aria-label="Title" />
+        </>,
+      ),
+    );
+    const discard = screen.getByRole("button", { name: "Discard instead" });
+    discard.focus();
+    fireEvent.click(discard);
+    expect(onDiscard).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("Title")).toHaveFocus();
+  });
+
   test("state 3, restored, while an update reload is prepared (revision 2, R3): 'Discard instead' is disabled and says why", async () => {
     const onDiscard = vi.fn();
     const { container } = render(
