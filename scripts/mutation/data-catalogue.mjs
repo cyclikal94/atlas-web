@@ -21185,26 +21185,25 @@ export const UNIT = [
     file: "src/features/tasks/memory.ts",
     tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
     expect: /S2: /,
+    // Re-anchored in revision 12 (R25): the answer's settlement also records what a success acknowledged; the same move to `reading`.
     patch: (t) =>
-      sub(
-        t,
-        '  if (cycle?.phase === "sending") cycle.phase = "reading";\n',
-        '  if (cycle?.phase === "sending") cycle.phase = "done";\n',
-      ),
+      sub(t, '    cycle.phase = "reading";\n', '    cycle.phase = "done";\n'),
   },
 
   {
     id: "MU-2225",
     title:
       "WEB-10a rev 11 (R23): an audience/consent edit is admitted when it happens without asking whether a change owns the settings",
-    file: "src/features/tasks/detail/Controls.tsx",
+    // Re-expressed in revision 12 (R23, C1): the page owner of the draft admits each edit when it happens (the settings only ask it); the
+    // same lock check removed there.
+    file: "src/features/tasks/memory.ts",
     tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
     expect: /S5: .*Choose, one turn/,
     patch: (t) =>
       sub(
         t,
-        "    env.writable && enrolmentLock(env.identity, taskId) === null;\n",
-        "    env.writable;\n",
+        "  if (\n    enrolmentLock(identity, taskId) !== null ||\n    (draft !== undefined && draft.base.version !== base.version)\n  )\n",
+        "  if (draft !== undefined && draft.base.version !== base.version)\n",
       ),
   },
 
@@ -21212,14 +21211,16 @@ export const UNIT = [
     id: "MU-2226",
     title:
       "WEB-10a rev 11 (R23): a read showing another version drops a draft whose later edits were never sent",
-    file: "src/features/tasks/detail/Controls.tsx",
+    // Re-expressed in revision 12 (R23/R25): the current read ends drafts in page memory (`answerEnrolment`); the same fault, any draft
+    // of another version dropped by the read.
+    file: "src/features/tasks/memory.ts",
     tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
-    expect: /S8: a draft with edits/,
+    expect: /S8: a draft not acknowledged/,
     patch: (t) =>
       sub(
         t,
-        "            d !== null && d.base.version !== value.version && !unsent(d)\n",
-        "            d !== null && d.base.version !== value.version\n",
+        "        (draft.revision === 0 && draft.base.version !== value.version))\n",
+        "        draft.base.version !== value.version)\n",
       ),
   },
 
@@ -21269,7 +21270,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    blocked ??\n    (draft !== null && unsent(draft) ? CONTROLS_COPY.finishFirst : null);\n",
+        // Re-anchored in revision 12 (R25): any draft with an edit holds them (unsent, refused or uncertain); the same rule removed.
+        "    blocked ??\n    (draft !== null && draft.revision > 0 ? CONTROLS_COPY.finishFirst : null);\n",
         "    blocked;\n",
       ),
   },
@@ -21284,8 +21286,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "answerEnrolment(env.identity, taskId, read, result.ok)",
-        "answerEnrolment(env.identity, taskId, read, true)",
+        // Re-anchored in revision 12: the read's value (null: failed) is passed; a failed read passed as a successful one.
+        "answerEnrolment(env.identity, taskId, read, got)",
+        "answerEnrolment(\n        env.identity,\n        taskId,\n        read,\n        got ?? ({ version: -1 } as Enrolment),\n      )",
       ),
   },
 
@@ -21341,11 +21344,239 @@ export const UNIT = [
     file: "src/features/tasks/detail/Controls.tsx",
     tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
     expect: /S1\/S2 controls: /,
+    // Re-expressed in revision 12 (R25, C2): a Save/Join names the draft revision it submits (its ticket) instead of marking it sent; the
+    // same fault, the change submitted without naming it (its own success then leaves the draft kept as unsaved).
     patch: (t) =>
       sub(
         t,
-        "now !== null && now.base === d.base ? { ...now, sent: d.edits } : now,",
-        "now,",
+        "    send(enrolCommand(taskId, d.base, change), {\n      session: d.session,\n      revision: d.revision,\n    });\n",
+        "    send(enrolCommand(taskId, d.base, change));\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 12 (review 12, R23/R25; design assessment C1-C7, Q2-Q15): MU-2237..MU-2250 --------------------------------------
+  {
+    id: "MU-2237",
+    title:
+      "WEB-10a rev 12 (R23, C1): the settings end the page's draft when they unmount (an ordinary remount loses the later edit)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q2 \(R23\): .*REMOUNT/,
+    patch: (t) =>
+      sub(
+        t,
+        "  useEffect(() => subscribeEnrolment(changed), []);\n",
+        "  // biome-ignore lint/correctness/useExhaustiveDependencies: mutant\n  useEffect(() => {\n    const stop = subscribeEnrolment(changed);\n    return () => {\n      stop();\n      const d = enrolmentDraftOf(env.identity, taskId);\n      if (d !== null) discardEnrolmentDraft(env.identity, taskId, d.session);\n    };\n  }, []);\n",
+      ),
+  },
+
+  {
+    id: "MU-2238",
+    title:
+      "WEB-10a rev 12 (R25, C2): a refusal acknowledges the submitted draft like a success (the read that follows ends it)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q4 \(R25\): .*kept with its grant|refused, the read at version/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (outcome === "saved") cycle.acknowledged = attempt.ticket;\n',
+        '    if (outcome !== "uncertain") cycle.acknowledged = attempt.ticket;\n',
+      ),
+  },
+
+  {
+    id: "MU-2239",
+    title:
+      "WEB-10a rev 12 (R25, I4): an uncertain answer acknowledges the submitted draft (a later read showing another version ends it)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-ownership.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect:
+      /SAME audience at version 8|uncertain, the read at version|S8: a draft not acknowledged/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (outcome === "saved") cycle.acknowledged = attempt.ticket;\n',
+        '    if (outcome !== "refused") cycle.acknowledged = attempt.ticket;\n',
+      ),
+  },
+
+  {
+    id: "MU-2240",
+    title:
+      "WEB-10a rev 12 (R23, Q9): a success ends a LATER revision of the draft it submitted (the edit made after it is lost)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect:
+      /Q9: .*a later edit after the uncertain save|a later revision survives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        saved.session === draft.session &&\n        saved.revision === draft.revision) ||\n",
+        "        saved.session === draft.session) ||\n",
+      ),
+  },
+
+  {
+    id: "MU-2241",
+    title:
+      "WEB-10a rev 12 (C5, Q9): a success ends ANOTHER editor session's draft (one reopened after Cancel, its revision and values equal)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Cancel and reopen|another session with the same revision/,
+    patch: (t) => sub(t, "        saved.session === draft.session &&\n", ""),
+  },
+
+  {
+    id: "MU-2242",
+    title:
+      "WEB-10a rev 12 (C3, Q9): Try again names the LIVE draft's revision as what it submits (its success ends the later edit)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q9: .*a later edit after the uncertain save/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  onClick={() => void send(uncertain.command)}",
+        "                  onClick={() =>\n                    void send(\n                      uncertain.command,\n                      held === null\n                        ? undefined\n                        : { session: held.session, revision: held.revision },\n                    )\n                  }",
+      ),
+  },
+
+  {
+    id: "MU-2243",
+    title:
+      "WEB-10a rev 12 (C4, Q7): a first Join already begun waits for the defaults read again (a failed read hides the choices made)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q7: .*consent No and the default audience chosen/,
+    patch: (t) =>
+      sub(
+        t,
+        "            current === null ? (\n",
+        "            (true as boolean) ? (\n",
+      ),
+  },
+
+  {
+    id: "MU-2244",
+    title:
+      "WEB-10a rev 12 (Q6): a refused enrolment read keeps the unsaved draft (shown again when the read is allowed)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /the enrolment read is refused|a 403\/404 of the enrolment read/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (read.startsWith("enrolment:") && memory.drafts.delete(read.slice(10)))\n    enrolmentChanged();\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2245",
+    title:
+      "WEB-10a rev 12 (C6, Q14): a late answer for a replaced identity allocates its page memory (the current identity's is dropped)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q14: |another identity starts with nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const memory = memories.get(identity);\n  if (memory === undefined || memory.enrolment.get(taskId) !== attempt) return;\n",
+        "  const memory = memoryOf(identity);\n  if (memory.enrolment.get(taskId) !== attempt) return;\n",
+      ),
+  },
+
+  {
+    id: "MU-2246",
+    title:
+      "WEB-10a rev 12 (C6, Q15): a full page reclaims the oldest cycle even while it owns the settings (its lock is lost)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an unconfirmed cycle is never reclaimed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (id !== taskId && !owned(memory, id)) {\n",
+        "        if (id !== taskId) {\n",
+      ),
+  },
+
+  {
+    id: "MU-2247",
+    title:
+      "WEB-10a rev 12 (I8, Q15): a full page admits a new draft or change without limit (no refusal with why)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q15: |at capacity a NEW task/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.enrolment.size + memory.drafts.size >= limit\n",
+        "    (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-2248",
+    title:
+      "WEB-10a rev 12 (C5): opening the editor replaces a draft with edits (Change… loses the unsaved change)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an edited draft is never replaced by an opening/,
+    patch: (t) =>
+      sub(t, "    (held !== undefined && held.revision > 0) ||\n", ""),
+  },
+
+  {
+    id: "MU-2249",
+    title:
+      "WEB-10a rev 12 (I5): an edit made to the version shown changes a kept draft of an earlier version (it is moved onto it)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /a draft of another version is never edited/,
+    patch: (t) =>
+      sub(
+        t,
+        " ||\n    (draft !== undefined && draft.base.version !== base.version)\n  )\n",
+        "\n  )\n",
+      ),
+  },
+
+  {
+    id: "MU-2250",
+    title:
+      "WEB-10a rev 12: an editor opened with nothing in it outlives a change of the version (it then blocks the next edit there)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an editor opened with nothing in it ends at another version/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (draft.revision === 0 && draft.base.version !== value.version))\n",
+        "        (false as boolean))\n",
       ),
   },
 ];
@@ -24606,7 +24837,8 @@ export const ENGINE = [
       sub(
         sub(
           t,
-          "    const mine = startEnrolment(env.identity, taskId, command, env.newId);\n    if (mine === null) return false;",
+          // Re-anchored in revision 12: `startEnrolment` also takes the change's ticket (R25); the same owner bypassed.
+          "    const mine = startEnrolment(\n      env.identity,\n      taskId,\n      command,\n      env.newId,\n      ticket,\n    );\n    if (mine === null) return false;",
           '    const mine = {\n      key: env.newId(),\n      body: JSON.stringify(command),\n      command,\n      phase: "pending" as const,\n    };',
         ),
         // Re-expressed in revision 10 (R22): the pending rule now lives in `blocked` (every enrolment control), and the body is sent.

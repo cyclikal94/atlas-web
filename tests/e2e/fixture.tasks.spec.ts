@@ -2603,7 +2603,8 @@ test.describe("E-T27: Leave and the consent resend the audience that was read (A
 /**
  * A server that keeps one enrolment for E-T29..E-T31 (revision 11, R23): a stale `expected_version` is refused (409); a key seen before
  * replays its first receipt without applying anything (the backend's same-key receipt rule); `hold` keeps the next command or the next
- * enrolment read until released; `lose` commits the next command and then drops its answer (a network error).
+ * enrolment read until released; `lose` commits the next command and then drops its answer (a network error); `drop` (revision 12) fails
+ * the next command before anything is applied (a network error, nothing committed).
  */
 async function enrolmentServer(
   context: import("@playwright/test").BrowserContext,
@@ -2617,6 +2618,7 @@ async function enrolmentServer(
     holdCommand: null as null | Promise<void>,
     holdRead: null as null | Promise<void>,
     lose: false,
+    drop: false,
     reads: 0,
   };
   await context.route(
@@ -2640,6 +2642,10 @@ async function enrolmentServer(
         .command as Record<string, unknown>;
       s.bodies.push({ key, command });
       if (s.holdCommand !== null) await s.holdCommand;
+      if (s.drop) {
+        s.drop = false;
+        return route.abort("failed");
+      }
       const replay = s.receipts.get(key);
       if (replay !== undefined)
         return route.fulfill({
@@ -2802,8 +2808,11 @@ test.describe("E-T29: while an audience change is sent and confirmed, an open di
   });
 });
 
-test.describe("E-T30: two tabs read the same enrolment, the other winner order: B commits first, A's audience change is refused (A15, A16; R23 of revision 11, S10)", () => {
-  test("B's consent wins at version 2; A's Save sharing at version 2 is refused, nothing overwritten, nothing kept; A's next change keeps B's consent", async ({
+// ADAPTATION, revision 12 (R25; design assessment C7, Q11): E-T30 asserted that A's refused audience change was NOT kept ("nothing kept").
+// A refusal is not an acknowledgement: the refused values are now kept, unsaved, beside B's state until A discards them explicitly; every
+// body, version and winner assertion is unchanged. The pre-adaptation spec is kept in `.agtx/evidence/web10a-revision-12/pre-adaptation/`.
+test.describe("E-T30: two tabs read the same enrolment, the other winner order: B commits first, A's audience change is refused (A15, A16; R23 of revision 11, S10; R25 of revision 12)", () => {
+  test("B's consent wins at version 2; A's Save sharing at version 2 is refused, nothing overwritten; A's refused audience is kept until discarded; A's next change keeps B's consent", async ({
     context,
   }) => {
     const task = buildTask({
@@ -2861,19 +2870,38 @@ test.describe("E-T30: two tabs read the same enrolment, the other winner order: 
       aggregate_consent: false,
       policy: SHARED_AUDIENCE,
     });
-    // A read again: B's state is shown; the refused draft is not kept or rebased.
+    // A read again: B's state is shown; the refused draft is KEPT as it was (private), never rebased or resent.
     const consentA = inA.getByRole("checkbox", {
       name: "Count me in the shared total",
     });
     await expect(consentA).not.toBeChecked();
-    await expect(inA.locator("[data-enrol-kept]")).toHaveCount(0);
-    await expect(inA.locator("[data-audience-chooser]")).toHaveCount(0);
+    const kept = inA.locator("[data-enrol-kept]");
+    await expect(kept).toHaveCount(1);
+    await expect(kept).toContainText("Not saved:");
+    await expect(kept.locator("[data-audience-chooser]")).toHaveCount(1);
+    await expect(inA.locator("[data-audience-chooser]")).toHaveCount(1);
+    await expect(
+      kept.locator(
+        '[data-grant="account"][data-principal="22222222-2222-4222-8222-222222222222"]',
+      ),
+    ).toHaveCount(0);
     await expect(inA).toContainText(
       "Who sees your progress from now on: you and 1 person",
     );
-    await inA
-      .getByRole("button", { name: "Leave this task", exact: true })
+    // Nothing else changes while it is kept; it is discarded explicitly.
+    const leaveA = inA.getByRole("button", {
+      name: "Leave this task",
+      exact: true,
+    });
+    await expect(leaveA).toBeDisabled();
+    await expect(consentA).toBeDisabled();
+    expect(s.bodies).toHaveLength(2);
+    await kept
+      .getByRole("button", { name: "Discard this change", exact: true })
       .click();
+    await expect(inA.locator("[data-enrol-kept]")).toHaveCount(0);
+    await expect(inA.locator("[data-audience-chooser]")).toHaveCount(0);
+    await leaveA.click();
     await expect.poll(() => s.bodies.length).toBe(3);
     expect(s.bodies[2]?.command).toEqual({
       kind: "enrol",
@@ -2967,6 +2995,270 @@ test.describe("E-T31: A's change commits but its answer is lost; B changes after
         .getByRole("button", { name: "Leave this task", exact: true }),
     ).toBeEnabled();
     expect(s.bodies).toHaveLength(before);
+  });
+});
+
+test.describe("E-T32: a later audience edit survives a same-identity remount of the protected tree (A15, A16; R23 of revision 12, Q2/Q3)", () => {
+  test("A's Save is not confirmed (nothing committed); A adds a grant; a 403 elsewhere remounts the tree: the grant and the unconfirmed change are still there, nothing resent; A's Save of it is acknowledged", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 49,
+      title: "Kept through a remount",
+      participation: "everyone",
+      goal: JOURNAL_GOAL,
+    });
+    const journal = liveJournal(20);
+    progressOf(task, journal);
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await context.route("**/api/experimental/v1/households", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      }),
+    );
+    await context.route("**/api/experimental/v1/directory**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { id: "33333333-3333-4333-8333-333333333333", username: "reader" },
+        ]),
+      }),
+    );
+    await seedSettled(context);
+    const page = await bootAt(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+    );
+    await cacheTasks(page, net, [task]);
+    const route = journalRoute(journal);
+    await page.route(
+      `**${API}/progress/${task.progressId}/entries?*`,
+      route.handler,
+    );
+    const settings = page.locator("[data-enrolment]");
+    const third = settings.locator(
+      '[data-grant="account"][data-principal="33333333-3333-4333-8333-333333333333"]',
+    );
+    await settings
+      .getByRole("button", { name: "Change…", exact: true })
+      .click();
+    await settings
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    // The Save fails in the network before the server applies anything: uncertain, then read (version 2, unchanged).
+    s.drop = true;
+    await settings
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(settings).toContainText(
+      "Couldn't confirm the change. Try again.",
+    );
+    expect(s.bodies).toHaveLength(1);
+    expect(s.state.version).toBe(2);
+    // Editable again after the read: a grant is added and accepted.
+    await settings
+      .getByRole("button", { name: "+ Add account grant", exact: true })
+      .click();
+    await settings.getByLabel("Name", { exact: true }).fill("rea");
+    await settings.getByRole("button", { name: "Search", exact: true }).click();
+    await settings
+      .getByRole("button", { name: "Choose: reader", exact: true })
+      .click();
+    await expect(third).toHaveCount(1);
+    await page.evaluate(() => {
+      const e = document.querySelector("[data-enrolment]") as
+        | (Element & { __mark?: boolean })
+        | null;
+      if (e !== null) e.__mark = true;
+    });
+    // A 403 on the full history's Refresh closes and reopens the protected display for the SAME identity (the tree remounts).
+    await page
+      .getByRole("button", { name: "Full history", exact: true })
+      .click();
+    await expect(page.locator("[data-entry-history]")).toHaveAttribute(
+      "data-journal-version",
+      "1",
+    );
+
+    route.refuseNext(403, "forbidden");
+    await page
+      .locator("[data-entry-history]")
+      .getByRole("button", { name: "Refresh", exact: true })
+      .click();
+    // Barrier: NEW settings (the tree remounted), shown after their own read.
+    await page.waitForFunction(
+      () => {
+        const e = document.querySelector("[data-enrolment]") as
+          | (Element & { __mark?: boolean })
+          | null;
+        return e !== null && e.__mark !== true;
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    await expect(
+      settings.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeVisible();
+    // The accepted grant and the private audience it was made to; the unconfirmed change and its Try again; nothing resent.
+    await expect(third).toHaveCount(1);
+    await expect(
+      settings.locator(
+        '[data-grant="account"][data-principal="22222222-2222-4222-8222-222222222222"]',
+      ),
+    ).toHaveCount(0);
+    await expect(settings).toContainText(
+      "Couldn't confirm the change. Try again.",
+    );
+    expect(s.bodies).toHaveLength(1);
+    // Its Save is a new change of version 2 (its own key), acknowledged; the read that follows ends the draft.
+    await settings
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(settings).toContainText("Saved.");
+    expect(s.bodies).toHaveLength(2);
+    expect(s.bodies[1]?.key).not.toBe(s.bodies[0]?.key);
+    expect(s.bodies[1]?.command).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 2,
+      active: true,
+      aggregate_consent: true,
+      initial_policy: {
+        grants: [
+          {
+            kind: "account",
+            id: "33333333-3333-4333-8333-333333333333",
+            edit: false,
+          },
+        ],
+        exclude_accounts: [],
+      },
+    });
+    await expect(
+      settings.getByRole("button", { name: "Change…", exact: true }),
+    ).toBeEnabled();
+    await expect(settings.locator("[data-audience-chooser]")).toHaveCount(0);
+    await expect(settings).toContainText(
+      "Who sees your progress from now on: you and 1 person",
+    );
+  });
+});
+
+test.describe("E-T33: A's change is not committed, A edits again, B wins; A's exact retry is refused and A's later edit is kept, never sent (A15, A16; R23/R25 of revision 12, Q12)", () => {
+  test("A Save (network failure, nothing applied) -> A adds a grant -> B's consent wins -> A Try again resends the old body and key, refused; A's later draft is kept beside B's state", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 50,
+      title: "Retry is not the draft",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await context.route("**/api/experimental/v1/households", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      }),
+    );
+    await context.route("**/api/experimental/v1/directory**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { id: "33333333-3333-4333-8333-333333333333", username: "reader" },
+        ]),
+      }),
+    );
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const inA = a.locator("[data-enrolment]");
+    await inA.getByRole("button", { name: "Change…", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    s.drop = true;
+    await inA
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(inA).toContainText("Couldn't confirm the change. Try again.");
+    expect(s.state.version).toBe(2);
+    // A's later edit, accepted.
+    await inA
+      .getByRole("button", { name: "+ Add account grant", exact: true })
+      .click();
+    await inA.getByLabel("Name", { exact: true }).fill("rea");
+    await inA.getByRole("button", { name: "Search", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Choose: reader", exact: true })
+      .click();
+    const third =
+      '[data-grant="account"][data-principal="33333333-3333-4333-8333-333333333333"]';
+    await expect(inA.locator(third)).toHaveCount(1);
+    // B changes the consent: version 3.
+    const b = await bootAt(context, path);
+    const consentB = b
+      .locator("[data-enrolment]")
+      .getByRole("checkbox", { name: "Count me in the shared total" });
+    await consentB.click();
+    await expect.poll(() => s.state.version).toBe(3);
+    // A's Try again is the EXACT unconfirmed change (old body and key; not the later draft): refused at version 2.
+    await inA
+      .locator("[data-enrolment-uncertain]")
+      .getByRole("button", { name: "Try again", exact: true })
+      .click();
+    await expect(inA).toContainText(
+      "This change wasn't accepted. The latest settings are shown.",
+    );
+    expect(s.bodies).toHaveLength(3);
+    expect(s.bodies[2]).toEqual(s.bodies[0]);
+    expect(s.bodies[0]?.command.initial_policy).toEqual(PRIVATE_AUDIENCE);
+    expect(s.state).toEqual({
+      version: 3,
+      active: true,
+      aggregate_consent: false,
+      policy: SHARED_AUDIENCE,
+    });
+    // B's state shown; A's later draft kept as it was (private + the grant), never sent; nothing more sent.
+    await expect(
+      inA.getByRole("checkbox", { name: "Count me in the shared total" }),
+    ).not.toBeChecked();
+    await expect(inA).toContainText(
+      "Who sees your progress from now on: you and 1 person",
+    );
+    const kept = inA.locator("[data-enrol-kept]");
+    await expect(kept).toHaveCount(1);
+    await expect(kept.locator(third)).toHaveCount(1);
+    await expect(
+      kept.locator(
+        '[data-grant="account"][data-principal="22222222-2222-4222-8222-222222222222"]',
+      ),
+    ).toHaveCount(0);
+    await expect(
+      inA.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeDisabled();
+    expect(s.bodies).toHaveLength(3);
   });
 });
 

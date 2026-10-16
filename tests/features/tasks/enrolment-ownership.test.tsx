@@ -7,6 +7,9 @@
  * moved onto another version; an offline retry is not a definite answer. Composed through the production task detail, over the real data
  * env's defaults source and the sharing env's chooser, with every POST and (where named) every read held until released.
  *
+ * Revision 12 (R23/R25): the draft now belongs to the page, and only a SUCCESS for the revision it submitted ends it (S8's control adapted;
+ * see `enrolment-retention.test.tsx` for the remount and refusal schedules).
+ *
  * Review 11's original probes, run unchanged against this revision, are kept in `.agtx/evidence/web10a-revision-11/r23-reviewer-probes/`:
  * their controls pass and each failing case now stops at its PRECONDITION (the Choose button is disabled; the editor is frozen during the
  * follow-up read), the changed precondition this design intends; the accepted-then-lost input they caught can no longer arise.
@@ -806,7 +809,7 @@ describe("S8/DA-1: an uncertain change stays uncertain until a definite answer; 
     });
 });
 
-describe("S8: a draft with edits after the one sent is kept, unsaved, when a later read shows another version", () => {
+describe("S8: a draft not acknowledged is kept, unsaved, when a later read shows another version", () => {
   /** Enrolled: "Only me" saved, answered uncertain; the read shows it did not commit (yet). */
   async function uncertainSave() {
     const w = await opened("enrolled");
@@ -867,14 +870,39 @@ describe("S8: a draft with edits after the one sent is kept, unsaved, when a lat
     },
   );
 
+  // ADAPTATION, revision 12 (R25; design assessment C7): this control asserted that a read showing another version ended a draft with no
+  // edit after its uncertain save. A version that moved is not an acknowledgement (another writer can make it), so the draft is now KEPT
+  // until its own change is answered with success; the original assertion is kept in `.agtx/evidence/web10a-revision-12/pre-adaptation/`.
   test(
-    "control: with no edit after the save, the read that shows its version ends the draft",
+    "no edit after the uncertain save: the read showing version 8 keeps it (not acknowledged); Try again's success, then the read, end it",
     SLOW,
     async () => {
       const w = await uncertainSave();
       await lateCommit(w);
+      const kept = document.querySelector("[data-enrol-kept]") as HTMLElement;
+      expect(kept).not.toBeNull();
+      expect(kept.querySelector(`[data-principal="${OTHER}"]`)).toBeNull();
+      expect(settings().textContent).toContain(
+        `${CONTROLS_COPY.audienceHeading}: ${CONTROLS_COPY.audienceLine(PRIVATE)}`,
+      );
+      expect(w.sent).toHaveLength(1);
+      // The exact retry (same key and body): the server replays its receipt; that success acknowledges the revision it submitted.
+      await click(
+        within(
+          document.querySelector("[data-enrolment-uncertain]") as HTMLElement,
+        ).getByRole("button", { name: copy.TRY_AGAIN }),
+      );
+      expect(w.sent).toHaveLength(2);
+      expect(w.sent[1]?.key).toBe(w.sent[0]?.key);
+      expect(w.sent[1]?.command).toEqual(w.sent[0]?.command);
+      await act(async () =>
+        w.sent[1]?.release({ ok: true, value: { revision: 50 } }),
+      );
+      await w.t.settle();
       reconciledPrivate();
+      expect(settings().textContent).toContain(CONTROLS_COPY.saved);
       expect(button(CONTROLS_COPY.changeAudience)?.disabled).toBe(false);
+      expect(w.sent).toHaveLength(2);
     },
   );
 });
@@ -923,7 +951,9 @@ describe("S9: a failed read after the answer leaves the change unconfirmed, with
       await ack(t);
       await act(async () => held()[0]?.release({ ok: false, kind: "closed" }));
       await t.settle();
+      // (Revision 12: asserted present first, so a cycle wrongly ended - which now also ends the draft - fails here, not with a TypeError.)
       const cancel = button(CONTROLS_COPY.cancel) as HTMLButtonElement;
+      expect(cancel).not.toBeNull();
       expect(cancel.disabled).toBe(true);
       expect(reasonOf(cancel)).toContain(CONTROLS_COPY.confirming);
       hold(false);

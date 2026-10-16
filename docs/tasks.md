@@ -284,6 +284,22 @@ Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its re
     is not a definite answer (DA-1): only `conflict`, `operation_conflict`, `forbidden`, `not_found` and `invalid` end an attempt, so an
     uncertain change keeps its body and key whatever a later retry finds. No cross-tab lock, rebase or persistence across a reload is added.
 
+    Revision 12 (review 12: R23 `task-save-acknowledgement-consumes-newer-edits`, R25 `task-enrolment-refusal-discards-input`; design
+    assessment I3/I4, C1-C7): the draft is no longer the settings' React state but the PAGE's (`EnrolmentDraft` in `memory.ts`, per identity
+    and task: a never-reused editor `session`, its `revision` (edits accepted), the enrolment it was made to, a frozen copy of the policy and
+    the consent), so an ordinary same-identity remount of the protected tree shows it again, after the remounted settings' own authorised
+    read. Being sent is not being saved: Save/Join captures the draft's session and revision with the change (`EnrolmentTicket`, kept on the
+    attempt; a Try again keeps the ticket of what it resends), only a SUCCESS records it as acknowledged, and only the current read that
+    follows ends that exact draft revision (`answerEnrolment`). A refused (`conflict`, `operation_conflict`, `invalid`, ...) or uncertain
+    change keeps the submitted values, unsaved, beside the settings read: editable on the same version (Save again), kept with "Discard this
+    change" on another; never resent, rebased or merged, and Leave and the consent wait for it. A version that moved, or a server state that
+    looks equal, is not an acknowledgement. Every edit, opening and Cancel/Discard is admitted by the owner when it happens (not while a
+    change is sent or confirmed); Discard ends only its own session and never forgets an uncertain change. A refused enrolment read
+    (`403`/`404`) removes the draft; another identity never sees it (page memory is per identity); a reload starts without it and resends
+    nothing. A first Join already begun keeps its own audience and consent whatever a later defaults read says. The page holds at most 2,000
+    changes and drafts: a NEW one beyond that is refused with "Too many unsaved changes on this page: save or discard one first", and
+    nothing held is evicted to make room (only cycles with nothing in progress are reclaimed).
+
 Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
 `enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
 follows a committed correction), E-T16 (an enrolment change pressed again while pending) and E-T17 (another tab commits between the detail's
@@ -396,6 +412,7 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 4: enrolment "Sending your change…" (the disabled reason while a change is pending) and "Try again" beside "Couldn't confirm the change. Try again." | `/tasks/<id>` of a shared task (jsdom `enrolment-attempt.test.tsx`, native E-T16) |
 | Revision 10: joining asks "Count your contribution in the shared total?" ("Yes, include my contribution" / "No, leave my contribution out of the shared total"; Join waits with "Choose whether to count your contribution first"), then "Who sees your progress from now on" with "This starts from your default sharing." (first Join) or "This starts from the sharing you had before." (rejoining) and "This applies to days from now on. A day already started keeps its own sharing (Who sees my progress)."; the default loading/unreadable lines "Loading your default sharing" / "Your default sharing couldn't be loaded." with "Try again" (Join's reason: "Who would see your progress isn't known yet"); enrolled: "Who sees your progress from now on: only you" (or "you and 1 household and 2 people, 1 excluded"), "Change…", the chooser's "Only me (private)", "Cancel" and "Save sharing" ("Nothing has changed" while unchanged) | `/tasks/<id>` of a shared task (jsdom `enrolment-policy.test.tsx`, native E-T16/E-T27/E-T28) |
 | Revision 11: while a change is answered and its read is awaited every control says "Checking your settings…" (after "Sending your change…"), an open lookup's Choose included; Leave and the consent beside an unsaved audience edit: "Save or cancel the sharing change first"; a kept draft: "Not saved: your settings changed after you started this change, so it can't be sent. Discard it to change the settings shown." with "Discard this change", and elsewhere "Discard the unsaved change first" | `/tasks/<id>` of a shared task (jsdom `enrolment-ownership.test.tsx`, native E-T29–E-T31) |
+| Revision 12: after a refused change the submitted audience (and a join's consent) stays: on another version as the kept draft above beside "This change wasn't accepted. The latest settings are shown.", on the same version in the editor; a page holding 2,000 unsaved changes refuses a new one with "Too many unsaved changes on this page: save or discard one first" | `/tasks/<id>` of a shared task (jsdom `enrolment-retention.test.tsx`, native E-T30/E-T32/E-T33) |
 | Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
 
 ## Escalation E-1 (material, not blocking WEB-10a)

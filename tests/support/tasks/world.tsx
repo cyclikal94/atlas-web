@@ -310,6 +310,12 @@ export interface Mounted {
     command: { command: Record<string, unknown> };
   }>;
   rerender(env: TasksEnv): void;
+  /**
+   * Remounts the protected tree (revision 12, R23): `ProtectedProviders` is keyed afresh, so every component under it (the router's
+   * screens included) mounts again, as the session does when it closes and reopens the display for the SAME identity. The router, data
+   * env, API doubles, location and page memory are kept: not a reload and not a navigation.
+   */
+  remount(): void;
   unmount(): void;
   /**
    * Commits ONE delta sync page carrying `rows` through the PRODUCTION `commitPage` plan, as the leader does: the cache changes and its
@@ -422,8 +428,10 @@ export async function mountTasks(options: {
   const api = options.api ?? fakeApi();
   const sharing = options.sharing ?? fakeSharingApi();
   const router = createAppRouter({ initialPath: options.path });
+  let generation = 0;
+  let shown = tasksEnv(api, options.env);
   const tree = (env: TasksEnv) => (
-    <ProtectedProviders>
+    <ProtectedProviders key={generation}>
       <ShellEnvProvider
         value={{
           syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
@@ -447,7 +455,7 @@ export async function mountTasks(options: {
       </ShellEnvProvider>
     </ProtectedProviders>
   );
-  const view = render(tree(tasksEnv(api, options.env)));
+  const view = render(tree(shown));
   const settle = async () => {
     await act(async () => {
       for (let i = 0; i < 60; i += 1) {
@@ -472,7 +480,14 @@ export async function mountTasks(options: {
         (a, b) => a.created_seq - b.created_seq,
       ),
     bodies: () => (world.idb.snapshot(NAME)?.draft_commands ?? []) as never,
-    rerender: (env) => view.rerender(tree(env)),
+    rerender: (env) => {
+      shown = env;
+      view.rerender(tree(env));
+    },
+    remount: () => {
+      generation += 1;
+      view.rerender(tree(shown));
+    },
     unmount: () => view.unmount(),
     commitSync: async (rows, removed = [], options = {}) => {
       let committed = false;

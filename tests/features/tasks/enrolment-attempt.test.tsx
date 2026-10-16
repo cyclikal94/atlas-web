@@ -11,6 +11,9 @@
  * enrolment's Leave and checkbox), its stale state now an ACTIVE enrolment so that showing it is visible. Every command now carries the
  * policy that was read (`initial_policy`). The pre-adaptation file and its failing run are kept in
  * `.agtx/evidence/web10a-revision-10/pre-adaptation/`.
+ *
+ * ADAPTATION, revision 12 (R25): E2's refusal control now asserts the refused Join is KEPT (not dropped) and discarded explicitly before the
+ * next Join; its new-key and new-version assertions are unchanged. The pre-adaptation file is in `.agtx/evidence/web10a-revision-12/`.
  */
 import {
   act,
@@ -296,6 +299,19 @@ describe("E2: an uncertain change is retried exactly", () => {
       await t.settle();
       expect(settings()?.textContent).toContain(CONTROLS_COPY.enrolRefused);
       expect(button(copy.TRY_AGAIN)).toBeNull();
+      // ADAPTATION, revision 12 (R25; design assessment C7): the refused Join's choices are kept, unsaved, beside version 2 (a refusal is
+      // not an acknowledgement); nothing is resent, and the next Join is possible only after they are discarded explicitly.
+      const kept = settings()?.querySelector(
+        "[data-enrol-kept]",
+      ) as HTMLElement;
+      expect(kept).not.toBeNull();
+      expect(kept.textContent).toContain(CONTROLS_COPY.consentYes);
+      expect((button(CONTROLS_COPY.join) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+      expect(sent).toHaveLength(1);
+      await press(t, button(CONTROLS_COPY.discard));
+      expect(settings()?.querySelector("[data-enrol-kept]")).toBeNull();
       await chooseConsent();
       await press(t, button(CONTROLS_COPY.join));
       expect(sent).toHaveLength(2);

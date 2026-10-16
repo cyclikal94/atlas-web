@@ -18,12 +18,19 @@ import { momentLabel } from "../format";
 import {
   answerEnrolment,
   askEnrolment,
+  type EnrolmentDraft as Draft,
+  discardEnrolmentDraft,
   type EnrolmentAttempt,
+  type EnrolmentTicket,
+  editEnrolmentDraft,
   enrolmentAttemptOf,
+  enrolmentDraftOf,
+  enrolmentFull,
   enrolmentLock,
   forgetRefusal,
   type JointAnswer,
   noteIfRefused,
+  openEnrolmentDraft,
   refusalOf,
   settleEnrolment,
   startEnrolment,
@@ -31,11 +38,7 @@ import {
 } from "../memory";
 import { canonicalBody } from "../model/attempt";
 import { type Enrolment, parseProgressState } from "../model/contract";
-import {
-  copyPolicy,
-  enrolCommand,
-  progressDefaultPolicy,
-} from "../model/enrolment";
+import { enrolCommand, progressDefaultPolicy } from "../model/enrolment";
 import { jointLine } from "../model/row-state";
 import type { RowModel } from "../view";
 
@@ -80,6 +83,7 @@ export const CONTROLS_COPY = {
     "Not saved: your settings changed after you started this change, so it can't be sent. Discard it to change the settings shown.",
   discard: "Discard this change",
   discardFirst: "Discard the unsaved change first",
+  full: "Too many unsaved changes on this page: save or discard one first",
   saved: "Saved.",
   joinConsent: "Count your contribution in the shared total?",
   consentYes: "Yes, include my contribution",
@@ -346,23 +350,6 @@ const DEFINITE: ReadonlySet<string> = new Set([
   "invalid",
 ]);
 
-/**
- * An unsaved change of the enrolment (revision 11, R23): made to `base`, the enrolment read when it began, whose version is the command's
- * guard (it is never moved onto another version). Held by the settings, not by a child keyed by version, so a hidden form (offline, a
- * failed read) keeps it. `edits` counts the edits accepted; `sent` is that count when it was last sent (null: never).
- */
-interface Draft {
-  base: Enrolment;
-  policy: Policy;
-  /** The join form's consent choice; null until chosen (an enrolled person's audience edit has none). */
-  consent: boolean | null;
-  edits: number;
-  sent: number | null;
-}
-
-/** Edits accepted since the draft was last sent (or at all). */
-const unsent = (draft: Draft): boolean => draft.edits > (draft.sent ?? 0);
-
 type Change = {
   active?: boolean;
   aggregate_consent?: boolean;
@@ -387,13 +374,18 @@ type Change = {
  * that were sent. A failed read leaves the cycle open, with its Try again (a read, never a send). A draft lives here: sent and answered, it
  * ends with the version it made (or was refused at); one with edits not yet sent is never dropped by a read, nor moved onto another
  * version: it is kept, unsaved, until it is discarded. Leave and the consent wait while an audience edit is unsaved.
+ *
+ * Revision 12 (R23/R25; design assessment C1-C5): the draft belongs to the PAGE (`EnrolmentDraft` in page memory, per identity and task),
+ * not to this component, so an ordinary remount of the protected tree shows it again (after its own authorised read; a refused read of the
+ * enrolment removes it). Being sent is not being saved: a change captures the draft's session and revision (`EnrolmentTicket`), and only
+ * its SUCCESS, followed by the current read, ends that exact revision. A refused or uncertain change keeps the draft, unsaved, beside the
+ * settings read (editable on the same version; kept, with Discard, on another): it is never resent, rebased or replaced by the read.
  */
 function EnrolmentSettings({ taskId }: { taskId: string }) {
   const env = useTasksEnv();
   const heading = useId();
   const readKey = `enrolment:${taskId}`;
   const [enrolment, setEnrolment] = useState<Enrolment | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
   const [state, setState] = useState<
     "idle" | "loading" | "unavailable" | "refused" | "saved"
   >("idle");
@@ -402,6 +394,7 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
   useEffect(() => subscribeEnrolment(changed), []);
   const attempt = enrolmentAttemptOf(env.identity, taskId);
   const lock = enrolmentLock(env.identity, taskId);
+  const draft = enrolmentDraftOf(env.identity, taskId);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -429,16 +422,12 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
     void env.api.readEnrolment(taskId).then((result) => {
       noteIfRefused(env.identity, readKey, result);
       if (!live) return;
-      const answer = answerEnrolment(env.identity, taskId, read, result.ok);
+      const got = result.ok ? result.value : null;
+      const answer = answerEnrolment(env.identity, taskId, read, got);
       if (result.ok) {
         const value = result.value;
         if (answer === "current") {
-          // The current state ends a draft whose edits were all sent (the version they made, or were refused at); unsent edits stay.
-          setDraft((d) =>
-            d !== null && d.base.version !== value.version && !unsent(d)
-              ? null
-              : d,
-          );
+          // The current state. It ended only a draft whose own change was saved (page memory: `answerEnrolment`); any other is kept.
           setEnrolment(value);
         } else setEnrolment((shown) => shown ?? value);
         setState((s) => (s === "loading" ? "idle" : s));
@@ -449,10 +438,8 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       live = false;
     };
   }, [env.api, env.online, env.identity, taskId, reload]);
-  // Admitted only while nothing is being sent or confirmed, checked when it happens: a control rendered before a change was sent can
-  // still be pressed in the same turn.
-  const admitted = () =>
-    env.writable && enrolmentLock(env.identity, taskId) === null;
+  // Every edit, opening and discard is admitted by the page owner WHEN IT HAPPENS (nothing while a change is sent or confirmed): a control
+  // rendered before a change was sent can still be pressed in the same turn.
   const deliver = async (mine: EnrolmentAttempt) => {
     // The captured body is what is sent, byte for byte, now and on Try again (R22: its policy too).
     const result = await env.api.enrol(JSON.parse(mine.body), mine.key);
@@ -461,7 +448,7 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       env.identity,
       taskId,
       mine,
-      definite ? "definite" : "uncertain",
+      result.ok ? "saved" : definite ? "refused" : "uncertain",
     );
     if (!mounted.current) return;
     if (result.ok) setState("saved");
@@ -469,47 +456,43 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
     else if (result.kind !== "closed") setState("idle");
   };
   /** Sends `command` if its attempt is taken (nothing of the task pending or unconfirmed): true when it was. */
-  const send = (command: EnrolCommand): boolean => {
-    const mine = startEnrolment(env.identity, taskId, command, env.newId);
+  const send = (command: EnrolCommand, ticket?: EnrolmentTicket): boolean => {
+    const mine = startEnrolment(
+      env.identity,
+      taskId,
+      command,
+      env.newId,
+      ticket,
+    );
     if (mine === null) return false;
     void deliver(mine);
     return true;
   };
-  // A draft never outlives its identity or task: the detail's read belongs to one identity and task (`useTaskDetail`'s scope), so either
-  // changing remounts these settings and the draft with them (revision 11 S13).
+  // A draft never outlives its identity: page memory is per identity, and another identity's is gone (revision 11 S13).
   const held = draft;
   const stale =
     held !== null &&
     enrolment !== null &&
     held.base.version !== enrolment.version;
-  /** An edit of the draft for `base` (made from `seed` if there is none yet); a kept draft of another version is never edited. */
+  /** An edit of the draft for `base` (begun from `seed` if there is none yet); a kept draft of another version is never edited. */
   const edit = (
     base: Enrolment,
     seed: Policy,
     next: { policy?: Policy; consent?: boolean },
   ) => {
-    if (!admitted()) return;
-    setDraft((d) => {
-      if (d !== null && d.base.version !== base.version) return d;
-      const from: Draft = d ?? {
-        base,
-        policy: copyPolicy(seed),
-        consent: null,
-        edits: 0,
-        sent: null,
-      };
-      return { ...from, ...next, edits: from.edits + 1 };
+    if (env.writable)
+      editEnrolmentDraft(env.identity, taskId, base, seed, next);
+  };
+  /** Sends the draft's change, naming the revision it submits: only that revision's success can end it. */
+  const submit = (d: Draft, change: Change) => {
+    send(enrolCommand(taskId, d.base, change), {
+      session: d.session,
+      revision: d.revision,
     });
   };
-  /** Sends the draft's change; admitted, the edits it carries are `sent` (an edit after them would stay unsaved). */
-  const submit = (d: Draft, change: Change) => {
-    if (send(enrolCommand(taskId, d.base, change)))
-      setDraft((now) =>
-        now !== null && now.base === d.base ? { ...now, sent: d.edits } : now,
-      );
-  };
   const discard = () => {
-    if (admitted()) setDraft(null);
+    if (env.writable && held !== null)
+      discardEnrolmentDraft(env.identity, taskId, held.session);
   };
   const uncertain = attempt?.phase === "uncertain" ? attempt : null;
   const blocked = !env.writable
@@ -519,13 +502,19 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       : lock !== null
         ? CONTROLS_COPY.confirming
         : null;
-  // While a draft of an earlier version is kept, it is discarded before anything else is changed.
-  const actions = blocked ?? (stale ? CONTROLS_COPY.discardFirst : null);
+  // A full page refuses a NEW draft or change with why (nothing held is dropped for it); one held here is never refused.
+  const free =
+    blocked ??
+    (enrolmentFull(env.identity, taskId) ? CONTROLS_COPY.full : null);
+  // While a draft of an earlier version is kept, it is discarded before anything else is changed (an opened editor holds nothing).
+  const kept = stale && held.revision > 0;
+  const actions = free ?? (kept ? CONTROLS_COPY.discardFirst : null);
+  const current = stale ? null : held;
   const joinForm = (shown: Enrolment, seed: Policy, note: string) => (
     <JoinForm
       seed={seed}
       note={note}
-      draft={stale ? null : held}
+      draft={current}
       blocked={actions}
       edit={(next) => edit(shown, seed, next)}
       join={(d) => {
@@ -569,23 +558,17 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
         <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.loading}</p>
       ) : (
         <div className="flex flex-col gap-2">
-          {stale && held !== null ? (
+          {kept && held !== null ? (
             <KeptDraft draft={held} blocked={blocked} discard={discard} />
           ) : null}
           {enrolment.active ? (
             <Enrolled
               enrolment={enrolment}
-              draft={stale ? null : held}
+              draft={current}
               blocked={actions}
               open={() => {
-                if (admitted())
-                  setDraft({
-                    base: enrolment,
-                    policy: copyPolicy(enrolment.policy),
-                    consent: null,
-                    edits: 0,
-                    sent: null,
-                  });
+                if (env.writable)
+                  openEnrolmentDraft(env.identity, taskId, enrolment);
               }}
               edit={(policy) => edit(enrolment, enrolment.policy, { policy })}
               cancel={discard}
@@ -593,11 +576,16 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
               change={(next) => send(enrolCommand(taskId, enrolment, next))}
             />
           ) : enrolment.version === 0 ? (
-            <FirstJoin
-              form={(seed) =>
-                joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)
-              }
-            />
+            current === null ? (
+              <FirstJoin
+                form={(seed) =>
+                  joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)
+                }
+              />
+            ) : (
+              // A first Join already begun keeps the audience it began from: no defaults read can replace it or hide it.
+              joinForm(enrolment, current.policy, CONTROLS_COPY.defaultAudience)
+            )
           ) : (
             joinForm(enrolment, enrolment.policy, CONTROLS_COPY.lastAudience)
           )}
@@ -680,10 +668,11 @@ function Enrolled({
   const unchanged =
     draft !== null &&
     canonicalBody(draft.policy) === canonicalBody(enrolment.policy);
-  // An unsaved audience edit is saved or cancelled first: never sent with Leave or the consent, nor lost to their answer.
+  // An audience edit not yet saved (unsent, refused or uncertain) is saved or cancelled first: never sent with Leave or the consent, nor
+  // lost to their answer.
   const others =
     blocked ??
-    (draft !== null && unsent(draft) ? CONTROLS_COPY.finishFirst : null);
+    (draft !== null && draft.revision > 0 ? CONTROLS_COPY.finishFirst : null);
   return (
     <>
       <span>
