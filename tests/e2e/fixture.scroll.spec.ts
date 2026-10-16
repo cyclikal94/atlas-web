@@ -1,5 +1,11 @@
 import type { Locator, Page } from "@playwright/test";
-import { evidencePath, expect, pressTab, test } from "./helpers";
+import {
+  evidencePath,
+  expect,
+  fixturePageReady,
+  pressTab,
+  test,
+} from "./helpers";
 
 /**
  * R5 (revision review): the navigation and the sync status stay inside the viewport while long content scrolls, at all three
@@ -398,6 +404,7 @@ async function sharedInputClasses(page: Page) {
   const gallery = await page.context().newPage();
   try {
     await gallery.goto("/__controls");
+    await fixturePageReady(gallery);
     const classes = await gallery
       .getByTestId("input-canvas")
       .getAttribute("class");

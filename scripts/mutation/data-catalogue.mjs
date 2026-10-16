@@ -22411,4 +22411,58 @@ export const ENGINE = [
         "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
       ),
   },
+  {
+    id: "MU-1692",
+    title:
+      "WEB-08d review r18 M1: (REAL ENGINE) the fixture entry marks every page ready as it starts, before an on-demand diagnostic page's code has even arrived",
+    file: "src/fixture/main.tsx",
+    spec: "tests/e2e/fixture.diagnostic-pages.spec.ts",
+    grep: "diagnostic pages load on demand",
+    expect: /not ready while its code is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "document.documentElement.dataset.atlasFixture = ATLAS_FIXTURE_ONLY;\n",
+        'document.documentElement.dataset.atlasFixture = ATLAS_FIXTURE_ONLY;\ndocument.documentElement.dataset.fixturePage = "ready";\n',
+      ),
+  },
+  {
+    id: "MU-1693",
+    title:
+      "WEB-08d review r18 M1: (REAL ENGINE) a diagnostic page marks itself ready in a layout effect, before its children's effects (the heading's focus) have run",
+    file: "src/fixture/page-ready.tsx",
+    spec: "tests/e2e/fixture.diagnostic-pages.spec.ts",
+    grep: "diagnostic pages load on demand",
+    expect:
+      /(a neutral state|the sign-in-again form): not ready while its code is held/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          'import { type ReactNode, useEffect } from "react";',
+          'import { type ReactNode, useLayoutEffect } from "react";',
+        ),
+        "  useEffect(markFixturePageReady, []);",
+        "  useLayoutEffect(markFixturePageReady, []);",
+      ),
+  },
+  {
+    id: "MU-1694",
+    title:
+      "WEB-08d review r18 M1: (REAL ENGINE) a gallery is marked ready once its code has arrived, before the boot screen is cleared and the gallery is mounted",
+    file: "src/fixture/main.tsx",
+    spec: "tests/e2e/fixture.diagnostic-pages.spec.ts",
+    grep: "diagnostic pages load on demand",
+    expect: /gallery: not ready while its code is held/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          'import { FixturePageReady } from "./page-ready";',
+          'import { FixturePageReady, markFixturePageReady } from "./page-ready";',
+        ),
+        "  void page.then((gallery) => {\n",
+        "  void page.then((gallery) => {\n    markFixturePageReady();\n",
+      ),
+  },
 ];

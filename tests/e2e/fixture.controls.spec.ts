@@ -1,6 +1,12 @@
 import { contrastRatio } from "../../src/design/contrast";
 import { tokens } from "../../src/design/tokens";
-import { evidencePath, expect, runAxe, test } from "./helpers";
+import {
+  evidencePath,
+  expect,
+  fixturePageReady,
+  runAxe,
+  test,
+} from "./helpers";
 
 /**
  * Q17 (input-border sweep), in a real browser: the shared controls are measured with the colours actually painted,
@@ -23,6 +29,7 @@ for (const scheme of ["dark", "light"] as const) {
       page,
     }) => {
       await page.goto("/__controls");
+      await fixturePageReady(page);
       await expect(
         page.getByRole("heading", { level: 1, name: "Controls" }),
       ).toBeVisible();
@@ -56,6 +63,7 @@ for (const scheme of ["dark", "light"] as const) {
       page,
     }) => {
       await page.goto("/__controls");
+      await fixturePageReady(page);
       const fills = await page
         .locator("input")
         .evaluateAll((elements) =>
@@ -71,6 +79,7 @@ for (const scheme of ["dark", "light"] as const) {
       page,
     }) => {
       await page.goto("/__controls");
+      await fixturePageReady(page);
       const colour = await page
         .getByPlaceholder("Type here")
         .evaluate(
@@ -86,6 +95,7 @@ for (const scheme of ["dark", "light"] as const) {
       page,
     }) => {
       await page.goto("/__controls");
+      await fixturePageReady(page);
       const ring = await page
         .getByRole("radio", { name: "Second" })
         .locator("span[aria-hidden]")
@@ -101,6 +111,7 @@ for (const scheme of ["dark", "light"] as const) {
 
     test("a disabled button shows its reason beside it", async ({ page }) => {
       await page.goto("/__controls");
+      await fixturePageReady(page);
       const button = page.getByRole("button", { name: "Send now" });
       await expect(button).toBeDisabled();
       await expect(
@@ -112,6 +123,7 @@ for (const scheme of ["dark", "light"] as const) {
       page,
     }) => {
       await page.goto("/__controls");
+      await fixturePageReady(page);
       expect(await runAxe(page)).toEqual([]);
       await page.screenshot({
         path: evidencePath(`A4/controls-${scheme}.png`),
@@ -129,6 +141,7 @@ test.describe("forced colours", () => {
   }) => {
     await page.emulateMedia({ forcedColors: "active" });
     await page.goto("/__controls");
+    await fixturePageReady(page);
     const input = page.getByTestId("input-canvas");
     const style = await input.evaluate((element) => {
       const s = getComputedStyle(element);
@@ -153,6 +166,7 @@ test.describe("reduced motion", () => {
   test("transitions are removed", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/__controls");
+    await fixturePageReady(page);
     const duration = await page
       .getByRole("button", { name: "Primary" })
       .evaluate((element) => getComputedStyle(element).transitionDuration);

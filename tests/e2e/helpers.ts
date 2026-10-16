@@ -74,6 +74,17 @@ export const test = base.extend<{
 });
 export { expect };
 
+/**
+ * The fixture's diagnostic pages (`/__neutral`, `/__controls`, `/__gate`) load on demand, after the load event `page.goto` waits
+ * for in Chromium and Firefox (WebKit holds `load` for them), so a check made at once could measure the boot screen instead. This waits until the page marks itself ready: mounted,
+ * with its effects (such as the neutral heading's focus) run (src/fixture/page-ready.tsx).
+ */
+export async function fixturePageReady(page: Page): Promise<void> {
+  await page
+    .locator("html[data-fixture-page=ready]")
+    .waitFor({ state: "attached" });
+}
+
 interface AxeViolation {
   id: string;
   impact: string | null;

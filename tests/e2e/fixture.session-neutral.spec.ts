@@ -3,6 +3,7 @@ import {
   evidencePath,
   expect,
   expectFocusLoop,
+  fixturePageReady,
   pressTab,
   runAxe,
   test,
@@ -75,8 +76,14 @@ const SURFACES: Surface[] = [
     path: `/__neutral?state=${state}&count=4`,
     region: "main",
     focusHeading: true,
+    prepare: fixturePageReady,
   })),
-  { name: "gate", path: "/__neutral?state=gate", region: "#resume-gate" },
+  {
+    name: "gate",
+    path: "/__neutral?state=gate",
+    region: "#resume-gate",
+    prepare: fixturePageReady,
+  },
   {
     name: "settings-home",
     path: "/settings",
@@ -187,6 +194,7 @@ const SURFACES: Surface[] = [
     name: "compatibility-api",
     path: "/__neutral?state=1b",
     region: "main",
+    prepare: fixturePageReady,
   },
 ];
 

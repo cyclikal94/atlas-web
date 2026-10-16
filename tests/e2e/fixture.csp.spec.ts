@@ -1,5 +1,5 @@
 import { containerHeaders, enforceContainerPolicy, violations } from "./csp";
-import { expect, test } from "./helpers";
+import { expect, fixturePageReady, test } from "./helpers";
 
 /**
  * B10 (browser layer): the shell, its dialogs and its tooltips under the strict policy the container sends. Any
@@ -76,6 +76,7 @@ test.describe("content security policy (B10, fixture)", () => {
   test("the controls gallery raises zero violations", async ({ page }) => {
     await enforceContainerPolicy(page);
     await page.goto("/__controls");
+    await fixturePageReady(page);
     await expect(
       page.getByRole("heading", { level: 1, name: "Controls" }),
     ).toBeVisible();

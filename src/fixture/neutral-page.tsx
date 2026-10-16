@@ -8,12 +8,14 @@ import {
   type NeutralStateId,
   SessionProvider,
 } from "../session";
+import { FixturePageReady, markFixturePageReady } from "./page-ready";
 import { fixtureSession } from "./session-double";
 
 /**
  * FIXTURE ONLY. `/__neutral?state=<id>` renders one neutral state (or `state=gate`, the level-0 resume gate) so a real engine
  * can measure it at four widths in both themes: layout, contrast, targets, focus. `count` gives the consent prompt its number.
  * `form=1` renders the sign-in form a "Sign in again" / "Reconnect" button leads to (WEB-08b), in its reauthenticate mode.
+ * Loaded on demand by src/fixture/main.tsx; the page marks itself ready (src/fixture/page-ready.tsx) once mounted.
  */
 export function mountNeutralPage(params: URLSearchParams): void {
   const root = document.getElementById("neutral-root");
@@ -24,6 +26,7 @@ export function mountNeutralPage(params: URLSearchParams): void {
     const gate = createGateDialog();
     gate.open();
     gate.focusHeading();
+    markFixturePageReady();
     return;
   }
   const noop = () => undefined;
@@ -31,7 +34,13 @@ export function mountNeutralPage(params: URLSearchParams): void {
     createRoot(root).render(
       <ThemeProvider>
         <SessionProvider session={fixtureSession(params)}>
-          <SignInSurface mode="reauthenticate" onBack={noop} navigate={noop} />
+          <FixturePageReady>
+            <SignInSurface
+              mode="reauthenticate"
+              onBack={noop}
+              navigate={noop}
+            />
+          </FixturePageReady>
         </SessionProvider>
       </ThemeProvider>,
     );
@@ -39,20 +48,22 @@ export function mountNeutralPage(params: URLSearchParams): void {
   }
   createRoot(root).render(
     <ThemeProvider>
-      <NeutralState
-        state={state as NeutralStateId}
-        consent={{
-          count: Number(params.get("count") ?? 4),
-          ticket: "fixture-prompt" as ConsentTicket,
-        }}
-        actions={{
-          signIn: noop,
-          retry: noop,
-          reload: noop,
-          reviewDevice: noop,
-          consent: noop,
-        }}
-      />
+      <FixturePageReady>
+        <NeutralState
+          state={state as NeutralStateId}
+          consent={{
+            count: Number(params.get("count") ?? 4),
+            ticket: "fixture-prompt" as ConsentTicket,
+          }}
+          actions={{
+            signIn: noop,
+            retry: noop,
+            reload: noop,
+            reviewDevice: noop,
+            consent: noop,
+          }}
+        />
+      </FixturePageReady>
     </ThemeProvider>,
   );
 }

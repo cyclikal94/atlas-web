@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { recordEvidence } from "./data-evidence";
-import { expect, pressTab, runAxe, test } from "./helpers";
+import { expect, fixturePageReady, pressTab, runAxe, test } from "./helpers";
 
 /**
  * E-U1 (plan 8.7): the sync screens in a real engine, LIGHT AND DARK, at 320, 390, 768 and 1280 px: axe including colour contrast,
@@ -191,6 +191,7 @@ for (const scheme of ["dark", "light"] as const) {
           page,
         }, info) => {
           await page.goto(screen.url);
+          if (screen.url.startsWith("/__gate")) await fixturePageReady(page);
           await expect(page.getByText(screen.expect).first()).toBeVisible();
           const violations = await runAxe(page);
           expect(
