@@ -30,11 +30,11 @@ describe("the check against the stub server's /health (F-API)", () => {
   };
 
   test.each([
-    ["0.28.0", "supported"],
-    ["0.28.10", "supported"],
-    ["0.29.0", "unsupported"],
-    ["0.27.9", "unsupported"],
-    ["0.28.0-rc.1", "missing"],
+    ["0.29.0", "supported"],
+    ["0.29.10", "supported"],
+    ["0.30.0", "unsupported"],
+    ["0.28.9", "unsupported"],
+    ["0.29.0-rc.1", "missing"],
     [undefined, "missing"],
   ] as const)("api_version %j is %s", async (version, status) => {
     const { page } = await boot(version);
@@ -42,13 +42,13 @@ describe("the check against the stub server's /health (F-API)", () => {
   });
 
   test("an unsupported answer names the supported range, derived from the contract pin", async () => {
-    const { page } = await boot("0.29.0");
+    const { page } = await boot("0.30.0");
     expect(page.session.compat.get()).toEqual({
       status: "unsupported",
-      version: "0.29.0",
+      version: "0.30.0",
       supported: formatRange(rangeFromPin(pin.version)),
     });
-    expect(formatRange(rangeFromPin(pin.version))).toBe(">=0.28.0 <0.29.0");
+    expect(formatRange(rangeFromPin(pin.version))).toBe(">=0.29.0 <0.30.0");
   });
 
   test("a server that cannot be reached is 'unreachable', never a refusal", async () => {
@@ -74,7 +74,7 @@ describe("the check against the stub server's /health (F-API)", () => {
 
   test("an unsupported server does not hide a settled account when online either; only sign-in is gated", async () => {
     const f = new Fixture();
-    f.server.apiVersion = "0.29.0";
+    f.server.apiVersion = "0.30.0";
     await bootstrapSettled(f, { epoch: 1, fences: "none" });
     const page = f.addPage();
     await f.boot(page);
@@ -102,8 +102,8 @@ describe("the screen and the sign-in gate (F-API)", () => {
       { kind: "signed_out", state: null },
       {
         status: "unsupported",
-        version: "0.29.0",
-        supported: ">=0.28.0 <0.29.0",
+        version: "0.30.0",
+        supported: ">=0.29.0 <0.30.0",
       },
     );
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
@@ -122,7 +122,7 @@ describe("the screen and the sign-in gate (F-API)", () => {
   });
 
   test.each([
-    [{ status: "supported", version: "0.28.0" }],
+    [{ status: "supported", version: "0.29.0" }],
     [{ status: "unknown" }],
     [{ status: "unreachable" }],
   ] as const)("signed out and %j: the entry is offered as usual", (compat) => {

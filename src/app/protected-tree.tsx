@@ -3,8 +3,10 @@ import { type ReactNode, useMemo } from "react";
 import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
 import { invitationMemory } from "../features/authentication/handoff";
 import { isJoinPath } from "../features/authentication/public-route";
+import { documentRouteChanges } from "../lib/route-changes";
 import { type Session, SessionProvider } from "../session";
 import { AccountSlot } from "./AccountSlot";
+import { appCommands } from "./commands";
 import { ProtectedProviders } from "./providers";
 import { createAppRouter } from "./router";
 import { SessionNotices } from "./SessionNotices";
@@ -64,6 +66,8 @@ function normalisePublicPath(): void {
 
 /** `extra`: fixture-only recoverable form, mounted inside the shared data provider after the routed shell. */
 export function createProtectedTree(session: Session, extra?: () => ReactNode) {
+  // Record document departures before the router; calendar visits outlive protected-tree mounts.
+  documentRouteChanges();
   return (): ReactNode => {
     normalisePublicPath();
     // A new router per mount: an account change must not inherit the previous account's location or loaders.
@@ -71,7 +75,7 @@ export function createProtectedTree(session: Session, extra?: () => ReactNode) {
     return (
       <SessionProvider session={session}>
         <ProtectedProviders>
-          <DataProvider session={session}>
+          <DataProvider session={session} commands={appCommands()}>
             <ShellFromData router={router}>
               <RouterProvider router={router} />
               <SessionNotices />

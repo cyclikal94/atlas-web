@@ -33,9 +33,9 @@ default `0`) and gzip level 9. Two runs over the same `dist/` produce the same S
 
 ```json
 {
-  "atlas_backend_ref": { "tag": "v0.28.0-rc.1", "commit": "<full backend commit>" },
+  "atlas_backend_ref": { "tag": "v0.29.0-rc.1", "commit": "<full backend commit>" },
   "contract_hash": "<SHA-256 of api/openapi.json>",
-  "api_types_version": "0.28.0-rc.1",
+  "api_types_version": "0.29.0-rc.1",
   "api_types_tarball_sha256": "<SHA-256>",
   "frontend_ref": { "tag": null, "commit": "<full frontend commit>", "dirty": false },
   "ci_run_id": "local",

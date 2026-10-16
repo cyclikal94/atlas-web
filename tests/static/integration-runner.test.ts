@@ -426,6 +426,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         i14e: 4,
         i14d: 2,
         data: 37,
+        calendar: 13,
         traces: 16,
         registration: 20,
         oidc: 10,
@@ -434,7 +435,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         sharing: 7,
         snapshot: 6,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(165);
+      expect(inBrowser(whole, browser)).toHaveLength(178);
       expect(inBrowser(pwa, browser)).toHaveLength(1);
     }
     // Sharing and snapshot are named by their own stacks only.
@@ -444,7 +445,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       ).toBe(s.name === "sharing" || s.name === "snapshot");
   }, 120_000);
 
-  test("compared with the schedule Review ran, only sharing, snapshot, pages and password-path cases move: from base to their own fresh stacks", async () => {
+  test("compared with the schedule Review ran, only sharing, snapshot, pages, password-path and calendar cases move: from base to their own fresh stacks", async () => {
     // The revision-14 stacks, verbatim (scripts/integration/run.mjs at 6ad80ae).
     const OLD: Array<[string, string[]]> = [
       [
@@ -482,12 +483,13 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       expect(was).toBe("base");
       moved[name] = (moved[name] ?? 0) + 1;
     }
-    // Per engine: sharing 7, snapshot 6 (R22) and pages 13, password-path 8 (revision 15's measured throttle split).
+    // Per engine: sharing 7, snapshot 6 (R22), pages 13, password-path 8 (revision 15) and the accepted calendar stack's 13.
     expect(moved).toEqual({
       sharing: 21,
       snapshot: 18,
       pages: 39,
       "password-path": 24,
+      calendar: 39,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);

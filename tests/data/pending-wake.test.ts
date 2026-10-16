@@ -697,7 +697,7 @@ describe("the dispatcher: a wake during a step", () => {
       kind: "paused",
       reason: "compat_unsupported",
     });
-    w.compat.set({ status: "supported", version: "0.28.0" } as never);
+    w.compat.set({ status: "supported", version: "0.29.0" } as never);
     await w.settle();
     expect(w.sent).toHaveLength(1);
     w.dispatcher.stop();

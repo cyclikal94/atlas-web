@@ -1,5 +1,12 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @import "./fonts.css";
 @import "./tokens.css";
 @import "./theme.css";
 @import "./base.css";
+
+/* Utilities are generated from what ships: the application source and its two HTML entry points. Automatic detection also scanned
+ * tests, scripts, documentation and untracked launcher files, so production CSS carried their words as utilities (and differed with
+ * whatever untracked files a checkout held). WEB-13a revision 6 (the combined production CSS budget). */
+@source "..";
+@source "../../index.html";
+@source "../../fixture.html";

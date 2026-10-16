@@ -65,6 +65,13 @@ export const DEFAULT_STACKS = [
     oidc: false,
   },
   { name: "data", suffix: "-data", files: [SPEC("data")], oidc: false },
+  // Accepted WEB-13a journeys retain their own backend, throttle and loopback feed.
+  {
+    name: "calendar",
+    suffix: "-calendar",
+    files: [SPEC("calendars")],
+    oidc: false,
+  },
   {
     name: "traces",
     suffix: "-traces",
