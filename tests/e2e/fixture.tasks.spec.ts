@@ -3262,6 +3262,108 @@ test.describe("E-T33: A's change is not committed, A edits again, B wins; A's ex
   });
 });
 
+test.describe("E-T34: the first choice of a first Join keeps keyboard focus at its control (A15, A19; R26 of revision 13, Q1)", () => {
+  // Review 13's witness, maintained: the first choice begins the page's draft, and the form it was made in must stay mounted. Reached by
+  // real keyboard traversal (Option+Tab in WebKit, `nextKey`) and chosen by Space; never focus() or check(). Rejoining (version 7, whose
+  // form never moved) is the structural control. The control is marked before the key press: the same node, still in the page, keeps focus,
+  // and the next key continues from it. Nothing is sent (the command route records and refuses).
+  for (const version of [0, 7])
+    for (const choice of ["consent", "private"] as const)
+      test(`${version === 0 ? "first join" : "control: rejoin"}, ${choice === "consent" ? "consent Yes" : "Only me (private)"} by Tab and Space: the same control keeps visible focus, nothing sent, the next Tab goes on from it`, async ({
+        context,
+      }) => {
+        const task = buildTask({
+          n: 58,
+          title: "Focus boundary",
+          participation: "everyone",
+        });
+        const net = await stubNetwork(context);
+        await serveIdentityReads(context);
+        await serveTaskReads(context);
+        await context.route(
+          `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+          (route) =>
+            route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                version,
+                active: false,
+                aggregate_consent: false,
+                policy: { grants: [], exclude_accounts: [] },
+              }),
+            }),
+        );
+        const posts: string[] = [];
+        await context.route(
+          "**/api/experimental/v1/task-access-commands",
+          (route) => {
+            posts.push(route.request().postData() ?? "");
+            return route.abort();
+          },
+        );
+        await seedSettled(context);
+        const page = await bootAt(
+          context,
+          `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        );
+        await cacheTasks(page, net, [task]);
+        await untilTreeSettled(page);
+        const settings = page.locator("[data-enrolment]");
+        await expect(settings.locator("[data-audience-chooser]")).toBeVisible();
+        const name =
+          choice === "consent"
+            ? "Yes, include my contribution"
+            : "Only me (private)";
+        const target =
+          choice === "consent"
+            ? settings.getByRole("radio", { name })
+            : settings.getByRole("button", { name, exact: true });
+        await expect(target).toBeEnabled();
+        await fromPageStart(page);
+        const reached = await tabTo(page, (f) => f.name === name, name, {
+          max: 120,
+        });
+        seen(reached, `${name} reached`);
+        await expect(target).toBeFocused();
+        await target.evaluate((el) => el.setAttribute("data-e-t34", ""));
+        await page.keyboard.press("Space");
+        if (choice === "consent") await expect(target).toBeChecked();
+        await untilTreeSettled(page);
+        const after = await page.evaluate(() => {
+          const marked = document.querySelector("[data-e-t34]");
+          return {
+            marked: marked !== null,
+            focussed: marked !== null && document.activeElement === marked,
+            active: document.activeElement?.tagName ?? "none",
+          };
+        });
+        expect(
+          after,
+          "the control chosen is still in the page, and keeps focus",
+        ).toEqual({
+          marked: true,
+          focussed: true,
+          active: choice === "consent" ? "INPUT" : "BUTTON",
+        });
+        seen(await focusOf(page), `${name} after Space`);
+        expect(posts).toHaveLength(0);
+        // One key more goes on from the choice: to a control of the settings, not from the page's start.
+        await page.keyboard.press(nextKey());
+        expect(
+          await page.evaluate(
+            () =>
+              document.activeElement !== document.body &&
+              document
+                .querySelector("[data-enrolment]")
+                ?.contains(document.activeElement) === true,
+          ),
+          "the next key continues inside the settings",
+        ).toBe(true);
+        expect(posts).toHaveLength(0);
+      });
+});
+
 test.describe("E-T17: another tab commits while the task detail's read is between its stages (A1, A18; R9 of revision 4, D7)", () => {
   for (const between of [true, false])
     test(`between=${between}: tab A never shows the new title with the old day (or the reverse); it ends on what B committed`, async ({

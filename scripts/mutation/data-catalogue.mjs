@@ -58,6 +58,12 @@ const PORT_TESTS = [
   "tests/data/fence.test.ts",
 ];
 
+/** WEB-10a revision 13 (R26): the first Join as revision 13 renders it, and as revision 12 did (MU-2252, MU-2254). */
+const FIRST_JOIN_R13 =
+  "            // One path before and after the first choice (revision 13, R26): the choice that begins the draft keeps its form, and focus.\n            <FirstJoin\n              begun={current}\n              form={(seed) =>\n                joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)\n              }\n            />\n";
+const FIRST_JOIN_R12 =
+  "            current === null ? (\n              <FirstJoin\n                begun={null}\n                form={(seed) =>\n                  joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)\n                }\n              />\n            ) : (\n              joinForm(enrolment, current.policy, CONTROLS_COPY.defaultAudience)\n            )\n";
+
 /** The mutants run by vitest over the production source in the fake world (layers L1a and L1b). */
 export const UNIT = [
   // ---- the commit guard -----------------------------------------------------------------------------------------------------
@@ -21462,11 +21468,17 @@ export const UNIT = [
     file: "src/features/tasks/detail/Controls.tsx",
     tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
     expect: /Q7: .*consent No and the default audience chosen/,
+    // Re-anchored in revision 13 (R26, C1/C2): the first Join's form no longer moves once begun; the same fault is its defaults read asked
+    // for again with a draft begun, and the defaults' loading or failure shown in place of the draft.
     patch: (t) =>
       sub(
-        t,
-        "            current === null ? (\n",
-        "            (true as boolean) ? (\n",
+        sub(
+          t,
+          "      {begun === null ? <SeedRead round={round} found={setSeed} /> : null}\n",
+          "      <SeedRead round={round} found={setSeed} />\n",
+        ),
+        '      {begun !== null ? (\n        form(begun.policy)\n      ) : seed.status === "ready" ? (\n',
+        '      {seed.status === "ready" ? (\n',
       ),
   },
 
@@ -21577,6 +21589,48 @@ export const UNIT = [
         t,
         "        (draft.revision === 0 && draft.base.version !== value.version))\n",
         "        (false as boolean))\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 13 (review 13, R26; design assessment C1/C2, Q1/Q3): MU-2251..MU-2253 (unit), MU-2254 (REAL ENGINE) -------------
+  {
+    id: "MU-2251",
+    title:
+      "WEB-10a rev 13 (R26): the first Join's form is keyed by whether a draft is begun (the first choice replaces it, and focus falls to the body)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect: /F1 \(R26\): .*first join, consent|F2 \(R26\): .*first join, /,
+    patch: (t) =>
+      sub(
+        t,
+        "            <FirstJoin\n              begun={current}\n",
+        '            <FirstJoin\n              key={current === null ? "seed" : "draft"}\n              begun={current}\n',
+      ),
+  },
+
+  {
+    id: "MU-2252",
+    title:
+      "WEB-10a rev 13 (R26): revision 12's first Join restored: once begun, its form is rendered outside FirstJoin (the focussed control is replaced)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect:
+      /F1 \(R26\): .*first join, consent|F2 \(R26\): .*first join, |F4 \(R26\): .*first join/,
+    patch: (t) => sub(t, FIRST_JOIN_R13, FIRST_JOIN_R12),
+  },
+
+  {
+    id: "MU-2253",
+    title:
+      "WEB-10a rev 13 (R26, C2): a first Join already begun still asks for the defaults snapshot (the draft shown, but a read asked for nothing)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect: /F5 \(R26, C2\): .*a draft begun/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {begun === null ? <SeedRead round={round} found={setSeed} /> : null}\n",
+        "      <SeedRead round={round} found={setSeed} />\n",
       ),
   },
 ];
@@ -24990,5 +25044,16 @@ export const ENGINE = [
         '    if (page.next_after === null)\n      return { kind: "failed", reason: "inaccessible" };',
         '    if (page.next_after === null || after === null)\n      return { kind: "failed", reason: "inaccessible" };',
       ),
+  },
+
+  {
+    id: "MU-2254",
+    title:
+      "WEB-10a N-T34: (REAL ENGINE) revision 12's first Join restored: once begun, its form is rendered outside FirstJoin (focus leaves the control chosen)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T34:",
+    expect: /E-T34:/,
+    patch: (t) => sub(t, FIRST_JOIN_R13, FIRST_JOIN_R12),
   },
 ];

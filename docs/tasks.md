@@ -300,6 +300,11 @@ Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its re
     changes and drafts: a NEW one beyond that is refused with "Too many unsaved changes on this page: save or discard one first", and
     nothing held is evicted to make room (only cycles with nothing in progress are reclaimed).
 
+    Revision 13 (review 13: R26 `task-enrolment-first-choice-focus`; design assessment C1/C2, I7): the first choice of a first Join (consent
+    or audience) begins the draft without replacing its form. `FirstJoin` renders the same join form in the same place before and after
+    (from the draft once begun, from the defaults seed before), so the control chosen stays in the page and keeps keyboard focus. The
+    defaults snapshot is read only while nothing is begun (`SeedRead`), so a begun first Join neither waits for nor asks for one, as before.
+
 Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
 `enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
 follows a committed correction), E-T16 (an enrolment change pressed again while pending) and E-T17 (another tab commits between the detail's
@@ -320,6 +325,10 @@ draft, failed follow-up reads, another identity), `tests/static/mutation-invento
 membership check, R24), native E-T29 (an open lookup frozen while sent and confirmed, pointer and keyboard), E-T30 (two tabs, the other
 winner order) and E-T31 (a lost answer replayed after another tab's change; a reload sends nothing); unit MU-2223…MU-2236 (MU-2232 retired: its guard was unreachable and removed); MU-2142,
 MU-2143, MU-2146…MU-2148 and MU-2220…MU-2222 re-anchored and real-engine MU-2150 re-expressed (same intent).
+Revision 13 (R26): `enrolment-focus.test.tsx` (F1–F6: the first consent Yes/No, Private from a shared and an already-private default, a
+grant's permission and a consent choice with the directory lookup open, each keeping the same connected control focussed with nothing sent;
+rejoining, enrolled and rerender controls; no defaults snapshot asked for once begun), native E-T34 (real Tab, Option+Tab in WebKit, and Space
+in three engines, with rejoin controls); unit MU-2251…MU-2253 and real-engine MU-2254; MU-2243 re-anchored (same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old

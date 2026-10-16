@@ -371,15 +371,19 @@ type Change = {
  * Revision 11 (R23; design assessment C1-C3): a change owns the settings from the moment it is admitted until a read asked AFTER its answer
  * is accepted (the change's cycle, page memory): meanwhile nothing here is edited, chosen (an open directory lookup included) or sent, and
  * every edit is admitted when it happens, not only by a disabled control. So the answer and the read that follows can only end the edits
- * that were sent. A failed read leaves the cycle open, with its Try again (a read, never a send). A draft lives here: sent and answered, it
- * ends with the version it made (or was refused at); one with edits not yet sent is never dropped by a read, nor moved onto another
- * version: it is kept, unsaved, until it is discarded. Leave and the consent wait while an audience edit is unsaved.
+ * that were sent. A failed read leaves the cycle open, with its Try again (a read, never a send). A draft lived here (revision 12 below
+ * moved it to page memory, and ends it only on its own SUCCESS: a refused change no longer ends it); one with edits not yet sent is never
+ * dropped by a read, nor moved onto another version: it is kept, unsaved, until it is discarded. Leave and the consent wait while an
+ * audience edit is unsaved.
  *
  * Revision 12 (R23/R25; design assessment C1-C5): the draft belongs to the PAGE (`EnrolmentDraft` in page memory, per identity and task),
  * not to this component, so an ordinary remount of the protected tree shows it again (after its own authorised read; a refused read of the
  * enrolment removes it). Being sent is not being saved: a change captures the draft's session and revision (`EnrolmentTicket`), and only
  * its SUCCESS, followed by the current read, ends that exact revision. A refused or uncertain change keeps the draft, unsaved, beside the
  * settings read (editable on the same version; kept, with Discard, on another): it is never resent, rebased or replaced by the read.
+ *
+ * Revision 13 (R26): the first Join's first choice, which begins the draft, keeps the form it was made in (`FirstJoin` renders it before
+ * and after), so the control chosen keeps focus.
  */
 function EnrolmentSettings({ taskId }: { taskId: string }) {
   const env = useTasksEnv();
@@ -576,16 +580,13 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
               change={(next) => send(enrolCommand(taskId, enrolment, next))}
             />
           ) : enrolment.version === 0 ? (
-            current === null ? (
-              <FirstJoin
-                form={(seed) =>
-                  joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)
-                }
-              />
-            ) : (
-              // A first Join already begun keeps the audience it began from: no defaults read can replace it or hide it.
-              joinForm(enrolment, current.policy, CONTROLS_COPY.defaultAudience)
-            )
+            // One path before and after the first choice (revision 13, R26): the choice that begins the draft keeps its form, and focus.
+            <FirstJoin
+              begun={current}
+              form={(seed) =>
+                joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)
+              }
+            />
           ) : (
             joinForm(enrolment, enrolment.policy, CONTROLS_COPY.lastAudience)
           )}
@@ -778,21 +779,75 @@ type Seed =
  * The first Join (version 0): the read enrolment's empty policy is a placeholder, not an audience. The audience offered is the CURRENT
  * default sharing for progress, from a defaults snapshot asked for when this opened; until it is known nothing can be joined, and a failed
  * read says so with Try again (never shown as Private). A draft already begun keeps its own audience whatever is read here.
+ *
+ * Revision 13 (R26; design assessment C1/C2, I2/I7): the first choice begins the page's draft, and the form stays where it was: the draft is
+ * rendered by the same `form` at the same place as the seed was, so React keeps the mounted form, its chooser and the focussed control. A
+ * draft is preferred to the defaults (loading, failed or answered later), and with one there is nothing to ask for: the snapshot is read
+ * (`SeedRead`, beside the form, never around it) only while nothing is begun, as before.
  */
-function FirstJoin({ form }: { form(seed: Policy): ReactNode }) {
+function FirstJoin({
+  begun,
+  form,
+}: {
+  /** The draft of this first Join (a choice made), or null. */
+  begun: Draft | null;
+  form(seed: Policy): ReactNode;
+}) {
+  const [seed, setSeed] = useState<Seed>({ status: "loading" });
+  const [round, setRound] = useState(0);
+  return (
+    <>
+      {begun === null ? <SeedRead round={round} found={setSeed} /> : null}
+      {begun !== null ? (
+        form(begun.policy)
+      ) : seed.status === "ready" ? (
+        form(seed.policy)
+      ) : (
+        <>
+          {seed.status === "loading" ? (
+            <p className="text-[12.5px] text-ink-2">
+              {CONTROLS_COPY.defaultLoading}
+            </p>
+          ) : (
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="text-[12.5px] text-ink-2">
+                {CONTROLS_COPY.defaultFailed}
+              </span>
+              <Button variant="quiet" onClick={() => setRound((n) => n + 1)}>
+                {copy.TRY_AGAIN}
+              </Button>
+            </span>
+          )}
+          <span>
+            <Button disabled reason={CONTROLS_COPY.audienceUnknown}>
+              {CONTROLS_COPY.join}
+            </Button>
+          </span>
+        </>
+      )}
+    </>
+  );
+}
+
+/** The first Join's defaults snapshot, asked for when it mounts and on each Try again (`round`); it renders nothing. */
+function SeedRead({
+  round,
+  found,
+}: {
+  round: number;
+  found(seed: Seed): void;
+}) {
   const defaults = useSharingDefaults();
   const source = useRef(defaults);
   source.current = defaults;
-  const [seed, setSeed] = useState<Seed>({ status: "loading" });
-  const [round, setRound] = useState(0);
   // biome-ignore lint/correctness/useExhaustiveDependencies: one snapshot read per opening or Try again
   useEffect(() => {
     let live = true;
-    setSeed({ status: "loading" });
+    found({ status: "loading" });
     const { acquire, boundary } = source.current;
     void acquire(boundary()).then((got) => {
       if (live)
-        setSeed(
+        found(
           got.outcome === "fetched"
             ? { status: "ready", policy: progressDefaultPolicy(got.record) }
             : { status: "failed" },
@@ -802,30 +857,7 @@ function FirstJoin({ form }: { form(seed: Policy): ReactNode }) {
       live = false;
     };
   }, [round]);
-  if (seed.status === "ready") return form(seed.policy);
-  return (
-    <>
-      {seed.status === "loading" ? (
-        <p className="text-[12.5px] text-ink-2">
-          {CONTROLS_COPY.defaultLoading}
-        </p>
-      ) : (
-        <span className="flex flex-wrap items-center gap-2">
-          <span className="text-[12.5px] text-ink-2">
-            {CONTROLS_COPY.defaultFailed}
-          </span>
-          <Button variant="quiet" onClick={() => setRound((n) => n + 1)}>
-            {copy.TRY_AGAIN}
-          </Button>
-        </span>
-      )}
-      <span>
-        <Button disabled reason={CONTROLS_COPY.audienceUnknown}>
-          {CONTROLS_COPY.join}
-        </Button>
-      </span>
-    </>
-  );
+  return null;
 }
 
 /** Joining: the explicit consent choice and the audience (seeded, kept or changed), then Join with both. */
