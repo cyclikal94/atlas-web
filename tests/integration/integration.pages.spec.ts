@@ -3,12 +3,15 @@ import {
   bootHarness,
   expect,
   finishSignIn,
+  freshHarnessDocument,
+  identityReadsAtProxy,
   liftedAt,
   proxy,
   raw,
   rawSignIn,
   recordMeasurement,
   records,
+  type SettledLike,
   setVisibility,
   signIn,
   startSignIn,
@@ -18,6 +21,7 @@ import {
   untilView,
   view,
   watchLift,
+  withStaleSharedConfirmation,
 } from "./helpers";
 
 /**
@@ -639,9 +643,15 @@ async function callAtVerificationAnswer(
   await context.addInitScript(() => {
     const original = window.fetch.bind(window);
     window.fetch = async (...args: Parameters<typeof fetch>) => {
-      const response = await original(...args);
       const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-      const w = window as unknown as { __onCurrent?: () => void };
+      const w = window as unknown as {
+        __onCurrent?: () => void;
+        __currentIssued?: number;
+      };
+      // R16: this document's identity reads, counted as they are made (the setup proves its read was issued and held).
+      if (url.includes("/browser-sessions/current"))
+        w.__currentIssued = (w.__currentIssued ?? 0) + 1;
+      const response = await original(...args);
       if (url.includes("/browser-sessions/current") && w.__onCurrent) {
         const hook = w.__onCurrent;
         w.__onCurrent = undefined;
@@ -651,17 +661,37 @@ async function callAtVerificationAnswer(
     };
   });
   const page = await bootHarness(context);
+  expect((await signIn(page, "alice")).kind).toBe("settled");
+  await untilView(page, "displaying");
+  // WEB-08c revision 14 (review 14 R16): since HF1-SHARED-CONFIRMATION-20261013 the settlement's shared confirmation spares the
+  // settled page its post-display verification (the accepted behaviour; control: no identity read reached the proxy). The
+  // verification these cases place a call against is the one a NEW document makes when the record's confirmation is older than the
+  // interval: the token is still adopted (no CSRF read), so it is the document's only identity read, exactly as every display made it
+  // when revision 10 failed. Made eligible explicitly, then proven issued (by this document, once) and held.
+  expect(await identityReadsAtProxy()).toEqual([]);
+  const a = (await records(page)).auth_state.settled as SettledLike;
+  expect(await withStaleSharedConfirmation(page, a)).toMatchObject({
+    aged: true,
+    settlement_matched: true,
+    confirmation_matched: true,
+    written_age_ms: 120_000,
+  });
   const verification = await proxy.addRule({
     method: "GET",
     path: "/^\\/api\\/experimental\\/v1\\/browser-sessions\\/current$/",
     action: "hold",
     ordinal: 1,
   });
-  expect((await signIn(page, "alice")).kind).toBe("settled");
+  await freshHarnessDocument(page, a);
   await untilView(page, "displaying");
-  // The page's own verification of the displayed account is outstanding at the proxy.
+  // The new document's own verification of the displayed account is outstanding at the proxy.
   await untilHeld(verification.id);
-  const a = (await records(page)).auth_state.settled;
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { __currentIssued?: number }).__currentIssued,
+    ),
+  ).toBe(1);
+  expect(await identityReadsAtProxy()).toHaveLength(1);
   const sessions = await proxy.addRule(sessionsRule("hold"));
   await page.evaluate(
     (arg) => {

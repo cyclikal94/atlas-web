@@ -24,7 +24,15 @@
 //                        client keeps its queued work; the log entry records `refused`)
 import { createServer, request as httpRequest } from "node:http";
 
-export function createProxy({ upstream, port = 0, controlPort = 0 }) {
+// `observe` (WEB-08c revision 14, R17; the sibling WEB-14a revision 15 has the same hook): told of every request that reached the
+// BACKEND, with the backend's own status (before any rule rewrites it; null when the upstream connection failed), so the runner
+// can record a stack's demand on the backend's sign-in throttle. The test-visible `log` is reset by every test; this is not.
+export function createProxy({
+  upstream,
+  port = 0,
+  controlPort = 0,
+  observe = () => undefined,
+}) {
   const target = new URL(upstream);
   const log = [];
   const rules = [];
@@ -80,6 +88,12 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
               status: upstreamRes.statusCode,
             });
             entry.status = upstreamRes.statusCode;
+            observe({
+              method: entry.method,
+              path: new URL(entry.path, "http://x").pathname,
+              status: upstreamRes.statusCode,
+              at: entry.at,
+            });
             const body = Buffer.concat(chunks);
             if (rule?.action === "drop_client_after") {
               // The browser's connection is already gone: the backend finished, and nobody receives its answer.
@@ -191,6 +205,14 @@ export function createProxy({ upstream, port = 0, controlPort = 0 }) {
           t: Date.now() - entry.at,
           event: "upstream_error",
         });
+        // The request may still have reached the backend (and used its budget): counted, with no status.
+        if (entry.status === undefined)
+          observe({
+            method: entry.method,
+            path: new URL(entry.path, "http://x").pathname,
+            status: null,
+            at: entry.at,
+          });
         if (res.destroyed || res.writableEnded) return;
         // An upstream error AFTER the answer began (a reset of a large response, a client that went away) must not throw: the
         // connection is simply ended. Before the answer began, it is a 502.

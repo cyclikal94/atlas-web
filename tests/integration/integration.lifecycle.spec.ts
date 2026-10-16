@@ -1,6 +1,3 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import { installDisplayOracle } from "../e2e/display-oracle";
 import {
@@ -8,7 +5,7 @@ import {
   expect,
   exposeSession,
   OIDC,
-  ORIGIN,
+  paceSignIn,
   provider,
   proxy,
   raw,
@@ -38,33 +35,7 @@ import { followNavigation } from "./web08b-support";
 const API = "/api/experimental/v1";
 
 // The released backend allows 10 password attempts per account per minute: the same paced ledger as the other specs, keyed by stack.
-const LEDGER = join(
-  tmpdir(),
-  `atlas-signin-ledger-${new URL(ORIGIN || "http://x").port}.json`,
-);
-async function budget(who: Who): Promise<void> {
-  for (;;) {
-    let all: Record<string, number[]> = {};
-    try {
-      all = JSON.parse(readFileSync(LEDGER, "utf8")) as Record<
-        string,
-        number[]
-      >;
-    } catch {
-      all = {};
-    }
-    const now = Date.now();
-    const recent = (all[who] ?? []).filter((t) => now - t < 60_000);
-    if (recent.length < 8) {
-      all[who] = [...recent, now];
-      writeFileSync(LEDGER, JSON.stringify(all));
-      return;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, 60_000 - (now - (recent[0] ?? now)) + 250),
-    );
-  }
-}
+const budget = (who: Who) => paceSignIn(who);
 const signIn = async (page: Page, who: Who) => {
   await budget(who);
   return signInUnpaced(page, who);
