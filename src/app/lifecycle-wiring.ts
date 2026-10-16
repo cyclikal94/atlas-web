@@ -1,5 +1,8 @@
 import { watchAttemptEnd } from "../features/authentication/attempt-end";
-import { sectionPath, settingsSections } from "../features/settings/sections";
+import {
+  SESSIONS_SECTION_ROUTE,
+  settingsPath,
+} from "../features/settings/section-routes";
 import type { Session } from "../session";
 import { returnDestination } from "./return-destination";
 
@@ -17,7 +20,8 @@ export function startAttemptEndWatcher(session: Session): () => void {
  * "Review this device" on state 1a.device_changed (gap G-10). The kernel has already cleared the notice and re-evaluates; this records
  * where to put the person when the display returns: the Sessions & devices screen, focused on this device's row, for the account the
  * notice concerned (read from the settled identity now, at the click) and only that account (D-8c-03). With nobody settled it does
- * nothing.
+ * nothing. The path comes from `section-routes`, not the Settings registry: the registry carries every section's route builder, and
+ * importing it from this lazy chunk split the fixture shell's entry (revision 12, `section-routes.ts`).
  */
 export function reviewDevice(
   session: Session,
@@ -25,13 +29,11 @@ export function reviewDevice(
 ): void {
   const identity = session.identity.get();
   if (identity === null) return;
-  const section = settingsSections().find((entry) => entry.id === "sessions");
-  if (!section) return;
   returnDestination.set({
     account: identity.account_id,
     epoch: identity.epoch,
     when: "same-or-newer",
-    path: sectionPath(section),
+    path: settingsPath(SESSIONS_SECTION_ROUTE),
     focusKey: "device-this",
     requestedAt: now(),
   });

@@ -20,6 +20,10 @@ import { NEUTRAL_COPY } from "../../src/components/ui/neutral-state";
 import { authFeedback } from "../../src/features/authentication/feedback";
 import { ENDED_IN_TREE } from "../../src/features/authentication/outcome-copy";
 import { signInRequest } from "../../src/features/authentication/sign-in-request";
+import {
+  sectionPath,
+  settingsSections,
+} from "../../src/features/settings/sections";
 import { switchFlow } from "../../src/features/switch/state";
 import { SessionProvider, type SessionView } from "../../src/session";
 import {
@@ -222,6 +226,20 @@ describe("Review this device (G-10)", () => {
     const session = sessionDouble({}, { identity: store(null) });
     reviewDevice(session);
     expect(returnDestination.peek()).toBeNull();
+  });
+
+  test("its path is the Settings registry's Sessions & devices section, named without importing the registry (revision 12)", () => {
+    const sessions = settingsSections().find((s) => s.id === "sessions");
+    expect(sessions && sectionPath(sessions)).toBe("/settings/sessions");
+    reviewDevice(sessionDouble(), () => 1);
+    expect(returnDestination.peek()?.path).toBe(
+      sessions && sectionPath(sessions),
+    );
+    // The registry imports every section's route builder (the calendar section's lazy screen among them): from this lazy chunk it
+    // split the fixture shell's entry into further initial files (.agtx/evidence/WEB-08c/revision-12/budget).
+    expect(sourceText("src/app/lifecycle-wiring.ts")).not.toMatch(
+      /from "\.\.\/features\/settings\/sections"/,
+    );
   });
 
   test("MU-8C-11: boot passes onReviewDevice and starts the 1c.ended watcher before the session starts", () => {
