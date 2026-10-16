@@ -4,7 +4,8 @@
 // fail its own test by an assertion, and the listed failures are reported as ATTRIBUTED, apart from the catch.
 //
 // Each entry is narrow: one mutant, one exact test (`<file> > <full name>`), the kind `error` only (never a timeout, a file-level error,
-// an unhandled error or a damaged report), and a pattern for the first line of that test's failure. Anything the entry does not name
+// an unhandled error or a damaged report), and a pattern for the first line of ONE failure message of that test (revision 18, review r17
+// H6a: each message is judged on its own, so another message of the same test is not covered). Anything the entry does not name
 // still fails the run. `why` says how the mutation produces the error; `established` names the evidence (focused run and analysis).
 // New entries need the same evidence and independent review; nothing here is a blanket exemption.
 

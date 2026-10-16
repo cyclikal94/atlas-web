@@ -10,7 +10,8 @@
 //   --only    a subset of the catalogue; the result is labelled `partial` and never stands for the whole catalogue
 //
 // A mutant is CAUGHT when the named tests FAIL on it by an ASSERTION and the run is otherwise sound (WEB-08d revision 17, review r16
-// H6; scripts/validation/unit-results.mjs has the rules). Each failure is classified:
+// H6; scripts/validation/unit-results.mjs has the rules). Each failure MESSAGE is classified on its own (revision 18, review r17 H6a: a
+// failed test can report several, for example its assertion and an error of its teardown):
 //
 //   assertion   an `AssertionError`, or the plain `Error` that vitest's `rejects`, `resolves` and the jest-dom matchers throw (recognised
 //               by their assertion frames): the test said the behaviour is wrong
@@ -19,11 +20,13 @@
 //   suite       a file-level error (the file did not load, a hook failed)
 //
 // A timeout, an error, a suite error, an unhandled error, a damaged or incomplete report, a signal or a command that did not start makes
-// the mutant INVALID even beside the expected assertion (that assertion is kept as an observation). The only exception is an `error`
-// listed for that mutant, by exact test and message, in scripts/mutation/attributed-errors.mjs after a focused check; it is reported as
-// attributed and never counted as a catch. A mutant with an `expect` pattern (every mutant since revision 12) is caught only by an
-// assertion of the test written for it. A mutant of an earlier revision without `expect` is caught by any assertion; one whose only
-// failures are crashes is listed as `crash_only_legacy` (never counted as an assertion catch, and the list is part of the evidence).
+// the mutant INVALID even beside the expected assertion (that assertion is kept as an observation), in the same test or another. The
+// only exception is an `error` message listed for that mutant, by exact test and message, in scripts/mutation/attributed-errors.mjs
+// after a focused check; it is reported as attributed and never counted as a catch, and it covers that message alone. The ledger keeps
+// every message (`failures`: test, ordinal, kind, headline, whole text) apart from the failed tests (`failedTests`, `failedCount`).
+// A mutant with an `expect` pattern (every mutant since revision 12) is caught only by an assertion of the test written for it. A mutant
+// of an earlier revision without `expect` is caught by any assertion; one whose only failures are crashes is listed as
+// `crash_only_legacy` (never counted as an assertion catch, and the list is part of the evidence).
 //
 // FAIL FAST (review r16 H7): the first failure of the run (a patch that does not apply, a control that fails, a mutant that is not
 // caught, a report or ledger that cannot be written, a signal) stops admission at once. Nothing new is started; mutants already running
@@ -47,6 +50,7 @@ import { ENGINE, UNIT } from "./mutation/data-catalogue.mjs";
 import {
   classifyControl,
   classifyMutant,
+  failedTests,
   inspectRun,
 } from "./validation/unit-results.mjs";
 
@@ -270,6 +274,7 @@ for (const [key, files] of controlSets) {
       inventory: {},
       total: 0,
       passing: 0,
+      failed: 0,
       skipped: 0,
     };
   }
@@ -286,7 +291,7 @@ for (const [key, files] of controlSets) {
     total: verdict.total,
     passing: verdict.passing,
     skipped: verdict.skipped,
-    failed: verdict.total - verdict.passing - verdict.skipped,
+    failed: verdict.failed,
     problems: verdict.problems,
     report: rel(report),
     log: log && rel(log),
@@ -320,13 +325,14 @@ async function worker() {
       );
     } catch (error) {
       result ??= { code: null, signal: null, output: "" };
-      seen ??= { failures: [] };
+      seen ??= { tests: [], errors: [] };
       verdict = {
         status: "invalid",
         ok: false,
         caught: false,
         expected_assertion_observed: false,
         crashOnly: false,
+        failed_tests: 0,
         kinds: { assertion: 0, timeout: 0, error: 0, suite: 0 },
         problems: [
           `the runner could not judge this mutant: ${error.message ?? error}`,
@@ -337,11 +343,16 @@ async function worker() {
     }
     if (!verdict.ok) halt(`${mutant.id} is ${verdict.status}`);
     const log = keepLog(join(dir, "output.log"), result.output);
-    const failures = seen.failures.map((f) => ({
+    // Every reported message, each with its test occurrence and ordinal; the failed tests are counted from the tests themselves.
+    const failures = seen.errors.map((f) => ({
       name: f.name,
+      test: f.test,
+      ordinal: f.ordinal,
       kind: f.kind,
       message: f.message,
+      text: f.text,
     }));
+    const failed = failedTests(seen);
     results.push({
       id: mutant.id,
       title: mutant.title,
@@ -359,14 +370,15 @@ async function worker() {
       unexpected: verdict.unexpected,
       attributed: verdict.attributed,
       failures,
-      failedTests: failures.map((f) => f.name).slice(0, 12),
-      failedCount: failures.length,
+      failedTests: failed.map((t) => t.name),
+      failedCount: failed.length,
+      messageCount: failures.length,
       ms: Date.now() - started,
       report: rel(report),
       log: log && rel(log),
     });
     console.log(
-      `${verdict.status.toUpperCase().padEnd(17)} ${mutant.id} (${verdict.kinds.assertion} assertion, ${verdict.kinds.timeout} timeout, ${verdict.kinds.error} error${verdict.attributed.length ? ` (${verdict.attributed.length} attributed)` : ""}, ${verdict.kinds.suite} suite failure(s))  ${mutant.title}${verdict.problems.length ? ` — ${verdict.problems[0]}` : ""}`,
+      `${verdict.status.toUpperCase().padEnd(17)} ${mutant.id} (${failed.length} failed test(s): ${verdict.kinds.assertion} assertion, ${verdict.kinds.timeout} timeout, ${verdict.kinds.error} error message(s)${verdict.attributed.length ? ` (${verdict.attributed.length} attributed)` : ""}; ${verdict.kinds.suite} suite failure(s))  ${mutant.title}${verdict.problems.length ? ` — ${verdict.problems[0]}` : ""}`,
     );
   }
 }
@@ -397,7 +409,7 @@ const passed =
 const summary = {
   layer: "L1a/L1b (vitest, patched copies, unmutated control per test set)",
   rules:
-    "revision 17: a catch needs the intended assertion AND a sound run (no unexpected failure of another kind); fail fast",
+    "revision 18: a catch needs the intended assertion AND a sound run (no unexpected failure of another kind, judged per failure message, in any test); fail fast",
   partial,
   selected: selected.length,
   expected_unit_mutants: EXPECTED_UNIT,

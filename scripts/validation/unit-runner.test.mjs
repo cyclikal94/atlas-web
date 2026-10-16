@@ -82,7 +82,8 @@ function report(launch, statuses = {}) {
       file,
       fullName,
       status: m ? "failed" : "passed",
-      failureMessages: m ? [m] : [],
+      // A test can report several messages (revision 18, H6a): an array is that test's whole `failureMessages`.
+      failureMessages: m ? (Array.isArray(m) ? m : [m]) : [],
     };
   });
   const failed = all.filter((t) => t.status === "failed").length;
@@ -392,6 +393,40 @@ test("H7 Q4: a survivor, a wrong assertion or a mixed failure stops admission: t
     ],
     "H6 signal": [() => ({ signal: "SIGKILL" }), "invalid"],
     "H6 damaged report": [() => ({ report: "{", code: 1 }), "invalid"],
+    // Review r17 H6a: the unexpected failure is a second message of the INTENDED test itself, in either order.
+    "H6a same-test error after the assertion": [
+      (l) => ({
+        report: report(l, {
+          [NAMES["MU-1600"]]: [
+            ASSERT,
+            "TypeError: independent teardown failure",
+          ],
+        }),
+        code: 1,
+      }),
+      "invalid",
+    ],
+    "H6a same-test error before the assertion": [
+      (l) => ({
+        report: report(l, {
+          [NAMES["MU-1600"]]: [
+            "TypeError: independent teardown failure",
+            ASSERT,
+          ],
+        }),
+        code: 1,
+      }),
+      "invalid",
+    ],
+    "H6a same-test hook timeout": [
+      (l) => ({
+        report: report(l, {
+          [NAMES["MU-1600"]]: [ASSERT, "Error: Hook timed out in 10000ms."],
+        }),
+        code: 1,
+      }),
+      "invalid",
+    ],
   };
   for (const [name, [first, status]] of Object.entries(variants)) {
     // The healthy control with an extra test proves the "independent" test exists in the inventory; here it is only on the mutant, so
@@ -420,7 +455,7 @@ test("H7 Q4: a survivor, a wrong assertion or a mixed failure stops admission: t
       new RegExp(`MU-1600 is ${status}`),
       name,
     );
-    if (name.startsWith("H6 mixed")) {
+    if (name.startsWith("H6 mixed") || name.startsWith("H6a")) {
       assert.equal(
         a.expected_assertion_observed,
         true,
@@ -432,7 +467,16 @@ test("H7 Q4: a survivor, a wrong assertion or a mixed failure stops admission: t
       );
       assert.ok(
         a.unexpected.length === 1 && a.failures.length === 2,
-        `${name}: every failure is kept`,
+        `${name}: every failure message is kept`,
+      );
+      // Tests and messages are counted apart: the same-test cells have ONE failed test with two messages.
+      assert.equal(a.failedCount, name.startsWith("H6a") ? 1 : 2, name);
+      assert.equal(a.messageCount, 2, name);
+      assert.equal(a.kinds.assertion, 1, name);
+      assert.equal(
+        a.unexpected[0].kind,
+        name.includes("timeout") ? "timeout" : "error",
+        name,
       );
     }
     cleanup(r);
@@ -446,6 +490,7 @@ test("H7 Q5 (jobs 2): A fails while B is held; C never starts; B settles and kee
     "A fails first",
     "B fails first",
     "A fails, then B fails late",
+    "A fails by a same-test error first",
   ]) {
     const held = { "MU-1600": later(), "MU-1602": later() };
     const h = start({
@@ -471,10 +516,12 @@ test("H7 Q5 (jobs 2): A fails while B is held; C never starts; B settles and kee
     const failure = (id) => ({
       report: report(
         h.launches.find((l) => l.id === id),
-        {
-          [NAMES[id]]: ASSERT,
-          extra: [[SET, "independent fixture preparation", TYPE]],
-        },
+        order === "A fails by a same-test error first"
+          ? { [NAMES[id]]: [ASSERT, TYPE] }
+          : {
+              [NAMES[id]]: ASSERT,
+              extra: [[SET, "independent fixture preparation", TYPE]],
+            },
       ),
       code: 1,
     });

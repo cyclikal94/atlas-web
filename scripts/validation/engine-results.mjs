@@ -1,5 +1,26 @@
 // Parse Playwright's structured report, not terminal glyphs/colours. Missing, skipped,
 // flaky/retried or interrupted cases cannot make a control/mutant pass.
+//
+// Every error of a case is judged on its own (WEB-08d revision 18, design assessment DA-N1). Playwright
+// reports each error of a test (its body, its hooks and fixtures) as one entry of the result's `errors`,
+// so a case can carry the intended `expect` failure AND an unrelated TypeError of its teardown. A case
+// counts as an assertion only when it failed, reported at least one error, and EVERY error is an
+// assertion; one other error makes it an `error` case, which no catch can contain. A timed-out case is
+// a timeout whatever its errors say. `error` (the first error alone) is read only when a reporter gives
+// no `errors` array, never as a second copy.
+const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+/** The kind of ONE Playwright error: an `expect` failure is an assertion, anything else an error. */
+export function errorKind(error) {
+  const text = `${error?.message ?? ""}\n${error?.stack ?? ""}`.replace(
+    ANSI,
+    "",
+  );
+  return /(?:Error:\s*expect\(|^\s*expect\()/m.test(text)
+    ? "assertion"
+    : "error";
+}
+
 export function inspectReport(report, browsers, exit) {
   const cases = [];
   function visit(suite, parents = []) {
@@ -7,18 +28,22 @@ export function inspectReport(report, browsers, exit) {
       for (const test of spec.tests ?? []) {
         const results = test.results ?? [];
         const last = results.at(-1);
-        const errors = last?.errors ?? (last?.error ? [last.error] : []);
-        const messages = errors
-          .map((e) => `${e.message ?? ""}\n${e.stack ?? ""}`)
-          .join("\n")
-          .replace(
-            new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"),
-            "",
-          );
+        const reported = Array.isArray(last?.errors)
+          ? last.errors
+          : last?.error
+            ? [last.error]
+            : [];
+        const errors = reported.map((e, ordinal) => ({
+          ordinal,
+          kind: errorKind(e),
+          message: String(e?.message ?? "")
+            .replace(ANSI, "")
+            .split("\n")[0],
+        }));
         const kind =
           last?.status === "timedOut"
             ? "timeout"
-            : /(?:Error:\s*expect\(|^\s*expect\()/m.test(messages)
+            : errors.length > 0 && errors.every((e) => e.kind === "assertion")
               ? "assertion"
               : "error";
         cases.push({
@@ -30,6 +55,7 @@ export function inspectReport(report, browsers, exit) {
           attempts: results.length,
           expectedStatus: test.expectedStatus,
           kind,
+          errors,
         });
       }
     }
@@ -43,7 +69,9 @@ export function inspectReport(report, browsers, exit) {
       (c) =>
         c.attempts === 1 &&
         c.expectedStatus === "passed" &&
-        ["passed", "failed", "timedOut"].includes(c.status),
+        ["passed", "failed", "timedOut"].includes(c.status) &&
+        // A passing case that reports errors is a damaged result, not a pass.
+        (c.status !== "passed" || c.errors.length === 0),
     ) &&
     !report.errors?.length;
   return {
@@ -70,6 +98,22 @@ export function classifyMutant(mutant, result, browsers) {
       ).test(f.title),
   );
   const engines = [...new Set(matching.map((f) => f.engine))];
+  // Observation only: engines whose intended case reported the assertion, even beside another error.
+  const observed = [
+    ...new Set(
+      result.failures
+        .filter(
+          (f) =>
+            f.errors?.some((e) => e.kind === "assertion") &&
+            (!mutant.expect ||
+              new RegExp(
+                mutant.expect.source,
+                mutant.expect.flags.replaceAll("g", "").replaceAll("y", ""),
+              ).test(f.title)),
+        )
+        .map((f) => f.engine),
+    ),
+  ];
   const caught =
     result.code !== 0 &&
     result.complete &&
@@ -82,11 +126,21 @@ export function classifyMutant(mutant, result, browsers) {
   return {
     caught,
     engines_with_expected_assertion: engines,
+    engines_with_expected_assertion_observed: observed,
     crashOnly: result.failed.length > 0 && assertions.length === 0,
     kinds: Object.fromEntries(
       ["assertion", "timeout", "error"].map((kind) => [
         kind,
         result.failures.filter((f) => f.kind === kind).length,
+      ]),
+    ),
+    // Every reported error of a failing case, by kind (cases above, errors here).
+    error_kinds: Object.fromEntries(
+      ["assertion", "error"].map((kind) => [
+        kind,
+        result.failures
+          .flatMap((f) => f.errors ?? [])
+          .filter((e) => e.kind === kind).length,
       ]),
     ),
   };

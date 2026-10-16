@@ -10,6 +10,7 @@ import {
   classifyControl,
   classifyMutant,
   expectation,
+  failedTests,
   inspectRun,
   kindOf,
   unhandledErrors,
@@ -26,14 +27,15 @@ const TYPE =
   "TypeError: deliberately simulated unrelated setup defect\n    at /repo/tests/a.test.ts:9:1";
 const TIMEOUT = "Error: Test timed out in 5000ms.";
 
-/** A Vitest JSON report: `tests` are [file, fullName, status, message?]. */
+/** A Vitest JSON report: `tests` are [file, fullName, status, message?]; an array message is the test's whole `failureMessages`. */
 function vitest(tests, extra = {}) {
   const files = [...new Set(tests.map(([f]) => f))];
   const all = tests.map(([file, fullName, status, message]) => ({
     file,
     fullName,
     status,
-    failureMessages: message ? [message] : [],
+    failureMessages:
+      message === undefined ? [] : Array.isArray(message) ? message : [message],
   }));
   const failed = all.filter((t) => t.status === "failed").length;
   return {
@@ -403,17 +405,19 @@ test("H6: a listed attribution covers only its exact test, kind `error` and mess
 });
 
 test("the recognition rules are the runner's since WEB-09a; a stateful expect pattern is normalised", () => {
-  assert.equal(kindOf([ASSERT]), "assertion");
+  assert.equal(kindOf(ASSERT), "assertion");
   assert.equal(
-    kindOf(["Error: rejected\n    at __VITEST_REJECTS__ (x)"]),
+    kindOf("Error: rejected\n    at __VITEST_REJECTS__ (x)"),
     "assertion",
   );
-  assert.equal(kindOf([TIMEOUT]), "timeout");
-  assert.equal(kindOf([TYPE]), "error");
+  assert.equal(kindOf(TIMEOUT), "timeout");
+  assert.equal(kindOf(TYPE), "error");
   assert.equal(
-    kindOf(["TestingLibraryElementError: Unable to find an element"]),
+    kindOf("TestingLibraryElementError: Unable to find an element"),
     "error",
   );
+  // Revision 18 (H6a): one message at a time; a joined list would let one message's kind stand for another's.
+  assert.throws(() => kindOf([ASSERT, TYPE]), TypeError);
   const g = expectation(/intended/g);
   assert.equal(g.test("the intended test"), true);
   assert.equal(
@@ -476,5 +480,325 @@ test("the attribution table is narrow and names catalogue mutants only", () => {
   assert.throws(
     () => checkAttributions({ "MU-01": { ...ok, failures: [] } }, UNIT),
     /no failures/,
+  );
+});
+
+// ---- WEB-08d revision 18 (review r17 H6a; design assessment C1-C3, Q2-Q5): every message of a failed test is judged on its own --------
+const TEARDOWN =
+  "TypeError: independent teardown failure\n    at /repo/tests/a.test.ts:20:9";
+const HOOK_TIMEOUT = "Error: Hook timed out in 10000ms.";
+const ASSERT2 =
+  "AssertionError: expected [] to have a length of 1 but got +0\n    at /repo/tests/a.test.ts:5:6";
+
+test("H6a Q2: an intended assertion beside an error or timeout of the SAME test is invalid in either order, and both are kept", () => {
+  const cells = {
+    "assertion, then teardown error": [[ASSERT, TEARDOWN], ["error"]],
+    "teardown error, then assertion": [[TEARDOWN, ASSERT], ["error"]],
+    "assertion, then hook timeout": [[ASSERT, HOOK_TIMEOUT], ["timeout"]],
+    "hook timeout, then assertion": [[HOOK_TIMEOUT, ASSERT], ["timeout"]],
+    "assertion, error and timeout": [
+      [ASSERT, TEARDOWN, HOOK_TIMEOUT],
+      ["error", "timeout"],
+    ],
+    "the same error twice is two errors": [
+      [ASSERT, TEARDOWN, TEARDOWN],
+      ["error", "error"],
+    ],
+  };
+  for (const [name, [messages, unexpectedKinds]] of Object.entries(cells)) {
+    const r = mutantRun({ "the intended test": messages }, { code: 1 });
+    assert.equal(
+      r.errors.length,
+      messages.length,
+      `${name}: every message is kept`,
+    );
+    assert.deepEqual(
+      r.errors.map((e) => e.ordinal),
+      messages.map((_, i) => i),
+      name,
+    );
+    assert.deepEqual(
+      r.errors.map((e) => e.text),
+      messages,
+      `${name}: the whole text of each message is kept`,
+    );
+    const v = classifyMutant(mutant, r, inventory);
+    assert.equal(v.status, "invalid", name);
+    assert.equal(v.ok, false, name);
+    assert.equal(v.caught, false, name);
+    assert.equal(v.expected_assertion_observed, true, name);
+    assert.deepEqual(
+      v.unexpected.map((f) => f.kind),
+      unexpectedKinds,
+      name,
+    );
+    assert.equal(v.failed_tests, 1, `${name}: one failed test`);
+    assert.equal(
+      v.kinds.assertion + v.kinds.error + v.kinds.timeout,
+      messages.length,
+      `${name}: kinds count messages`,
+    );
+  }
+});
+
+test("H6a Q2: two assertions of one test stay a sound catch; a second test's assertion beside them too", () => {
+  for (const messages of [
+    [ASSERT, ASSERT2],
+    [ASSERT2, ASSERT],
+  ]) {
+    const v = classifyMutant(
+      mutant,
+      mutantRun(
+        { "the intended test": messages, "a neighbour": ASSERT },
+        { code: 1 },
+      ),
+      inventory,
+    );
+    assert.equal(v.status, "caught");
+    assert.equal(v.kinds.assertion, 3);
+    assert.equal(v.failed_tests, 2);
+    assert.deepEqual(v.unexpected, []);
+  }
+});
+
+test("H6a Q3: an attribution covers only the message it names; a second error of that test, in either order, stays unexpected", () => {
+  const ATTRIBUTED_ERROR = "TypeError: expected consequence of this mutation";
+  const entry = {
+    test: "tests/a.test.ts > a neighbour",
+    kind: "error",
+    message: /^TypeError: expected consequence of this mutation$/,
+  };
+  // The positive control: the attributed message alone is attributed and the run is a catch.
+  const alone = classifyMutant(
+    mutant,
+    mutantRun(
+      { "the intended test": ASSERT, "a neighbour": ATTRIBUTED_ERROR },
+      { code: 1 },
+    ),
+    inventory,
+    [entry],
+  );
+  assert.equal(alone.status, "caught");
+  assert.equal(alone.attributed.length, 1);
+  for (const messages of [
+    [ATTRIBUTED_ERROR, TEARDOWN],
+    [TEARDOWN, ATTRIBUTED_ERROR],
+    [ATTRIBUTED_ERROR, HOOK_TIMEOUT],
+  ]) {
+    const v = classifyMutant(
+      mutant,
+      mutantRun(
+        { "the intended test": ASSERT, "a neighbour": messages },
+        { code: 1 },
+      ),
+      inventory,
+      [entry],
+    );
+    assert.equal(v.status, "invalid", messages.join(" | "));
+    assert.equal(v.expected_assertion_observed, true);
+    assert.deepEqual(
+      v.attributed.map((f) => f.message),
+      [ATTRIBUTED_ERROR],
+      "the attributed message stays visible",
+    );
+    assert.equal(v.unexpected.length, 1, "the other message is never covered");
+    assert.notEqual(v.unexpected[0].message, ATTRIBUTED_ERROR);
+  }
+  // The expected assertion, the attributed error and an unrelated error all in the intended test.
+  const own = { ...entry, test: "tests/a.test.ts > the intended test" };
+  const v = classifyMutant(
+    mutant,
+    mutantRun(
+      { "the intended test": [ASSERT, ATTRIBUTED_ERROR, TEARDOWN] },
+      { code: 1 },
+    ),
+    inventory,
+    [own],
+  );
+  assert.equal(v.status, "invalid");
+  assert.equal(v.attributed.length, 1);
+  assert.equal(v.unexpected.length, 1);
+  // ... and without the unrelated error, the same attribution is accepted beside the assertion of its own test.
+  assert.equal(
+    classifyMutant(
+      mutant,
+      mutantRun(
+        { "the intended test": [ASSERT, ATTRIBUTED_ERROR] },
+        { code: 1 },
+      ),
+      inventory,
+      [own],
+    ).status,
+    "caught",
+  );
+  // An attribution alone is no catch, even with several attributed messages.
+  assert.equal(
+    classifyMutant(
+      mutant,
+      mutantRun(
+        { "a neighbour": [ATTRIBUTED_ERROR, ATTRIBUTED_ERROR] },
+        { code: 1 },
+      ),
+      inventory,
+      [entry],
+    ).status,
+    "crash_only",
+  );
+});
+
+test("H6a Q4: tests and messages are counted apart; duplicates are occurrences; unusable messages are unusable evidence", () => {
+  // One failed test with three messages among passing and skipped tests: counts come from the tests.
+  const r = run(
+    vitest([
+      [FILE, "the intended test", "failed", [ASSERT, TEARDOWN, HOOK_TIMEOUT]],
+      [FILE, "a neighbour", "passed"],
+      [OTHER, "another file's test", "skipped"],
+      [OTHER, "a second skipped test", "skipped"],
+    ]),
+    { code: 1 },
+  );
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.errors.length, 3);
+  assert.deepEqual(
+    failedTests(r).map((t) => [t.name, t.errors.length]),
+    [["tests/a.test.ts > the intended test", 3]],
+  );
+  const control = classifyControl(r);
+  assert.equal(control.passed, false);
+  assert.equal(control.failed, 1);
+  assert.equal(
+    control.skipped,
+    2,
+    "skipped never derives from the message count",
+  );
+  assert.equal(control.passing, 1);
+  assert.equal(control.total, 4);
+  // Two tests with the same full name are two occurrences in the inventory and both must run again.
+  const dup = classifyControl(
+    run(
+      vitest([
+        [FILE, "the intended test", "passed"],
+        [FILE, "the intended test", "passed"],
+        [OTHER, "another file's test", "passed"],
+      ]),
+    ),
+  );
+  assert.equal(dup.passed, true, dup.problems.join("; "));
+  assert.equal(dup.inventory["tests/a.test.ts > the intended test"], 2);
+  const once = classifyMutant(
+    mutant,
+    run(
+      vitest([
+        [FILE, "the intended test", "failed", ASSERT],
+        [OTHER, "another file's test", "passed"],
+      ]),
+      { code: 1 },
+    ),
+    dup.inventory,
+  );
+  assert.equal(
+    once.status,
+    "invalid",
+    "one occurrence of a duplicated test did not run",
+  );
+  const both = classifyMutant(
+    mutant,
+    run(
+      vitest([
+        [FILE, "the intended test", "failed", [ASSERT, ASSERT2]],
+        [FILE, "the intended test", "failed", ASSERT],
+        [OTHER, "another file's test", "passed"],
+      ]),
+      { code: 1 },
+    ),
+    dup.inventory,
+  );
+  assert.equal(both.status, "caught");
+  assert.equal(both.failed_tests, 2);
+  assert.equal(both.kinds.assertion, 3);
+  // A failed test with missing, empty or unusable messages, or a passing test with messages, is a damaged report.
+  const damaged = {
+    "no failureMessages": (t) => {
+      delete t.failureMessages;
+    },
+    "an empty failureMessages": (t) => {
+      t.failureMessages = [];
+    },
+    "a non-array failureMessages": (t) => {
+      t.failureMessages = ASSERT;
+    },
+    "a null message beside the assertion": (t) => {
+      t.failureMessages = [ASSERT, null];
+    },
+    "an empty message beside the assertion": (t) => {
+      t.failureMessages = [ASSERT, ""];
+    },
+  };
+  for (const [name, damage] of Object.entries(damaged)) {
+    const report = vitest(
+      CONTROL.map(([f, n]) =>
+        n === "the intended test" ? [f, n, "failed", ASSERT] : [f, n, "passed"],
+      ),
+    );
+    damage(
+      report.testResults[0].assertionResults.find(
+        (t) => t.fullName === "the intended test",
+      ),
+    );
+    const seen = run(report, { code: 1 });
+    assert.ok(
+      seen.problems.some((p) => p.startsWith("the report gives")),
+      `${name}: named as unusable evidence`,
+    );
+    assert.equal(
+      classifyMutant(mutant, seen, inventory).status,
+      "invalid",
+      name,
+    );
+    assert.equal(
+      classifyMutant({ id: "MU-L" }, seen, inventory).status,
+      "invalid",
+      `${name}: never a legacy crash either`,
+    );
+  }
+  const passedWithMessages = vitest(CONTROL);
+  passedWithMessages.testResults[0].assertionResults[1].failureMessages = [
+    TEARDOWN,
+  ];
+  const pm = run(passedWithMessages);
+  assert.ok(
+    pm.problems.some((p) => p.startsWith("the report gives a passed test")),
+  );
+  assert.equal(classifyControl(pm).passed, false);
+});
+
+test("H6a Q5: legacy (no expect) keeps its rules per message: crashes alone stay `crash_only_legacy`; an assertion with a crash in one test is INVALID", () => {
+  const legacy = { id: "MU-L" };
+  const crashes = classifyMutant(
+    legacy,
+    mutantRun({ "a neighbour": [TYPE, TEARDOWN] }, { code: 1 }),
+    inventory,
+  );
+  assert.equal(crashes.status, "crash_only_legacy");
+  assert.equal(crashes.caught, false);
+  for (const messages of [
+    [ASSERT, TYPE],
+    [TYPE, ASSERT],
+  ]) {
+    const mixed = classifyMutant(
+      legacy,
+      mutantRun({ "a neighbour": messages }, { code: 1 }),
+      inventory,
+    );
+    assert.equal(mixed.status, "invalid", messages.join(" | "));
+    assert.equal(mixed.ok, false);
+  }
+  assert.equal(
+    classifyMutant(
+      legacy,
+      mutantRun({ "a neighbour": [ASSERT, ASSERT2] }, { code: 1 }),
+      inventory,
+    ).status,
+    "caught",
   );
 });

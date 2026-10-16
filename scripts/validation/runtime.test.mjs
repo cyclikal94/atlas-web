@@ -389,3 +389,103 @@ test("interrupting a plan cannot produce a passing partial ledger", async (t) =>
   );
   assert.equal(readFileSync(join(path, "results.json"), "utf8"), preserved);
 });
+
+// WEB-08d revision 18 (design assessment DA-N1, Q9): every Playwright error of a case is judged on its own. Reports below follow the
+// installed Playwright 1.63 JSON reporter (results[].errors[], one entry per error of the body, hooks and fixtures).
+test("DA-N1: an intended assertion beside an unrelated error of the SAME case is not a catch, in either order", () => {
+  const mutant = { expect: /required assertion/ };
+  const EXPECT = "Error: expect(received).toBe(expected)";
+  const TEARDOWN = "TypeError: independent teardown failure";
+  const sameCase = (errors) => {
+    const r = report("failed");
+    for (const t of r.suites[0].specs[0].tests)
+      t.results = [
+        { status: "failed", errors: errors.map((message) => ({ message })) },
+      ];
+    return r;
+  };
+  // Positive controls: one assertion, and two assertions of the same case, in every engine.
+  for (const errors of [[EXPECT], [EXPECT, EXPECT]]) {
+    const v = classifyMutant(
+      mutant,
+      inspectReport(sameCase(errors), browsers, 1),
+      browsers,
+    );
+    assert.equal(v.caught, true, errors.join(" | "));
+    assert.equal(v.error_kinds.assertion, errors.length * browsers.length);
+  }
+  for (const errors of [
+    [EXPECT, TEARDOWN],
+    [TEARDOWN, EXPECT],
+    [EXPECT, "Error: page.goto: net::ERR_CONNECTION_REFUSED"],
+  ]) {
+    const seen = inspectReport(sameCase(errors), browsers, 1);
+    assert.ok(
+      seen.cases.every((c) => c.kind === "error" && c.errors.length === 2),
+      errors.join(" | "),
+    );
+    const v = classifyMutant(mutant, seen, browsers);
+    assert.equal(v.caught, false, errors.join(" | "));
+    assert.deepEqual(v.engines_with_expected_assertion, []);
+    assert.deepEqual(
+      v.engines_with_expected_assertion_observed.sort(),
+      browsers.map((b) => `fixture-${b}`),
+      "the assertion is kept as an observation",
+    );
+    assert.equal(v.error_kinds.error, browsers.length);
+  }
+  // Only one engine's case carries the extra error: still not a catch.
+  const oneEngine = sameCase([EXPECT]);
+  oneEngine.suites[0].specs[0].tests[2].results[0].errors.push({
+    message: TEARDOWN,
+  });
+  assert.equal(
+    classifyMutant(mutant, inspectReport(oneEngine, browsers, 1), browsers)
+      .caught,
+    false,
+  );
+  // A failed case with no error at all is not an assertion.
+  assert.equal(
+    classifyMutant(mutant, inspectReport(sameCase([]), browsers, 1), browsers)
+      .caught,
+    false,
+  );
+});
+
+test("DA-N1: `error` is read only when a reporter gives no `errors` array, and a passing case that reports errors is damaged", () => {
+  const legacy = report("failed");
+  for (const t of legacy.suites[0].specs[0].tests)
+    t.results = [
+      { status: "failed", error: { message: "Error: expect(x).toBe(y)" } },
+    ];
+  const fallback = inspectReport(legacy, browsers, 1);
+  assert.ok(
+    fallback.cases.every(
+      (c) => c.kind === "assertion" && c.errors.length === 1,
+    ),
+  );
+  const both = report("failed");
+  for (const t of both.suites[0].specs[0].tests)
+    t.results = [
+      {
+        status: "failed",
+        error: { message: "Error: expect(x).toBe(y)" },
+        errors: [
+          { message: "Error: expect(x).toBe(y)" },
+          { message: "TypeError: teardown" },
+        ],
+      },
+    ];
+  const seen = inspectReport(both, browsers, 1);
+  assert.ok(
+    seen.cases.every((c) => c.errors.length === 2 && c.kind === "error"),
+    "`error` is not a second copy",
+  );
+  const damaged = report("passed");
+  damaged.suites[0].specs[0].tests[0].results[0].errors = [
+    { message: "TypeError: late" },
+  ];
+  const d = inspectReport(damaged, browsers, 0);
+  assert.equal(d.complete, false);
+  assert.equal(d.controlOk, false);
+});
