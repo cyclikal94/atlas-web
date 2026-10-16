@@ -5,8 +5,8 @@ obligation: where the evidence is, its **layer**, the engines, and what it does 
 (`.agtx/execute.md`) and the review; this file names the evidence so that a later card (WEB-09d, WEB-15) can find and re-run it.
 
 **Layers, never mixed:** L1 unit/component; L2 the real kernel in the fake world (`tests/support/session`, `tests/support/data`); L3 the PRODUCTION build in a real engine
-with a STUBBED network (`tests/e2e/auth-stub.ts`: never integration evidence); L4 the RELEASED backend pinned by `contract-pin.json` (`v0.28.0-rc.1` since the merge of
-11 October 2026; earlier L4 runs were `v0.27.0-rc.1`; SHA-256 verified by the runner) on disposable SQLite behind the delaying proxy (`scripts/integration/run.mjs`, stacks
+with a STUBBED network (`tests/e2e/auth-stub.ts`: never integration evidence); L4 the RELEASED backend pinned by `contract-pin.json` (`v0.29.0-rc.1` since the merge of
+15 October 2026; L4 runs from 11 October 2026 were `v0.28.0-rc.1` and earlier ones `v0.27.0-rc.1`, each figure attributed to the candidate that produced it; SHA-256 verified by the runner) on disposable SQLite behind the delaying proxy (`scripts/integration/run.mjs`, stacks
 `-lifecycle` and `-lifecycle-restart`); L5 real-browser lifecycle and Web Locks (production build, stubbed network); L6 manual
 assistive technology; D measurements. Engines are Playwright's desktop Chromium, Firefox and WebKit on macOS unless stated.
 
