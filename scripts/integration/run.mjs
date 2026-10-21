@@ -342,10 +342,25 @@ async function stackRun(browser, stack) {
       { encoding: "utf8" },
     );
     stopIfInterrupted();
-    if (fetched.status !== 0)
+    if (fetched.status !== 0) {
+      // The whole output goes to the log; the stack's recorded reason keeps its cause on ONE line (the schedule records a reason's
+      // first line only), so a failed preparation is never reported without its cause (revision 14, campaign 2).
+      const output = `${fetched.stdout ?? ""}${fetched.stderr ?? ""}`;
+      console.error(`fetch-backend output:\n${output}`);
+      const lines = output
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      // The error's own headline (`TypeError: fetch failed`, `Error: GET SHA256SUMS: 503`), else the last line printed.
+      const cause =
+        lines.find((l) => /^[A-Za-z]*Error(: |$)/.test(l)) ??
+        lines.at(-1) ??
+        fetched.error?.message ??
+        `signal ${fetched.signal}`;
       throw new Error(
-        `fetch-backend failed:\n${fetched.stdout}${fetched.stderr}`,
+        `fetch-backend failed (exit ${fetched.status}): ${cause.slice(0, 300)}`,
       );
+    }
     const backend = JSON.parse(fetched.stdout.trim().split("\n").at(-1));
     revision = {
       tag: backend.tag,
