@@ -32,3 +32,16 @@ export function recordBlock(
     (data.definition.participation === "anyone" && row.canEdit);
   return canRecord ? null : copy.ONLY_PARTICIPANTS;
 }
+
+/**
+ * Whether a revision of this task may be offered (R29, revision 15): `revise_task` writes the task AND its details, and the server checks
+ * write access to both, so a known denial of EITHER (`can_edit: false` as last read) withholds it. A policy version is not edit authority.
+ * A task created on this device and not sent yet is its creator's (its projected rows say so). Nothing here is a fresh online check: the
+ * server still decides when the change is sent.
+ */
+export function editable(
+  task: { can_edit: boolean },
+  execution: { can_edit: boolean } | null,
+): boolean {
+  return task.can_edit && execution?.can_edit !== false;
+}

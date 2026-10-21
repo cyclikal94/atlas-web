@@ -14,7 +14,7 @@ import type { TaskActions } from "../actions";
 import type { EnrolCommand } from "../api";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { momentLabel } from "../format";
+import { momentLabel, whoLabel } from "../format";
 import {
   answerEnrolment,
   askEnrolment,
@@ -62,9 +62,6 @@ export const CONTROLS_COPY = {
   conflict: "Someone else already changed this — reload and try again",
   archiveConflict: "This changed since it was archived — reload and try again",
   whoHeading: "Who's on this",
-  you: "You",
-  youAnd: (n: number) => `You and ${n} other${n === 1 ? "" : "s"}`,
-  people: (n: number) => `${n} ${n === 1 ? "person" : "people"}`,
   mine: "Your result",
   settings: "Your settings",
   join: "Join this task",
@@ -315,11 +312,7 @@ export function Participation({
       </h2>
       <p className="text-[13px] text-ink-1">
         {copy.PARTICIPATION[data.definition.participation]} ·{" "}
-        {data.participants.includes(env.accountId)
-          ? others.length === 0
-            ? CONTROLS_COPY.you
-            : CONTROLS_COPY.youAnd(others.length)
-          : CONTROLS_COPY.people(data.participants.length)}
+        {whoLabel(row, env.accountId)}
       </p>
       <p className="text-[12.5px] text-ink-2">
         {copy.PARTICIPATION_LINE[data.definition.participation]}

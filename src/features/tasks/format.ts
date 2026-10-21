@@ -1,3 +1,4 @@
+import { WHO } from "./copy";
 import { dateIn, hourIn, timeIn } from "./model/time";
 import type { RowModel } from "./view";
 
@@ -61,4 +62,23 @@ export function compareRows(a: RowModel, b: RowModel): number {
   const lb = b.title ?? "";
   if (la !== lb) return la < lb ? -1 : 1;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Whether I take part in this occurrence, by evidence only (R28, revision 15): the roster names me, or my own stream is held or being
+ * created here (a queued join or Anyone first record, which puts me on the roster when it lands). Being able to see or share the task is
+ * not taking part, and for Anyone a stream this device does not hold says nothing either way, so neither adds me. This is what the words
+ * say, never who may record: `recordBlock`/`eligible` keep their own rules (an Anyone task I may edit stays recordable without a stream).
+ */
+export function takesPart(row: RowModel, me: string): boolean {
+  return (
+    row.data.participants.includes(me) || row.streamPresent || row.streamPending
+  );
+}
+
+/** Who takes part, the same on Today and on the task (Q8): "You and 2 others" when I take part, else "3 people", by the roster. */
+export function whoLabel(row: RowModel, me: string): string {
+  const others = row.data.participants.filter((id) => id !== me).length;
+  if (!takesPart(row, me)) return WHO.people(others);
+  return others === 0 ? WHO.you : WHO.youAnd(others);
 }

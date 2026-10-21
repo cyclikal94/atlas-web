@@ -38,6 +38,7 @@ import {
   draftsOf,
   goOfflineAtBoundary,
   goOnlineAtBoundary,
+  OTHER,
   occurrenceIdOf,
   progressIdOf,
   serveTaskReads,
@@ -4660,5 +4661,129 @@ test.describe("E-T26: the conflict dialog finds my stream on a later page of /pr
     await expect(page.getByRole("tab", { selected: true })).toHaveText(
       /Needs a decision · 1/,
     );
+  });
+});
+
+/** Every upsert of `kinds` made read-only for me (`can_edit: false`), as a viewer's sync page carries it. */
+function readOnly(task: BuiltTask, kinds: readonly string[]): BuiltTask {
+  for (const u of task.upserts as Array<{
+    resource: { kind: string; can_edit: boolean };
+  }>)
+    if (kinds.includes(u.resource.kind)) u.resource.can_edit = false;
+  return task;
+}
+
+test.describe("E-T35: Today names the viewer only when they take part (A1; R28 of revision 15)", () => {
+  // Review 15's witness, maintained: a shared occurrence I can see but whose roster does not name me (no stream of mine, no edit) says how
+  // many take part, never "You and 1 other". The enrolled viewer is the control. Real IndexedDB through the production data controller.
+  for (const participation of ["everyone", "pooled", "anyone"] as const)
+    test(`${participation}: a viewer off the roster is not named as You`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 59,
+        title: "Shared view only",
+        participation,
+        stream: false,
+        ...(participation === "pooled"
+          ? {
+              goal: {
+                kind: "numeric",
+                minimum: "1",
+                maximum: null,
+                unit: "items",
+              },
+            }
+          : {}),
+      });
+      task.data.participants = [OTHER];
+      readOnly(task, ["task", "execution", "occurrence"]);
+      const { page } = await setup(context, todayRoute(), [task]);
+      await goOfflineAtBoundary(page);
+      const row = rowOf(page, task.occurrenceId);
+      await expect(row).toBeVisible();
+      await expect(row).toContainText("1 person");
+      expect(await row.textContent()).not.toContain("You");
+    });
+
+  test("control: an enrolled viewer is You and the others", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 60,
+      title: "Shared and joined",
+      participation: "everyone",
+    });
+    task.data.participants = [ACCOUNT, OTHER];
+    const { page } = await setup(context, todayRoute(), [task]);
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, task.occurrenceId)).toContainText(
+      "You and 1 other",
+    );
+  });
+});
+
+test.describe("E-T36: a known denial of the task or its details admits no revision (A11; R29 of revision 15)", () => {
+  // Review 15's witnesses, maintained: offline, with the task, its details or both read-only for me, the detail offers no Edit link and
+  // the direct edit route withholds Save (the button, and Enter in the Name field); nothing is queued and the typed name stays. The
+  // permitted editor is the control: exactly one revise_task.
+  for (const denied of [["task"], ["execution"], ["task", "execution"]])
+    test(`denied ${denied.join(" and ")}: no Edit link, the direct route queues nothing, the typed name stays`, async ({
+      context,
+    }) => {
+      const task = readOnly(
+        buildTask({
+          n: 61,
+          title: "Partial permission",
+          participation: "everyone",
+          stream: false,
+        }),
+        denied,
+      );
+      task.data.participants = [OTHER];
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await goOfflineAtBoundary(page);
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      await expect(
+        page.getByRole("link", { name: "Edit task", exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: "Edit task", exact: true }),
+      ).toBeDisabled();
+      await navigateInApp(page, `/tasks/${task.taskId}/edit`);
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      const name = page.getByLabel("Name", { exact: true });
+      await name.fill("Not authorised to revise");
+      const save = page.getByRole("button", { name: "Save", exact: true });
+      await expect(save).toBeDisabled();
+      await name.press("Enter");
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      await expect(name).toHaveValue("Not authorised to revise");
+      expect(
+        (await draftsOf(page)).filter((d) => d.kind === "revise_task"),
+      ).toHaveLength(0);
+    });
+
+  test("control: an editor of both queues exactly one revision offline", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 62,
+      title: "Permission test",
+      participation: "everyone",
+    });
+    const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [task]);
+    await goOfflineAtBoundary(page);
+    await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+    await page.getByLabel("Name", { exact: true }).fill("Renamed by editor");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    expect(
+      (await draftsOf(page)).filter((d) => d.kind === "revise_task"),
+    ).toHaveLength(1);
   });
 });

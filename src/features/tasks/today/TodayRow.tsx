@@ -3,7 +3,7 @@ import { useId, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
-import { dayLabel } from "../format";
+import { dayLabel, whoLabel } from "../format";
 import { dateIn, gapShifted, timeIn } from "../model/time";
 import { recordBlock } from "../reasons";
 import type { RowModel } from "../view";
@@ -70,7 +70,6 @@ export function TodayRow({
   const provisional =
     row.personal.kind === "result" && row.personal.provisional;
   const stale = row.personal.kind === "result" && row.personal.stale;
-  const others = data.participants.filter((id) => id !== me).length;
   const participation = data.definition.participation;
   const reason = recordBlock(row, now, zone, writable);
   const done = row.outcome === "complete";
@@ -114,9 +113,7 @@ export function TodayRow({
         </Link>
         <span className="text-[12.5px] text-ink-2">
           {copy.PARTICIPATION[participation]}
-          {participation === "personal"
-            ? ""
-            : ` · ${others === 0 ? "You" : `You and ${others} other${others === 1 ? "" : "s"}`}`}
+          {participation === "personal" ? "" : ` · ${whoLabel(row, me)}`}
           {" · "}
           {copy.CARRY[data.definition.carry].line}
         </span>

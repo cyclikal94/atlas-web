@@ -50,6 +50,7 @@ import {
 } from "../model/form";
 import { occurrenceId, progressId } from "../model/ids";
 import { firstSlot, todayIn } from "../model/time";
+import { editable } from "../reasons";
 import { knownZones } from "../today/TodayPage";
 import { PresetPicker } from "./PresetPicker";
 
@@ -106,6 +107,7 @@ export const FORM_COPY = {
   newerEdits: "Saved. Your newer changes are still here.",
   retargeted: "This change can't be made until the task has been sent.",
   wait: "Wait for this task to finish syncing before editing it.",
+  denied: "You can't edit this task. What you typed is kept here.",
 } as const;
 
 type Mode = { kind: "new" } | { kind: "edit"; taskId: string };
@@ -199,6 +201,7 @@ function EditTask({ taskId }: { taskId: string }) {
           executionId: view.execution.id,
           policyVersion: view.task.policy_version,
           synced: view.synced,
+          editable: editable(view.task, view.execution),
         }}
       />
     </>
@@ -213,6 +216,8 @@ type FormMode =
       executionId: string;
       policyVersion: number | undefined;
       synced: boolean;
+      /** Both the task and its details may be changed by me, as this device last read them (R29). */
+      editable: boolean;
     };
 
 const select =
@@ -353,8 +358,11 @@ function TaskForm({
     queueUnread &&
     outstanding?.status === "unavailable" &&
     outstanding.reason !== "absent";
+  // A known denial withholds every save of an edit, a coalescing one included (R29): what was typed stays in the form.
+  const denied = mode.kind === "edit" && !mode.editable;
   const canSave =
     !queueUnread &&
+    !denied &&
     (mode.kind === "new" ||
       queuedCreate !== undefined ||
       (mode.synced && mode.policyVersion !== undefined));
@@ -371,6 +379,9 @@ function TaskForm({
         );
 
   const save = async () => {
+    // Every route into a save (the button, Enter's implicit submission) is admitted here, by this render's facts, not only by the
+    // button's state (R29).
+    if (!canSave) return;
     const result = applicable(state);
     if (!result.ok) {
       setErrors(result.errors);
@@ -851,6 +862,10 @@ function TaskForm({
       <div className="flex flex-wrap gap-2">
         {!env.writable ? (
           <Button disabled reason={copy.NOT_WRITABLE}>
+            {FORM_COPY.save}
+          </Button>
+        ) : denied ? (
+          <Button disabled reason={FORM_COPY.denied}>
             {FORM_COPY.save}
           </Button>
         ) : !canSave ? (

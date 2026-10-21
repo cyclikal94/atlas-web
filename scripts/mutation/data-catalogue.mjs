@@ -64,6 +64,13 @@ const FIRST_JOIN_R13 =
 const FIRST_JOIN_R12 =
   "            current === null ? (\n              <FirstJoin\n                begun={null}\n                form={(seed) =>\n                  joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)\n                }\n              />\n            ) : (\n              joinForm(enrolment, current.policy, CONTROLS_COPY.defaultAudience)\n            )\n";
 
+/** WEB-10a revision 15 (R28): Today's participant words as they are, and as they were before (MU-2255, MU-2266: "You" unconditionally). */
+const TODAY_WHO_R15 = `          {participation === "personal" ? "" : \` · \${whoLabel(row, me)}\`}\n`;
+const TODAY_WHO_R14 = `          {participation === "personal"\n            ? ""\n            : \` · \${data.participants.filter((id) => id !== me).length === 0 ? "You" : \`You and \${data.participants.filter((id) => id !== me).length} other\${data.participants.filter((id) => id !== me).length === 1 ? "" : "s"}\`}\`}\n`;
+/** WEB-10a revision 15 (R29): the rule that a revision needs BOTH resources editable (MU-2259, MU-2260, MU-2267). */
+const EDITABLE_R15 =
+  "  return task.can_edit && execution?.can_edit !== false;\n";
+
 /** The mutants run by vitest over the production source in the fake world (layers L1a and L1b). */
 export const UNIT = [
   // ---- the commit guard -----------------------------------------------------------------------------------------------------
@@ -21633,6 +21640,154 @@ export const UNIT = [
         "      <SeedRead round={round} found={setSeed} />\n",
       ),
   },
+
+  // ---- WEB-10a revision 15 (review 15, R28 today-participant-membership-label, R29 task-edit-permission-admission): MU-2255..MU-2265
+  // (unit), MU-2266/MU-2267 (REAL ENGINE) ------------------------------------------------------------------------------------------------
+  {
+    id: "MU-2255",
+    title:
+      "WEB-10a rev 15 (R28): Today's row restored to review 15's defect: every shared row says You (or You and N others), whoever the roster names",
+    file: "src/features/tasks/today/TodayRow.tsx",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect:
+      /Today never names a viewer who is not taking part \(R28\) (everyone|pooled|anyone): |an empty roster says no one/,
+    patch: (t) => sub(t, TODAY_WHO_R15, TODAY_WHO_R14),
+  },
+
+  {
+    id: "MU-2256",
+    title:
+      "WEB-10a rev 15 (R28): edit permission counted as taking part (an Anyone task I may record on names me before I have)",
+    file: "src/features/tasks/format.ts",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /eligibility is not membership/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row.data.participants.includes(me) || row.streamPresent || row.streamPending\n",
+        "    row.data.participants.includes(me) ||\n    row.streamPresent ||\n    row.streamPending ||\n    row.canEdit\n",
+      ),
+  },
+
+  {
+    id: "MU-2257",
+    title:
+      "WEB-10a rev 15 (R28): my own stream (held, or being created by a queued first record) is not counted as taking part",
+    file: "src/features/tasks/format.ts",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /own stream held|my first record makes me You/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row.data.participants.includes(me) || row.streamPresent || row.streamPending\n",
+        "    row.data.participants.includes(me)\n",
+      ),
+  },
+
+  {
+    id: "MU-2258",
+    title:
+      "WEB-10a rev 15 (R28): the task's Who's on this says You unconditionally (the two screens disagree)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /the task says the same as Today \(R28\) a viewer off the roster/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {whoLabel(row, env.accountId)}\n",
+        `        {others.length === 0\n          ? "You"\n          : \`You and \${others.length} other\${others.length === 1 ? "" : "s"}\`}\n`,
+      ),
+  },
+
+  {
+    id: "MU-2259",
+    title:
+      "WEB-10a rev 15 (R29): a revision needs only the task editable (a read-only execution is ignored)",
+    file: "src/features/tasks/reasons.ts",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /denied execution|both resources must be editable/,
+    patch: (t) => sub(t, EDITABLE_R15, "  return task.can_edit;\n"),
+  },
+
+  {
+    id: "MU-2260",
+    title:
+      "WEB-10a rev 15 (R29): a revision needs only the execution editable (a read-only task is ignored)",
+    file: "src/features/tasks/reasons.ts",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /denied task|both resources must be editable/,
+    patch: (t) =>
+      sub(t, EDITABLE_R15, "  return execution?.can_edit !== false;\n"),
+  },
+
+  {
+    id: "MU-2261",
+    title:
+      "WEB-10a rev 15 (R29): the form's admission ignores a known denial (Save still disabled with its reason, but Enter queues the revision)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect:
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)/,
+    patch: (t) =>
+      sub(t, "    !queueUnread &&\n    !denied &&\n", "    !queueUnread &&\n"),
+  },
+
+  {
+    id: "MU-2262",
+    title:
+      "WEB-10a rev 15 (R29): save() admits whatever started it (Enter's implicit submission bypasses the disabled Save)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect:
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)/,
+    patch: (t) => sub(t, "    if (!canSave) return;\n", ""),
+  },
+
+  {
+    id: "MU-2263",
+    title:
+      "WEB-10a rev 15 (R29): a denied Save gives the wrong reason (wait for syncing) instead of saying the task can't be edited",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /Save is withheld with the reason|withholds Save; the typed name/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ) : denied ? (\n          <Button disabled reason={FORM_COPY.denied}>\n            {FORM_COPY.save}\n          </Button>\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2264",
+    title:
+      "WEB-10a rev 15 (R29): the task detail offers the Edit task link under a known denial (sync and policy version only)",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /the task's Edit affordance \(R29\) denied /,
+    patch: (t) =>
+      sub(
+        t,
+        "          {!editable(task, view.execution) ? (\n",
+        "          {false ? (\n",
+      ),
+  },
+
+  {
+    id: "MU-2265",
+    title:
+      "WEB-10a rev 15 (R29): the edit route does not carry the permissions it read into the form (a direct route is always editable)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect:
+      /direct route: Save is withheld|permission lost while the form is open|a queued revision is not edited/,
+    patch: (t) =>
+      sub(
+        t,
+        "          editable: editable(view.task, view.execution),\n",
+        "          editable: true,\n",
+      ),
+  },
 ];
 
 /**
@@ -25055,5 +25210,27 @@ export const ENGINE = [
     grep: "E-T34:",
     expect: /E-T34:/,
     patch: (t) => sub(t, FIRST_JOIN_R13, FIRST_JOIN_R12),
+  },
+
+  {
+    id: "MU-2266",
+    title:
+      "WEB-10a N-T35: (REAL ENGINE) Today's row restored to review 15's defect: every shared row says You, whoever the roster names",
+    file: "src/features/tasks/today/TodayRow.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T35:",
+    expect: /E-T35:/,
+    patch: (t) => sub(t, TODAY_WHO_R15, TODAY_WHO_R14),
+  },
+
+  {
+    id: "MU-2267",
+    title:
+      "WEB-10a N-T36: (REAL ENGINE) a revision is offered whatever the task's and its details' permissions (review 15's defect)",
+    file: "src/features/tasks/reasons.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T36:",
+    expect: /E-T36:/,
+    patch: (t) => sub(t, EDITABLE_R15, "  return true;\n"),
   },
 ];

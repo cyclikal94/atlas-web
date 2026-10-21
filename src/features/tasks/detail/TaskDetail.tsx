@@ -11,6 +11,7 @@ import { dayLabel, longDayLabel } from "../format";
 import { commandOf, reviseOccurrence } from "../model/commands";
 import { submittedCorrection } from "../model/correction";
 import { resolveWallTime } from "../model/time";
+import { editable } from "../reasons";
 import { pillTone } from "../today/TodayRow";
 import { ArchiveControl, ClosureControls, Participation } from "./Controls";
 import { CORRECTION_COPY, CorrectionDialog } from "./CorrectionDialog";
@@ -22,6 +23,7 @@ export const DETAIL_COPY = {
   back: "‹ Tasks",
   edit: "Edit task",
   editWait: "Wait for this task to finish syncing before editing it.",
+  editDenied: "You can't edit this task",
   sharing: "Sharing",
   sharingWait: "Sharing can be changed once this task has synced.",
   sharingProgress: "Who sees my progress",
@@ -204,7 +206,11 @@ export function TaskDetail({
           </p>
         ) : null}
         <div className="flex flex-wrap items-start gap-2">
-          {policyVersion === undefined || !view.synced ? (
+          {!editable(task, view.execution) ? (
+            <Button disabled reason={DETAIL_COPY.editDenied}>
+              {DETAIL_COPY.edit}
+            </Button>
+          ) : policyVersion === undefined || !view.synced ? (
             <Button disabled reason={DETAIL_COPY.editWait}>
               {DETAIL_COPY.edit}
             </Button>

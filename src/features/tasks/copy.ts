@@ -144,6 +144,12 @@ export const PARTICIPATION: Readonly<Record<Participation, string>> = {
   everyone: "Everyone",
   pooled: "Pooled",
 };
+/** Who takes part (Q8): "You" only for someone known to take part (R28, revision 15); names are WEB-11a's. */
+export const WHO = {
+  you: "You",
+  youAnd: (n: number) => `You and ${n} other${n === 1 ? "" : "s"}`,
+  people: (n: number) => `${n} ${n === 1 ? "person" : "people"}`,
+} as const;
 export const PARTICIPATION_LINE: Readonly<Record<Participation, string>> = {
   personal: "Only you do this.",
   anyone: "Done when anyone does it.",

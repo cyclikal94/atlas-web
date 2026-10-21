@@ -336,6 +336,13 @@ production public surfaces' Chromium screenshots and painted-contrast records, a
 `tests/static/browser-evidence-writers.test.ts` (no fixed evidence destination, append or literal screenshot path in `tests/e2e`,
 profiling producers exempt) and `scripts/validation/design-evidence.test.mjs` (two and concurrent invocations, projects, repeats, a
 failed attempt, report discovery and a sentinel historical folder, through Playwright).
+Revision 15 (review 15's R28 `today-participant-membership-label` and R29 `task-edit-permission-admission`; decision 41):
+`today-participants.test.tsx` (the roster's label for non-members, members and an empty roster, own-stream evidence, Everyone/Pooled/Anyone
+off the roster on Today, Just me unchanged, an Anyone task still recordable without a stream, the task saying the same as Today) and
+`task-edit-permission.test.tsx` (the rule; Edit task withheld for a denied task, details or both; the direct route's Save and Enter queue
+nothing and keep the typed name; a permission lost while the form is open; a queued revision not coalesced after the loss; the editor and
+queued-create controls), native E-T35 (Today off the roster, three modes, enrolled control) and E-T36 (denied task, details, both: no Edit
+link, the direct route queues nothing; the editor control) in three engines; unit MU-2255…MU-2265 and real-engine MU-2266/MU-2267.
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -380,6 +387,18 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     new sign-in fact). Dismissing one of two notices therefore never replays the other over a later message or cancels that message's frame. A
     new session notice arriving while another is shown is now announced (it was not before). The record ends with the presentation; nothing is
     persisted or shared between tabs.
+41. **"You" only for someone known to take part; no revision under a known denial (R28, R29; revision 15).** Today's row and the task's
+    "Who's on this" say the same thing, from one rule (`whoLabel` in `format.ts`): "You" (or "You and N others") only when the roster names
+    me or my own stream is held or being created on this device (a queued first record or join); otherwise the roster's count ("1 person",
+    "0 people"). Seeing or sharing a task is not taking part, and for Anyone a stream this device does not hold proves nothing either way.
+    It is display only: who may record keeps its own rule (`recordBlock`), so an Anyone task I may edit stays recordable without a stream.
+    `revise_task` writes the task and its details and the server checks write access to both, so a known denial of either (`can_edit:
+    false` as this device last read it, `editable` in `reasons.ts`) disables "Edit task" on the task ("You can't edit this task") and every
+    save of the edit form, the direct route and Enter's implicit submission included, with "You can't edit this task. What you typed is
+    kept here."; a permission lost while the form is open does the same, nothing is queued or coalesced into a queued revision, and the
+    typed values stay. A policy version is not edit authority. A task created on this device and not sent yet is its creator's (its
+    projected rows are editable), so its queued create is still edited in place. No fresh online check is added: the server still decides
+    when a change is sent.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -409,7 +428,8 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | No `happened_at` editor | — |
 | "Let people skip a day without breaking their streak" toggle (required by Q21, absent from the drawings) | `/tasks/new` |
 | Time zone and participation fields from the baseline | `/tasks/new` |
-| Participants as counts ("You and 2 others"), names are WEB-11a's | `/tasks/<id>` |
+| Participants as counts ("You and 2 others" only when I take part, else "3 people"), the same on Today and the task (revision 15); names are WEB-11a's | `/today`, `/tasks/<id>` (jsdom `today-participants.test.tsx`, native E-T35) |
+| Revision 15: a task I can't edit (task or details read-only for me): "Edit task" disabled with "You can't edit this task"; the edit page's Save disabled with "You can't edit this task. What you typed is kept here." | `/tasks/<id>`, `/tasks/<id>/edit` of a read-only task (jsdom `task-edit-permission.test.tsx`, native E-T36) |
 | The header says "Who can see this is set in Sharing." instead of naming the audience (the policy is readable by its owner only, online) | `/tasks/<id>` |
 | The "‹ Tasks" link shows at every width (the CSS budget had no room for a desktop-only rule); the mobile tab bar stays on the detail | `/tasks/<id>` |
 | Status colour only for Missed and Conflict (Done uses the neutral pill: the CSS budget); the words always say the state | `/today` |
