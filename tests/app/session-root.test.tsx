@@ -44,7 +44,7 @@ afterEach(() => {
   authFeedback.clearOnBegin();
 });
 
-const supported: ApiCompatibility = { status: "supported", version: "0.28.0" };
+const supported: ApiCompatibility = { status: "supported", version: "0.29.0" };
 function root(
   view: SessionView,
   options: { api?: ApiCompatibility; pathname?: string } = {},

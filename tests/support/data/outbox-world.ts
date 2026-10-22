@@ -140,7 +140,7 @@ export async function outboxWorld(
   const compatListeners = new Set<() => void>();
   let compatValue: ApiCompatibility = options.compat ?? {
     status: "supported",
-    version: "0.28.0",
+    version: "0.29.0",
   };
   out.compat = {
     get: () => compatValue,

@@ -23,7 +23,7 @@ import {
 
 /**
  * WEB-09a integration (plan 8.3 to 8.7): the data layer's PRODUCTION code (the production session, its adapters, the Dexie store,
- * the sync engine, the outbox dispatcher and the profile read) in a real engine against the RELEASED backend (v0.28.0-rc.1) on a
+ * the sync engine, the outbox dispatcher and the profile read) in a real engine against the RELEASED backend (v0.29.0-rc.1) on a
  * disposable SQLite database, behind the delaying proxy. The sync engine and the dispatcher are started by the FIXTURE test leader
  * (production starts neither until WEB-09b supplies leadership), and the snapshot is a FIXTURE seeder (the real first snapshot is
  * WEB-09b's). Anything the proxy injects is labelled so. Not release evidence; PostgreSQL, HTTPS and devices are not exercised.
@@ -774,13 +774,13 @@ test.describe("I-O3: queued writes wait for a supported server", () => {
     ]
   > = [
     [
-      "0.29.0",
-      { action: "rewrite_json", set: { api_version: "0.29.0" } },
+      "0.30.0",
+      { action: "rewrite_json", set: { api_version: "0.30.0" } },
       { kind: "paused", reason: "compat_unsupported" },
     ],
     [
-      "0.27.9",
-      { action: "rewrite_json", set: { api_version: "0.27.9" } },
+      "0.28.9",
+      { action: "rewrite_json", set: { api_version: "0.28.9" } },
       { kind: "paused", reason: "compat_unsupported" },
     ],
     [

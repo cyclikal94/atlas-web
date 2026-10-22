@@ -1,0 +1,402 @@
+import { RouterProvider } from "@tanstack/react-router";
+import { act, render, screen } from "@testing-library/react";
+import { ProtectedProviders } from "../../src/app/providers";
+import { createAppRouter } from "../../src/app/router";
+import { ShellEnvProvider } from "../../src/app/shell/env";
+import {
+  type CacheRow,
+  createCommandRegistry,
+  createDataEnv,
+  type DataEnv,
+  DataEnvProvider,
+  type DraftWithCommand,
+} from "../../src/data";
+import { createQuotaGuard } from "../../src/data/engine/quota-guard";
+import type { SyncChannel } from "../../src/data/engine/sync-channel";
+import { accountDatabaseName } from "../../src/data/model/schema";
+import { w as writes } from "../../src/data/store/port";
+import { forgetIdentityMemories } from "../../src/features/calendars/memory";
+import { registerCalendarCommands } from "../../src/features/calendars/register";
+import { documentRouteChanges } from "../../src/lib/route-changes";
+import {
+  type ApiCompatibility,
+  type Identity,
+  SessionProvider,
+  type Store,
+} from "../../src/session";
+import { sessionDouble } from "../helpers/session-double";
+import { DataTestWorld } from "./data/env";
+
+/**
+ * The calendar screens' test world (WEB-13a): the PRODUCTION controller (`createDataEnv`), plans and outbox facade over the double of
+ * IndexedDB, with the calendar commands registered; the session double with a programmable typed client that records every request;
+ * and the application's router, so the screen is reached at `/settings/calendars` exactly as in the app. FIXTURE evidence.
+ */
+export const ACCOUNT = "11111111-1111-4111-8111-111111111111";
+export const DB = accountDatabaseName(ACCOUNT);
+
+export class Cell<T> implements Store<T> {
+  private listeners = new Set<() => void>();
+  constructor(private value: T) {}
+  get() {
+    return this.value;
+  }
+  set(next: T) {
+    this.value = next;
+    for (const l of [...this.listeners]) l();
+  }
+  subscribe(l: () => void) {
+    this.listeners.add(l);
+    return () => {
+      this.listeners.delete(l);
+    };
+  }
+}
+
+export interface WireCall {
+  method: "GET" | "POST";
+  path: string;
+  key?: string;
+  /** The JSON body as the client was asked to send it. */
+  body?: unknown;
+  id?: string;
+  query?: unknown;
+}
+
+export type WireReply =
+  | { status: number; json?: unknown; contentType?: string }
+  | { throws: unknown }
+  /** Revision 2: the answer is HELD until the test resolves the promise (a request already sent whose answer arrives later). */
+  | { wait: Promise<WireReply> };
+
+export const atlasBody = (
+  code: string,
+  extra: Record<string, unknown> = {},
+) => ({
+  code,
+  message: "m",
+  request_id: "22222222-2222-4222-8222-222222222222",
+  details: [],
+  ...extra,
+});
+
+export interface CalendarWorld {
+  world: DataTestWorld;
+  env: DataEnv;
+  online: Cell<boolean>;
+  compat: Cell<ApiCompatibility>;
+  identity: Cell<Identity | null>;
+  calls: WireCall[];
+  /** Replies by path, consumed in order; a path with none answers its default. */
+  replies: Map<string, WireReply[]>;
+  settle(): Promise<void>;
+  rows<K extends "cache" | "drafts" | "draft_commands" | "resource_versions">(
+    store: K,
+  ): object[];
+  snapshot(): Record<string, object[]> | null;
+  /**
+   * Revision 5 (R11): the protected tree unmounted and mounted again at the SAME address under the same identity, as the session's
+   * re-check of a `403` does (a new router, a new screen; the per-identity memory and the document stay). Settles after.
+   */
+  remount(): Promise<void>;
+  /**
+   * Revision 6 (R13): the two halves of `remount`, so that the document can move while NO tree is mounted (the session's protective
+   * closure). `detach` unmounts the tree; `attach` mounts a new one (a new router) wherever the document is now. Both settle after.
+   */
+  detach(): Promise<void>;
+  attach(): Promise<void>;
+  /** Revision 5: an in-app navigation (the router's own), then settles. */
+  navigate(to: string): Promise<void>;
+  /**
+   * Revision 6 (R13): the browser's own history traversal (`history.go`: Back is -1, Forward 1), mounted or not; resolves after its
+   * `popstate`, then settles.
+   */
+  traverse(delta: number): Promise<void>;
+  /** Revision 6 (R13): an address written straight into the document's history, by no router (`pushState` or `replaceState`). */
+  write(how: "push" | "replace", to: string): Promise<void>;
+  /** Revision 5: the current address of the mounted tree's router (revision 6: the document's, when no tree is mounted). */
+  path(): string;
+  /**
+   * Commits a change to the account database through the production store, as a sync or a recovery would (one transaction), then
+   * settles: `put` rows into `cache` or `sync_state`, or `remove` cache rows by id. Live queries observe it as they observe any write.
+   */
+  commit(change: {
+    put?: { store: "cache" | "sync_state"; rows: object[] };
+    remove?: string[];
+    /**
+     * Revision 2: rows of `resource_versions` written in the SAME transaction (a publication sets the version the outbox assumes), and
+     * drafts retired with their bodies in it (`local_id`s): what a delta page that publishes a receipted create does at once (W1).
+     */
+    versions?: object[];
+    retire?: string[];
+  }): Promise<void>;
+}
+
+export function sourceRow(over: Partial<CacheRow> = {}): CacheRow {
+  return {
+    id: over.id ?? "00000000-0000-4000-8000-0000000000a1",
+    kind: "calendar_source",
+    parent_id: null,
+    label: "Family calendar",
+    value: {
+      health: "healthy",
+      last_success: 1_790_000_000,
+      coverage_start: null,
+      coverage_end: null,
+      timezone: "Europe/Vienna",
+    },
+    version: 3,
+    can_edit: true,
+    archived: false,
+    kind_date: null,
+    ...over,
+  };
+}
+
+export async function calendarWorld(
+  options: {
+    database?: boolean;
+    online?: boolean;
+    cache?: CacheRow[];
+    drafts?: DraftWithCommand[];
+    route?: string;
+    calendarLinks?: boolean;
+    /** Revision 4: answers queued BEFORE the screen mounts (its first live read is made as it opens). */
+    replies?: ReadonlyArray<readonly [string, WireReply[]]>;
+    compat?: ApiCompatibility;
+  } = {},
+): Promise<CalendarWorld> {
+  // The per-identity memory outlives a mount by design (`memory.ts`); each test starts without one.
+  forgetIdentityMemories();
+  const world = new DataTestWorld();
+  world.idb.autoDrive = true;
+  const page = world.page("A");
+  page.identity.account = ACCOUNT;
+  if (options.database !== false) {
+    const created = await page.open(ACCOUNT, { create: true });
+    if (created.kind !== "opened") throw new Error("setup");
+    if (options.cache) world.idb.seed(DB, "cache", options.cache);
+    if (options.drafts) world.idb.seed(DB, "drafts", options.drafts);
+  }
+  const identity = new Cell<Identity | null>({
+    account_id: ACCOUNT,
+    epoch: 1,
+    session_id: "s",
+  });
+  const online = new Cell(options.online ?? true);
+  const compat = new Cell<ApiCompatibility>(
+    options.compat ?? {
+      status: "supported",
+      version: "0.27.0",
+    },
+  );
+  const runtime = new world.modules.accountService.DataRuntime({
+    identity,
+    persistence: world.modules.accountService.unorderedPersistence,
+    registry: page.registry,
+    open: (a, o) => page.open(a, o),
+  });
+  const channel: SyncChannel = {
+    post: () => undefined,
+    subscribe: () => () => undefined,
+  };
+  const commands = createCommandRegistry();
+  registerCalendarCommands(commands);
+  const env = createDataEnv({
+    identity,
+    loadRuntime: async () => runtime,
+    online,
+    quota: createQuotaGuard({ storage: undefined, now: () => 0 }),
+    ids: { uuid: () => crypto.randomUUID() },
+    clock: { iso: () => new Date().toISOString(), now: () => 0 },
+    fence: () => ({ hasPendingOperation: false, sessionStarted: true }),
+    readMe: async () => ({ kind: "closed" }),
+    currentDeviceId: async () => ({ kind: "closed" }),
+    onOnline: () => () => undefined,
+    channel,
+    commands,
+  });
+
+  const calls: WireCall[] = [];
+  const replies = new Map<string, WireReply[]>(
+    (options.replies ?? []).map(([path, queue]) => [path, [...queue]]),
+  );
+  const reply = async (call: WireCall) => {
+    calls.push(call);
+    const queue = replies.get(call.path);
+    let next: WireReply =
+      queue?.shift() ??
+      (call.path === "/notification-capabilities"
+        ? {
+            status: 200,
+            json: { calendar_links: options.calendarLinks ?? true },
+          }
+        : call.path === "/calendar-sources"
+          ? { status: 200, json: { items: [], next_after: null } }
+          : { status: 200, json: { revision: 1 } });
+    while ("wait" in next) next = await next.wait;
+    if ("throws" in next) throw next.throws;
+    const response = new Response(null, {
+      status: next.status,
+      headers: { "content-type": next.contentType ?? "application/json" },
+    });
+    return next.status < 300
+      ? { data: next.json, response }
+      : { error: next.json, response };
+  };
+  const client = {
+    POST: (
+      path: string,
+      init: {
+        params: { header: Record<string, string>; path?: { id: string } };
+        body?: unknown;
+      },
+    ) =>
+      reply({
+        method: "POST",
+        path,
+        key: init.params.header["Idempotency-Key"],
+        body: init.body,
+        id: init.params.path?.id,
+      }),
+    GET: (path: string, init?: { params?: { query?: unknown } }) =>
+      reply({ method: "GET", path, query: init?.params?.query }),
+  };
+  const session = sessionDouble(
+    {},
+    {
+      identity,
+      compat,
+      api: { client: () => client, fetchFor: () => fetch } as never,
+    },
+  );
+  // Revision 6 (R13): the document's real history, as production: the route record is installed before the first router (as
+  // `createProtectedTree` does), every router is a browser-history router over this document, and the address starts where asked.
+  documentRouteChanges();
+  window.history.replaceState(null, "", options.route ?? "/settings/calendars");
+  let router = createAppRouter();
+  const tree = () => (
+    <SessionProvider session={session}>
+      <ProtectedProviders>
+        <DataEnvProvider env={env}>
+          <ShellEnvProvider
+            value={{
+              syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+              onOpenSync: () => {},
+            }}
+          >
+            <RouterProvider router={router} />
+          </ShellEnvProvider>
+        </DataEnvProvider>
+      </ProtectedProviders>
+    </SessionProvider>
+  );
+  let mounted: ReturnType<typeof render> | null = render(tree());
+  const settle = async () => {
+    await act(async () => {
+      for (let i = 0; i < 20; i += 1) {
+        await world.settle();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    });
+  };
+  await screen.findByRole("heading", { level: 1, name: "Calendar sources" });
+  await settle();
+  return {
+    world,
+    env,
+    online,
+    compat,
+    identity,
+    calls,
+    replies,
+    settle,
+    rows: (store) => world.idb.snapshot(DB)?.[store] ?? [],
+    snapshot: () => world.idb.snapshot(DB),
+    async remount() {
+      act(() => mounted?.unmount());
+      router = createAppRouter();
+      mounted = render(tree());
+      await settle();
+    },
+    async detach() {
+      act(() => mounted?.unmount());
+      mounted = null;
+      await settle();
+    },
+    async attach() {
+      if (mounted !== null) throw new Error("a tree is mounted");
+      router = createAppRouter();
+      mounted = render(tree());
+      await settle();
+    },
+    async navigate(to) {
+      await act(async () => {
+        await router.navigate({ to: to as never });
+      });
+      await settle();
+    },
+    async traverse(delta) {
+      const popped = new Promise<void>((resolve) =>
+        window.addEventListener("popstate", () => resolve(), { once: true }),
+      );
+      await act(async () => {
+        window.history.go(delta);
+        await popped;
+      });
+      await settle();
+    },
+    async write(how, to) {
+      act(() => {
+        if (how === "push") window.history.pushState(null, "", to);
+        else window.history.replaceState(null, "", to);
+      });
+      await settle();
+    },
+    path: () =>
+      mounted === null
+        ? window.location.pathname
+        : router.history.location.pathname,
+    async commit(change) {
+      const service = env.service();
+      if (service === null) throw new Error("no account database");
+      const scope = [
+        ...(change.put ? [change.put.store] : []),
+        ...(change.remove ? (["cache"] as const) : []),
+        ...(change.versions ? (["resource_versions"] as const) : []),
+        ...(change.retire ? (["drafts", "draft_commands"] as const) : []),
+      ];
+      await act(async () => {
+        await service.store.run(
+          {
+            name: "test.calendars.commit",
+            scope: [...new Set(scope)],
+            mode: "readwrite",
+            durability: "strict",
+            read: async () => null,
+            decide: () => ({
+              writes: [
+                ...(change.put?.rows ?? []).map((row) =>
+                  writes.put(change.put?.store ?? "cache", row as never),
+                ),
+                ...(change.remove ?? []).map((id) =>
+                  writes.delete("cache", id),
+                ),
+                ...(change.versions ?? []).map((row) =>
+                  writes.put("resource_versions", row as never),
+                ),
+                ...(change.retire ?? []).flatMap((id) => [
+                  writes.delete("drafts", id),
+                  writes.delete("draft_commands", id),
+                ]),
+              ],
+              result: null,
+            }),
+          },
+          {},
+        );
+      });
+      await settle();
+    },
+  };
+}

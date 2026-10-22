@@ -61,7 +61,19 @@
         },
         "authority": "FB-20261010-WEB12A; accepted exact-tree main integration delivery/integrations/web12a-20261011/acceptance.md"
       },
-      "od2_revision_1": "dist-fixture 219,582 / 6,873 / 83,736 on the WEB-09c revision-1 candidate (validation run 2026-10-10T10-48-05.449Z-104ce4d2), ceilings 241,540 / 7,560 / 92,110"
+      "od2_revision_1": "dist-fixture 219,582 / 6,873 / 83,736 on the WEB-09c revision-1 candidate (validation run 2026-10-10T10-48-05.449Z-104ce4d2), ceilings 241,540 / 7,560 / 92,110",
+      "accepted_calendar_base": {
+        "commit": "f4756b23b2dd0c9f4ebc754c6e8d63065602b746",
+        "calendar_commit": "e84a9ae5609dfd9a1c1e6962dd6a185cdf9a8934",
+        "fixture_baseline": {
+          "initial_js_gzip": 243097,
+          "css_gzip": 7240,
+          "fonts": 83736
+        },
+        "fixture_initial_js_ceiling": 267406,
+        "authority": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010 (Kieran, 10 October 2026; authority approval/fixture-budget-20261010.json and hand-off delivery/handoffs/fixture-budget-20261010.md in the orchestrator), a one-off re-record for WEB-13a revision 3, dist-fixture only and on the same terms: main's merged WEB-09b/WEB-08b shell measured 240,479 B, and the calendar screen's lazy route makes the bundler split shared React/session code out of the entry into further initial files (243,097 B); baseline re-recorded with `--record`, ceiling = that baseline plus `tolerance`, rounded down (267,406 B). WEB-09c owns replacing it with a reasoned, measured ceiling; this authorises no automatic future reset.",
+        "integration": "Merged into WEB-09c on 22 October 2026 with the verified API 0.29 contract. These temporary figures remain history; the shared successor budget, both build baselines and 10% tolerance are unchanged. The earlier measurement and loading observations above describe their original candidate, not this combined build. Current combined-build checks and attribution are recorded separately in .agtx/merge-conflicts.md; complete Air P-1/P-1S and independent acceptance remain outstanding."
+      }
     },
     "follow_up": [
       "Combined-build remeasurement when WEB-08c, WEB-08d, WEB-13a and WEB-14a are integrated with this successor: rebuild dist and dist-fixture, run node scripts/check-budgets.mjs dist and dist-fixture and the P-1 attribution (node scripts/profile-sync.mjs --evidence <fresh dir> --only bundle) on the combined candidate. Branch sizes are not additive.",

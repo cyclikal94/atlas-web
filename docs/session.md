@@ -9,9 +9,9 @@ from another: one database per account, the canonical `indexedDB.deleteDatabase(
 of an account until the lifecycle says so. Its `atlas-active-account`, `atlas-session-generation` and `atlas-transition-intent` bookkeeping is **superseded** by the matrix's `auth_state` record (matrix
 section 5); the deletion procedure itself is not.
 
-The current client targets API 0.28.0. Historical integration results below remain attributed to their original 0.27 release; upgrading the pin does not establish new full integration acceptance. WEB-08d owns acceptance of the new management features.
+The current client targets API 0.29.0. Historical integration results below remain attributed to their original 0.27 release; upgrading the pin does not establish new full integration acceptance. WEB-08d owns acceptance of the new management features.
 
-Sources, in order of authority: the lifecycle matrix (protocol), the pinned OpenAPI contract `v0.28.0-rc.1` (wire), WEB-04 section 7.8 (deletion procedure only).
+Sources, in order of authority: the lifecycle matrix (protocol), the pinned OpenAPI contract `v0.29.0-rc.1` (wire), WEB-04 section 7.8 (deletion procedure only).
 Where this document says "the matrix" it means that file; its wording is not restated here.
 
 ## Public interface
@@ -257,7 +257,7 @@ other slices: `settings/account/slots.ts` (`accountActions`: WEB-08c appends "Sw
 
 - **D-01** raw IndexedDB, no dependency; **D-02** the device id is a record in `atlas-auth` (atomic get-or-create across pages); **D-03** the deletion ledger is in `atlas-auth`.
 - **D-05** neutral-state precedence (above); **D-06** the stamped API returns a `Response` or throws `StampedRequestError`; a `401` or `403 credential_mismatch` is never
-  returned as a response; **D-07** `recovery.begin` and `finish` belong here; **D-08** the client supports `>=0.28.0 <0.29.0`, derived from `contract-pin.json`.
+  returned as a response; **D-07** `recovery.begin` and `finish` belong here; **D-08** the client supports `>=0.29.0 <0.30.0`, derived from `contract-pin.json`.
 - **D-10** the protected tree loads before `expose`; **D-12** `neutral-state.tsx` is on the R6 live-region allowlist; **D-13** no `localStorage`, `sessionStorage` or cookie
   in the session or the api-client; **D-14** the default deletion ports refuse when a database exists; **D-19** the tree `act` mounts is the shell with the sync chip reading
   "Updates stopped" (true: nothing syncs), never "Up to date".

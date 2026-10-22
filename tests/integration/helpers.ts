@@ -63,6 +63,8 @@ export interface ProxyRule {
     | "buffer_request"
     | "delay"
     | "drop_after_forward"
+    /** WEB-13a: destroy the browser's connection after `ms` while the backend request carries on (an answer lost mid-execution). */
+    | "drop_client_after"
     | "rewrite_status"
     | "rewrite_json"
     | "replace_response"
