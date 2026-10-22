@@ -7,6 +7,7 @@ import { listReadPlans } from "../../src/data/plans/registry";
 import { createConditionalFormPort } from "../../src/data/ports/conditional-form";
 import {
   decodeHeld,
+  encodeHeld,
   type HeldChange,
   heldPrefixOf,
   heldStoreOver,
@@ -268,7 +269,7 @@ describe("a held change is a durable form copy of the account (Q3, Q20)", () => 
     ]);
   });
 
-  test("a copy of the first shape (v 1) is read as state 0, not admitted; an unknown shape or a mismatched context is not a held change", () => {
+  test("a copy of the first shape (v 1) is read as state 0, not admitted", () => {
     const first = row(`people-held:${P}:${F}`, change().holdId, {
       fields: {
         held: JSON.stringify({
@@ -289,10 +290,18 @@ describe("a held change is a durable form copy of the account (Q3, Q20)", () => 
       },
     });
     expect(decodeHeld(first)).toEqual(change());
-    expect(decodeHeld({ ...first, fields: { held: "not json" } })).toBeNull();
-    expect(decodeHeld({ ...first, fields: { held: "{}" } })).toBeNull();
+  });
+
+  test("a copy that is not a held change this page can read is never decoded as one", () => {
+    const good = row(`people-held:${P}:${F}`, change().holdId, {
+      fields: encodeHeld(change()),
+    });
+    expect(decodeHeld(good)).not.toBeNull();
+    expect(decodeHeld({ ...good, fields: { held: "not json" } })).toBeNull();
+    expect(decodeHeld({ ...good, fields: { held: "{}" } })).toBeNull();
+    // A copy whose context names another field than its text is not that change.
     expect(
-      decodeHeld({ ...first, form_context: `people-held:${P}:another` }),
+      decodeHeld({ ...good, form_context: `people-held:${P}:another` }),
     ).toBeNull();
   });
 });
