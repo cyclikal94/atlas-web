@@ -8,6 +8,7 @@ import {
   scopeOf,
 } from "../support/data/marker-storage";
 import { type OutboxWorld, outboxWorld } from "../support/data/outbox-world";
+import { type ReadTripwire, readTripwire } from "../support/data/read-tripwire";
 import { cacheRow } from "../support/data/rows";
 
 /**
@@ -400,6 +401,7 @@ describe("R46: should the queue read and the claim ever disagree about a stop, t
   for (const mechanism of ["marker", "memory"] as const)
     test(`${mechanism}: a queue read that cannot see the stop and a claim that can: the draft is refused, nothing is written or sent, and the attempts are paced`, async () => {
       const w = await world();
+      let tripwire: ReadTripwire | null = null;
       try {
         await queued(w);
         await facadeStop(w, mechanism);
@@ -407,12 +409,24 @@ describe("R46: should the queue read and the claim ever disagree about a stop, t
         if (mechanism === "marker")
           w.markers.inspect = () => ({ operations: [], known: true });
         else w.markers.stops.operations = () => [];
+        // Each queue read is counted as it commits, by whichever pump (R29, revision 24). A hot loop never lets the world go idle, and
+        // its 31st read already disproves the bound: the run is stopped there, and the assertion below is reached at once. A run that
+        // never passes it is observed for the whole ten seconds, as before.
+        tripwire = readTripwire(w.env.world, {
+          label: "data.readDispatchWindow",
+          limit: 30,
+          seed: reads(w, "data.readDispatchWindow"),
+          onViolation: () => w.dispatcher.stop(),
+        });
         w.online = true;
         w.start();
-        // A hot loop never lets the world go idle: what is asserted is how often the queue was read and what was written.
-        await w.settle().catch(() => undefined);
-        await w.advance(10_000).catch(() => undefined);
-        expect(reads(w, "data.readDispatchWindow")).toBeLessThanOrEqual(30);
+        await w.settle();
+        if (tripwire.violation === null) await w.advance(10_000);
+        tripwire.check();
+        if (tripwire.count !== reads(w, "data.readDispatchWindow"))
+          throw new Error(
+            `the tripwire counted ${tripwire.count} queue reads and the log holds ${reads(w, "data.readDispatchWindow")}`,
+          );
         expect(w.sent).toHaveLength(0);
         expect(written(w, "data.markInFlight")).toBe(0);
         // The stop is still there (the blind question is the window's, so `where` is read through the page's own answer).
@@ -421,7 +435,9 @@ describe("R46: should the queue read and the claim ever disagree about a stop, t
             ? markerStands(w.markerStorage, account(w), "draft:a")
             : w.markers.stops.has(w.service, "draft:a"),
         ).toBe(true);
+        expect(reads(w, "data.readDispatchWindow")).toBeLessThanOrEqual(30);
       } finally {
+        tripwire?.dispose();
         finish(w);
       }
     });

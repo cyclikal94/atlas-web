@@ -1,6 +1,12 @@
 import { mkdirSync } from "node:fs";
-import type { Page } from "@playwright/test";
+import type { BrowserContext, Page } from "@playwright/test";
 import { test } from "./auth-helpers";
+import {
+  observeAuthWork,
+  recordAuthTransactions,
+  settleAuth,
+  workOf,
+} from "./auth-settlement";
 import { AuthStub } from "./auth-stub";
 import { expect, pressTab, runAxe } from "./helpers";
 import { expectPaintedContrast } from "./surface-checks";
@@ -39,6 +45,21 @@ interface Surface {
   focusHeading?: boolean;
 }
 
+/**
+ * WEB-14a revision 23 (diagnosis of the campaign-2 WebKit failure of "sign-in-offline", .agtx/evidence/WEB-14a/revision-23/diagnostics/
+ * offline-chunk-race): since accepted main's WEB-09b composition was merged, a signed-out page also starts the data leader, whose chunks
+ * (`browser-leader`, `browser-env`, `dexie-adapter`) are dynamic imports loaded AFTER boot (WebKit often only after the heading shows).
+ * With the worker blocked (the labelled revision-19 adaptation) they come from the network, so going offline while one is in flight
+ * makes the browser log the failed load ("WebKit encountered an internal error", Chromium "ERR_INTERNET_DISCONNECTED"). The offline
+ * surfaces are what these cases check, so they go offline once those loads are over: a condition, not a delay.
+ */
+const lazyChunksLoaded = (page: Page) =>
+  page.waitForFunction(() => {
+    const loaded = performance.getEntriesByType("resource").map((e) => e.name);
+    return ["browser-leader", "browser-env", "dexie-adapter"].every((chunk) =>
+      loaded.some((name) => name.includes(`/assets/${chunk}-`)),
+    );
+  });
 const heading = (page: Page, name: string | RegExp) =>
   page.getByRole("heading", { level: 1, name }).waitFor();
 
@@ -87,6 +108,7 @@ const SURFACES: Surface[] = [
     open: async (page) => {
       await page.goto("/");
       await heading(page, "Sign in to Atlas");
+      await lazyChunksLoaded(page);
       await page.context().setOffline(true);
       await page.getByText("Signing in needs a connection.").waitFor();
     },
@@ -202,6 +224,7 @@ const SURFACES: Surface[] = [
     name: "join-offline",
     open: async (page, stub) => {
       await readyJoin(page, stub, null);
+      await lazyChunksLoaded(page);
       await page.context().setOffline(true);
       await page.getByText("Creating an account needs a connection.").waitFor();
     },
@@ -218,9 +241,12 @@ for (const scheme of ["dark", "light"] as const) {
         const stub = new AuthStub();
         await stub.install(context);
         for (const [width, height] of WIDTHS) {
-          // A FRESH document each time: a fragment-only navigation does not reload the page.
-          await context.setOffline(false);
+          // A FRESH document each time: a fragment-only navigation does not reload the page. Revision 22 (C4): the previous document
+          // (offline, for the two offline surfaces) is left BEFORE the connection comes back, so its reconnect work is not started only to
+          // be cut off by this navigation (the retained Firefox "transaction aborted due to page navigation" warnings); that schedule has
+          // its own cases (S10) below.
           await page.goto("about:blank");
+          await context.setOffline(false);
           await page.setViewportSize({ width, height });
           await surface.open(page, stub);
           const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
@@ -433,3 +459,193 @@ for (const scheme of ["dark", "light"] as const) {
     });
   });
 }
+
+/**
+ * WEB-14a revision 22 (design assessment C4, schedule S10): the retained Firefox warning "An IndexedDB transaction that was not yet
+ * complete has been aborted due to page navigation" on the offline public surfaces. Diagnosis (author, scratch recorder over the unchanged
+ * production build, all three engines): `online` starts the session's reconnect work, whose `atlas-auth` transactions (the evaluation's
+ * record read and `resolve()`'s read under `atlas-auth`, both readwrite) were cut off when the test navigated to about:blank at once;
+ * Chromium and WebKit abort them silently. None of them had asked for a write. These cases hold that schedule deterministically (another
+ * page of the origin keeps a readwrite transaction on `records` open, so the reconnect transactions exist but cannot finish), and require:
+ * the cut-off transactions asked for no write, and the durable records are byte-for-byte what they were. The control lets the reconnect
+ * work finish first: nothing is cut off and nothing is declared.
+ */
+test.describe("revision 22, C4: a reconnect immediately followed by leaving the page", () => {
+  /** A same-origin page that runs no application: it reads and holds the `atlas-auth` records without booting a session. */
+  async function originPage(context: BrowserContext) {
+    await context.route("**/__r22-origin-page", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>origin page</title>",
+      }),
+    );
+    const other = await context.newPage();
+    await other.goto("/__r22-origin-page");
+    return other;
+  }
+  const readRecords = (other: Page) =>
+    other.evaluate(
+      () =>
+        new Promise<string>((resolve, reject) => {
+          const open = indexedDB.open("atlas-auth");
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const db = open.result;
+            const tx = db.transaction("records", "readonly");
+            const store = tx.objectStore("records");
+            const keys = store.getAllKeys();
+            const values = store.getAll();
+            tx.oncomplete = () => {
+              db.close();
+              resolve(
+                JSON.stringify(
+                  keys.result.map((key, index) => [key, values.result[index]]),
+                ),
+              );
+            };
+            tx.onerror = () => reject(tx.error);
+          };
+        }),
+    );
+  /** Keeps a readwrite transaction on `records` open until `release`. */
+  const block = (other: Page) =>
+    other.evaluate(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const w = window as unknown as {
+            __blocking: boolean;
+            __blocked: Promise<void>;
+          };
+          const open = indexedDB.open("atlas-auth");
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const db = open.result;
+            const tx = db.transaction("records", "readwrite");
+            const store = tx.objectStore("records");
+            w.__blocking = true;
+            const spin = () => {
+              if (!w.__blocking) return;
+              store.get("auth_state").onsuccess = spin;
+            };
+            spin();
+            w.__blocked = new Promise<void>((done) => {
+              tx.oncomplete = () => {
+                db.close();
+                done();
+              };
+            });
+            resolve();
+          };
+        }),
+    );
+  const release = (other: Page) =>
+    other.evaluate(() => {
+      const w = window as unknown as {
+        __blocking: boolean;
+        __blocked: Promise<void>;
+      };
+      w.__blocking = false;
+      return w.__blocked;
+    });
+  const FIREFOX_ABORT =
+    /^\[JavaScript Warning: "An IndexedDB transaction that was not yet complete has been aborted due to page navigation\." \{file: "[^"]+" line: \d+\}\]$/;
+
+  for (const surface of ["sign-in", "join"] as const) {
+    test(`S10 [cut off] ${surface}: the reconnect transactions cut off by leaving the page asked for no write, and the durable records are unchanged`, async ({
+      page,
+      context,
+      provokes,
+    }) => {
+      provokes(FIREFOX_ABORT);
+      await observeAuthWork(context);
+      const log = await recordAuthTransactions(context);
+      const stub = new AuthStub();
+      await stub.install(context);
+      if (surface === "sign-in") {
+        await page.goto("/");
+        await heading(page, "Sign in to Atlas");
+      } else await readyJoin(page, stub, null);
+      // Opened while online: an offline context cannot load it.
+      const other = await originPage(context);
+      await lazyChunksLoaded(page);
+      await context.setOffline(true);
+      await page
+        .getByText(
+          surface === "sign-in"
+            ? "Signing in needs a connection."
+            : "Creating an account needs a connection.",
+        )
+        .waitFor();
+      await settleAuth(stub, [page], { instruments: [other] });
+      const before = await readRecords(other);
+      const leaving = page.url();
+      await block(other);
+      const begun = log.filter((t) => t.url === leaving).length;
+      await context.setOffline(false);
+      // The reconnect work exists before the page is left: its transactions are created and waiting behind the held one.
+      await expect
+        .poll(async () => (await workOf(page)).authTx, { timeout: 20_000 })
+        .toBeGreaterThan(0);
+      await page.goto("about:blank");
+      await release(other);
+      const cut = log
+        .slice(begun)
+        .filter((t) => t.url === leaving && t.end !== "complete");
+      expect(cut.length, "reconnect transactions cut off").toBeGreaterThan(0);
+      expect(
+        cut.map((t) => ({ stores: t.stores, writes: t.writes })),
+        "a cut-off transaction asked for no write",
+      ).toEqual(cut.map(() => ({ stores: ["records"], writes: 0 })));
+      expect(await readRecords(other), "the durable records").toBe(before);
+    });
+
+    test(`S10 [control] ${surface}: reconnect work that finishes before the page is left: nothing is cut off and nothing is declared`, async ({
+      page,
+      context,
+    }) => {
+      await observeAuthWork(context);
+      const log = await recordAuthTransactions(context);
+      const stub = new AuthStub();
+      await stub.install(context);
+      if (surface === "sign-in") {
+        await page.goto("/");
+        await heading(page, "Sign in to Atlas");
+      } else await readyJoin(page, stub, null);
+      // Opened while online: an offline context cannot load it.
+      const other = await originPage(context);
+      await lazyChunksLoaded(page);
+      await context.setOffline(true);
+      await page
+        .getByText(
+          surface === "sign-in"
+            ? "Signing in needs a connection."
+            : "Creating an account needs a connection.",
+        )
+        .waitFor();
+      await settleAuth(stub, [page], { instruments: [other] });
+      const before = await readRecords(other);
+      const leaving = page.url();
+      const begun = log.filter((t) => t.url === leaving).length;
+      await context.setOffline(false);
+      await expect
+        .poll(() => log.filter((t) => t.url === leaving).length, {
+          timeout: 20_000,
+        })
+        .toBeGreaterThan(begun);
+      await settleAuth(stub, [page], { instruments: [other] });
+      const reconnect = log.slice(begun).filter((t) => t.url === leaving);
+      await page.goto("about:blank");
+      expect(
+        log.filter((t) => t.url === leaving && t.end !== "complete"),
+        "nothing cut off",
+      ).toEqual([]);
+      // The same reconnect work, allowed to finish, writes nothing: what the cut-off case loses is a read.
+      expect(
+        reconnect.map((t) => ({ end: t.end, writes: t.writes })),
+        "a completed reconnect transaction asked for no write",
+      ).toEqual(reconnect.map(() => ({ end: "complete", writes: 0 })));
+      expect(await readRecords(other), "the durable records").toBe(before);
+    });
+  }
+});
