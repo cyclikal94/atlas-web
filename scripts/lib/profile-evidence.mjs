@@ -80,9 +80,22 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * dispatcher, run, service and epoch, with nothing else recorded or traced up to the completion read), with the dispatch binding equal
  * before and after every await and the row read through the bound service as corroboration; each mark follows the previous sample's
  * completion read. Version 8's draft support closed a sample on any later queue status but queued/in_flight; version 8 evidence (no Air
- * request was recorded under it) resolves incomplete and stays history, unchanged.
+ * request was recorded under it) resolves incomplete and stays history, unchanged. Version 10 (WEB-09c revision 15, review 15 R2, design
+ * assessment DA15-R2a/R2b): the P-4 draft support is `draft-request-sample/3`: every dispatch record well formed for its kind, every
+ * result its call's only one with its call's identity (dispatcher, service, plan, local ID, epoch; a request's key and path), the records
+ * and the trace one ordered interval agreeing with each read's recorded position and time, and the receipt's result delivered before the
+ * completion read's recorded start (`started_at`, `log_before`); each mark follows the previous sample's completion read in time too.
+ * Version 9's draft support accepted a result that omitted its service or contradicted its call, and times outside the sample; version 9
+ * evidence (no Air request was recorded under it) resolves incomplete and stays history, unchanged. Version 11 (WEB-09c revision 16, review
+ * 16 R16-SYNC, design assessment DA16-S1/S2/D1, invariants I1-I5): the P-4/P-10 sync support is `sync-request-sample/3` (the mark's and
+ * the read's typed page times as one interval enclosing every retained trace line and request entry, the lines' times never going back,
+ * a started engine, the exact `/sync` pathname) and each sync mark follows the previous sample's read in time; the draft support is
+ * `draft-request-sample/4` (the dispatcher's request and every retained entry the exact `/commands` pathname, every entry inside
+ * [t0, completion.at]). Version 10's sync support accepted a read timed before its mark, absent observation times, a step end traced
+ * before its tick and an entry to another path; version 10 evidence (no Air request was recorded under it) resolves incomplete and stays
+ * history, unchanged.
  */
-export const CONTRACT_VERSION = 9;
+export const CONTRACT_VERSION = 11;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [
@@ -498,11 +511,37 @@ export function finishStage(dir, stage, status, seal = {}) {
 }
 
 /**
+ * Why a required sampler's terminal result is not a success (null: it is). Revision 15 (review 15 R15-S1, design assessment DA15-S1,
+ * invariant 8): the sampler must have exited 0 after the stop, with a valid final sample of THIS sampler, stage and invocation root written
+ * after the stop began (no error row: `startLoadSampler`'s `stop()` judges the final row), and the stop itself must not have failed.
+ */
+export function samplerTerminalProblem(stopped) {
+  if (!stopped || typeof stopped !== "object")
+    return "the sampler's stop returned no result";
+  if (stopped.error)
+    return `the sampler could not be stopped: ${stopped.error}`;
+  if (stopped.exit_code !== 0)
+    return `the sampler exited ${stopped.exit_code === null ? "by a signal or without a code" : `with ${stopped.exit_code}`}, not 0`;
+  if (stopped.final_error)
+    return `the sampler's final sample is an error: ${stopped.final_error}`;
+  if (stopped.final_sample !== true)
+    return "the sampler wrote no valid final sample of its own after the stop";
+  return null;
+}
+
+/**
  * Runs one stage's `action` between the sampler's barriers and seals it whatever happens: the sampler must have written a valid first
  * sample before the action starts (otherwise the stage fails closed), the action's interval is recorded inside it, a throw is recorded as
  * a failure, and the sampler's final sample is written after the action. `sample(dir, stage, context)` starts the sampler with the
  * invocation's isolation `context`, which the stage record keeps; a sampled stage without its invocation's context fails before its action.
  * Returns the exit status.
+ *
+ * Revision 15 (review 15 R15-S1, DA15-S1): the status is the REDUCTION of the action's and the required sampler's outcomes. A requested
+ * sampler that gives no ready handle with a `stop` is a startup failure (the action never runs). The stop is awaited in its own try/catch
+ * (a synchronous throw or a rejection is recorded, never escapes); a sampler that did not finish successfully (`samplerTerminalProblem`)
+ * turns an action's 0 into 1 and is sealed as `sampler.problem` beside the action's own `failure`, and a non-zero action status is kept.
+ * The returned status is the sealed `exit_status`; both drivers continue or exit on it. An unsampled stage (`sample` null: the handoff) is
+ * exempt from sampling only.
  */
 export async function runStage(
   dir,
@@ -527,6 +566,16 @@ export async function runStage(
         `stage ${stage} has no isolation context of its invocation ${invocation}: the stage cannot be judged and does not run`,
       );
     sampler = sample ? await sample(dir, stage, context) : null;
+    if (
+      sample &&
+      (sampler?.ready !== true || typeof sampler.stop !== "function")
+    ) {
+      const given = sampler;
+      sampler = null;
+      throw new Error(
+        `the load sampler of stage ${stage} gave no ready handle (${given === null || given === undefined ? "none" : "not ready or no stop"}): the stage cannot be judged and does not run`,
+      );
+    }
     started = new Date().toISOString();
     status = (await action()) ?? 1;
   } catch (error) {
@@ -535,10 +584,14 @@ export async function runStage(
   } finally {
     finished = new Date().toISOString();
     if (sampler)
-      stopped = await sampler.stop().catch((error) => ({
-        error: String(error).slice(0, 200),
-      }));
+      try {
+        stopped = await sampler.stop();
+      } catch (error) {
+        stopped = { error: String(error).slice(0, 200) };
+      }
   }
+  const problem = sampler ? samplerTerminalProblem(stopped) : null;
+  if (problem && status === 0) status = 1;
   finishStage(dir, stage, status, {
     action_started_at: started,
     action_finished_at: finished,
@@ -552,6 +605,8 @@ export async function runStage(
           exit_code: stopped?.exit_code ?? null,
           samples: stopped?.samples ?? null,
           error: stopped?.error ?? null,
+          final_error: stopped?.final_error ?? null,
+          problem,
         }
       : null,
     failure,

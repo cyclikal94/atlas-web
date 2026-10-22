@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import {
+  COMMANDS_PATH,
   draftWitnessSelection,
+  SYNC_PATH,
   syncWitnessSelection,
 } from "../../scripts/lib/profile-sample-rules.mjs";
 import { w4 } from "../../scripts/lib/profile-workloads.mjs";
@@ -159,6 +161,61 @@ test("P-2 and P-4 selectors: a lapsed sample is refused as no written page; heal
     [2, 1],
     [3, 1],
   ]);
+  // Revision 16 (review 16 R16-SYNC, design assessment DA16-S1/S2, Q7): the real writer stores the exact pathname; its mark and read
+  // enclose every retained line (within the trace's 1 ms rounding) and entry (the same unrounded clock); lines never go back; each mark
+  // follows the previous read in position and time.
+  for (const [k, e] of c.samples.entries()) {
+    expect(e.resources.map((r) => r.name)).toEqual([SYNC_PATH]);
+    expect(e.mark.at).toBeLessThanOrEqual(e.read.at);
+    const times = e.lines.map((l) => Number(l.split("ms")[0]));
+    expect(times).toEqual([...times].sort((a, b) => a - b));
+    for (const ms of times) {
+      expect(ms).toBeGreaterThanOrEqual(e.mark.at - 1);
+      expect(ms).toBeLessThanOrEqual(e.read.at + 1);
+    }
+    for (const r of e.resources) {
+      expect(r.startTime).toBeGreaterThanOrEqual(e.mark.at);
+      expect(r.responseEnd).toBeLessThanOrEqual(e.read.at);
+    }
+    const previous = c.samples[k - 1];
+    if (previous) {
+      expect(e.mark.from).toBeGreaterThanOrEqual(previous.read.to);
+      expect(e.mark.at).toBeGreaterThanOrEqual(previous.read.at);
+    }
+  }
+  // LABELLED CONSUMER-INTEGRITY COPIES (not a writer's output): review 16's contradictions applied to a copy of a REAL witness are refused;
+  // the unedited copy is complete.
+  const real = c.samples[0];
+  if (!real) throw new Error("no sample");
+  const copy = (edit: (w: SyncWitness) => void) => {
+    const w = structuredClone(real) as SyncWitness;
+    edit(w);
+    return syncWitnessSelection(w);
+  };
+  expect(copy(() => {}).status).toBe("complete");
+  expect(
+    copy((w) => {
+      w.read.at = w.mark.at - 1000;
+    }).problem,
+  ).toBe("its read is timed before its mark");
+  expect(
+    copy((w) => {
+      delete (w.mark as { at?: number }).at;
+      delete (w.read as { at?: number }).at;
+    }).problem,
+  ).toBe("its mark records no finite, non-negative page time");
+  expect(
+    copy((w) => {
+      const i = real.selected.end - w.mark.from;
+      w.lines[i] = (w.lines[i] ?? "").replace(/^-?\d+ms/, "1ms");
+    }).problem,
+  ).toMatch(/^a trace line \(\d+\) precedes the sample's mark$/);
+  expect(
+    copy((w) => {
+      const r = w.resources[0];
+      if (r) r.name = "/not-sync";
+    }).problem,
+  ).toBe("a retained request entry is not the /sync endpoint (/not-sync)");
 });
 
 /**
@@ -243,6 +300,67 @@ test("P-4/P-10 natively: a step that ended with no request is the sample's failu
     lapsed.witness.lines[(s.selected?.end ?? 0) - lapsed.mark.from],
   ).toContain('"state":"running"');
   await waitForState(page, "idle");
+  // (4) Revision 16 (DA16-S1, Q7): a healthy step read late, after a LATER real step and its own request, is still that step with the
+  // same values; the later request is retained inside the read and excluded. A second same-origin tab's own /sync fetch during a sample
+  // is in that tab's ResourceTiming, never this page's.
+  const timely = await markAndRead(page);
+  const first = syncWitnessSelection(timely.witness);
+  expect(first.status, String(first.problem)).toBe("complete");
+  await page.evaluate(() => window.__atlasData?.nudgeSync());
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (from) =>
+          (window.__atlasData?.engineTrace ?? [])
+            .slice(from)
+            .filter((l) => l.split(" ")[1] === "data.sync_next").length,
+        timely.witness.read.to,
+      ),
+    )
+    .toBeGreaterThan(0);
+  const lateRead = (await page.evaluate(readSyncSample, {
+    mark: timely.mark,
+    force: true,
+  })) as SyncWitness;
+  expect(lateRead.resources.map((r) => r.name)).toEqual([SYNC_PATH, SYNC_PATH]);
+  expect(syncWitnessSelection(lateRead)).toEqual(first);
+  await waitForState(page, "idle");
+  const other = await context.newPage();
+  // A same-origin JSON document (the stubbed identity read): no app boots in the other tab.
+  await other.goto("/api/experimental/v1/browser-sessions/current");
+  const sampleMark = (await (
+    await page.waitForFunction(prepareSyncSample, undefined, {
+      timeout: 60_000,
+      polling: 10,
+    })
+  ).jsonValue()) as SyncMark;
+  const status = await other.evaluate(async () => {
+    const r = await fetch("/api/experimental/v1/sync?limit=1", {
+      credentials: "same-origin",
+    });
+    await r.text();
+    return r.status;
+  });
+  expect(status).toBe(200);
+  expect(
+    await other.evaluate(
+      () =>
+        performance
+          .getEntriesByType("resource")
+          .filter((e) => new URL(e.name).pathname.endsWith("/sync")).length,
+    ),
+  ).toBe(1);
+  const alongside = (await (
+    await page.waitForFunction(
+      readSyncSample,
+      { mark: sampleMark, force: false },
+      { timeout: 60_000, polling: 10 },
+    )
+  ).jsonValue()) as SyncWitness;
+  expect(alongside.resources).toHaveLength(1);
+  expect(syncWitnessSelection(alongside).status).toBe("complete");
+  await other.close();
+  await waitForState(page, "idle");
   // (3) An engine started again between the mark and the read.
   const mark = (await (
     await page.waitForFunction(prepareSyncSample, undefined, {
@@ -306,7 +424,54 @@ test("P-4 draft natively: healthy drafts are one send, its answer and its reques
       kind: "row",
       status: "acknowledged",
     });
+    // Revision 15 (`draft-request-sample/3`; review 15 R2): the real records are complete for their kinds and ordered in time inside the
+    // sample, each result repeats its call, and the completion read's recorded start follows the receipt's result in position and time.
+    for (const [i, r] of e.records.entries()) {
+      expect(Number.isFinite(r.at) && r.at >= e.mark.t0).toBe(true);
+      if (i > 0) expect(r.at).toBeGreaterThanOrEqual(e.records[i - 1]?.at ?? 0);
+      if (r.event.startsWith("commit_"))
+        expect(r.service).toEqual(expect.any(Number));
+    }
+    for (const [end, call] of [
+      [1, 0],
+      [3, 2],
+      [5, 4],
+    ] as const) {
+      expect(e.records[end]?.of).toBe(e.records[call]?.seq);
+      for (const k of [
+        "dispatcher",
+        "service",
+        "plan",
+        "local_id",
+        "epoch",
+        "key",
+        "path",
+      ] as const)
+        expect(e.records[end]?.[k]).toEqual(e.records[call]?.[k]);
+    }
+    expect(e.completion.log_before).toBe((e.records[5]?.seq ?? -1) + 1);
+    expect(e.records[5]?.at).toBeLessThanOrEqual(e.completion.started_at);
+    expect(e.timing.done).toBeLessThanOrEqual(e.completion.started_at);
+    expect(e.completion.started_at).toBeLessThanOrEqual(e.completion.at);
+    // Revision 16 (`draft-request-sample/4`; DA16-D1, Q7): the real request and entry are the exact /commands pathname, and the entry lies
+    // inside [t0, completion read], ending by the timing read.
+    expect(e.records[2]?.path).toBe(COMMANDS_PATH);
+    expect(e.resources.map((r) => r.name)).toEqual([COMMANDS_PATH]);
+    for (const r of e.resources) {
+      expect(r.startTime).toBeGreaterThanOrEqual(e.mark.t0);
+      expect(r.responseEnd).toBeLessThanOrEqual(e.timing.done);
+    }
   }
+  // LABELLED CONSUMER-INTEGRITY COPY (not a writer's output): the request, its result and its entry all moved to another endpoint.
+  const foreign = structuredClone(healthy.samples[0]) as DraftWitness;
+  for (const r of foreign.records)
+    if (r.event === "request_begin" || r.event === "request_end")
+      (r as { path?: string }).path = "/api/experimental/v1/task-commands";
+  if (foreign.resources[0])
+    foreign.resources[0].name = "/api/experimental/v1/task-commands";
+  expect(draftWitnessSelection(foreign).problem).toBe(
+    "a retained request entry is not the /commands endpoint (/api/experimental/v1/task-commands)",
+  );
   net.commandScript.push(() => ({ abort: true }));
   const aborted = await collectDraftSamples(samplePageOf(page), {
     ...options,

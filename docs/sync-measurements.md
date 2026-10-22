@@ -129,6 +129,21 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > BEFORE it awaits the receipt transaction, so the answer is not the end of the operation. Revision 14 closes each draft sample on the observed dispatcher's
 > own admitted receipt of that draft, with the binding checked across every await (contract version 9, below). No measurement was taken under version 8,
 > and no figure here changes.
+>
+> **Status after review 15 (revision 15, 15 October 2026).** Review 15 found that the consumer still accepted contradictory completion records (a receipt
+> result that omitted its service, named another plan or epoch than its call, carried no time or a time after the completion read, and a completion read
+> timed before the enqueue all completed the sample and supported the desktop decision in an otherwise complete synthetic package), and that a stage
+> whose load sampler died after readiness sealed `exit_status: 0` and let the next stage start. Revision 15 checks every dispatch record against its kind
+> and every result against its call, requires one ordered interval and the receipt's result before the completion read's recorded start
+> (`draft-request-sample/3`, contract version 10, below), and makes a stage's status the reduction of its action and its required sampler. No
+> measurement was taken under version 9, and no figure here changes.
+>
+> **Status after review 16 (revision 16, 16 October 2026).** Review 16 found the sync counterpart unchecked: a sync witness whose read was timed before its
+> mark, whose mark and read times were both missing, whose step end was traced before its tick, or whose one entry was named `/not-sync` still completed
+> its sample and supported the desktop decision in an otherwise complete synthetic package (P-4 and P-10, all three engines). The design assessment added a
+> whole witness translated earlier in time and a draft whose request, result and entry agree on another endpoint. Revision 16 closes each sync sample's
+> observation interval and requires the exact endpoint pathname for both request kinds (`sync-request-sample/3`, `draft-request-sample/4`, contract
+> version 11, below). No measurement was taken under version 10, and no figure here changes.
 
 ## Read this first
 
@@ -501,6 +516,10 @@ From revision 2 (review 2, design assessment), the unit of evidence is a **cell*
   protocol) is judged over its own window by the samples of **its own stage only**; another stage's samples never fill a gap;
 * a stage's action runs between its sampler's barriers: the sampler must have written a valid first sample before it (otherwise the stage fails before its action),
   and writes a final one after it; the stage record is sealed whatever happens, with the action's interval, the sampler's state and any failure;
+* (revision 15, review 15 R15-S1) a sampled stage succeeds only if its action succeeds AND its sampler finished successfully: exit 0 after the stop and a
+  valid final sample of its own process, stage, invocation and root written after the stop began (a final marker on an error row is not one); otherwise a
+  zero action status becomes 1 and the sampler's problem is sealed beside any action failure (a non-zero action status is kept). A sampler that gives no
+  ready handle is a startup failure. Both drivers continue or exit on that status, so a stage whose sampler died is never followed by the next stage;
 * a stage whose sampler was not ready, wrote no final sample, wrote a malformed sample, whose clock went backwards or that left a gap of more than two intervals
   judges its cells `unknown`; only `clean` is isolated, and there is still no CPU tolerance;
 * a 5 s poll cannot prove that no short foreign job ran between two samples: final timings need a protected controller.
@@ -610,6 +629,29 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   [send, answer] and seen by the timing read. Each mark follows the previous completion read. Segments unchanged: `record` ends at the answer event and so
   does NOT include the receipt transaction (the method text says so); completion time is evidence, not an endpoint. Version-8 draft support resolves
   incomplete and stays history.
+* **Completion evidence is checked against its own calls and one interval (revision 15; contract version 10).** The witness is `draft-request-sample/3`.
+  Every dispatch record is parsed by its kind (a commit always names its service, plan, local ID and epoch; a request its key and path; a result its call,
+  outcome and that outcome's fields); a missing, null, non-finite or mistyped field is malformed, never a wildcard. Every result is its call's only one and
+  repeats its call's identity (dispatcher, service, plan, local ID and epoch; a request's key and path); the delivery run is kept and must be the
+  sample's. The records' times never go back and lie between the mark and the completion read's end; the outbox lines likewise within their 1 ms
+  rounding; each read's record position and its time agree (every earlier record no later, every later one no earlier). The completion read records
+  its start (`started_at`, `log_before`) before it awaits the row, and the receipt's result must lie before it: a result delivered during the read cannot
+  be corroborated by it. The dispatcher's request path must be its `/commands` entry's. The consumer also refuses a mark taken before the previous
+  sample's completion read ended. The six values and P-10's reuse are unchanged; version-9 draft support resolves incomplete and stays history.
+* **Every request sample is one closed observation of its exact endpoint (revision 16; contract version 11).** Sync (`sync-request-sample/3`): the mark's
+  and the read's own times (`performance.now()`, unrounded) must be finite, non-negative numbers with the mark no later than the read; every retained trace
+  line must be timed (the engine trace stamps every line), its rounded times never go back (no allowance between two rounded lines), and each lies inside
+  [mark, read] within the trace's 1 ms rounding, judged on the WHOLE retained slice (a later step's lines too) separately from the selection, which is
+  unchanged. The engine must have been started (a recorded start and an integer generation; two matching absent generations are not an engine), and the
+  buffer count must cover the retained entries. Both request kinds: every retained ResourceTiming entry must be named exactly the pathname the writer
+  stores (`/api/experimental/v1/sync`, `/api/experimental/v1/commands`, the API client's `API_BASE`; a query is never part of it; a suffix or substring test
+  would admit `/not-sync`) and lie inside the observation on the page clock (sync: [mark, read]; draft (`draft-request-sample/4`): [t0, completion read],
+  the selected entry ending by the timing read). Malformed or foreign entries are refused, never filtered out. The draft's request, its result and its entry
+  agreeing on another endpoint is refused by the entry's pathname; the dispatcher's request path must still be its entry's. The consumer also refuses a sync
+  mark taken before the previous sample's read (a tie is valid), so a whole witness translated earlier with its durations kept is refused; the collector
+  refuses such a mark too. Every metric definition, count, workload, throttle and timer is unchanged; version-10 support resolves incomplete and stays
+  history. The synthetic programme's sync reads now close after the last line they retain (a labelled harness correction: a later step's tick previously
+  followed its read).
 * **Device results are schema 4 (revision 12; schema 3 below is its predecessor).** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
   admitted run's figures must equal; W5 and killed attempts carry none. Schema 4 adds the run's own observation (made by the page with the same cold

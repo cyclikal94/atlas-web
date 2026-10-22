@@ -1427,6 +1427,10 @@ function derivedProblems(where, e, selection, segment, value) {
  * `/sync` entry) is re-derived with the writers' own rule (scripts/lib/profile-sample-rules.mjs): the first real step after the mark,
  * closed by its own end, one commit, the one request inside it and none before or overlapping it. A step that ended without a commit, an
  * earlier step's start, a second request, a reload or an engine start never yields a value. Latency does not require a written page.
+ * Contract version 11 (`sync-request-sample/3`, revision 16, review 16 R16-SYNC, design assessment DA16-S1/S2, invariants I1-I5): the rule
+ * also requires the mark's and the read's typed times as an interval enclosing every retained line and entry, and the exact `/sync`
+ * pathname; here each mark must also follow the previous sample's read in time (positions were already framed; a tie is valid), so a
+ * whole witness translated earlier with its durations kept is refused.
  */
 function syncSupportProblems(ev, file, segment, samples, row, engine) {
   const { problems, v } = supportFrameProblems(
@@ -1439,6 +1443,11 @@ function syncSupportProblems(ev, file, segment, samples, row, engine) {
   );
   if (problems.length) return problems;
   for (const [k, e] of v.samples.entries()) {
+    // The page's clock: a mark taken before the previous sample's read overlaps it (the frame compares positions).
+    if (k > 0 && !(e.mark.at >= v.samples[k - 1].read.at))
+      return [
+        `sample ${k}: it overlaps the previous sample's operation in time`,
+      ];
     const found = derivedProblems(
       `sample ${k}`,
       e,
@@ -1458,7 +1467,11 @@ function syncSupportProblems(ev, file, segment, samples, row, engine) {
  * observed dispatcher's own applied/admitted receipt of that draft (same dispatcher, run, service and epoch; nothing else recorded or traced
  * up to the completion read; the binding unchanged across every await; the row through the bound service corroborating), re-derived with
  * the writers' rule. Each mark follows the previous completion read. A first attempt that got no answer never donates its send time, and
- * no later attempt, replacement page or unreadable read completes one.
+ * no later attempt, replacement page or unreadable read completes one. Contract version 10 (`draft-request-sample/3`, revision 15, review
+ * 15 R2, DA15-R2a/R2b): the rule also checks every record's schema and its call, the closed time interval and the completion read's
+ * recorded start; here each mark's `t0` must not precede the previous sample's completion read in time either. Contract version 11
+ * (`draft-request-sample/4`, revision 16, DA16-D1): the dispatcher's request and every retained entry are the exact `/commands` pathname,
+ * and every entry lies inside [t0, completion.at].
  */
 function draftSupportProblems(ev, file, segment, samples, row, engine) {
   const { problems, v } = supportFrameProblems(
@@ -1472,6 +1485,11 @@ function draftSupportProblems(ev, file, segment, samples, row, engine) {
   );
   if (problems.length) return problems;
   for (const [k, e] of v.samples.entries()) {
+    // The page's clock: a mark taken before the previous sample's completion read ended overlaps it (the frame compares positions).
+    if (k > 0 && !(e.mark.t0 >= v.samples[k - 1].completion.at))
+      return [
+        `sample ${k}: it overlaps the previous sample's operation in time`,
+      ];
     const found = derivedProblems(
       `sample ${k}`,
       e,

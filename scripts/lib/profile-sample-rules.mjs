@@ -12,16 +12,35 @@
 //          one `data.sync_commit` between them (latency needs no written page: its value is recorded, not judged), and the ONE `/sync`
 //          ResourceTiming entry inside [tick, commit] (1 ms trace rounding) with no other entry before the step or overlapping it. A step
 //          that ends with no commit fails the sample at that end; nothing later can repair it.
-//   draft  `draft-request-sample/2` (revision 14, review 14 R2): no draft waiting at the mark, the enqueue, ONE first send (`resend:
+//   draft  `draft-request-sample/3` (revision 15, review 15 R2): no draft waiting at the mark, the enqueue, ONE first send (`resend:
 //          false`) after it, its answer (a receipt) and the ONE `/commands` entry inside [send, answer]; completion is the observed
 //          dispatcher's own applied/admitted receipt of that local ID, by the same dispatcher, run and service, with nothing else recorded
-//          or traced up to the completion read, and the binding unchanged across every await. Revision 13's `draft-request-sample/1` closed
-//          the sample on any later queue status but queued/in_flight (an unreadable read, a replaced page, a later retry's row).
+//          or traced up to the completion read, and the binding unchanged across every await. Every record is checked against its kind's
+//          schema and every result against its own call; the records and the trace are one closed, ordered interval, and the receipt's
+//          result was delivered before the completion read began. Revision 14's `/2` accepted a result that omitted its service, named
+//          another plan or epoch than its call, carried no time or a time after the read, and a completion read before the mark (review
+//          15); revision 13's `/1` closed the sample on any later queue status but queued/in_flight.
+//
+// Revision 16 (review 16 R16-SYNC, design assessment DA16-S1/S2/D1/H1, invariants I1-I8): positions, identities and derived values agreeing with
+// each other did not prove the observation they claim. `sync-request-sample/3` types the mark's and the read's own times and closes the
+// interval between them: every retained trace line is timed, its times never go back, and they lie inside [mark.at, read.at] within the
+// trace rounding; the engine was started (a generation, not two matching absent ones); the inventory count covers the retained entries.
+// Every retained request entry, for both helper callers, is the EXACT configured endpoint pathname the writer stores (`SYNC_PATH`,
+// `COMMANDS_PATH`), never a label, and lies inside the observation on the page clock. `draft-request-sample/4` adds the draft's endpoint
+// (its request, result and entry agreeing on a foreign path is not `/commands`) and the observation bounds of its entries. Revision 15's
+// `/2` sync rule accepted a read timed before its mark, absent times, a step end traced before its tick and an entry named `/not-sync`.
 //
 // Pending (the operation has not finished) is distinct from invalid (it finished, or the witness shows it cannot be the sample's).
 
-export const SYNC_WITNESS_METHOD = "sync-request-sample/2";
-export const DRAFT_WITNESS_METHOD = "draft-request-sample/2";
+export const SYNC_WITNESS_METHOD = "sync-request-sample/3";
+export const DRAFT_WITNESS_METHOD = "draft-request-sample/4";
+/**
+ * The pathnames the measurement writers store for their requests (`new URL(entry.name).pathname`): `apiUrl("/sync")` and
+ * `apiUrl("/commands")` under `API_BASE` (src/lib/api-client/wire.ts; tests/profiling/profile-samples.test.ts checks the route). A query
+ * is never part of a stored pathname. Exact: a suffix or substring test would admit `/not-sync`.
+ */
+export const SYNC_PATH = "/api/experimental/v1/sync";
+export const COMMANDS_PATH = "/api/experimental/v1/commands";
 /** The trace's own millisecond rounding (`Math.round(performance.now())`): a resource time may lie up to this far outside its line. */
 export const TRACE_ROUNDING_MS = 1;
 /** The default ResourceTiming buffer: at this many entries the browser drops new ones, so the inventory may be incomplete. */
@@ -30,6 +49,7 @@ export const RESOURCE_BUFFER = 250;
 const isObj = (x) => typeof x === "object" && x !== null && !Array.isArray(x);
 const isCount = (x) => Number.isInteger(x) && x >= 0;
 const fin = (x) => typeof x === "number" && Number.isFinite(x);
+const isText = (x) => typeof x === "string" && x !== "";
 const eventOf = (line) => {
   const parts = String(line ?? "").split(" ");
   return parts.length >= 2 && /^-?\d+ms$/.test(parts[0]) ? parts[1] : null;
@@ -61,7 +81,13 @@ const pending = (problem) => ({
   values: null,
 });
 
-/** The shape, page identity and trace continuity every witness shares; a problem string or null. */
+/** A page time: a finite, non-negative number (never a string, null or a coerced value). */
+const isPageTime = (x) => fin(x) && x >= 0;
+
+/**
+ * The shape, page identity, trace continuity and observation interval of a sync witness (revision 16, invariant I1); a problem string or
+ * null. The mark's and the read's own times are the page clock's (`performance.now()`, unrounded) and must be an interval.
+ */
 function frameProblem(w) {
   if (!isObj(w) || !isObj(w.mark) || !isObj(w.read))
     return "the witness is not a mark and a read";
@@ -69,7 +95,7 @@ function frameProblem(w) {
     return "the witness retains no trace slice";
   if (!Array.isArray(w.resources)) return "the witness retains no requests";
   if (
-    typeof w.mark.page !== "string" ||
+    !isText(w.mark.page) ||
     w.read.page !== w.mark.page ||
     !fin(w.mark.time_origin) ||
     w.read.time_origin !== w.mark.time_origin
@@ -77,27 +103,76 @@ function frameProblem(w) {
     return "the page was reloaded or replaced during the sample";
   if (!isCount(w.mark.from) || w.read.to !== w.mark.from + w.lines.length)
     return "its trace slice is not contiguous from the mark to the read";
+  if (!isPageTime(w.mark.at))
+    return "its mark records no finite, non-negative page time";
+  if (!isPageTime(w.read.at))
+    return "its read records no finite, non-negative page time";
+  if (!(w.mark.at <= w.read.at)) return "its read is timed before its mark";
   if (!isCount(w.read.resource_entries))
     return "the witness does not record the resource buffer's entries";
   if (w.read.resource_entries >= RESOURCE_BUFFER)
     return "the resource-timing buffer was full: requests may be missing";
+  if (w.resources.length > w.read.resource_entries)
+    return "the witness retains more requests than the buffer held";
+  return null;
+}
+
+/**
+ * The retained slice's chronology (revision 16, invariant I2): every line is timed (the engine trace stamps every line), the rounded
+ * times never go back (no rounding allowance between two rounded lines) and each lies inside [mark.at, read.at] within the trace's own
+ * rounding. Judged on the WHOLE slice, separately from the selection, so a later step's lines are held to the observation too without
+ * extending the selected operation. Null, or the problem.
+ */
+function chronologyProblem(w) {
+  let last = Number.NEGATIVE_INFINITY;
+  for (const [i, line] of w.lines.entries()) {
+    const ms = eventOf(line) === null ? Number.NaN : msOf(line);
+    if (!fin(ms))
+      return `a trace line (${w.mark.from + i}) carries no time or event`;
+    if (ms < w.mark.at - TRACE_ROUNDING_MS)
+      return `a trace line (${w.mark.from + i}) precedes the sample's mark`;
+    if (ms > w.read.at + TRACE_ROUNDING_MS)
+      return `a trace line (${w.mark.from + i}) follows the sample's read`;
+    if (ms < last) return `the trace's times go back (line ${w.mark.from + i})`;
+    last = ms;
+  }
   return null;
 }
 
 /**
  * The one request entry of an operation from `from` to `to` (trace times) that closed at `end`: the unique entry inside [from − 1, to + 1];
  * an entry that began before the operation, or overlaps it up to its end without lying inside, makes it ambiguous. Entries that begin
- * after the end belong to later operations and are ignored. Returns `{ request, problem }`.
+ * after the end belong to later operations and are ignored. Revision 16 (invariants I3, I4): `endpoint` is `{ path, label }` and EVERY
+ * retained entry must name exactly `path` (the writer's stored pathname; the label only words the problem) and lie inside the
+ * observation `[observed.from, observed.to]` on the page clock (the entries and the observation times are the same unrounded clock, so no
+ * rounding allowance). A malformed or foreign entry is refused, never filtered out. Returns `{ request, problem }`.
  */
-function oneRequest(resources, from, to, end, label) {
+function oneRequest(resources, from, to, end, endpoint, observed) {
   // Judged once the operation is known, so a relation the trace already refutes (a second send, an earlier step's end) is named first.
+  const { path, label } = endpoint;
   for (const r of resources)
     if (
       !isObj(r) ||
       ![r.startTime, r.requestStart, r.responseEnd].every(fin) ||
-      !(r.startTime <= r.requestStart && r.requestStart <= r.responseEnd)
+      !(
+        r.startTime >= 0 &&
+        r.startTime <= r.requestStart &&
+        r.requestStart <= r.responseEnd
+      )
     )
       return { request: null, problem: "a request entry has no usable timing" };
+  for (const r of resources)
+    if (typeof r.name !== "string" || r.name !== path)
+      return {
+        request: null,
+        problem: `a retained request entry is not the ${label} endpoint (${typeof r.name === "string" ? r.name : String(r.name)})`,
+      };
+  for (const r of resources)
+    if (r.startTime < observed.from || r.responseEnd > observed.to)
+      return {
+        request: null,
+        problem: `a ${label} request entry lies outside the sample's observation`,
+      };
   const inside = [];
   for (const [i, r] of resources.entries()) {
     if (
@@ -125,8 +200,9 @@ function oneRequest(resources, from, to, end, label) {
 }
 
 /**
- * The operation of a `sync-request-sample/2` witness: `{ status: "complete" | "pending" | "invalid", problem, selected, values }`.
- * `selected` holds absolute trace positions (`start`, `commit`, `end`) and the request's index in `resources`.
+ * The operation of a `sync-request-sample/3` witness: `{ status: "complete" | "pending" | "invalid", problem, selected, values }`.
+ * `selected` holds absolute trace positions (`start`, `commit`, `end`) and the request's index in `resources`. Revision 16: the frame's
+ * observation interval, the engine's start and the whole slice's chronology are judged first; the selection is unchanged.
  */
 export function syncWitnessSelection(w) {
   const frame = frameProblem(w);
@@ -137,6 +213,14 @@ export function syncWitnessSelection(w) {
     w.read.generation !== w.mark.generation
   )
     return invalid("the engine was started again during the sample");
+  if (
+    !Number.isInteger(w.mark.epochs) ||
+    w.mark.epochs < 1 ||
+    !Number.isInteger(w.mark.generation)
+  )
+    return invalid("the sample's engine had not been started");
+  const disorder = chronologyProblem(w);
+  if (disorder) return invalid(disorder);
   let start = -1;
   let commit = -1;
   let end = -1;
@@ -169,17 +253,17 @@ export function syncWitnessSelection(w) {
     return invalid(
       `the sample's step ended without a commit (${line(end).trim()}): no later step can stand for it`,
     );
+  // Every line is timed and ordered (the chronology above), so tick <= commit <= end.
   const tick = msOf(line(start));
   const committed = msOf(line(commit));
   const ended = msOf(line(end));
-  if (![tick, committed, ended].every(fin))
-    return invalid("a step line carries no time");
   const { request, problem } = oneRequest(
     w.resources,
     tick,
     committed,
     ended,
-    "/sync",
+    { path: SYNC_PATH, label: "/sync" },
+    { from: w.mark.at, to: w.read.at },
   );
   if (problem) return invalid(problem);
   const r = w.resources[request];
@@ -224,6 +308,159 @@ const LIFECYCLE = [
   "dispatcher_stopped",
   "service_ended",
 ];
+
+// ---- the dispatch records' schema (revision 15, review 15 R2, design assessment DA15-R2a, invariants 1-2) ----------------------------------
+// Each kind's required fields, as src/fixture/data-harness/dispatch-observer.ts writes them. A required field that is absent, null where a
+// value is required, non-finite or of another type makes the record malformed: never a wildcard. A request carries no service or epoch
+// (its actor is its dispatcher, run and key); a commit always carries its service.
+const COMMIT_KINDS = ["commit_begin", "commit_end", "commit_gated"];
+const WRITE_KINDS = ["write_begin", "write_end"];
+const REQUEST_KINDS = ["request_begin", "request_end"];
+const OUTCOMES = {
+  commit_end: ["applied", "dropped", "failed", "threw", "unknown"],
+  request_end: ["response", "error"],
+  write_end: ["ran", "threw"],
+};
+/** The begin kind an end record closes. */
+const BEGIN_OF = {
+  commit_end: "commit_begin",
+  request_end: "request_begin",
+  write_end: "write_begin",
+};
+/** The fields an end record repeats from its call (the run is the run at delivery and may differ: a restart shows). */
+const CALL_FIELDS = {
+  commit_end: ["dispatcher", "service", "plan", "local_id", "epoch"],
+  request_end: ["dispatcher", "key", "path"],
+  write_end: ["dispatcher", "service", "plan", "local_id"],
+};
+const isIdOrNull = (x) => x === null || typeof x === "string";
+const isIntOrNull = (x) => x === null || Number.isInteger(x);
+
+/** Why a retained dispatch record is not a well-formed record of its kind (null: it is). */
+function recordProblem(r) {
+  if (!isObj(r)) return "it is not a record";
+  if (!fin(r.at) || r.at < 0)
+    return "its time is not a finite, non-negative page time";
+  if (!Number.isInteger(r.dispatcher) || r.dispatcher < 0 || !isCount(r.run))
+    return "it names no dispatcher and run";
+  const event = r.event;
+  if (COMMIT_KINDS.includes(event) || WRITE_KINDS.includes(event)) {
+    if (!Number.isInteger(r.service)) return `its ${event} names no service`;
+    if (!isText(r.plan)) return `its ${event} names no plan`;
+    if (!isIdOrNull(r.local_id))
+      return `its ${event}'s local ID is not a string or null`;
+    if (
+      (event === "commit_begin" || event === "commit_end") &&
+      !isIntOrNull(r.epoch)
+    )
+      return `its ${event}'s epoch is not an integer or null`;
+  } else if (REQUEST_KINDS.includes(event)) {
+    if (!isIdOrNull(r.key) || !isText(r.path))
+      return `its ${event} names no key and path`;
+  } else if (event === "service_ended") {
+    if (!isIntOrNull(r.service)) return "its service_ended names no service";
+  } else if (!LIFECYCLE.includes(event))
+    return `its event (${String(event)}) is not a dispatch record`;
+  if (!(event in BEGIN_OF)) return null;
+  if (!isCount(r.of) || r.of >= r.seq)
+    return `its ${event} names no earlier call`;
+  if (!OUTCOMES[event].includes(r.outer))
+    return `its ${event}'s outcome (${String(r.outer)}) is not one of ${OUTCOMES[event].join(", ")}`;
+  if (event === "commit_end") {
+    if (r.outer === "applied" && !isText(r.inner))
+      return "its applied commit_end names no inner result";
+    if (
+      (r.outer === "dropped" || r.outer === "failed") &&
+      typeof r.reason !== "string"
+    )
+      return `its ${r.outer} commit_end names no reason`;
+    if (r.removed !== undefined && typeof r.removed !== "boolean")
+      return "its commit_end's removal is not a boolean";
+  }
+  if (
+    event === "request_end" &&
+    r.outer === "response" &&
+    !Number.isInteger(r.http)
+  )
+    return "its answered request_end names no HTTP status";
+  if (r.outer === "threw" || (event === "request_end" && r.outer === "error"))
+    if (typeof r.error !== "string") return `its ${event} names no error`;
+  return null;
+}
+
+/**
+ * Every end record whose call is in the slice is that call's only result and repeats its identity (invariant 2): null, or the problem. An
+ * end whose call precedes the slice is judged by the selection (it cannot be the sample's).
+ */
+function pairingProblem(records) {
+  const bySeq = new Map(records.map((r) => [r.seq, r]));
+  const closed = new Set();
+  for (const r of records) {
+    if (!(r.event in BEGIN_OF)) continue;
+    const call = bySeq.get(r.of);
+    if (call === undefined) continue;
+    const kind = r.event.slice(0, r.event.indexOf("_"));
+    if (call.event !== BEGIN_OF[r.event])
+      return `a ${kind} result (record ${r.seq}) names a ${String(call.event)} as its call`;
+    if (closed.has(r.of))
+      return `a ${kind} call (record ${r.of}) has two results`;
+    closed.add(r.of);
+    const differ = CALL_FIELDS[r.event].filter((k) => r[k] !== call[k]);
+    if (differ.length > 0)
+      return `a ${kind} result (record ${r.seq}) contradicts its call (${differ.join(", ")})`;
+  }
+  return null;
+}
+
+/**
+ * The closed interval of the sample's observations (invariant 3): the records' times do not go back and lie inside [t0, the completion
+ * read's end]; each watermark (the timing read, the completion read's start, its end) has every earlier record no later and every later
+ * record no earlier than its time; the trace's rounded lines likewise, within the trace rounding. Ties are valid. Null, or the problem.
+ */
+function intervalProblem(w) {
+  const { mark, timing, completion } = w;
+  const marks = [
+    ["the timing read", timing.log_to, timing.done],
+    [
+      "the completion read's start",
+      completion.log_before,
+      completion.started_at,
+    ],
+    ["the completion read's end", completion.log_to, completion.at],
+  ];
+  let previous = mark.t0;
+  for (const r of w.records) {
+    if (r.at < previous)
+      return r.at < mark.t0
+        ? `a dispatch record (${r.seq}) precedes the sample's mark`
+        : `the dispatch records' times go back (record ${r.seq})`;
+    previous = r.at;
+    for (const [what, seq, at] of marks)
+      if (r.seq < seq ? r.at > at : r.at < at)
+        return `a dispatch record's time (${r.seq}) contradicts ${what} (its record position and its time disagree)`;
+  }
+  let last = mark.t0 - TRACE_ROUNDING_MS;
+  for (const [i, text] of w.lines.entries()) {
+    if (eventOf(text) === null) continue;
+    const ms = msOf(text);
+    const at = mark.from + i;
+    if (!fin(ms)) return "an outbox line carries no time";
+    if (ms < last)
+      return ms < mark.t0 - TRACE_ROUNDING_MS
+        ? "an outbox line precedes the sample's mark"
+        : "the outbox trace's times go back";
+    last = ms;
+    if (ms > completion.at + TRACE_ROUNDING_MS)
+      return "an outbox line follows the completion read";
+    if (
+      at < timing.to
+        ? ms > timing.done + TRACE_ROUNDING_MS
+        : ms < timing.done - TRACE_ROUNDING_MS
+    )
+      return "an outbox line's time contradicts the timing read (its position and its time disagree)";
+  }
+  return null;
+}
 
 /** Why the first identity is not a complete binding of an observed, running dispatcher to the sample's account (null: it is). */
 function bindingProblem(w, id) {
@@ -274,17 +511,20 @@ function changeProblem(a, b, where) {
 }
 
 /**
- * The operation of a `draft-request-sample/2` witness (WEB-09c revision 14; review 14 R2, design assessment DA-R14-A/B/C): `{ status, problem,
- * selected, values }`. `selected` holds the absolute outbox trace positions of the send and the answer, the request's index in `resources`
- * and the sequence numbers of the dispatcher's claim, request, receipt call and receipt result.
+ * The operation of a `draft-request-sample/4` witness (WEB-09c revision 15; review 15 R2, design assessment DA15-R2a/R2b; revision 14's
+ * DA-R14-A/B/C kept): `{ status, problem, selected, values }`. `selected` holds the absolute outbox trace positions of the send and the
+ * answer, the request's index in `resources` and the sequence numbers of the dispatcher's claim, request, receipt call and receipt result.
  *
- * Revision 13's rule broke at the first answer and accepted any queue status but `queued`/`in_flight` read later, unfenced: a read that
- * threw, a replacement page's empty queue and a row a later retry acknowledged all passed. Here completion is POSITIVE and the SAME
- * dispatch's: the observed dispatcher's one claim of this local ID (applied/claimed), its one request keyed by it, answered, and its one
- * `data.admitReceipt` of it, applied/admitted, all by the sample's dispatcher, run and service, at its epoch, with nothing else recorded and
- * no further send, answer or failure traced up to the completion read. The identity is the same before and after every await. The row read
- * through the bound service corroborates (`removed` ⇒ gone, otherwise `acknowledged`); a read failure or a contradiction is invalid,
- * never absence. The values are revision 13's: completion is evidence, not an endpoint.
+ * Completion is POSITIVE and the SAME dispatch's: the observed dispatcher's one claim of this local ID (applied/claimed), its one request
+ * keyed by it, answered, and its one `data.admitReceipt` of it, applied/admitted, all by the sample's dispatcher, run and service, at its
+ * epoch, with nothing else recorded and no further send, answer or failure traced up to the completion read; the identity is the same
+ * before and after every await. Revision 15: every record must be well formed for its kind, every result must repeat its call's identity
+ * (dispatcher, service, plan, local ID, epoch; a request's key and path) and be its only result, the records and the trace are ordered in
+ * time inside [t0, the completion read's end] and agree with each read's record position and time, and the receipt's result lies before
+ * the completion read's recorded start (`started_at`, `log_before`): a result delivered during the read cannot be corroborated by it. The
+ * row read through the bound service corroborates (`removed` ⇒ gone, otherwise `acknowledged`); a read failure or a contradiction is
+ * invalid, never absence. The values are revision 13's: completion is evidence, not an endpoint. Revision 16 (`/4`; DA16-D1, I3/I4): the
+ * dispatcher's request is to the `/commands` pathname, and every retained entry is that pathname and lies inside [t0, completion.at].
  */
 export function draftWitnessSelection(w) {
   if (
@@ -347,6 +587,15 @@ export function draftWitnessSelection(w) {
     timing.log_to > completion.log_to
   )
     return invalid("its timing read does not lie inside the sample's records");
+  // Revision 15: the completion read's start, recorded before it awaited the row (record position and time).
+  if (
+    !isCount(completion.log_before) ||
+    completion.log_before < timing.log_to ||
+    completion.log_before > completion.log_to
+  )
+    return invalid(
+      "its completion read records no start inside the sample's records",
+    );
   if (!isCount(completion.resource_entries) || !isCount(timing.requests))
     return invalid("the witness does not record the resource buffer's entries");
   if (completion.resource_entries >= RESOURCE_BUFFER)
@@ -368,9 +617,38 @@ export function draftWitnessSelection(w) {
     );
   if (!fin(mark.t0) || !fin(mark.t1) || !(mark.t0 <= mark.t1))
     return invalid("the enqueue's times are not an interval");
+  // Revision 15 (invariant 3): the reads' own times, in order: the timing read, then the completion read's start and end.
+  if (!fin(timing.done) || timing.at !== timing.done)
+    return invalid("its timing read does not record one time");
+  if (timing.done < mark.t1)
+    return invalid("its timing read's time is not after the enqueue");
+  if (
+    !fin(completion.started_at) ||
+    !fin(completion.at) ||
+    !(timing.done <= completion.started_at) ||
+    !(completion.started_at <= completion.at)
+  )
+    return invalid(
+      "its completion read's times are not after its timing read and in order",
+    );
+  // Every record well formed for its kind, every result its call's only one with its call's identity, and one ordered interval.
+  for (const r of w.records) {
+    const problem = recordProblem(r);
+    if (problem)
+      return invalid(`dispatch record ${r.seq} is malformed: ${problem}`);
+  }
+  const unpaired = pairingProblem(w.records);
+  if (unpaired) return invalid(unpaired);
+  const outside = intervalProblem(w);
+  if (outside) return invalid(outside);
 
   // The dispatcher's records, from the mark to the completion read: the claim, the request and the receipt of THIS draft, and nothing else.
   const L = w.local_id;
+  // The sample's actor: its dispatcher and run, and (a commit) its service.
+  const own = (r) =>
+    r.dispatcher === id.dispatcher &&
+    r.run === id.run &&
+    (!COMMIT_KINDS.includes(r.event) || r.service === id.service);
   let claim = null;
   let claimed = null;
   let issued = null;
@@ -387,26 +665,11 @@ export function draftWitnessSelection(w) {
       note(`the dispatcher's lifecycle changed during the sample (${r.event})`);
       continue;
     }
-    if (r.event === "write_begin" || r.event === "write_end") {
+    if (WRITE_KINDS.includes(r.event)) {
       note(`the dispatcher ran ${String(r.plan)} during the sample`);
       continue;
     }
-    const subject =
-      typeof r.event === "string" && r.event.startsWith("request_")
-        ? r.key
-        : r.local_id;
-    if (
-      ![
-        "commit_begin",
-        "commit_end",
-        "commit_gated",
-        "request_begin",
-        "request_end",
-      ].includes(r.event)
-    ) {
-      note(`an unrecognised dispatch record (${String(r.event)})`);
-      continue;
-    }
+    const subject = REQUEST_KINDS.includes(r.event) ? r.key : r.local_id;
     if (subject !== L) {
       note(
         `another draft's dispatch (${String(r.plan ?? r.path)}) was recorded during the sample`,
@@ -414,8 +677,13 @@ export function draftWitnessSelection(w) {
       continue;
     }
     if (r.event === "commit_gated") {
-      // A qualification gate held the dispatcher's call (its transaction not yet admitted): the receipt is still to come.
-      if (r.plan === "data.admitReceipt" && !receipt) gated = true;
+      // A qualification gate held the dispatcher's call (its transaction not yet admitted): the receipt is still to come. Only the
+      // sample's own actor's receipt call can be held so.
+      if (r.plan !== "data.admitReceipt" || !own(r))
+        note(
+          `the dispatcher held ${String(r.plan)} of another actor or plan during the sample`,
+        );
+      else if (!receipt) gated = true;
       continue;
     }
     if (r.event === "commit_begin") {
@@ -494,14 +762,10 @@ export function draftWitnessSelection(w) {
     return invalid("its send precedes the end of its enqueue");
   if (answer >= timing.to)
     return invalid("its timing read did not see its answer");
-  if (!fin(timing.done) || timing.done < answeredMs - TRACE_ROUNDING_MS)
+  if (timing.done < answeredMs - TRACE_ROUNDING_MS)
     return invalid("the sample was read before its answer");
 
   // The same dispatch, positively: claim → request → receipt, by the sample's dispatcher, run and service, at its epoch.
-  const own = (r) =>
-    r.dispatcher === id.dispatcher &&
-    r.run === id.run &&
-    (r.service === undefined || r.service === id.service);
   if (!claim) return invalid(extra ?? "the sample's claim was not recorded");
   if (!claimed) return invalid(extra ?? "the claim's result was not recorded");
   if (claimed.outer !== "applied" || claimed.inner !== "claimed")
@@ -555,8 +819,6 @@ export function draftWitnessSelection(w) {
     return invalid(
       "the receipt's result does not say whether it removed the row",
     );
-  if (![issued.at, answered.at, receipt.at].every(fin))
-    return invalid("a dispatch record carries no time");
   if (issued.at < sent - TRACE_ROUNDING_MS)
     return invalid("its recorded request precedes its send");
   if (answered.at > answeredMs + TRACE_ROUNDING_MS)
@@ -565,6 +827,11 @@ export function draftWitnessSelection(w) {
     return invalid("its receipt was committed before its answer");
   if (extra) return invalid(extra);
   if (after) return invalid(after);
+  // Revision 15: the receipt's result was delivered before the completion read began, so the read can corroborate it.
+  if (received.seq >= completion.log_before)
+    return invalid(
+      "the receipt's result was delivered during the completion read: the read cannot corroborate it",
+    );
 
   // The row, read through the bound service once the receipt's result was delivered.
   const row = completion.row;
@@ -592,18 +859,27 @@ export function draftWitnessSelection(w) {
   if (completion.waiting !== 0)
     return invalid("another draft was waiting at the completion read");
 
-  // The one `/commands` entry since the mark (the buffer was cleared there), inside [send, answer], seen by the timing read.
+  // The one `/commands` entry since the mark (the buffer was cleared there), inside [send, answer], seen by the timing read, and the
+  // one the dispatcher's request was made to.
+  // Revision 16 (DA16-D1): every retained entry is the /commands endpoint itself (the helper's exact pathname), and the dispatcher's
+  // request (whose result repeats its path: pairing) must be to that entry's path below. Three fields agreeing on a foreign path are
+  // refused by the first; a request to another path than a /commands entry by the second.
   const { request, problem } = oneRequest(
     w.resources,
     sent,
     answeredMs,
     Number.POSITIVE_INFINITY,
-    "/commands",
+    { path: COMMANDS_PATH, label: "/commands" },
+    { from: mark.t0, to: completion.at },
   );
   if (problem) return invalid(problem);
-  if (request >= timing.requests)
-    return invalid("its timing read did not see its request");
   const r = w.resources[request];
+  if (request >= timing.requests || r.responseEnd > timing.done)
+    return invalid("its timing read did not see its request");
+  if (r.name !== issued.path)
+    return invalid(
+      "the dispatcher's request was made to another path than its /commands entry",
+    );
   return {
     status: "complete",
     problem: null,

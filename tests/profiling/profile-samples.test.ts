@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  COMMANDS_PATH,
+  DRAFT_WITNESS_METHOD,
   draftWitnessSelection,
+  SYNC_PATH,
+  SYNC_WITNESS_METHOD,
   syncWitnessSelection,
 } from "../../scripts/lib/profile-sample-rules.mjs";
+import { apiUrl } from "../../src/lib/api-client/wire";
 import {
   closeDraftSample,
   collectDraftSamples,
@@ -16,6 +21,7 @@ import {
   readSyncSample,
   type SamplePage,
   type SyncMark,
+  type SyncWitness,
   selectP2Sample,
 } from "../e2e/profile-samples";
 
@@ -35,10 +41,24 @@ let resources: Array<{
   requestStart: number;
   responseEnd: number;
 }> = [];
-const line = (ms: number, event: string, data?: unknown) =>
+/**
+ * REVISION 16 HARNESS CORRECTION (labelled; review 16 R16-SYNC, design assessment DA16-H1): the sync page's own clock. The production
+ * trace stamps a line with `Math.round(performance.now())` when it is written, and the mark and the read take `performance.now()`; these
+ * doubles scripted trace and entry times without any page clock, so a mark or a read could be timed anywhere. Writing a line now advances
+ * the page clock to it, a page read happens once the entries it sees have ended (`readAt`), and a fresh trace starts a fresh clock
+ * (`restartTrace`). Every schedule, expected value and problem of revisions 12-15 is unchanged; the clock only makes them possible.
+ */
+let pageClock = 0;
+const line = (ms: number, event: string, data?: unknown) => {
+  pageClock = Math.max(pageClock, ms);
   trace.push(
     `${ms}ms ${event} ${data === undefined ? "" : JSON.stringify(data)}`,
   );
+};
+const restartTrace = () => {
+  trace = [];
+  pageClock = 0;
+};
 const SYNC = "http://127.0.0.1:4100/api/experimental/v1/sync?limit=200";
 
 /**
@@ -77,6 +97,7 @@ let harness: HarnessDouble;
 let clears = 0;
 beforeEach(() => {
   trace = [];
+  pageClock = 0;
   resources = [];
   clears = 0;
   harness = {
@@ -156,6 +177,8 @@ beforeEach(() => {
   vi.spyOn(performance, "getEntriesByType").mockImplementation(
     () => resources as unknown as PerformanceEntryList,
   );
+  // Revision 16 (DA16-H1): the sync page clock (the draft schedules below install their own).
+  vi.spyOn(performance, "now").mockImplementation(() => pageClock);
   vi.spyOn(performance, "clearResourceTimings").mockImplementation(() => {
     clears += 1;
     resources = [];
@@ -277,8 +300,16 @@ const mark = (): SyncMark => {
   if (!m) throw new Error("a step is open");
   return m;
 };
-const witnessOf = (m: SyncMark, force = false) =>
-  inPage.readSyncSample({ mark: m, force });
+/** A page read once the entries it sees have ended (revision 16, DA16-H1): the clock is at least every visible entry's end. */
+const readAt = () => {
+  for (const r of resources)
+    if (Number.isFinite(r.responseEnd))
+      pageClock = Math.max(pageClock, r.responseEnd);
+};
+const witnessOf = (m: SyncMark, force = false) => {
+  readAt();
+  return inPage.readSyncSample({ mark: m, force });
+};
 const select = (m: SyncMark) => syncWitnessSelection(witnessOf(m, true));
 const healthyLines = (t: number) => {
   line(t, "data.sync_tick", { why: "now", coalesced: false });
@@ -418,14 +449,14 @@ describe("P-4/P-10 sync: the mark, the page read and the rule (Q1)", () => {
     expect(syncWitnessSelection(witnessOf(m))?.problem).toBe(
       "a second step started before the sample's step ended",
     );
-    trace = [];
+    restartTrace();
     m = mark();
     line(100, "data.sync_tick", { why: "now", coalesced: false });
     line(105, "data.sync_commit", { kind: "applied", value: "committed" });
     line(106, "data.sync_commit", { kind: "applied", value: "committed" });
     line(107, "data.sync_next", { when: "after", state: "idle" });
     expect(select(m).problem).toBe("the sample's step traced two commits");
-    trace = [];
+    restartTrace();
     m = mark();
     line(105, "data.sync_commit", { kind: "applied", value: "committed" });
     expect(syncWitnessSelection(witnessOf(m))?.problem).toBe(
@@ -563,7 +594,7 @@ const healthyStep = (pre = 2 + (steps++ % 3) * 0.5) => {
       line(t + 15, "data.sync_commit", { kind: "applied", value: "committed" });
     },
     () => line(t + 16, "data.sync_next", { when: "after", state: "idle" }),
-  ];
+  ] as const;
 };
 /** Review 13's no-request step (a stop) and, later, a requesting timer step. */
 const stoppedThenTimer = () => {
@@ -666,7 +697,7 @@ describe("P-4/P-10 sync: the shared collector both writers call (Q2)", () => {
     });
     expect(c.samples).toEqual([]);
     expect(c.failure).toMatchObject({ index: 0, warmup: true });
-    trace = [];
+    restartTrace();
     actions = [];
     harness.onNudge = () =>
       actions.push(() =>
@@ -685,6 +716,653 @@ describe("P-4/P-10 sync: the shared collector both writers call (Q2)", () => {
     expect(
       (d.failure?.witness as { lines: string[] } | undefined)?.lines,
     ).toHaveLength(1);
+  });
+});
+
+describe("P-4/P-10 sync: consecutive samples in one collector (revision 16, review 16 R16-SYNC, DA16-S2, Q3)", () => {
+  beforeEach(() => {
+    actions = [];
+    at = 1_000;
+    steps = 0;
+  });
+  /** The collector's page with the n-th mark (from 1) edited as it leaves the page: a mark the page clock or trace could not produce. */
+  const editedMark = (
+    n: number,
+    edit: (m: SyncMark) => SyncMark,
+  ): SamplePage => {
+    const base = scripted();
+    let marks = 0;
+    return {
+      async poll(fn, arg, o) {
+        const out = await base.poll(fn, arg, o);
+        if ((fn as unknown) !== prepareSyncSample) return out;
+        marks += 1;
+        return (marks === n ? edit(out as SyncMark) : out) as typeof out;
+      },
+      run: base.run,
+    };
+  };
+
+  it("control: each mark follows the previous read in position and time, a tie included (the page clock does not move between a read and the next mark)", async () => {
+    harness.onNudge = () => actions.push(...healthyStep());
+    const c = await collectSyncSamples(scripted(), {
+      ...OPTIONS,
+      warmup: 1,
+      samples: 3,
+    });
+    expect(c.failure).toBeNull();
+    for (const [k, e] of c.samples.entries()) {
+      expect(e.mark.at).toBeLessThanOrEqual(e.read.at);
+      if (k > 0) {
+        const previous = c.samples[k - 1]?.read;
+        expect(e.mark.from).toBeGreaterThanOrEqual(previous?.to ?? Infinity);
+        expect(e.mark.at).toBe(previous?.at);
+      }
+    }
+  });
+
+  it("cases: a mark timed before the previous read, or positioned before its end, stops the collection at that sample with its mark kept; nothing further is nudged", async () => {
+    for (const [edit, label] of [
+      [(m: SyncMark) => ({ ...m, at: m.at - 5 }), "time"],
+      [(m: SyncMark) => ({ ...m, from: m.from - 1 }), "position"],
+    ] as const) {
+      restartTrace();
+      actions = [];
+      harness.nudges = 0;
+      harness.onNudge = () => actions.push(...healthyStep());
+      const c = await collectSyncSamples(editedMark(3, edit), {
+        ...OPTIONS,
+        warmup: 1,
+        samples: 3,
+      });
+      expect(c.failure, label).toMatchObject({
+        index: 2,
+        warmup: false,
+        problem: "the sample's mark does not follow the previous sample's read",
+      });
+      expect(c.failure?.witness).toMatchObject({ mark: expect.any(Object) });
+      expect(
+        c.samples.map((e) => e.index),
+        label,
+      ).toEqual([1]);
+      expect(harness.nudges, label).toBe(3);
+    }
+  });
+
+  it("cases (Q3): a second ResourceTiming clear during a sample (another collector on the page) leaves the step's request unseen: the read waits, is forced at the time-out and fails, never borrowing a later entry; a stop traced after a completed step does not undo it", async () => {
+    harness.onNudge = () => {
+      const [tick, requestAndCommit, end] = healthyStep();
+      actions.push(
+        tick,
+        () => {
+          requestAndCommit();
+          resources = [];
+        },
+        end,
+      );
+    };
+    const c = await collectSyncSamples(scripted(12), {
+      ...OPTIONS,
+      warmup: 0,
+      samples: 2,
+    });
+    expect(c.samples).toEqual([]);
+    expect(c.failure).toMatchObject({
+      index: 0,
+      problem:
+        "0 /sync requests lie inside the operation (0 since the sample began)",
+    });
+    expect(harness.nudges).toBe(1);
+    // A stop after the step ended (the engine stopped before the read): the completed step stays the sample.
+    restartTrace();
+    resources = [];
+    actions = [];
+    harness.onNudge = () => {
+      const [tick, requestAndCommit, end] = healthyStep();
+      actions.push(tick, requestAndCommit, () => {
+        end();
+        line(pageClock + 1, "data.sync_next", {
+          when: "event",
+          state: "stopped",
+        });
+      });
+    };
+    const d = await collectSyncSamples(scripted(), {
+      ...OPTIONS,
+      warmup: 0,
+      samples: 1,
+    });
+    expect(d.failure).toBeNull();
+    expect(d.samples[0]?.lines.at(-1)).toContain('"state":"stopped"');
+  });
+});
+
+/**
+ * WEB-09c revision 16 (review 16 R16-SYNC, design assessment DA16-S1, invariants I1-I4, Q0-Q2): `sync-request-sample/3` judged on a
+ * HAND-WRITTEN witness (no generator, no selector as the oracle). Mark at 99.6 (unrounded page clock); trace 20-23: the real tick 100, a
+ * coalesced wake 101, the commit 115 and the end 115 (rounded lines); one entry 100.5/102/110.5 named as the writer stores it; read at
+ * 115.4. Values by hand: pre-issue 2, request 8.5, post-response 4.5, total 15, duration 10.
+ */
+describe("P-4/P-10 sync `sync-request-sample/3`: the observation interval and the endpoint on a hand-written witness (revision 16, Q1/Q2)", () => {
+  const PATH = "/api/experimental/v1/sync";
+  // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+  const healthyWitness = (): any => ({
+    mark: {
+      page: "page-1",
+      time_origin: 1000.5,
+      epochs: 1,
+      generation: 1,
+      from: 20,
+      at: 99.6,
+    },
+    read: {
+      page: "page-1",
+      time_origin: 1000.5,
+      epochs: [],
+      generation: 1,
+      to: 24,
+      at: 115.4,
+      resource_entries: 1,
+    },
+    lines: [
+      '100ms data.sync_tick {"why":"nudge","coalesced":false}',
+      '101ms data.sync_tick {"why":"wake","coalesced":true}',
+      '115ms data.sync_commit {"kind":"applied","value":"committed"}',
+      '115ms data.sync_next {"when":"after","state":"idle"}',
+    ],
+    resources: [
+      { name: PATH, startTime: 100.5, requestStart: 102, responseEnd: 110.5 },
+    ],
+  });
+  const SELECTED = { start: 20, commit: 22, end: 23, request: 0 };
+  const VALUES = {
+    pre_issue_ms: 2,
+    request_ms: 8.5,
+    post_response_ms: 4.5,
+    total_ms: 15,
+    duration_ms: 10,
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: see above
+  const judge = (edit: (w: any) => void) => {
+    const w = healthyWitness();
+    edit(w);
+    return syncWitnessSelection(w);
+  };
+
+  it("the writer's route: the stored pathnames are the API client's (`apiUrl`), without the query, and the methods are the successors", () => {
+    expect(apiUrl("/sync").pathname).toBe(PATH);
+    expect(SYNC_PATH).toBe(PATH);
+    expect(apiUrl("/commands").pathname).toBe(COMMANDS_PATH);
+    expect(new URL(SYNC).pathname).toBe(PATH);
+    expect([SYNC_WITNESS_METHOD, DRAFT_WITNESS_METHOD]).toEqual([
+      "sync-request-sample/3",
+      "draft-request-sample/4",
+    ]);
+    // The page read stores exactly that pathname from a full URL with its query.
+    resources = [{ name: SYNC, startTime: 1, requestStart: 2, responseEnd: 3 }];
+    const m = mark();
+    line(1, "data.sync_tick", { why: "now", coalesced: false });
+    expect(witnessOf(m, true)?.resources.map((r) => r.name)).toEqual([]);
+    resources = [
+      { name: SYNC, startTime: 1.5, requestStart: 2, responseEnd: 3 },
+    ];
+    expect((witnessOf(m, true) as SyncWitness).resources[0]?.name).toBe(PATH);
+  });
+
+  it("controls: the healthy ordinary and 250 ms steps, zero and tied times, the 1 ms trace rounding at each end, a coalesced tail and a later step inside the read keep their hand-computed values", () => {
+    expect(judge(() => {})).toEqual({
+      status: "complete",
+      problem: null,
+      selected: SELECTED,
+      values: VALUES,
+    });
+    // P-10: the proxy holds the response 250 ms.
+    expect(
+      judge((w) => {
+        w.lines[2] =
+          '353ms data.sync_commit {"kind":"applied","value":"committed"}';
+        w.lines[3] = '353ms data.sync_next {"when":"after","state":"idle"}';
+        w.resources[0] = {
+          name: PATH,
+          startTime: 100.5,
+          requestStart: 101,
+          responseEnd: 351,
+        };
+        w.read.at = 353.2;
+      }),
+    ).toEqual({
+      status: "complete",
+      problem: null,
+      selected: SELECTED,
+      values: {
+        pre_issue_ms: 1,
+        request_ms: 250,
+        post_response_ms: 2,
+        total_ms: 253,
+        duration_ms: 250.5,
+      },
+    });
+    // Zero and tied: everything at the page's first millisecond.
+    expect(
+      judge((w) => {
+        w.mark.at = 0;
+        w.read.at = 0;
+        w.lines = [
+          '0ms data.sync_tick {"why":"nudge","coalesced":false}',
+          '0ms data.sync_commit {"kind":"applied","value":"committed"}',
+          '0ms data.sync_next {"when":"after","state":"idle"}',
+        ];
+        w.read.to = 23;
+        w.resources[0] = {
+          name: PATH,
+          startTime: 0,
+          requestStart: 0,
+          responseEnd: 0,
+        };
+      }),
+    ).toMatchObject({
+      status: "complete",
+      selected: { start: 20, commit: 21, end: 22, request: 0 },
+      values: {
+        pre_issue_ms: 0,
+        request_ms: 0,
+        post_response_ms: 0,
+        total_ms: 0,
+        duration_ms: 0,
+      },
+    });
+    // The rounding: a line 1 ms before the mark and 1 ms after the read is inside (the entry stays on the unrounded clock).
+    expect(
+      judge((w) => {
+        w.mark.at = 101;
+        w.resources[0].startTime = 101.5;
+        w.read.at = 114;
+      }),
+    ).toMatchObject({
+      status: "complete",
+      selected: SELECTED,
+      values: { ...VALUES, duration_ms: 9 },
+    });
+    // A coalesced tail and a later real step (its own entry) inside the read: the sample is still the first step's.
+    expect(
+      judge((w) => {
+        w.lines.push(
+          '116ms data.sync_tick {"why":"wake","coalesced":true}',
+          '117ms data.sync_tick {"why":"timer","coalesced":false}',
+          '121ms data.sync_commit {"kind":"applied","value":"committed"}',
+          '121ms data.sync_next {"when":"after","state":"idle"}',
+        );
+        w.read.to = 28;
+        w.read.at = 121.3;
+        w.read.resource_entries = 2;
+        w.resources.push({
+          name: PATH,
+          startTime: 117.5,
+          requestStart: 118,
+          responseEnd: 119.5,
+        });
+      }),
+    ).toEqual({
+      status: "complete",
+      problem: null,
+      selected: SELECTED,
+      values: VALUES,
+    });
+    // A buffer one short of full is complete.
+    expect(
+      judge((w) => {
+        w.read.resource_entries = 249;
+      }).status,
+    ).toBe("complete");
+  });
+
+  it("cases (I1, I2): the observation's own times, the engine's start and the slice's chronology refuse the sample with their own reason, and nothing throws", () => {
+    // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+    const cases: Array<[string, (w: any) => void, string]> = [];
+    const markTime = "its mark records no finite, non-negative page time";
+    const readTime = "its read records no finite, non-negative page time";
+    for (const [what, value] of [
+      ["missing", undefined],
+      ["null", null],
+      ["a string", "99.6"],
+      ["negative", -1],
+    ] as const) {
+      cases.push([
+        `mark time ${what}`,
+        (w) => {
+          if (value === undefined) delete w.mark.at;
+          else w.mark.at = value;
+        },
+        markTime,
+      ]);
+      cases.push([
+        `read time ${what}`,
+        (w) => {
+          if (value === undefined) delete w.read.at;
+          else w.read.at = value;
+        },
+        readTime,
+      ]);
+    }
+    cases.push(
+      // Direct-selector inputs only (JSON writes NaN and Infinity as null, covered above).
+      [
+        "mark time NaN",
+        (w) => {
+          w.mark.at = Number.NaN;
+        },
+        markTime,
+      ],
+      [
+        "read time Infinity",
+        (w) => {
+          w.read.at = Number.POSITIVE_INFINITY;
+        },
+        readTime,
+      ],
+      // Review 16's schedules.
+      [
+        "both observation times missing",
+        (w) => {
+          delete w.mark.at;
+          delete w.read.at;
+        },
+        markTime,
+      ],
+      [
+        "read timed before the mark",
+        (w) => {
+          w.read.at = 99;
+        },
+        "its read is timed before its mark",
+      ],
+      [
+        "the step end traced at 1 ms, before its tick",
+        (w) => {
+          w.lines[3] = '1ms data.sync_next {"when":"after","state":"idle"}';
+        },
+        "a trace line (23) precedes the sample's mark",
+      ],
+      // The engine (I1): matching absent generations are no started engine.
+      [
+        "no engine start recorded at the mark",
+        (w) => {
+          w.mark.epochs = 0;
+        },
+        "the sample's engine had not been started",
+      ],
+      [
+        "no generation at either end",
+        (w) => {
+          w.mark.generation = null;
+          w.read.generation = null;
+        },
+        "the sample's engine had not been started",
+      ],
+      [
+        "a generation as a string at both ends",
+        (w) => {
+          w.mark.generation = "1";
+          w.read.generation = "1";
+        },
+        "the sample's engine had not been started",
+      ],
+      [
+        "an empty page identity",
+        (w) => {
+          w.mark.page = "";
+          w.read.page = "";
+        },
+        "the page was reloaded or replaced during the sample",
+      ],
+      // The chronology (I2).
+      [
+        "the commit traced before the tick",
+        (w) => {
+          w.lines[2] =
+            '99ms data.sync_commit {"kind":"applied","value":"committed"}';
+        },
+        "the trace's times go back (line 22)",
+      ],
+      [
+        "the end traced before its commit (inside the rounding)",
+        (w) => {
+          w.lines[3] = '114ms data.sync_next {"when":"after","state":"idle"}';
+        },
+        "the trace's times go back (line 23)",
+      ],
+      [
+        "the tick 1.5 ms before the mark",
+        (w) => {
+          w.mark.at = 101.5;
+          w.resources[0].startTime = 101.6;
+        },
+        "a trace line (20) precedes the sample's mark",
+      ],
+      [
+        "the end 1.5 ms after the read",
+        (w) => {
+          w.read.at = 113.5;
+        },
+        "a trace line (22) follows the sample's read",
+      ],
+      [
+        "a coalesced tail after the read",
+        (w) => {
+          w.lines.push('130ms data.sync_tick {"why":"wake","coalesced":true}');
+          w.read.to = 25;
+        },
+        "a trace line (24) follows the sample's read",
+      ],
+      [
+        "an untimed line",
+        (w) => {
+          w.lines[1] = 'data.sync_tick {"why":"wake","coalesced":true}';
+        },
+        "a trace line (21) carries no time or event",
+      ],
+      [
+        "a malformed line where the step began (never skipped for a later step)",
+        (w) => {
+          w.lines[0] = "garbage";
+        },
+        "a trace line (20) carries no time or event",
+      ],
+    );
+    for (const [label, edit, problem] of cases) {
+      let s: ReturnType<typeof judge> | undefined;
+      expect(() => {
+        s = judge(edit);
+      }, label).not.toThrow();
+      expect(s, label).toEqual({
+        status: "invalid",
+        problem,
+        selected: null,
+        values: null,
+      });
+    }
+  });
+
+  it("cases (I3, I4): every retained entry is the exact /sync pathname with usable timing inside the observation; prior, duplicate and overlapping entries keep their reasons", () => {
+    const foreign = (name: unknown) =>
+      `a retained request entry is not the /sync endpoint (${String(name)})`;
+    // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+    const cases: Array<[string, (w: any) => void, string]> = [
+      ...(
+        [
+          "/not-sync",
+          "/sync",
+          `${PATH}-extra`,
+          `${PATH}?limit=200`,
+          `http://127.0.0.1:4100${PATH}`,
+          "/api/experimental/v1/commands",
+          "/api/experimental/v2/sync",
+          "",
+          null,
+          5,
+        ] as const
+      ).map(
+        // biome-ignore lint/suspicious/noExplicitAny: see above
+        (name): [string, (w: any) => void, string] => [
+          `entry named ${String(name)}`,
+          (w) => {
+            w.resources[0].name = name;
+          },
+          foreign(name),
+        ],
+      ),
+      [
+        "entry with no name",
+        (w) => {
+          delete w.resources[0].name;
+        },
+        foreign(undefined),
+      ],
+      [
+        "a later foreign entry inside the read",
+        (w) => {
+          w.read.resource_entries = 2;
+          w.resources.push({
+            name: "/not-sync",
+            startTime: 112,
+            requestStart: 112,
+            responseEnd: 113,
+          });
+        },
+        foreign("/not-sync"),
+      ],
+      [
+        "an entry that began before the mark (inside the trace's rounding)",
+        (w) => {
+          w.resources[0].startTime = 99.5;
+        },
+        "a /sync request entry lies outside the sample's observation",
+      ],
+      [
+        "an entry that ended after the read (inside the commit's rounding)",
+        (w) => {
+          w.resources[0].responseEnd = 115.5;
+        },
+        "a /sync request entry lies outside the sample's observation",
+      ],
+      [
+        "a negative start",
+        (w) => {
+          w.resources[0].startTime = -0.5;
+        },
+        "a request entry has no usable timing",
+      ],
+      [
+        "reversed request and response",
+        (w) => {
+          w.resources[0].requestStart = 111;
+        },
+        "a request entry has no usable timing",
+      ],
+      [
+        "a missing response end",
+        (w) => {
+          delete w.resources[0].responseEnd;
+        },
+        "a request entry has no usable timing",
+      ],
+      [
+        "fewer buffer entries than retained entries",
+        (w) => {
+          w.read.resource_entries = 0;
+        },
+        "the witness retains more requests than the buffer held",
+      ],
+      [
+        "a full buffer",
+        (w) => {
+          w.read.resource_entries = 250;
+        },
+        "the resource-timing buffer was full: requests may be missing",
+      ],
+      [
+        "a duplicate entry",
+        (w) => {
+          w.read.resource_entries = 2;
+          w.resources.push({ ...w.resources[0] });
+        },
+        "2 /sync requests lie inside the operation (2 since the sample began)",
+      ],
+      [
+        "a prior entry (before the step, after the mark)",
+        (w) => {
+          w.mark.at = 90;
+          w.read.resource_entries = 2;
+          w.resources.unshift({
+            name: PATH,
+            startTime: 90.5,
+            requestStart: 91,
+            responseEnd: 95,
+          });
+        },
+        "a /sync request began before the sample's operation",
+      ],
+      [
+        "an entry overlapping the step's end (inside the read)",
+        (w) => {
+          w.read.at = 130;
+          w.read.resource_entries = 2;
+          w.resources.push({
+            name: PATH,
+            startTime: 114,
+            requestStart: 114,
+            responseEnd: 125,
+          });
+        },
+        "a /sync request overlaps the sample's operation without lying inside it",
+      ],
+    ];
+    for (const [label, edit, problem] of cases) {
+      let s: ReturnType<typeof judge> | undefined;
+      expect(() => {
+        s = judge(edit);
+      }, label).not.toThrow();
+      expect(s, label).toEqual({
+        status: "invalid",
+        problem,
+        selected: null,
+        values: null,
+      });
+    }
+  });
+
+  it("pending stays pending: a forced read before the step's end, inside its observation, yields no value; a contradiction appended later stays invalid", () => {
+    expect(
+      judge((w) => {
+        w.lines = w.lines.slice(0, 2);
+        w.read.to = 22;
+        w.read.at = 101.2;
+        w.resources = [];
+        w.read.resource_entries = 0;
+      }),
+    ).toEqual({
+      status: "pending",
+      problem: "the sample's step has not ended",
+      selected: null,
+      values: null,
+    });
+    // The first step ended without a commit: a later healthy step inside the read cannot stand for it.
+    expect(
+      judge((w) => {
+        w.lines = [
+          '100ms data.sync_tick {"why":"nudge","coalesced":false}',
+          '101ms data.sync_next {"when":"event","state":"waiting"}',
+          '102ms data.sync_tick {"why":"online","coalesced":false}',
+          '115ms data.sync_commit {"kind":"applied","value":"committed"}',
+          '115ms data.sync_next {"when":"after","state":"idle"}',
+        ];
+        w.read.to = 25;
+        w.resources[0].startTime = 102.5;
+        w.resources[0].requestStart = 103;
+      }).problem,
+    ).toBe(
+      'the sample\'s step ended without a commit (101ms data.sync_next {"when":"event","state":"waiting"}): no later step can stand for it',
+    );
   });
 });
 
@@ -1346,6 +2024,8 @@ describe("P-4 draft: one send, its answer, its request and its own completion pe
         "the draft was requested again during the sample: a later attempt cannot complete the sample's",
       ],
       [
+        // Revision 15 (adapted): the late result names its real call, the earlier sample's receipt call recorded BEFORE this sample's
+        // mark (record 0, set up below); revision 14's `of: 0` named the result itself, which `/3` refuses as malformed.
         "earlier sample's late receipt",
         (id, base) => [
           () => {
@@ -1397,6 +2077,12 @@ describe("P-4 draft: one send, its answer, its request and its own completion pe
       harness.seq = 0;
       resources = [];
       actions = [];
+      if (label === "earlier sample's late receipt")
+        rec("commit_begin", {
+          plan: "data.admitReceipt",
+          local_id: "earlier",
+          ...actor(),
+        });
       enqueueWith(schedule);
       harness.onBoundDraft = () => {
         for (let step = actions.shift(); step; step = actions.shift()) step();
@@ -1438,13 +2124,24 @@ describe("P-4 draft: one send, its answer, its request and its own completion pe
         },
         "the resource-timing buffer was full: requests may be missing",
       ],
+      // REVISION 16 ADAPTATION (labelled; DA16-S1, invariant I3): revision 14's entry moved 40 ms later now ends after the completion read
+      // itself, which no browser can show (an entry is retained only once it has ended), and is refused for that first; the old intent
+      // (an entry overlapping the answer, inside the observation) is the 3 ms move, refused with the old reason.
       [
         "entry outside",
         () => {
           const r = resources.find((e) => e.name === COMMANDS);
-          if (r) r.responseEnd += 40;
+          if (r) r.responseEnd += 3;
         },
         "a /commands request overlaps the sample's operation without lying inside it",
+      ],
+      [
+        "entry ending after the completion read",
+        () => {
+          const r = resources.find((e) => e.name === COMMANDS);
+          if (r) r.responseEnd += 40;
+        },
+        "a /commands request entry lies outside the sample's observation",
       ],
     ];
     for (const [label, edit, problem] of cases) {
@@ -1549,5 +2246,730 @@ describe("P-4 draft: one send, its answer, its request and its own completion pe
     expect(ready()).toBeNull();
     harness.identity = { ...harness.identity, epoch: 9 };
     expect(ready()).toBe(true);
+  });
+
+  it("Q2 (revision 15, review 15 R2): the completion read records its start before it awaits the row; a delayed receipt delivered before it completes the sample with its timing values; a receipt result delivered DURING the read (the poll timed out first) is refused, its witness kept and nothing further enqueued", async () => {
+    // Control: the receipt's result at 40, the read starts at 40 (a tie), the row is read by 41.
+    enqueueWith((id) => [
+      act.claim(id, 5),
+      act.send(id, 10),
+      act.respond(id, { startTime: 11, requestStart: 12, responseEnd: 20 }),
+      act.answer(id, 21, 22),
+      act.receipt(id, 40),
+    ]);
+    harness.onBoundDraft = () => {
+      clock = 41;
+    };
+    clock = 1;
+    let c = await one();
+    expect(c.failure).toBeNull();
+    let w = witness(c);
+    expect(w.completion.started_at).toBe(40);
+    expect(w.completion.log_before).toBe(6);
+    expect(w.completion.at).toBe(41);
+    expect(w.records.at(-1)).toMatchObject({ seq: 5, at: 40 });
+    expect(c.values[0]?.total_ms).toBe(21);
+    // Case: the receipt is never delivered while the collector waits; it is delivered while the bound row is being read.
+    harness.rows = [];
+    harness.outbox = [];
+    harness.log = [];
+    harness.seq = 0;
+    resources = [];
+    actions = [];
+    enqueues = 0;
+    let deliver = () => {};
+    enqueueWith((id, base) => {
+      deliver = act.receipt(id, base + 30);
+      return healthy(id, base).slice(0, 4);
+    });
+    harness.onBoundDraft = () => deliver();
+    c = await collectDraftSamples(driven(30), {
+      ...OPT,
+      timeout: 40,
+      warmup: 0,
+      samples: 3,
+    });
+    expect(c.values).toEqual([]);
+    expect(c.failure?.problem).toBe(
+      "the receipt's result was delivered during the completion read: the read cannot corroborate it",
+    );
+    w = witness(c);
+    expect(w.completion.log_before).toBe(5);
+    expect(w.records.at(-1)).toMatchObject({ seq: 5, event: "commit_end" });
+    expect(w.completion.row).toMatchObject({ status: "acknowledged" });
+    expect(enqueues).toBe(1);
+  });
+
+  it("Q2 (revision 15): consecutive samples: each mark follows the previous completion read in position AND time; the collector's samples satisfy the consumer's frame", async () => {
+    enqueueWith(healthy);
+    const c = await collectDraftSamples(driven(), {
+      ...OPT,
+      warmup: 1,
+      samples: 3,
+    });
+    expect(c.failure).toBeNull();
+    for (const [k, e] of c.samples.entries()) {
+      expect(e.completion.started_at).toBeLessThanOrEqual(e.completion.at);
+      expect(e.timing.done).toBeLessThanOrEqual(e.completion.started_at);
+      if (k > 0) {
+        const previous = c.samples[k - 1]?.completion;
+        expect(e.mark.t0).toBeGreaterThanOrEqual(previous?.at ?? Infinity);
+        expect(e.mark.log_from).toBeGreaterThanOrEqual(previous?.log_to ?? 0);
+      }
+    }
+  });
+});
+
+/**
+ * WEB-09c revision 15 (review 15 R2, design assessment DA15-R2a/R2b, Q1): `draft-request-sample/3` judged on a HAND-WRITTEN witness in
+ * production order (no generator, no selector as the oracle): enqueue 100→101, claim 102/103, send 109, request begin 109, entry
+ * 110/111/119, request result 119.1, answer 120, receipt call 120.05, timing read 121, receipt result 130, completion read 130.5→131.
+ * Values by hand: enqueue 1, claim 8, stamping 2, request 8, record 1, total 21.
+ */
+describe("P-4 draft `draft-request-sample/3`: schema, pairing and the closed interval on a hand-written witness (revision 15, Q1)", () => {
+  const PATH = "/api/experimental/v1/commands";
+  const I = {
+    page: "page-1",
+    time_origin: 1000,
+    account: "a",
+    identity_account: "a",
+    epoch: 3,
+    service: 2,
+    incarnation: "inc-1",
+    live: true,
+    current_service: 2,
+    dispatcher: 1,
+    run: 1,
+    running: true,
+    observing: true,
+  };
+  const actorOf = { dispatcher: 1, run: 1 };
+  const commit = { ...actorOf, service: 2, local_id: "d", epoch: 3 };
+  const request = { ...actorOf, key: "d", path: PATH };
+  // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+  const healthyWitness = (): any => ({
+    local_id: "d",
+    account: "a",
+    enqueue: { kind: "queued", local_id: "d" },
+    identities: { before: I, queued: I, enqueued: I },
+    mark: {
+      page: "page-1",
+      time_origin: 1000,
+      from: 10,
+      log_from: 4,
+      waiting: 0,
+      t0: 100,
+      t1: 101,
+    },
+    timing: {
+      identity: I,
+      to: 12,
+      log_to: 9,
+      at: 121,
+      done: 121,
+      requests: 1,
+      resource_entries: 1,
+    },
+    completion: {
+      identity_before: I,
+      identity_after: I,
+      row: { kind: "row", local_id: "d", status: "acknowledged" },
+      waiting: 0,
+      started_at: 130.5,
+      log_before: 10,
+      at: 131,
+      to: 12,
+      log_first: 0,
+      log_to: 10,
+      resource_entries: 1,
+    },
+    lines: [
+      '109ms data.outbox_send {"resend":false}',
+      '120ms data.outbox_answer {"kind":"receipt"}',
+    ],
+    records: [
+      {
+        seq: 4,
+        at: 102,
+        event: "commit_begin",
+        plan: "data.markInFlight",
+        ...commit,
+      },
+      {
+        seq: 5,
+        at: 103,
+        event: "commit_end",
+        of: 4,
+        plan: "data.markInFlight",
+        ...commit,
+        outer: "applied",
+        inner: "claimed",
+      },
+      { seq: 6, at: 109, event: "request_begin", ...request },
+      {
+        seq: 7,
+        at: 119.1,
+        event: "request_end",
+        of: 6,
+        ...request,
+        outer: "response",
+        http: 200,
+      },
+      {
+        seq: 8,
+        at: 120.05,
+        event: "commit_begin",
+        plan: "data.admitReceipt",
+        ...commit,
+      },
+      {
+        seq: 9,
+        at: 130,
+        event: "commit_end",
+        of: 8,
+        plan: "data.admitReceipt",
+        ...commit,
+        outer: "applied",
+        inner: "admitted",
+        removed: false,
+      },
+    ],
+    resources: [
+      { name: PATH, startTime: 110, requestStart: 111, responseEnd: 119 },
+    ],
+  });
+  const VALUES = {
+    enqueue_ms: 1,
+    claim_ms: 8,
+    stamping_ms: 2,
+    request_ms: 8,
+    record_ms: 1,
+    total_ms: 21,
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: see above
+  const judge = (edit: (w: any) => void) => {
+    const w = healthyWitness();
+    edit(w);
+    return draftWitnessSelection(w);
+  };
+
+  it("controls: the healthy witness, a receipt delivered before the timing read, ties at every boundary, the removal branch, a fetch answered before its body ended, and a same-evaluation read inside the answer line's rounding are complete with their hand-computed values", () => {
+    expect(judge(() => {})).toEqual({
+      status: "complete",
+      problem: null,
+      selected: {
+        send: 10,
+        answer: 11,
+        request: 0,
+        claim: 4,
+        issued: 6,
+        receipt: 8,
+        received: 9,
+      },
+      values: VALUES,
+    });
+    // Receipt result BEFORE the timing read (seq 9 inside its position, at 120.5 ≤ 121): same values.
+    expect(
+      judge((w) => {
+        w.records[5].at = 120.5;
+        w.timing.log_to = 10;
+      }),
+    ).toMatchObject({ status: "complete", values: VALUES });
+    // Ties: claim result at the request's time (the send's), the read's start at the receipt result's, its end at its start, the timing
+    // read at the receipt call's time (total 20.05).
+    expect(
+      judge((w) => {
+        w.records[1].at = 109;
+        w.completion.started_at = 130;
+        w.completion.at = 130;
+        w.timing.done = 120.05;
+        w.timing.at = 120.05;
+      }),
+    ).toMatchObject({
+      status: "complete",
+      values: { ...VALUES, total_ms: 120.05 - 100 },
+    });
+    expect(
+      judge((w) => {
+        w.records[5].removed = true;
+        w.completion.row = { kind: "absent" };
+      }),
+    ).toMatchObject({ status: "complete", values: VALUES });
+    // The fetch promise resolves with the headers, before ResourceTiming's responseEnd (the body): not required to follow it.
+    expect(
+      judge((w) => {
+        w.records[3].at = 118;
+      }),
+    ).toMatchObject({ status: "complete", values: VALUES });
+    // Same evaluation as the answer: 0.3 ms before the rounded line, after the receipt call (0.35 before it).
+    expect(
+      judge((w) => {
+        w.records[4].at = 119.65;
+        w.timing.done = 119.7;
+        w.timing.at = 119.7;
+      }),
+    ).toMatchObject({
+      status: "complete",
+      values: { ...VALUES, total_ms: 119.7 - 100 },
+    });
+  });
+
+  it("cases (review 15 and their claim/request analogues): each contradicted, malformed, misplaced or late record is invalid with its own reason, and nothing throws", () => {
+    // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+    const cases: Array<[string, (w: any) => void, string]> = [
+      [
+        "receipt result omits its service",
+        (w) => {
+          delete w.records[5].service;
+        },
+        "dispatch record 9 is malformed: its commit_end names no service",
+      ],
+      [
+        "receipt result null service",
+        (w) => {
+          w.records[5].service = null;
+        },
+        "dispatch record 9 is malformed: its commit_end names no service",
+      ],
+      [
+        "receipt result another service",
+        (w) => {
+          w.records[5].service = 999;
+        },
+        "a commit result (record 9) contradicts its call (service)",
+      ],
+      [
+        "receipt result epoch +100",
+        (w) => {
+          w.records[5].epoch = 103;
+        },
+        "a commit result (record 9) contradicts its call (epoch)",
+      ],
+      [
+        "receipt result another plan",
+        (w) => {
+          w.records[5].plan = "data.recordOutcome";
+        },
+        "a commit result (record 9) contradicts its call (plan)",
+      ],
+      [
+        "receipt result another local ID",
+        (w) => {
+          w.records[5].local_id = "e";
+        },
+        "a commit result (record 9) contradicts its call (local_id)",
+      ],
+      [
+        "receipt result another dispatcher",
+        (w) => {
+          w.records[5].dispatcher = 2;
+        },
+        "a commit result (record 9) contradicts its call (dispatcher)",
+      ],
+      [
+        "receipt result delivered in another run",
+        (w) => {
+          w.records[5].run = 2;
+        },
+        "the receipt's result was made by another dispatcher, run or service than the sample's",
+      ],
+      [
+        "receipt result after the read",
+        (w) => {
+          w.records[5].at = 131 + 60_000;
+        },
+        "a dispatch record's time (9) contradicts the completion read's start (its record position and its time disagree)",
+      ],
+      [
+        "receipt result without a time",
+        (w) => {
+          delete w.records[5].at;
+        },
+        "dispatch record 9 is malformed: its time is not a finite, non-negative page time",
+      ],
+      [
+        "receipt result null time",
+        (w) => {
+          w.records[5].at = null;
+        },
+        "dispatch record 9 is malformed: its time is not a finite, non-negative page time",
+      ],
+      [
+        "receipt result non-finite time",
+        (w) => {
+          w.records[5].at = Number.POSITIVE_INFINITY;
+        },
+        "dispatch record 9 is malformed: its time is not a finite, non-negative page time",
+      ],
+      [
+        "receipt result negative time",
+        (w) => {
+          w.records[5].at = -1;
+        },
+        "dispatch record 9 is malformed: its time is not a finite, non-negative page time",
+      ],
+      [
+        "receipt result failed without reason",
+        (w) => {
+          w.records[5].outer = "failed";
+        },
+        "dispatch record 9 is malformed: its failed commit_end names no reason",
+      ],
+      [
+        "receipt result removal not a boolean",
+        (w) => {
+          w.records[5].removed = "no";
+        },
+        "dispatch record 9 is malformed: its commit_end's removal is not a boolean",
+      ],
+      [
+        "completion read before the mark",
+        (w) => {
+          w.completion.at = 100 - 60_000;
+        },
+        "its completion read's times are not after its timing read and in order",
+      ],
+      [
+        "completion start missing",
+        (w) => {
+          delete w.completion.started_at;
+        },
+        "its completion read's times are not after its timing read and in order",
+      ],
+      [
+        "completion start before the timing read",
+        (w) => {
+          w.completion.started_at = 120;
+        },
+        "its completion read's times are not after its timing read and in order",
+      ],
+      [
+        "completion start position missing",
+        (w) => {
+          delete w.completion.log_before;
+        },
+        "its completion read records no start inside the sample's records",
+      ],
+      [
+        "completion start position before the timing read's",
+        (w) => {
+          w.completion.log_before = 8;
+        },
+        "its completion read records no start inside the sample's records",
+      ],
+      [
+        "receipt result delivered during the read",
+        (w) => {
+          w.completion.log_before = 9;
+          w.completion.started_at = 129;
+        },
+        "the receipt's result was delivered during the completion read: the read cannot corroborate it",
+      ],
+      [
+        "read start position contradicts its time",
+        (w) => {
+          w.completion.started_at = 129;
+        },
+        "a dispatch record's time (9) contradicts the completion read's start (its record position and its time disagree)",
+      ],
+      [
+        "timing position contradicts its time",
+        (w) => {
+          w.timing.log_to = 8;
+        },
+        "a dispatch record's time (8) contradicts the timing read (its record position and its time disagree)",
+      ],
+      [
+        "timing read with two times",
+        (w) => {
+          w.timing.at = 122;
+        },
+        "its timing read does not record one time",
+      ],
+      [
+        "timing read before the enqueue ended",
+        (w) => {
+          w.timing.done = 100.5;
+          w.timing.at = 100.5;
+        },
+        "its timing read's time is not after the enqueue",
+      ],
+      [
+        "claim result another epoch",
+        (w) => {
+          w.records[1].epoch = 4;
+        },
+        "a commit result (record 5) contradicts its call (epoch)",
+      ],
+      [
+        "claim result omits its service",
+        (w) => {
+          delete w.records[1].service;
+        },
+        "dispatch record 5 is malformed: its commit_end names no service",
+      ],
+      [
+        "claim result before its call",
+        (w) => {
+          w.records[1].at = 101.5;
+        },
+        "the dispatch records' times go back (record 5)",
+      ],
+      [
+        "claim before the mark",
+        (w) => {
+          w.records[0].at = 99;
+        },
+        "a dispatch record (4) precedes the sample's mark",
+      ],
+      [
+        "request result another key",
+        (w) => {
+          w.records[3].key = "e";
+        },
+        "a request result (record 7) contradicts its call (key)",
+      ],
+      [
+        "request result another path",
+        (w) => {
+          w.records[3].path = "/x";
+        },
+        "a request result (record 7) contradicts its call (path)",
+      ],
+      [
+        "request result without HTTP status",
+        (w) => {
+          delete w.records[3].http;
+        },
+        "dispatch record 7 is malformed: its answered request_end names no HTTP status",
+      ],
+      [
+        "request result error without its error",
+        (w) => {
+          w.records[3].outer = "error";
+          delete w.records[3].http;
+        },
+        "dispatch record 7 is malformed: its request_end names no error",
+      ],
+      [
+        "request without a path",
+        (w) => {
+          delete w.records[2].path;
+        },
+        "dispatch record 6 is malformed: its request_begin names no key and path",
+      ],
+      [
+        "a result naming another kind",
+        (w) => {
+          w.records[3].of = 5;
+        },
+        "a request result (record 7) names a commit_end as its call",
+      ],
+      [
+        "a result naming itself",
+        (w) => {
+          w.records[5].of = 9;
+        },
+        "dispatch record 9 is malformed: its commit_end names no earlier call",
+      ],
+      [
+        "two results of one call",
+        (w) => {
+          w.records[5].of = 4;
+        },
+        "a commit call (record 4) has two results",
+      ],
+      [
+        "an unknown outcome",
+        (w) => {
+          w.records[5].outer = "maybe";
+        },
+        "dispatch record 9 is malformed: its commit_end's outcome (maybe) is not one of applied, dropped, failed, threw, unknown",
+      ],
+      [
+        "an unknown event",
+        (w) => {
+          w.records[5].event = "mystery";
+        },
+        "dispatch record 9 is malformed: its event (mystery) is not a dispatch record",
+      ],
+      [
+        "a record that is not an object",
+        (w) => {
+          w.records[5] = null;
+        },
+        "its dispatch records are not contiguous from the mark to the completion read",
+      ],
+      [
+        "request to another path than its entry",
+        (w) => {
+          w.records[2].path = "/x";
+          w.records[3].path = "/x";
+        },
+        "the dispatcher's request was made to another path than its /commands entry",
+      ],
+      [
+        "outbox trace going back",
+        (w) => {
+          w.lines[1] = '108ms data.outbox_answer {"kind":"receipt"}';
+        },
+        "the outbox trace's times go back",
+      ],
+      [
+        "outbox line after the read",
+        (w) => {
+          w.lines.push('140ms data.outbox_send {"resend":true}');
+          w.completion.to = 13;
+        },
+        "an outbox line follows the completion read",
+      ],
+      [
+        "outbox line contradicts the timing read",
+        (w) => {
+          w.timing.to = 10;
+        },
+        "an outbox line's time contradicts the timing read (its position and its time disagree)",
+      ],
+      [
+        "a gate of another plan",
+        (w) => {
+          w.records.push({
+            seq: 10,
+            at: 130.2,
+            event: "commit_gated",
+            plan: "data.markInFlight",
+            ...actorOf,
+            service: 2,
+            local_id: "d",
+          });
+          w.completion.log_to = 11;
+          w.completion.log_before = 11;
+        },
+        "the dispatcher held data.markInFlight of another actor or plan during the sample",
+      ],
+    ];
+    for (const [label, edit, problem] of cases) {
+      let s: ReturnType<typeof judge> | undefined;
+      expect(() => {
+        s = judge(edit);
+      }, label).not.toThrow();
+      expect(s, label).toMatchObject({
+        status: "invalid",
+        problem,
+        selected: null,
+        values: null,
+      });
+    }
+  });
+
+  it("cases (revision 16, DA16-D1, I3/I4): the /commands endpoint is established apart from the paths agreeing; entries lie inside [t0, completion read] and the selected entry ended by the timing read", () => {
+    const OTHER = "/api/experimental/v1/task-commands";
+    // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+    const cases: Array<[string, (w: any) => void, string]> = [
+      [
+        "request, result and entry all agreeing on another endpoint",
+        (w) => {
+          w.records[2].path = OTHER;
+          w.records[3].path = OTHER;
+          w.resources[0].name = OTHER;
+        },
+        `a retained request entry is not the /commands endpoint (${OTHER})`,
+      ],
+      [
+        "the entry alone on another endpoint",
+        (w) => {
+          w.resources[0].name = OTHER;
+        },
+        `a retained request entry is not the /commands endpoint (${OTHER})`,
+      ],
+      [
+        "the request call alone",
+        (w) => {
+          w.records[2].path = OTHER;
+        },
+        "a request result (record 7) contradicts its call (path)",
+      ],
+      [
+        "the request result alone",
+        (w) => {
+          w.records[3].path = OTHER;
+        },
+        "a request result (record 7) contradicts its call (path)",
+      ],
+      [
+        "request and result agreeing on another endpoint than their /commands entry",
+        (w) => {
+          w.records[2].path = OTHER;
+          w.records[3].path = OTHER;
+        },
+        "the dispatcher's request was made to another path than its /commands entry",
+      ],
+      [
+        "an entry named by its full URL",
+        (w) => {
+          w.resources[0].name = `http://127.0.0.1:4100${PATH}`;
+        },
+        `a retained request entry is not the /commands endpoint (http://127.0.0.1:4100${PATH})`,
+      ],
+      [
+        "an entry that began before the enqueue",
+        (w) => {
+          w.resources[0].startTime = 99.9;
+        },
+        "a /commands request entry lies outside the sample's observation",
+      ],
+      [
+        "an entry that ended after the completion read",
+        (w) => {
+          w.completion.resource_entries = 2;
+          w.resources.push({
+            name: PATH,
+            startTime: 125,
+            requestStart: 126,
+            responseEnd: 131.5,
+          });
+        },
+        "a /commands request entry lies outside the sample's observation",
+      ],
+      [
+        "the selected entry ending after the timing read that counted it",
+        (w) => {
+          w.timing.done = 120.5;
+          w.timing.at = 120.5;
+          w.resources[0].responseEnd = 120.8;
+        },
+        "its timing read did not see its request",
+      ],
+    ];
+    for (const [label, edit, problem] of cases) {
+      let s: ReturnType<typeof judge> | undefined;
+      expect(() => {
+        s = judge(edit);
+      }, label).not.toThrow();
+      expect(s, label).toMatchObject({
+        status: "invalid",
+        problem,
+        selected: null,
+        values: null,
+      });
+    }
+    // Controls: the healthy entry; a later /commands entry (another draft's, after the answer) inside the completion read is no request of
+    // this operation; the selected entry ending exactly at the timing read.
+    expect(judge(() => {})).toMatchObject({
+      status: "complete",
+      values: VALUES,
+    });
+    expect(
+      judge((w) => {
+        w.timing.done = 119;
+        w.timing.at = 119;
+        w.records[4].at = 119;
+        w.lines[1] = '119ms data.outbox_answer {"kind":"receipt"}';
+        w.records[3].at = 119;
+      }),
+    ).toMatchObject({
+      status: "complete",
+      values: { ...VALUES, record_ms: 0, total_ms: 19 },
+    });
   });
 });

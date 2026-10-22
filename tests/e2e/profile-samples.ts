@@ -17,6 +17,10 @@
  *         selection is derived from it by the pure rules of scripts/lib/profile-sample-rules.mjs, which the evidence contract applies again. Revision 12's `readSyncSample`/`syncSample` took the first real tick, the first commit
  *         anywhere after it and an end after that: an earlier step that ended without a request donated its start to a later request.
  *
+ * Revision 16 (review 16 R16-SYNC, design assessment DA16-S1/S2/D1; `sync-request-sample/3`, `draft-request-sample/4`): the rule also
+ * requires the mark's and the read's own page times to enclose every retained line and request entry, the exact endpoint pathname the
+ * readers below store, and (here, in the collector) each mark to follow the previous sample's read in position and time.
+ *
  * The page functions run IN THE PAGE (Playwright serialises them): they refer to nothing outside their own bodies.
  */
 
@@ -291,6 +295,7 @@ export async function collectSyncSamples(
 }> {
   const samples: SyncSampleEntry[] = [];
   const values: SyncValues[] = [];
+  let previous: SampleRead | null = null;
   for (let i = 0; i < o.warmup + o.samples; i += 1) {
     const failed = (problem: string, witness: unknown) => ({
       samples,
@@ -306,6 +311,12 @@ export async function collectSyncSamples(
         null,
       );
     }
+    // Revision 16 (invariant I5): one serial collector, so each mark follows the previous read (warm-ups included) in position and time.
+    if (previous && !(mark.from >= previous.to && mark.at >= previous.at))
+      return failed(
+        "the sample's mark does not follow the previous sample's read",
+        { mark },
+      );
     let witness: SyncWitness;
     try {
       witness = await page.poll(readSyncSample, { mark, force: false }, o);
@@ -322,6 +333,7 @@ export async function collectSyncSamples(
         );
       }
     }
+    previous = witness.read;
     const s = syncWitnessSelection(witness);
     if (s.status !== "complete" || !s.selected || !s.values)
       return failed(
@@ -338,6 +350,9 @@ export async function collectSyncSamples(
 }
 
 // ---- P-4 draft: one send, its answer, its request and its own completion per sample (revision 14; review 14 R2, DA-R14-A/B/C) ---------
+// Revision 15 (review 15 R2, DA15-R2a/R2b; `draft-request-sample/3`): the completion read also records its start before it awaits the row,
+// so the rule can require the receipt's result to have been delivered before the read; every record is checked against its kind's schema
+// and its call, and the reads' times and positions must agree (scripts/lib/profile-sample-rules.mjs).
 //
 // Revision 13 froze the send/answer/request at the answer and then polled the queue separately, unfenced: a read that threw became the
 // status `unreadable: …`, a replacement page's empty queue `absent`, and a row a later retry acknowledged closed the first attempt; the
@@ -399,6 +414,14 @@ export interface DraftCompletion {
   /** The draft's row through the bound service, and how many OTHER drafts were queued or in flight there (-1: not read). */
   row: DraftRow;
   waiting: number;
+  /**
+   * Revision 15 (`draft-request-sample/3`; review 15 R2, DA15-R2b): the read's start, taken synchronously with `identity_before`, before
+   * the row is awaited: its time and the next dispatch record's sequence number. A receipt result at or after `log_before` was delivered
+   * during the read, which cannot then corroborate it.
+   */
+  started_at: number;
+  log_before: number;
+  /** The read's end (its time and positions are taken together, after the row is read). */
   at: number;
   to: number;
   log_first: number;
@@ -609,8 +632,9 @@ export function draftCompletionReady(arg: {
 }
 
 /**
- * In the page: the completion read. The identity, the draft's row through the BOUND service (a rejection is a recorded read failure, never
- * absence), the identity again, then, synchronously, the outbox trace, the dispatch records and the `/commands` entries from the mark.
+ * In the page: the completion read. The identity and the read's start (its time and record position, revision 15), the draft's row
+ * through the BOUND service (a rejection is a recorded read failure, never absence), the identity again, then, synchronously, the read's
+ * end, the outbox trace, the dispatch records and the `/commands` entries from the mark.
  */
 export async function closeDraftSample(arg: {
   mark: DraftMark;
@@ -622,6 +646,9 @@ export async function closeDraftSample(arg: {
     ...data.dispatchIdentity(),
     time_origin: performance.timeOrigin,
   };
+  // The read's start, in the same synchronous turn as the identity (nothing can be recorded in between).
+  const startedAt = performance.now();
+  const logBefore = data.dispatchNext();
   let row: DraftRow;
   let waiting = -1;
   try {
@@ -648,6 +675,8 @@ export async function closeDraftSample(arg: {
       identity_after: identityAfter,
       row,
       waiting,
+      started_at: startedAt,
+      log_before: logBefore,
       at: performance.now(),
       to: trace.length,
       log_first: first,

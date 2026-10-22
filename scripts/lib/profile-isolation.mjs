@@ -574,7 +574,7 @@ export function sampleIdentityProblem({
  * one when stopped; it ends by itself (with an error sample, not a final one) when the stage owner (this process) or the root has gone. The
  * returned sampler is `ready` only once a valid first sample of THIS sampler process, stage and context is on disk: a stage whose sampler never
  * becomes ready throws here, before its action, and so fails closed. `stop()` resolves after the final sample, with whether this sampler
- * wrote it after the stop began.
+ * wrote it after the stop began (of its own stage, invocation and root, and not an error row; revision 15) and the final row's error.
  */
 export async function startLoadSampler(
   dir,
@@ -667,17 +667,42 @@ export async function startLoadSampler(
       } catch {
         samples = [];
       }
-      const last = samples.at(-1);
+      const final = finalSample(samples, {
+        pid: child.pid,
+        stage,
+        context,
+        stopping,
+      });
       return {
         exit_code: code,
         samples: samples.length,
-        final_sample:
-          code === 0 &&
-          last?.final === true &&
-          last.sampler_pid === child.pid &&
-          Date.parse(last.at) >= stopping,
+        final_error: final.final_error,
+        final_sample: code === 0 && final.final_sample,
       };
     },
+  };
+}
+
+/**
+ * Revision 15 (review 15 R15-S1, DA15-S1): whether the LAST of a stage's samples is a valid final sample of the sampler process `pid`, of
+ * `stage` and of `context`'s invocation and root, written at or after `stopping` (ms since the epoch) and not an error row; and the error
+ * of a final-marked error row. A final marker alone (on an error row, another stage's, invocation's or root's row, another process's or
+ * one written before the stop) is no final sample.
+ */
+export function finalSample(rows, { pid, stage, context, stopping }) {
+  const last = rows.at(-1);
+  const marked = last?.final === true;
+  return {
+    final_error: marked && last.error ? String(last.error) : null,
+    final_sample:
+      marked &&
+      !last.error &&
+      last.sampler_pid === pid &&
+      last.context?.stage === stage &&
+      last.context?.invocation === context?.invocation &&
+      last.context?.root_pid === context?.root?.pid &&
+      last.context?.root_started === context?.root?.started &&
+      Date.parse(last.at) >= stopping,
   };
 }
 

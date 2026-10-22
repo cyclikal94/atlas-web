@@ -38,7 +38,12 @@
 // later step's start after some reads, every `/sync` entry, selected references), and the P-4 draft series carry the same kind of
 // support (`samples/P-4.draft.<engine>.json`); every series is computed here from the generated times. Revision 14 (review 14 R2; contract
 // version 9): the draft support is `draft-request-sample/2` (dispatch identity at every await, the observed dispatcher's claim, keyed
-// request and admitted receipt, the completion read through the bound service), never a fabricated status.
+// request and admitted receipt, the completion read through the bound service), never a fabricated status. Revision 15 (review 15 R2;
+// contract version 10): `draft-request-sample/3`, whose completion read records its start (`started_at`, `log_before`) after the
+// receipt's result and before its own end, every record complete for its kind and every time inside the sample's interval. Revision 16
+// (review 16 R16-SYNC, design assessment DA16-H1; contract version 11): `sync-request-sample/3` and `draft-request-sample/4`. LABELLED
+// HARNESS CORRECTION: a sync read now closes after the last line it retains (a later step's tick at `commit + 2` was retained by a read
+// timed `commit + 0.75`, a chronology no writer can produce); the measured values do not depend on the read's time and are unchanged.
 //
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
@@ -1343,6 +1348,8 @@ export function writeProgramme(
             `${commit + 2}ms data.sync_tick ${JSON.stringify({ why: "timer", coalesced: false })}`,
           );
         const to = from + lines.length;
+        // Revision 16 (DA16-H1): the read follows every line it retains (its time is the page clock's, unrounded).
+        const readAt = msOf(lines.at(-1)) + 0.75;
         out.push({
           index: warmup + k,
           mark: {
@@ -1359,7 +1366,7 @@ export function writeProgramme(
             epochs: [],
             generation: 1,
             to,
-            at: commit + 0.75,
+            at: readAt,
             resource_entries: 1 + (k % 3),
           },
           lines,
@@ -1383,7 +1390,7 @@ export function writeProgramme(
     );
     const post = p4.map((e) => commitOf(e) - e.resources[0].responseEnd);
     json(`samples/P-4.sync.${engine}.json`, {
-      method: "sync-request-sample/2",
+      method: "sync-request-sample/3",
       engine,
       warmup: 20,
       samples: p4,
@@ -1554,6 +1561,8 @@ export function writeProgramme(
               ? { kind: "absent" }
               : { kind: "row", local_id: local, status: "acknowledged" },
             waiting: 0,
+            started_at: receiptEnd + 0.2,
+            log_before: logFrom + records.length,
             at: closed,
             to: from + lines.length,
             log_first: 0,
@@ -1586,7 +1595,7 @@ export function writeProgramme(
       }
     }
     json(`samples/P-4.draft.${engine}.json`, {
-      method: "draft-request-sample/2",
+      method: "draft-request-sample/4",
       engine,
       warmup: 20,
       samples: drafts,
@@ -1632,7 +1641,7 @@ export function writeProgramme(
     );
     const p10 = syncWitnesses(100, 0, "P-10", 250);
     json(`samples/P-10.sync.${engine}.json`, {
-      method: "sync-request-sample/2",
+      method: "sync-request-sample/3",
       engine,
       warmup: 0,
       samples: p10,
@@ -2109,7 +2118,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 9,
+      contract_version: 11,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

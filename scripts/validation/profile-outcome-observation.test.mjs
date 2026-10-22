@@ -310,10 +310,10 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 9; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 11; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 9);
+  assert.equal(evidence.CONTRACT_VERSION, 11);
   assert.equal(device.DEVICE_SCHEMA, 4);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
@@ -1577,8 +1577,9 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 
 // ---- versions -----------------------------------------------------------------------------------------------------------------------
 
-test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12) and 8 (revision 13) are not evidence of version 9", (t) => {
-  for (const version of [3, 4, 5, 6, 7, 8]) {
+// Revision 16 (adapted): version 10 (revision 15) joins the list and the current version is 11.
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12), 8 (revision 13), 9 (revision 14) and 10 (revision 15) are not evidence of version 11", (t) => {
+  for (const version of [3, 4, 5, 6, 7, 8, 9, 10]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1591,7 +1592,7 @@ test("case: stages recorded under contract versions 3 (review 9's Air request), 
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 9`),
+          .includes(`recorded under contract ${version}, not 11`),
       ),
     );
   }
@@ -1721,6 +1722,12 @@ test("case R12-M4 (DA-M2): a P-4 sync sample paired with ANOTHER sample's reques
   const support = readJson(file);
   const [a, b] = support.samples;
   a.resources = [{ ...b.resources[0] }];
+  // REVISION 16 ADAPTATION (labelled; DA16-S1, invariant I3): the next sample's entry ended after sample 0's read, which no page read
+  // can retain; it is now refused for that first (asserted below). To keep this case's intent (the selection finds no request of its
+  // own step), sample 0's read is extended to that entry's end; the next sample's mark then precedes it, which the frame reports only
+  // after sample 0's own refusal.
+  const unextended = structuredClone(support);
+  a.read.at = b.resources[0].responseEnd + 0.1;
   writeFileSync(file, `${JSON.stringify(support, null, 2)}\n`);
   const lineOf = (e, at) => e.lines[at - e.mark.from];
   const tick = Number(lineOf(a, a.selected.start).split("ms")[0]);
@@ -1755,6 +1762,13 @@ test("case R12-M4 (DA-M2): a P-4 sync sample paired with ANOTHER sample's reques
     );
   assert.equal(r.complete, false);
   refusedEndToEnd(dir);
+  writeFileSync(file, `${JSON.stringify(unextended, null, 2)}\n`);
+  assert.match(
+    reasons(
+      cell(contract.resolveEvidence(dir), "P-4 sync page request_ms[firefox]"),
+    ),
+    /sample 0: its operation is invalid: a \/sync request entry lies outside the sample's observation/,
+  );
   // The support removed: the throttled series has nothing to rest on.
   const dir2 = scratch(t);
   writeComplete(dir2);
@@ -1885,14 +1899,16 @@ test("control R13-K1: the complete programme's sync and draft witnesses resolve 
   const dir = scratch(t);
   writeComplete(dir);
   const p4 = readJson(syncFile(dir, "webkit"));
-  assert.equal(p4.method, "sync-request-sample/2");
+  // Revision 16 (adapted): version 3.
+  assert.equal(p4.method, "sync-request-sample/3");
   assert.ok(
     p4.samples.some((e) => e.lines.some((l) => l.includes('"coalesced":true'))),
   );
   assert.ok(p4.samples.some((e) => e.read.to > e.selected.end + 1));
   // Revision 14 (adapted from `draft-request-sample/1`): the draft witness is version 2; some receipts removed their row (absent).
+  // Revision 15 (adapted again): version 3, whose completion read records its start. Revision 16 (adapted): version 4.
   const drafts = readJson(draftFile(dir, "webkit"));
-  assert.equal(drafts.method, "draft-request-sample/2");
+  assert.equal(drafts.method, "draft-request-sample/4");
   assert.ok(
     drafts.samples.some(
       (e) => e.completion.row.kind === "absent" && e.records[5].removed,
@@ -1934,6 +1950,9 @@ test("case R13-C1 (review 13 R2, DA-R2-A/B): an earlier step that ended without 
       ln(tick - 90, "data.sync_tick", { why: "nudge", coalesced: false }),
       ln(tick - 89, "data.sync_next", { when: "event", state: "stopped" }),
     );
+    // REVISION 16 HARNESS CORRECTION (labelled; DA16-H1): the mark precedes the inserted step it triggered (it was left after it, a line
+    // before the mark, which `/3` refuses first). Schedule, values and expected reason unchanged.
+    e.mark.at = tick - 90.5;
     e.read.to += 2;
     e.selected = {
       start: honest ? e.selected.start + 2 : e.mark.from,
@@ -2057,26 +2076,32 @@ test("case R13-C3 (DA-R2-B, invariant 3): a second /sync request inside the step
         }),
       /2 \/sync requests lie inside the operation \(2 since the sample began\)/,
     ],
+    // REVISION 16 HARNESS CORRECTIONS (labelled; DA16-H1, invariant I3): an entry the read retains began after the mark and ended before
+    // the read, so the mark is moved before the earlier entry and the read after the overlapping one; schedules and reasons unchanged.
     [
       "began before",
-      (e) =>
+      (e) => {
         e.resources.unshift({
           ...e.resources[0],
           startTime: msAt(e.lines[0]) - 5,
           requestStart: msAt(e.lines[0]) - 4,
           responseEnd: msAt(e.lines[0]) - 3,
-        }),
+        });
+        e.mark.at = msAt(e.lines[0]) - 5.5;
+      },
       /a \/sync request began before the sample's operation/,
     ],
     [
       "overlaps the end",
-      (e) =>
+      (e) => {
         e.resources.push({
           ...e.resources[0],
           startTime: e.resources[0].startTime + 1,
           requestStart: e.resources[0].startTime + 1.2,
           responseEnd: msAt(e.lines[e.selected.commit - e.mark.from]) + 30,
-        }),
+        });
+        e.read.at = e.resources.at(-1).responseEnd + 0.5;
+      },
       /a \/sync request overlaps the sample's operation without lying inside it/,
     ],
     [
@@ -2188,7 +2213,7 @@ test("case R13-C4 (invariant 1): identity and binding: a reloaded page, an engin
       (v) => {
         v.method = "sync-request-sample/1";
       },
-      /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/2/,
+      /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/3/, // revision 16 (adapted): the current method is /3
     ],
     [
       "failure recorded",
@@ -2318,6 +2343,8 @@ test("case R13-D2 (DA-N1): the draft witness's other relations: a draft waiting 
       (e) => {
         e.records.pop();
         e.completion.log_to -= 1;
+        // Revision 15 (adapted): the read began with the same records (`draft-request-sample/3` records its start position).
+        e.completion.log_before -= 1;
       },
       /^pending: the draft's receipt transaction has not completed/,
       "pending",
@@ -2325,6 +2352,9 @@ test("case R13-D2 (DA-N1): the draft witness's other relations: a draft waiting 
     [
       "another draft's receipt",
       (e) => {
+        // Revision 15 (adapted): another draft's receipt is its call AND its result; a result alone naming another draft contradicts
+        // its call, which case R15-C2 refuses with that reason.
+        e.records[4].local_id = "00000000-0000-4000-8000-000000000000";
         e.records[5].local_id = "00000000-0000-4000-8000-000000000000";
       },
       /another draft's dispatch \(data\.admitReceipt\) was recorded during the sample/,
@@ -2332,9 +2362,13 @@ test("case R13-D2 (DA-N1): the draft witness's other relations: a draft waiting 
     [
       "read before answer",
       (e) => {
-        e.timing.done = msAt(e.lines[1]) - 5;
+        // Revision 15 (adapted): the read's one time (`at` = `done`) 1.5 ms before the answer it saw. Its retained receipt call, recorded
+        // before the read's position yet timed after it, now refuses it first (the closed interval); revision 14's message was "the
+        // sample was read before its answer", which an internally consistent `/3` witness cannot reach before this check.
+        e.timing.done = msAt(e.lines[1]) - 1.5;
+        e.timing.at = e.timing.done;
       },
-      /the sample was read before its answer/,
+      /a dispatch record's time \(\d+\) contradicts the timing read/,
     ],
   ];
   for (const [label, edit, reason, status = "invalid"] of cases) {
@@ -2377,6 +2411,9 @@ test("control R13-K2 (the released backend's first real-writer run): a draft rea
   const answer = msAt(e.lines[1]);
   e.timing.done = answer - 0.3;
   e.timing.at = e.timing.done;
+  // Revision 15 (adapted): production begins the receipt's call in the answer's own turn, so a read in that evaluation follows the call:
+  // its record lies before the read's position, no later than its time (the answer's raw time is at most 0.5 ms before its line).
+  e.records[4].at = answer - 0.35;
   writeFileSync(draftFile(dir, "webkit"), `${JSON.stringify(v, null, 2)}\n`);
   rebind(dir, "webkit", 11, {
     "P-4 draft total_ms": e.timing.done - e.mark.t0,
@@ -2431,6 +2468,8 @@ const shiftLogAfter = (v, k, delta) => {
     e.mark.log_from += delta;
     e.timing.log_to += delta;
     e.completion.log_to += delta;
+    // Revision 15: the completion read's recorded start moves with them.
+    if (e.completion.log_before !== undefined) e.completion.log_before += delta;
     for (const r of e.records) {
       r.seq += delta;
       if (r.of !== undefined) r.of += delta;
@@ -2774,7 +2813,7 @@ test("case R14-C3: version-8 draft support (`draft-request-sample/1`) is refused
   assert.deepEqual(unsatisfied(r), draftIds("firefox"));
   assert.match(
     reasons(cell(r, "P-4 draft claim_ms[firefox]")),
-    /samples\/P-4\.draft\.firefox\.json is not draft-request-sample\/2/,
+    /samples\/P-4\.draft\.firefox\.json is not draft-request-sample\/4/, // revision 16 (adapted): the current method is /4
   );
   dir = `${scratch(t)}-overlap`;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -2787,5 +2826,601 @@ test("case R14-C3: version-8 draft support (`draft-request-sample/1`) is refused
   assert.match(
     reasons(cell(r, "P-4 draft enqueue_ms[firefox]")),
     /sample 4: it overlaps the previous sample's operation/,
+  );
+});
+
+// ---- revision 15 (review 15 R2, design assessment DA15-R2a/R2b, Q4): completion evidence is checked against its own call and interval ------
+// Each case edits ONLY completion evidence of ONE draft witness of a complete programme (`draft-request-sample/3`): every series value,
+// selected index, count, summary and hash stays as the writer computed it, so only the evidence's integrity can refuse it. The expected
+// reasons are written here by hand from the rule's contract (scripts/lib/profile-sample-rules.mjs), not computed by it.
+
+test("case R15-C1 (review 15 R2): the review's nine completion-integrity schedules end to end: the healthy and every contradicted receipt result or completion time is judged through the contract, ordinary assembly and both validator modes (healthy 0/0 with desktop support; each contradiction refused 1/1 in exactly the six P-4 draft cells and P-10's draft reuse, support withheld)", (t) => {
+  const cases = [
+    ["healthy", () => {}, null],
+    [
+      "receipt result failed",
+      (e) => {
+        e.records.at(-1).outer = "failed";
+      },
+      /dispatch record \d+ is malformed: its failed commit_end names no reason/,
+    ],
+    [
+      "receipt result names another service",
+      (e) => {
+        e.records.at(-1).service = 999;
+      },
+      /a commit result \(record \d+\) contradicts its call \(service\)/,
+    ],
+    [
+      "receipt result omits its service",
+      (e) => {
+        delete e.records.at(-1).service;
+      },
+      /dispatch record \d+ is malformed: its commit_end names no service/,
+    ],
+    [
+      "receipt result epoch 100 greater than its call",
+      (e) => {
+        e.records.at(-1).epoch += 100;
+      },
+      /a commit result \(record \d+\) contradicts its call \(epoch\)/,
+    ],
+    [
+      "receipt result names another plan",
+      (e) => {
+        e.records.at(-1).plan = "data.recordOutcome";
+      },
+      /a commit result \(record \d+\) contradicts its call \(plan\)/,
+    ],
+    [
+      "receipt result 60 s after the completion read",
+      (e) => {
+        e.records.at(-1).at = e.completion.at + 60_000;
+      },
+      /a dispatch record's time \(\d+\) contradicts the completion read's start/,
+    ],
+    [
+      "receipt result has no time",
+      (e) => {
+        delete e.records.at(-1).at;
+      },
+      /dispatch record \d+ is malformed: its time is not a finite, non-negative page time/,
+    ],
+    [
+      "completion read 60 s before the enqueue",
+      (e) => {
+        e.completion.at = e.mark.t0 - 60_000;
+      },
+      /its completion read's times are not after its timing read and in order/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    const before = readFileSync(join(dir, "measurements.jsonl"), "utf8");
+    const v = readJson(draftFile(dir, "chromium"));
+    const selected = structuredClone(v.samples[0].selected);
+    editJson(draftFile(dir, "chromium"), (w) => {
+      edit(w.samples[0]);
+    });
+    // Completion evidence only: no series value, summary, hash or selection changed.
+    assert.equal(
+      readFileSync(join(dir, "measurements.jsonl"), "utf8"),
+      before,
+      label,
+    );
+    assert.deepEqual(
+      readJson(draftFile(dir, "chromium")).samples[0].selected,
+      selected,
+      label,
+    );
+    if (reason === null) {
+      assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), [], label);
+      const results = assemble(dir);
+      assert.equal(
+        results.acceptance_scope.desktop_decision.supports,
+        true,
+        label,
+      );
+      for (const extra of [[], ["--allow-partial"]]) {
+        const run = validate(dir, ...extra);
+        assert.equal(
+          run.status,
+          0,
+          `${label} ${extra}: ${run.stdout}${run.stderr}`,
+        );
+      }
+      continue;
+    }
+    try {
+      draftRefusal(dir, "chromium", 0, reason);
+      refusedEndToEnd(dir);
+    } catch (error) {
+      error.message = `${label}: ${error.message}`;
+      throw error;
+    }
+  }
+});
+
+test("case R15-C2 (DA15-R2a/R2b, invariants 1-3): claim and request results, end references and the closed interval: a result contradicting its call, a malformed result, a duplicate, a result naming another kind or itself, records out of order or before the mark, a receipt delivered during the completion read, each read's position against its time, and a request to another path than its entry each refuse the sample with their own reason", (t) => {
+  const cases = [
+    [
+      "claim result epoch",
+      (e) => {
+        e.records[1].epoch += 1;
+      },
+      /a commit result \(record \d+\) contradicts its call \(epoch\)/,
+    ],
+    [
+      "claim result service missing",
+      (e) => {
+        delete e.records[1].service;
+      },
+      /dispatch record \d+ is malformed: its commit_end names no service/,
+    ],
+    [
+      "claim result another dispatcher",
+      (e) => {
+        e.records[1].dispatcher = 7;
+      },
+      /a commit result \(record \d+\) contradicts its call \(dispatcher\)/,
+    ],
+    [
+      "request result another key",
+      (e) => {
+        e.records[3].key = "00000000-0000-4000-8000-000000000000";
+      },
+      /a request result \(record \d+\) contradicts its call \(key\)/,
+    ],
+    [
+      "request result another path",
+      (e) => {
+        e.records[3].path = "/api/experimental/v1/other";
+      },
+      /a request result \(record \d+\) contradicts its call \(path\)/,
+    ],
+    [
+      "request result without HTTP status",
+      (e) => {
+        delete e.records[3].http;
+      },
+      /dispatch record \d+ is malformed: its answered request_end names no HTTP status/,
+    ],
+    [
+      "two results of one call",
+      (e) => {
+        e.records[5].of = e.records[0].seq;
+      },
+      /a commit call \(record \d+\) has two results/,
+    ],
+    [
+      "a result naming another kind",
+      (e) => {
+        e.records[3].of = e.records[1].seq;
+      },
+      /a request result \(record \d+\) names a commit_end as its call/,
+    ],
+    [
+      "a result naming itself",
+      (e) => {
+        e.records[5].of = e.records[5].seq;
+      },
+      /dispatch record \d+ is malformed: its commit_end names no earlier call/,
+    ],
+    [
+      "an unknown outcome",
+      (e) => {
+        e.records[5].outer = "maybe";
+      },
+      /dispatch record \d+ is malformed: its commit_end's outcome \(maybe\) is not one of/,
+    ],
+    [
+      "records going back",
+      (e) => {
+        e.records[1].at = e.records[0].at - 0.01;
+      },
+      /the dispatch records' times go back \(record \d+\)/,
+    ],
+    [
+      "a record before the mark",
+      (e) => {
+        e.records[0].at = e.mark.t0 - 1;
+      },
+      /a dispatch record \(\d+\) precedes the sample's mark/,
+    ],
+    [
+      "receipt delivered during the completion read",
+      (e) => {
+        e.completion.log_before -= 1;
+        e.completion.started_at = e.records[5].at - 0.1;
+      },
+      /the receipt's result was delivered during the completion read: the read cannot corroborate it/,
+    ],
+    [
+      "completion start position contradicts its time",
+      (e) => {
+        e.completion.started_at = e.records[5].at - 0.1;
+      },
+      /a dispatch record's time \(\d+\) contradicts the completion read's start/,
+    ],
+    [
+      "timing position contradicts its time",
+      (e) => {
+        e.timing.log_to -= 1;
+      },
+      /a dispatch record's time \(\d+\) contradicts the timing read/,
+    ],
+    [
+      "completion start missing",
+      (e) => {
+        delete e.completion.log_before;
+      },
+      /its completion read records no start inside the sample's records/,
+    ],
+    [
+      "timing read with two times",
+      (e) => {
+        e.timing.at = e.timing.done + 1;
+      },
+      /its timing read does not record one time/,
+    ],
+    [
+      "request to another path than its entry",
+      (e) => {
+        e.records[2].path = "/api/experimental/v1/other";
+        e.records[3].path = "/api/experimental/v1/other";
+      },
+      /the dispatcher's request was made to another path than its \/commands entry/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    const before = readFileSync(join(dir, "measurements.jsonl"), "utf8");
+    editJson(draftFile(dir, "firefox"), (v) => {
+      edit(v.samples[2]);
+    });
+    assert.equal(
+      readFileSync(join(dir, "measurements.jsonl"), "utf8"),
+      before,
+      label,
+    );
+    try {
+      draftRefusal(dir, "firefox", 2, reason);
+    } catch (error) {
+      error.message = `${label}: ${error.message}`;
+      throw error;
+    }
+  }
+});
+
+test("case R15-C3: version-9 draft support (`draft-request-sample/2`) is refused; a mark taken before the previous sample's completion read ended overlaps it in time, and a mark at that very time (with its values rebound) does not", (t) => {
+  let dir = scratch(t);
+  writeComplete(dir);
+  editJson(draftFile(dir, "webkit"), (v) => {
+    v.method = "draft-request-sample/2";
+  });
+  let r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), draftIds("webkit"));
+  assert.match(
+    reasons(cell(r, "P-4 draft claim_ms[webkit]")),
+    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/4/, // revision 16 (adapted): the current method is /4
+  );
+  dir = `${scratch(t)}-overlap`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeComplete(dir);
+  editJson(draftFile(dir, "webkit"), (v) => {
+    v.samples[4].mark.t0 = v.samples[3].completion.at - 0.5;
+  });
+  r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), draftIds("webkit"));
+  assert.match(
+    reasons(cell(r, "P-4 draft total_ms[webkit]")),
+    /sample 4: it overlaps the previous sample's operation in time/,
+  );
+  dir = `${scratch(t)}-tie`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeComplete(dir);
+  const v = readJson(draftFile(dir, "webkit"));
+  const e = v.samples[4];
+  e.mark.t0 = v.samples[3].completion.at;
+  writeFileSync(draftFile(dir, "webkit"), `${JSON.stringify(v, null, 2)}\n`);
+  rebind(dir, "webkit", 4, {
+    "P-4 draft enqueue_ms": e.mark.t1 - e.mark.t0,
+    "P-4 draft total_ms": e.timing.done - e.mark.t0,
+  });
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), []);
+});
+
+// ---- revision 16 (review 16 R16-SYNC, design assessment DA16-S1/S2/D1/H1, Q4) --------------------------------------------------------------
+// `sync-request-sample/3` and `draft-request-sample/4` (contract version 11): the sync witness's own observation interval (typed mark and
+// read times enclosing every retained line and entry, the lines' times never going back), the exact endpoint pathname for both helper
+// callers, and each sync mark following the previous read in time. Every case edits retained witnesses of a complete programme and is
+// judged by the contract, the ordinary assembler and both validator modes; expected cells and reasons are written here.
+const syncIds = (engine) =>
+  [...SYNC_P4, SYNC_P10U, "P-10 sync page duration_ms (proxy delay 250 ms)"]
+    .map((n) => `${n}[${engine}]`)
+    .sort();
+const ENGINES = ["chromium", "firefox", "webkit"];
+
+test("case R16-C1 (review 16 R16-SYNC): the review's sync schedules on the first P-4 and P-10 witness of every engine, end to end: healthy 0/0 with desktop support; a second request, a read timed before its mark, both observation times missing, a step end traced before its tick and an entry to /not-sync each refused 1/1 in every series resting on them, with the selections and values unchanged", (t) => {
+  const cases = [
+    ["healthy", () => {}, null],
+    [
+      "second request (the review's known-invalid control)",
+      (w) => {
+        w.resources.push(structuredClone(w.resources[0]));
+        w.read.resource_entries += 1;
+      },
+      /2 \/sync requests lie inside the operation \(2 since the sample began\)/,
+    ],
+    [
+      "read 1000 ms before its mark",
+      (w) => {
+        w.read.at = w.mark.at - 1000;
+      },
+      /its read is timed before its mark/,
+    ],
+    [
+      "both observation times missing",
+      (w) => {
+        delete w.read.at;
+        delete w.mark.at;
+      },
+      /its mark records no finite, non-negative page time/,
+    ],
+    [
+      "step end traced at 1 ms, before its tick",
+      (w) => {
+        const i = w.selected.end - w.mark.from;
+        w.lines[i] = w.lines[i].replace(/^-?\d+ms/, "1ms");
+      },
+      /a trace line \(\d+\) precedes the sample's mark/,
+    ],
+    [
+      "entry named /not-sync",
+      (w) => {
+        w.resources[0].name = "/not-sync";
+      },
+      /a retained request entry is not the \/sync endpoint \(\/not-sync\)/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    const before = readFileSync(join(dir, "measurements.jsonl"), "utf8");
+    for (const engine of ENGINES)
+      for (const which of ["P-4", "P-10"])
+        editJson(syncFile(dir, engine, which), (v) => {
+          const selected = structuredClone(v.samples[0].selected);
+          edit(v.samples[0]);
+          assert.deepEqual(v.samples[0].selected, selected, label);
+        });
+    // Witnesses only: no series value, summary or hash changed.
+    assert.equal(
+      readFileSync(join(dir, "measurements.jsonl"), "utf8"),
+      before,
+      label,
+    );
+    const r = contract.resolveEvidence(dir);
+    if (reason === null) {
+      assert.deepEqual(unsatisfied(r), [], label);
+      const results = assemble(dir);
+      assert.equal(
+        results.acceptance_scope.desktop_decision.supports,
+        true,
+        label,
+      );
+      for (const extra of [[], ["--allow-partial"]]) {
+        const run = validate(dir, ...extra);
+        assert.equal(
+          run.status,
+          0,
+          `${label} ${extra}: ${run.stdout}${run.stderr}`,
+        );
+      }
+      continue;
+    }
+    try {
+      assert.deepEqual(unsatisfied(r), ENGINES.flatMap(syncIds).sort());
+      for (const engine of ENGINES)
+        for (const id of [
+          `P-4 sync page pre_issue_ms[${engine}]`,
+          `P-4 sync page total_ms[${engine}]`,
+          `${SYNC_P10U}[${engine}]`,
+          `P-10 sync page duration_ms (proxy delay 250 ms)[${engine}]`,
+        ])
+          assert.match(
+            reasons(cell(r, id)),
+            new RegExp(`sample 0: its operation is invalid: ${reason.source}`),
+            id,
+          );
+      assert.equal(r.complete, false);
+      refusedEndToEnd(dir);
+    } catch (error) {
+      error.message = `${label}: ${error.message}`;
+      throw error;
+    }
+  }
+});
+
+test("case R16-C2 (DA16-S1/S2, invariants I1-I5): a middle and the last witness, a whole witness translated earlier with its durations kept, an entry outside its read and a tail line after it are refused in their engine's series; a mark tied to the previous read is not", (t) => {
+  const cases = [
+    [
+      "middle sample's read before its mark",
+      "chromium",
+      "P-4",
+      150,
+      (v) => {
+        v.samples[150].read.at = v.samples[150].mark.at - 0.25;
+      },
+      /sample 150: its operation is invalid: its read is timed before its mark/,
+    ],
+    [
+      "last sample's entry to another endpoint",
+      "webkit",
+      "P-4",
+      299,
+      (v) => {
+        v.samples[299].resources[0].name = "/api/experimental/v1/commands";
+      },
+      /sample 299: its operation is invalid: a retained request entry is not the \/sync endpoint \(\/api\/experimental\/v1\/commands\)/,
+    ],
+    [
+      "an entry ending after the read (inside the commit's rounding)",
+      "firefox",
+      "P-10",
+      6,
+      (v) => {
+        const e = v.samples[6];
+        const commit = msAt(e.lines[e.selected.commit - e.mark.from]);
+        e.resources[0].responseEnd = e.read.at + 0.1;
+        assert.ok(e.resources[0].responseEnd <= commit + 1);
+      },
+      /sample 6: its operation is invalid: a \/sync request entry lies outside the sample's observation/,
+    ],
+    [
+      "a later step's tick retained after the read",
+      "webkit",
+      "P-10",
+      2,
+      (v) => {
+        const e = v.samples[2];
+        e.lines.push(
+          ln(Math.ceil(e.read.at) + 5, "data.sync_tick", {
+            why: "timer",
+            coalesced: false,
+          }),
+        );
+        e.read.to += 1;
+        shiftAfter(v, 2, 1);
+      },
+      /sample 2: its operation is invalid: a trace line \(\d+\) follows the sample's read/,
+    ],
+    [
+      "a whole witness translated before the previous read (positions, durations and local order kept)",
+      "webkit",
+      "P-4",
+      10,
+      (v) => {
+        const e = v.samples[10];
+        const d = Math.ceil(e.mark.at - v.samples[9].read.at) + 2;
+        e.mark.at -= d;
+        e.read.at -= d;
+        e.lines = e.lines.map((l) =>
+          l.replace(/^(-?\d+)ms/, (_, ms) => `${Number(ms) - d}ms`),
+        );
+        for (const r of e.resources) {
+          r.startTime -= d;
+          r.requestStart -= d;
+          r.responseEnd -= d;
+        }
+      },
+      /sample 10: it overlaps the previous sample's operation in time/,
+    ],
+  ];
+  for (const [label, engine, which, k, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    const before = readJson(syncFile(dir, engine, which)).samples[k].selected;
+    editJson(syncFile(dir, engine, which), edit);
+    const ids =
+      which === "P-4"
+        ? [...SYNC_P4, SYNC_P10U].map((n) => `${n}[${engine}]`).sort()
+        : [`P-10 sync page duration_ms (proxy delay 250 ms)[${engine}]`];
+    const r = contract.resolveEvidence(dir);
+    assert.deepEqual(unsatisfied(r), ids, label);
+    for (const id of ids) assert.match(reasons(cell(r, id)), reason, label);
+    assert.deepEqual(
+      readJson(syncFile(dir, engine, which)).samples[k].selected,
+      before,
+      label,
+    );
+  }
+  // One end to end: the translated witness through assembly and both validator modes.
+  const dir = `${scratch(t)}-translated-public`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeComplete(dir);
+  editJson(syncFile(dir, "chromium", "P-10"), cases[4][4]);
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), [
+    "P-10 sync page duration_ms (proxy delay 250 ms)[chromium]",
+  ]);
+  refusedEndToEnd(dir);
+  // A tie: the mark at the previous read's very time (its values do not depend on the mark's time).
+  const tie = `${scratch(t)}-tie`;
+  t.after(() => rmSync(tie, { recursive: true, force: true }));
+  writeComplete(tie);
+  editJson(syncFile(tie, "firefox"), (v) => {
+    v.samples[40].mark.at = v.samples[39].read.at;
+  });
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(tie)), []);
+});
+
+test("case R16-C3 (DA16-D1): a draft whose request, its result and its entry agree on another endpoint, or whose entry lies outside [t0, completion read], is refused in every draft series and end to end; version-10 support (`sync-request-sample/2`, `draft-request-sample/3`) is refused", (t) => {
+  const OTHER = "/api/experimental/v1/task-commands";
+  const cases = [
+    [
+      "coherently foreign endpoint",
+      (e) => {
+        for (const r of e.records)
+          if (r.event === "request_begin" || r.event === "request_end")
+            r.path = OTHER;
+        e.resources[0].name = OTHER;
+      },
+      /a retained request entry is not the \/commands endpoint \(\/api\/experimental\/v1\/task-commands\)/,
+    ],
+    [
+      "entry beginning before the enqueue",
+      (e) => {
+        e.resources[0].startTime = e.mark.t0 - 0.5;
+      },
+      /a \/commands request entry lies outside the sample's observation/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editJson(draftFile(dir, "firefox"), (v) => {
+      edit(v.samples[0]);
+    });
+    try {
+      draftRefusal(dir, "firefox", 0, reason);
+      refusedEndToEnd(dir);
+    } catch (error) {
+      error.message = `${label}: ${error.message}`;
+      throw error;
+    }
+  }
+  let dir = `${scratch(t)}-old-sync`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeComplete(dir);
+  editJson(syncFile(dir, "chromium"), (v) => {
+    v.method = "sync-request-sample/2";
+  });
+  let r = contract.resolveEvidence(dir);
+  assert.deepEqual(
+    unsatisfied(r),
+    [...SYNC_P4, SYNC_P10U].map((n) => `${n}[chromium]`).sort(),
+  );
+  assert.match(
+    reasons(cell(r, "P-4 sync page request_ms[chromium]")),
+    /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/3/,
+  );
+  dir = `${scratch(t)}-old-draft`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeComplete(dir);
+  editJson(draftFile(dir, "chromium"), (v) => {
+    v.method = "draft-request-sample/3";
+  });
+  r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), draftIds("chromium"));
+  assert.match(
+    reasons(cell(r, "P-4 draft request_ms[chromium]")),
+    /samples\/P-4\.draft\.chromium\.json is not draft-request-sample\/4/,
   );
 });

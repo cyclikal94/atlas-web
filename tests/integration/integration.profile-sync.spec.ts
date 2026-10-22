@@ -152,7 +152,7 @@ test("P-4: what the page does around ONE sync page, against the real backend", a
   const extra = {
     warmup: WARMUP,
     method:
-      "the engine's own trace (rounded to 1 ms) against the page's ResourceTiming for /sync; pre-issue = tick to requestStart (capture, lease cover, stamping), request = requestStart to responseEnd (the real backend on loopback), post-response = responseEnd to the commit event (the release checks, scan, the guarded commit and the sizing marker)",
+      "the engine's own trace (rounded to 1 ms) against the page's ResourceTiming for /sync; pre-issue = tick to requestStart (capture, lease cover, stamping), request = requestStart to responseEnd (the real backend on loopback), post-response = responseEnd to the commit event (the release checks, scan, the guarded commit and the sizing marker). Each sample is the first step after its mark, one closed observation (sync-request-sample/3: the mark's and read's page times enclose every retained line and entry, and the one entry is the exact /sync pathname)",
   };
   record("P-4 sync page pre_issue_ms", engine, preIssue, extra);
   record("P-4 sync page request_ms", engine, request, extra);
@@ -207,7 +207,7 @@ test("P-4: what the page does around ONE draft submission, against the real back
   const extra = {
     warmup: WARMUP,
     method:
-      "enqueue = the strict enqueue transaction; claim = enqueue complete to the dispatcher's send event (wake, window read, markInFlight); stamping = send event to requestStart (lease cover write, issue); request = the real backend on loopback; record = responseEnd to the answer event (reading and classifying the response body; production emits the answer event BEFORE it awaits the receipt transaction, so that transaction is not inside record or total); total = the enqueue's start to the observation that read the answer and its request. Each sample is one send, its answer (a receipt) and its one /commands request, completed by the same dispatcher's applied/admitted receipt transaction of that draft, which is evidence of completion, not a timing endpoint (draft-request-sample/2). Trace times are rounded to 1 ms.",
+      "enqueue = the strict enqueue transaction; claim = enqueue complete to the dispatcher's send event (wake, window read, markInFlight); stamping = send event to requestStart (lease cover write, issue); request = the real backend on loopback; record = responseEnd to the answer event (reading and classifying the response body; production emits the answer event BEFORE it awaits the receipt transaction, so that transaction is not inside record or total); total = the enqueue's start to the observation that read the answer and its request. Each sample is one send, its answer (a receipt) and its one /commands request, completed by the same dispatcher's applied/admitted receipt transaction of that draft, which is evidence of completion, not a timing endpoint (draft-request-sample/4: every dispatch record checked against its kind and every result against its call, one ordered interval, the receipt's result delivered before the completion read began, and the request and its entry the exact /commands pathname inside the sample). Trace times are rounded to 1 ms.",
   };
   record("P-4 draft enqueue_ms", engine, enqueue, extra);
   record("P-4 draft claim_ms", engine, claim, extra);

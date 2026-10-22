@@ -1,5 +1,7 @@
-export const SYNC_WITNESS_METHOD: "sync-request-sample/2";
-export const DRAFT_WITNESS_METHOD: "draft-request-sample/2";
+export const SYNC_WITNESS_METHOD: "sync-request-sample/3";
+export const DRAFT_WITNESS_METHOD: "draft-request-sample/4";
+export const SYNC_PATH: "/api/experimental/v1/sync";
+export const COMMANDS_PATH: "/api/experimental/v1/commands";
 export const TRACE_ROUNDING_MS: number;
 export const RESOURCE_BUFFER: number;
 
