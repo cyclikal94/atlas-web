@@ -683,10 +683,11 @@ export const UNIT = [
       "tests/data/form-recovery.test.ts",
       "tests/data/form-recovery-overlap.test.ts",
     ],
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        'return result.kind === "superseded" ? "failed" : "saved";',
+        'return result.kind === "superseded" || result.kind === "changed"\n                ? "failed"\n                : "saved";',
         'return "saved";',
       ),
   },
@@ -16109,11 +16110,12 @@ export const UNIT = [
     file: "src/features/sync/ItemDetailDialog.tsx",
     tests: ["tests/features/sync/recovery-screens.test.tsx"],
     expect: /U-6/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        ".saveAsNew(draft.local_id, base)",
-        ".saveAsNew(draft.local_id, null)",
+        ".saveAsNew(draft.local_id, base, shownBody?.command_digest)",
+        ".saveAsNew(draft.local_id, null, shownBody?.command_digest)",
       ),
   },
   {
@@ -16123,8 +16125,9 @@ export const UNIT = [
     file: "src/features/sync/ItemDetailDialog.tsx",
     tests: ["tests/features/sync/recovery-screens.test.tsx"],
     expect: /U-7/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
-      sub(t, '    read === "loaded" ||\n', "    (true as boolean) ||\n"),
+      sub(t, '    (read === "loaded" ||\n', "    ((true as boolean) ||\n"),
   },
   // ---- WEB-09b review cycle 2 (R3, R7) ----------------------------------------------------------------------------------------------
   {
@@ -16671,10 +16674,11 @@ export const UNIT = [
     file: "src/features/people/field/held.ts",
     tests: ["tests/features/people/field-editor.test.tsx"],
     expect: /the policy goes first, then the content/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "  if (!samePolicy(held.from.policy, held.to)) {",
+        "  if (!samePolicy(copy.change.from.policy, copy.change.to)) {",
         "  if (false) {",
       ),
   },
@@ -16685,10 +16689,11 @@ export const UNIT = [
     file: "src/features/people/field/held.ts",
     tests: ["tests/features/people/field-editor.test.tsx"],
     expect: /the policy goes first, then the content/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "      held.from = { version: result.policyVersion, policy: held.to };\n",
+        "            from: { version: result.policyVersion, policy: held.to },\n",
         "",
       ),
   },
@@ -16847,11 +16852,12 @@ export const UNIT = [
     ],
     expect:
       /a field changed WHILE the policy step ran|whose field changed while its policy read was on its way/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         sub(
           t,
-          "  const after = bound();\n  if (after !== null) return after;\n",
+          "  const after = bound();\n  if (after !== null) return fail(after);\n",
           "",
         ),
         "    sameKind: held.sameKind,\n    guard,\n",
@@ -16869,11 +16875,12 @@ export const UNIT = [
     ],
     expect:
       /discarded while its policy read was on its way|Discard while its policy read is on its way/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "isCurrentMemory(memory) && !run.cancelled && deps.listed();",
-        "isCurrentMemory(memory) && deps.listed();",
+        "isCurrentMemory(memory) && !run.cancelled && deps.mounted();",
+        "isCurrentMemory(memory) && deps.mounted();",
       ),
   },
   {
@@ -17003,11 +17010,12 @@ export const UNIT = [
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect:
       /'Hold as draft' writes the change, with the versions it began on, to the account's database/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "      const kept = await env.held.save({",
-        '      const kept: string = "saved";\n      void ({',
+        "      const kept = await env.held.create({",
+        '      const kept: { kind: string } = { kind: "saved" };\n      void ({',
       ),
   },
   {
@@ -17038,15 +17046,16 @@ export const UNIT = [
     id: "MU-2154",
     title:
       "WEB-11a R1 finding 6: a held change is run without the cross-page lock (two pages may run one hold)",
-    file: "src/features/people/detail/PersonDetail.tsx",
+    file: "src/features/people/detail/HeldChanges.tsx",
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect:
       /run by one page at a time: while another page holds it, this page sends nothing/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "      const result = await env.exclusive(",
-        "      const result = await ((_name: string, go: () => Promise<unknown>) => go())(",
+        "        result = await env.exclusive(lockOf(env, shown.change.fieldId), () =>",
+        "        result = await ((_name: string, go: () => Promise<HeldResult>) => go())(lockOf(env, shown.change.fieldId), () =>",
       ),
   },
   {
@@ -20538,10 +20547,11 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P6:",
     expect: /E-P6:/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "  if (!samePolicy(held.from.policy, held.to)) {",
+        "  if (!samePolicy(copy.change.from.policy, copy.change.to)) {",
         "  if (false) {",
       ),
   },
@@ -20599,11 +20609,12 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P15:",
     expect: /E-P15:/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "      const kept = await env.held.save({",
-        '      const kept: string = "saved";\n      void ({',
+        "      const kept = await env.held.create({",
+        '      const kept: { kind: string } = { kind: "saved" };\n      void ({',
       ),
   },
   {
@@ -20614,11 +20625,12 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P16:",
     expect: /E-P16:/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "isCurrentMemory(memory) && !run.cancelled && deps.listed();",
-        "isCurrentMemory(memory) && deps.listed();",
+        "isCurrentMemory(memory) && !run.cancelled && deps.mounted();",
+        "isCurrentMemory(memory) && deps.mounted();",
       ),
   },
   // MU-2162 (a person's screen not keyed, E-P17) was RETIRED after campaign 6 (pool request request-5ce6cedd4a164dbeb1a7): it survived with
