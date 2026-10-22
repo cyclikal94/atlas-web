@@ -4787,3 +4787,378 @@ test.describe("E-T36: a known denial of the task or its details admits no revisi
     ).toHaveLength(1);
   });
 });
+
+/**
+ * A denial of `id` committed by ANOTHER TAB of the same origin through its own connection to the account's real IndexedDB (revision 16, S4,
+ * S8): the cache row as stored, with `can_edit: false`. The page under test is not told (no sync page, no channel hint), so its screens
+ * still offer the save; only the writing transaction can see the denial. The other tab is a static asset of the origin (no app boots).
+ */
+async function denyFromAnotherTab(
+  context: BrowserContext,
+  id: string,
+): Promise<void> {
+  const other = await context.newPage();
+  await other.goto("/favicon.svg");
+  const done = await other.evaluate(
+    ({ name, id }) =>
+      new Promise<string>((resolve) => {
+        const open = indexedDB.open(name);
+        open.onerror = () => resolve(`open: ${String(open.error)}`);
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("cache", "readwrite");
+          const store = tx.objectStore("cache");
+          const read = store.get(id);
+          read.onsuccess = () => {
+            if (read.result === undefined) resolve("absent");
+            else store.put({ ...read.result, can_edit: false });
+          };
+          tx.oncomplete = () => {
+            db.close();
+            resolve("committed");
+          };
+          tx.onerror = () => resolve(`tx: ${String(tx.error)}`);
+        };
+      }),
+    { name: `atlas-${ACCOUNT}`, id },
+  );
+  await other.close();
+  expect(done).toBe("committed");
+}
+
+test.describe("E-T37: a known denial of the occurrence admits no correction (A9; R30 of revision 16)", () => {
+  // Review 16's witnesses, maintained, with the retention they did not reach: read-only occurrence, a denial arriving while the dialog is
+  // open, a denial that arrives with the newer version a conflicted correction waits for, and a denial another tab committed after the
+  // screen offered the save (refused by the writing transaction). The permitted editor is the control of each.
+  const correctable = (n: number, canEdit: boolean) => {
+    const task = buildTask({
+      n,
+      title: "Occurrence permission",
+      participation: "everyone",
+    });
+    return canEdit ? task : readOnly(task, ["occurrence"]);
+  };
+  const correctThisDay = (page: Page) =>
+    page.getByRole("button", { name: "Correct this day", exact: true });
+  const closeDays = (page: Page) =>
+    page.getByLabel("How long it stays open (days)", { exact: true });
+  const saveCorrection = (page: Page) =>
+    page.getByRole("button", { name: "Save correction", exact: true });
+  const corrections = async (page: Page) =>
+    (await draftsOf(page)).filter((d) => d.kind === "revise_occurrence");
+
+  test("read-only occurrence: Correct this day is withheld; nothing is queued", async ({
+    context,
+  }) => {
+    const task = correctable(70, false);
+    const { page } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await goOfflineAtBoundary(page);
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    await expect(correctThisDay(page)).toBeDisabled();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await corrections(page)).toHaveLength(0);
+  });
+
+  test("control: an editor queues exactly one correction offline", async ({
+    context,
+  }) => {
+    const task = correctable(71, true);
+    const { page } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await goOfflineAtBoundary(page);
+    await correctThisDay(page).click();
+    await closeDays(page).fill("3");
+    await saveCorrection(page).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await corrections(page)).toHaveLength(1);
+  });
+
+  test("the permission lost while the dialog is open: Save is withheld, the dialog and the typed value stay, nothing is queued", async ({
+    context,
+  }) => {
+    const task = correctable(72, true);
+    const { page, net } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await correctThisDay(page).click();
+    await closeDays(page).fill("3");
+    const occ = (
+      task.upserts as Array<{ resource: { kind: string; version: number } }>
+    ).find((u) => u.resource.kind === "occurrence") as {
+      resource: Record<string, unknown>;
+    };
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              ...occ,
+              resource: { ...occ.resource, version: 2, can_edit: false },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await startLeader(page);
+    await waitForState(page, "idle");
+    await expect(saveCorrection(page)).toBeDisabled();
+    await goOfflineAtBoundary(page);
+    await expect(page.getByRole("dialog")).toHaveCount(1);
+    await expect(closeDays(page)).toHaveValue("3");
+    expect(await corrections(page)).toHaveLength(0);
+  });
+
+  for (const denied of [false, true])
+    test(`${denied ? "another tab committed a denial" : "control: nothing committed in between"} after the dialog offered Save: ${denied ? "the transaction refuses it, the dialog keeps the input" : "the correction is queued once"}`, async ({
+      context,
+    }) => {
+      const task = correctable(denied ? 73 : 74, true);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await goOfflineAtBoundary(page);
+      await correctThisDay(page).click();
+      await closeDays(page).fill("4");
+      if (denied) await denyFromAnotherTab(context, task.occurrenceId);
+      await expect(saveCorrection(page)).toBeEnabled();
+      await saveCorrection(page).click();
+      if (denied) {
+        await expect(
+          page.getByText("You can't change this. Nothing was saved.", {
+            exact: true,
+          }),
+        ).toHaveCount(1);
+        await expect(page.getByRole("dialog")).toHaveCount(1);
+        await expect(closeDays(page)).toHaveValue("4");
+        expect(await corrections(page)).toHaveLength(0);
+      } else {
+        await expect(page.getByRole("dialog")).toHaveCount(0);
+        expect(await corrections(page)).toHaveLength(1);
+      }
+    });
+
+  const conflict = () => ({
+    status: 409,
+    body: JSON.stringify({
+      code: "conflict",
+      message: "The item changed",
+      details: [],
+      request_id: "11111111-1111-4111-8111-111111111111",
+    }),
+  });
+  /** A correction refused `409 conflict`, then version 2 (with `canEdit`) delivered: the conflict block waits for "Save mine". */
+  async function conflicted(
+    context: BrowserContext,
+    n: number,
+    canEdit: boolean,
+  ) {
+    const task = correctable(n, true);
+    const { page, net } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await goOfflineAtBoundary(page);
+    await correctThisDay(page).click();
+    await closeDays(page).fill("3");
+    await saveCorrection(page).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    net.commandScript.push(conflict);
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.status))
+      .toEqual(["version_conflict"]);
+    const occ = (task.upserts as Array<{ resource: { kind: string } }>).find(
+      (u) => u.resource.kind === "occurrence",
+    ) as {
+      resource: Record<string, unknown>;
+    };
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              ...occ,
+              resource: { ...occ.resource, version: 2, can_edit: canEdit },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect
+      .poll(
+        async () =>
+          (
+            (await page.evaluate(
+              (acct) => window.__atlasData?.rows(acct, "cache"),
+              ACCOUNT,
+            )) as Array<{ id: string; version: number }>
+          ).find((r) => r.id === task.occurrenceId)?.version,
+      )
+      .toBe(2);
+    await goOfflineAtBoundary(page);
+    const block = page.locator("[data-correction-conflict]");
+    await expect(block).toBeVisible();
+    const before = JSON.stringify({
+      drafts: await draftsOf(page),
+      bodies: await bodiesOf(page),
+    });
+    return { page, task, block, before };
+  }
+  const saveMine = (block: ReturnType<Page["locator"]>) =>
+    block.getByRole("button", {
+      name: "Save mine on the current version",
+      exact: true,
+    });
+
+  test("a denial delivered with the newer version: Save mine is withheld; the conflicted correction stays as it was", async ({
+    context,
+  }) => {
+    const { page, block, before } = await conflicted(context, 75, false);
+    await expect(saveMine(block)).toBeDisabled();
+    expect(
+      JSON.stringify({
+        drafts: await draftsOf(page),
+        bodies: await bodiesOf(page),
+      }),
+    ).toBe(before);
+  });
+
+  test("control: an editor's Save mine replaces it with one queued correction on version 2", async ({
+    context,
+  }) => {
+    const { page, block } = await conflicted(context, 76, true);
+    await saveMine(block).click();
+    await expect(block).toHaveCount(0);
+    const queued = (await corrections(page)).filter(
+      (d) => d.status === "queued",
+    );
+    expect(queued).toHaveLength(1);
+    const body = (await bodiesOf(page)).find(
+      (b) => b.local_id === queued[0]?.local_id,
+    )?.command.command;
+    expect(body?.expected_version).toBe(2);
+  });
+
+  test("another tab committed a denial after Save mine was offered: the replacement is refused, the conflicted correction and the block stay, with the reason", async ({
+    context,
+  }) => {
+    const { page, task, block, before } = await conflicted(context, 77, true);
+    await denyFromAnotherTab(context, task.occurrenceId);
+    await expect(saveMine(block)).toBeEnabled();
+    await saveMine(block).click();
+    await expect(block.locator("[data-correction-replace-failed]")).toHaveText(
+      "You can't correct this day any more. Your saved correction stays until you discard it.",
+    );
+    expect(
+      JSON.stringify({
+        drafts: await draftsOf(page),
+        bodies: await bodiesOf(page),
+      }),
+    ).toBe(before);
+  });
+});
+
+test.describe("E-T38: an untouched time keeps its seconds (A7, A9; R31 of revision 16)", () => {
+  // Review 16's witnesses, maintained: a task and an occurrence at 07:30:45 whose name, or open window, alone is changed queue the whole
+  // time; 07:30:00 is the control; an explicit time edit queues the chosen minute.
+  const timed = (n: number, seconds: string) =>
+    buildTask({
+      n,
+      title: "Keep my time",
+      time: `07:30:${seconds}`,
+      instant: Math.floor(Date.parse(`${TODAY}T07:30:${seconds}Z`) / 1000),
+    });
+  for (const seconds of ["45", "00"])
+    test(`task at 07:30:${seconds}: a change of the name alone queues 07:30:${seconds}`, async ({
+      context,
+    }) => {
+      const task = timed(seconds === "45" ? 80 : 81, seconds);
+      const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [
+        task,
+      ]);
+      await goOfflineAtBoundary(page);
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      await page.getByLabel("Name", { exact: true }).fill("Only the title");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      const body = (await bodiesOf(page))[0]?.command.command as {
+        definition: { schedule: { time: string } };
+      };
+      expect(body.definition.schedule.time).toBe(`07:30:${seconds}`);
+    });
+
+  test("task at 07:30:45: the person's own time edit queues the chosen minute", async ({
+    context,
+  }) => {
+    const task = timed(82, "45");
+    const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [task]);
+    await goOfflineAtBoundary(page);
+    await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+    await page.getByLabel("Time of day", { exact: true }).fill("08:15");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    const body = (await bodiesOf(page))[0]?.command.command as {
+      definition: { schedule: { time: string } };
+    };
+    expect(body.definition.schedule.time).toBe("08:15:00");
+  });
+
+  for (const seconds of ["45", "00"])
+    test(`occurrence at 07:30:${seconds}: a change of the window alone queues 07:30:${seconds}, its key kept`, async ({
+      context,
+    }) => {
+      const task = timed(seconds === "45" ? 83 : 84, seconds);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await goOfflineAtBoundary(page);
+      await page
+        .getByRole("button", { name: "Correct this day", exact: true })
+        .click();
+      await page
+        .getByLabel("How long it stays open (days)", { exact: true })
+        .fill("3");
+      await page
+        .getByRole("button", { name: "Save correction", exact: true })
+        .click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      const body = (await bodiesOf(page))[0]?.command.command as {
+        time: string;
+      };
+      expect(body.time).toBe(`07:30:${seconds}`);
+      const draft = (
+        (await page.evaluate(
+          (acct) => window.__atlasData?.rows(acct, "drafts"),
+          ACCOUNT,
+        )) as Array<{
+          display_patch: Record<
+            string,
+            { value: { slot: { key: string; intended_time: string } } }
+          > | null;
+        }>
+      )[0];
+      const slot = draft?.display_patch?.[task.occurrenceId]?.value.slot;
+      expect(slot?.key).toBe("once");
+      expect(slot?.intended_time).toBe(`07:30:${seconds}`);
+    });
+});

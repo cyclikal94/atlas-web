@@ -1,18 +1,27 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
+import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { PageHeading } from "../../../components/ui/page-heading";
-import { useDataEnv, useDraftWithCommand } from "../../../data";
+import {
+  type DraftWithCommand,
+  useDataEnv,
+  useDraftWithCommand,
+} from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel, longDayLabel } from "../format";
 import { commandOf, reviseOccurrence } from "../model/commands";
-import { submittedCorrection } from "../model/correction";
+import {
+  type SubmittedCorrection,
+  submittedCorrection,
+} from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import { editable } from "../reasons";
 import { pillTone } from "../today/TodayRow";
+import type { RowModel } from "../view";
 import { ArchiveControl, ClosureControls, Participation } from "./Controls";
 import { CORRECTION_COPY, CorrectionDialog } from "./CorrectionDialog";
 import { EntryHistory } from "./EntryHistory";
@@ -85,7 +94,6 @@ export function TaskDetail({
   focusRecord?: boolean;
 }) {
   const env = useTasksEnv();
-  const data = useDataEnv();
   const navigate = useNavigate();
   const view = useTaskDetail(taskId, occurrence);
   const actions = useTaskActions();
@@ -223,11 +231,16 @@ export function TaskDetail({
               {DETAIL_COPY.edit}
             </Link>
           )}
-          {row ? (
+          {row === null ? null : row.canEdit ? (
             <Button onClick={() => setCorrecting(row.id)}>
               {CORRECTION_COPY.open}
             </Button>
-          ) : null}
+          ) : (
+            // A known denial of the occurrence withholds the correction (R30); an open dialog stays open and explains it.
+            <Button disabled reason={CORRECTION_COPY.denied}>
+              {CORRECTION_COPY.open}
+            </Button>
+          )}
           {view.synced ? (
             <Button onClick={() => setSharing(task.id)}>
               {DETAIL_COPY.sharing}
@@ -336,77 +349,17 @@ export function TaskDetail({
       ) : (
         <>
           {correctionConflict ? (
-            <section
-              data-correction-conflict=""
-              className="flex flex-col gap-2 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
-            >
-              <h2 className="text-[14px] font-medium text-ink-1">
-                {CORRECTION_COPY.conflictTitle}
-              </h2>
-              <p className="text-[13px] text-ink-1">
-                {CORRECTION_COPY.current}:{" "}
-                {row.data.slot.date
-                  ? dayLabel(row.data.slot.date)
-                  : DETAIL_COPY.undated}
-                {mine
-                  ? ` · ${CORRECTION_COPY.mine}: ${mine.date ? dayLabel(mine.date) : DETAIL_COPY.undated}`
-                  : ""}
-              </p>
-              {mine === null && conflictDraft.status === "ready" ? (
-                <p className="text-[12.5px] text-ink-2">
-                  {CORRECTION_COPY.mineUnavailable}
-                </p>
-              ) : mine !== null && !newerShown ? (
-                <p className="text-[12.5px] text-ink-2">
-                  {CORRECTION_COPY.waitingNewer}
-                </p>
-              ) : null}
-              <div className="flex flex-wrap gap-2">
-                {mine && stored && newerShown && env.writable ? (
-                  <Button
-                    variant="primary"
-                    onClick={() => {
-                      const outbox = data.outbox();
-                      if (outbox === null) return;
-                      // The person's explicit act: the correction they SUBMITTED (its durable command) again, built in full on the version
-                      // they are shown now (`reviewedBase`), and only if the queued operation is still the one read (`expectDraft`).
-                      const request = reviseOccurrence(
-                        {
-                          occurrenceId: row.id,
-                          current: row.data,
-                          definition: mine.definition,
-                          date: mine.date,
-                          time: mine.time,
-                          progressIds,
-                        },
-                        resolveWallTime,
-                      );
-                      void outbox.supersede(correctionConflict.local_id, {
-                        ...request,
-                        targets: request.targets.map((target) =>
-                          target.resourceId === row.id
-                            ? { ...target, reviewedBase: row.version }
-                            : target,
-                        ),
-                        expectDraft: (now) =>
-                          now.local_id === stored.local_id &&
-                          now.status === stored.status &&
-                          now.command_digest === stored.command_digest,
-                      });
-                    }}
-                  >
-                    {CORRECTION_COPY.saveMine}
-                  </Button>
-                ) : null}
-                <Button
-                  onClick={() => {
-                    void data.outbox()?.discard(correctionConflict.local_id);
-                  }}
-                >
-                  {CORRECTION_COPY.discardMine}
-                </Button>
-              </div>
-            </section>
+            <CorrectionConflict
+              key={`conflict:${correctionConflict.local_id}`}
+              row={row}
+              conflictId={correctionConflict.local_id}
+              stored={stored}
+              mine={mine}
+              readable={conflictDraft.status === "ready"}
+              newerShown={newerShown}
+              progressIds={progressIds}
+              writable={env.writable}
+            />
           ) : null}
           <RecordCard
             key={`record:${row.id}`}
@@ -469,5 +422,146 @@ export function TaskDetail({
         />
       ) : null}
     </article>
+  );
+}
+
+/**
+ * A correction that met another one (version conflict), with the person's two choices. "Save mine on the current version" replaces the
+ * SUBMITTED correction (its durable command, `stored`) with the same correction built in full on the version shown now (`reviewedBase`),
+ * only while the queued operation is still the one read (`expectDraft`) and only while the occurrence may be corrected (R30: a known denial
+ * withholds it here, and the writing transaction checks it again). The replacement's answer is awaited: only an actual supersession lets
+ * the block go (it leaves with its draft); a refusal or a failure keeps the saved correction, its dependants and this block, and says why.
+ */
+function CorrectionConflict({
+  row,
+  conflictId,
+  stored,
+  mine,
+  readable,
+  newerShown,
+  progressIds,
+  writable,
+}: {
+  row: RowModel;
+  conflictId: string;
+  stored: DraftWithCommand | null;
+  mine: SubmittedCorrection | null;
+  /** The conflicted operation was read (so an unreadable one can be said to be). */
+  readable: boolean;
+  newerShown: boolean;
+  progressIds: readonly string[];
+  writable: boolean;
+}) {
+  const data = useDataEnv();
+  const announcer = useAnnouncer();
+  const [replacing, setReplacing] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const offered = mine !== null && stored !== null && newerShown && writable;
+  const saveMine = async () => {
+    // Admitted by this render's facts, whatever called it (R30).
+    if (!offered || !row.canEdit || replacing) return;
+    const outbox = data.outbox();
+    if (outbox === null) return;
+    const request = reviseOccurrence(
+      {
+        occurrenceId: row.id,
+        current: row.data,
+        definition: mine.definition,
+        date: mine.date,
+        time: mine.time,
+        progressIds,
+      },
+      resolveWallTime,
+    );
+    setReplacing(true);
+    setFailed(null);
+    let outcome: Awaited<ReturnType<typeof outbox.supersede>> | null;
+    try {
+      outcome = await outbox.supersede(conflictId, {
+        ...request,
+        targets: request.targets.map((target) =>
+          target.resourceId === row.id
+            ? { ...target, reviewedBase: row.version }
+            : target,
+        ),
+        expectDraft: (now) =>
+          now.local_id === stored.local_id &&
+          now.status === stored.status &&
+          now.command_digest === stored.command_digest,
+      });
+    } catch {
+      outcome = null;
+    }
+    setReplacing(false);
+    if (outcome?.kind === "superseded") return;
+    const reason = outcome?.kind === "refused" ? outcome.reason : "storage";
+    const message =
+      reason === "denied"
+        ? CORRECTION_COPY.replaceDenied
+        : reason === "draft_changed" || reason === "changed"
+          ? CORRECTION_COPY.replaceChanged
+          : reason === "closed" || reason === "identity_changed"
+            ? null
+            : (copy.refusalMessage(reason) ?? CORRECTION_COPY.replaceFailed);
+    setFailed(message);
+    if (message !== null) announcer.announce(message, "assertive");
+  };
+  return (
+    <section
+      data-correction-conflict=""
+      className="flex flex-col gap-2 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+    >
+      <h2 className="text-[14px] font-medium text-ink-1">
+        {CORRECTION_COPY.conflictTitle}
+      </h2>
+      <p className="text-[13px] text-ink-1">
+        {CORRECTION_COPY.current}:{" "}
+        {row.data.slot.date
+          ? dayLabel(row.data.slot.date)
+          : DETAIL_COPY.undated}
+        {mine
+          ? ` · ${CORRECTION_COPY.mine}: ${mine.date ? dayLabel(mine.date) : DETAIL_COPY.undated}`
+          : ""}
+      </p>
+      {mine === null && readable ? (
+        <p className="text-[12.5px] text-ink-2">
+          {CORRECTION_COPY.mineUnavailable}
+        </p>
+      ) : mine !== null && !newerShown ? (
+        <p className="text-[12.5px] text-ink-2">
+          {CORRECTION_COPY.waitingNewer}
+        </p>
+      ) : null}
+      {failed !== null ? (
+        <p
+          className="text-[12.5px] text-ink-2"
+          data-correction-replace-failed=""
+        >
+          {failed}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap gap-2">
+        {!offered ? null : !row.canEdit ? (
+          <Button disabled reason={CORRECTION_COPY.denied}>
+            {CORRECTION_COPY.saveMine}
+          </Button>
+        ) : replacing ? (
+          <Button disabled reason={CORRECTION_COPY.replacing}>
+            {CORRECTION_COPY.saveMine}
+          </Button>
+        ) : (
+          <Button variant="primary" onClick={() => void saveMine()}>
+            {CORRECTION_COPY.saveMine}
+          </Button>
+        )}
+        <Button
+          onClick={() => {
+            void data.outbox()?.discard(conflictId);
+          }}
+        >
+          {CORRECTION_COPY.discardMine}
+        </Button>
+      </div>
+    </section>
   );
 }

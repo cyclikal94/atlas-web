@@ -195,18 +195,22 @@ export function reviseTask(input: ReviseTaskInput): EnqueueRequest {
   const definition = canonicalDefinition(input.definition);
   return {
     endpoint: TASK_ENDPOINT,
+    // The server writes the task AND its details, and needs write access to both (R29/DA-A2): a known denial of either refuses the
+    // save in the transaction that would write it, an edit of a queued revision included.
     targets: [
       {
         resourceId: input.taskId,
         role: "primary",
         basis: "resource",
         versionChecked: true,
+        requiresEdit: true,
       },
       {
         resourceId: input.executionId,
         role: "side_effect",
         basis: "resource",
         versionChecked: true,
+        requiresEdit: true,
       },
     ],
     ...(input.localId === undefined ? {} : { localId: input.localId }),
@@ -385,12 +389,14 @@ export function archive(input: {
 }): EnqueueRequest {
   return {
     endpoint: TASK_ENDPOINT,
+    // Archiving needs write access to the task (DA-A3): a known denial refuses it in the writing transaction.
     targets: [
       {
         resourceId: input.taskId,
         role: "primary",
         basis: "resource",
         versionChecked: true,
+        requiresEdit: true,
       },
     ],
     build: (bases: Bases) => ({
@@ -457,12 +463,15 @@ export function reviseOccurrence(
   const progress = [...new Set(input.progressIds)];
   return {
     endpoint: TASK_ENDPOINT,
+    // A correction needs write access to the occurrence (R30): a known denial refuses it in the writing transaction, a replacement of a
+    // conflicted correction included. The progress streams it raises are side effects the server raises; they need no access of mine.
     targets: [
       {
         resourceId: input.occurrenceId,
         role: "primary",
         basis: "resource",
         versionChecked: true,
+        requiresEdit: true,
       },
       ...progress.map(
         (id): TargetSpec => ({

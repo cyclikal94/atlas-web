@@ -206,8 +206,14 @@ function endedStreak(
 // ---- W2: enqueue ---------------------------------------------------------------------------------------------------------------
 export type EnqueueResult =
   | { kind: "queued"; localId: LocalId; createdSeq: number; duplicate: boolean }
-  /** `changed`: the request stated what its caller saw (`observed`), and this transaction read something else; nothing was written. */
-  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" | "changed" }
+  /**
+   * `changed`: the request stated what its caller saw (`observed`), and this transaction read something else; nothing was written.
+   * `denied`: a target the request needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`); nothing was written.
+   */
+  | {
+      kind: "refused";
+      reason: "fenced" | "closing" | "no_base" | "changed" | "denied";
+    }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
 
@@ -340,10 +346,18 @@ export type EditResult =
         | "not_found"
         | "not_queued"
         | "retargeted"
-        | "draft_changed";
+        | "draft_changed"
+        /** As `EnqueueResult`'s `denied`. */
+        | "denied";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
+
+interface EditReads {
+  draft: DraftRow | undefined;
+  /** The cached rows of the targets the request needs to write (`requiresEdit`), read in this transaction. */
+  cache: Map<ResourceId, CacheRow>;
+}
 
 export const editQueuedDraft = singletonPlan<
   {
@@ -354,18 +368,32 @@ export const editQueuedDraft = singletonPlan<
     maxBytes?: number;
     leaseLive?: () => boolean;
   },
-  DraftRow | undefined,
+  EditReads,
   EditResult
 >({
   name: "data.editQueuedDraft",
   meta: { writer: "W3", guards: ["INC", "FEN"], quota: "input" },
-  scope: ["drafts", "draft_commands"],
+  scope: ["drafts", "draft_commands", "cache"],
   durability: "strict",
-  read: (reader, input) => reader.get("drafts", input.localId),
+  read: async (reader, input) => {
+    const draft = await reader.get("drafts", input.localId);
+    // The permission an edit needs is read in the SAME transaction that writes it (R30): a denial committed before it is honoured.
+    // (A request's target ids are distinct: `validateRequest`.)
+    const rows = await bulkGetWindowed(
+      reader,
+      "cache",
+      input.request.targets
+        .filter((target) => target.requiresEdit)
+        .map((target) => target.resourceId),
+    );
+    const cache = new Map<ResourceId, CacheRow>();
+    for (const row of rows) if (row) cache.set(row.id, row);
+    return { draft, cache };
+  },
   decide: ({ sync, reads, input }) => {
     if (sync === undefined)
       return { result: { kind: "refused", reason: "not_found" } };
-    const planned = planEdit(input.request, reads, sync);
+    const planned = planEdit(input.request, reads.draft, sync, reads.cache);
     if (planned.kind !== "edited") return { result: planned };
     const over = overBound(input, {
       draft: planned.draft,
@@ -537,6 +565,8 @@ export type SupersedeResult =
         | "not_supersedable"
         | "key_in_use"
         | "no_base"
+        /** As `EnqueueResult`'s `denied`. */
+        | "denied"
         /** The request's `expectDraft` refused the old draft as it is stored now; nothing was written. */
         | "draft_changed"
         /** No order of the queue lets the replacement and the drafts around it all be sent (R45, revision 25); nothing was written. */

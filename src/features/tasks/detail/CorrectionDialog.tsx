@@ -48,11 +48,20 @@ export const CORRECTION_COPY = {
   footer: "Nothing is deleted — corrections are added on top.",
   cancel: "Cancel",
   save: "Save correction",
+  denied: "You can't correct this day",
+  deniedKept:
+    "You can't correct this day any more. What you entered is kept here.",
   saved: "Correction saved on this device. Not sent yet.",
   conflictTitle: "Someone else corrected this day first",
   current: "Now saved",
   mine: "Yours",
   saveMine: "Save mine on the current version",
+  replacing: "Saving your correction…",
+  replaceFailed: "Your correction wasn't saved on the current version.",
+  replaceDenied:
+    "You can't correct this day any more. Your saved correction stays until you discard it.",
+  replaceChanged:
+    "Your correction changed somewhere else. Check it, then try again.",
   discardMine: "Discard mine",
   mineUnavailable: "Your saved correction can't be read on this device.",
   waitingNewer: "The other correction hasn't reached this device yet.",
@@ -146,7 +155,12 @@ export function CorrectionDialog({
     setState(correctionFrom(row.data));
     setErrors({});
   };
+  // Whether a correction may be saved now, by this render's facts (R30): every route into a save is admitted here, not only by the
+  // footer's state. A known denial of the occurrence (`can_edit: false` as this device last read it) keeps what was typed, unsaved; the
+  // writing transaction checks the denial again (`requiresEdit`), so one committed after this render is honoured too.
+  const admitted = writable && row.canEdit && !busy;
   const save = async () => {
+    if (!admitted) return;
     const result = correctionResult(row.data, state);
     if (!result.ok) {
       setErrors(result.errors);
@@ -213,6 +227,10 @@ export function CorrectionDialog({
             </Button>
             {!writable ? (
               <Button disabled reason={copy.NOT_WRITABLE}>
+                {CORRECTION_COPY.save}
+              </Button>
+            ) : !row.canEdit ? (
+              <Button disabled reason={CORRECTION_COPY.deniedKept}>
                 {CORRECTION_COPY.save}
               </Button>
             ) : busy ? (
@@ -306,7 +324,14 @@ export function CorrectionDialog({
               type="time"
               value={state.time}
               {...field("time")}
-              onChange={(e) => set({ time: e.target.value })}
+              // The person's own edit of the time: from now on the minute shown is what is sent (R31).
+              onChange={(e) =>
+                set({
+                  time: e.target.value,
+                  keptTime: null,
+                  timeUnconfirmed: false,
+                })
+              }
             />
             <span className="text-[12px] text-ink-2">
               {CORRECTION_COPY.timeHint}

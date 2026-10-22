@@ -1,7 +1,7 @@
 import type { Goal, OccurrenceData, TaskDefinition } from "./contract";
 import { isContractDate, parseDefinition } from "./contract";
 import { parseDecimalInput, toUnits } from "./decimal";
-import { MESSAGES } from "./form";
+import { MESSAGES, timeToSend } from "./form";
 
 /**
  * The correction of ONE occurrence (WF-TASK-03, `revise_occurrence`) as a PURE value: the target for that day (in the frozen goal's kind),
@@ -15,7 +15,16 @@ export interface CorrectionState {
   /** Checklist item labels by id (the items themselves, and their ids, are kept). */
   labels: Record<string, string>;
   date: string;
+  /** `HH:MM` or empty: what the minute input shows and edits. */
   time: string;
+  /**
+   * The occurrence's own intended time (`HH:MM:SS`, its slot's, never the task definition's) as the dialog loaded it, kept until the
+   * person edits the time field, or null (R31, revision 16): while kept, a correction of anything else sends it unchanged, seconds
+   * included. Part of the editing session's state, so it is retained and restored with the rest of it, never taken from a newer row.
+   */
+  keptTime: string | null;
+  /** As `TaskFormState.timeUnconfirmed`: a restored legacy time whose seconds are unknown waits for the person's confirmation. */
+  timeUnconfirmed: boolean;
   openDaysBefore: string;
   closeDaysAfter: string;
 }
@@ -32,6 +41,8 @@ export function correctionFrom(data: OccurrenceData): CorrectionState {
         : {},
     date: data.slot.date ?? "",
     time: data.slot.intended_time?.slice(0, 5) ?? "",
+    keptTime: data.slot.intended_time,
+    timeUnconfirmed: false,
     openDaysBefore: String(data.definition.open_days_before),
     closeDaysAfter: String(data.definition.close_days_after),
   };
@@ -106,10 +117,13 @@ export function correctionResult(
   const date = state.date.trim();
   if (date !== "" && !isContractDate(date)) errors.date = MESSAGES.startDate;
   let time: string | null = null;
-  if (date !== "" && state.time.trim() !== "") {
-    if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(state.time.trim()))
-      errors.time = MESSAGES.time;
-    else time = `${state.time.trim()}:00`;
+  if (date !== "") {
+    const sent = timeToSend(state.time, state.keptTime, state.timeUnconfirmed);
+    if (sent.ok) time = sent.time;
+    else
+      errors.time = state.timeUnconfirmed
+        ? MESSAGES.timeUnconfirmed
+        : MESSAGES.time;
   }
   const open = intIn(state.openDaysBefore, 0, 366);
   if (open === null) errors.openDaysBefore = MESSAGES.openDaysBefore;

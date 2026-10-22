@@ -39,6 +39,27 @@ export interface TargetSpec {
    * passes it; an ordinary save never does.
    */
   reviewedBase?: number;
+  /**
+   * The command needs the person's write access to this resource (the server checks it, WEB-10a R30): a CACHED row that says
+   * `can_edit: false` (as this device last read it) refuses the save as `denied`, decided in the transaction that would write it, so a
+   * denial another tab committed after the screen offered the save is honoured too. A resource the cache does not hold (a create this
+   * device has not sent, a row not fetched) is no known denial: the server decides. A grant is never inferred from anything else.
+   */
+  requiresEdit?: boolean;
+}
+
+/**
+ * Whether the cache holds a known denial of a resource the request needs to write (`TargetSpec.requiresEdit`): a cached row with
+ * `can_edit: false`. Absence is not a denial; a display patch never changes `can_edit`.
+ */
+export function knownDenial(
+  targets: readonly TargetSpec[],
+  cache?: ReadonlyMap<ResourceId, CacheRow>,
+): boolean {
+  return targets.some(
+    (target) =>
+      target.requiresEdit && cache?.get(target.resourceId)?.can_edit === false,
+  );
 }
 
 /** The versions the command is built from, by resource id (only the targets that have one). */
@@ -430,6 +451,7 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
       ...(target.reviewedBase === undefined
         ? {}
         : { reviewedBase: target.reviewedBase }),
+      ...(target.requiresEdit ? { requiresEdit: true } : {}),
     })),
     build: (bases) => build.call(request, bases),
     ...(request.targetId === undefined ? {} : { targetId: request.targetId }),
@@ -509,7 +531,7 @@ export interface EnqueueFacts {
 }
 
 export type PlannedEnqueue =
-  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" }
+  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" | "denied" }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   /** The same save was already made (a retry after a lost completion): nothing changes. */
   | { kind: "duplicate"; draft: DraftRow }
@@ -720,6 +742,8 @@ export function planEnqueue(
   if (facts.existing) return { kind: "duplicate", draft: facts.existing };
   const refusal = fenceRefusal(facts.sync);
   if (refusal !== null) return { kind: "refused", reason: refusal };
+  if (knownDenial(request.targets, facts.cache))
+    return { kind: "refused", reason: "denied" };
   const resolved = resolveTargets(request.targets, facts);
   if (resolved === null) return { kind: "refused", reason: "no_base" };
 
@@ -769,7 +793,9 @@ export type PlannedEdit =
         | "not_found"
         | "not_queued"
         | "retargeted"
-        | "draft_changed";
+        | "draft_changed"
+        /** A target the request needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`): nothing is written. */
+        | "denied";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | { kind: "edited"; draft: DraftRow; command: JsonObject };
@@ -796,12 +822,14 @@ function sameTargets(request: EnqueueRequest, draft: DraftRow): boolean {
 /**
  * The body of a `queued` draft, edited in place. The command is frozen the instant the status leaves `queued` (it may have been
  * transmitted), so an edit of any other status is refused and the change is a NEW draft (F-O3). The edit rebuilds from the
- * bases the draft already holds and cannot change what it targets.
+ * bases the draft already holds and cannot change what it targets. A known denial of a resource it needs to write (`cache`: the cached
+ * rows of the request's targets, read in the editing transaction) refuses it, as it refuses a new draft.
  */
 export function planEdit(
   request: EnqueueRequest,
   draft: DraftRow | undefined,
   sync: SyncStateRow,
+  cache?: ReadonlyMap<ResourceId, CacheRow>,
 ): PlannedEdit {
   if (draft === undefined) return { kind: "refused", reason: "not_found" };
   const refusal = fenceRefusal(sync);
@@ -810,6 +838,8 @@ export function planEdit(
     return { kind: "refused", reason: "not_queued" };
   if (!sameTargets(request, draft))
     return { kind: "refused", reason: "retargeted" };
+  if (knownDenial(request.targets, cache))
+    return { kind: "refused", reason: "denied" };
   if (request.expectDraft !== undefined && !request.expectDraft(draft))
     return { kind: "refused", reason: "draft_changed" };
   let built: BuildResult;
@@ -1120,6 +1150,8 @@ export type SupersedeDecision =
         | "not_supersedable"
         | "key_in_use"
         | "no_base"
+        /** A target the replacement needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`): nothing is written. */
+        | "denied"
         /** The request's `expectDraft` refused the old draft as it is stored now: nothing is written. */
         | "draft_changed"
         /**

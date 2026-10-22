@@ -114,6 +114,8 @@ export function refusalMessage(reason: string): string | null {
       return "There isn't enough storage space on this device to save this.";
     case "no_base":
       return "This isn't available on this device yet.";
+    case "denied":
+      return "You can't change this. Nothing was saved.";
     case "closed":
     case "identity_changed":
       return null;

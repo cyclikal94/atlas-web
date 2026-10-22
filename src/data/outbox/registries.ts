@@ -34,11 +34,14 @@ export interface CommandSpec {
    * WEB-09b's seam for the generic item-detail dialog (WF-QUEUE-02): a NEW command built from a failed or conflicting draft and `current`,
    * the value of the authorised current read (`readCurrent`) the person reviewed, or `null` when they continued without it (never the
    * cache), for "Resend as a new operation" / "Review, then save as new". `null`: nothing can be rebuilt.
-   * A kind that registers none is never offered them: the dialog offers only what the store can do (discard).
+   * A kind that registers none is never offered them: the dialog offers only what the store can do (discard). `related`: the other rows
+   * the same authorised read returned (`CurrentRead.related`), for their facts (a task's details and whether I may change them), never a
+   * base.
    */
   rebuild?(
     draft: DraftWithCommand,
     current: CacheRow | null,
+    related?: readonly CacheRow[],
   ): EnqueueRequest | null;
   /**
    * The command needs a connection and is never queued (enrolment, rota consent, a sharing or policy change): the dialog shows the
@@ -69,7 +72,15 @@ export interface CurrentReadIo {
 
 /** The authorised current-state read of WF-QUEUE-02, as the dialog distinguishes it. */
 export type CurrentRead =
-  | { kind: "loaded"; value: CacheRow }
+  | {
+      kind: "loaded";
+      value: CacheRow;
+      /**
+       * Other rows the SAME authorised response returned (a task's details with the task, WEB-10a DA-A1), for a rebuild to consult their
+       * facts; the reviewed value, and the only base, is `value`. Absent: none.
+       */
+      related?: readonly CacheRow[];
+    }
   /** The read succeeded but the current state cannot be compared to the queued attempt. */
   | { kind: "indeterminate" }
   | {
@@ -102,6 +113,7 @@ export interface CommandRegistry {
   rebuild(
     draft: DraftWithCommand,
     current: CacheRow | null,
+    related?: readonly CacheRow[],
   ): EnqueueRequest | null;
   onlineOnly(draft: Pick<DraftRow, "kind">): boolean;
   /** The kind's authorised current-state read (R7); `failed`/`unavailable` when it registered none, `failed`/`error` if it threw. */
@@ -126,8 +138,8 @@ export function createCommandRegistry(): CommandRegistry {
     },
     canRebuild: (draft) =>
       typeof specs.get(commandKind(draft))?.rebuild === "function",
-    rebuild: (draft, current) =>
-      specs.get(commandKind(draft))?.rebuild?.(draft, current) ?? null,
+    rebuild: (draft, current, related) =>
+      specs.get(commandKind(draft))?.rebuild?.(draft, current, related) ?? null,
     onlineOnly: (draft) => specs.get(commandKind(draft))?.onlineOnly === true,
     async readCurrent(draft, io) {
       const read = specs.get(commandKind(draft))?.readCurrent;

@@ -78,7 +78,12 @@ export type RefusalReason =
    * The request stated what its caller saw (`EnqueueRequest.observed`) and the resource has changed since: nothing was stored. The
    * caller reads the resource again and the person decides again (WEB-13a revision 2); it is never resubmitted on their behalf.
    */
-  | "changed";
+  | "changed"
+  /**
+   * The request needs write access to a resource that this device last read as `can_edit: false` (`TargetSpec.requiresEdit`, WEB-10a
+   * R30), as the writing transaction found it: nothing was stored. The server, not this device, grants access; a later read may.
+   */
+  | "denied";
 
 export type EnqueueOutcome =
   | { kind: "queued"; localId: LocalId; createdSeq: number }

@@ -343,6 +343,18 @@ off the roster on Today, Just me unchanged, an Anyone task still recordable with
 nothing and keep the typed name; a permission lost while the form is open; a queued revision not coalesced after the loss; the editor and
 queued-create controls), native E-T35 (Today off the roster, three modes, enrolled control) and E-T36 (denied task, details, both: no Edit
 link, the direct route queues nothing; the editor control) in three engines; unit MU-2255…MU-2265 and real-engine MU-2266/MU-2267.
+Revision 16 (review 16's R30 `occurrence-correction-permission-admission` and R31 `task-time-precision-loss`, design assessment DA-A1–A3;
+decision 42): `write-admission.test.ts` (the rule; W2, W3 and W4 under a denial committed before their transaction and after a write, with
+editor controls; the generic rebuilds of a revision and an archive, and the task's read keeping its details), `correction-permission.test.tsx`
+(Correct this day withheld; a permission lost while the dialog is open, then restored; a denial committed before Save; Save mine withheld,
+refused with its reason, and its editor control), `task-revision-admission.test.tsx` (a denial committed before a revision and before an edit
+of the queued one; another tab's edit of the queued revision not overwritten, with its control) and `time-precision.test.tsx` (00/01/45/59
+seconds through the form and the correction, explicit and cleared times, a hidden time, the slot's time rather than the definition's, the
+corrected instant and key, DST folds and gaps, recovery round trips and legacy values; the real form and dialog at 07:30:45 and 07:30:00),
+with `current-read.test.ts` and `recovery-screens.test.tsx` U-6b for the read's details reaching the rebuild; native E-T37 (read-only
+occurrence, the editor control, a permission lost while the dialog is open, a denial committed by another tab's own connection before Save
+and before Save mine, a denial delivered with the newer version) and E-T38 (07:30:45 and 07:30:00 task and occurrence, an explicit time
+edit) in three engines; unit MU-2268…MU-2298 and real-engine MU-2299…MU-2303 (`scripts/mutation/catalogue-web10a-r16.mjs`).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -399,6 +411,30 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     typed values stay. A policy version is not edit authority. A task created on this device and not sent yet is its creator's (its
     projected rows are editable), so its queued create is still edited in place. No fresh online check is added: the server still decides
     when a change is sent.
+42. **A known denial admits no write in the transaction that would make it; an untouched time is sent whole (R30, R31, DA-A1–A3; revision
+    16).** A request's target may say it needs the person's write access (`TargetSpec.requiresEdit`): a correction's occurrence, a revision's
+    task AND details, an archive's task. The enqueue (W2), the edit of a queued command (W3, which now reads those cached rows in its own
+    transaction) and the replacement (W4) refuse it as `denied`, writing nothing, when they find that resource cached with `can_edit: false`,
+    so a denial another tab committed after a screen offered the save is honoured too; a denial committed after the write does not erase
+    it. A resource the cache does not hold (a create not sent yet) is no known denial, and a progress stream a correction raises is a side
+    effect, not mine to need. The screens check the same fact first: "Correct this day" is disabled with "You can't correct this day"; an open
+    dialog that loses the permission stays open with Save disabled ("You can't correct this day any more. What you entered is kept here.");
+    "Save mine on the current version" is disabled under a denial of the newer occurrence, waits for the replacement's answer ("Saving your
+    correction…") and, when it is refused, keeps the conflicted correction and says why ("You can't correct this day any more. Your saved
+    correction stays until you discard it.", "Your correction changed somewhere else. Check it, then try again."). A refused ordinary save
+    says "You can't change this. Nothing was saved." and keeps the input. An edit of a queued revision is made only to the queued change the
+    form was shown (`expectDraft` on its id, status and digest): another tab's edit committed in between is not overwritten ("This task's
+    unsent change was edited somewhere else. What you typed is kept here: check it, then save again."). The generic "save as new" of a
+    revision or an archive declines under a denial its authorised read returned: the task's read keeps the details it returned beside the
+    reviewed task (`CurrentRead.related`), for that check only, never as a base. No online check is added; offline saves under a permission
+    last read as granted are unchanged, and the server still decides.
+    Time: the task form and the correction keep the time they loaded (`keptTime`, `HH:MM:SS`; the correction's from the occurrence's slot,
+    never the task definition) while the person has not edited the time field, and send it unchanged: a change of the name, the window, the
+    goal, the zone or the date keeps the seconds, and the corrected occurrence keeps its key and intended instant. The person's own edit of
+    the minute input (even back to the same minute) sends that minute with `:00`; clearing it sends none; a time hidden by a removed date is
+    sent again whole with the date. The minute input itself is unchanged (no seconds editor). Recovery values carry the kept time; one saved
+    before it existed keeps its visible time and waits for the person to confirm it ("Check the time of day, then save."), never a guess.
+    Durable queued bodies are not repaired: one already truncated stays as it was sent.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -430,6 +466,8 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Time zone and participation fields from the baseline | `/tasks/new` |
 | Participants as counts ("You and 2 others" only when I take part, else "3 people"), the same on Today and the task (revision 15); names are WEB-11a's | `/today`, `/tasks/<id>` (jsdom `today-participants.test.tsx`, native E-T35) |
 | Revision 15: a task I can't edit (task or details read-only for me): "Edit task" disabled with "You can't edit this task"; the edit page's Save disabled with "You can't edit this task. What you typed is kept here." | `/tasks/<id>`, `/tasks/<id>/edit` of a read-only task (jsdom `task-edit-permission.test.tsx`, native E-T36) |
+| Revision 16: a day I can't correct: "Correct this day" disabled with "You can't correct this day"; a dialog open when the permission is lost: Save disabled with "You can't correct this day any more. What you entered is kept here."; "Save mine on the current version" disabled under a denial, "Saving your correction…" while it is saved, and "You can't correct this day any more. Your saved correction stays until you discard it." / "Your correction changed somewhere else. Check it, then try again." when refused; "You can't change this. Nothing was saved." for a save refused on this device | `/tasks/<id>` of a read-only occurrence, or a correction in conflict (jsdom `correction-permission.test.tsx`, native E-T37) |
+| Revision 16: an edit of a queued revision that another tab changed: "This task's unsent change was edited somewhere else. What you typed is kept here: check it, then save again."; a restored time whose seconds are unknown: "Check the time of day, then save." | `/tasks/<id>/edit` (jsdom `task-revision-admission.test.tsx`, `time-precision.test.tsx`) |
 | The header says "Who can see this is set in Sharing." instead of naming the audience (the policy is readable by its owner only, online) | `/tasks/<id>` |
 | The "‹ Tasks" link shows at every width (the CSS budget had no room for a desktop-only rule); the mobile tab bar stays on the detail | `/tasks/<id>` |
 | Status colour only for Missed and Conflict (Done uses the neutral pill: the CSS budget); the words always say the state | `/today` |

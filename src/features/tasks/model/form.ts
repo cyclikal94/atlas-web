@@ -24,8 +24,20 @@ export interface TaskFormState {
   interval: string;
   /** `YYYY-MM-DD` or empty (an undated one-off). */
   startDate: string;
-  /** `HH:MM` or empty (any time that day). */
+  /** `HH:MM` or empty (any time that day): what the minute input shows and edits. */
   time: string;
+  /**
+   * The definition's own time (`HH:MM:SS`) as it was loaded into the form (an existing task, a queued one or a preset), kept for as long as
+   * the person has not changed the time field, or null (R31, revision 16). While it is kept it is what a save sends, seconds included,
+   * so a change of another field never alters the schedule; an edit of the time field (even back to the same minute) clears it and the
+   * chosen minute is sent as `HH:MM:00`.
+   */
+  keptTime: string | null;
+  /**
+   * A time restored from a recovery value that predates `keptTime` (R31): whether it had seconds is unknown, so a save waits for the
+   * person to confirm the time field (an edit of it clears this). Never a guess.
+   */
+  timeUnconfirmed: boolean;
   timezone: string;
   openDaysBefore: string;
   closeDaysAfter: string;
@@ -65,6 +77,8 @@ export function emptyForm(zone: string, today: string): TaskFormState {
     interval: "1",
     startDate: today,
     time: "",
+    keptTime: null,
+    timeUnconfirmed: false,
     timezone: zone,
     openDaysBefore: "0",
     closeDaysAfter: "1",
@@ -97,6 +111,8 @@ export function fromDefinition(
         : String(schedule.repeat.interval),
     startDate: schedule.start_date ?? "",
     time: schedule.time === null ? "" : schedule.time.slice(0, 5),
+    keptTime: schedule.time,
+    timeUnconfirmed: false,
     timezone: schedule.timezone,
     openDaysBefore: String(definition.open_days_before),
     closeDaysAfter: String(definition.close_days_after),
@@ -139,6 +155,26 @@ const intIn = (text: string, min: number, max: number): number | null => {
 };
 const chars = (text: string) => [...text].length;
 const HHMM = /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/;
+/** The contract's `TaskSchedule.time` and `intended_time` (`HH:MM:SS`). */
+export const HHMMSS = /^(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$/;
+
+/**
+ * The time a save sends from a minute input and the time kept from what was loaded (R31): the kept time while the person has not edited
+ * the field, else the chosen minute as `HH:MM:00`, else none. `null` with `ok: false`: the input is not a time, or a restored time still
+ * needs confirming.
+ */
+export function timeToSend(
+  shown: string,
+  keptTime: string | null,
+  timeUnconfirmed: boolean,
+): { ok: true; time: string | null } | { ok: false } {
+  if (timeUnconfirmed) return { ok: false };
+  if (keptTime !== null)
+    return HHMMSS.test(keptTime) ? { ok: true, time: keptTime } : { ok: false };
+  const text = shown.trim();
+  if (text === "") return { ok: true, time: null };
+  return HHMM.test(text) ? { ok: true, time: `${text}:00` } : { ok: false };
+}
 
 export const MESSAGES = {
   title: "Give the task a name of 1 to 300 characters.",
@@ -146,6 +182,7 @@ export const MESSAGES = {
   startDate: "Enter a real date.",
   startNeeded: "A repeating task needs a start date.",
   time: "Enter a time as hours and minutes, for example 07:30.",
+  timeUnconfirmed: "Check the time of day, then save.",
   timezone: "Choose a time zone from the list.",
   openDaysBefore: "Enter a whole number of days from 0 to 366.",
   closeDaysAfter: "Enter a whole number of days from 1 to 366.",
@@ -184,9 +221,13 @@ export function applicable(state: TaskFormState): Applicable {
     else interval = n;
   }
   let time: string | null = null;
-  if (show.time && state.time.trim() !== "") {
-    if (!HHMM.test(state.time.trim())) errors.time = MESSAGES.time;
-    else time = `${state.time.trim()}:00`;
+  if (show.time) {
+    const sent = timeToSend(state.time, state.keptTime, state.timeUnconfirmed);
+    if (sent.ok) time = sent.time;
+    else
+      errors.time = state.timeUnconfirmed
+        ? MESSAGES.timeUnconfirmed
+        : MESSAGES.time;
   }
   if (!isKnownZone(state.timezone)) errors.timezone = MESSAGES.timezone;
   const open = intIn(state.openDaysBefore, 0, 366);

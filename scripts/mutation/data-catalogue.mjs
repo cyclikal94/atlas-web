@@ -5,6 +5,8 @@
 // `patch(text)` returns the mutated text. `sub` refuses a patch whose anchor is missing or ambiguous, so a refactor that moves the
 // code a mutant targets fails LOUDLY here instead of silently turning the mutant into a no-op ("patch applied" is asserted).
 
+import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
+
 export class PatchError extends Error {}
 
 /** Replaces exactly ONE occurrence of `from` (a string or a RegExp with no `g` flag). Throws when there is none or more than one. */
@@ -197,8 +199,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        'const refusal = fenceRefusal(facts.sync);\n  if (refusal !== null) return { kind: "refused", reason: refusal };\n  const resolved',
-        "const resolved",
+        'const refusal = fenceRefusal(facts.sync);\n  if (refusal !== null) return { kind: "refused", reason: refusal };\n  if (knownDenial(',
+        "if (knownDenial(",
       ),
   },
   {
@@ -14824,8 +14826,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        ".saveAsNew(draft.local_id, base)",
-        ".saveAsNew(draft.local_id, null)",
+        "        draft.local_id,\n        base,\n",
+        "        draft.local_id,\n        null,\n",
       ),
   },
   {
@@ -18492,7 +18494,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      {\n        resourceId: input.executionId,\n        role: "side_effect",\n        basis: "resource",\n        versionChecked: true,\n      },\n',
+        '      {\n        resourceId: input.executionId,\n        role: "side_effect",\n        basis: "resource",\n        versionChecked: true,\n        requiresEdit: true,\n      },\n',
         "",
       ),
   },
@@ -19522,11 +19524,7 @@ export const UNIT = [
     tests: ["tests/features/tasks/conflict-context.test.tsx"],
     expect: /operation changed/,
     patch: (t) =>
-      sub(
-        t,
-        "                        expectDraft: (now) =>",
-        "                        _expectDraft: (now) =>",
-      ),
+      sub(t, "        expectDraft: (now) =>", "        _expectDraft: (now) =>"),
   },
 
   {
@@ -19552,11 +19550,7 @@ export const UNIT = [
     tests: ["tests/features/tasks/conflict-context.test.tsx"],
     expect: /unreadable submitted correction/,
     patch: (t) =>
-      sub(
-        t,
-        '              {mine === null && conflictDraft.status === "ready" ? (',
-        "              {false ? (",
-      ),
+      sub(t, "      {mine === null && readable ? (", "      {false ? ("),
   },
 
   {
@@ -21725,9 +21719,14 @@ export const UNIT = [
     title:
       "WEB-10a rev 15 (R29): the form's admission ignores a known denial (Save still disabled with its reason, but Enter queues the revision)",
     file: "src/features/tasks/form/TaskFormPage.tsx",
-    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    // Revision 16: the writing transaction refuses such a write too (`denied`), so the form's own admission is observed by
+    // task-revision-admission.test.tsx's "attempts no write" cases (no write is even asked for).
+    tests: [
+      "tests/features/tasks/task-edit-permission.test.tsx",
+      "tests/features/tasks/task-revision-admission.test.tsx",
+    ],
     expect:
-      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)/,
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)|attempts no write under a known denial/,
     patch: (t) =>
       sub(t, "    !queueUnread &&\n    !denied &&\n", "    !queueUnread &&\n"),
   },
@@ -21737,9 +21736,14 @@ export const UNIT = [
     title:
       "WEB-10a rev 15 (R29): save() admits whatever started it (Enter's implicit submission bypasses the disabled Save)",
     file: "src/features/tasks/form/TaskFormPage.tsx",
-    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    // Revision 16: the writing transaction refuses such a write too (`denied`), so the form's own admission is observed by
+    // task-revision-admission.test.tsx's "attempts no write" cases (no write is even asked for).
+    tests: [
+      "tests/features/tasks/task-edit-permission.test.tsx",
+      "tests/features/tasks/task-revision-admission.test.tsx",
+    ],
     expect:
-      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)/,
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)|attempts no write under a known denial/,
     patch: (t) => sub(t, "    if (!canSave) return;\n", ""),
   },
 
@@ -21788,6 +21792,8 @@ export const UNIT = [
         "          editable: true,\n",
       ),
   },
+  // WEB-10a revision 16 (R30, R31, DA-A1..A3): MU-2268..MU-2298, kept in their own module (this file reached Biome's size limit).
+  ...UNIT_R16,
 ];
 
 /**
@@ -25233,4 +25239,6 @@ export const ENGINE = [
     expect: /E-T36:/,
     patch: (t) => sub(t, EDITABLE_R15, "  return true;\n"),
   },
+  // WEB-10a revision 16 (R30, R31): MU-2299..MU-2303, in their own module.
+  ...ENGINE_R16,
 ];

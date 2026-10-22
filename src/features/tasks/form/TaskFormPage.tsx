@@ -108,6 +108,8 @@ export const FORM_COPY = {
   retargeted: "This change can't be made until the task has been sent.",
   wait: "Wait for this task to finish syncing before editing it.",
   denied: "You can't edit this task. What you typed is kept here.",
+  changedElsewhere:
+    "This task's unsent change was edited somewhere else. What you typed is kept here: check it, then save again.",
 } as const;
 
 type Mode = { kind: "new" } | { kind: "edit"; taskId: string };
@@ -439,20 +441,30 @@ function TaskForm({
       let review = false;
       if (coalesce !== undefined) {
         const outbox = data.outbox();
+        // The edit is made only to the queued change this form was shown (S6): another tab's edit of it, committed in between, is never
+        // overwritten from this older view, and a known denial is checked in the same transaction (R29/DA-A2).
         const edited = outbox
-          ? await outbox.editQueued(
-              coalesce.local_id,
-              widened(coalesce, request),
-            )
+          ? await outbox.editQueued(coalesce.local_id, {
+              ...widened(coalesce, request),
+              expectDraft: (now) =>
+                now.local_id === coalesce.local_id &&
+                now.status === coalesce.status &&
+                now.command_digest === coalesce.command_digest,
+            })
           : null;
         if (edited?.kind === "edited") ok = true;
         else
           setNotice(
             edited?.kind === "refused" && edited.reason === "retargeted"
               ? FORM_COPY.retargeted
-              : (copy.refusalMessage(
-                  edited?.kind === "refused" ? edited.reason : "storage",
-                ) ?? null),
+              : edited?.kind === "refused" && edited.reason === "denied"
+                ? FORM_COPY.denied
+                : edited?.kind === "refused" &&
+                    edited.reason === "draft_changed"
+                  ? FORM_COPY.changedElsewhere
+                  : (copy.refusalMessage(
+                      edited?.kind === "refused" ? edited.reason : "storage",
+                    ) ?? null),
           );
       } else {
         // A create captured from defaults this device never fetched is held for review in the queue (WEB-12a).
@@ -569,7 +581,14 @@ function TaskForm({
                 value={state.time}
                 data-field-edge=""
                 className={select}
-                onChange={(e) => set({ time: e.target.value })}
+                // The person's own edit of the time: from now on the minute shown is what is sent (R31).
+                onChange={(e) =>
+                  set({
+                    time: e.target.value,
+                    keptTime: null,
+                    timeUnconfirmed: false,
+                  })
+                }
               />
             </Field>
           ) : null}

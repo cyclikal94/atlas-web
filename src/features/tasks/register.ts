@@ -150,9 +150,15 @@ async function readTaskCurrent(
   );
   if (status !== 200) return failedFor(status);
   const detail = parseTaskDetail(body);
+  // The task's details come back with it and are kept beside it (DA-A1): a revision needs write access to both, and only this read says
+  // whether the person still has it. The task is the reviewed value and the only base.
   return detail === null
     ? { kind: "indeterminate" }
-    : { kind: "loaded", value: detail.task };
+    : {
+        kind: "loaded",
+        value: detail.task,
+        related: detail.execution === null ? [] : [detail.execution],
+      };
 }
 
 /**
@@ -304,9 +310,15 @@ function rebuildRecord(
   );
 }
 
+/**
+ * A revision rebuilt on the reviewed task (DA-A1): never under a known denial of the task or of its details, as the reviewed read returned
+ * them (`related`); the writing transaction checks the cached rows again (`requiresEdit`). Details the read did not return are no
+ * denial (the server decides), and nothing here is a grant.
+ */
 function rebuildReviseTask(
   draft: DraftWithCommand,
   current: CacheRow | null,
+  related: readonly CacheRow[] = [],
 ): EnqueueRequest | null {
   const command = commandOf(draft);
   const [taskId, executionId] = draft.target_resource_ids;
@@ -328,6 +340,9 @@ function rebuildReviseTask(
     execution === undefined
   )
     return null;
+  // The rule of `reasons.ts` `editable`, stated here so the registration chunk does not load the screens' copy.
+  const details = related.find((row) => row.id === execution);
+  if (!current.can_edit || details?.can_edit === false) return null;
   return asReplacement(
     draft,
     reviseTask({
@@ -370,11 +385,13 @@ function rebuildArchive(
 ): EnqueueRequest | null {
   const command = commandOf(draft);
   const taskId = draft.target_resource_ids[0];
+  // Archiving needs write access to the task (DA-A3): never rebuilt on a reviewed read that denies it.
   if (
     command === null ||
     current === null ||
     taskId === undefined ||
     current.id !== taskId ||
+    !current.can_edit ||
     typeof command.archived !== "boolean"
   )
     return null;

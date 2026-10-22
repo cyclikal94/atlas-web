@@ -114,6 +114,8 @@ describe("the correction owner: compare-and-consume (C4)", () => {
     labels: {},
     date: "2026-10-13",
     time: "",
+    keptTime: null,
+    timeUnconfirmed: false,
     openDaysBefore: "0",
     closeDaysAfter: "0",
   });

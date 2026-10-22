@@ -1,6 +1,6 @@
 import type { OccurrenceData } from "./contract";
 import { type CorrectionState, correctionFrom } from "./correction";
-import type { TaskFormState } from "./form";
+import { HHMMSS, type TaskFormState } from "./form";
 
 /**
  * Form recovery readiness (Q4; WEB-14a supplies the app-update event that captures them). PURE. The recoverable value is the form's
@@ -16,6 +16,27 @@ export function taskFormRecoveryValues(
   state: TaskFormState,
 ): Record<string, string> {
   return { form: JSON.stringify(state) };
+}
+
+/**
+ * The time precision of a recovered form (R31, revision 16): its own kept time when the value carries one (a full `HH:MM:SS` or null, as
+ * saved: never taken from a newer row), else, for a value saved before `keptTime` existed, no kept time and, when a time was shown, a
+ * confirmation the person has to give before a save (whether it had seconds is unknown). `null`: the value is not one of these.
+ */
+function precisionOf(
+  raw: Record<string, unknown>,
+): { keptTime: string | null; timeUnconfirmed: boolean } | null {
+  if (!("keptTime" in raw))
+    return {
+      keptTime: null,
+      timeUnconfirmed: typeof raw.time === "string" && raw.time.trim() !== "",
+    };
+  const kept = raw.keptTime;
+  if (kept !== null && (typeof kept !== "string" || !HHMMSS.test(kept)))
+    return null;
+  const unconfirmed = raw.timeUnconfirmed ?? false;
+  if (typeof unconfirmed !== "boolean") return null;
+  return { keptTime: kept, timeUnconfirmed: unconfirmed };
 }
 
 const FORM_KEYS: ReadonlyArray<keyof TaskFormState> = [
@@ -87,9 +108,14 @@ export function restoreTaskForm(
       !one(raw.sharing, ["defaults", "only_me"])
     )
       return null;
-    return Object.fromEntries(
-      FORM_KEYS.map((key) => [key, raw[key]]),
-    ) as unknown as TaskFormState;
+    const precision = precisionOf(raw);
+    if (precision === null) return null;
+    return {
+      ...(Object.fromEntries(
+        FORM_KEYS.map((key) => [key, raw[key]]),
+      ) as unknown as TaskFormState),
+      ...precision,
+    };
   } catch {
     return null;
   }
@@ -134,6 +160,11 @@ export function restoreCorrection(
       labels[id] = label;
     }
     out.labels = { ...base.labels, ...labels };
+    // The recovered session's own precision, never the newer row's (`base`): a legacy value's time waits for confirmation (R31).
+    const precision = precisionOf(raw);
+    if (precision === null) return null;
+    out.keptTime = precision.keptTime;
+    out.timeUnconfirmed = precision.timeUnconfirmed;
     return out;
   } catch {
     return null;
