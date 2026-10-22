@@ -24,6 +24,7 @@ export type { LeaderRole } from "./leader/election";
 export { getPageDataHost, type PageDataHost } from "./leader/page-host";
 export { markLeaderStarted } from "./leader/presence";
 export { type DataLeaderHandle, startDataLeader } from "./leader/start";
+export type { Observation } from "./model/observation";
 export type {
   Bases,
   BuildResult,
@@ -80,10 +81,12 @@ export type {
   StatusInputs,
 } from "./model/status";
 export type {
+  AccountId,
   CacheRow,
   DraftRow,
   DraftStatus,
   DraftWithCommand,
+  Epoch,
   FormRecoveryRow,
   JsonObject,
   LocalId,
@@ -119,6 +122,11 @@ export type {
   ResourcePage,
 } from "./plans/outbox";
 export type { OutstandingCreatesPage } from "./plans/outstanding-reads";
+export type {
+  Outstanding,
+  PendingCreatesPage,
+  ResourceView,
+} from "./plans/pending-reads";
 // The conditional port of WEB-11a's held changes (form copies that are operations): only lazy screens import it.
 export {
   type ConditionalEnd,
@@ -159,8 +167,11 @@ export {
   useDraftQueue,
   useNotices,
   useOptionalDataEnv,
+  useOutstanding,
+  usePendingCreates,
   useQueueSummary,
   useResourceList,
+  useResourceView,
   useSharingDefaults,
   useStatusInputs,
   useSyncStatusModel,

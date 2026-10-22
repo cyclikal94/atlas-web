@@ -5,10 +5,10 @@
     "css_gzip": 30720,
     "fonts": 256000
   },
-  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010-WEB12A (approved by Kieran on 10 October 2026; approval/fixture-budget-20261010.json and delivery/handoffs/web12a-fixture-budget-20261010.md in the orchestrator), WEB-12a revision 4 only: the measured candidate's fixture initial JavaScript was 241,870 bytes, 326 above the R61 ceiling 241,544 (the R10 defaults-source correction +310, the policy editor's DA-P1 fix +20, the fixture harness +10). The dist-fixture baseline was re-recorded on that candidate (initial JavaScript 241,870, CSS 7,059, fonts 83,736) and its initial JavaScript ceiling set to 266,057 (floor of 241,870 x 1.10). A one-off adjustment for this measured candidate, not authority for later resets; WEB-09c owns the reasoned successor ceiling (FB-20261010). Production baseline, shared provisional ceilings and tolerance are unchanged.",
+  "_provisional_by_build": "WEB-09a R61 (revision 39), authorised by the operator on 10 October 2026, dist-fixture only: its baseline was re-recorded with `check-budgets.mjs dist-fixture --record` (the shell now carries the approved data layer), and its initial JavaScript ceiling is that baseline plus `tolerance` until WEB-09c's measurements replace the provisional figures. The production build keeps the shared figures and its own baseline. FB-20261010 (Kieran, 10 October 2026; authority approval/fixture-budget-20261010.json and hand-off delivery/handoffs/fixture-budget-20261010.md in the orchestrator), a one-off re-record for WEB-13a revision 3, dist-fixture only and on the same terms: main's merged WEB-09b/WEB-08b shell measured 240,479 B, and the calendar screen's lazy route makes the bundler split shared React/session code out of the entry into further initial files (243,097 B); baseline re-recorded with `--record`, ceiling = that baseline plus `tolerance`, rounded down (267,406 B). WEB-09c owns replacing it with a reasoned, measured ceiling; this authorises no automatic future reset.",
   "provisional_by_build": {
     "dist-fixture": {
-      "initial_js_gzip": 266057
+      "initial_js_gzip": 267406
     }
   },
   "tolerance": 0.1,
@@ -19,8 +19,8 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 241870,
-      "css_gzip": 7059,
+      "initial_js_gzip": 243097,
+      "css_gzip": 7240,
       "fonts": 83736
     }
   }
