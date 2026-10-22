@@ -65,9 +65,12 @@ A presentation takes focus ONCE: a change of what the update state says is a new
 of a failure to the neutral root or the same state published again is not. Each of these is a focus REQUEST (revision 20): pending until
 its target really became the active element. Behind the session gate (`inert` and its modal dialog), an app dialog or a form's hold the
 browser refuses focus, and the gate usually lifts an existing tree without another render, so a pending request is attempted again
-whenever the document's eligibility can have changed (an `inert`, `open`, `hidden` or `disabled` attribute or the node tree changed: one
-MutationObserver, kept only while a request is pending, run at the microtask checkpoint after the step that changed the document; no timer
-or polling). A request belongs to the component that made it, so an unmount (another account, another route, the shell going) withdraws it.
+whenever the document's eligibility can have changed: ANY attribute or the node tree changed (one MutationObserver on the whole document,
+kept only while a request is pending, run once per batch of changes at the microtask checkpoint after the step that changed the document; no
+timer or polling). Revision 21 (R26/R27) widened this from `inert`, `open`, `hidden` and `disabled`: a target or an ancestor revealed by its
+`class`, its `style` or any attribute a stylesheet selects on is focused at that reveal. A reveal that changes no part of the document (a
+stylesheet edit, a media query, the end of a transition) is not seen; no current caller reveals a target that way (the shell's layouts are
+chosen by rendering), and a future one would have to signal it. A request belongs to the component that made it, so an unmount (another account, another route, the shell going) withdraws it.
 Where both surfaces hold one for the same failure, the shell's goes first. An app dialog's return of focus to its opener yields to focus
 placed since it closed. Focus never chooses anything: no action, save, discard or reload follows from it. DA-F1 (Kieran, 15 October 2026):
 a restored form's first field wins over a state-1 prompt of the same arrival, in either order, until the next in-app navigation; the prompt

@@ -21099,11 +21099,12 @@ export const UNIT = [
     tests: ["tests/pwa/update-focus.test.tsx"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /S10: a neutral-root failure behind the open modal gate dialog/,
+    // Re-anchored in revision 21 (same intent): the observer now watches every attribute, so the mutant ignores only `open` changes.
     patch: (t) =>
       sub(
         t,
-        '      attributeFilter: ["inert", "open", "hidden", "disabled"],\n',
-        '      attributeFilter: ["inert", "hidden", "disabled"],\n',
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "open")) reconcile();\n    });\n',
       ),
   },
   {
@@ -21130,6 +21131,101 @@ export const UNIT = [
         t,
         '  if (request.kind !== "restored" && placed?.at === request.at) {\n    request.state = "done";\n    return false;\n  }\n',
         "",
+      ),
+  },
+
+  // ---- WEB-14a revision 21 (R26/R27 CSS readiness; review r20, design assessment Q3): one wake source removed at a time ----
+  {
+    id: "MU-2019",
+    title:
+      "WEB-14a revision 21 (R26/R27, I2, S2/S6): a change of `class` is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hidden by its class: focused when only that class|hidden by its own class is focused/,
+    patch: (t) =>
+      sub(
+        t,
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "class")) reconcile();\n    });\n',
+      ),
+  },
+  {
+    id: "MU-2020",
+    title:
+      "WEB-14a revision 21 (R26/R27, I2, S2/S4/S6): a change of `style` is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hidden by its style: focused when only that style|hidden by its own style is focused|hidden by the neutral root's style/,
+    patch: (t) =>
+      sub(
+        t,
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "style")) reconcile();\n    });\n',
+      ),
+  },
+  {
+    id: "MU-2021",
+    title:
+      "WEB-14a revision 21 (R26/R27, I2, S6): the revision-20 wake list restored (`inert`, `open`, `hidden`, `disabled` only): a stylesheet's attribute selector is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /hidden by its own data-state is focused/,
+    patch: (t) =>
+      sub(
+        t,
+        "      attributes: true,\n    });\n",
+        '      attributes: true,\n      attributeFilter: ["inert", "open", "hidden", "disabled"],\n    });\n',
+      ),
+  },
+  {
+    id: "MU-2022",
+    title:
+      "WEB-14a revision 21 (R26, C2, S2/S12): only a change of a target itself is a wake-up (an ancestor's reveal is missed)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /presented while <main> is hidden by its (class|style)|S12, DA-F1: the prompt and a restored field both hidden/,
+    patch: (t) =>
+      sub(
+        t,
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      const targets = [...requests].map((request) => request.target());\n      if (records.some((record) => record.type === "childList" || targets.includes(record.target as HTMLElement))) reconcile();\n    });\n',
+      ),
+  },
+  {
+    id: "MU-2023",
+    title:
+      "WEB-14a revision 21 (I9): each change is its own attempt (no coalescing of a batch)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /I9: a batch of changes is one attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        "    observer = new MutationObserver(reconcile);\n",
+        "    observer = new MutationObserver((records) => {\n      for (const _ of records) reconcile();\n    });\n",
+      ),
+  },
+  {
+    id: "MU-2024",
+    title:
+      "WEB-14a revision 21 (I9, S23): the watch is kept when nothing is pending any more",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S23\/I9: once fulfilled, the watch stops/,
+    patch: (t) =>
+      sub(
+        t,
+        "  } else if (!waiting && observer) {\n",
+        "  } else if (false) {\n",
       ),
   },
 

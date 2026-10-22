@@ -10,10 +10,14 @@ import { appUpdates } from "../pwa/store";
  * Each of these is a REQUEST (revision 20; design assessment of 16 October 2026, RC1/C1-C4, I1-I12): pending until its target really
  * became the active element, then done, or cancelled. A refused attempt is still pending. Behind a closed session gate, the gate dialog,
  * an app dialog or a form's hold the browser refuses focus, and the tree is usually lifted later WITHOUT another render, so a pending
- * request is attempted again whenever the document's eligibility can have changed: an `inert`, `open`, `hidden` or `disabled` attribute or
- * the node tree changed (the gate lifts, a dialog closes, a hold is released, the target is rendered). That is one MutationObserver, kept
- * only while a request is pending, whose callback runs at the microtask checkpoint after the synchronous step that changed the document
- * (so after `act` has finished exposing the account), never a timer or a poll. Each attempt reads its target afresh (never a kept node)
+ * request is attempted again whenever the document's eligibility can have changed: ANY attribute or the node tree changed. That covers
+ * the gate lifting, a dialog closing and a hold being released (`inert`, `open`), a target rendered or `hidden`/`disabled` no longer, and
+ * (revision 21, R26/R27) a target or an ancestor revealed by its `class` or `style`, or by any attribute a stylesheet selects on (`data-*`,
+ * `aria-*`), since CSS can hide by any of them. That is one MutationObserver on the whole document, kept only while a request is pending,
+ * whose callback runs once per batch of changes at the microtask checkpoint after the synchronous step that changed the document (so after
+ * `act` has finished exposing the account), never a timer or a poll. It sees DOM changes only: a reveal by a stylesheet edit, a media query
+ * or the end of a transition, with no change to the document, would need its owner to say so (no current caller reveals a target like
+ * that: the shell's layouts are chosen by rendering, revision 21 inventory). Each attempt reads its target afresh (never a kept node)
  * and checks it is attached, not inside `[inert]` and not behind a modal dialog, then lets the browser decide. A request belongs to the
  * component that made it: an unmount (a different account, another route, the shell going) withdraws it, so old work cannot focus a new
  * owner's tree.
@@ -139,7 +143,6 @@ function reconcile(): void {
       subtree: true,
       childList: true,
       attributes: true,
-      attributeFilter: ["inert", "open", "hidden", "disabled"],
     });
   } else if (!waiting && observer) {
     observer.disconnect();

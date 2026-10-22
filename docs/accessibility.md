@@ -38,7 +38,7 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **The update banner (WEB-14a)** is a labelled region ("Update") at the top of the shell (and, signed out, of the neutral screen). A plain notice never takes
   focus. With a recoverable form open, Q4's states do (revision 19, R26/R27; the table in `docs/pwa.md`): "Save and reload" when the prompt appears, "Retry
   save" when a save fails, the restored form's first field after the reload, each once per presentation, and when the session gate, a dialog or a
-  form's hold refused it, as soon as the target can take it (revision 20); "Not now" returns focus to where the prompt took it
+  form's hold refused it, or CSS hid the target or an ancestor, as soon as the target can take it (revisions 20 and 21); "Not now" returns focus to where the prompt took it
   from (or the page heading). Its message is announced once through the announcer; in the neutral root, which has no protected tree, through the neutral root's own polite status region
   (`NeutralLiveRegion` in `announcer.tsx`, kept mounted and empty while no account is displayed, so it exists before a message is written into it; neutral text
   only, cleared by the level-0 gate; WEB-14a revision 1, R8, `production.pwa.spec.ts` P-P2 checks exactly one announcement and unmoved focus in three engines).

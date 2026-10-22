@@ -434,3 +434,289 @@ test.describe("revision 20: Q4 focus across the real session gate", () => {
     expect(await call(page, "calls")).toEqual(NONE);
   });
 });
+
+/**
+ * WEB-14a revision 21, R26/R27 (independent review r20 of 16 October 2026; design assessment of 16 October 2026, RC1/RC2, I1-I4/I6/I9/I11,
+ * S2-S4/S6/S9/S12/S13/S23, Q1/Q3): a pending Q4 request is fulfilled when its target becomes focusable through a CSS change of the target
+ * or of an ancestor, with no render, publication, remount or focus call between the reveal and the assertion. The rules (`.probe-concealed`,
+ * `[data-probe-state="closed"]`: `display: none`) are in the harness page from the start. Each case first proves the request was ATTEMPTED
+ * and REFUSED by the engine (the focus trace) and is still pending, then changes ONLY the one attribute, then asserts the destination, the
+ * unchanged input and that nothing was chosen. The reviewer's two probes (`.agtx/evidence/review-r20-20261016/eligibility.spec.ts` and
+ * `action-eligibility.spec.ts`: 12 failures in three engines on revision 20) are kept unchanged; their schedules are promoted here with hard
+ * assertions and extended. Tags in the titles say which wake-up a requirement depends on (`[class]`, `[style]`, `[data]`; `[ancestor]` when
+ * the change is not on the target itself); the native counterfactuals select by them. FIXTURE evidence: states are published directly.
+ */
+type Mechanism = "class" | "style" | "data";
+/** Hide (or reveal) `selector`'s node by ONE attribute only. */
+const cssStep = (
+  page: Page,
+  selector: string,
+  mechanism: Mechanism,
+  hidden: boolean,
+) =>
+  page.evaluate(
+    ([selector, mechanism, hidden]) => {
+      const node = document.querySelector(selector) as HTMLElement;
+      if (mechanism === "class")
+        node.classList.toggle("probe-concealed", hidden);
+      else if (mechanism === "style") node.style.display = hidden ? "none" : "";
+      else node.setAttribute("data-probe-state", hidden ? "closed" : "open");
+    },
+    [selector, mechanism, hidden] as const,
+  );
+/** The probe's focus trace (every `focus()` call and whether it became the active element). */
+const traceOf = async (page: Page) =>
+  (await call(page, "trace")) as ReturnType<Probe["trace"]>;
+/** The engine refused a focus attempt on `target` (the trace's own record, made before any assertion). */
+const refused = async (page: Page, target: string) =>
+  (await traceOf(page)).some(
+    (entry) => entry.target === target && !entry.active,
+  );
+
+/** A target by CSS, so it is found while hidden (a role query skips hidden nodes and would find nothing to be "not focused"). */
+const hiddenTitle = (page: Page) =>
+  page.locator('#protected-root input[aria-label="Title"]');
+const hiddenButton = (page: Page, name: string) =>
+  page.locator("#protected-root button", { hasText: name });
+
+test.describe("revision 21: Q4 focus follows a CSS reveal", () => {
+  for (const mechanism of ["class", "style"] as const)
+    for (const [name, state, target] of [
+      ["the prompt", PROMPT, "Save and reload"],
+      ["save failed", FAILED, "Retry save"],
+      ["save refused", { kind: "save_failed", refused: true }, null],
+      ["discard failed", { kind: "discard_failed" }, "Try again"],
+    ] as const)
+      test(`[${mechanism}][ancestor] S2/S3, ${name}: presented while <main> is hidden by its ${mechanism}, focused when only that ${mechanism} reveals it`, async ({
+        page,
+      }) => {
+        await call(page, "mount", {});
+        await frames(page);
+        await cssStep(page, "#main", mechanism, true);
+        await call(page, "publish", state);
+        await frames(page);
+        expect(
+          await refused(page, target ?? "Update"),
+          "attempted and refused while hidden",
+        ).toBe(true);
+        await cssStep(page, "#main", mechanism, false);
+        await frames(page);
+        await expect(
+          target ? inShell(page, target) : region(page),
+          `Q4 after the ${mechanism} reveal`,
+        ).toBeFocused();
+        await unchanged(page);
+      });
+
+  for (const mechanism of ["class", "style", "data"] as const)
+    test(`[${mechanism}] S6: a restored field hidden by its own ${mechanism} is focused when only that ${mechanism} reveals it`, async ({
+      page,
+    }) => {
+      await call(page, "mount", {});
+      await frames(page);
+      await cssStep(page, '[aria-label="Title"]', mechanism, true);
+      await call(page, "restored", true);
+      await frames(page);
+      expect(await refused(page, "Title")).toBe(true);
+      await expect(hiddenTitle(page)).not.toBeFocused();
+      await cssStep(page, '[aria-label="Title"]', mechanism, false);
+      await frames(page);
+      await expect(
+        title(page),
+        `Q4 state 3 after the ${mechanism} reveal`,
+      ).toBeFocused();
+      await unchanged(page);
+    });
+
+  test("[class][ancestor] S6: a restored field inside a form hidden by the form's class is focused when only that class reveals it", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await frames(page);
+    await cssStep(page, "[data-probe-form]", "class", true);
+    await call(page, "restored", true);
+    await frames(page);
+    expect(await refused(page, "Title")).toBe(true);
+    await cssStep(page, "[data-probe-form]", "class", false);
+    await frames(page);
+    await expect(
+      title(page),
+      "Q4 state 3 after the class reveal",
+    ).toBeFocused();
+    await unchanged(page);
+  });
+
+  for (const attribute of ["hidden", "disabled"] as const)
+    test(`S6 control: a restored field released by \`${attribute}\` is focused (the revision-20 wake-ups, kept)`, async ({
+      page,
+    }) => {
+      await call(page, "mount", {});
+      await frames(page);
+      await page.evaluate((attribute) => {
+        (document.querySelector('[aria-label="Title"]') as HTMLInputElement)[
+          attribute
+        ] = true;
+      }, attribute);
+      await call(page, "restored", true);
+      await frames(page);
+      await expect(hiddenTitle(page)).not.toBeFocused();
+      await page.evaluate((attribute) => {
+        (document.querySelector('[aria-label="Title"]') as HTMLInputElement)[
+          attribute
+        ] = false;
+      }, attribute);
+      await frames(page);
+      await expect(title(page)).toBeFocused();
+      await unchanged(page);
+    });
+
+  test("[style][ancestor] S4: a neutral-root failure hidden by the neutral root's style is focused when only that style reveals it", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await call(page, "unmount");
+    await cssStep(page, "#neutral-root", "style", true);
+    await call(page, "neutral", true);
+    await call(page, "publish", FAILED);
+    await frames(page);
+    expect(await refused(page, "Retry save")).toBe(true);
+    await cssStep(page, "#neutral-root", "style", false);
+    await frames(page);
+    await expect(
+      page.locator("#neutral-root").getByRole("button", { name: "Retry save" }),
+      "Q4 state 2 on the neutral root after the style reveal",
+    ).toBeFocused();
+    expect(await call(page, "calls")).toEqual(NONE);
+  });
+
+  test("S9/I3: a CSS reveal while the gate is closed moves nothing; the lift then focuses 'Save and reload'", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await cssStep(page, "#main", "class", true);
+    await call(page, "gate");
+    await call(page, "publish", PROMPT);
+    await frames(page);
+    await expect(gateHeading(page)).toBeFocused();
+    await cssStep(page, "#main", "class", false);
+    await frames(page);
+    await expect(
+      gateHeading(page),
+      "the gate keeps focus: a reveal is not a lift",
+    ).toBeFocused();
+    await call(page, "attach");
+    await frames(page);
+    await expect(inShell(page, "Save and reload")).toBeFocused();
+    await unchanged(page);
+  });
+
+  test("[class][ancestor] S9/I3: lifted while <main> is still hidden: nothing is focused until the class reveal", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await cssStep(page, "#main", "class", true);
+    await call(page, "gate");
+    await call(page, "publish", PROMPT);
+    await call(page, "attach");
+    await frames(page);
+    await expect(hiddenButton(page, "Save and reload")).not.toBeFocused();
+    await cssStep(page, "#main", "class", false);
+    await frames(page);
+    await expect(
+      inShell(page, "Save and reload"),
+      "Q4 state 1 after the class reveal",
+    ).toBeFocused();
+    await unchanged(page);
+  });
+
+  test("[class][ancestor] I3: revealed and hidden again in one step: nothing is focused; the later reveal is", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await frames(page);
+    await cssStep(page, "#main", "class", true);
+    await call(page, "publish", PROMPT);
+    await frames(page);
+    await page.evaluate(() => {
+      const main = document.querySelector("#main") as HTMLElement;
+      main.classList.remove("probe-concealed");
+      main.classList.add("probe-concealed");
+    });
+    await frames(page);
+    await expect(hiddenButton(page, "Save and reload")).not.toBeFocused();
+    await cssStep(page, "#main", "class", false);
+    await frames(page);
+    await expect(
+      inShell(page, "Save and reload"),
+      "Q4 state 1 after the class reveal",
+    ).toBeFocused();
+    await unchanged(page);
+  });
+
+  test("[class][ancestor] S12, DA-F1: the prompt and a restored field both hidden by <main>'s class: the field wins at the reveal and keeps focus", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await frames(page);
+    await cssStep(page, "#main", "class", true);
+    await call(page, "publish", PROMPT);
+    await call(page, "restored", true);
+    await frames(page);
+    await cssStep(page, "#main", "class", false);
+    await frames(page);
+    await expect(
+      title(page),
+      "DA-F1: the restored field after the class reveal",
+    ).toBeFocused();
+    await page.evaluate(() =>
+      document.querySelector("#main")?.setAttribute("data-marked", ""),
+    );
+    await frames(page);
+    await expect(title(page)).toBeFocused();
+    await unchanged(page);
+  });
+
+  test("S13, DA-F2: a restored field still hidden by its class is cancelled by a later save failure; its reveal does not take focus", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await frames(page);
+    await cssStep(page, '[aria-label="Title"]', "class", true);
+    await call(page, "restored", true);
+    await frames(page);
+    expect(await refused(page, "Title")).toBe(true);
+    await call(page, "publish", FAILED);
+    await expect(inShell(page, "Retry save")).toBeFocused();
+    await cssStep(page, '[aria-label="Title"]', "class", false);
+    await frames(page);
+    await expect(
+      inShell(page, "Retry save"),
+      "DA-F2: the older restored request never takes focus later",
+    ).toBeFocused();
+    await unchanged(page);
+  });
+
+  test("S23: once fulfilled, later class and style changes make no focus attempt and leave the person's focus where it is", async ({
+    page,
+  }) => {
+    await call(page, "mount", {});
+    await call(page, "publish", PROMPT);
+    await expect(inShell(page, "Save and reload")).toBeFocused();
+    await inShell(page, "Opener").focus();
+    const before = (await traceOf(page)).length;
+    for (const marked of [true, false, true]) {
+      await page.evaluate((marked) => {
+        const main = document.querySelector("#main") as HTMLElement;
+        main.classList.toggle("probe-marked", marked);
+        main.style.color = marked ? "red" : "";
+      }, marked);
+      await frames(page);
+    }
+    await expect(inShell(page, "Opener")).toBeFocused();
+    expect(
+      (await traceOf(page)).length,
+      "no focus attempt after fulfilment",
+    ).toBe(before);
+    await unchanged(page);
+  });
+});

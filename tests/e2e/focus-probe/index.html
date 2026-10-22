@@ -3,6 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <title>Q4 focus across the session gate (test harness)</title>
+    <!-- Revision 21 (R26/R27): the rules a CSS reveal removes. Present before any request, so only the attribute a case changes can reveal a target. -->
+    <style>
+      .probe-concealed,
+      [data-probe-state="closed"] {
+        display: none;
+      }
+    </style>
   </head>
   <body>
     <div id="neutral-root"></div>

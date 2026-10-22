@@ -765,3 +765,302 @@ test("I5: a banner loaded after the state was published counts that state as one
   expect(other).toHaveFocus();
   act(() => store.appUpdates.set({ kind: "none" }));
 });
+
+/**
+ * WEB-14a revision 21, R26/R27 (independent review r20 of 16 October 2026; design assessment of 16 October 2026, RC1/RC2, C1-C5, I1-I4/
+ * I6/I9, S2/S3/S4/S6/S9/S12/S13/S15/S16/S23, Q2/Q3): a pending request is fulfilled when its target becomes focusable by a CSS change of
+ * the target or of an ancestor (its `class`, its `style`, or any attribute a stylesheet selects on), with no render, publication or remount.
+ * jsdom does not compute CSS visibility for focus, so a TEST DOUBLE stands in for the engine's refusal: `focus()` does nothing for a node
+ * that is, or is inside, `.concealed`, `display: none` inline, or `[data-state="closed"]` (the stylesheet rules of the native harness,
+ * tests/e2e/focus-probe/, where the real engines refuse; tests/e2e/fixture.update-focus-gate.spec.ts proves those). Every attempt is
+ * counted, so refusal (pending), the wake-up and the one attempt per batch of changes are each asserted, not inferred.
+ */
+describe("revision 21: a pending request follows a CSS reveal of its target or an ancestor", () => {
+  const concealedBy = (node: Element) => {
+    for (let at: Element | null = node; at; at = at.parentElement)
+      if (
+        at.classList.contains("concealed") ||
+        (at as HTMLElement).style?.display === "none" ||
+        at.getAttribute("data-state") === "closed"
+      )
+        return true;
+    return false;
+  };
+  let attempts: string[];
+  beforeEach(() => {
+    attempts = [];
+    const native = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      attempts.push(
+        this.getAttribute("aria-label") ?? this.textContent ?? this.tagName,
+      );
+      if (!concealedBy(this)) native.call(this, options);
+    });
+  });
+  const main = () => document.getElementById("main") as HTMLElement;
+  const outside = () => {
+    const away = document.body.appendChild(document.createElement("button"));
+    away.textContent = "Outside";
+    away.focus();
+    return away;
+  };
+  const conceal: Record<"class" | "style", (node: HTMLElement) => void> = {
+    class: (node) => node.classList.add("concealed"),
+    style: (node) => {
+      node.style.display = "none";
+    },
+  };
+  const reveal: Record<"class" | "style", (node: HTMLElement) => void> = {
+    class: (node) => node.classList.remove("concealed"),
+    style: (node) => {
+      node.style.display = "";
+    },
+  };
+
+  for (const mechanism of ["class", "style"] as const)
+    for (const [state, target] of [
+      [{ kind: "available", dismissed: false }, "Save and reload"],
+      [{ kind: "save_failed", refused: false }, "Retry save"],
+      [{ kind: "save_failed", refused: true }, null],
+      [{ kind: "discard_failed" }, "Try again"],
+    ] as const)
+      test(`S2/S3: ${JSON.stringify(state)} presented while <main> is hidden by its ${mechanism}: focused when only that ${mechanism} reveals it, choosing nothing`, async () => {
+        openForm();
+        shell();
+        const field = title();
+        conceal[mechanism](main());
+        const away = outside();
+        set(state);
+        const name = target ?? "Update";
+        expect(attempts, "the request was attempted and refused").toContain(
+          name,
+        );
+        expect(away, "refused: still pending").toHaveFocus();
+        await act(async () => reveal[mechanism](main()));
+        expect(
+          target ? button(target) : update(),
+          `Q4 after the ${mechanism} reveal of an ancestor`,
+        ).toHaveFocus();
+        expect(title(), "the same tree: no remount").toBe(field);
+        expect(calls).toEqual(none());
+        expect(title()).toHaveValue("Unfinished");
+      });
+
+  for (const mechanism of ["class", "style", "data-state"] as const)
+    test(`S6: a restored field hidden by its own ${mechanism} is focused when only that ${mechanism} reveals it`, async () => {
+      const field = createRef<HTMLInputElement>();
+      render(<Shell field={field} />, { container: inProtected() });
+      const input = title();
+      if (mechanism === "data-state")
+        input.setAttribute("data-state", "closed");
+      else conceal[mechanism](input);
+      const away = outside();
+      restore(field);
+      expect(attempts).toContain("Title");
+      expect(away).toHaveFocus();
+      await act(async () => {
+        if (mechanism === "data-state")
+          input.setAttribute("data-state", "open");
+        else reveal[mechanism](input);
+      });
+      expect(title(), `Q4 state 3 after the ${mechanism} reveal`).toHaveFocus();
+      expect(calls).toEqual(none());
+    });
+
+  test("S4: a neutral-root failure hidden by the neutral root's style is focused when that style reveals it", async () => {
+    const root = document.getElementById("neutral-root") as HTMLElement;
+    root.style.display = "none";
+    const away = outside();
+    render(
+      <>
+        <NeutralLiveRegion />
+        <NeutralUpdateBanner />
+      </>,
+      { container: root },
+    );
+    set({ kind: "save_failed", refused: false });
+    expect(away).toHaveFocus();
+    await act(async () => {
+      root.style.display = "";
+    });
+    expect(
+      button("Retry save"),
+      "Q4 state 2 on the neutral root after the style reveal",
+    ).toHaveFocus();
+    expect(calls).toEqual(none());
+  });
+
+  test("S9/I3: a CSS reveal while the gate is still closed focuses nothing; the lift then does, and the other order too", async () => {
+    for (const order of ["reveal, then lift", "lift, then reveal"] as const) {
+      openForm();
+      const view = shell();
+      protectedRoot().setAttribute("inert", "");
+      conceal.class(main());
+      const away = outside();
+      set({ kind: "available", dismissed: false });
+      await act(async () => {
+        if (order === "reveal, then lift") reveal.class(main());
+        else protectedRoot().removeAttribute("inert");
+      });
+      expect(away, `${order}: one blocker remains`).toHaveFocus();
+      await act(async () => {
+        if (order === "reveal, then lift")
+          protectedRoot().removeAttribute("inert");
+        else reveal.class(main());
+      });
+      expect(button("Save and reload"), order).toHaveFocus();
+      view.unmount();
+      offForm?.();
+      away.remove();
+      act(() => appUpdates.set({ kind: "none" }));
+    }
+  });
+
+  test("I3: revealed and hidden again in one step: nothing is focused; the later reveal is", async () => {
+    openForm();
+    shell();
+    conceal.class(main());
+    const away = outside();
+    set({ kind: "available", dismissed: false });
+    await act(async () => {
+      reveal.class(main());
+      conceal.class(main());
+    });
+    expect(away).toHaveFocus();
+    await act(async () => reveal.class(main()));
+    expect(button("Save and reload")).toHaveFocus();
+  });
+
+  test("I9: a batch of changes is one attempt (the observer's delivery), not one per change", async () => {
+    openForm();
+    shell();
+    conceal.class(main());
+    outside();
+    set({ kind: "available", dismissed: false });
+    const before = attempts.filter((a) => a === "Save and reload").length;
+    await act(async () => {
+      for (let i = 0; i < 5; i += 1) {
+        reveal.class(main());
+        conceal.class(main());
+        main().style.color = i % 2 ? "red" : "blue";
+      }
+    });
+    expect(
+      attempts.filter((a) => a === "Save and reload").length - before,
+      "one batch of changes, one attempt",
+    ).toBe(1);
+    await act(async () => reveal.class(main()));
+    expect(button("Save and reload")).toHaveFocus();
+  });
+
+  test("S12, DA-F1: the prompt and a restored field both hidden by <main>'s class: at the reveal the field wins and keeps focus", async () => {
+    openForm();
+    const field = createRef<HTMLInputElement>();
+    render(<Shell field={field} />, { container: inProtected() });
+    conceal.class(main());
+    const away = outside();
+    set({ kind: "available", dismissed: false });
+    restore(field);
+    expect(away).toHaveFocus();
+    await act(async () => reveal.class(main()));
+    expect(
+      title(),
+      "DA-F1: the restored field after the class reveal",
+    ).toHaveFocus();
+    await act(async () => {
+      main().setAttribute("data-marked", "");
+    });
+    expect(title()).toHaveFocus();
+  });
+
+  test("S13, DA-F2: a restored field still hidden by its class is cancelled by a later save failure; revealing it later does not take focus", async () => {
+    openForm();
+    const field = createRef<HTMLInputElement>();
+    render(<Shell field={field} />, { container: inProtected() });
+    conceal.class(title());
+    outside();
+    restore(field);
+    set({ kind: "save_failed", refused: false });
+    expect(button("Retry save")).toHaveFocus();
+    await act(async () => reveal.class(title()));
+    expect(
+      button("Retry save"),
+      "DA-F2: the older restored request never takes focus later",
+    ).toHaveFocus();
+  });
+
+  test("S15/S16: the field replaced while hidden: only the CURRENT node is focused at the reveal, never the old one", async () => {
+    const field = createRef<HTMLInputElement>();
+    function Swap({ second }: { second: boolean }) {
+      return (
+        <main id="main" className="concealed">
+          {second ? (
+            <input key="b" ref={field} aria-label="Second" />
+          ) : (
+            <input key="a" ref={field} aria-label="First" />
+          )}
+        </main>
+      );
+    }
+    const view = render(<Swap second={false} />, { container: inProtected() });
+    const old = screen.getByRole("textbox", { name: "First" });
+    const away = outside();
+    restore(field);
+    view.rerender(<Swap second />);
+    expect(old.isConnected).toBe(false);
+    expect(away).toHaveFocus();
+    const since = attempts.length;
+    await act(async () => reveal.class(main()));
+    expect(
+      screen.getByRole("textbox", { name: "Second" }),
+      "the current node after the class reveal",
+    ).toHaveFocus();
+    expect(
+      attempts.slice(since),
+      "the replaced node is never attempted",
+    ).not.toContain("First");
+  });
+
+  test("S16/I4: the owner goes in the same step as the reveal: nothing is focused and the watch stops", async () => {
+    const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
+    openForm();
+    const view = shell();
+    conceal.class(main());
+    const away = outside();
+    set({ kind: "available", dismissed: false });
+    const host = main();
+    await act(async () => {
+      reveal.class(host);
+      view.unmount();
+    });
+    expect(away).toHaveFocus();
+    expect(disconnect).toHaveBeenCalled();
+  });
+
+  test("S23/I9: once fulfilled, the watch stops: later class and style changes attempt nothing and the person's focus stays", async () => {
+    const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
+    openForm();
+    shell();
+    conceal.class(main());
+    outside();
+    set({ kind: "available", dismissed: false });
+    await act(async () => reveal.class(main()));
+    expect(button("Save and reload")).toHaveFocus();
+    expect(
+      disconnect,
+      "the watch stops once nothing is pending",
+    ).toHaveBeenCalled();
+    title().focus();
+    const before = attempts.length;
+    await act(async () => {
+      main().classList.add("marked");
+      main().style.color = "red";
+    });
+    await act(async () => main().classList.remove("marked"));
+    expect(title()).toHaveFocus();
+    expect(attempts.length, "no attempt after fulfilment").toBe(before);
+  });
+});
