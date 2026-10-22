@@ -8,6 +8,7 @@ import {
 } from "@playwright/test";
 
 import { claimEvidencePath } from "./evidence-run";
+import { publishHeldOperations } from "./held-operation-ledger";
 
 const require = createRequire(import.meta.url);
 const axeSource = readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
@@ -19,7 +20,21 @@ const axeSource = readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
 export const test = base.extend<{
   consoleGuard: undefined;
   harnessDiagnostics: undefined;
+  heldOperations: undefined;
 }>({
+  /**
+   * WEB-08d revision 21 (R20-N1): what the case's held-operation scopes did is attached, and a failure of their cleanup (a release that
+   * failed or found its hold gone, an operation that failed or never settled, a scope a timeout interrupted) is reported as an error of
+   * its own, beside the case's own failure and never inside its message (tests/e2e/held-operation.ts). It depends on the context, so it
+   * runs while the case's pages are still open.
+   */
+  heldOperations: [
+    async ({ context: _context }, use, testInfo) => {
+      await use(undefined);
+      await publishHeldOperations(testInfo);
+    },
+    { auto: true },
+  ],
   /**
    * R57 (revision 34): a spec that FAILS has the state of every data-harness page of its context attached to its report: the clock, the
    * identity, what the harness outbox is bound to (the captured service's lifetime and incarnation, the registry's open count and latch),

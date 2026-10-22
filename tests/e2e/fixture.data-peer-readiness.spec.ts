@@ -14,6 +14,7 @@ import {
   untilTreeSettled,
   uuid,
 } from "./data-sync-helpers";
+import { withHeldOperations } from "./held-operation";
 import { expect, test } from "./helpers";
 
 /**
@@ -271,24 +272,28 @@ test.describe("E-H1 (revision 33, R57): the readiness of a page's harness outbox
     await context.setOffline(true);
     // The draft's own write fails, so the facade writes its failure counter; that write's answer is held, so the action awaits.
     await arm(page, { id: A, armed: 1 });
-    await page.evaluate(() =>
-      window.__atlasData?.holdOutboxPlan("data.recordLocalWriteOutcome"),
-    );
-    const pending = enqueue(page, A, "r", "original");
-    await expect
-      .poll(() => page.evaluate(() => window.__atlasData?.outboxPlanHeld()), {
-        timeout: 20_000,
-      })
-      .toBe(true);
-    // While it awaits, the captured service ends and the outbox is rebuilt over the page's current service.
-    await page.evaluate(() => window.__atlasData?.endOutboxService());
-    const readiness = await untilOutboxBound(page);
-    expect(readiness.rebound).toBe(true);
-    await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
-    // The OLD facade's answer: its lifetime is over (R56), so it refuses `identity_changed`.
-    expect(await pending).toMatchObject({
-      kind: "refused",
-      reason: "identity_changed",
+    // Revision 21 (R20-N1): the enqueue and the held answer are owned by a scope that releases the hold by its own token and joins the
+    // enqueue on every path.
+    const readiness = await withHeldOperations(async (holds) => {
+      const counter = await holds.holdOutbox(
+        page,
+        "data.recordLocalWriteOutcome",
+      );
+      const pending = holds.launch("the enqueue", () =>
+        enqueue(page, A, "r", "original"),
+      );
+      await counter.untilHeld();
+      // While it awaits, the captured service ends and the outbox is rebuilt over the page's current service.
+      await page.evaluate(() => window.__atlasData?.endOutboxService());
+      const readiness = await untilOutboxBound(page);
+      expect(readiness.rebound).toBe(true);
+      await counter.release();
+      // The OLD facade's answer: its lifetime is over (R56), so it refuses `identity_changed`.
+      expect(await pending.settled()).toMatchObject({
+        kind: "refused",
+        reason: "identity_changed",
+      });
+      return readiness;
     });
     const diagnosed = await page.evaluate(() =>
       window.__atlasData?.diagnostics(),

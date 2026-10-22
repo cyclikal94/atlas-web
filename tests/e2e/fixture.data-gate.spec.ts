@@ -24,6 +24,7 @@ import {
   uuid,
   waitForState,
 } from "./data-sync-helpers";
+import { type HeldOperations, withHeldOperations } from "./held-operation";
 import { expect, test } from "./helpers";
 
 /**
@@ -1495,8 +1496,14 @@ test.describe("E-C8 (revision 31, R51): an older page completion does not erase 
       KEY,
     );
 
-  /** The leader applies an ordinary EMPTY page that keeps `cursor-0`; with `held`, the answer of that commit is held. */
-  async function leaderApplies(context: BrowserContext, held: boolean) {
+  /**
+   * The leader applies an ordinary EMPTY page that keeps `cursor-0`; with `holds`, the answer of that commit is held, owned by the case's
+   * held-operation scope (revision 21, R20-N1: released and checked by its own token on every path).
+   */
+  async function leaderApplies(
+    context: BrowserContext,
+    holds: HeldOperations | null,
+  ) {
     const net = await stubNetwork(context);
     await serveIdentityReads(context);
     await seedSettled(context);
@@ -1510,18 +1517,10 @@ test.describe("E-C8 (revision 31, R51): an older page completion does not erase 
         has_more: false,
       }),
     }));
-    if (held)
-      await leader.evaluate(() =>
-        window.__atlasData?.holdEnginePlan("data.commitPage"),
-      );
+    const hold =
+      holds === null ? null : await holds.holdEngine(leader, "data.commitPage");
     await startLeaderSettled(leader);
-    if (held)
-      await expect
-        .poll(
-          () => leader.evaluate(() => window.__atlasData?.enginePlanHeld()),
-          { timeout: 20_000 },
-        )
-        .toBe(true);
+    if (hold !== null) await hold.untilHeld();
     else {
       await waitForState(leader, "idle");
       // The timely control: the page is applied and its completion delivered, and the leader polls no more, so that the position stays
@@ -1539,7 +1538,7 @@ test.describe("E-C8 (revision 31, R51): an older page completion does not erase 
       { a: ACCOUNT, row: RETAINED_ROW, draft: DRAFT },
     );
     expect(net.requests).toHaveLength(1);
-    return { net, leader };
+    return { net, leader, hold };
   }
 
   /** Another page whose real engine receives `410` at `cursor-0`; with `aborts`, its invalidation and counter writes abort. */
@@ -1572,55 +1571,60 @@ test.describe("E-C8 (revision 31, R51): an older page completion does not erase 
     test(`R51 older completion: ${scenario}: the newer invalidation stays exactly as recorded, and the cache stays hidden for the follower attached before and for one attached afterwards`, async ({
       context,
     }, info) => {
-      const { leader } = await leaderApplies(
-        context,
-        scenario !== "timely-marker",
-      );
-      const writer = await invalidatesAnother(
-        context,
-        scenario !== "delayed-durable",
-      );
-      const recorded = await markerName(writer);
-      expect(recorded === null).toBe(scenario === "delayed-durable");
-      const attached = await watchingPage(context);
-      await attached.evaluate((a) => window.__atlasData?.startGate(a), ACCOUNT);
-      await expect
-        .poll(() => gate(attached), { timeout: 20_000 })
-        .toBe("refreshing");
-      if (scenario !== "timely-marker") {
-        // The older completion is delivered now: the engine's success path runs.
-        expect(await traced(leader, "data.sync_commit")).toBe(false);
-        await leader.evaluate(() => window.__atlasData?.releaseEnginePlan());
+      // Revision 21 (R20-N1): the held completion is owned by a scope that releases it by its own token on every path.
+      const run = async (holds: HeldOperations | null) => {
+        const { leader, hold } = await leaderApplies(context, holds);
+        const writer = await invalidatesAnother(
+          context,
+          scenario !== "delayed-durable",
+        );
+        const recorded = await markerName(writer);
+        expect(recorded === null).toBe(scenario === "delayed-durable");
+        const attached = await watchingPage(context);
+        await attached.evaluate(
+          (a) => window.__atlasData?.startGate(a),
+          ACCOUNT,
+        );
         await expect
-          .poll(() => traced(leader, "data.sync_next"), { timeout: 20_000 })
-          .toBe(true);
-      }
-      for (let sample = 0; sample < 6; sample += 1) {
-        await attached.waitForTimeout(250);
-        expect(await gate(attached)).toBe("refreshing");
-      }
-      expect(await markerName(writer)).toBe(recorded);
-      expect((await markerKeys(writer)).length).toBe(
-        scenario === "delayed-durable" ? 0 : 1,
-      );
-      // A follower attached NOW reads the records and has no cached state to lean on.
-      const later = await watchingPage(context);
-      await later.evaluate((a) => window.__atlasData?.startGate(a), ACCOUNT);
-      await expect
-        .poll(() => cacheState(later), { timeout: 20_000 })
-        .toBe("invalid");
-      for (let sample = 0; sample < 6; sample += 1) {
-        await later.waitForTimeout(250);
-        expect(await gate(later)).toBe("refreshing");
-      }
-      expect(await history(later)).not.toContain("valid");
-      expect(await retained(later)).toEqual({ cache: 1, drafts: 1 });
-      recordEvidence(info, `r51-${scenario}`, {
-        recorded,
-        after: await markerName(writer),
-        attached: await history(attached),
-        later: await history(later),
-      });
+          .poll(() => gate(attached), { timeout: 20_000 })
+          .toBe("refreshing");
+        if (hold !== null) {
+          // The older completion is delivered now: the engine's success path runs.
+          expect(await traced(leader, "data.sync_commit")).toBe(false);
+          await hold.release();
+          await expect
+            .poll(() => traced(leader, "data.sync_next"), { timeout: 20_000 })
+            .toBe(true);
+        }
+        for (let sample = 0; sample < 6; sample += 1) {
+          await attached.waitForTimeout(250);
+          expect(await gate(attached)).toBe("refreshing");
+        }
+        expect(await markerName(writer)).toBe(recorded);
+        expect((await markerKeys(writer)).length).toBe(
+          scenario === "delayed-durable" ? 0 : 1,
+        );
+        // A follower attached NOW reads the records and has no cached state to lean on.
+        const later = await watchingPage(context);
+        await later.evaluate((a) => window.__atlasData?.startGate(a), ACCOUNT);
+        await expect
+          .poll(() => cacheState(later), { timeout: 20_000 })
+          .toBe("invalid");
+        for (let sample = 0; sample < 6; sample += 1) {
+          await later.waitForTimeout(250);
+          expect(await gate(later)).toBe("refreshing");
+        }
+        expect(await history(later)).not.toContain("valid");
+        expect(await retained(later)).toEqual({ cache: 1, drafts: 1 });
+        recordEvidence(info, `r51-${scenario}`, {
+          recorded,
+          after: await markerName(writer),
+          attached: await history(attached),
+          later: await history(later),
+        });
+      };
+      if (scenario === "timely-marker") await run(null);
+      else await withHeldOperations(run);
     });
 });
 

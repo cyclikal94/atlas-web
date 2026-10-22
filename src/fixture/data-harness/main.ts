@@ -469,6 +469,11 @@ export interface DataHarness {
    * `data.markInFlight`, the claim) is held: the plan runs at once, over the real database, and its answer is delivered to the
    * dispatcher only when `releaseOutboxPlan()` is called, as a read made before another writer's write and told of after it. One hold at a
    * time, and it applies once. `outboxPlanHeld()` says the answer is being held now.
+   *
+   * WEB-08d revision 21 (review r20 R20-N1): one hold at a time is ENFORCED (arming while a hold is armed or held throws), and the arm
+   * returns a token naming this document and the arm. `releaseOutboxPlan(token)` delivers the real answer of a consumed hold, DISARMS a
+   * hold that was never reached (so no later operation is held after a case's cleanup), is harmless when repeated, and does nothing
+   * (`stale`) for the token of another document or an earlier arm. Without a token it acts on the current hold.
    */
   holdOutboxPlan(
     plan:
@@ -479,20 +484,20 @@ export interface DataHarness {
       | "data.discardDraft"
       | "data.supersedeDraft"
       | "data.recordLocalWriteOutcome",
-  ): void;
+  ): HoldToken;
   outboxPlanHeld(): boolean;
-  releaseOutboxPlan(): void;
+  releaseOutboxPlan(token?: HoldToken): HoldRelease;
   /**
    * FIXTURE (R51, revision 31): the answer of the NEXT commit of the plan `plan` that the leader's ENGINE makes (`data.commitPage`, a page
    * applied) is held: the commit runs at once, over the real database, and its answer is delivered to the engine only when
    * `releaseEnginePlan()` is called, as a completion that arrives after another page's write. One hold at a time, and it applies once.
-   * `enginePlanHeld()` says the answer is being held now.
+   * `enginePlanHeld()` says the answer is being held now. Tokens and release outcomes as for `holdOutboxPlan` (revision 21).
    */
   holdEnginePlan(
     plan: "data.commitPage" | "data.recordLocalWriteOutcome",
-  ): void;
+  ): HoldToken;
   enginePlanHeld(): boolean;
-  releaseEnginePlan(): void;
+  releaseEnginePlan(token?: HoldToken): HoldRelease;
   /**
    * FIXTURE (R46, R47): what the facade says about local storage, as the status model reads it ("local storage isn't responding", and
    * whether that stop is held in this tab alone), or `null` while no outbox runs on this page.
@@ -966,18 +971,69 @@ export interface HarnessDiagnostics {
  * real plan over the real database, and the transaction is then aborted, as a read that fails after it has started would be.
  */
 let stopReadFaults = 0;
+/** FIXTURE (revision 21, R20-N1): names one arm of one hold in one document, so a stale cleanup cannot release a successor. */
+export interface HoldToken {
+  document: string;
+  generation: number;
+}
+/**
+ * What a release did, and the hold's state after it: `released` delivered a consumed hold's real answer, `disarmed` removed an arm that was
+ * never reached, `stale` was given another document's or an earlier arm's token and did nothing, `idle` found nothing to release.
+ */
+export interface HoldRelease {
+  outcome: "released" | "disarmed" | "stale" | "idle";
+  armed: boolean;
+  held: boolean;
+}
+interface PlanHold {
+  plan: string | null;
+  held: boolean;
+  release: () => void;
+  generation: number;
+}
+/** This document, for the tokens of its holds (a reloaded page is another document, whose holds begin again). */
+const holdDocument = crypto.randomUUID();
 /** FIXTURE (R46, revision 28): the plan whose next answer is held (`holdOutboxPlan`), whether it is held now, and how to deliver it. */
-const planHold: {
-  plan: string | null;
-  held: boolean;
-  release: () => void;
-} = { plan: null, held: false, release: () => undefined };
+const planHold: PlanHold = {
+  plan: null,
+  held: false,
+  release: () => undefined,
+  generation: 0,
+};
 /** FIXTURE (R51, revision 31): the commit of the engine whose answer is held (`holdEnginePlan`), whether it is held now, and how to deliver it. */
-const engineHold: {
-  plan: string | null;
-  held: boolean;
-  release: () => void;
-} = { plan: null, held: false, release: () => undefined };
+const engineHold: PlanHold = {
+  plan: null,
+  held: false,
+  release: () => undefined,
+  generation: 0,
+};
+/** Revision 21: one hold at a time, enforced: a second arm while one is armed or held is a misuse of the seam, not a replacement. */
+const armHold = (hold: PlanHold, plan: string): HoldToken => {
+  if (hold.plan !== null || hold.held)
+    throw new Error(
+      `a hold is already ${hold.held ? "held" : `armed for ${hold.plan}`}: one hold at a time`,
+    );
+  hold.generation += 1;
+  hold.plan = plan;
+  return { document: holdDocument, generation: hold.generation };
+};
+const releaseHold = (hold: PlanHold, token?: HoldToken): HoldRelease => {
+  const stale =
+    token !== undefined &&
+    (token.document !== holdDocument || token.generation !== hold.generation);
+  let outcome: HoldRelease["outcome"] = "idle";
+  if (stale) outcome = "stale";
+  else if (hold.held) {
+    const deliver = hold.release;
+    hold.release = () => undefined;
+    deliver();
+    outcome = "released";
+  } else if (hold.plan !== null) {
+    hold.plan = null;
+    outcome = "disarmed";
+  }
+  return { outcome, armed: hold.plan !== null, held: hold.held };
+};
 const heldServices = new WeakMap<object, AccountService>();
 /** The engine's view of its service: `commit` of the plan under `engineHold` answers only when released; everything else is the service's. */
 const heldEngineService = <T extends AccountService | null | undefined>(
@@ -1020,9 +1076,11 @@ const heldEngineService = <T extends AccountService | null | undefined>(
         const answer = target.commit(plan, input);
         if (engineHold.plan === null || plan.name !== engineHold.plan)
           return answer;
-        // Held once: the plan has run, and its answer is delivered when the spec says.
+        // Held once: the plan has run, and its answer is delivered when the spec says. A rejection is delivered on release (revision 21:
+        // observed now, as the store's is, so a case that ends while it is held leaves no unhandled rejection in the page).
         engineHold.plan = null;
         engineHold.held = true;
+        answer.catch(() => undefined);
         return new Promise((resolve, reject) => {
           engineHold.release = () => {
             engineHold.held = false;
@@ -1664,24 +1722,12 @@ const harness: DataHarness = {
     stopReadFaults = times;
   },
   stopReadFaultsLeft: () => stopReadFaults,
-  holdOutboxPlan(plan) {
-    planHold.plan = plan;
-    planHold.held = false;
-  },
+  holdOutboxPlan: (plan) => armHold(planHold, plan),
   outboxPlanHeld: () => planHold.held,
-  releaseOutboxPlan() {
-    planHold.release();
-    planHold.release = () => undefined;
-  },
-  holdEnginePlan(plan) {
-    engineHold.plan = plan;
-    engineHold.held = false;
-  },
+  releaseOutboxPlan: (token) => releaseHold(planHold, token),
+  holdEnginePlan: (plan) => armHold(engineHold, plan),
   enginePlanHeld: () => engineHold.held,
-  releaseEnginePlan() {
-    engineHold.release();
-    engineHold.release = () => undefined;
-  },
+  releaseEnginePlan: (token) => releaseHold(engineHold, token),
   outboxStorage: () =>
     outbox === null
       ? null
