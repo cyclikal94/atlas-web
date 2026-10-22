@@ -39,13 +39,13 @@ defaultsReviewCase, reviewKinds, parseDefaultsContext, TEMPLATE_KINDS and the sn
 WEB-11a needs a QUICK change of one field's audience ("Only you" / "Home · can view") and the same online-only call rules the editors use; these are exported from the index rather than written twice (D-11a-8):
 
 ```ts
-applyPolicyChange({ api, newId }, { resourceId, from: { version, policy }, to, attempt, isCurrent? })
+applyPolicyChange({ api, newId }, { resourceId, from: { version, policy }, to, attempt, isCurrent?, admit? })
   // -> { result: { ok: true, policyVersion } | { ok: false, kind: "changed" | "conflict" | "forbidden" | "not_found" | "invalid"
   //                                                            | "uncertain" | "offline" | "not_sent" | "closed" }, attempt }
 useSharingEnv, classifyAnswer, classifyThrown, untilSent, samePolicy, toWirePolicy, canonicalBody, nextAttempt, type Attempt
 ```
 
-`applyPolicyChange` renders nothing. It reads `GET /policies/{id}` (the page's `403` memo of D-12a-13 applies: a refused policy is never asked again), refuses with `changed` when the version is not the one the caller showed, sends ONE `replace_policy` guarded by the version it read under the attempt's key (one attempt per body: after an uncertain outcome the same key and byte-identical body), and reports `ok` only after a confirming read shows the policy asked for, with that read's version (the content step that follows is guarded by it, Q1). A retry after an uncertain send that did commit finds the version moved and the policy already the one asked for: confirmed, never sent twice. Tests: `tests/features/sharing/apply-policy-change.test.ts`.
+`applyPolicyChange` renders nothing. It reads `GET /policies/{id}` (the page's `403` memo of D-12a-13 applies: a refused policy is never asked again), refuses with `changed` when the version is not the one the caller showed, sends ONE `replace_policy` guarded by the version it read under the attempt's key (one attempt per body: after an uncertain outcome the same key and byte-identical body), and reports `ok` only after a confirming read shows the policy asked for, with that read's version (the content step that follows is guarded by it, Q1). A retry after an uncertain send that did commit finds the version moved and the policy already the one asked for: confirmed, never sent twice. `admit` (WEB-11a review 2) is asked with the exact attempt before it may be sent; `false` sends nothing (`closed`), and the caller's identity is checked again just before the send. Tests: `tests/features/sharing/apply-policy-change.test.ts`.
 
 ## What a consumer must do
 

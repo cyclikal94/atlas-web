@@ -1,0 +1,424 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useAnnouncer } from "../../../components/ui/announcer";
+import { Button } from "../../../components/ui/button";
+import { List } from "../../../components/ui/list";
+import {
+  type CacheRow,
+  type FormCopyCursor,
+  useCachedResource,
+  useFormCopies,
+} from "../../../data";
+import * as copy from "../copy";
+import { type PeopleEnv, usePeopleEnv } from "../env";
+import {
+  type HeldResult,
+  keyOf,
+  lockOf,
+  progressOf,
+  runHeldChange,
+} from "../field/held";
+import {
+  type HeldChange,
+  type HeldCopy,
+  type HeldEnd,
+  heldOf,
+  heldPrefixOf,
+} from "../field/held-store";
+import { type HeldRun, isCurrentMemory, useMemoryRevision } from "../memory";
+import { useOutboxSave } from "../parts";
+
+/**
+ * The audience changes held for this person's fields (D-11a-12), DURABLE in the account's database (`field/held-store.ts`, finding 6),
+ * with their state and "Send now" / "Try again" / "Discard".
+ *
+ *  - LISTED A BOUNDED PAGE AT A TIME (review 2 of 22 October 2026, finding 4): one page of `readFormCopies` after a cursor, with "Show
+ *    more held changes" while the read says more may follow (an empty page that says so is never "nothing held") and "Back to the first".
+ *    Only the current cursor is kept. A failed read says so; it is never an empty list.
+ *  - RUN BY THIS PAGE ONLY WITH ITS AUTHORITY (D1, decided 22 October 2026: "explicit Send now"): a hold made in this page, or one the
+ *    person chose "Send now" or "Try again" for here, runs when the page is online and writable, one at a time, by one page of the browser
+ *    at a time per field (`exclusive`, held for the whole run and its last write). Any other hold (after a reload, an account switch back,
+ *    one held in another page, one whose discard could not be written) waits for "Send now".
+ *  - Every outcome is the store's own: a discard is said only when the hold's copy ENDED (a conditional end from the state shown); one that
+ *    the store refused or failed stays visible, with its reason, and never runs again by itself. Each run reads its own field directly
+ *    (finding 5) and the hold again under the lock (`runHeldChange`).
+ */
+export function HeldChanges({ personId }: { personId: string }) {
+  const env = usePeopleEnv();
+  useMemoryRevision(env.memory);
+  const [after, setAfter] = useState<FormCopyCursor | null>(null);
+  const copies = useFormCopies(heldPrefixOf(personId), after);
+  if (copies.status === "loading")
+    return after === null ? null : (
+      <p className="text-[13px] text-ink-2">{copy.HELD_CHECKING}</p>
+    );
+  if (copies.status === "unavailable")
+    return copies.reason === "error" ? (
+      <p className="text-[13px] text-ink-2">{copy.HELD_LIST_FAILED}</p>
+    ) : null;
+  const { copies: rows, next } = copies.value;
+  if (rows.length === 0 && next === null && after === null) return null;
+  return (
+    <div className="flex flex-col gap-2" data-held-page="">
+      {rows.length > 0 ? (
+        <List className="flex flex-col gap-2" data-held-changes="">
+          {rows.map((row) => {
+            const held = heldOf(row);
+            return held === null || held.change.personId !== personId ? (
+              <UnreadableHeld
+                key={row.tab_instance_id}
+                formContext={row.form_context}
+                holdId={row.tab_instance_id}
+                digest={row.content_digest}
+              />
+            ) : (
+              <HeldRow key={held.change.holdId} env={env} held={held} />
+            );
+          })}
+        </List>
+      ) : next !== null ? (
+        <p className="text-[13px] text-ink-2">{copy.HELD_MORE_EMPTY}</p>
+      ) : null}
+      {next !== null || after !== null ? (
+        <div className="flex flex-wrap gap-2">
+          {after !== null ? (
+            <Button variant="quiet" onClick={() => setAfter(null)}>
+              {copy.HELD_FIRST}
+            </Button>
+          ) : null}
+          {next !== null ? (
+            <Button variant="quiet" onClick={() => setAfter(next)}>
+              {copy.HELD_MORE}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Whether an end left the hold's copy terminal (by this call, or already by another page). */
+const isEnded = (end: HeldEnd): boolean =>
+  end.kind === "ended" || (end.kind === "changed" && end.stored !== "live");
+
+/** Why an end or a write did not commit, in the row. */
+const notCommitted = (kind: "changed" | "refused" | "failed"): string =>
+  kind === "changed"
+    ? copy.HELD_CHANGED_ELSEWHERE
+    : kind === "refused"
+      ? copy.REFUSED.closing
+      : copy.HELD_DISCARD_FAILED;
+
+/** What ending a hold that was in `change`'s state means for the person. */
+function endedMessage(change: HeldChange): string {
+  const progress = progressOf(change);
+  if (progress.content) return copy.HELD_CONTENT_MAYBE(change.label);
+  if (progress.policy === "done") return copy.HELD_POLICY_DONE(change.label);
+  if (progress.policy === "maybe")
+    return copy.HELD_POLICY_UNCERTAIN(change.label);
+  return copy.HELD_STOPPED(change.label);
+}
+
+function UnreadableHeld({
+  formContext,
+  holdId,
+  digest,
+}: {
+  formContext: string;
+  holdId: string;
+  digest: string;
+}) {
+  const env = usePeopleEnv();
+  const [, personId = "", fieldId = ""] = formContext.split(":");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const discard = async () => {
+    setBusy(true);
+    setNote(null);
+    const end = await env.held.end({ personId, fieldId, holdId }, digest);
+    setBusy(false);
+    if (!isEnded(end))
+      setNote(notCommitted(end.kind as "changed" | "refused" | "failed"));
+  };
+  return (
+    <li
+      data-held-change={holdId}
+      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+    >
+      <p className="text-[13px] text-ink-1">{copy.HELD_UNREADABLE}</p>
+      {note !== null ? (
+        <p className="text-[12.5px] text-conflict-text">{note}</p>
+      ) : null}
+      {busy ? (
+        <Button variant="quiet" disabled reason={copy.SAVING}>
+          {copy.DISCARD}
+        </Button>
+      ) : (
+        <Button variant="quiet" onClick={() => void discard()}>
+          {copy.DISCARD}
+        </Button>
+      )}
+    </li>
+  );
+}
+
+function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
+  const memory = env.memory;
+  const change = held.change;
+  const holdId = change.holdId;
+  const save = useOutboxSave();
+  const announcer = useAnnouncer();
+  const field = useCachedResource(change.fieldId);
+  const current: CacheRow | null =
+    field.status === "ready" &&
+    field.value.merged?.kind === "field" &&
+    field.value.merged.parent_id === change.personId
+      ? field.value.merged
+      : null;
+  const currentRef = useRef(current);
+  currentRef.current = current;
+  // The state the row shows now: what a run or a discard starts from (the live list may move on meanwhile).
+  const heldRef = useRef(held);
+  heldRef.current = held;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // A run that came back `waiting` (not sent) runs again only when the env changes: never in a loop.
+  const [pausedFor, setPausedFor] = useState<PeopleEnv | null>(null);
+  // A run that found the field's lock taken (another page's run, this page's replacement of an earlier hold) looks again once it is let go.
+  const [lockBusy, setLockBusy] = useState(false);
+  // This page's own outcome that the store does not hold (a failure it could not write, a discard that did not commit).
+  const [note, setNote] = useState<string | null>(null);
+  const [discarding, setDiscarding] = useState(false);
+  // A run found the stored hold moved on from the state shown: not run again until the list shows another state.
+  const [stale, setStale] = useState<string | null>(null);
+  const run = memory.heldRuns.get(holdId);
+  const authorised = memory.heldAuthority.has(holdId);
+  const failure = change.status.kind === "failed" ? change.status.reason : null;
+  const fieldSettled = field.status !== "loading";
+
+  const finish = useCallback(
+    (result: HeldResult | null, mine: HeldRun, shown: HeldCopy) => {
+      if (!isCurrentMemory(memory)) return;
+      let message: string | null = null;
+      if (result === null) {
+        setLockBusy(true);
+        void env.released(lockOf(env, change.fieldId)).then(() => {
+          if (mounted.current) setLockBusy(false);
+        });
+      } else if (result.kind === "waiting") setPausedFor(env);
+      else if (result.kind === "stale") setStale(shown.digest);
+      else if (result.kind === "failed") {
+        if (!result.kept) setNote(copy.HELD_FAILED[result.reason] ?? null);
+      } else if (result.kind === "done") {
+        message = copy.SAVED_NOT_SENT;
+        if (result.ended) memory.heldEnded.add(holdId);
+        else {
+          memory.heldAuthority.delete(holdId);
+          setNote(copy.HELD_NOT_ENDED);
+        }
+      } else if (result.kind === "cancelled") {
+        if (result.ended) {
+          memory.heldEnded.add(holdId);
+          // Its uncertain policy attempt outlives the hold: a later audience change of the field sends the same key and body.
+          if (result.attempt !== null && result.policy === "maybe")
+            memory.attempts.set(`policy:${change.fieldId}`, result.attempt);
+          if (mine.cancelled)
+            message =
+              result.policy === "done"
+                ? copy.HELD_POLICY_DONE(change.label)
+                : result.policy === "maybe"
+                  ? copy.HELD_POLICY_UNCERTAIN(change.label)
+                  : copy.HELD_STOPPED(change.label);
+        } else setNote(copy.HELD_DISCARD_FAILED);
+      }
+      if (message !== null) announcer.announce(message, "polite");
+      memory.touch();
+    },
+    [env, memory, holdId, change.fieldId, change.label, announcer],
+  );
+
+  const start = useCallback(() => {
+    if (memory.heldRuns.size > 0 || memory.heldEnded.has(holdId)) return;
+    const shown = heldRef.current;
+    const mine: HeldRun = { holdId, cancelled: false, policyDone: false };
+    memory.heldRuns.set(holdId, mine);
+    memory.touch();
+    void (async () => {
+      let result: HeldResult | null;
+      try {
+        // One run of the FIELD's holds at a time in the whole browser, held until its last durable write.
+        result = await env.exclusive(lockOf(env, shown.change.fieldId), () =>
+          runHeldChange(env, shown, mine, {
+            current: () => currentRef.current,
+            mounted: () => mounted.current,
+            enqueue: save,
+          }),
+        );
+      } catch {
+        result = { kind: "failed", reason: "not_saved", kept: false };
+      } finally {
+        if (memory.heldRuns.get(holdId) === mine)
+          memory.heldRuns.delete(holdId);
+      }
+      finish(result, mine, shown);
+    })();
+  }, [env, memory, holdId, save, finish]);
+
+  const ended = memory.heldEnded.has(holdId);
+  // `held.digest`: a new stored state of the hold is a reason to look again.
+  useEffect(() => {
+    if (
+      !authorised ||
+      ended ||
+      failure !== null ||
+      note !== null ||
+      discarding ||
+      lockBusy ||
+      stale === held.digest ||
+      run !== undefined ||
+      !fieldSettled ||
+      !env.online ||
+      !env.writable ||
+      pausedFor === env
+    )
+      return;
+    start();
+  }, [
+    authorised,
+    ended,
+    failure,
+    note,
+    discarding,
+    lockBusy,
+    stale,
+    run,
+    fieldSettled,
+    env,
+    pausedFor,
+    start,
+    held.digest,
+  ]);
+
+  /** "Send now" (a recovered hold) and "Try again" (a failure): this page may run it; a stored failure is first written back as waiting. */
+  const resume = async () => {
+    setNote(null);
+    if (failure !== null) {
+      const shown = heldRef.current;
+      const written = await env.held.update(shown, {
+        ...shown.change,
+        status: { kind: "waiting" },
+      });
+      if (written.kind !== "saved") {
+        setNote(
+          written.kind === "failed"
+            ? (copy.HELD_FAILED.not_saved as string)
+            : notCommitted(written.kind),
+        );
+        return;
+      }
+    }
+    memory.heldAuthority.add(holdId);
+    setPausedFor(null);
+    memory.touch();
+  };
+
+  const discard = async () => {
+    // A hold the person discarded never runs by itself again in this page, whatever the store answers.
+    memory.heldAuthority.delete(holdId);
+    if (run !== undefined) {
+      // Running: the run stops at its next admission boundary and ends the hold itself (see `runHeldChange`).
+      run.cancelled = true;
+      memory.touch();
+      return;
+    }
+    setNote(null);
+    setDiscarding(true);
+    const shown = heldRef.current;
+    const end = await env.held.end(keyOf(shown.change), shown.digest);
+    setDiscarding(false);
+    if (!isCurrentMemory(memory)) return;
+    if (isEnded(end)) {
+      memory.heldEnded.add(holdId);
+      if (end.kind === "ended") {
+        // Its uncertain policy attempt outlives the hold: a later audience change of the field sends the same key and body.
+        if (
+          shown.change.attempt !== null &&
+          progressOf(shown.change).policy === "maybe"
+        )
+          memory.attempts.set(
+            `policy:${shown.change.fieldId}`,
+            shown.change.attempt,
+          );
+        announcer.announce(endedMessage(shown.change), "polite");
+      }
+      memory.touch();
+      return;
+    }
+    setNote(notCommitted(end.kind as "changed" | "refused" | "failed"));
+    memory.touch();
+  };
+
+  const stopping = run?.cancelled === true;
+  if (ended && run === undefined) return null;
+  const retryable = run === undefined && (failure !== null || note !== null);
+  const sendable =
+    run === undefined && !retryable && !authorised && !discarding;
+  const offlineReason = !env.writable
+    ? copy.READ_ONLY_COMPAT
+    : !env.online
+      ? copy.NEEDS_CONNECTION
+      : null;
+  return (
+    <li
+      data-held-change={holdId}
+      data-held-field={change.fieldId}
+      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+    >
+      <p className="text-[13px] text-ink-1">
+        {stopping
+          ? copy.HELD_STOPPING(change.label)
+          : discarding
+            ? copy.HELD_DISCARDING(change.label)
+            : run !== undefined
+              ? copy.HELD_RUNNING(change.label)
+              : authorised
+                ? copy.HELD_WAITING(change.label)
+                : copy.HELD_RECOVERED(change.label)}
+      </p>
+      {run === undefined && failure !== null ? (
+        <p className="text-[12.5px] text-conflict-text">
+          {copy.HELD_FAILED[failure]}
+        </p>
+      ) : null}
+      {note !== null ? (
+        <p className="text-[12.5px] text-conflict-text">{note}</p>
+      ) : null}
+      <div className="flex flex-wrap gap-2">
+        {retryable && !discarding ? (
+          <Button onClick={() => void resume()}>{copy.TRY_AGAIN}</Button>
+        ) : sendable ? (
+          offlineReason === null ? (
+            <Button onClick={() => void resume()}>{copy.SEND_NOW}</Button>
+          ) : (
+            <Button disabled reason={offlineReason}>
+              {copy.SEND_NOW}
+            </Button>
+          )
+        ) : null}
+        {stopping || discarding ? (
+          <Button variant="quiet" disabled reason={copy.SAVING}>
+            {copy.DISCARD}
+          </Button>
+        ) : (
+          <Button variant="quiet" onClick={() => void discard()}>
+            {copy.DISCARD}
+          </Button>
+        )}
+      </div>
+    </li>
+  );
+}

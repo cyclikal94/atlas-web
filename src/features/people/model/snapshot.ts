@@ -1,4 +1,9 @@
-import type { CacheRow, DraftWithCommand } from "../../../data";
+import type {
+  CacheRow,
+  DraftRow,
+  DraftWithCommand,
+  EditOutcome,
+} from "../../../data";
 import { type FieldValue, parseFieldValue } from "./values";
 
 /**
@@ -14,12 +19,17 @@ import { type FieldValue, parseFieldValue } from "./values";
  *    published by someone else, or a save queued by another page in between, resolves another base and the save is refused, never
  *    re-based.
  *  - `latestLocalId`: the newest outstanding save of the row then; only that one may be edited in place (D-11a-15).
+ *  - `latestDigest`: the `command_digest` of THAT save's body as the edit read it (review 2 of 22 October 2026, finding 3). The form shows
+ *    that body; an edit in place replaces it only while it is stored exactly so (`reviewedDraft`, judged inside the writing
+ *    transaction). Another page's newer edit of the same draft keeps its id, status and bases, so neither those nor the server versions can
+ *    tell it apart: only the body's identity can. null when nothing was outstanding, or when the save was not in the outstanding read.
  */
 export interface EditSnapshot {
   version: number;
   policyVersion: number | null;
   expectedBase: number;
   latestLocalId: string | null;
+  latestDigest: string | null;
 }
 
 /** The outstanding saves of this device that raised `id`'s version (its own chain), newest last. */
@@ -60,7 +70,48 @@ export function snapshotOf(
     policyVersion: row.policy_version ?? null,
     expectedBase: expectedBaseOf(row, drafts),
     latestLocalId,
+    latestDigest:
+      latestLocalId === null
+        ? null
+        : (drafts.find((draft) => draft.local_id === latestLocalId)
+            ?.command_digest ?? null),
   };
+}
+
+/**
+ * The draft an edit in place may replace (D-11a-15; review 2, finding 3): the save the edit began on, still queued, with exactly the body
+ * it read. For `expectDraft`, inside the writing transaction. PURE.
+ */
+export const reviewedDraft =
+  (snapshot: Pick<EditSnapshot, "latestLocalId" | "latestDigest">) =>
+  (draft: DraftRow): boolean =>
+    snapshot.latestLocalId !== null &&
+    snapshot.latestDigest !== null &&
+    draft.local_id === snapshot.latestLocalId &&
+    draft.status === "queued" &&
+    draft.command_digest === snapshot.latestDigest;
+
+/**
+ * Whether a NEW draft may follow the save the edit began on (review 2, finding 3): after an edit in place was refused (`refusal`), or
+ * when none was asked (null: that save is held for the defaults review, or the audience was just changed). Only when the outstanding read
+ * shows that save NOW with exactly the body the edit read: a body still queued may be edited by another page in the one transaction's
+ * window before the new draft is written (as for a held change, docs/people.md), and a body that has left the queue is frozen. Never after
+ * `draft_changed` (the stored body is not the one the edit read), `retargeted` or `not_found`, nor when the read does not show it: the
+ * person reviews the field again. With nothing outstanding when the edit began, the base guard alone decides. PURE.
+ */
+export function successorFollows(
+  refusal: Extract<EditOutcome, { kind: "refused" }>["reason"] | null,
+  snapshot: Pick<EditSnapshot, "latestLocalId" | "latestDigest">,
+  drafts: readonly DraftWithCommand[],
+): boolean {
+  if (snapshot.latestLocalId === null) return true;
+  if (refusal !== null && refusal !== "not_queued") return false;
+  const draft = drafts.find((d) => d.local_id === snapshot.latestLocalId);
+  return (
+    draft !== undefined &&
+    snapshot.latestDigest !== null &&
+    draft.command_digest === snapshot.latestDigest
+  );
 }
 
 /** Whether the row as it is now is still the one the edit began on (content and policy versions). */

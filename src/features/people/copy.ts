@@ -302,6 +302,28 @@ export const HELD_POLICY_DONE = (name: string) =>
   `Who can see ${name} had already changed when you discarded it. Your edit wasn't saved.`; // PROVISIONAL
 export const HELD_POLICY_UNCERTAIN = (name: string) =>
   `The change to who can see ${name} may already have been made. Check it on the field's row; your edit wasn't saved.`; // PROVISIONAL
+// Review 2 of 22 October 2026 (finding 2, D1: a recovered hold waits for "Send now"; every outcome is the store's own)
+export const HELD_RECOVERED = (name: string) =>
+  `Waiting to change who can see ${name}. Send it when you're ready.`; // PROVISIONAL (D1)
+export const SEND_NOW = "Send now"; // PROVISIONAL (D1)
+export const HELD_DISCARDING = (name: string) =>
+  `Discarding the held change to ${name}…`; // PROVISIONAL
+export const HELD_DISCARD_FAILED =
+  "Couldn't discard it on this device. It's still kept. Try again."; // PROVISIONAL
+export const HELD_CHANGED_ELSEWHERE =
+  "This held change was updated in another window. Check it, then try again."; // PROVISIONAL
+export const HELD_CONTENT_MAYBE = (name: string) =>
+  `Your edit to ${name} may already be queued. Check Sync to keep or discard it.`; // PROVISIONAL
+export const HELD_NOT_ENDED =
+  "Saved, but the held copy is still on this device. Try again to finish it."; // PROVISIONAL
+export const HELD_MORE = "Show more held changes"; // PROVISIONAL (finding 4)
+export const HELD_FIRST = "Back to the first held changes"; // PROVISIONAL
+export const HELD_MORE_EMPTY = "More held changes may be kept on this device."; // PROVISIONAL
+export const HELD_CHECKING = "Checking held changes…"; // PROVISIONAL
+export const HELD_LIST_FAILED =
+  "Couldn't read the held changes on this device."; // PROVISIONAL
+export const HELD_KEPT_EARLIER = (name: string) =>
+  `An earlier held change to who can see ${name} is still kept. Check it on the person's page.`; // PROVISIONAL
 export const HELD_UNREADABLE =
   "A held change on this device can't be read any more. Discard it."; // PROVISIONAL
 export const HELD_SAVE_FAILED =
@@ -331,6 +353,8 @@ export const CONFLICT_NEEDS_AUDIENCE =
 export const LOADING_MINE = "Loading your saved change…"; // PROVISIONAL
 export const STALE_NOT_SAVED =
   "Nothing was saved. Check the current value, then save yours on it or discard it."; // PROVISIONAL
+export const CREATE_CHANGED =
+  "This field was changed in another window since you opened it. Close it and open it again to see the change; nothing was saved."; // PROVISIONAL (review 2, finding 3)
 export const STALE_TITLE = "This field changed since you opened it"; // PROVISIONAL (finding 1)
 export const STALE_RENAME =
   "This person changed since you started. Review the name, then save again."; // PROVISIONAL

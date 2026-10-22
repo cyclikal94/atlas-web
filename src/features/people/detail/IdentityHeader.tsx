@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
@@ -21,7 +21,13 @@ import {
 import { firstPageCount } from "../model/duplicates";
 import { type LinkageState, renameRoute, unlinkOffer } from "../model/linkage";
 import type { ShownRow } from "../model/project";
-import { type EditSnapshot, snapshotOf, stillBound } from "../model/snapshot";
+import {
+  type EditSnapshot,
+  reviewedDraft,
+  snapshotOf,
+  stillBound,
+  successorFollows,
+} from "../model/snapshot";
 import { charCount } from "../model/values";
 import { sendOnline } from "../online";
 import { Avatar, Banner, PendingBadge, useOutboxSave } from "../parts";
@@ -346,6 +352,9 @@ function RenameForm({
       }
     );
   });
+  // The outstanding saves as they are read NOW (a save decides on the latest read, not the one of the render that started it).
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
   const [name, setName] = useState(initial.name);
   const [snapshot, setSnapshot] = useState(initial.snapshot);
   const [saving, setSaving] = useState(false);
@@ -437,8 +446,11 @@ function RenameForm({
     };
     const guard = baseGuard(snapshot.expectedBase);
     const latest = shown.latest;
+    // The rename was typed over a body that is no longer the one stored (review 2, finding 3): nothing is written; it is reviewed again.
+    let reviewAgain = false;
     const outcome = await save(async (outbox) => {
-      // D-11a-15: the unsent rename the form OPENED on is edited in place, while it is still queued; anything else is a new draft.
+      // D-11a-15: the unsent rename the form OPENED on is edited in place, while it is stored exactly as the form read it.
+      let refusal: Parameters<typeof successorFollows>[0] = null;
       if (
         latest?.kind === "edit" &&
         latest.status === "queued" &&
@@ -446,23 +458,26 @@ function RenameForm({
       ) {
         const edited = await outbox.editQueued(latest.localId, {
           ...renameEditRequest(input),
-          expectDraft: (draft) =>
-            draft.local_id === snapshot.latestLocalId &&
-            draft.status === "queued",
+          expectDraft: reviewedDraft(snapshot),
         });
+        if (edited.kind === "edited") return edited;
         if (
-          edited.kind === "edited" ||
-          (edited.reason !== "not_queued" &&
-            edited.reason !== "not_found" &&
-            edited.reason !== "retargeted" &&
-            edited.reason !== "draft_changed")
+          edited.reason !== "not_queued" &&
+          edited.reason !== "not_found" &&
+          edited.reason !== "retargeted" &&
+          edited.reason !== "draft_changed"
         )
           return edited;
+        refusal = edited.reason;
+      }
+      if (!successorFollows(refusal, snapshot, draftsRef.current)) {
+        reviewAgain = true;
+        return { kind: "refused", reason: "draft_changed" } as const;
       }
       return outbox.enqueue(renameEditRequest({ ...input, guard }));
     });
     setSaving(false);
-    if (guard.moved) return stale();
+    if (guard.moved || reviewAgain) return stale();
     if (!outcome.ok) {
       if (outcome.message !== null) setMessage({ text: outcome.message });
       return;

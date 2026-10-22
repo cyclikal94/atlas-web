@@ -147,8 +147,14 @@ export function stubEnv(
       const answer = env.currentRead;
       return typeof answer === "function" ? answer(localId) : answer;
     },
-    saveAsNew: async (localId, current) => {
-      calls.push({ action: "saveAsNew", args: [localId, current] });
+    saveAsNew: async (localId, current, reviewed) => {
+      calls.push({
+        action: "saveAsNew",
+        args:
+          reviewed === undefined
+            ? [localId, current]
+            : [localId, current, reviewed],
+      });
       return { kind: "refused", reason: "not_rebuildable" };
     },
     showNextQueue: record("showNextQueue"),

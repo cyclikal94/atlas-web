@@ -281,7 +281,9 @@ export function createFormRecoveryPort(
               written = result.kind === "saved";
               if (result.kind === "refused") return "refused";
               // `superseded`: a later capture is durable and this one never will be; it is NOT retried above it.
-              return result.kind === "superseded" ? "failed" : "saved";
+              return result.kind === "superseded" || result.kind === "changed"
+                ? "failed"
+                : "saved";
             }
           } catch {
             return "failed";

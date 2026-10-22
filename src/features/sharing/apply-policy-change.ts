@@ -45,6 +45,12 @@ export interface PolicyChangeInput {
   attempt: Attempt | null;
   /** False once the caller's identity or target changed: nothing more is asked. */
   isCurrent?: () => boolean;
+  /**
+   * Asked with the EXACT attempt (key and body) after the version check and before it may be sent (WEB-11a review 2, finding 2: a held
+   * change makes its attempt durable first, so a page that ends it afterwards knows it may have been sent). `false`: nothing is sent
+   * (`closed`, the earlier attempt kept as it was).
+   */
+  admit?: (attempt: Attempt) => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -124,6 +130,11 @@ export async function applyPolicyChange(
     },
   ];
   const attempt = nextAttempt(input.attempt, commands, env.newId);
+  if (
+    (input.admit !== undefined && !(await input.admit(attempt))) ||
+    !current()
+  )
+    return { result: { ok: false, kind: "closed" }, attempt: input.attempt };
   const sent = await untilSent(
     () => env.api.management(commands, attempt.key),
     options,

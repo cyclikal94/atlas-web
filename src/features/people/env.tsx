@@ -1,5 +1,5 @@
 import { createContext, type ReactNode, useContext, useMemo } from "react";
-import { createFormRecoveryPort, useDataEnv } from "../../data";
+import { createConditionalFormPort, useDataEnv } from "../../data";
 import { useIdentity, useSession } from "../../session";
 import { type SharingApi, SharingBoundary, useSharingEnv } from "../sharing";
 import { createPeopleApi, type PeopleApi } from "./api";
@@ -35,6 +35,8 @@ export interface PeopleEnv {
    * null when another page holds it: a held change is run by one page at a time.
    */
   exclusive<T>(name: string, run: () => Promise<T>): Promise<T | null>;
+  /** Resolves once no page holds the lock `name` (a run that found it taken looks again then, never in a loop). */
+  released(name: string): Promise<void>;
 }
 
 /** `exclusive` over Web Locks (`ifAvailable`: never queued behind another page's run). */
@@ -45,6 +47,16 @@ export function webLocksExclusive<T>(
   return navigator.locks.request(name, { ifAvailable: true }, (lock) =>
     lock === null ? null : run(),
   ) as Promise<T | null>;
+}
+
+/** `released` over Web Locks: the lock is asked for (queued behind its holder) and let go at once. */
+export function webLocksReleased(name: string): Promise<void> {
+  return navigator.locks
+    .request(name, async () => undefined)
+    .then(
+      () => undefined,
+      () => undefined,
+    );
 }
 
 const PeopleEnvContext = createContext<PeopleEnv | null>(null);
@@ -88,7 +100,7 @@ function ProductionPeopleEnv({ children }: { children: ReactNode }) {
   const held = useMemo(() => {
     const now = () => new Date().toISOString();
     return heldStoreOver(
-      createFormRecoveryPort({
+      createConditionalFormPort({
         service: () => data.service(),
         quota: data.quota,
         now,
@@ -112,6 +124,7 @@ function ProductionPeopleEnv({ children }: { children: ReactNode }) {
             memory: peopleMemory(sharing.identity),
             held,
             exclusive: webLocksExclusive,
+            released: webLocksReleased,
           },
     [api, sharing, account, held],
   );

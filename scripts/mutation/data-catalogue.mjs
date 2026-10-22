@@ -17568,6 +17568,299 @@ export const UNIT = [
         "  decide: () => null,",
       ),
   },
+  // ---- WEB-11a review 2 of 22 October 2026: one causal mutant per corrected mechanism (design assessment C1–C5) ----------------
+  {
+    id: "MU-2206",
+    title: "WEB-11a R2 F5: summary labels are measured in UTF-16 units again",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /characters as the server counts them/,
+    patch: (t) =>
+      sub(
+        t,
+        "  charCount(value) <= LIMITS.label;",
+        "  value.length <= LIMITS.label;",
+      ),
+  },
+  {
+    id: "MU-2207",
+    title:
+      "WEB-11a R2 F4: the held-copy read gives no continuation at its scan bound",
+    file: "src/data/plans/form-copies.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect: /terminal rows are crossed, never a dead end/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return page(copies, cursor);\n  },",
+        "    return page(copies, null);\n  },",
+      ),
+  },
+  {
+    id: "MU-2208",
+    title: "WEB-11a R2 F4: terminal rows do not move the held-copy cursor",
+    file: "src/data/plans/form-copies.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect: /terminal rows are crossed, never a dead end/,
+    patch: (t) =>
+      sub(
+        t,
+        "        cursor = [row.form_context, row.tab_instance_id];\n        if (row.terminal) continue;",
+        "        if (row.terminal) continue;\n        cursor = [row.form_context, row.tab_instance_id];",
+      ),
+  },
+  {
+    id: "MU-2209",
+    title: "WEB-11a R2 F4: the held list offers no way past its first page",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /more holds than one page/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {next !== null ? (\n            <Button variant="quiet" onClick={() => setAfter(next)}>',
+        '          {false ? (\n            <Button variant="quiet" onClick={() => setAfter(next)}>',
+      ),
+  },
+  {
+    id: "MU-2210",
+    title:
+      "WEB-11a R2 F2: a hold is taken for ended whatever the store answered",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /end FAILS/,
+    patch: (t) =>
+      sub(
+        t,
+        '  end.kind === "ended" || (end.kind === "changed" && end.stored !== "live");',
+        "  true;",
+      ),
+  },
+  {
+    id: "MU-2211",
+    title: "WEB-11a R2 F2: a terminal write that fails is reported as ended",
+    file: "src/data/ports/conditional-form.ts",
+    tests: ["tests/data/conditional-form.test.ts"],
+    expect: /a terminal write that fails inside the store is `failed`/,
+    patch: (t) =>
+      sub(
+        t,
+        '          (unwritten(result) as ConditionalEnd | null) ?? { kind: "failed" }\n        );\n      } catch {\n        return { kind: "failed" };',
+        '          (unwritten(result) as ConditionalEnd | null) ?? { kind: "failed" }\n        );\n      } catch {\n        return { kind: "ended" };',
+      ),
+  },
+  {
+    id: "MU-2212",
+    title:
+      "WEB-11a R2 F2: a conditional write no longer compares the stored state",
+    file: "src/data/plans/form-recovery.ts",
+    tests: [
+      "tests/data/conditional-form.test.ts",
+      "tests/features/people/held-run.test.ts",
+    ],
+    expect: /only from the state it names|replaces only the state it names/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!holds) return { result: { kind: "changed", stored: state } };',
+        "",
+      ),
+  },
+  {
+    id: "MU-2213",
+    title: "WEB-11a R2 F2: the policy attempt is sent before it is durable",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /durable before it is sent/,
+    patch: (t) =>
+      sub(
+        t,
+        "            : await write({ ...copy.change, attempt })) &&",
+        "            : true) &&",
+      ),
+  },
+  {
+    id: "MU-2214",
+    title:
+      "WEB-11a R2 F2: a failed write of the confirmed audience does not stop the content step",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /CONFIRMED audience queues no content/,
+    patch: (t) => sub(t, "    if (!progressed) return refused();\n", ""),
+  },
+  {
+    id: "MU-2215",
+    title: "WEB-11a R2 F2: a run does not read the hold again under the lock",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /moved on by another page/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (stored.copy.digest !== shown.digest) return { kind: "stale" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2216",
+    title: "WEB-11a R2 F2/D1: a recovered hold runs by itself again",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /recovered hold online and writable|end FAILS stays visible/,
+    patch: (t) => sub(t, "      !authorised ||\n", ""),
+  },
+  {
+    id: "MU-2217",
+    title:
+      "WEB-11a R2 F3: an edit in place no longer compares the body it read",
+    file: "src/features/people/model/snapshot.ts",
+    tests: [
+      "tests/features/people/review-findings.test.tsx",
+      "tests/features/people/held-run.test.ts",
+    ],
+    expect:
+      /another page edited meanwhile|by another page while the form was open|replaces only the body it read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    draft.command_digest === snapshot.latestDigest;",
+        "    true;",
+      ),
+  },
+  {
+    id: "MU-2218",
+    title:
+      "WEB-11a R2 F3: a refused field edit falls back to queuing the older form",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /another page edited meanwhile|with ANOTHER body than the editor read/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
+        "      if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-2219",
+    title:
+      "WEB-11a R2 F3: a refused rename edit falls back to queuing the older form",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /by another page while the form was open/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
+        "      if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-2220",
+    title:
+      "WEB-11a R2 F3: an unsent create is edited without comparing the body the editor read (both sites)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /by another page while the editor was open/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      if (reviewed === null || draft.command_digest !== reviewed)",
+          "      if (reviewed === null)",
+        ),
+        "            stored.command_digest === reviewed,",
+        "            true,",
+      ),
+  },
+  {
+    id: "MU-2221",
+    title:
+      "WEB-11a R2 F1: a generic rebuild re-binds a field change to the current audience",
+    file: "src/features/people/register.ts",
+    tests: ["tests/features/people/register.test.ts"],
+    expect: /audience moved since the save/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    current.policy_version !== put.policyVersion\n",
+          "    current.policy_version === undefined\n",
+        ),
+        "  const policyVersion = put.policyVersion;",
+        "  const policyVersion = current.policy_version as number;",
+      ),
+  },
+  {
+    id: "MU-2222",
+    title:
+      "WEB-11a R2 F1: the dialog's review never withholds a resend under a moved audience",
+    file: "src/features/people/register.ts",
+    tests: [
+      "tests/features/people/register.test.ts",
+      "tests/features/sync/recovery-screens.test.tsx",
+    ],
+    expect: /audience moved since the save|audience was WIDENED/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : put.policyVersion === null || now.policy_version !== put.policyVersion",
+        "        : false",
+      ),
+  },
+  {
+    id: "MU-2223",
+    title:
+      "WEB-11a R2 F1: the generic dialog ignores the slice's reason to withhold a resend",
+    file: "src/features/sync/ItemDetailDialog.tsx",
+    tests: ["tests/features/sync/recovery-screens.test.tsx"],
+    expect: /audience was WIDENED/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (!reviewable || (review !== null && review.blocked === null));",
+        "    true;",
+      ),
+  },
+  {
+    id: "MU-2224",
+    title:
+      "WEB-11a R2 F1: 'save as new' replaces a draft whose body changed since the dialog showed it",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /with the body the dialog showed/,
+    patch: (t) =>
+      sub(
+        t,
+        "          stored.command_digest === reviewed &&",
+        "          true &&",
+      ),
+  },
+  {
+    id: "MU-2225",
+    title:
+      "WEB-11a R2 F2/F4: a new hold no longer ends the earlier holds of its field",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /replaces the earlier one/,
+    patch: (t) =>
+      sub(t, "      if (holdId === keep) continue;", "      continue;"),
+  },
+  {
+    id: "MU-2226",
+    title:
+      "WEB-11a R2 F2: a run that found the field's lock taken waits for the env to change, not for the lock",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /looks again when it is let go/,
+    patch: (t) =>
+      sub(
+        t,
+        "        setLockBusy(true);\n",
+        "        setPausedFor(env);\n        return;\n",
+      ),
+  },
 ];
 
 /**
@@ -20402,6 +20695,70 @@ export const ENGINE = [
         t,
         '          {rail.disclosure === "partial" ? (',
         "          {false ? (",
+      ),
+  },
+  // ---- WEB-11a review 2 of 22 October 2026: the new native cases' causal mutants (real IndexedDB, Web Locks, the production tree) ----
+  {
+    id: "MU-2227",
+    title:
+      "WEB-11a R2 F2/D1: (REAL ENGINE) a hold recovered after the page closed runs by itself",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P15:",
+    expect: /E-P15:/,
+    patch: (t) => sub(t, "      !authorised ||\n", ""),
+  },
+  {
+    id: "MU-2228",
+    title:
+      "WEB-11a R2 F3: (REAL ENGINE) an edit in place no longer compares the queued body it read",
+    file: "src/features/people/model/snapshot.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P22:",
+    expect: /E-P22:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    draft.command_digest === snapshot.latestDigest;",
+        "    true;",
+      ),
+  },
+  {
+    id: "MU-2229",
+    title:
+      "WEB-11a R2 F1: (REAL ENGINE) the generic resend re-binds a People change to the current audience (rebuild and review)",
+    file: "src/features/people/register.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P23:",
+    expect: /E-P23:/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "    current.policy_version !== put.policyVersion\n",
+            "    current.policy_version === undefined\n",
+          ),
+          "  const policyVersion = put.policyVersion;",
+          "  const policyVersion = current.policy_version as number;",
+        ),
+        "        : put.policyVersion === null || now.policy_version !== put.policyVersion",
+        "        : false",
+      ),
+  },
+  {
+    id: "MU-2230",
+    title:
+      "WEB-11a R2 F4: (REAL ENGINE) terminal rows do not move the held-copy cursor",
+    file: "src/data/plans/form-copies.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P24:",
+    expect: /E-P24:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        cursor = [row.form_context, row.tab_instance_id];\n        if (row.terminal) continue;",
+        "        if (row.terminal) continue;\n        cursor = [row.form_context, row.tab_instance_id];",
       ),
   },
 ];

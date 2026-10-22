@@ -108,6 +108,23 @@ reopens it with its draft), and `/settings/archived`.
   with the confirmed policy version, under the hold's id as its local id. Every failure keeps the held draft with its reason, Try again and
   Discard. Discard while it runs stops it at the next admission boundary (before the policy write, after it, before and inside the content
   write); a policy change already made, or possibly made, is said so, and its attempt is kept for recovery (finding 2).
+- **D-11a-12a** (review 2 of 22 October 2026, findings 2 and 4) A hold is an OPERATION, not a form. Its copy is written only through the
+  conditional port (`src/data/ports/conditional-form.ts`): every write is a compare-and-set of the stored row (`content_digest`; the
+  record's `rev` grows with each write, so a digest never comes back), an end is a terminal write from the state read, and every answer is
+  typed (`saved`/`ended`, `changed`, `refused`, `failed`). The rows hold the highest writer generation, so the ordinary form port cannot
+  claim or revive them. A run holds the FIELD's lock (`atlas-people-held:<account>:<field>`) until its last write, reads the hold again under
+  it and runs only the state shown; the exact policy attempt is written BEFORE it may be sent (`applyPolicyChange`'s `admit`), the confirmed
+  audience after it, and the content step is recorded as admitted (`queued`) before it is queued. A discard is said only when the end
+  committed; a failed or refused end keeps the row visible with its reason. An end from another page before an admission makes the run's
+  next write fail (`changed`, nothing more sent); after one, that page says what may already have happened (audience may have changed,
+  edit may be queued). A new hold of a field ends the earlier ones from their stored states under the field's lock (a bounded, resumable
+  read of that field's own copies); one it cannot end is kept, and said so. The held list is a bounded page of `readFormCopies` with "Show
+  more held changes"/"Back to the first": its keyset cursor (`[form_context, tab_instance_id]`) crosses ranges of terminal rows of any
+  length, and an empty page with a cursor is never "nothing held".
+- **D1** (design assessment of 22 October 2026; answered "explicit Send now" in the Running session's question on 22 October 2026) A hold
+  runs by itself only in the page that made it, or after the person chose "Send now" or "Try again" there (`memory.heldAuthority`). A
+  recovered hold (after a reload, an account switch back, in another page, a legacy v1 copy, one whose discard could not be written) is shown
+  as "Waiting to change who can see {name}. Send it when you're ready." and sends nothing until "Send now".
 - **D-11a-13** (revised by D-11a-21) A field's audience comes from the field audiences summary while online and not older than the
   cached field; else from a policy this page read in the editor; else the button reads "Who can see it?". It opens the policy editor, which
   shows its own owner-only state. No owner-only policy is read to fill the table.
@@ -180,11 +197,22 @@ archive is folded over its row. A projected row is never a base for a version-ch
 - The page memory (linkage answers, policies read, editor drafts) is per identity and dropped for any other identity; the held audience
   changes are not in it (they are durable, D-11a-12). An open, unsaved editor's typed text is page memory: it survives a remount, not an
   account switch or a reload (WEB-14a's Q4 recovery covers the update reload).
-- A held change discarded in one page while another page's run is between its last check and its write may still queue its content there;
-  that draft is an ordinary queued change, shown in Sync and discardable (the window is one transaction).
+- A held change discarded in one page after another page's run recorded its content admission may still be queued there; the discarding
+  page says so ("may already be queued. Check Sync"), and that draft is an ordinary queued change, shown in Sync and discardable.
+- A new draft that FOLLOWS a still-queued save the edit began on (held for the defaults review, or after the audience was just changed) is
+  allowed only while the outstanding read shows that save with the body the edit read; another page's edit of it in the one transaction's
+  window before the new draft is written is not detected (an edit in place is judged inside its own transaction, `reviewedDraft`).
 - A field update that changes type patches only the label in the overlay (the overlay's value merge is shallow); the screens show the saved
   value from the draft body.
-- Rebuilds offered by the sync queue ("save as new") are built on the authorised current read's version and policy version.
+- Rebuilds offered by the sync queue ("save as new") are built on the authorised current read's CONTENT version, under the policy version
+  the person saved them with; a field change or rename whose audience moved since is not rebuilt there (review 2, finding 1, Q1): the
+  dialog shows the retained and current content (`review`) and says to review it in People (the field editor's comparison) or, for a
+  rename, to discard it and rename again. A resend is bound to the body the dialog showed (`saveAsNew`'s reviewed digest).
+- An edit in place of a queued save (field update, rename, unsent create) replaces only the body the edit read (`latestDigest` /
+  `createDigest`, compared inside the writing transaction). Another page's newer edit of the same draft is never overwritten, and the
+  refusal never falls back to queuing the older form after it: the field or rename is reviewed again (review 2, finding 3).
+- Summary labels (person, owner's person, household and primary household names) are limited to 300 characters as the server counts them
+  (Unicode scalar values), never UTF-16 units (review 2, finding 5).
 
 ## Not claimed
 

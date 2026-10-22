@@ -1,18 +1,20 @@
-import type { FormRecoveryRow, Policy } from "../../../data";
 import type {
-  FormRecoveryPort,
-  SaveResult,
-} from "../../../lib/form-recovery/port";
+  ConditionalFormPort,
+  FormCopiesPage,
+  FormCopyCursor,
+  FormRecoveryRow,
+  Policy,
+} from "../../../data";
 import type { Attempt } from "../model/attempt";
 import { type FieldValue, parseFieldValue } from "../model/values";
 
 /**
  * The HELD audience changes of the account (D-11a-12, "Hold it as a draft until I'm online"), kept DURABLY (finding 6 of the review of
  * 13 October 2026; the human decision of 13 October: durable, in WEB-11a). Each held change is one form copy of the account's own
- * database (`form_recovery`, written through WEB-09a's `FormRecoveryPort`, read through `readFormCopies`):
+ * database (`form_recovery`, written through the conditional port below, read through `readFormCopies`):
  *
- *  - `form_context` = `people-held:<person>:<field>`, `tab_instance_id` = the hold's own id. One row per hold, written only by the page that
- *    made it (or, to finish or discard it, by the page that runs it), so the port's writer order never refuses a later hold of the same field.
+ *  - `form_context` = `people-held:<person>:<field>`, `tab_instance_id` = the hold's own id. One row per hold. WEB-14a's Q4 recovery must
+ *    leave the `people-held:` family alone; the ordinary form port cannot write these rows at all (they hold the highest writer generation).
  *  - It survives a reload, an account switch without logout, an expired session and a password change (Q3, Q20(a)), and is deleted with the
  *    account's data only by a confirmed logout or self-retirement; it is counted in the unsynced work a logout warns about (category
  *    `form_copy`) and its consent binds to; it is admitted by the quota guard and refused while signing out (D-16); it is read only inside
@@ -21,6 +23,14 @@ import { type FieldValue, parseFieldValue } from "../model/values";
  *    audience asked for, and the uncertain attempt of its policy step (the same key and body on a retry). No secret is stored.
  *  - Nothing is queued until it runs (online, writable, on the person's page): the policy step is online-only and is never queued (WEB-04
  *    §5.1); the content step is queued only after the policy step is confirmed.
+ *
+ * A HOLD IS AN OPERATION, NOT A FORM (review 2 of 22 October 2026, finding 2). Its copy is written only through the CONDITIONAL port
+ * (`createConditionalFormPort`): every write names the state it was decided on (the copy's digest; `rev` grows with every write, so a
+ * digest never comes back) and is refused (`changed`) when another state is stored, ended included; ending it is a terminal write from
+ * the state read, never a removal inferred from a call that returned. Every answer is typed (`saved`/`ended`, `changed`, `refused`,
+ * `failed`): the screens claim a hold ended, or a step admitted, only when the store committed it. Its progress is a state of the copy:
+ * the uncertain policy attempt is written BEFORE it is sent (`attempt`), and the content step is recorded as admitted (`queued`) BEFORE
+ * it is queued, so a page that ends the hold afterwards says truthfully what may already have happened.
  */
 export const HELD_FORM = "people-held:";
 
@@ -58,7 +68,47 @@ export interface HeldChange {
   /** `waiting` until it runs; a failure keeps its reason until "Try again". */
   status: { kind: "waiting" } | { kind: "failed"; reason: HeldFailure };
   heldAt: string;
+  /** The number of this state: every write of the hold is the next (0: as it was held, or a copy of the first shape). */
+  rev: number;
+  /** The content step was admitted: its draft may be queued (an end after it says so). */
+  queued: boolean;
 }
+
+/** A held change with the digest of the stored state it was read as: the only state a write of it may replace. */
+export interface HeldCopy {
+  change: HeldChange;
+  digest: string;
+}
+
+export interface HeldKey {
+  personId: string;
+  fieldId: string;
+  holdId: string;
+}
+
+/** What is stored now, when a conditional write found another state. */
+export type HeldStored = "absent" | "ended" | "live";
+
+export type HeldWrite =
+  | { kind: "saved"; copy: HeldCopy }
+  | { kind: "changed"; stored: HeldStored }
+  | { kind: "refused" }
+  | { kind: "failed" };
+
+export type HeldEnd =
+  | { kind: "ended" }
+  | { kind: "changed"; stored: HeldStored }
+  | { kind: "refused" }
+  | { kind: "failed" };
+
+export type HeldRead =
+  | { kind: "live"; copy: HeldCopy }
+  /** A live copy this page cannot read (an older shape, a damaged value): it can only be ended, from its digest. */
+  | { kind: "unreadable"; digest: string }
+  | { kind: "ended" }
+  | { kind: "absent" }
+  /** The store could not be read: never taken for absence. */
+  | { kind: "failed" };
 
 /** A held row the page could not read (an older shape, a damaged value): listed so it can be discarded, never run. */
 export interface UnreadableHeld {
@@ -114,7 +164,11 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
   } catch {
     return null;
   }
-  if (!isObject(raw) || raw.v !== 1) return null;
+  if (!isObject(raw) || (raw.v !== 1 && raw.v !== 2)) return null;
+  // The first shape (v 1) had no state number and no content admission: it is read as state 0, not admitted.
+  const rev = raw.v === 1 ? 0 : raw.rev;
+  const queued = raw.v === 1 ? false : raw.queued;
+  if (!isVersion(rev) || typeof queued !== "boolean") return null;
   const value = parseFieldValue(raw.value);
   const fromRaw = raw.from;
   const from =
@@ -167,6 +221,8 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
         ? { kind: "waiting" }
         : { kind: "failed", reason: status as HeldFailure },
     heldAt: raw.heldAt,
+    rev,
+    queued,
   };
 }
 
@@ -174,7 +230,9 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
 export function encodeHeld(change: HeldChange): Record<string, string> {
   return {
     held: JSON.stringify({
-      v: 1,
+      v: 2,
+      rev: change.rev,
+      queued: change.queued,
       fieldId: change.fieldId,
       personId: change.personId,
       label: change.label,
@@ -192,41 +250,89 @@ export function encodeHeld(change: HeldChange): Record<string, string> {
 }
 
 /**
- * Writes the held changes of the displayed account (production: `FormRecoveryPort` over the account's database). `save` is `saved` only
- * when THIS content is durable; `refused` while signing out; `failed` otherwise (nothing is claimed).
+ * The held changes of the displayed account (production: the CONDITIONAL port over the account's database). Every answer is typed and
+ * none is inferred: `create` writes a hold whose copy must not exist yet; `update` writes the next state of the one read as `from` (its
+ * `rev` is `from`'s plus one, whatever `next` says); `end` makes the copy read as `digest` terminal; `read` says what is stored; `list` is
+ * one bounded, resumable page of a person's (or one field's) holds, or null when it could not be read.
  */
 export interface HeldStore {
-  save(change: HeldChange): Promise<SaveResult>;
-  /** Ends a hold (finished, discarded): its copy is cleared and is never listed again. */
-  discard(hold: {
-    personId: string;
-    fieldId: string;
-    holdId: string;
-  }): Promise<"discarded" | "failed">;
+  create(change: HeldChange): Promise<HeldWrite>;
+  update(from: HeldCopy, next: HeldChange): Promise<HeldWrite>;
+  end(hold: HeldKey, digest: string): Promise<HeldEnd>;
+  read(hold: HeldKey): Promise<HeldRead>;
+  list(
+    personId: string,
+    fieldId: string | null,
+    after: FormCopyCursor | null,
+  ): Promise<FormCopiesPage | null>;
+}
+
+/** The hold a live copy carries, with its digest, or the copy's digest alone when this page cannot read it. PURE. */
+export function heldOf(row: FormRecoveryRow): HeldCopy | null {
+  const change = decodeHeld(row);
+  return change === null ? null : { change, digest: row.content_digest };
 }
 
 export function heldStoreOver(
-  port: FormRecoveryPort,
+  port: ConditionalFormPort,
   now: () => string,
 ): HeldStore {
-  return {
-    save: (change) =>
-      port.save({
+  const write = async (
+    change: HeldChange,
+    expect: string | null,
+  ): Promise<HeldWrite> => {
+    const answer = await port.put(
+      {
         formContext: heldContextOf(change.personId, change.fieldId),
         tabInstanceId: change.holdId,
         values: encodeHeld(change),
         savedAt: now(),
-      }),
-    discard: async (hold) => {
-      try {
-        await port.discard(
-          heldContextOf(hold.personId, hold.fieldId),
-          hold.holdId,
-        );
-        return "discarded";
-      } catch {
-        return "failed";
-      }
+      },
+      expect,
+    );
+    return answer.kind === "saved"
+      ? { kind: "saved", copy: { change, digest: answer.digest } }
+      : answer;
+  };
+  return {
+    create: (change) => write(change, null),
+    update: (from, next) =>
+      write(
+        {
+          ...next,
+          holdId: from.change.holdId,
+          personId: from.change.personId,
+          fieldId: from.change.fieldId,
+          rev: from.change.rev + 1,
+        },
+        from.digest,
+      ),
+    end: (hold, digest) =>
+      port.end(heldContextOf(hold.personId, hold.fieldId), hold.holdId, digest),
+    read: async (hold) => {
+      const stored = await port.read(
+        heldContextOf(hold.personId, hold.fieldId),
+        hold.holdId,
+      );
+      if (stored.kind !== "live") return stored;
+      const copy = heldOf(stored.row);
+      return copy === null ||
+        copy.change.personId !== hold.personId ||
+        copy.change.fieldId !== hold.fieldId
+        ? { kind: "unreadable", digest: stored.row.content_digest }
+        : { kind: "live", copy };
+    },
+    list: async (personId, fieldId, after) => {
+      if (fieldId === null) return port.list(heldPrefixOf(personId), after);
+      // One field's holds: its context is the prefix, and only rows of exactly that context are its own.
+      const context = heldContextOf(personId, fieldId);
+      const page = await port.list(context, after);
+      return page === null
+        ? null
+        : {
+            ...page,
+            copies: page.copies.filter((row) => row.form_context === context),
+          };
     },
   };
 }

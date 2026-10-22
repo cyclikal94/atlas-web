@@ -39,7 +39,9 @@ import {
  * E-P17 state stays with its person; E-P18 every person reachable in bounded steps. E-P5 also asserts the conflicted save's content.
  * Finding 8 with API 0.29's viewer-safe summaries: E-P19 the drawn lines and the server's In Home / Shared with me / Not linked views,
  * offline included; E-P20 the "Shared with" rails and the field audience tags; E-P21 a synced change reads them again, and an answer it
- * superseded is never shown.
+ * superseded is never shown. Review 2 (22 October 2026): E-P22 an old editor never overwrites a newer edit of the same queued draft
+ * (finding 3); E-P23 the generic Sync dialog never resends a People change under an audience the person did not review (finding 1);
+ * E-P24 held changes past a thousand ended copies stay reachable in real IndexedDB (finding 4). E-P15 asserts D1's "Send now".
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -728,15 +730,14 @@ test.describe("E-P10: a new person with a note, never-fetched defaults (A8 at th
   test("one /commands batch [create_person, create_field], held for the defaults review: nothing is sent", async ({
     context,
   }, info) => {
-    const { net, page } = await setup(context, "/people", [personP(Q, "Bo")]);
-    // The defaults cannot be read (registered after the stubs, so it wins): the save captures 'never fetched' and is held for review.
-    await context.route("**/api/experimental/v1/defaults/snapshot", (route) =>
-      route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify(atlas("unavailable")),
-      }),
-    );
+    // The defaults cannot be read from the page's first request on: the save captures 'never fetched' and is held for review.
+    // HARNESS CORRECTION (22 October 2026): the 503 used to be routed AFTER `setup` had booted the page, so the boot's own defaults read
+    // could already have been answered 200 (Chromium, run pw-people-4: review_block null). Same intent, arranged before the boot.
+    const { net, page } = await setup(context, "/people", [personP(Q, "Bo")], {
+      arrange: (s) => {
+        s.snapshotUnavailable = true;
+      },
+    });
     await startOutbox(page);
     await page.locator('[data-people-action="new-person"]').click();
     const dialog = page.getByRole("dialog", { name: "New person" });
@@ -985,7 +986,10 @@ test.describe("E-P14: an edit keeps the versions and audience it began on (A4, A
 });
 
 test.describe("E-P15: a held change is durable for its account (Q3, Q20; finding 6)", () => {
-  test("held offline, it survives the page closing (a new page reads it from real IndexedDB) and runs there: the audience first, then the content", async ({
+  // ADAPTATION (D1, 22 October 2026: "explicit Send now"): the reopened page used to run the recovered hold by itself. Its intent (durable
+  // across the page closing, read from real IndexedDB, the audience first and then the content on the confirmed version) is kept; the run
+  // now starts only from "Send now", and nothing is asked before it.
+  test("held offline, it survives the page closing (a new page reads it from real IndexedDB), waits for 'Send now' there, then runs: the audience first, then the content", async ({
     context,
   }, info) => {
     const { net, page, served } = await setup(
@@ -1022,11 +1026,30 @@ test.describe("E-P15: a held change is durable for its account (Q3, Q20; finding
       () => ({ status: 200, body: { version: 6, policy: HOME_VIEW } }),
       () => ({ status: 200, body: { version: 7, policy: PRIVATE } }),
     );
+    const sinceReopen = served.log.length;
     const reopened = await bootAt(context, `/people/${P}`);
     await startOutbox(reopened);
+    const recovered = reopened.locator(`[data-held-field="${F}"]`);
+    await expect(recovered).toContainText(
+      "Waiting to change who can see Note. Send it when you're ready.",
+    );
+    const sendNow = recovered.getByRole("button", { name: "Send now" });
+    await expect(sendNow).toBeEnabled();
+    // Online and writable, and nothing was asked for it before the person chose to send it.
+    const atChoice = served.log.length;
+    expect(
+      served.log
+        .slice(sinceReopen)
+        .filter((line) => line === `GET /policies/${F}`),
+    ).toEqual([]);
+    expect(served.management).toEqual([]);
+    await sendNow.click();
     await expect
       .poll(() => served.management.length, { timeout: 15_000 })
       .toBe(1);
+    expect(
+      served.log.slice(sinceReopen).indexOf(`GET /policies/${F}`) + sinceReopen,
+    ).toBeGreaterThanOrEqual(atChoice);
     await expect.poll(async () => (await draftsOf(reopened)).length).toBe(1);
     await send(reopened);
     await expect.poll(() => net.commands.length).toBe(1);
@@ -1414,4 +1437,267 @@ test.describe("E-P21: freshness and supersession in real IndexedDB (finding 8)",
     await expect(row).not.toContainText("Added by you");
     recordEvidence(info, "e-p21", { log: served.log });
   });
+});
+
+test.describe("E-P22: an old editor never overwrites a newer edit of the same queued draft (review 2, finding 3)", () => {
+  for (const concurrent of [false, true])
+    test(`${concurrent ? "the queued body was edited through the public outbox while the editor was open: nothing is written, the field is reviewed, the newer body survives" : "control: the queued draft the editor opened on is edited in place"}`, async ({
+      context,
+    }, info) => {
+      const { page } = await setup(
+        context,
+        `/people/${P}/fields/${F}`,
+        [
+          personP(P, "Ada"),
+          fieldP(
+            F,
+            P,
+            "Note",
+            { kind: "text", text: "Original" },
+            { version: 4, policy_version: 6 },
+          ),
+        ],
+        { arrange: (s) => s.policies.set(F, { version: 6, policy: PRIVATE }) },
+      );
+      const bodies = () =>
+        page.evaluate(
+          (account) => window.__atlasData?.rows(account, "draft_commands"),
+          ME,
+        ) as Promise<
+          Array<{ command: { command: { value: { text: string } } } }>
+        >;
+      let dialog = page.getByRole("dialog");
+      await expect(
+        dialog.getByRole("radio", { name: "Only you", exact: true }),
+      ).toBeChecked();
+      await dialog
+        .getByRole("textbox", { name: "Value" })
+        .fill("Original queued");
+      await dialog.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(dialog).toBeHidden();
+      const [original] = await draftsOf(page);
+      expect(original?.status).toBe("queued");
+      await navigateInApp(page, `/people/${P}/fields/${F}`);
+      dialog = page.getByRole("dialog");
+      await expect(dialog.getByRole("textbox", { name: "Value" })).toHaveValue(
+        "Original queued",
+      );
+      await dialog
+        .getByRole("textbox", { name: "Value" })
+        .fill("Older open editor");
+      if (concurrent) {
+        await startOutbox(page, ME, { start: false });
+        const edited = await page.evaluate(
+          ({ id, field, person }) =>
+            window.__atlasData?.editQueued(id, {
+              endpoint: "/task-commands",
+              targets: [
+                {
+                  resourceId: field,
+                  role: "primary",
+                  basis: "resource",
+                  versionChecked: true,
+                },
+              ],
+              command: {
+                command: {
+                  kind: "put_field",
+                  id: field,
+                  parent_id: person,
+                  expected_version: 4,
+                  expected_policy_version: 6,
+                  label: "Note",
+                  value: { kind: "text", text: "Newer save from another tab" },
+                },
+              },
+            }),
+          { id: original?.local_id as string, field: F, person: P },
+        );
+        expect(edited?.kind).toBe("edited");
+      }
+      await dialog.getByRole("button", { name: "Save", exact: true }).click();
+      if (concurrent) {
+        await expect(dialog).toContainText(
+          "This field changed since you opened it",
+        );
+        await expect(
+          dialog.getByRole("textbox", { name: "Value" }),
+        ).toHaveValue("Older open editor");
+      } else await expect(dialog).toBeHidden();
+      const stored = await bodies();
+      expect(await draftsOf(page)).toHaveLength(1);
+      expect(stored[0]?.command.command.value.text).toBe(
+        concurrent ? "Newer save from another tab" : "Older open editor",
+      );
+      recordEvidence(info, "e-p22", { concurrent, stored });
+    });
+});
+
+test.describe("E-P23: the generic Sync dialog never resends a People change under an audience the person did not review (review 2, finding 1)", () => {
+  for (const widened of [false, true])
+    test(`${widened ? "the field's audience was widened to Home after the conflict: the retained content is shown, Resend is withheld with its reason, nothing is sent" : "control, the same audience: the retained content beside the current, and Resend sends it under the policy version it was saved with"}`, async ({
+      context,
+    }, info) => {
+      const field = (version: number, policy: number) =>
+        fieldP(
+          F,
+          P,
+          "Note",
+          { kind: "text", text: "Original" },
+          { version, policy_version: policy },
+        );
+      const { page, net, served } = await setup(
+        context,
+        `/people/${P}/fields/${F}`,
+        [personP(P, "Ada"), field(4, 6)],
+        { arrange: (s) => s.policies.set(F, { version: 6, policy: PRIVATE }) },
+      );
+      await startOutbox(page);
+      net.commandScript.push(() => ({
+        status: 409,
+        body: atlasError("conflict"),
+      }));
+      const dialog = page.getByRole("dialog");
+      await expect(
+        dialog.getByRole("radio", { name: "Only you", exact: true }),
+      ).toBeChecked();
+      await dialog.getByRole("textbox", { name: "Value" }).fill("Confidential");
+      await dialog.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(dialog).toBeHidden();
+      await send(page);
+      await expect
+        .poll(async () => (await draftsOf(page)).map((d) => d.status))
+        .toEqual(["version_conflict"]);
+      const now = widened ? field(4, 7) : field(5, 6);
+      if (widened) served.policies.set(F, { version: 7, policy: HOME_VIEW });
+      await publish(page, net, [now], { start: false });
+      await context.route("**/fields?**", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ items: [now], next_after: null }),
+        }),
+      );
+      await navigateInApp(page, "/sync?tab=conflicts");
+      await page.getByRole("button", { name: "Details: Field change" }).click();
+      const detailDialog = page.getByRole("dialog");
+      await expect(
+        detailDialog.locator('[data-compare="retained"]'),
+      ).toContainText("Note: Confidential");
+      await expect(
+        detailDialog.locator('[data-compare="current"]'),
+      ).toContainText("Note: Original");
+      const resend = detailDialog.getByRole("button", {
+        name: "Resend as a new operation",
+      });
+      if (widened) {
+        await expect(detailDialog).toContainText(
+          "Who can see this field changed since you saved it. Review it on the person's page in People.",
+        );
+        await expect(resend).toBeDisabled();
+        await send(page);
+        expect(net.commands).toHaveLength(1);
+        expect((await draftsOf(page)).map((d) => d.status)).toEqual([
+          "version_conflict",
+        ]);
+        recordEvidence(info, "e-p23", { widened, commands: net.commands });
+        return;
+      }
+      await expect(resend).toBeEnabled();
+      await resend.click();
+      await expect(detailDialog).toBeHidden();
+      await send(page);
+      await expect.poll(() => net.commands.length).toBe(2);
+      expect(JSON.parse(net.commands[1]?.body ?? "{}").command).toMatchObject({
+        expected_version: 5,
+        expected_policy_version: 6,
+        value: { kind: "text", text: "Confidential" },
+      });
+      recordEvidence(info, "e-p23", { widened, commands: net.commands });
+    });
+});
+
+test.describe("E-P24: held changes past a thousand ended copies stay reachable in real IndexedDB (review 2, finding 4)", () => {
+  for (const ended of [999, 1000])
+    test(`${ended} ended copies of the field before one held change: ${ended < 1000 ? "it is on the first page (control)" : "the first page says more may be kept, and 'Show more held changes' reaches it"}`, async ({
+      context,
+    }, info) => {
+      const { page } = await setup(context, `/people/${P}`, [
+        personP(P, "Ada"),
+        fieldP(
+          F,
+          P,
+          "Note",
+          { kind: "text", text: "Original" },
+          { version: 4, policy_version: 6 },
+        ),
+      ]);
+      const context_ = `people-held:${P}:${F}`;
+      const live = {
+        form_context: context_,
+        tab_instance_id: "zzzzzzzz-0000-4000-8000-000000000001",
+        fields: {
+          held: JSON.stringify({
+            v: 2,
+            rev: 0,
+            queued: false,
+            fieldId: F,
+            personId: P,
+            label: "Note",
+            value: { kind: "text", text: "Kept" },
+            sameKind: true,
+            version: 4,
+            expectedBase: 4,
+            from: { version: 6, policy: HOME_VIEW },
+            to: PRIVATE,
+            attempt: null,
+            failed: null,
+            heldAt: "2026-10-22T09:00:00.000Z",
+          }),
+        },
+        redacted: [],
+        saved_at: "2026-10-22T09:00:00.000Z",
+        capture_seq: 0,
+        writer_gen: Number.MAX_SAFE_INTEGER,
+        terminal: false,
+        content_digest: "live-digest",
+      };
+      const rows = [
+        ...Array.from({ length: ended }, (_, i) => ({
+          ...live,
+          tab_instance_id: `t${String(i).padStart(5, "0")}`,
+          fields: {},
+          terminal: true,
+          content_digest: "ended",
+        })),
+        live,
+      ];
+      await page.evaluate(
+        ({ account, rows }) =>
+          window.__atlasData?.put(account, "form_recovery", rows),
+        { account: ME, rows },
+      );
+      await navigateInApp(page, "/people");
+      await navigateInApp(page, `/people/${P}`);
+      const held = page.locator(`[data-held-field="${F}"]`);
+      if (ended < 1000) {
+        await expect(held).toContainText("Waiting to change who can see Note");
+      } else {
+        await expect(page.locator("[data-held-page]")).toContainText(
+          "More held changes may be kept on this device.",
+        );
+        await expect(held).toHaveCount(0);
+        await page
+          .getByRole("button", { name: "Show more held changes" })
+          .click();
+        await expect(held).toContainText("Waiting to change who can see Note");
+      }
+      // The ended copies are kept (they order late writes).
+      const stored = (await page.evaluate(
+        (account) => window.__atlasData?.rows(account, "form_recovery"),
+        ME,
+      )) as Array<{ terminal: boolean }>;
+      expect(stored.filter((row) => row.terminal)).toHaveLength(ended);
+      recordEvidence(info, "e-p24", { ended });
+    });
 });

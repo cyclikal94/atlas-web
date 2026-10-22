@@ -214,8 +214,35 @@ describe("current reads (authorised, never the cache)", () => {
   });
 });
 
-describe("rebuild (on the authorised current read)", () => {
-  test("a field update: the same name and value on the CURRENT version and policy version", () => {
+describe("rebuild (on the authorised current read; never under another audience)", () => {
+  // ADAPTATION (review 2 of 22 October 2026, finding 1): the earlier assertion rebuilt a field change on the CURRENT policy version, which
+  // re-bound the person's retained content to an audience they never saw. Its intent (rebuilt on the authorised current read, never the
+  // cache) is kept for the content version; the policy version is now the draft's own, and a moved audience rebuilds nothing.
+  test("a field update: the same name and value on the CURRENT content version, under the policy version it was SAVED with", () => {
+    const registry = createCommandRegistry();
+    registerPeopleCommands(registry);
+    const current = cacheRow({
+      id: F,
+      kind: "field",
+      parent_id: P,
+      version: 7,
+      policy_version: 1,
+    });
+    const request = registry.rebuild(putDraft(true), current);
+    expect(request?.build({}).command).toEqual({
+      command: {
+        kind: "put_field",
+        id: F,
+        parent_id: P,
+        expected_version: 7,
+        expected_policy_version: 1,
+        label: "Mobile",
+        value: { kind: "text", text: "0771" },
+      },
+    });
+  });
+
+  test("a field whose audience moved since the save (policy 1 → 3) is NOT rebuilt here (Q1: reviewed in People)", () => {
     const registry = createCommandRegistry();
     registerPeopleCommands(registry);
     const current = cacheRow({
@@ -225,18 +252,53 @@ describe("rebuild (on the authorised current read)", () => {
       version: 7,
       policy_version: 3,
     });
-    const request = registry.rebuild(putDraft(true), current);
-    expect(request?.build({}).command).toEqual({
-      command: {
-        kind: "put_field",
-        id: F,
-        parent_id: P,
-        expected_version: 7,
-        expected_policy_version: 3,
-        label: "Mobile",
-        value: { kind: "text", text: "0771" },
-      },
+    expect(registry.rebuild(putDraft(true), current)).toBeNull();
+    expect(registry.review(putDraft(true), current)).toEqual({
+      retained: "Mobile: 0771",
+      current: expect.any(String),
+      blocked:
+        "Who can see this field changed since you saved it. Review it on the person's page in People.",
     });
+  });
+
+  test("the dialog's lines: the retained and the current content; nothing is resendable without the current read", () => {
+    const registry = createCommandRegistry();
+    registerPeopleCommands(registry);
+    const current = cacheRow({
+      id: F,
+      kind: "field",
+      parent_id: P,
+      label: "Phone",
+      value: { kind: "text", text: "0770" },
+      version: 7,
+      policy_version: 1,
+    });
+    expect(registry.canReview(putDraft(true))).toBe(true);
+    expect(registry.review(putDraft(true), current)).toEqual({
+      retained: "Mobile: 0771",
+      current: "Phone: 0770",
+      blocked: null,
+    });
+    expect(registry.review(putDraft(true), null)?.blocked).toBe(
+      "This can be resent only after its current state and audience are checked.",
+    );
+    const person = cacheRow({
+      id: P,
+      kind: "person",
+      label: "Ada",
+      version: 9,
+      policy_version: 1,
+    });
+    expect(registry.review(renameDraft(), person)).toEqual({
+      retained: "Ada L.",
+      current: "Ada",
+      blocked: null,
+    });
+    expect(
+      registry.review(renameDraft(), { ...person, policy_version: 2 })?.blocked,
+    ).toBe(
+      "Who can see this person changed since you saved it. Discard it here and rename them again in People.",
+    );
   });
 
   test("nothing is rebuilt without a current read, without a policy version, or for a create", () => {
@@ -247,7 +309,7 @@ describe("rebuild (on the authorised current read)", () => {
       kind: "field",
       parent_id: P,
       version: 7,
-      policy_version: 3,
+      policy_version: 1,
     });
     expect(registry.rebuild(putDraft(true), null)).toBeNull();
     expect(
@@ -259,14 +321,14 @@ describe("rebuild (on the authorised current read)", () => {
     expect(registry.rebuild(putDraft(false), current)).toBeNull();
   });
 
-  test("a rename and an archive rebuild on the current versions", () => {
+  test("a rename on the current content version under its own policy version; an archive on the current version", () => {
     const registry = createCommandRegistry();
     registerPeopleCommands(registry);
     const current = cacheRow({
       id: P,
       kind: "person",
       version: 9,
-      policy_version: 4,
+      policy_version: 1,
     });
     expect(registry.rebuild(renameDraft(), current)?.build({}).command).toEqual(
       {
@@ -275,15 +337,21 @@ describe("rebuild (on the authorised current read)", () => {
             kind: "edit",
             id: P,
             expected_version: 9,
-            expected_policy_version: 4,
+            expected_policy_version: 1,
             label: "Ada L.",
             value: "",
           },
         ],
       },
     );
+    // ADAPTATION (finding 1): a rename whose person's audience moved is not rebuilt (the earlier assertion re-bound it to policy 4).
     expect(
-      registry.rebuild(archiveDraft(P), current)?.build({}).command,
+      registry.rebuild(renameDraft(), { ...current, policy_version: 4 }),
+    ).toBeNull();
+    expect(
+      registry
+        .rebuild(archiveDraft(P), { ...current, policy_version: 4 })
+        ?.build({}).command,
     ).toEqual({
       command: { kind: "archive", id: P, expected_version: 9, archived: true },
     });

@@ -111,7 +111,7 @@ export {
   createCommandRegistry,
   createConflictHandlerRegistry,
 } from "./outbox/registries";
-export type { FormCopiesPage } from "./plans/form-copies";
+export type { FormCopiesPage, FormCopyCursor } from "./plans/form-copies";
 export type {
   ConflictPage,
   ListedResource,
@@ -119,11 +119,19 @@ export type {
   ResourcePage,
 } from "./plans/outbox";
 export type { OutstandingCreatesPage } from "./plans/outstanding-reads";
+// The conditional port of WEB-11a's held changes (form copies that are operations): only lazy screens import it.
+export {
+  type ConditionalEnd,
+  type ConditionalFormPort,
+  type ConditionalPut,
+  createConditionalFormPort,
+  type FormRowRead,
+} from "./ports/conditional-form";
 export {
   createDataDeletionPorts,
   type DeletionPortsOptions,
 } from "./ports/deletion-ports";
-// A port over the account database's form copies (WEB-11a's held changes): only lazy screens import it.
+// A port over the account database's form copies: only lazy screens import it.
 export { createFormRecoveryPort } from "./ports/form-recovery";
 export type { Loadable } from "./store/port";
 // The applied server revision (WEB-11a's summary invalidation): only lazy screens import it.

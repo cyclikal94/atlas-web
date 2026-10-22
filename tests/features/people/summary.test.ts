@@ -169,6 +169,66 @@ describe("strict parsing", () => {
     ).toBeNull();
   });
 
+  test("labels are limited in characters as the server counts them, not UTF-16 units (review 2, finding 5)", () => {
+    // Every label position: the person's own, the owner's visible person, a household's name, the primary household's.
+    const withLabel = (text: string) => {
+      const summary = clone(DOC_PERSON);
+      summary.label = text;
+      return summary;
+    };
+    const withOwnerPerson = (text: string) => {
+      const summary = clone(DOC_PERSON);
+      summary.owner.person = {
+        id: "7a6b5c4d-3e2f-4a1b-8c9d-0e1f2a3b4c5d",
+        label: text,
+      };
+      return summary;
+    };
+    const withHousehold = (text: string) => {
+      const summary = clone(DOC_PERSON);
+      summary.audience.households[0].name = text;
+      return summary;
+    };
+    const detailWithHome = (text: string) =>
+      parsePersonSummaryDetail({
+        summary: DOC_PERSON,
+        shared_with: DOC_RAIL,
+        home: {
+          id: "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+          name: text,
+          version: 3,
+          member_count: 2,
+        },
+        preferences_version: 2,
+      });
+    const emoji = (count: number) => "😀".repeat(count);
+    const mixed = `${"é".repeat(150)}${emoji(150)}`; // 300 characters, 450 UTF-16 units
+    for (const build of [withLabel, withOwnerPerson, withHousehold]) {
+      expect(parsePersonSummary(build("A".repeat(300)))).not.toBeNull();
+      expect(parsePersonSummary(build(emoji(200)))).not.toBeNull();
+      expect(parsePersonSummary(build(emoji(300)))).not.toBeNull();
+      expect(parsePersonSummary(build(mixed))).not.toBeNull();
+      expect(parsePersonSummary(build(emoji(1)))).not.toBeNull();
+      expect(parsePersonSummary(build("A".repeat(301)))).toBeNull();
+      expect(parsePersonSummary(build(emoji(301)))).toBeNull();
+      expect(parsePersonSummary(build(""))).toBeNull();
+    }
+    expect(detailWithHome(emoji(300))).not.toBeNull();
+    expect(detailWithHome(emoji(301))).toBeNull();
+    expect(detailWithHome("")).toBeNull();
+    // The field-audience and rail envelopes share the household parser.
+    const field = clone(DOC_FIELD_OWNER);
+    field.audience.households[0].name = emoji(300);
+    expect(parseFieldAudience(field)).not.toBeNull();
+    field.audience.households[0].name = emoji(301);
+    expect(parseFieldAudience(field)).toBeNull();
+    const rail = clone(DOC_RAIL);
+    rail.households[0].name = emoji(300);
+    expect(parseSharedWith(rail)).not.toBeNull();
+    rail.households[0].name = emoji(301);
+    expect(parseSharedWith(rail)).toBeNull();
+  });
+
   test("the detail's rail and summary come from one snapshot (same owner, same disclosure)", () => {
     const other = clone(DOC_RAIL);
     other.owner.account_id = "11111111-1111-4111-8111-111111111111";

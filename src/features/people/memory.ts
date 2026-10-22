@@ -13,6 +13,7 @@ import type { LinkageState } from "./model/linkage";
  *  - `dismissed`: duplicate pairs hidden with "Not the same" (D-11a-9);
  *  - `heldRuns`: the held audience changes this page is running now, and whether the person discarded one while it ran (the held
  *    changes themselves are DURABLE, in the account's database: `field/held-store.ts`, finding 6 of the review of 13 October);
+ *  - `heldAuthority`: the holds this page may run by itself (D1 of 22 October 2026); every other hold waits for "Send now";
  *  - `drafts`: editor input kept by the in-dialog sync control or across a remount (field editor, rename);
  *  - `attempts`: the uncertain attempt of an online-only command, per target (same key and body on "Try again");
  *  - `summaries`: the viewer-safe summaries read for this identity (finding 8, `summaries.tsx`), per query, for the CURRENT invalidation
@@ -66,6 +67,12 @@ export class PeopleMemory {
    * read is live but asynchronous).
    */
   readonly heldEnded = new Set<string>();
+  /**
+   * Holds this page may RUN by itself (D1, decided 22 October 2026: "explicit Send now"): the holds made in this page, and those the
+   * person chose "Send now" or "Try again" for here. A hold recovered from the database (after a reload, an account switch back, in
+   * another page) is shown, and waits for the person; it never sends merely because the page that ended or stopped it is gone.
+   */
+  readonly heldAuthority = new Set<string>();
   readonly drafts = new Map<string, unknown>();
   /** Field policies this page read (owner-only `GET /policies/{id}`), with their versions: the only audiences the table names. */
   readonly policies = new Map<string, { version: number; policy: Policy }>();

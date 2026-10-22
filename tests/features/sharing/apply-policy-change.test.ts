@@ -196,4 +196,61 @@ describe("applyPolicyChange", () => {
     expect(outcome.result).toEqual({ ok: false, kind: "closed" });
     expect(api.sent).toEqual([]);
   });
+
+  test("admit (WEB-11a review 2): asked with the EXACT attempt before it is sent; false sends nothing and keeps the earlier attempt", async () => {
+    for (const admitted of [true, false]) {
+      const api = fakeSharingApi();
+      api.next.policy.push(
+        ok({ version: 4, policy: HOME_VIEW }),
+        ok({ version: 5, policy: PRIVATE }),
+      );
+      const asked: Array<{ key: string; body: string }> = [];
+      const outcome = await applyPolicyChange(env(api), {
+        resourceId: FIELD,
+        from: { version: 4, policy: HOME_VIEW },
+        to: PRIVATE,
+        attempt: null,
+        admit: async (attempt) => {
+          asked.push(attempt);
+          // Nothing was sent when it is asked.
+          expect(api.sent).toEqual([]);
+          return admitted;
+        },
+        sleep,
+      });
+      expect(asked).toHaveLength(1);
+      if (admitted) {
+        expect(api.sent).toEqual([
+          { key: asked[0]?.key, commands: expect.any(Array) },
+        ]);
+        expect(outcome.result).toEqual({ ok: true, policyVersion: 5 });
+      } else {
+        expect(api.sent).toEqual([]);
+        expect(outcome).toEqual({
+          result: { ok: false, kind: "closed" },
+          attempt: null,
+        });
+      }
+    }
+  });
+
+  test("an identity that moves on WHILE the attempt is admitted stops it before the send", async () => {
+    const api = fakeSharingApi();
+    api.next.policy.push(ok({ version: 4, policy: HOME_VIEW }));
+    let current = true;
+    const outcome = await applyPolicyChange(env(api), {
+      resourceId: FIELD,
+      from: { version: 4, policy: HOME_VIEW },
+      to: PRIVATE,
+      attempt: null,
+      isCurrent: () => current,
+      admit: async () => {
+        current = false;
+        return true;
+      },
+      sleep,
+    });
+    expect(outcome.result).toEqual({ ok: false, kind: "closed" });
+    expect(api.sent).toEqual([]);
+  });
 });

@@ -1,4 +1,5 @@
 import type { components } from "../../../lib/api-types";
+import { charCount, LIMITS } from "./values";
 
 /**
  * The VIEWER-SAFE SUMMARIES of API 0.29 (BE-PEOPLE-SUMMARY, finding 8 of the review of 13 October 2026; backend `docs/people.md`
@@ -46,8 +47,11 @@ const isUuid = (value: unknown): value is string =>
 const isInt = (value: unknown, min: number): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= min;
 const isBool = (value: unknown): value is boolean => typeof value === "boolean";
+/** 1..300 characters as the server counts them (`label.chars().count()`), not UTF-16 code units: 200 emoji are a valid label. */
 const isLabel = (value: unknown): value is string =>
-  typeof value === "string" && value.length >= 1 && value.length <= 300;
+  typeof value === "string" &&
+  value.length >= 1 &&
+  charCount(value) <= LIMITS.label;
 const isName = (value: unknown): value is string =>
   typeof value === "string" && value.length >= 1;
 /** Exactly these keys: none missing, none added. */

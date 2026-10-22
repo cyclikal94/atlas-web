@@ -6,6 +6,7 @@ import { createAppRouter } from "../../../src/app/router";
 import { ShellEnvProvider } from "../../../src/app/shell/env";
 import {
   type CacheRow,
+  type ConditionalFormPort,
   DataEnvProvider,
   type DraftWithCommand,
   type EnqueueOutcome,
@@ -14,6 +15,7 @@ import {
   type JsonObject,
   type Loadable,
 } from "../../../src/data";
+import { digestOf } from "../../../src/data/model/canonical";
 import {
   commandKindOf,
   estimateDraftBytes,
@@ -36,6 +38,7 @@ import {
   type HeldChange,
   type HeldStore,
   heldContextOf,
+  heldStoreOver,
 } from "../../../src/features/people/field/held-store";
 import { peopleMemory } from "../../../src/features/people/memory";
 import {
@@ -353,10 +356,14 @@ export interface PeopleWorld {
   held(): HeldChange[];
   /** Puts a held change as a form copy (as a page that held it earlier did). */
   putHeld(change: HeldChange): void;
-  /** What the held store's next saves answer (default `saved`). */
+  /** What the held store's next conditional writes answer instead of writing (default: they write, compare-and-set). */
   heldSaves: Array<"saved" | "failed" | "refused">;
+  /** What the held store's next ends answer instead of ending (default: they end, compare-and-set). */
+  heldEnds: Array<"failed" | "refused">;
   /** Locks another page of the browser holds (`exclusive` answers null for them). */
   heldElsewhere: Set<string>;
+  /** Another page lets go of a lock it held: whoever waits for it looks again. */
+  releaseElsewhere(name: string): void;
   setOnline(online: boolean): void;
   /** The outbox is null (no database bound yet). */
   noDatabase(): void;
@@ -377,6 +384,7 @@ export function peopleWorld(
   const bodies = new Map<string, JsonObject>();
   const copies = new Map<string, FormRecoveryRow>();
   const heldSaves: Array<"saved" | "failed" | "refused"> = [];
+  const heldEnds: Array<"failed" | "refused"> = [];
   const heldElsewhere = new Set<string>();
   const held = new Set<string>();
   const listeners = new Set<Listener>();
@@ -439,14 +447,11 @@ export function peopleWorld(
       value: appliedRevision,
     }),
     "data.readFormCopies": (input) => {
-      const prefix = input.prefix as string;
-      const live = [...copies.values()]
-        .filter((row) => !row.terminal && row.form_context.startsWith(prefix))
-        .sort((a, b) => (a.saved_at < b.saved_at ? -1 : 1));
-      return {
-        status: "ready",
-        value: { copies: live.slice(0, 100), more: live.length > 100 },
-      };
+      const value = copiesPage(
+        input.prefix as string,
+        (input.after as readonly [string, string] | null | undefined) ?? null,
+      );
+      return { status: "ready", value };
     },
     "data.readDraftWithCommand": (input) => {
       const id = input.localId as string;
@@ -654,35 +659,109 @@ export function peopleWorld(
       act(() => notify());
     }, 0);
   const copyKey = (context: string, tab: string) => `${context}\u0000${tab}`;
-  const heldStore: HeldStore = {
-    async save(change) {
-      const answer = heldSaves.shift() ?? "saved";
-      if (answer !== "saved") return answer;
-      const context = heldContextOf(change.personId, change.fieldId);
-      copies.set(copyKey(context, change.holdId), {
-        form_context: context,
-        tab_instance_id: change.holdId,
-        fields: encodeHeld(change),
+  /** One page of a family's live copies after `after`, in primary-key order (the real read's paging), shown oldest first. */
+  const copiesPage = (
+    prefix: string,
+    after: readonly [string, string] | null,
+  ) => {
+    const keyed = [...copies.values()]
+      .filter((row) => row.form_context.startsWith(prefix))
+      .sort((a, b) =>
+        a.form_context === b.form_context
+          ? a.tab_instance_id < b.tab_instance_id
+            ? -1
+            : 1
+          : a.form_context < b.form_context
+            ? -1
+            : 1,
+      )
+      .filter(
+        (row) =>
+          after === null ||
+          row.form_context > after[0] ||
+          (row.form_context === after[0] && row.tab_instance_id > after[1]),
+      );
+    const page: FormRecoveryRow[] = [];
+    let next: readonly [string, string] | null = null;
+    for (const row of keyed) {
+      if (row.terminal) continue;
+      page.push(row);
+      if (page.length === 100) {
+        next = [row.form_context, row.tab_instance_id];
+        break;
+      }
+    }
+    page.sort((a, b) => (a.saved_at < b.saved_at ? -1 : 1));
+    return { copies: page, next, more: next !== null };
+  };
+  const stateOf = (row: FormRecoveryRow | undefined) =>
+    row === undefined ? "absent" : row.terminal ? "ended" : "live";
+  // The conditional port's double: compare-and-set over the copies (the real digest), answers scripted by `heldSaves`/`heldEnds`.
+  const heldPort: ConditionalFormPort = {
+    async put(snapshot, expect) {
+      const answer = heldSaves.shift() ?? "write";
+      if (answer === "failed" || answer === "refused") return { kind: answer };
+      const key = copyKey(snapshot.formContext, snapshot.tabInstanceId);
+      const stored = copies.get(key);
+      const state = stateOf(stored);
+      if (
+        expect === null
+          ? state !== "absent"
+          : state !== "live" || stored?.content_digest !== expect
+      )
+        return { kind: "changed", stored: state };
+      const digest = digestOf(snapshot.values);
+      copies.set(key, {
+        form_context: snapshot.formContext,
+        tab_instance_id: snapshot.tabInstanceId,
+        fields: { ...snapshot.values },
         redacted: [],
         saved_at: new Date(Date.now() + copies.size).toISOString(),
-        capture_seq: 1,
+        capture_seq: 0,
         terminal: false,
-        content_digest: "x",
+        content_digest: digest,
       });
       later();
-      return "saved";
+      return { kind: "saved", digest };
     },
-    async discard(hold) {
-      const key = copyKey(
-        heldContextOf(hold.personId, hold.fieldId),
-        hold.holdId,
-      );
-      const row = copies.get(key);
-      if (row !== undefined)
-        copies.set(key, { ...row, fields: {}, terminal: true });
+    async end(formContext, tab, expect) {
+      const answer = heldEnds.shift();
+      if (answer !== undefined) return { kind: answer };
+      const key = copyKey(formContext, tab);
+      const stored = copies.get(key);
+      const state = stateOf(stored);
+      if (state !== "live" || stored?.content_digest !== expect)
+        return { kind: "changed", stored: state };
+      copies.set(key, {
+        ...(stored as FormRecoveryRow),
+        fields: {},
+        terminal: true,
+        content_digest: digestOf({}),
+      });
       later();
-      return "discarded";
+      return { kind: "ended" };
     },
+    async read(formContext, tab) {
+      const stored = copies.get(copyKey(formContext, tab));
+      return stored === undefined
+        ? { kind: "absent" }
+        : stored.terminal
+          ? { kind: "ended" }
+          : { kind: "live", row: { ...stored, fields: { ...stored.fields } } };
+    },
+    async list(prefix, after) {
+      return copiesPage(prefix, after);
+    },
+  };
+  const heldStore: HeldStore = heldStoreOver(heldPort, () =>
+    new Date().toISOString(),
+  );
+  // Who waits for a lock to be let go (`released`): told when this page's run ends, or when `releaseElsewhere` lets another page's go.
+  const waiters = new Map<string, Array<() => void>>();
+  const wake = (name: string) => {
+    if (heldElsewhere.has(name) || held.has(name)) return;
+    for (const resolve of waiters.get(name) ?? []) resolve();
+    waiters.delete(name);
   };
   const exclusive = async <T,>(
     name: string,
@@ -694,8 +773,15 @@ export function peopleWorld(
       return await run();
     } finally {
       held.delete(name);
+      wake(name);
     }
   };
+  const released = (name: string): Promise<void> =>
+    heldElsewhere.has(name) || held.has(name)
+      ? new Promise((resolve) => {
+          waiters.set(name, [...(waiters.get(name) ?? []), resolve]);
+        })
+      : Promise.resolve();
   const sharing = fakeSharingApi();
   const identity = options.identity ?? `${ME}:1`;
   let online = options.online ?? true;
@@ -714,6 +800,7 @@ export function peopleWorld(
       memory: peopleMemory(identity),
       held: heldStore,
       exclusive,
+      released,
     };
   };
   let peopleEnv = people();
@@ -756,7 +843,12 @@ export function peopleWorld(
     versions,
     copies,
     heldSaves,
+    heldEnds,
     heldElsewhere,
+    releaseElsewhere(name) {
+      heldElsewhere.delete(name);
+      act(() => wake(name));
+    },
     held() {
       return [...copies.values()]
         .filter((row) => !row.terminal)
@@ -765,15 +857,16 @@ export function peopleWorld(
     },
     putHeld(change) {
       const context = heldContextOf(change.personId, change.fieldId);
+      const fields = encodeHeld(change);
       copies.set(copyKey(context, change.holdId), {
         form_context: context,
         tab_instance_id: change.holdId,
-        fields: encodeHeld(change),
+        fields,
         redacted: [],
         saved_at: new Date(Date.now() + copies.size).toISOString(),
-        capture_seq: 1,
+        capture_seq: 0,
         terminal: false,
-        content_digest: "x",
+        content_digest: digestOf(fields),
       });
       act(() => notify());
     },

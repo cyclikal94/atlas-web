@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import type { JsonObject } from "../../../src/data";
+import type { FormRecoveryRow, JsonObject } from "../../../src/data";
 import type { HeldChange } from "../../../src/features/people/field/held-store";
 import {
   forgetAllPeopleMemory,
@@ -384,6 +384,225 @@ describe("finding 1: an edit keeps the versions and audience it began on", () =>
   });
 });
 
+describe("review 2, finding 3: an old editor never overwrites a newer edit of the SAME queued draft", () => {
+  const queuedL = (
+    text: string,
+    digest: string,
+    over: Record<string, unknown> = {},
+  ) =>
+    draftRow({
+      local_id: "L",
+      created_seq: 1,
+      endpoint: "/task-commands",
+      kind: "put_field",
+      target_resource_ids: [F],
+      index_targets: [F],
+      bases: { [F]: 4 },
+      bumped: [F],
+      command_digest: digest,
+      command: {
+        command: {
+          kind: "put_field",
+          id: F,
+          parent_id: P,
+          expected_version: 4,
+          expected_policy_version: 6,
+          label: "Note",
+          value: { kind: "text", text },
+        },
+      },
+      ...over,
+    });
+  async function openOnL() {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.setDrafts([queuedL("Original queued", "digest-original")]);
+    w.versions.set(F, 5);
+    w.env.setDefaults(record());
+    w.sharing.next.policy.push(ok({ version: 6, policy: PRIVATE }));
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await within(d).findByRole("textbox", { name: "Value" });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Older open editor" },
+    });
+    return { w, d };
+  }
+
+  for (const concurrent of [false, true])
+    test(`a field update over queued L ${concurrent ? "that another page edited meanwhile: nothing is written, no successor, the field is reviewed" : "(control): edited in place"}`, async () => {
+      const { w, d } = await openOnL();
+      if (concurrent) {
+        w.setDrafts([queuedL("Newer save from another tab", "digest-newer")]);
+        await settle();
+      }
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      if (!concurrent) {
+        await waitFor(() => expect(w.built).toHaveLength(1));
+        expect(w.built[0]).toMatchObject({ op: "edit", target: "L" });
+        return;
+      }
+      await waitFor(() =>
+        expect(
+          within(d).queryByText("This field changed since you opened it"),
+        ).not.toBeNull(),
+      );
+      expect(w.built).toEqual([]);
+      expect(
+        (
+          w.drafts[0] as unknown as {
+            command: { command: { value: { text: string } } };
+          }
+        ).command.command.value.text,
+      ).toBe("Newer save from another tab");
+      // The person's input is kept for the review.
+      expect(within(d).getByRole("textbox", { name: "Value" })).toHaveValue(
+        "Older open editor",
+      );
+    });
+
+  for (const changed of [false, true])
+    test(`L left the queue ${changed ? "with ANOTHER body than the editor read: no successor is queued" : "with the body the editor read (control): a successor follows it"}`, async () => {
+      const { w, d } = await openOnL();
+      // L is being sent (no longer editable in place).
+      w.setDrafts([
+        queuedL(
+          changed ? "Changed before it was sent" : "Original queued",
+          changed ? "digest-newer" : "digest-original",
+          { status: "in_flight" },
+        ),
+      ]);
+      await settle();
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      if (!changed) {
+        await waitFor(() => expect(w.built).toHaveLength(1));
+        expect(w.built[0]).toMatchObject({ op: "enqueue" });
+        return;
+      }
+      await waitFor(() =>
+        expect(
+          within(d).queryByText("This field changed since you opened it"),
+        ).not.toBeNull(),
+      );
+      expect(w.built).toEqual([]);
+    });
+
+  for (const concurrent of [false, true])
+    test(`a queued rename edited ${concurrent ? "by another page while the form was open: nothing is written; it is reviewed again" : "(control): in place"}`, async () => {
+      const renameL = (label: string, digest: string) =>
+        draftRow({
+          local_id: "R",
+          created_seq: 1,
+          endpoint: "/commands",
+          kind: "edit",
+          target_resource_ids: [P],
+          index_targets: [P],
+          bases: { [P]: 3 },
+          bumped: [P],
+          command_digest: digest,
+          command: {
+            commands: [
+              {
+                kind: "edit",
+                id: P,
+                expected_version: 3,
+                expected_policy_version: 2,
+                label,
+                value: "",
+              },
+            ],
+          },
+        });
+      const w = peopleWorld();
+      w.setCache([
+        person({ id: P, label: "Ada", version: 3, policy_version: 2 }),
+      ]);
+      w.setDrafts([renameL("Ada queued", "r-original")]);
+      w.versions.set(P, 4);
+      await w.mount(`/people/${P}`);
+      const rename = await screen.findByRole("button", { name: "Rename" });
+      await waitFor(() => expect(rename).toBeEnabled());
+      fireEvent.click(rename);
+      fireEvent.change(await screen.findByRole("textbox", { name: "Name" }), {
+        target: { value: "Ada from the old form" },
+      });
+      if (concurrent) {
+        w.setDrafts([renameL("Ada from another tab", "r-newer")]);
+        await settle();
+      }
+      const form = document.querySelector("[data-rename-form]") as HTMLElement;
+      fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+      if (!concurrent) {
+        await waitFor(() => expect(w.built).toHaveLength(1));
+        expect(w.built[0]).toMatchObject({ op: "edit", target: "R" });
+        return;
+      }
+      await waitFor(() =>
+        expect(
+          within(form).queryByText(
+            "This person changed since you started. Review the name, then save again.",
+          ),
+        ).not.toBeNull(),
+      );
+      expect(w.built).toEqual([]);
+    });
+
+  for (const concurrent of [false, true])
+    test(`an unsent create edited ${concurrent ? "by another page while the editor was open: nothing is written, the editor says so" : "(control): in place"}`, async () => {
+      const create = (text: string, digest: string) =>
+        draftRow({
+          local_id: "f1",
+          created_seq: 1,
+          endpoint: "/task-commands",
+          target_resource_ids: [F],
+          command_digest: digest,
+          command: {
+            command: {
+              kind: "put_field",
+              id: F,
+              parent_id: P,
+              label: "Phone",
+              value: { kind: "text", text },
+            },
+          },
+        });
+      const w = peopleWorld();
+      w.setCache([person({ id: P, label: "Ada" })]);
+      w.env.setDefaults(record());
+      w.setDrafts([create("0770", "c-original")]);
+      await w.mount(`/people/${P}/fields/${F}`);
+      const d = await dialog();
+      fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+        target: { value: "0771 (old editor)" },
+      });
+      if (concurrent) {
+        w.setDrafts([create("0772 (another tab)", "c-newer")]);
+        await settle();
+      }
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      if (!concurrent) {
+        await waitFor(() => expect(w.built).toHaveLength(1));
+        expect(w.built[0]).toMatchObject({ op: "edit", target: "f1" });
+        return;
+      }
+      await waitFor(() =>
+        expect(
+          within(d).queryByText(/This field was changed in another window/),
+        ).not.toBeNull(),
+      );
+      expect(w.built).toEqual([]);
+    });
+});
+
 describe("finding 1 (continued): a linked rename and a held continuation", () => {
   test("a linked rename (rename_profile, online-only) sends nothing on a version newer than the form opened on until saved again", async () => {
     const w = peopleWorld();
@@ -557,10 +776,19 @@ const heldChange = (over: Partial<HeldChange> = {}): HeldChange => ({
   attempt: null,
   status: { kind: "waiting" },
   heldAt: "2026-10-13T09:00:00.000Z",
+  rev: 0,
+  queued: false,
   ...over,
 });
 
-function heldWorld(change: HeldChange = heldChange()) {
+/**
+ * A page with one held change. `authorised` (the default): the hold was made in THIS page, which may run it by itself (D1 of 22 October
+ * 2026); false: a hold recovered from the database, which waits for "Send now".
+ */
+function heldWorld(
+  change: HeldChange = heldChange(),
+  { authorised = true }: { authorised?: boolean } = {},
+) {
   const w = peopleWorld();
   w.setCache([
     person({ id: P, label: "Ada" }),
@@ -574,6 +802,8 @@ function heldWorld(change: HeldChange = heldChange()) {
   ]);
   w.env.setDefaults(record());
   w.putHeld(change);
+  if (authorised)
+    peopleMemory(w.people.identity).heldAuthority.add(change.holdId);
   return w;
 }
 const heldRow = () =>
@@ -1001,7 +1231,10 @@ describe("finding 6: a held change is durable for its account", () => {
     expect(w.built).toEqual([]);
   });
 
-  test("it survives the page forgetting everything (an account switch and back, a reload) and runs when the account is online again", async () => {
+  // ADAPTATION (D1, decided 22 October 2026: "explicit Send now"): the earlier assertion ran the recovered hold by itself once online. Its
+  // intent (the hold survives the page forgetting everything and runs on the confirmed audience) is kept; it now runs when the person
+  // chooses "Send now", and sends nothing before that, online included.
+  test("it survives the page forgetting everything (an account switch and back, a reload); online it waits for 'Send now', then runs", async () => {
     const { w, d } = await holdOffline();
     fireEvent.click(within(d).getByRole("button", { name: "Hold as draft" }));
     await waitFor(() => expect(w.held()).toHaveLength(1));
@@ -1017,6 +1250,17 @@ describe("finding 6: a held change is durable for its account", () => {
       ok({ version: 7, policy: PRIVATE }),
     );
     w.setOnline(true);
+    await settle();
+    expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toEqual([]);
+    expect(w.built).toEqual([]);
+    expect(heldRow()?.textContent ?? "").toContain(
+      "Waiting to change who can see Note. Send it when you're ready.",
+    );
+    fireEvent.click(
+      within(heldRow() as HTMLElement).getByRole("button", {
+        name: "Send now",
+      }),
+    );
     await waitFor(() => expect(w.built).toHaveLength(1));
     expect(body(0, w)).toMatchObject({
       expected_version: 4,
@@ -1057,12 +1301,176 @@ describe("finding 6: a held change is durable for its account", () => {
 
   test("run by one page at a time: while another page holds it, this page sends nothing", async () => {
     const w = heldWorld();
-    w.heldElsewhere.add(`atlas-people-held:${ME}:${HOLD}`);
+    // One run of the FIELD's holds at a time (review 2: a replacement hold has another id, the same field).
+    w.heldElsewhere.add(`atlas-people-held:${ME}:${F}`);
     await w.mount(`/people/${P}`);
     await settle();
     expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toEqual([]);
     expect(w.built).toEqual([]);
     expect(heldRow()).not.toBeNull();
+  });
+});
+
+describe("review 2, finding 2: a hold ends only when the store says so; a recovered hold waits for the person (D1)", () => {
+  for (const failure of [false, true])
+    test(`Discard of a waiting hold whose end ${failure ? "FAILS stays visible, says so, and is never sent after a reload" : "commits ends it (healthy control)"}`, async () => {
+      const w = heldWorld(heldChange(), { authorised: false });
+      await w.mount(`/people/${P}`);
+      const row = await waitFor(() => heldRow() as HTMLElement);
+      if (failure) w.heldEnds.push("failed");
+      fireEvent.click(within(row).getByRole("button", { name: "Discard" }));
+      if (!failure) {
+        await waitFor(() => expect(w.held()).toEqual([]));
+        await said("The held change to Note was discarded. Nothing was sent.");
+        return;
+      }
+      await waitFor(() =>
+        expect(heldRow()?.textContent ?? "").toContain(
+          "Couldn't discard it on this device. It's still kept. Try again.",
+        ),
+      );
+      expect(w.held()).toHaveLength(1);
+      expect(
+        document.querySelector("[aria-live]")?.textContent ?? "",
+      ).not.toContain("was discarded");
+      // The page is gone (a reload, fresh memory) and the device is online: the surviving copy is shown and sends nothing by itself.
+      cleanup();
+      forgetAllPeopleMemory();
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      await w.mount(`/people/${P}`);
+      await waitFor(() => expect(heldRow()).not.toBeNull());
+      await settle();
+      expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toEqual([]);
+      expect(w.sharing.sent).toEqual([]);
+      expect(w.built).toEqual([]);
+      expect(
+        within(heldRow() as HTMLElement).queryByRole("button", {
+          name: "Send now",
+        }),
+      ).not.toBeNull();
+    });
+
+  test("a recovered hold online and writable: nothing is read or sent until 'Send now' (control: the page's own hold runs)", async () => {
+    const recovered = heldWorld(heldChange(), { authorised: false });
+    await recovered.mount(`/people/${P}`);
+    await waitFor(() => expect(heldRow()).not.toBeNull());
+    await settle();
+    expect(recovered.sharing.calls).toEqual([]);
+    expect(recovered.built).toEqual([]);
+    cleanup();
+    forgetAllPeopleMemory();
+    const own = heldWorld();
+    own.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    await own.mount(`/people/${P}`);
+    await waitFor(() => expect(own.built).toHaveLength(1));
+  });
+
+  test("a Discard while it runs whose end FAILS: the row stays with the reason, and it does not run again by itself", async () => {
+    const w = heldWorld();
+    const read = deferred<unknown>();
+    w.sharing.next.policy.push(() => read.promise as never);
+    await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toHaveLength(
+        1,
+      ),
+    );
+    w.heldEnds.push("failed");
+    fireEvent.click(
+      within(heldRow() as HTMLElement).getByRole("button", { name: "Discard" }),
+    );
+    await act(async () => read.release(ok({ version: 6, policy: HOME_VIEW })));
+    await waitFor(() =>
+      expect(heldRow()?.textContent ?? "").toContain(
+        "Couldn't discard it on this device. It's still kept. Try again.",
+      ),
+    );
+    await settle();
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.built).toEqual([]);
+    expect(w.held()).toHaveLength(1);
+    expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toHaveLength(
+      1,
+    );
+  });
+
+  test("Discard of a hold another page moved on: refused (`changed`), said so, and nothing is announced as discarded", async () => {
+    const w = heldWorld(heldChange(), { authorised: false });
+    await w.mount(`/people/${P}`);
+    const row = await waitFor(() => heldRow() as HTMLElement);
+    // Another page wrote another state of it (its live list here has not caught up).
+    const key = [...w.copies.keys()][0] as string;
+    const stored = w.copies.get(key) as FormRecoveryRow;
+    w.copies.set(key, { ...stored, content_digest: "moved-elsewhere" });
+    fireEvent.click(within(row).getByRole("button", { name: "Discard" }));
+    await waitFor(() =>
+      expect(heldRow()?.textContent ?? "").toContain(
+        "This held change was updated in another window.",
+      ),
+    );
+    expect(w.held()).toHaveLength(1);
+  });
+});
+
+describe("review 2, finding 2 (native WebKit E-P6, 22 October 2026): a run that finds the field's lock taken looks again when it is let go", () => {
+  test("the lock is held (another page's run, or this page's replacement of an earlier hold) while the page goes online: nothing is sent, then the run follows the release", async () => {
+    const w = heldWorld();
+    const lock = `atlas-people-held:${ME}:${F}`;
+    w.heldElsewhere.add(lock);
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    await w.mount(`/people/${P}`);
+    await waitFor(() => expect(heldRow()).not.toBeNull());
+    await settle();
+    expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toEqual([]);
+    expect(w.built).toEqual([]);
+    w.releaseElsewhere(lock);
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+});
+
+describe("review 2, finding 4: held changes past any number of ended ones stay reachable", () => {
+  // The real reader's crossing of terminal-only ranges is in tests/data/form-copies.test.ts; here the page's own continuation.
+  test("more holds than one page: 'Show more held changes' reaches the rest, 'Back to the first' returns", async () => {
+    const w = heldWorld(heldChange(), { authorised: false });
+    // 120 holds of fields whose contexts sort before F's, so F's hold is on the second page.
+    for (let i = 0; i < 120; i += 1) {
+      const holdId = `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, "0")}`;
+      w.putHeld(
+        heldChange({ holdId, fieldId: `1-${String(i).padStart(3, "0")}` }),
+      );
+    }
+    await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll("[data-held-change]").length,
+      ).toBeGreaterThan(0),
+    );
+    // 100 shown, and a way on; the 121st (the live one under F) is on the next page.
+    expect(document.querySelectorAll("[data-held-change]")).toHaveLength(100);
+    expect(heldRow()).toBeNull();
+    const more = await waitFor(() => {
+      const button = screen.queryByRole("button", {
+        name: "Show more held changes",
+      });
+      expect(button).not.toBeNull();
+      return button as HTMLElement;
+    });
+    fireEvent.click(more);
+    await waitFor(() => expect(heldRow()).not.toBeNull());
+    fireEvent.click(
+      screen.getByRole("button", { name: "Back to the first held changes" }),
+    );
+    await waitFor(() => expect(heldRow()).toBeNull());
   });
 });
 

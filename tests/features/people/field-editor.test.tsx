@@ -7,7 +7,10 @@ import {
 } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { forgetAllPeopleMemory } from "../../../src/features/people/memory";
+import {
+  forgetAllPeopleMemory,
+  peopleMemory,
+} from "../../../src/features/people/memory";
 import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
@@ -452,7 +455,11 @@ describe("updating a field", () => {
       attempt: null,
       status: { kind: "waiting" },
       heldAt: "2026-10-13T09:00:00.000Z",
+      rev: 0,
+      queued: false,
     });
+    // Held in this page (D1: it may run by itself).
+    peopleMemory(w.people.identity).heldAuthority.add("hold-1");
     w.sharing.next.policy.push(
       ok({ version: 6, policy: HOME_VIEW }),
       ok({ version: 8, policy: HOME_VIEW }),

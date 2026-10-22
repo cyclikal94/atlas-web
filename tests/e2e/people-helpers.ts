@@ -107,6 +107,8 @@ export interface Served {
   management: Array<{ key: string | null; body: unknown }>;
   managementScript: Answer[];
   snapshot: unknown;
+  /** `GET /defaults/snapshot` answers 503 from the first request (set in `arrange`, before the page boots): the defaults were never fetched. */
+  snapshotUnavailable: boolean;
   /**
    * The viewer-safe summaries (API 0.29, finding 8), derived from `people`: by default the account's own private person, its linkage from
    * `linked`. `summaries` overrides fields of a person's summary by id; `rails` gives a person's "Shared with"; `fieldAudiences` lists a
@@ -200,6 +202,7 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
     management: [],
     managementScript: [],
     snapshot: snapshotOf(rev(1)),
+    snapshotUnavailable: false,
     summaries: new Map(),
     rails: new Map(),
     fieldAudiences: new Map(),
@@ -283,7 +286,11 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
         }),
       );
     if (path === "/defaults/snapshot")
-      return route.fulfill(json(200, served.snapshot));
+      return route.fulfill(
+        served.snapshotUnavailable
+          ? json(503, atlas("unavailable"))
+          : json(200, served.snapshot),
+      );
     if (path === "/households")
       return route.fulfill(
         json(200, (served.snapshot as { households: unknown[] }).households),

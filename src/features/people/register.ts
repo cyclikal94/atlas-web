@@ -13,6 +13,21 @@ import {
   registerArchiveReader,
 } from "../content/archive-registration";
 import { type Projection, parsePersonDetail, parseProjectionPage } from "./api";
+import { formatValue, parseFieldValue } from "./model/values";
+
+// The generic dialog's lines (PROVISIONAL copy, review 2 finding 1).
+const AUDIENCE_MOVED_FIELD =
+  "Who can see this field changed since you saved it. Review it on the person's page in People.";
+const AUDIENCE_MOVED_PERSON =
+  "Who can see this person changed since you saved it. Discard it here and rename them again in People.";
+const NEEDS_CURRENT =
+  "This can be resent only after its current state and audience are checked.";
+
+/** A field value as one line, or a plain mark when it cannot be shown. */
+const valueLine = (raw: unknown): string => {
+  const value = parseFieldValue(raw);
+  return value === null ? "—" : formatValue(value);
+};
 
 /**
  * WEB-11a's command registrations (§3.4): how the sync queue screens describe a people draft, read its target's CURRENT state from the
@@ -25,6 +40,14 @@ import { type Projection, parsePersonDetail, parseProjectionPage } from "./api";
  * | `put_field`     | "Field change"      | `GET /fields?parent_id=…` then `&archived=true`      | an update: same name and value, current bases |
  * | `edit`          | "Name change"       | `GET /people/{id}`                                   | same name, current bases                      |
  * | `archive`       | (shared, `content/archive-registration.ts`) + the person reader `GET /people/{id}`                   |
+ *
+ * A REBUILD NEVER CHANGES THE AUDIENCE THE PERSON REVIEWED (review 2 of 22 October 2026, finding 1; Q1). A field change or a rename was
+ * saved under the policy version the person saw (`expected_policy_version`); the generic dialog shows neither that audience nor the one
+ * now. A rebuild therefore keeps the draft's OWN `expected_policy_version` and is offered only while the current read shows that same
+ * policy version (`review` says why not otherwise, and the server refuses the command atomically if the audience moves after the read).
+ * The dialog shows the retained and the current content (`review`), and a resend is bound to the body shown (`saveAsNew`'s digest). A
+ * change whose audience moved is reviewed in People: the field editor shows the conflicted save's content, the value now and the audience
+ * now, and only "Save mine on the current version" re-binds it (D-11a-17/18); a rename is discarded here and made again.
  */
 type Obj = Record<string, unknown>;
 const isObject = (value: unknown): value is Obj =>
@@ -119,6 +142,8 @@ export function putFieldOf(draft: DraftWithCommand): {
   update: boolean;
   label: string;
   value: JsonObject;
+  /** The policy version the person saved it under (the audience they reviewed), or null. */
+  policyVersion: number | null;
 } | null {
   const command = (draft.command as Obj).command;
   if (
@@ -138,13 +163,17 @@ export function putFieldOf(draft: DraftWithCommand): {
       command.expected_version !== null,
     label: command.label,
     value: command.value as JsonObject,
+    policyVersion:
+      typeof command.expected_policy_version === "number"
+        ? command.expected_policy_version
+        : null,
   };
 }
 
 /** The single person `edit` a draft carries, or null. */
 export function renameOf(
   draft: DraftWithCommand,
-): { id: string; label: string } | null {
+): { id: string; label: string; policyVersion: number | null } | null {
   const commands = (draft.command as Obj).commands;
   if (!Array.isArray(commands) || commands.length !== 1) return null;
   const [edit] = commands;
@@ -155,7 +184,14 @@ export function renameOf(
     typeof edit.label !== "string"
   )
     return null;
-  return { id: edit.id, label: edit.label };
+  return {
+    id: edit.id,
+    label: edit.label,
+    policyVersion:
+      typeof edit.expected_policy_version === "number"
+        ? edit.expected_policy_version
+        : null,
+  };
 }
 
 const checkedTarget = (id: string) =>
@@ -179,10 +215,12 @@ export function rebuildPutField(
     current === null ||
     current.id !== put.id ||
     current.kind !== "field" ||
-    current.policy_version === undefined
+    put.policyVersion === null ||
+    current.policy_version !== put.policyVersion
   )
     return null;
-  const policyVersion = current.policy_version;
+  // The audience the person reviewed when they saved it (never the current one): see the header.
+  const policyVersion = put.policyVersion;
   return {
     endpoint: "/task-commands",
     targets: checkedTarget(put.id),
@@ -213,10 +251,11 @@ export function rebuildRename(
     current === null ||
     current.id !== rename.id ||
     current.kind !== "person" ||
-    current.policy_version === undefined
+    rename.policyVersion === null ||
+    current.policy_version !== rename.policyVersion
   )
     return null;
-  const policyVersion = current.policy_version;
+  const policyVersion = rename.policyVersion;
   return {
     endpoint: "/commands",
     targets: checkedTarget(rename.id),
@@ -238,6 +277,53 @@ export function rebuildRename(
   };
 }
 
+/** The generic dialog's lines for a field change, and why it is not resent there. */
+export function reviewPutField(
+  draft: DraftWithCommand,
+  current: CacheRow | null,
+): { retained: string | null; current: string | null; blocked: string | null } {
+  const put = putFieldOf(draft);
+  if (put === null) return { retained: null, current: null, blocked: null };
+  const now =
+    current !== null && current.kind === "field" && current.id === put.id
+      ? current
+      : null;
+  return {
+    retained: `${put.label}: ${valueLine(put.value)}`,
+    current: now === null ? null : `${now.label}: ${valueLine(now.value)}`,
+    blocked:
+      now === null
+        ? NEEDS_CURRENT
+        : put.policyVersion === null || now.policy_version !== put.policyVersion
+          ? AUDIENCE_MOVED_FIELD
+          : null,
+  };
+}
+
+/** The generic dialog's lines for a rename, and why it is not resent there. */
+export function reviewRename(
+  draft: DraftWithCommand,
+  current: CacheRow | null,
+): { retained: string | null; current: string | null; blocked: string | null } {
+  const rename = renameOf(draft);
+  if (rename === null) return { retained: null, current: null, blocked: null };
+  const now =
+    current !== null && current.kind === "person" && current.id === rename.id
+      ? current
+      : null;
+  return {
+    retained: rename.label,
+    current: now === null ? null : now.label,
+    blocked:
+      now === null
+        ? NEEDS_CURRENT
+        : rename.policyVersion === null ||
+            now.policy_version !== rename.policyVersion
+          ? AUDIENCE_MOVED_PERSON
+          : null,
+  };
+}
+
 const registered = new WeakSet<CommandRegistry>();
 
 /** Registers every WEB-11a kind into `registry` (idempotent per registry). */
@@ -255,6 +341,7 @@ export function registerPeopleCommands(registry: CommandRegistry): void {
         : readFieldCurrent(put.id, put.parentId, io);
     },
     rebuild: rebuildPutField,
+    review: reviewPutField,
   });
   registry.register("edit", {
     describe: (_draft: DraftRow) => "Name change",
@@ -265,6 +352,7 @@ export function registerPeopleCommands(registry: CommandRegistry): void {
         : readPersonCurrent(rename.id, io);
     },
     rebuild: rebuildRename,
+    review: reviewRename,
   });
   registerArchiveReader(personArchiveReader);
   registerArchiveKind(registry);

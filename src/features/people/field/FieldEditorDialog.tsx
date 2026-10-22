@@ -11,7 +11,6 @@ import {
   useConflictInbox,
   useDataActions,
   useDraftWithCommand,
-  useFormCopies,
   useSharingDefaults,
 } from "../../../data";
 import {
@@ -55,8 +54,10 @@ import {
   draftFieldContent,
   type EditSnapshot,
   expectedBaseOf,
+  reviewedDraft,
   snapshotOf,
   stillBound,
+  successorFollows,
 } from "../model/snapshot";
 import {
   FIELD_KINDS,
@@ -68,7 +69,7 @@ import {
 import { sendOnline, sentSomething } from "../online";
 import { Banner, Choices, FieldError, useOutboxSave } from "../parts";
 import { OutstandingChain, usePersonLinkage } from "../reads";
-import { heldContextOf, heldPrefixOf } from "./held-store";
+import { endEarlierHolds, lockOf } from "./held";
 import { ValueInput } from "./ValueInput";
 
 /**
@@ -160,6 +161,11 @@ interface Retained {
   touched: boolean;
   /** What an edit of an existing field began on (finding 1); kept with the draft, so a remount restores the same binding. */
   snapshot: EditSnapshot | null;
+  /**
+   * The body of the unsent CREATE an edit of a projected field began on (its `command_digest`; review 2, finding 3): the edit in place
+   * replaces only exactly that body. null for any other edit.
+   */
+  createDigest: string | null;
 }
 
 type Outcome =
@@ -188,7 +194,6 @@ function Editor({
   const defaults = useSharingDefaults();
   const actions = useDataActions();
   const conflicts = useConflictInbox();
-  const heldCopies = useFormCopies(heldPrefixOf(person.row.id));
   const { linkage } = usePersonLinkage(person.row.id);
   const draftKey = `field:${person.row.id}:${field?.row.id ?? "new"}`;
   const existing = field?.row ?? null;
@@ -211,10 +216,17 @@ function Editor({
           existing === null || field?.projected
             ? null
             : snapshotOf(existing, drafts, field?.latest?.localId ?? null),
+        createDigest: field?.projected
+          ? (drafts.find((d) => d.local_id === field.createDraft)
+              ?.command_digest ?? null)
+          : null,
       },
       restored: false,
     };
   });
+  // The outstanding saves as they are read NOW (a save decides on the latest read, not the one of the render that started it).
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
   const [state, dispatch] = useReducer(reduceFieldForm, initial.retained.form);
   const [touched, setTouched] = useState(initial.retained.touched);
   const [snapshot, setSnapshot] = useState(initial.retained.snapshot);
@@ -239,8 +251,17 @@ function Editor({
       newFieldId: initial.retained.newFieldId,
       touched,
       snapshot,
+      createDigest: initial.retained.createDigest,
     } satisfies Retained);
-  }, [env, draftKey, state, touched, snapshot, initial.retained.newFieldId]);
+  }, [
+    env,
+    draftKey,
+    state,
+    touched,
+    snapshot,
+    initial.retained.newFieldId,
+    initial.retained.createDigest,
+  ]);
   const forget = () => env.memory.drafts.delete(draftKey);
   const close = () => {
     forget();
@@ -411,8 +432,11 @@ function Editor({
       sameKind,
     };
     const latest = field?.latest ?? null;
+    // The edit was made over a body that is no longer the one stored (finding 3 of review 2): nothing is written, the field is reviewed.
+    let reviewAgain = false;
     const outcome = await save(async (outbox) => {
-      // D-11a-15: only the unsent save the edit BEGAN on is edited in place, and only while it is still queued as it was.
+      // D-11a-15: only the unsent save the edit BEGAN on is edited in place, and only while it is stored exactly as the edit read it.
+      let refusal: Parameters<typeof successorFollows>[0] = null;
       if (
         latest !== null &&
         latest.localId === bound.latestLocalId &&
@@ -423,21 +447,26 @@ function Editor({
       ) {
         const edited = await outbox.editQueued(latest.localId, {
           ...putFieldUpdateRequest(base),
-          expectDraft: (draft) =>
-            draft.local_id === bound.latestLocalId && draft.status === "queued",
+          expectDraft: reviewedDraft(bound),
         });
+        if (edited.kind === "edited") return edited;
         if (
-          edited.kind === "edited" ||
-          (edited.reason !== "not_queued" &&
-            edited.reason !== "not_found" &&
-            edited.reason !== "retargeted" &&
-            edited.reason !== "draft_changed")
+          edited.reason !== "not_queued" &&
+          edited.reason !== "not_found" &&
+          edited.reason !== "retargeted" &&
+          edited.reason !== "draft_changed"
         )
           return edited;
+        refusal = edited.reason;
+      }
+      // A new draft follows the reviewed save only while it is stored with the body the edit read (never after another page's edit).
+      if (!successorFollows(refusal, bound, draftsRef.current)) {
+        reviewAgain = true;
+        return { kind: "refused", reason: "draft_changed" } as const;
       }
       return outbox.enqueue(putFieldUpdateRequest({ ...base, guard }));
     });
-    return { outcome, moved: guard.moved };
+    return { outcome, moved: guard.moved || reviewAgain };
   };
 
   const submit = async (choice?: "save_now" | "hold") => {
@@ -516,11 +545,26 @@ function Editor({
         draft === undefined ? null : editCreateRequest(draft, ready);
       if (draft === undefined || request === null)
         return fail(copy.WAIT_FOR_SYNC_FIELD);
+      // Only the create body the edit began on is replaced (another page's edit of it, or of its review, is never overwritten).
+      const reviewed = initial.retained.createDigest;
+      if (reviewed === null || draft.command_digest !== reviewed)
+        return fail(copy.CREATE_CHANGED);
       setSaving(true);
-      const outcome = await save((outbox) =>
-        outbox.editQueued(draft.local_id, request),
-      );
+      let changed = false;
+      const outcome = await save(async (outbox) => {
+        const edited = await outbox.editQueued(draft.local_id, {
+          ...request,
+          expectDraft: (stored) =>
+            stored.local_id === draft.local_id &&
+            stored.status === "queued" &&
+            stored.command_digest === reviewed,
+        });
+        changed =
+          edited.kind === "refused" && edited.reason === "draft_changed";
+        return edited;
+      });
       setSaving(false);
+      if (changed) return fail(copy.CREATE_CHANGED);
       if (!outcome.ok) return fail(outcome.message ?? null);
       return succeeded(copy.SAVED_NOT_SENT, ticket);
     }
@@ -579,10 +623,11 @@ function Editor({
         if (!contentChanged) return close();
         return queued(bound.policyVersion);
       }
-      // "Hold as draft": kept DURABLY in the account's database (finding 6); earlier holds of this field are replaced once it is kept.
+      // "Hold as draft": kept DURABLY in the account's database (finding 6), and this page may run it by itself (D1). Earlier holds of this
+      // field are then ended, each from the state it is stored in, while no run of the field holds its lock; one that stays is said so.
       setSaving(true);
       const holdId = env.newId();
-      const kept = await env.held.save({
+      const kept = await env.held.create({
         holdId,
         fieldId: existing.id,
         personId: person.row.id,
@@ -596,25 +641,25 @@ function Editor({
         attempt: null,
         status: { kind: "waiting" },
         heldAt: new Date(env.now()).toISOString(),
+        rev: 0,
+        queued: false,
       });
-      if (kept !== "saved") {
+      if (kept.kind !== "saved") {
         setSaving(false);
         return fail(
-          kept === "refused" ? copy.REFUSED.closing : copy.HELD_SAVE_FAILED,
+          kept.kind === "refused"
+            ? copy.REFUSED.closing
+            : copy.HELD_SAVE_FAILED,
         );
       }
-      if (heldCopies.status === "ready")
-        for (const row of heldCopies.value.copies)
-          if (
-            row.form_context === heldContextOf(person.row.id, existing.id) &&
-            row.tab_instance_id !== holdId
-          )
-            await env.held.discard({
-              personId: person.row.id,
-              fieldId: existing.id,
-              holdId: row.tab_instance_id,
-            });
+      env.memory.heldAuthority.add(holdId);
+      env.memory.touch();
+      const replaced = await env.exclusive(lockOf(env, existing.id), () =>
+        endEarlierHolds(env, person.row.id, existing.id, holdId),
+      );
       setSaving(false);
+      if (replaced !== true)
+        announcer.announce(copy.HELD_KEPT_EARLIER(ready.label), "polite");
       return succeeded(copy.HELD_WAITING(ready.label), ticket);
     }
     setSaving(true);
