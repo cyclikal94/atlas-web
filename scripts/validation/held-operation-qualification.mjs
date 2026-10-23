@@ -15,9 +15,18 @@
 // expected native verdicts; `survived` when every case is valid but at least one is unchanged; `invalid` otherwise. Both survived and
 // invalid fail the campaign. The healthy profiles are the controls' oracle; they are strictly the revision 22 oracle plus attribution
 // (source line, own test, exact publisher entries and ledger).
+//
+// Revision 24 (review r23 R23-N1; design assessment e228174c, invariants I1-I12, correction C1-C7): a negative control "passed" when the
+// mutant's contract found its run invalid, so an unrelated setup error, a missing engine or a wrong fault qualified as the intended
+// scenario. Three judgements are now kept apart: the run's integrity (complete, exact inventory in all three engines, one attempt, the
+// spec with exactly the fault hook appended, exit and signal), the scenario (each case is the negative control's own affirmative
+// profile: its status, every error at its line of the appended hook, NC2's original 30 s beforeEach timeout, NC4's genuine HM2 delta
+// with the teardown error, and no ledger where none is published), and the classifier (the named mutant's contract refuses it). A
+// negative control is `qualified` only when all three hold; nothing else is admitted.
 import { classifyMutant, inspectReport } from "./engine-results.mjs";
 
 export const CONTRACT_VERSION = "web08d-held-operation-qualification/1";
+export const NEGATIVE_CONTRACT_VERSION = "web08d-held-operation-negative/1";
 export const ENGINES = ["chromium", "firefox", "webkit"];
 export const HELPER = "tests/e2e/held-operation.ts";
 export const LEDGER = "tests/e2e/held-operation-ledger.ts";
@@ -1384,10 +1393,23 @@ export const mutantOf = (id) => {
 };
 
 /**
+ * An error raised by the appended fault hook: `hook` is the exact (trimmed) source line it must be located at, which must occur once in
+ * the hook; the line number is the hook's own line in the spec that ran (normalise), never a line of a case's body or another hook.
+ */
+const hookError = (kind, hook, first, ...text) => ({
+  kind,
+  origin: "spec",
+  hook,
+  first,
+  text,
+});
+const HM2_S1 = mutantOf("HM2").deltas.S1;
+/**
  * Negative controls (design assessment Q5): unmutated probes (NC4: one genuine mutant) with an unrelated fault injected by an opt-in hook
- * appended to a COPY of the probe spec (never the live spec). Each is judged by the named mutant's contract and must be `invalid` in
- * every case: an ordinary error or a hook timeout before the body (review r22's two reproductions), an assertion in setup, and an extra
- * teardown error beside a genuine delta are never a catch.
+ * appended to a COPY of the probe spec (never the live spec). Each `scenario` is the control's own affirmative profile, case by case: the
+ * fault must be shown to have happened, exactly where and as it was injected, with no other fault (revision 24). Independently, the named
+ * mutant's contract must refuse the run (every case `invalid`): an ordinary error or a hook timeout before the body, an assertion in
+ * setup, and an extra teardown error beside a genuine delta are never a catch.
  */
 export const NEGATIVE_CONTROLS = [
   {
@@ -1397,6 +1419,18 @@ export const NEGATIVE_CONTROLS = [
     contract: "HM10",
     fault: "runtime",
     probes: ["S10", "S11", "S12", "S13", "S14", "S21"],
+    // The beforeEach throws before the body: its error alone, and no held-operations ledger (the body never ran).
+    scenario: {
+      status: "failed",
+      errors: [
+        hookError(
+          "error",
+          'throw new Error("negative control: an ordinary runtime error before the probe body");',
+          "Error: negative control: an ordinary runtime error before the probe body",
+        ),
+      ],
+      ledger: null,
+    },
   },
   {
     id: "NC2",
@@ -1405,6 +1439,19 @@ export const NEGATIVE_CONTROLS = [
     contract: "HM12",
     fault: "timeout",
     probes: ["S21"],
+    // The original 30 s test timeout, spent in the appended beforeEach (Playwright locates a hook timeout at the hook's declaration).
+    scenario: {
+      status: "timedOut",
+      minDuration: 30000,
+      errors: [
+        hookError(
+          "error",
+          "test.beforeEach(async ({}, info) => {",
+          'Test timeout of 30000ms exceeded while running "beforeEach" hook.',
+        ),
+      ],
+      ledger: null,
+    },
   },
   {
     id: "NC3",
@@ -1413,6 +1460,20 @@ export const NEGATIVE_CONTROLS = [
     contract: "HM1",
     fault: "setup-assertion",
     probes: ["P03"],
+    // Both P03 parameterisations, each failing at the setup assertion with its own expected and received values.
+    scenario: {
+      status: "failed",
+      errors: [
+        hookError(
+          "assertion",
+          'expect(1, "negative control: a setup assertion before the probe body").toBe(2);',
+          "Error: negative control: a setup assertion before the probe body",
+          "Expected: 2",
+          "Received: 1",
+        ),
+      ],
+      ledger: null,
+    },
   },
   {
     id: "NC4",
@@ -1422,6 +1483,21 @@ export const NEGATIVE_CONTROLS = [
     mutant: "HM2",
     fault: "teardown-error",
     probes: ["S1"],
+    // HM2's genuine S1 delta (the intended assertion in S1's own test, the unjoined-call publisher error and its ledger) with the
+    // teardown error between them: the afterEach hook runs before the heldOperations fixture's teardown publishes.
+    scenario: {
+      status: "failed",
+      errors: [
+        HM2_S1.errors[0],
+        hookError(
+          "error",
+          'throw new Error("negative control: an unrelated teardown error after the probe body");',
+          "Error: negative control: an unrelated teardown error after the probe body",
+        ),
+        HM2_S1.errors[1],
+      ],
+      ledger: HM2_S1.ledger,
+    },
   },
 ];
 /** The hook a negative control appends to its copy of the probe spec; ATLAS_PROBE_FAULT selects the fault, ATLAS_PROBE_FAULT_IDS the probes. */
@@ -1443,6 +1519,33 @@ test.afterEach(async ({}, info) => {
     throw new Error("negative control: an unrelated teardown error after the probe body");
 });
 `;
+export const FAULTS = [
+  "runtime",
+  "timeout",
+  "setup-assertion",
+  "teardown-error",
+];
+/**
+ * Where the fault hook is in a spec text (null when it is absent): whether it occurs once and is appended at the very end (the runner's
+ * copy is exactly the live spec followed by it), the line it starts at, and the line number of each of its lines that occurs once in it.
+ */
+export function faultHookOf(specText) {
+  const at = specText.indexOf(FAULT_HOOK);
+  if (at < 0) return null;
+  const base = specText.slice(0, at).split("\n").length;
+  const own = FAULT_HOOK.split("\n").map((l) => l.trim());
+  const lines = {};
+  own.forEach((line, j) => {
+    if (line && own.indexOf(line) === own.lastIndexOf(line))
+      lines[line] = base + j;
+  });
+  return {
+    once: specText.indexOf(FAULT_HOOK, at + 1) < 0,
+    appended: at + FAULT_HOOK.length === specText.length,
+    from: base + 1,
+    lines,
+  };
+}
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
 /** Every contract is total and well formed (design assessment step 2): checked before anything is built or launched. */
@@ -1474,15 +1577,40 @@ export function validateContracts() {
     )
       problems.push(`${id}: healthy native verdict ${HEALTHY[id]?.native}`);
   }
+  const negativeIds = new Set();
+  const hookLines = faultHookOf(FAULT_HOOK).lines;
   for (const nc of NEGATIVE_CONTROLS) {
+    if (negativeIds.has(nc.id))
+      problems.push(`${nc.id}: duplicate negative control`);
+    negativeIds.add(nc.id);
     const mutant = MUTANTS.find((m) => m.id === nc.contract);
     if (!mutant) problems.push(`${nc.id}: unknown contract ${nc.contract}`);
     else if (nc.probes.some((id) => !mutant.probes.includes(id)))
       problems.push(`${nc.id}: probes outside ${nc.contract}'s contract`);
+    if (!nc.probes.length || new Set(nc.probes).size !== nc.probes.length)
+      problems.push(`${nc.id}: an empty or repeated probe selection`);
     if (nc.mutant !== undefined && nc.mutant !== nc.contract)
       problems.push(
         `${nc.id}: a negative control installs its own contract's mutant only`,
       );
+    if (
+      !FAULTS.includes(nc.fault) ||
+      !FAULT_HOOK.includes(`process.env.ATLAS_PROBE_FAULT === "${nc.fault}"`)
+    )
+      problems.push(`${nc.id}: unknown fault ${nc.fault}`);
+    problems.push(
+      ...profileProblems(nc.scenario).map((p) => `${nc.id} scenario: ${p}`),
+    );
+    if (nc.scenario?.status === "passed")
+      problems.push(`${nc.id} scenario: a negative control's cases fail`);
+    const hooked = (nc.scenario?.errors ?? []).filter((e) => e.hook);
+    if (!hooked.length)
+      problems.push(`${nc.id} scenario: no error raised by the fault hook`);
+    for (const e of hooked)
+      if (!hookLines[e.hook])
+        problems.push(
+          `${nc.id} scenario: ${JSON.stringify(e.hook)} is not a line that occurs once in the fault hook`,
+        );
   }
   return problems;
 }
@@ -1526,14 +1654,17 @@ function profileProblems(profile) {
  *
  * `specText` is the exact text of the probe spec that ran (the tree's copy). A `-g` selection reports only the selected tests, so a test's
  * own range (from its `test(` line to the next one) is taken from the spec itself; a reported test that does not start at a `test(` line
- * of that text means the text is not the spec that ran, and the run is invalid.
+ * of that text means the text is not the spec that ran, and the run is invalid. `signal` is the signal that ended Playwright, if any
+ * (a run ended by a signal is never a completed run, whatever exit code it was given).
  */
-export function normalise(report, browsers, exit, specText) {
+export function normalise(report, browsers, exit, specText, signal = null) {
   if (typeof specText !== "string")
     throw new Error("normalise needs the text of the probe spec that ran");
   const starts = specText
     .split("\n")
     .flatMap((line, i) => (/^[ \t]*test\(/.test(line) ? [i + 1] : []));
+  // An appended fault hook ends the last test's own lines (revision 24): its lines belong to no case.
+  const faultHook = faultHookOf(specText);
   const inspected = inspectReport(report, browsers, exit);
   const raw = [];
   const visit = (suite, parents = []) => {
@@ -1554,6 +1685,7 @@ export function normalise(report, browsers, exit, specText) {
           spec: spec.title,
           file,
           line: spec.line,
+          duration: last?.duration,
           reported,
           attachments: last?.attachments ?? [],
         });
@@ -1571,7 +1703,10 @@ export function normalise(report, browsers, exit, specText) {
       throw new Error(
         "the report's cases could not be paired with the reader's",
       );
-    const after = starts.filter((l) => l > r.line);
+    const after = [
+      ...starts.filter((l) => l > r.line),
+      ...(faultHook && faultHook.from > r.line ? [faultHook.from] : []),
+    ];
     const errors = r.reported.map((e, ordinal) => {
       const text = String(e?.message ?? "")
         .replace(ANSI, "")
@@ -1611,18 +1746,28 @@ export function normalise(report, browsers, exit, specText) {
       attempts: c.attempts,
       expectedStatus: c.expectedStatus,
       kind: c.kind,
+      duration: r.duration,
       errors,
       range: {
         file: r.file,
         from: r.line,
-        to: after[0] ?? Number.POSITIVE_INFINITY,
+        to: after.length ? Math.min(...after) : Number.POSITIVE_INFINITY,
       },
+      hook: faultHook?.lines ?? null,
       attachments: r.attachments.map((a) => a.name),
       ledger,
     };
   });
   return {
     exit,
+    signal,
+    fault_hook: faultHook
+      ? {
+          once: faultHook.once,
+          appended: faultHook.appended,
+          from: faultHook.from,
+        }
+      : null,
     complete: inspected.complete,
     report_errors: (report.errors ?? []).length,
     spec_mismatch: cases
@@ -1722,6 +1867,23 @@ function errorProblems(spec, error, c) {
         `${at}: line ${error.location?.line} is outside the case's own test (${c.range.from}-${c.range.to})`,
       );
   }
+  if (spec.hook !== undefined) {
+    // Raised at that one line of the appended fault hook: located there, with its code frame on the same line and text.
+    const line = c.hook?.[spec.hook];
+    if (line === undefined)
+      problems.push(
+        `${at}: the spec that ran has no fault hook line ${JSON.stringify(spec.hook)}`,
+      );
+    else if (
+      error.location?.file !== basename(PROBE_SPEC) ||
+      error.location.line !== line ||
+      error.frame?.line !== line ||
+      error.frame.source.trim() !== spec.hook
+    )
+      problems.push(
+        `${at}: raised at ${error.location?.file ?? "nothing"}:${error.location?.line ?? "-"} (${JSON.stringify(error.frame?.source?.trim() ?? null)}), not at the fault hook's line ${line} ${JSON.stringify(spec.hook)}`,
+      );
+  }
   if (spec.first !== undefined && error.first !== spec.first)
     problems.push(
       `${at}: ${JSON.stringify(error.first)}, expected ${JSON.stringify(spec.first)}`,
@@ -1806,6 +1968,13 @@ export function profileMismatch(profile, c) {
     problems.push(`expected status ${c.expectedStatus}`);
   if (c.status !== profile.status)
     problems.push(`status ${c.status}, expected ${profile.status}`);
+  if (
+    profile.minDuration !== undefined &&
+    !(Number.isFinite(c.duration) && c.duration >= profile.minDuration)
+  )
+    problems.push(
+      `ran ${c.duration ?? "an unrecorded time"} ms, not the ${profile.minDuration} ms it must spend`,
+    );
   if (c.errors.length !== profile.errors.length)
     problems.push(
       `${c.errors.length} error(s), expected ${profile.errors.length}: ${JSON.stringify(c.errors.map((e) => e.first))}`,
@@ -1882,6 +2051,7 @@ function runProblems(run, ids, browsers) {
     );
   if (run.report_errors)
     problems.push(`${run.report_errors} report-level error(s)`);
+  if (run.signal) problems.push(`Playwright was ended by ${run.signal}`);
   if (run.spec_mismatch.length)
     problems.push(
       `the spec text is not the spec that ran: ${run.spec_mismatch.join(", ")}`,
@@ -2002,26 +2172,207 @@ export function judgeMutant(id, run, browsers, probes) {
   };
 }
 
-/** A negative control passes only when its run is `invalid` and no case of it is a delta or unchanged (never evidence of anything). */
-export function judgeNegative(nc, run, browsers) {
+const sameList = (a, b) =>
+  Array.isArray(a) &&
+  Array.isArray(b) &&
+  a.length === b.length &&
+  a.every((x, i) => x === b[i]);
+
+/**
+ * What the runner records about the invocation of one negative control (held-operation-probes.mjs), checked against the control: the
+ * fault and probes the hook was given, the mutant installed, the copy's spec being exactly the live spec with the hook appended, and the
+ * copied tree identical to the live one (apart from those files) both before and after Playwright ran.
+ */
+export function provenanceProblems(nc, provenance) {
+  const problems = [];
+  if (provenance === null || typeof provenance !== "object")
+    return ["no invocation provenance"];
+  if (provenance.negative_control !== nc.id)
+    problems.push(
+      `provenance names ${provenance.negative_control}, not ${nc.id}`,
+    );
+  if (provenance.fault !== nc.fault)
+    problems.push(
+      `the hook was given fault ${provenance.fault}, not ${nc.fault}`,
+    );
+  if (!sameList(provenance.fault_ids, nc.probes))
+    problems.push(
+      `the hook was given probes ${JSON.stringify(provenance.fault_ids)}, not ${JSON.stringify(nc.probes)}`,
+    );
+  if (!sameList(provenance.installed, nc.mutant ? [nc.mutant] : []))
+    problems.push(
+      `installed ${JSON.stringify(provenance.installed)}, expected ${JSON.stringify(nc.mutant ? [nc.mutant] : [])}`,
+    );
+  if (
+    typeof provenance.copied_spec_sha256 !== "string" ||
+    provenance.copied_spec_sha256 !== provenance.expected_spec_sha256
+  )
+    problems.push(
+      "the copy's spec is not the live spec with exactly the fault hook appended",
+    );
+  for (const when of ["before", "after"])
+    if (
+      !Array.isArray(provenance.copy_problems?.[when]) ||
+      provenance.copy_problems[when].length > 0
+    )
+      problems.push(
+        `the copied tree ${when} the run: ${JSON.stringify(provenance.copy_problems?.[when] ?? "unchecked")}`,
+      );
+  if (provenance.signal)
+    problems.push(`Playwright was ended by ${provenance.signal}`);
+  return problems;
+}
+
+/**
+ * A negative control's run (revision 24, design assessment C2): three separate judgements, all of which must hold.
+ *  - integrity: complete, the exact inventory in all three engines (a narrower selection is a diagnostic, never a qualification), one
+ *    attempt each, no report error or signal, exit 1, the spec that ran being a spec with exactly the fault hook appended once at its
+ *    end, and (when given) the invocation's provenance;
+ *  - scenario: every case is the control's affirmative `scenario` profile (the fault really happened, where and as injected, alone);
+ *  - classifier: the named mutant's contract (judgeMutant, unchanged) refuses the run, every case `invalid`.
+ * `qualified` is their conjunction, and the only result any consumer admits. A classifier refusal alone proves nothing.
+ */
+export function judgeNegative(nc, run, browsers, provenance) {
+  const integrity = runProblems(run, nc.probes, browsers);
+  const coverage =
+    browsers.length === ENGINES.length &&
+    ENGINES.every((e) => browsers.includes(e))
+      ? "full"
+      : "narrow";
+  if (coverage !== "full")
+    integrity.push(
+      `narrow engine selection ${browsers.join(",")}: a negative control qualifies only in ${ENGINES.join(", ")}`,
+    );
+  if (run.exit !== 1) integrity.push(`exit ${run.exit}, expected 1`);
+  if (!run.fault_hook)
+    integrity.push("the spec that ran has no negative-control fault hook");
+  else if (!run.fault_hook.once || !run.fault_hook.appended)
+    integrity.push(
+      "the spec that ran is not a spec with exactly the fault hook appended once at its end",
+    );
+  if (provenance !== undefined)
+    integrity.push(...provenanceProblems(nc, provenance));
+  const cases = run.cases.map((c) => {
+    const why = nc.probes.includes(c.id)
+      ? profileMismatch(nc.scenario, c)
+      : ["not a selected probe"];
+    return {
+      engine: c.engine,
+      id: c.id,
+      spec: c.spec,
+      status: c.status,
+      valid: why.length === 0,
+      why,
+    };
+  });
+  const scenario = cases
+    .filter((c) => !c.valid)
+    .map((c) => `${c.engine} ${c.id}: ${c.why.join("; ")}`);
+  if (!cases.length) scenario.push("no case ran");
   const judged = judgeMutant(nc.contract, run, browsers, nc.probes);
   const refused =
     judged.verdict === "invalid" &&
     judged.cases.length > 0 &&
     judged.cases.every((c) => c.role === "invalid");
-  return { ...judged, negative_control: nc.id, refused };
+  const qualified = integrity.length === 0 && scenario.length === 0 && refused;
+  return {
+    contract: NEGATIVE_CONTRACT_VERSION,
+    negative_control: nc.id,
+    fault: nc.fault,
+    probes: nc.probes,
+    coverage,
+    provenance_checked: provenance !== undefined,
+    integrity: { valid: integrity.length === 0, problems: integrity },
+    scenario: { valid: scenario.length === 0, problems: scenario, cases },
+    classifier: {
+      contract: judged.contract,
+      mutant: judged.mutant,
+      verdict: judged.verdict,
+      refused,
+      problems: judged.problems,
+      cases: judged.cases,
+      native: judged.native,
+    },
+    qualified,
+    outcome: qualified ? "qualified" : "unqualified",
+    problems: [
+      ...integrity.map((p) => `integrity: ${p}`),
+      ...scenario.map((p) => `scenario: ${p}`),
+      ...(refused
+        ? []
+        : [
+            `classifier: ${nc.contract}'s contract judged it ${judged.verdict}, not invalid in every case`,
+          ]),
+    ],
+  };
+}
+
+/** Why a set of recorded parts is not exactly the planned one: each planned identity once, nothing unplanned. */
+function identityProblems(kind, planned, got) {
+  const problems = [];
+  if (new Set(planned).size !== planned.length)
+    problems.push(`the plan names a ${kind} twice`);
+  for (const id of new Set([...planned, ...got])) {
+    const want = planned.filter((p) => p === id).length;
+    const have = got.filter((g) => g === id).length;
+    if (!want) problems.push(`${kind} ${id} was not planned`);
+    else if (have !== want)
+      problems.push(`${kind} ${id} ran ${have} time(s), planned once`);
+  }
+  return problems;
 }
 
 /**
- * The campaign's outcome from its parts: exit 0 only when nothing failed or was interrupted, the source is unchanged, and EVERY planned
- * part ran and is sound (each control healthy, each negative control refused, each mutant caught). A survived or invalid mutant, a
- * negative control that was not refused, or a part that never ran fails it, so the shared driver stops before later work.
+ * A `--stage negatives` run's prerequisite (design assessment C3): a passed `--stage controls` run of the same source, engines and
+ * contract whose live and copy controls covered every probe the negative controls inject into. Returns why it is not.
+ */
+export function prerequisiteProblems(evidence, { source, browsers, probes }) {
+  const problems = [];
+  const summary = evidence?.summary;
+  if (!summary) return ["no controls evidence"];
+  if (summary.passed !== true) problems.push("the controls run did not pass");
+  if (summary.stage !== "controls")
+    problems.push(`the evidence is a ${summary.stage} run, not a controls run`);
+  if (summary.contract !== CONTRACT_VERSION)
+    problems.push(`contract ${summary.contract}, not ${CONTRACT_VERSION}`);
+  if (summary.source_unchanged !== true)
+    problems.push("its source changed during the run");
+  if (evidence.source !== source)
+    problems.push(
+      `it ran on source ${evidence.source}, not this run's ${source}`,
+    );
+  if (!sameList(summary.browsers, browsers))
+    problems.push(
+      `it ran in ${JSON.stringify(summary.browsers)}, not ${JSON.stringify(browsers)}`,
+    );
+  problems.push(
+    ...identityProblems(
+      "control",
+      ["control", "copy-control"],
+      (summary.controls ?? []).map((c) => c.name),
+    ),
+  );
+  for (const c of summary.controls ?? [])
+    if (c.ok !== true) problems.push(`control ${c.name} is not healthy`);
+  const covered = summary.control_probes ?? [];
+  const missing = probes.filter((p) => !covered.includes(p));
+  if (missing.length)
+    problems.push(`its controls did not cover ${missing.join(", ")}`);
+  return problems;
+}
+
+/**
+ * The campaign's outcome from its parts: exit 0 only when nothing failed or was interrupted, the source is unchanged, any prerequisite
+ * holds, and EXACTLY the planned parts ran, each once and sound: each control healthy, each negative control `qualified` under the
+ * current negative contract, each mutant caught under the current contract. Identities, not counts: a part run twice, an unplanned
+ * part, or one that never ran fails it, so the shared driver stops before later work.
  */
 export function campaignOutcome({
   preflight,
   fatal,
   interrupted,
   sourceUnchanged,
+  prerequisite,
   planned,
   controls,
   negatives,
@@ -2032,25 +2383,39 @@ export function campaignOutcome({
   if (fatal) reasons.push(`failed: ${fatal.split("\n")[0]}`);
   if (!preflight) reasons.push("preflight did not pass");
   if (!sourceUnchanged) reasons.push("the source changed during the run");
-  if (controls.length !== planned.controls)
-    reasons.push(`${controls.length} of ${planned.controls} control(s) ran`);
-  if (negatives.length !== planned.negatives.length)
+  if (prerequisite?.problems.length)
     reasons.push(
-      `${negatives.length} of ${planned.negatives.length} negative control(s) ran`,
+      ...prerequisite.problems.map((p) => `prerequisite controls: ${p}`),
     );
-  if (mutants.length !== planned.mutants.length)
-    reasons.push(
-      `${mutants.length} of ${planned.mutants.length} mutant(s) ran`,
-    );
+  reasons.push(
+    ...identityProblems(
+      "control",
+      planned.controls,
+      controls.map((c) => c.name),
+    ),
+    ...identityProblems(
+      "negative control",
+      planned.negatives,
+      negatives.map((n) => n.negative_control),
+    ),
+    ...identityProblems(
+      "mutant",
+      planned.mutants,
+      mutants.map((m) => m.mutant),
+    ),
+  );
   for (const c of controls)
-    if (!c.ok) reasons.push(`control ${c.name} is not healthy`);
+    if (c.ok !== true) reasons.push(`control ${c.name} is not healthy`);
   for (const n of negatives)
-    if (!n.refused)
+    if (n.contract !== NEGATIVE_CONTRACT_VERSION || n.qualified !== true)
       reasons.push(
-        `negative control ${n.negative_control} was ${n.verdict}, not refused`,
+        `negative control ${n.negative_control} is ${n.contract === NEGATIVE_CONTRACT_VERSION ? (n.outcome ?? "unjudged") : `judged under ${n.contract}`}, not qualified`,
       );
   for (const m of mutants)
-    if (m.verdict !== "caught") reasons.push(`mutant ${m.mutant} ${m.verdict}`);
+    if (m.contract !== CONTRACT_VERSION || m.verdict !== "caught")
+      reasons.push(
+        `mutant ${m.mutant} ${m.contract === CONTRACT_VERSION ? m.verdict : `judged under ${m.contract}`}`,
+      );
   return {
     passed: reasons.length === 0,
     exitCode: reasons.length === 0 ? 0 : 1,

@@ -25,13 +25,31 @@
 // controls (NC1-NC4) inject an unrelated fault through a hook appended to a COPY of the probe spec, and each must be
 // judged invalid. Anything but a sound control, refused negative controls and caught mutants exits 1.
 //
+// Revision 24 (review r23 R23-N1; design assessment e228174c C1-C5): a negative control is admitted only when it is
+// `qualified`: its run's integrity (exact three-engine inventory, one attempt, exit 1, no signal, the copy's spec exactly
+// the live spec with the hook appended), its own scenario (the injected fault really happened, alone, where injected) and
+// the named mutant contract's refusal. Each invocation's provenance is recorded and checked: the fault and probes given
+// to the hook, the installed mutant, the hashes of the live spec, the hook, the copy's spec and the installed file, the
+// copied tree compared file by file with the live one before and after Playwright ran, the exit, the signal and the
+// report's digest. --stage negatives needs --controls-evidence: a passed --stage controls run of the same source and
+// engines whose controls covered every injected probe. Nothing is reused from an earlier run otherwise.
+//
 // Usage: node scripts/validation/held-operation-probes.mjs [--check] [--stage all|controls|negatives]
-//          [--probes P01,S7,...] [--only HM10,...] [--browsers chromium,firefox,webkit] --out <dir>
+//          [--probes P01,S7,...] [--only HM10,...] [--browsers chromium,firefox,webkit]
+//          [--controls-evidence <the --out of a --stage controls run>] --out <dir>
 //   --check      preflight only: every contract is total and every patch applies once; nothing is built.
 //   --stage      all (default): controls, negative controls, then mutants; controls: the live and copy controls;
-//                negatives: the negative controls alone.
+//                negatives: the negative controls alone (with --controls-evidence).
 //   --probes     restricts the controls of --stage controls to these probes (exact case titles still required).
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort } from "../integration/free-port.mjs";
@@ -45,10 +63,12 @@ import {
   judgeNegative,
   MUTANTS,
   mutantOf,
+  NEGATIVE_CONTRACT_VERSION,
   NEGATIVE_CONTROLS,
   normalise,
   PROBE_IDS,
   PROBE_SPEC,
+  prerequisiteProblems,
   validateContracts,
 } from "./held-operation-qualification.mjs";
 import { fingerprint, json, newRun, processes } from "./runtime.mjs";
@@ -66,7 +86,14 @@ const value = (name, fallback) => {
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--check") continue;
   if (
-    !["--out", "--browsers", "--only", "--stage", "--probes"].includes(args[i])
+    ![
+      "--out",
+      "--browsers",
+      "--only",
+      "--stage",
+      "--probes",
+      "--controls-evidence",
+    ].includes(args[i])
   )
     throw new Error(`Unknown option: ${args[i]}`);
   i += 1;
@@ -103,6 +130,17 @@ const selected =
     : [];
 const negatives = stage === "controls" ? [] : NEGATIVE_CONTROLS;
 const checkOnly = args.includes("--check");
+const controlsEvidence = args.includes("--controls-evidence")
+  ? resolve(root, value("--controls-evidence"))
+  : null;
+if (controlsEvidence && stage !== "negatives")
+  throw new Error(
+    "--controls-evidence is the prerequisite of --stage negatives",
+  );
+if (stage === "negatives" && !checkOnly && !controlsEvidence)
+  throw new Error(
+    "--stage negatives needs --controls-evidence: a passed --stage controls run of the same source",
+  );
 
 const runDir = newRun(outDir);
 // Copies of the test tree live under .agtx/ (ignored, outside the source fingerprint) so that Node resolves the
@@ -118,10 +156,12 @@ console.log(`Evidence: ${runDir}`);
 const proc = processes(root);
 const started = Date.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 const record = { controls: [], negatives: [], mutants: [] };
 let fatal = null;
 let preflight = false;
 let interrupted = false;
+let prerequisite = null;
 
 async function build(mutantDir, buildDir, log) {
   const result = await proc.run(
@@ -201,6 +241,53 @@ async function withPreview(buildDir, action) {
     clearTimeout(timer);
   }
 }
+/** Every file under `dir` (relative paths, sorted); a link or anything but a regular file is reported as such. */
+function filesUnder(dir) {
+  return readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((e) => !e.isDirectory())
+    .map((e) => {
+      const rel = join(e.parentPath ?? e.path, e.name).slice(dir.length + 1);
+      return e.isFile() ? rel : `${rel} (not a regular file)`;
+    })
+    .sort();
+}
+/**
+ * Why a copied tree is not exactly what Playwright should load: the live config and tests/e2e, file for file, except the patched files,
+ * each with exactly its patch's text (design assessment C3: checked before and after the run).
+ */
+function copyProblems(tree, patches) {
+  const expected = new Map();
+  for (const rel of filesUnder(join(root, "tests/e2e")))
+    expected.set(
+      join("tests/e2e", rel),
+      sha256(readFileSync(join(root, "tests/e2e", rel))),
+    );
+  expected.set(
+    "playwright.config.ts",
+    sha256(readFileSync(join(root, "playwright.config.ts"))),
+  );
+  for (const patch of patches) expected.set(patch.file, sha256(patch.text));
+  const actual = new Map();
+  for (const rel of filesUnder(join(tree, "tests/e2e")))
+    actual.set(
+      join("tests/e2e", rel),
+      rel.endsWith(")")
+        ? null
+        : sha256(readFileSync(join(tree, "tests/e2e", rel))),
+    );
+  if (existsSync(join(tree, "playwright.config.ts")))
+    actual.set(
+      "playwright.config.ts",
+      sha256(readFileSync(join(tree, "playwright.config.ts"))),
+    );
+  const problems = [];
+  for (const file of new Set([...expected.keys(), ...actual.keys()]))
+    if (!expected.has(file)) problems.push(`${file}: not in the live tree`);
+    else if (!actual.has(file)) problems.push(`${file}: missing from the copy`);
+    else if (expected.get(file) !== actual.get(file))
+      problems.push(`${file}: differs from what was copied`);
+  return problems;
+}
 /** An unmutated (or patched) copy of what Playwright loads: the config and tests/e2e. */
 function copyTree(name, patches = []) {
   const tree = join(trees, name);
@@ -253,17 +340,25 @@ async function probes(url, cwd, ids, directory, env = {}) {
   writeFileSync(join(directory, "playwright.log"), result.output);
   // The exact spec text that ran (the tree's own copy) bounds each test's lines.
   const specText = readFileSync(join(cwd, PROBE_SPEC), "utf8");
-  return normalise(
-    JSON.parse(readFileSync(reportPath, "utf8")),
+  // This invocation's own report (its directory is new): a missing or unreadable one fails the run.
+  const reportText = readFileSync(reportPath, "utf8");
+  const run = normalise(
+    JSON.parse(reportText),
     browsers,
     result.code,
     specText,
+    result.signal ?? null,
   );
+  run.report_sha256 = sha256(reportText);
+  run.spec_sha256 = sha256(specText);
+  return run;
 }
 /** A judged part's record: the judgement with the normalised cases' error lists kept beside it for the reviewer. */
 const recorded = (name, run, judgement) => ({
   name,
   exit: run.exit,
+  signal: run.signal,
+  report_sha256: run.report_sha256,
   complete: run.complete,
   ...judgement,
   errors: run.cases.map((c) => ({
@@ -310,6 +405,50 @@ try {
   if (failures.length)
     throw new Error(`${failures.length} probe mutation(s) failed preflight`);
   preflight = true;
+  if (!checkOnly && controlsEvidence) {
+    // The prerequisite controls (design assessment C3): one passed --stage controls run of this very source and these engines.
+    const runs = existsSync(join(controlsEvidence, "runs"))
+      ? readdirSync(join(controlsEvidence, "runs"))
+      : [];
+    const problems = [];
+    let evidence = null;
+    if (runs.length !== 1)
+      problems.push(
+        `${controlsEvidence} holds ${runs.length} run(s), not exactly one`,
+      );
+    else {
+      const dir = join(controlsEvidence, "runs", runs[0]);
+      try {
+        evidence = {
+          path: dir,
+          summary: JSON.parse(
+            readFileSync(join(dir, "probe-results.json"), "utf8"),
+          ).summary,
+          source: JSON.parse(readFileSync(join(dir, "inputs.json"), "utf8"))
+            .sha256,
+          after: JSON.parse(
+            readFileSync(join(dir, "inputs-after.json"), "utf8"),
+          ).sha256,
+        };
+        if (evidence.after !== evidence.source)
+          problems.push("its inputs changed during the run");
+      } catch (error) {
+        problems.push(`unreadable controls evidence: ${error.message}`);
+      }
+    }
+    if (evidence)
+      problems.push(
+        ...prerequisiteProblems(evidence, {
+          source: before.sha256,
+          browsers,
+          probes: [...new Set(negatives.flatMap((n) => n.probes))],
+        }),
+      );
+    prerequisite = { evidence: evidence?.path ?? controlsEvidence, problems };
+    json(join(runDir, "prerequisite.json"), prerequisite);
+    if (problems.length)
+      throw new Error(`Prerequisite controls not met: ${problems[0]}`);
+  }
   if (!checkOnly) {
     const controlBuild = join(runDir, "control-build");
     await build(null, controlBuild, join(runDir, "control-build.log"));
@@ -348,20 +487,53 @@ try {
           `${nc.id}: a negative control installs helper or ledger mutants only`,
         );
       const tree = copyTree(nc.id, [faulted, ...installed]);
+      const env = {
+        ATLAS_PROBE_FAULT: nc.fault,
+        ATLAS_PROBE_FAULT_IDS: nc.probes.join(","),
+      };
+      const copyBefore = copyProblems(tree, [faulted, ...installed]);
       const run = await withPreview(controlBuild, (url) =>
-        probes(url, tree, nc.probes, join(directory, "browser"), {
-          ATLAS_PROBE_FAULT: nc.fault,
-          ATLAS_PROBE_FAULT_IDS: nc.probes.join(","),
-        }),
+        probes(url, tree, nc.probes, join(directory, "browser"), env),
       );
-      const judged = recorded(nc.id, run, judgeNegative(nc, run, browsers));
-      json(join(directory, "result.json"), { title: nc.title, ...judged });
+      const provenance = {
+        negative_control: nc.id,
+        fault: env.ATLAS_PROBE_FAULT,
+        fault_ids: env.ATLAS_PROBE_FAULT_IDS.split(","),
+        installed: nc.mutant ? [nc.mutant] : [],
+        live_spec_sha256: sha256(spec),
+        hook_sha256: sha256(FAULT_HOOK),
+        expected_spec_sha256: sha256(faulted.text),
+        copied_spec_sha256: run.spec_sha256,
+        installed_sha256: Object.fromEntries(
+          installed.map((p) => [p.file, sha256(p.text)]),
+        ),
+        copy_problems: {
+          before: copyBefore,
+          after: copyProblems(tree, [faulted, ...installed]),
+        },
+        tree,
+        exit: run.exit,
+        signal: run.signal,
+        report_sha256: run.report_sha256,
+      };
+      const judged = recorded(
+        nc.id,
+        run,
+        judgeNegative(nc, run, browsers, provenance),
+      );
+      json(join(directory, "result.json"), {
+        title: nc.title,
+        provenance,
+        ...judged,
+      });
       record.negatives.push(judged);
       console.log(
-        `${judged.refused ? "refused" : "NOT REFUSED"} ${nc.id} (${judged.verdict})`,
+        `${judged.qualified ? "qualified" : "NOT QUALIFIED"} ${nc.id} (integrity ${judged.integrity.valid}, scenario ${judged.scenario.valid}, ${nc.contract} ${judged.classifier.verdict})`,
       );
-      if (!judged.refused)
-        throw new Error(`Negative control not refused: ${nc.id}`);
+      if (!judged.qualified)
+        throw new Error(
+          `Negative control not qualified: ${nc.id}: ${judged.problems[0]}`,
+        );
     }
     for (const { mutant, text } of patches.filter((p) =>
       selected.includes(p.mutant),
@@ -418,8 +590,11 @@ const outcome = checkOnly
       fatal,
       interrupted,
       sourceUnchanged: unchanged,
+      prerequisite: controlsEvidence
+        ? (prerequisite ?? { problems: ["the prerequisite was never checked"] })
+        : null,
       planned: {
-        controls: stage === "negatives" ? 0 : 2,
+        controls: stage === "negatives" ? [] : ["control", "copy-control"],
         negatives: negatives.map((n) => n.id),
         mutants: selected.map((m) => m.id),
       },
@@ -429,17 +604,23 @@ const outcome = checkOnly
     });
 const summary = {
   layer:
-    "held-operation owner and fixture hold seam (WEB-08d r21-r23): real engines, probe controls, reporter shapes, negative controls, helper/fixture mutants judged by versioned contracts",
+    "held-operation owner and fixture hold seam (WEB-08d r21-r24): real engines, probe controls, reporter shapes, negative controls qualified by their own scenarios, helper/fixture mutants judged by versioned contracts",
   contract: CONTRACT_VERSION,
+  negative_contract: NEGATIVE_CONTRACT_VERSION,
   browsers,
   check_only: checkOnly,
   stage,
   preflight_pass: preflight,
+  control_probes: stage === "negatives" ? [] : controlIds,
   controls: record.controls.map((c) => ({ name: c.name, ok: c.ok })),
+  prerequisite,
   negatives: record.negatives.map((n) => ({
     id: n.negative_control,
-    verdict: n.verdict,
-    refused: n.refused,
+    outcome: n.outcome,
+    qualified: n.qualified,
+    integrity: n.integrity.valid,
+    scenario: n.scenario.valid,
+    classifier: n.classifier.verdict,
   })),
   selected: selected.map((m) => m.id),
   run: record.mutants.length,
