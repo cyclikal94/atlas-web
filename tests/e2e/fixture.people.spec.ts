@@ -55,6 +55,15 @@ const HOME_VIEW = {
 const send = (page: Page) =>
   page.evaluate(() => window.__atlasData?.retryOutbox());
 const detail = (page: Page) => page.locator(`[data-person-detail="${P}"]`);
+/**
+ * Harness precondition (revision 5, campaign 19): the person's linkage line has answered. Until then the header shows the longer
+ * "isn't known" line, and its answer moves every control below it up; a click whose press and release straddle that move reaches
+ * no link (Firefox E-P3). A case that clicks in the detail straight after boot waits for it first; what it asserts is unchanged.
+ */
+const linkageAnswered = (page: Page) =>
+  expect(
+    detail(page).locator('[data-linkage]:not([data-linkage="unknown"])'),
+  ).toBeVisible();
 
 test.describe("E-P1: the people list (A1)", () => {
   test("sorted by name, searchable, archived people only under Archived; the Account line comes from the summaries, never a person read", async ({
@@ -115,6 +124,7 @@ test.describe("E-P2: a field saved offline (A3, A6, A19)", () => {
     ]);
     await startOutbox(page);
     await expect(detail(page)).toBeVisible();
+    await linkageAnswered(page);
     await connectivity(context, page, false);
     await detail(page).getByRole("link", { name: "Add a field" }).click();
     const dialog = page.getByRole("dialog", { name: "Add a field" });
@@ -213,6 +223,7 @@ test.describe("E-P3: every value kind through the editor (A3)", () => {
     context,
   }, info) => {
     const { page } = await setup(context, `/people/${P}`, [personP(P, "Ada")]);
+    await linkageAnswered(page);
     const add = async (
       name: string,
       kind: string,
@@ -628,6 +639,7 @@ test.describe("E-P8: archive and restore (A12)", () => {
       ),
     ]);
     await startOutbox(page);
+    await linkageAnswered(page);
     await connectivity(context, page, false);
     const row = detail(page).locator(`[data-field-row="${F}"]`);
     await row.getByRole("button", { name: "Archive" }).click();
