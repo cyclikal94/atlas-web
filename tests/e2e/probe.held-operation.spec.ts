@@ -32,6 +32,12 @@ import { expect, test } from "./helpers";
  *    oracle checks the exact Playwright errors of each (an assertion alone; an operation error alone; an assertion beside a separate
  *    operation, cleanup or page-loss error; a timeout), and the all-error reader's verdict for each.
  *
+ * Revision 22 (review r21 R21-N1, design assessment 58bc72cc Q2-Q4): P14/P15 and S10-S21 qualify H7, an operation's rejection that the
+ * case explicitly joins (`settled()`) and that then escapes the body. S10/S11 are the review's J1 (page-origin, assertion-like and plain),
+ * S12 its J2 (the launched callback's own rejection); the others cover a synchronous throw, a value that is not an Error, a joined
+ * rejection beside an unjoined one or a failed release, genuine assertions after a join or about an expected rejection, a handled but
+ * unexpected rejection, and an expected rejection that escapes unasserted.
+ *
  * FIXTURE evidence for this engine on this machine: the HTTP answers are scripted, the holds and the failing/never-settling operations are
  * the probes' own, and nothing here is product evidence.
  */
@@ -61,6 +67,13 @@ const assertionLikeFailure = (page: Page, label: string) =>
     },
     { id: A, spec: edit("r", A, label) },
   );
+/** The launched callback's own (Node-side) rejection after the real edit: its text READS like an assertion (the review's J2). */
+const callbackFailure = (page: Page, label: string) => async () => {
+  await editDraft(page, label);
+  throw new Error(
+    "expect(received).toBe(expected) inside the operation callback",
+  );
+};
 const neverSettles = (page: Page) =>
   page.evaluate(() => new Promise<never>(() => undefined));
 const landed = (page: Page, text: string) =>
@@ -502,6 +515,92 @@ test.describe("held-operation probes: controls (pass)", () => {
       joined: true,
     });
   });
+  test("P14 an operation the case expects to reject: `expectRejection()` with its matcher passes and nothing is witnessed, even when the body fails later for another reason", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    const ledger = privateLedger();
+    await withHeldOperations(
+      async (holds) => {
+        const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+        const call = holds.launch("the failing edit", () =>
+          failingEdit(page, "saved"),
+        );
+        await hold.untilHeld();
+        await hold.release();
+        await expect(call.expectRejection()).rejects.toThrow(
+          "probe operation failure after edited",
+        );
+      },
+      { ledger },
+    );
+    expect(ledger.errors).toEqual([]);
+    expect(ledger.escaped).toEqual([]);
+    expect(ledger.scopes[0]?.calls[0]).toMatchObject({
+      id: "s1.c1",
+      state: "rejected",
+      joined: true,
+      rejectionExpected: true,
+      rejectionsDelivered: 0,
+    });
+    const later = await failing(async (holds) => {
+      const call = holds.launch("the expected rejection", () =>
+        Promise.reject(new Error("the expected rejection")),
+      );
+      await expect(call.expectRejection()).rejects.toThrow(
+        "the expected rejection",
+      );
+      sentinel();
+    });
+    expect((later.thrown as Error | null)?.message).toBe(SENTINEL);
+    expect(later.ledger.errors).toEqual([]);
+    expect(later.ledger.escaped).toEqual([]);
+    expect(later.ledger.scopes[0]?.escaped).toEqual([]);
+  });
+
+  test("P15 witnesses are per call, by id: a rejection handed over twice, a value that is not an Error that escapes, and an unjoined synchronous throw are three entries, each once", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    const notAnError = "a rejection that is not an Error";
+    const { thrown, ledger } = await failing(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const first = holds.launch("the failing edit", () =>
+        failingEdit(page, "saved"),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      for (let i = 0; i < 2; i += 1)
+        await first.settled().catch(() => undefined);
+      holds.launch("the synchronous throw", () => {
+        throw new Error("thrown synchronously");
+      });
+      const value = holds.launch("the value", () => Promise.reject(notAnError));
+      await value.settled();
+    });
+    expect(thrown).toBe(notAnError);
+    const calls = ledger.scopes[0]?.calls ?? [];
+    expect(calls.map((c) => [c.id, c.state, c.rejectionsDelivered])).toEqual([
+      ["s1.c1", "rejected", 2],
+      ["s1.c2", "rejected", 0],
+      ["s1.c3", "rejected", 1],
+    ]);
+    expect(calls[2]?.rejection).toEqual({
+      type: "string",
+      message: notAnError,
+    });
+    expect(calls[1]?.rejection).toMatchObject({
+      type: "Error",
+      message: "thrown synchronously",
+    });
+    expect(ledger.scopes[0]?.escaped).toEqual(["s1.c1", "s1.c3"]);
+    expect(ledger.escaped).toHaveLength(2);
+    expect(ledger.escaped.join("\n")).not.toContain(notAnError);
+    expect(ledger.escaped.join("\n")).not.toContain("probe operation failure");
+    expect(ledger.errors).toEqual([
+      "the operation the synchronous throw failed: thrown synchronously",
+    ]);
+  });
 });
 
 test.describe("held-operation probes: a harness older than its seam (revision 21 attempt 1)", () => {
@@ -603,8 +702,12 @@ test.describe("held-operation probes: reporter shapes (fail on purpose; judged b
     context,
   }) => {
     // The probe's own deadline (not a product timer or an observation window): the case must end while the scope is still waiting.
-    test.setTimeout(15_000);
+    // Revision 22: the deadline starts once the page is ready (its fixtures and `queued` setup ran under the default timeout), so a slow
+    // setup cannot end the case before the scope exists (revision 22 validation attempt 2: Firefox spent the old 15 s in
+    // `untilTreeSettled`). The scope's wait below never ends, so the case still times out inside it, whatever the margin.
+    const began = Date.now();
     const page = await queued(context);
+    test.setTimeout(Date.now() - began + 30_000);
     await withHeldOperations(async (holds) => {
       const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
       holds.launch("the saved edit", () => editDraft(page, "saved"));
@@ -638,6 +741,196 @@ test.describe("held-operation probes: reporter shapes (fail on purpose; judged b
       );
       await hold.untilHeld();
       await hold.release();
+    });
+  });
+
+  test("S10 shape: an explicitly joined page operation whose error reads like an assertion escapes the body (the review's J1): the case is an error, with a separate runtime-origin witness", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch("the assertion-like failure", () =>
+        assertionLikeFailure(page, "saved"),
+      );
+      await hold.untilHeld();
+      await landed(page, "saved");
+      await hold.release();
+      await saved.settled();
+    });
+  });
+
+  test("S11 shape: an explicitly joined page operation that fails plainly escapes the body: its error and a separate runtime-origin witness", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch("the failing edit", () =>
+        failingEdit(page, "saved"),
+      );
+      await hold.untilHeld();
+      await landed(page, "saved");
+      await hold.release();
+      await saved.settled();
+    });
+  });
+
+  test("S12 shape: the launched callback's own rejection, reading like an assertion, escapes through an explicit join (the review's J2): an error, never a catch", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch(
+        "the callback failure",
+        callbackFailure(page, "saved"),
+      );
+      await hold.untilHeld();
+      await landed(page, "saved");
+      await hold.release();
+      await saved.settled();
+    });
+  });
+
+  test("S13 shape: a callback that throws synchronously, reading like an assertion, escapes through an explicit join: an error", async () => {
+    await withHeldOperations(async (holds) => {
+      const thrown = holds.launch("the synchronous throw", () => {
+        throw new Error("expect(received).toBe(expected) thrown synchronously");
+      });
+      await thrown.settled();
+    });
+  });
+
+  test("S14 shape: a rejection that is not an Error, reading like an assertion, escapes through an explicit join: an error", async () => {
+    await withHeldOperations(async (holds) => {
+      const value = holds.launch("the value", () =>
+        Promise.reject("expect(received).toBe(expected) as a string"),
+      );
+      await value.settled();
+    });
+  });
+
+  test("S15 shape: a joined rejection escapes while another operation fails unjoined: the escaped error, then one error with both the cleanup failure and the witness", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch("the assertion-like failure", () =>
+        assertionLikeFailure(page, "saved"),
+      );
+      holds.launch("the second failure", () =>
+        Promise.reject(new Error("the second operation failed")),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      await saved.settled();
+    });
+  });
+
+  test("S16 shape: a joined rejection escapes and a later hold's release fails: the escaped error, then one error with the release failure and the witness", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch("the assertion-like failure", () =>
+        assertionLikeFailure(page, "saved"),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      await holds.holdEngine(page, "data.commitPage");
+      await page.evaluate(() => {
+        const harness = window.__atlasData as unknown as Record<
+          string,
+          unknown
+        >;
+        harness.releaseEnginePlan = () => undefined;
+      });
+      await saved.settled();
+    });
+  });
+
+  test("S17 shape: a successful join, then a genuine assertion fails: the assertion is the case's only error", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch("the saved edit", () =>
+        editDraft(page, "saved"),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      expect(await saved.settled()).toMatchObject({ kind: "edited" });
+      expect("fixed.1", "the probe's intended assertion").not.toBe("fixed.1");
+    });
+  });
+
+  test("S18 shape: an expected rejection whose message is not the expected one: the matcher's assertion is the case's only error", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const call = holds.launch("the failing edit", () =>
+        failingEdit(page, "saved"),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      await expect(call.expectRejection()).rejects.toThrow(
+        "a message the operation never had",
+      );
+    });
+  });
+
+  test("S19 shape: a rejection handed over by `settled()` and handled, then a genuine assertion fails: observing is not expecting, so the case is an error", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const call = holds.launch("the failing edit", () =>
+        failingEdit(page, "saved"),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      await call.settled().catch(() => undefined);
+      expect("fixed.1", "the probe's intended assertion").not.toBe("fixed.1");
+    });
+  });
+
+  test("S20 shape: an expected rejection asserted by its matcher, then a different genuine assertion fails: the assertion is the case's only error", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const call = holds.launch("the failing edit", () =>
+        failingEdit(page, "saved"),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      await expect(call.expectRejection()).rejects.toThrow(
+        "probe operation failure after edited",
+      );
+      expect("fixed.1", "the probe's intended assertion").not.toBe("fixed.1");
+    });
+  });
+
+  test("S21 shape: an expected rejection, reading like an assertion, escapes the body unasserted: it is the body's failure, so it is witnessed and the case is an error", async ({
+    context,
+  }) => {
+    const page = await queued(context);
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const call = holds.launch("the assertion-like failure", () =>
+        assertionLikeFailure(page, "saved"),
+      );
+      await hold.untilHeld();
+      await hold.release();
+      await call.expectRejection();
     });
   });
 

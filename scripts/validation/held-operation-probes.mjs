@@ -15,11 +15,17 @@
 //    own (never a timeout or a crash), in a complete run (one attempt, the exact cases discovered).
 // The source fingerprint must be unchanged at the end. One worker, no retries; a failed control stops the run
 // before any mutant. Nothing is cached.
+//
+// Revision 22 (review r21 R21-N1; design assessment 58bc72cc Q2-Q4, Q10): each shape probe's oracle also
+// requires the whole-mutant verdict of the UNCHANGED `classifyMutant` over that probe's cases (all engines,
+// with and without a matching case expectation): a catch exactly for the genuine assertion shapes (S1, S7,
+// S17, S18, S20) and never for a shape whose failure involves an operation's runtime failure. P14/P15 and
+// S10-S21 qualify the runtime-origin witness (H7); HM10-HM14 remove or misapply it.
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort } from "../integration/free-port.mjs";
-import { inspectReport } from "./engine-results.mjs";
+import { classifyMutant, inspectReport } from "./engine-results.mjs";
 import { fingerprint, json, newRun, processes } from "./runtime.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -50,6 +56,8 @@ const CASES = {
   P11: 1,
   P12: 1,
   P13: 1,
+  P14: 1,
+  P15: 1,
   S1: 1,
   S2: 1,
   S3: 1,
@@ -59,6 +67,41 @@ const CASES = {
   S7: 1,
   S8: 1,
   S9: 1,
+  S10: 1,
+  S11: 1,
+  S12: 1,
+  S13: 1,
+  S14: 1,
+  S15: 1,
+  S16: 1,
+  S17: 1,
+  S18: 1,
+  S19: 1,
+  S20: 1,
+  S21: 1,
+};
+
+/** The shapes the unchanged whole-mutant reader must accept as a catch: a genuine assertion alone. Every other shape must be refused. */
+const CATCHES = new Set(["S1", "S7", "S17", "S18", "S20"]);
+/** The operation each witnessed shape (H7) must name, by call id, and the text its escaped first error keeps. */
+const WITNESSED = {
+  S10: { calls: ["s1.c1"], first: "inside the operation" },
+  S11: { calls: ["s1.c1"], first: "probe operation failure after edited" },
+  S12: { calls: ["s1.c1"], first: "inside the operation callback" },
+  S13: { calls: ["s1.c1"], first: "thrown synchronously" },
+  S14: { calls: ["s1.c1"], first: "as a string" },
+  S15: {
+    calls: ["s1.c1"],
+    first: "inside the operation",
+    cleanup: "the operation the second failure failed",
+  },
+  S16: {
+    calls: ["s1.c1"],
+    first: "inside the operation",
+    cleanup: "the harness answered a release with undefined",
+  },
+  S19: { calls: ["s1.c1"], first: "the probe's intended assertion" },
+  S21: { calls: ["s1.c1"], first: "inside the operation" },
 };
 
 /** What each probe must report: `null` when it does, otherwise why not. */
@@ -71,6 +114,40 @@ function oracle(id, c) {
       c.status === "passed" && c.errors.length === 0,
       `control ${c.status} with ${c.errors.length} error(s)`,
     );
+  // The unchanged reader's whole-mutant verdict over this probe's cases (computed once per probe in `probes`).
+  if (c.verdict !== (CATCHES.has(id) ? "caught" : "refused"))
+    return `${id}: the whole-mutant reader's verdict is ${c.verdict}`;
+  const ledger = c.attachments["held-operations"];
+  if (CATCHES.has(id) && ledger !== undefined && ledger.escaped?.length !== 0)
+    return `${id}: a genuine assertion shape witnessed ${JSON.stringify(ledger.escaped)}`;
+  const witnessed = WITNESSED[id];
+  if (witnessed !== undefined) {
+    const last = text(c.errors.length - 1);
+    const scope = ledger?.scopes?.[0];
+    const call = scope?.calls?.[0];
+    return need(
+      c.status === "failed" &&
+        c.errors.length === 2 &&
+        c.errors[1].kind === "error" &&
+        c.kind === "error" &&
+        text(0).includes(witnessed.first) &&
+        last.includes("held-operation runtime failure") &&
+        witnessed.calls.every((callId) =>
+          last.includes(`operation ${callId} (`),
+        ) &&
+        // The witness never repeats the rejection's text.
+        !last.includes(witnessed.first) &&
+        last.includes("held-operation cleanup failed") ===
+          (witnessed.cleanup !== undefined) &&
+        (witnessed.cleanup === undefined || last.includes(witnessed.cleanup)) &&
+        JSON.stringify(scope?.escaped) === JSON.stringify(witnessed.calls) &&
+        ledger?.escaped?.length === witnessed.calls.length &&
+        call?.state === "rejected" &&
+        call?.joined === true &&
+        typeof call?.rejection?.message === "string",
+      `${id}: ${c.status} [${kinds}] case ${c.kind}; first ${JSON.stringify(text(0).split("\n")[0])}; last ${JSON.stringify(last.split("\n")[0])}; scope escaped ${JSON.stringify(scope?.escaped)}`,
+    );
+  }
   switch (id) {
     case "S1": {
       const ledger = c.attachments["held-operations"];
@@ -126,6 +203,29 @@ function oracle(id, c) {
           ),
         `S6: ${c.status} case ${c.kind} [${kinds}]`,
       );
+    case "S17":
+    case "S18":
+    case "S20": {
+      const scope = ledger?.scopes?.[0];
+      const call = scope?.calls?.[0];
+      const expected = {
+        S17: { first: "the probe's intended assertion", state: "fulfilled" },
+        S18: { first: "a message the operation never had", state: "rejected" },
+        S20: { first: "the probe's intended assertion", state: "rejected" },
+      }[id];
+      return need(
+        c.status === "failed" &&
+          kinds === "assertion" &&
+          c.kind === "assertion" &&
+          text(0).includes(expected.first) &&
+          ledger?.errors?.length === 0 &&
+          ledger?.escaped?.length === 0 &&
+          call?.state === expected.state &&
+          call?.joined === true &&
+          call?.rejectionExpected === (id !== "S17"),
+        `${id}: ${c.status} [${kinds}] case ${c.kind}; first ${JSON.stringify(text(0).split("\n")[0])}; ledger ${JSON.stringify({ errors: ledger?.errors, escaped: ledger?.escaped })}`,
+      );
+    }
     case "S7":
       return need(
         c.status === "failed" &&
@@ -182,8 +282,8 @@ const MUTANTS = [
     patch: (t) =>
       sub(
         t,
-        "if (!settled.ok) throw settled.error;",
-        "if (!settled.ok) return undefined as T;",
+        'event: "rejection-delivered" });\n            throw settled.error;',
+        'event: "rejection-delivered" });\n            return undefined as T;',
       ),
   },
   {
@@ -192,12 +292,7 @@ const MUTANTS = [
       "a failed body's cleanup failures are dropped (never reach the ledger)",
     file: HELPER,
     probes: ["P07", "S3", "S5"],
-    patch: (t) =>
-      sub(
-        t,
-        "ledger.errors.push(...(await finalise(true)));",
-        "await finalise(true);",
-      ),
+    patch: (t) => sub(t, "    ledger.errors.push(...problems);\n", ""),
   },
   {
     id: "HM5",
@@ -232,12 +327,63 @@ const MUTANTS = [
       ),
   },
   {
+    id: "HM10",
+    title:
+      "an explicitly joined rejection that escapes the body is not witnessed (the R21-N1 defect)",
+    file: HELPER,
+    probes: ["S10", "S11", "S12", "S13", "S14", "S21"],
+    patch: (t) =>
+      sub(
+        t,
+        "        failed !== null &&\n        (call.rejectionsDelivered",
+        "        failed === Symbol.for(String(failed)) &&\n        (call.rejectionsDelivered",
+      ),
+  },
+  {
+    id: "HM11",
+    title:
+      "a rejection `settled()` handed to the body is witnessed only when it is the body's failure (observing taken for expecting)",
+    file: HELPER,
+    probes: ["P15", "S19"],
+    patch: (t) =>
+      sub(
+        t,
+        "(call.rejectionsDelivered > 0 || carries(",
+        "(call.rejectionsDelivered < 0 || carries(",
+      ),
+  },
+  {
+    id: "HM12",
+    title:
+      "the body's failure is never matched to an operation's rejection (only deliveries by `settled()` are witnessed)",
+    file: HELPER,
+    probes: ["S21"],
+    patch: (t) =>
+      sub(
+        t,
+        "    if (current === error) return true;",
+        "    if (current === Symbol.for(String(error))) return true;",
+      ),
+  },
+  {
+    id: "HM13",
+    title:
+      "an expected rejection is witnessed like any other (`expectRejection()` counted as a delivery)",
+    file: HELPER,
+    probes: ["P14", "S20"],
+    patch: (t) =>
+      sub(
+        t,
+        "          call.rejectionExpected = true;\n",
+        "          call.rejectionExpected = true;\n          call.rejectionsDelivered += 1;\n",
+      ),
+  },
+  {
     id: "HM7",
     title: "the ledger is attached but its failures are never reported",
     file: LEDGER,
-    probes: ["S3", "S4", "S5", "S6"],
-    patch: (t) =>
-      sub(t, "  if (errors.length > 0)", "  if (errors.length < 0)"),
+    probes: ["S3", "S4", "S5", "S6", "S10"],
+    patch: (t) => sub(t, "  if (parts.length > 0)", "  if (parts.length < 0)"),
   },
   {
     id: "HM8",
@@ -247,6 +393,18 @@ const MUTANTS = [
     probes: ["S8", "S9"],
     patch: (t) =>
       sub(t, '  text.replaceAll("expect(", "expect (");', "  text;"),
+  },
+  {
+    id: "HM14",
+    title: "the ledger's runtime-origin witnesses are never published",
+    file: LEDGER,
+    probes: ["S10", "S12", "S15", "S16"],
+    patch: (t) =>
+      sub(
+        t,
+        "    ...(ledger.escaped.length > 0",
+        "    ...(ledger.escaped.length < 0",
+      ),
   },
   {
     id: "FM1",
@@ -515,20 +673,55 @@ async function probes(url, cwd, ids, directory) {
   const got = cases.map((c) => `${c.engine}::${c.id}`);
   const inventory =
     JSON.stringify([...got].sort()) === JSON.stringify([...expected].sort());
-  const judged = cases.map((c) => ({
-    engine: c.engine,
-    id: c.id,
-    title: c.title,
-    status: c.status,
-    attempts: c.attempts,
-    kind: c.kind,
-    errors: c.errors,
-    deviation: oracle(c.id, c),
-  }));
+  // The unchanged reader's whole-mutant verdict for each shape probe, as `run-engine-mutants.mjs` would reach it if the probe's cases were
+  // a mutant's: with a case expectation matching the probe's title and without one; "caught" only when both catch.
+  const verdicts = {};
+  for (const id of ids.filter((i) => i.startsWith("S"))) {
+    const mine = cases.filter((c) => c.id === id);
+    const subset = {
+      code: result.code,
+      complete: inspected.complete && mine.length === browsers.length,
+      cases: mine,
+      failures: mine.filter((c) => c.status !== "passed"),
+      failed: mine.filter((c) => c.status !== "passed").map((c) => c.engine),
+      passed: mine.filter((c) => c.status === "passed").map((c) => c.engine),
+    };
+    const matching = classifyMutant(
+      { expect: { source: `(?:^|\\s)${id}\\s`, flags: "" } },
+      subset,
+      browsers,
+    );
+    const any = classifyMutant({}, subset, browsers);
+    verdicts[id] = {
+      verdict:
+        matching.caught && any.caught
+          ? "caught"
+          : !matching.caught && !any.caught
+            ? "refused"
+            : "inconsistent",
+      matching,
+      any,
+    };
+  }
+  const judged = cases.map((c) => {
+    const verdict = verdicts[c.id]?.verdict;
+    return {
+      engine: c.engine,
+      id: c.id,
+      title: c.title,
+      status: c.status,
+      attempts: c.attempts,
+      kind: c.kind,
+      errors: c.errors,
+      verdict,
+      deviation: oracle(c.id, { ...c, verdict }),
+    };
+  });
   return {
     exit: result.code,
     complete: inspected.complete && inventory,
     inventory_matches: inventory,
+    verdicts,
     cases: judged,
   };
 }

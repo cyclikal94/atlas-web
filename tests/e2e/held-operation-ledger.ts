@@ -21,14 +21,32 @@ export interface HoldRecord {
   released: boolean;
   events: TraceEvent[];
 }
+/** An operation's rejection as it really was, for the attachment only: never part of an error's text (see `HeldOperationLedger.escaped`). */
+export interface RejectionRecord {
+  /** The error's `name` (`Error`, `TypeError`, ...), or `typeof` for a value that is not an Error. */
+  type: string;
+  message: string;
+  stack?: string;
+}
 export interface CallRecord {
+  /** Stable within the case: `s<scope>.c<call>`, in launch order. */
+  id: string;
   name: string;
   state: "pending" | "fulfilled" | "rejected";
+  /** The body or the cleanup awaited the outcome. Proves observation only: it says nothing about whether a rejection was expected. */
   joined: boolean;
+  /** How many times `settled()` handed the body this call's rejection (revision 22, R21-N1). */
+  rejectionsDelivered: number;
+  /** `expectRejection()` handed the body the outcome: the case declared that this operation should reject. */
+  rejectionExpected: boolean;
+  /** The first line of the rejection's message (as before). */
   error?: string;
+  rejection?: RejectionRecord;
   events: TraceEvent[];
 }
 export interface ScopeRecord {
+  /** Stable within the case: `s<n>`, in the order the scopes began. */
+  id: string;
   holds: HoldRecord[];
   calls: CallRecord[];
   finalised: boolean;
@@ -36,11 +54,21 @@ export interface ScopeRecord {
   bodyFailed?: boolean;
   /** What the cleanup found wrong, in order (also in the ledger's `errors` when the body failed). */
   problems: string[];
+  /** The ids of the calls whose rejection reached the failed body (also in the ledger's `escaped`). */
+  escaped?: string[];
 }
-/** The holds and operations of one case, and the cleanup failures it must report separately. */
+/** The holds and operations of one case, and the failures it must report separately. */
 export interface HeldOperationLedger {
   scopes: ScopeRecord[];
+  /** Cleanup failures: a release, a join or an unjoined operation that failed. */
   errors: string[];
+  /**
+   * Revision 22 (review r21 R21-N1): runtime-origin witnesses. A failed body that `settled()` had handed an operation's rejection (or whose
+   * failure IS an operation's rejection) is rethrown unchanged, so the case's first error is that rejection's own text, which the all-error
+   * reader can read as an assertion (`Error: expect(`). Each witness is a neutral statement that the case's failure involves an operation's
+   * runtime failure: it names the call by its id and never carries the rejection's message or stack, which stay in the attachment.
+   */
+  escaped: string[];
 }
 
 const ledgers = new WeakMap<TestInfo, HeldOperationLedger>();
@@ -50,7 +78,7 @@ export function heldOperationLedger(
 ): HeldOperationLedger {
   let ledger = ledgers.get(info);
   if (ledger === undefined) {
-    ledger = { scopes: [], errors: [] };
+    ledger = { scopes: [], errors: [], escaped: [] };
     ledgers.set(info, ledger);
   }
   return ledger;
@@ -59,6 +87,7 @@ export function heldOperationLedger(
 export const privateLedger = (): HeldOperationLedger => ({
   scopes: [],
   errors: [],
+  escaped: [],
 });
 
 /**
@@ -71,9 +100,10 @@ export const notAnAssertion = (text: string): string =>
 
 /**
  * The `heldOperations` fixture's teardown (tests/e2e/helpers.ts): attaches what every scope of the case did and, as ONE error of its own,
- * every cleanup failure, every scope that never finished (a case interrupted or timed out while it held an answer) and every operation a
- * finished scope never joined (its cleanup must have awaited it: a later settlement is not ownership). The text never
- * carries a body failure's message, and it passes through `notAnAssertion`.
+ * every cleanup failure, every scope that never finished (a case interrupted or timed out while it held an answer), every operation a
+ * finished scope never joined (its cleanup must have awaited it: a later settlement is not ownership) and every runtime-origin witness
+ * (an operation's rejection that reached the failed body). The text never carries a body failure's or a rejection's message, and it
+ * passes through `notAnAssertion`, so the reader always sees this error as an `error`: a case with one is never an assertion-only case.
  */
 export async function publishHeldOperations(info: TestInfo): Promise<void> {
   const ledger = ledgers.get(info);
@@ -98,8 +128,13 @@ export async function publishHeldOperations(info: TestInfo): Promise<void> {
           `the operation ${call.name} was never joined by its scope (${call.state})`,
       ),
   ];
-  if (errors.length > 0)
-    throw new Error(
-      notAnAssertion(`held-operation cleanup failed: ${errors.join(" | ")}`),
-    );
+  const parts = [
+    ...(errors.length > 0
+      ? [`held-operation cleanup failed: ${errors.join(" | ")}`]
+      : []),
+    ...(ledger.escaped.length > 0
+      ? [`held-operation runtime failure: ${ledger.escaped.join(" | ")}`]
+      : []),
+  ];
+  if (parts.length > 0) throw new Error(notAnAssertion(parts.join(" || ")));
 }
