@@ -30,6 +30,9 @@ import { PendingBadge, useOutboxSave } from "../parts";
 import { OutstandingChain, ResourceScan } from "../reads";
 import { archivedLedgerKinds } from "./ledger";
 
+/** "Kind | Name | Restore" (inline: a one-off column template would add a rule to the shared production stylesheet). */
+const ARCHIVED_COLUMNS = { gridTemplateColumns: "96px minmax(0, 1fr) auto" };
+
 /**
  * Settings → "Archived items" (Q21 gap 9, `archive-restore.html`; D-11a-11): "Kind | Name" with "Restore" per row, no date column (the
  * projection has no `archived_at`). People and fields are WEB-11a's kinds; other slices add theirs through `archivedLedgerKinds`. A field
@@ -85,7 +88,8 @@ function Ledger({ headingId }: { headingId: string }) {
       </h2>
       <div
         aria-hidden="true"
-        className="grid grid-cols-[96px_minmax(0,1fr)_auto] gap-3 px-3 text-[12px] text-ink-2"
+        className="grid gap-3 px-3 text-[12px] text-ink-2"
+        style={ARCHIVED_COLUMNS}
       >
         <span>{copy.COLUMN_KIND}</span>
         <span>{copy.COLUMN_NAME}</span>
@@ -124,7 +128,8 @@ function LedgerRow({
   return (
     <li
       data-archived-row={shown.row.id}
-      className="grid list-none grid-cols-[96px_minmax(0,1fr)_auto] items-center gap-3 rounded-row border border-hairline px-3 py-2"
+      className="grid list-none items-center gap-3 rounded-row border border-hairline px-3 py-2"
+      style={ARCHIVED_COLUMNS}
     >
       <span className="text-[12.5px] text-ink-2">{kindLabel}</span>
       <span className="flex min-w-0 flex-col gap-1">

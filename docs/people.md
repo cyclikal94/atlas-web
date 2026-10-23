@@ -121,6 +121,34 @@ reopens it with its draft), and `/settings/archived`.
   read of that field's own copies); one it cannot end is kept, and said so. The held list is a bounded page of `readFormCopies` with "Show
   more held changes"/"Back to the first": its keyset cursor (`[form_context, tab_instance_id]`) crosses ranges of terminal rows of any
   length, and an empty page with a cursor is never "nothing held".
+- **D-11a-12b** (review 3 of 22 October 2026, findings 1 and 2; the second design assessment's C3a-C3c) Three corrections of the hold's
+  lifecycle (`field/held.ts`):
+  - **Leaving is not discarding.** A run stops at its next admission boundary when its row leaves the page (another person, the list,
+    another page of held changes) or another identity is displayed, and ends NOTHING (`suspended`): the input stays as stored, an admitted
+    policy attempt and its answer are written as progress (same identity only), and an admitted content step that queued nothing is
+    withdrawn. Only the person's Discard (here or in another page), a replacement or a completed content hand-off ends a hold. With this
+    page's authority (D1) it runs again when its row is shown again.
+  - **One current hold per field.** "Hold as draft" is ONE operation under the field's lock, from before the new copy is written until its
+    earlier holds are retired (`holdChange`): it reads every live hold of the field (bounded), writes the new one as the field's next
+    generation (`seq`, in the same write as its content; copies of the first shapes are generation 0), and only while the new copy is still
+    stored as written retires the earlier ones, each from the state it was read in. A taken lock writes nothing and keeps the edit open
+    ("Another change to this field is being saved or sent. Try again in a moment."); an incomplete read writes nothing. A run runs only
+    the field's current hold: an earlier hold still kept (a page closed between the two steps, a refused retirement) is retired by the
+    run that finds the later one, never run; the current hold's run retires such leftovers first. Copies this page cannot read are kept
+    (shown, discardable, never run; explicit Discard ends the copy as it is, by its digest).
+  - **An unresolved attempt outlives its content.** A hold whose policy step may have been made is never ended by a discard or a
+    replacement: it is RETIRED (`settleHold`), a reconciliation record that keeps the attempt, the audience asked for and its guard
+    version, with the content cleared, counted as unsynced local work like any form copy. It is shown as "An earlier change to who can see
+    {name} may already have been made. Check it to be sure." with "Check now" (one owner-only `GET /policies/{id}` under the field's lock;
+    nothing is sent; "Checked: who can see {name} was changed." when the policy now is the one asked for at a later version, else
+    "Checked: who can see {name} wasn't changed by it."; the record then ends) and "Discard" (forgets it). A new hold of EXACTLY the same
+    change (same policy version, same audience asked for) takes the attempt over (same key and body) and the earlier hold then ends; a
+    direct change of the same audience in the editor sends the kept attempt's key and body too. A retry of an identical attempt is sent only
+    while the hold is still stored as the run read it (a discard elsewhere wins, as it does against a write). No background policy change.
+- **D-11a-13a** (review 3 of 22 October 2026, finding 3; C6) The page's own policy read names a field's audience only while no later
+  policy version of the field is known (the cached row's `policy_version` or a version a summary applied), a late older read never
+  replaces a later one (`notePolicy`), closing the shared policy editor withdraws it (it may have changed the policy), and it is said with
+  the time it was read ("Checked at {time}"), never as live. Otherwise the button reads "Who can see it?".
 - **D1** (design assessment of 22 October 2026; answered "explicit Send now" in the Running session's question on 22 October 2026) A hold
   runs by itself only in the page that made it, or after the person chose "Send now" or "Try again" there (`memory.heldAuthority`). A
   recovered hold (after a reload, an account switch back, in another page, a legacy v1 copy, one whose discard could not be written) is shown

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
-import { applyPolicyChange } from "../../../src/features/sharing";
+import { applyPolicyChange } from "../../../src/features/sharing/apply-policy-change";
 import { fakeSharingApi, ok } from "../../support/sharing/fake-api";
 
 /**

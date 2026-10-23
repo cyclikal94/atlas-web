@@ -6,8 +6,14 @@ import type {
   EnqueueRequest,
   Outbox,
 } from "../../../src/data";
+import { createConditionalFormPort } from "../../../src/data/ports/conditional-form";
 import type { PeopleEnv } from "../../../src/features/people/env";
-import { runHeldChange } from "../../../src/features/people/field/held";
+import {
+  heldAttemptOf,
+  holdChange,
+  runHeldChange,
+  settleHold,
+} from "../../../src/features/people/field/held";
 import {
   decodeHeld,
   type HeldChange,
@@ -27,6 +33,12 @@ import {
   stillBound,
   successorFollows,
 } from "../../../src/features/people/model/snapshot";
+import { toWirePolicy } from "../../../src/features/sharing";
+import {
+  canonicalBody,
+  nextAttempt,
+} from "../../../src/features/sharing/model/submission";
+import { pageWorld } from "../../support/data/page-world";
 import { cacheRow, draftRow } from "../../support/data/rows";
 import { heldPortDouble } from "../../support/people/held-port";
 import { fakeSharingApi, ok } from "../../support/sharing/fake-api";
@@ -62,10 +74,13 @@ const held = (over: Partial<HeldChange> = {}): HeldChange => ({
   heldAt: "2026-10-13T09:00:00.000Z",
   rev: 0,
   queued: false,
+  seq: 0,
+  retired: false,
   ...over,
 });
 const CONTEXT = heldContextOf(P, F);
 const HOLD = held().holdId;
+const keyOfHeld = () => ({ personId: P, fieldId: F, holdId: HOLD });
 
 const field = (over: Partial<CacheRow> = {}): CacheRow =>
   cacheRow({
@@ -88,6 +103,7 @@ function world() {
       return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
     },
     memory: peopleMemory("acct:1"),
+    now: () => Date.parse("2026-10-22T09:00:00.000Z"),
     held: heldStoreOver(store.port, () => "2026-10-22T09:00:00.000Z"),
   } as unknown as PeopleEnv;
   const queued: Array<{ request: EnqueueRequest; command: unknown }> = [];
@@ -221,6 +237,7 @@ describe("runHeldChange: ownership (finding 2)", () => {
       kind: "cancelled",
       policy: "none",
       ended: true,
+      retired: false,
       attempt: null,
     });
     expect(w.sharing.sent).toEqual([]);
@@ -262,6 +279,7 @@ describe("runHeldChange: ownership (finding 2)", () => {
       kind: "cancelled",
       policy: "done",
       ended: true,
+      retired: false,
       attempt: null,
     });
     expect(w.queued).toEqual([]);
@@ -276,6 +294,7 @@ describe("runHeldChange: ownership (finding 2)", () => {
       kind: "cancelled",
       policy: "none",
       ended: true,
+      retired: false,
       attempt: null,
     });
     expect(w.sharing.calls).toEqual([]);
@@ -304,6 +323,7 @@ describe("runHeldChange: ownership (finding 2)", () => {
       kind: "cancelled",
       policy: "none",
       ended: true,
+      retired: false,
       attempt: null,
     });
     expect(w.sharing.sent).toEqual([]);
@@ -423,18 +443,23 @@ describe("runHeldChange: ownership (finding 2)", () => {
       kind: "cancelled",
       policy: "none",
       ended: false,
+      retired: false,
       attempt: null,
     });
     expect(w.storedHeld()).not.toBeNull();
   });
 
+  // Adapted in revision 3 (review 3, finding 1): this case asserted only that nothing more is sent, and expected the hold `cancelled`
+  // (ended) while it did so. Leaving the page is not a discard: the run is `suspended` and the hold stays exactly as it was stored.
   test("navigated away (the row unmounted): nothing more is sent", async () => {
     const w = world();
     const shown = await w.hold();
     w.unmount();
     const result = await runHeldChange(w.env, shown, w.run, w.deps);
-    expect(result).toMatchObject({ kind: "cancelled", policy: "none" });
+    expect(result).toEqual({ kind: "suspended" });
     expect(w.sharing.calls).toEqual([]);
+    expect(w.stored()?.terminal).toBe(false);
+    expect(w.storedHeld()).toEqual(shown.change);
   });
 });
 
@@ -589,5 +614,609 @@ describe("an edit's snapshot (finding 1)", () => {
     expect(
       successorFollows(null, { latestLocalId: null, latestDigest: null }, []),
     ).toBe(true);
+  });
+});
+
+// ---- review 3 of 22 October 2026 (findings 1 and 2; the design assessment's C3a/C3b/C3c, schedules H1-H11) --------------------------
+
+/** The held store over the REAL conditional port and the real W9 plans, on the IndexedDB double (the reviewer's composition). */
+async function realHeld(w: ReturnType<typeof world>) {
+  const real = await pageWorld();
+  const now = () => "2026-10-22T12:00:00.000Z";
+  w.env.held = heldStoreOver(
+    createConditionalFormPort({ service: () => real.service, now }),
+    now,
+  );
+  return real;
+}
+
+/** A field lock as Web Locks' `ifAvailable` answers it: taken while held, null for anyone else meanwhile. */
+function locks() {
+  const taken = new Set<string>();
+  return {
+    taken,
+    exclusive: async <T>(
+      name: string,
+      go: () => Promise<T>,
+    ): Promise<T | null> => {
+      if (taken.has(name)) return null;
+      taken.add(name);
+      try {
+        return await go();
+      } finally {
+        taken.delete(name);
+      }
+    },
+  };
+}
+
+/** A people env for the replacement protocol: the world's store, a lock and the account. */
+function holder(w: ReturnType<typeof world>) {
+  const lock = locks();
+  Object.assign(w.env, { accountId: "acct", exclusive: lock.exclusive });
+  return lock;
+}
+
+const live = async (w: ReturnType<typeof world>) =>
+  ((await w.env.held.list(P, F, null))?.copies ?? []).map(decodeHeld);
+
+const fresh = (holdId: string, text: string) => {
+  const {
+    seq: _seq,
+    retired: _retired,
+    attempt: _attempt,
+    ...rest
+  } = held({
+    holdId,
+    value: { kind: "text", text },
+  });
+  return rest;
+};
+
+describe("review 3 finding 1: leaving the page is not a discard (H1, H3, H11)", () => {
+  for (const leave of ["route", "discard", "stay"] as const)
+    test(`real port, the first policy read held: ${leave === "route" ? "navigating away keeps the hold byte for byte and sends nothing" : leave === "discard" ? "control: an explicit Discard at the same moment ends it" : "control: staying on the page runs it once"}`, async () => {
+      const w = world();
+      await realHeld(w);
+      const shown = await w.hold();
+      const blocked = pending();
+      w.sharing.next.policy.push(
+        blocked.answer,
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      const task = runHeldChange(w.env, shown, w.run, w.deps);
+      await until(() => w.sharing.calls.length === 1);
+      if (leave === "route") w.unmount();
+      if (leave === "discard") w.run.cancelled = true;
+      blocked.release(ok({ version: 6, policy: HOME_VIEW }));
+      const result = await task;
+      const stored = await w.env.held.read(keyOfHeld());
+      if (leave === "stay") {
+        expect(result).toEqual({ kind: "done", ended: true });
+        expect(stored.kind).toBe("ended");
+        expect(w.queued).toHaveLength(1);
+        return;
+      }
+      expect(w.sharing.sent).toEqual([]);
+      expect(w.queued).toEqual([]);
+      if (leave === "discard") {
+        expect(result).toMatchObject({ kind: "cancelled", ended: true });
+        expect(stored.kind).toBe("ended");
+        return;
+      }
+      expect(result).toEqual({ kind: "suspended" });
+      expect(stored.kind).toBe("live");
+      if (stored.kind !== "live") return;
+      // Its input, edit snapshot and audience asked for are exactly the ones held (only its state number moved, with a write of progress).
+      const { rev: _a, ...kept } = stored.copy.change;
+      const { rev: _b, ...asHeld } = shown.change;
+      expect(kept).toEqual(asHeld);
+    });
+
+  test("left AFTER its attempt was admitted (while replace_policy was on its way): the attempt stays with the hold, nothing ends", async () => {
+    const w = world();
+    const shown = await w.hold();
+    const sent = pending();
+    w.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    w.sharing.next.management.push(sent.answer);
+    const task = runHeldChange(w.env, shown, w.run, w.deps);
+    await until(() => w.sharing.sent.length === 1);
+    w.unmount();
+    sent.release(ok({ revision: 1 }));
+    expect(await task).toEqual({ kind: "suspended" });
+    const kept = w.storedHeld();
+    expect(kept?.attempt?.key).toBe(w.sharing.sent[0]?.key);
+    expect(kept).toMatchObject({ queued: false, retired: false });
+    expect(w.stored()?.terminal).toBe(false);
+    expect(w.queued).toEqual([]);
+  });
+
+  test("left while its CONFIRMING read was on its way: the progress known so far is written, no content is queued, nothing ends", async () => {
+    const w = world();
+    const shown = await w.hold();
+    const confirm = pending();
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      confirm.answer,
+    );
+    const task = runHeldChange(w.env, shown, w.run, w.deps);
+    await until(() => w.sharing.calls.length === 3);
+    w.unmount();
+    confirm.release(ok({ version: 7, policy: PRIVATE }));
+    expect(await task).toEqual({ kind: "suspended" });
+    // The confirmation was never applied by a stopped run (`isCurrent`): the attempt is kept as uncertain, never dropped.
+    expect(w.storedHeld()?.attempt?.key).toBe(w.sharing.sent[0]?.key);
+    expect(w.stored()?.terminal).toBe(false);
+    expect(w.queued).toEqual([]);
+  });
+
+  test("left inside the content step's transaction: its build refuses, the admission is withdrawn, the hold is kept with its confirmed audience", async () => {
+    const w = world();
+    const shown = await w.hold();
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    w.onBeforeWrite(() => w.unmount());
+    expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
+      kind: "suspended",
+    });
+    expect(w.queued).toEqual([]);
+    expect(w.storedHeld()).toMatchObject({
+      queued: false,
+      from: { version: 7, policy: PRIVATE },
+      attempt: null,
+      value: { kind: "text", text: "Secret" },
+    });
+  });
+
+  test("after a stop with its audience confirmed, the next run (back on the page) only queues the content, once", async () => {
+    const w = world();
+    const shown = await w.hold();
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    w.onBeforeWrite(() => w.unmount());
+    await runHeldChange(w.env, shown, w.run, w.deps);
+    const again = w.storedHeld() as HeldChange;
+    const row = w.stored();
+    const w2 = { ...w.deps, mounted: () => true };
+    w.onBeforeWrite(() => {});
+    expect(
+      await runHeldChange(
+        w.env,
+        { change: again, digest: row?.content_digest ?? "" },
+        { holdId: HOLD, cancelled: false, policyDone: false },
+        w2,
+      ),
+    ).toEqual({ kind: "done", ended: true });
+    expect(w.sharing.sent).toHaveLength(1);
+    expect(w.queued).toHaveLength(1);
+    expect(w.queued[0]?.command).toMatchObject({
+      command: { expected_policy_version: 7 },
+    });
+  });
+
+  test("another identity is displayed while its policy read is on its way: nothing more is written or sent, the hold is kept", async () => {
+    const w = world();
+    const shown = await w.hold();
+    const read = pending();
+    w.sharing.next.policy.push(read.answer);
+    const task = runHeldChange(w.env, shown, w.run, w.deps);
+    await until(() => w.sharing.calls.length === 1);
+    const writes = w.store.writes.length;
+    peopleMemory("acct:2");
+    read.release(ok({ version: 6, policy: HOME_VIEW }));
+    expect(await task).toEqual({ kind: "suspended" });
+    expect(w.store.writes).toHaveLength(writes);
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.storedHeld()).toEqual(shown.change);
+  });
+});
+
+describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
+  test("two pages' saves cannot interleave: while one holds the field's lock the other writes nothing (busy), and the later save replaces the first", async () => {
+    const w = world();
+    holder(w);
+    const gate = pending();
+    let paused = false;
+    w.store.beforeList(() => {
+      paused = true;
+    });
+    // A is inside its operation (its read of the field's holds is held): B's save finds the lock taken.
+    const listing = w.env.held.list.bind(w.env.held);
+    let first = true;
+    w.env.held = {
+      ...w.env.held,
+      list: async (...args) => {
+        if (first) {
+          first = false;
+          await gate.answer();
+        }
+        return listing(...args);
+      },
+    };
+    const a = holdChange(w.env, fresh("hold-a", "First"));
+    // A has begun its read of the field's holds (inside its operation).
+    await until(() => !first);
+    expect(await holdChange(w.env, fresh("hold-b", "Second"))).toEqual({
+      kind: "busy",
+    });
+    expect(w.store.writes).toEqual([]);
+    gate.release(undefined);
+    expect(await a).toMatchObject({ kind: "held", complete: true });
+    expect(await holdChange(w.env, fresh("hold-b", "Second"))).toMatchObject({
+      kind: "held",
+      complete: true,
+    });
+    expect((await live(w)).map((h) => [h?.holdId, h?.value, h?.seq])).toEqual([
+      ["hold-b", { kind: "text", text: "Second" }, 2],
+    ]);
+    expect(paused).toBe(true);
+  });
+
+  test("control: two saves one after the other keep the second, the first retired from the state it was read in", async () => {
+    const w = world();
+    holder(w);
+    expect((await holdChange(w.env, fresh("hold-a", "First"))).kind).toBe(
+      "held",
+    );
+    expect((await holdChange(w.env, fresh("hold-b", "Second"))).kind).toBe(
+      "held",
+    );
+    expect((await live(w)).map((h) => h?.holdId)).toEqual(["hold-b"]);
+    expect(w.env.memory.heldEnded.has("hold-a")).toBe(true);
+  });
+
+  test("real port: the reviewer's create A, create B, then each one's cleanup, can no longer erase both (an earlier hold left by a cut-short save is retired by the later one's run, never the reverse)", async () => {
+    const w = world();
+    await realHeld(w);
+    holder(w);
+    // A cut-short replacement: B is the field's current hold (generation 2), A (1) is still kept.
+    const a = await w.env.held.create(
+      held({
+        holdId: "hold-a",
+        value: { kind: "text", text: "First" },
+        seq: 1,
+      }),
+    );
+    const b = await w.env.held.create(
+      held({
+        holdId: "hold-b",
+        value: { kind: "text", text: "Second" },
+        seq: 2,
+      }),
+    );
+    if (a.kind !== "saved" || b.kind !== "saved") throw new Error("setup");
+    // A's run (a page that still shows A): it is not run; it is retired as B's predecessor.
+    expect(
+      await runHeldChange(
+        w.env,
+        a.copy,
+        { ...w.run, holdId: "hold-a" },
+        w.deps,
+      ),
+    ).toEqual({ kind: "superseded", ended: true, retired: false });
+    expect(w.sharing.calls).toEqual([]);
+    // B's run then runs B.
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    expect(
+      await runHeldChange(
+        w.env,
+        b.copy,
+        { ...w.run, holdId: "hold-b" },
+        w.deps,
+      ),
+    ).toEqual({ kind: "done", ended: true });
+    expect(w.queued.map((q) => q.request.localId)).toEqual(["hold-b"]);
+  });
+
+  test("the current hold's run retires an earlier one a closed page left, then runs", async () => {
+    const w = world();
+    holder(w);
+    await w.env.held.create(held({ holdId: "hold-a", seq: 1 }));
+    const b = await w.env.held.create(held({ holdId: "hold-b", seq: 2 }));
+    if (b.kind !== "saved") throw new Error("setup");
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    expect(
+      await runHeldChange(
+        w.env,
+        b.copy,
+        { ...w.run, holdId: "hold-b" },
+        w.deps,
+      ),
+    ).toEqual({ kind: "done", ended: true });
+    expect(await live(w)).toEqual([]);
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+
+  test("a save whose new hold another page ended before its earlier ones were retired retires nothing and says so (changed)", async () => {
+    const w = world();
+    holder(w);
+    expect((await holdChange(w.env, fresh("hold-a", "First"))).kind).toBe(
+      "held",
+    );
+    const reading = w.env.held.read.bind(w.env.held);
+    w.env.held = {
+      ...w.env.held,
+      read: async (key) => {
+        if (key.holdId === "hold-b")
+          w.store.endElsewhere(heldContextOf(P, F), "hold-b");
+        return reading(key);
+      },
+    };
+    expect(await holdChange(w.env, fresh("hold-b", "Second"))).toEqual({
+      kind: "changed",
+    });
+    expect((await live(w)).map((h) => h?.holdId)).toEqual(["hold-a"]);
+  });
+
+  test("an earlier hold whose retirement is refused is kept (incomplete, said) and can never run: its run finds a later hold", async () => {
+    const w = world();
+    holder(w);
+    const a = await holdChange(w.env, fresh("hold-a", "First"));
+    w.store.failEnds.push("failed");
+    expect(await holdChange(w.env, fresh("hold-b", "Second"))).toMatchObject({
+      kind: "held",
+      complete: false,
+    });
+    if (a.kind !== "held") throw new Error("setup");
+    expect(
+      await runHeldChange(
+        w.env,
+        a.copy,
+        { ...w.run, holdId: "hold-a" },
+        w.deps,
+      ),
+    ).toEqual({ kind: "superseded", ended: true, retired: false });
+    expect(w.sharing.calls).toEqual([]);
+    expect((await live(w)).map((h) => h?.holdId)).toEqual(["hold-b"]);
+  });
+
+  test("copies of the first shape (generation 0) are retired by a new hold; an unreadable copy is kept and the save says so", async () => {
+    const w = world();
+    holder(w);
+    await w.env.held.create(held({ holdId: "old-1", seq: 0 }));
+    await w.env.held.create(held({ holdId: "old-2", seq: 0 }));
+    // A copy this page cannot read (a damaged value), put as another page wrote it.
+    w.store.rows.set(`${heldContextOf(P, F)}\u0000unreadable`, {
+      form_context: heldContextOf(P, F),
+      tab_instance_id: "unreadable",
+      fields: { held: "{not json" },
+      redacted: [],
+      saved_at: "2026-10-22T09:00:00.000Z",
+      capture_seq: 0,
+      writer_gen: Number.MAX_SAFE_INTEGER,
+      terminal: false,
+      content_digest: "d-unreadable",
+    });
+    expect(await holdChange(w.env, fresh("hold-n", "New"))).toMatchObject({
+      kind: "held",
+      complete: false,
+    });
+    expect(
+      (await w.env.held.list(P, F, null))?.copies.map((r) => r.tab_instance_id),
+    ).toEqual(["hold-n", "unreadable"]);
+    expect((await live(w)).find((h) => h?.holdId === "hold-n")?.seq).toBe(1);
+  });
+
+  test("the field's holds cannot all be read: nothing is kept (failed), the editor keeps the edit", async () => {
+    const w = world();
+    holder(w);
+    w.store.failLists.count = 1;
+    expect(await holdChange(w.env, fresh("hold-a", "First"))).toEqual({
+      kind: "failed",
+      refused: false,
+    });
+    expect(w.store.writes).toEqual([]);
+  });
+
+  test("a run that cannot read its field's holds does not run (it cannot know it is the current one)", async () => {
+    const w = world();
+    const shown = await w.hold();
+    w.store.failLists.count = 1;
+    expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
+      kind: "failed",
+      reason: "not_saved",
+      kept: false,
+    });
+    expect(w.sharing.calls).toEqual([]);
+  });
+});
+
+describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", () => {
+  // The attempt the runner itself builds for this change (the same key is reused only for a byte-identical body).
+  const ATTEMPT = nextAttempt(
+    null,
+    [
+      {
+        kind: "replace_policy",
+        id: F,
+        expected_version: 6,
+        policy: toWirePolicy(PRIVATE),
+      },
+    ],
+    () => "k-1",
+  );
+
+  test("discarded while its attempt is unresolved: RETIRED (attempt, audience asked for and guard kept, content cleared), never ended", async () => {
+    const w = world();
+    const shown = await w.hold(held({ attempt: ATTEMPT }));
+    const settled = await settleHold(w.env.held, shown);
+    expect(settled.kind).toBe("retired");
+    expect(w.storedHeld()).toMatchObject({
+      retired: true,
+      attempt: ATTEMPT,
+      to: PRIVATE,
+      from: { version: 6 },
+      value: { kind: "text", text: "" },
+    });
+    // A retired hold never runs.
+    const row = w.stored();
+    expect(
+      await runHeldChange(
+        w.env,
+        {
+          change: w.storedHeld() as HeldChange,
+          digest: row?.content_digest ?? "",
+        },
+        w.run,
+        w.deps,
+      ),
+    ).toEqual({ kind: "stale" });
+    expect(w.sharing.calls).toEqual([]);
+  });
+
+  test("control: a hold with nothing unresolved simply ends; a discarded reconciliation record ends", async () => {
+    const w = world();
+    const shown = await w.hold();
+    expect((await settleHold(w.env.held, shown)).kind).toBe("ended");
+    const w2 = world();
+    const retired = await w2.hold(held({ attempt: ATTEMPT }));
+    const record = await settleHold(w2.env.held, retired);
+    if (record.kind !== "retired") throw new Error("setup");
+    expect((await settleHold(w2.env.held, record.copy)).kind).toBe("ended");
+  });
+
+  test("a new hold of EXACTLY the same change takes the unresolved attempt over (same key and body) and the earlier one ends", async () => {
+    const w = world();
+    holder(w);
+    await w.env.held.create(
+      held({ holdId: "hold-a", seq: 1, attempt: ATTEMPT }),
+    );
+    const b = await holdChange(w.env, fresh("hold-b", "Second"));
+    expect(b).toMatchObject({ kind: "held", complete: true });
+    expect((await live(w)).map((h) => [h?.holdId, h?.attempt])).toEqual([
+      ["hold-b", ATTEMPT],
+    ]);
+    // Its run retries that exact attempt: the same key, the same body.
+    if (b.kind !== "held") throw new Error("setup");
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    await runHeldChange(w.env, b.copy, { ...w.run, holdId: "hold-b" }, w.deps);
+    expect(w.sharing.sent.map((s) => s.key)).toEqual([ATTEMPT.key]);
+  });
+
+  test("a new hold of ANOTHER change does not take it: the earlier hold is retired, its attempt kept on the device", async () => {
+    const w = world();
+    holder(w);
+    await w.env.held.create(
+      held({ holdId: "hold-a", seq: 1, attempt: ATTEMPT }),
+    );
+    const other = {
+      ...fresh("hold-b", "Second"),
+      to: HOME_VIEW,
+      from: { version: 6, policy: PRIVATE },
+    };
+    expect(await holdChange(w.env, other)).toMatchObject({
+      kind: "held",
+      complete: true,
+    });
+    const kept = await live(w);
+    expect(kept.map((h) => [h?.holdId, h?.retired, h?.attempt])).toEqual([
+      ["hold-a", true, ATTEMPT],
+      ["hold-b", false, null],
+    ]);
+  });
+
+  test("the attempt is found again after the page forgot everything (a reload), for a direct change of the same audience", async () => {
+    const w = world();
+    const shown = await w.hold(held({ attempt: ATTEMPT }));
+    await settleHold(w.env.held, shown);
+    forgetAllPeopleMemory();
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual(ATTEMPT);
+    expect(await heldAttemptOf(w.env, P, F, 6, HOME_VIEW)).toBeNull();
+  });
+
+  test("another page retires it after this run's attempt was admitted: this run is stale and queues nothing (the record keeps the attempt)", async () => {
+    const w = world();
+    const shown = await w.hold();
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    w.sharing.next.management.push(async () => {
+      const now = w.storedHeld() as HeldChange;
+      await settleHold(w.env.held, {
+        change: now,
+        digest: w.stored()?.content_digest ?? "",
+      });
+      return ok({ revision: 1 });
+    });
+    expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
+      kind: "stale",
+    });
+    expect(w.queued).toEqual([]);
+    expect(w.storedHeld()).toMatchObject({
+      retired: true,
+      attempt: { key: w.sharing.sent[0]?.key },
+    });
+  });
+
+  test("H7: a retry of the SAME attempt is not sent when another page ended the hold first (the fast path checks the stored state)", async () => {
+    const w = world();
+    const shown = await w.hold(held({ attempt: { key: "k-same", body: "" } }));
+    // The attempt the retry builds is byte-identical to the kept one only when its body is: build it the way the runner will.
+    const first = world();
+    const s1 = await first.hold();
+    first.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    first.sharing.next.management.push({
+      ok: false,
+      kind: "uncertain",
+    } as never);
+    await runHeldChange(first.env, s1, first.run, first.deps);
+    const kept = first.storedHeld() as HeldChange;
+    expect(kept.attempt).not.toBeNull();
+    const retry = await w.hold({
+      ...kept,
+      holdId: "hold-r",
+      rev: 0,
+      status: { kind: "waiting" },
+    });
+    w.sharing.next.policy.push(() => {
+      w.store.endElsewhere(heldContextOf(P, F), "hold-r");
+      return Promise.resolve(ok({ version: 6, policy: HOME_VIEW }));
+    });
+    expect(
+      await runHeldChange(w.env, retry, { ...w.run, holdId: "hold-r" }, w.deps),
+    ).toMatchObject({ kind: "cancelled", ended: true });
+    expect(w.sharing.sent).toEqual([]);
+    expect(shown.change.holdId).toBe(HOLD);
+  });
+
+  test("H7 control: the same retry with the hold untouched sends the kept key and byte-identical body", async () => {
+    const first = world();
+    const s1 = await first.hold();
+    first.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    first.sharing.next.management.push({
+      ok: false,
+      kind: "uncertain",
+    } as never);
+    await runHeldChange(first.env, s1, first.run, first.deps);
+    const kept = first.storedHeld() as HeldChange;
+    const w = world();
+    const retry = await w.hold({
+      ...kept,
+      holdId: "hold-r",
+      rev: 0,
+      status: { kind: "waiting" },
+    });
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    await runHeldChange(w.env, retry, { ...w.run, holdId: "hold-r" }, w.deps);
+    expect(w.sharing.sent).toHaveLength(1);
+    expect(w.sharing.sent[0]?.key).toBe(kept.attempt?.key);
+    expect(canonicalBody(w.sharing.sent[0]?.commands)).toBe(kept.attempt?.body);
   });
 });

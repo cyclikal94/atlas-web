@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useId, useState } from "react";
+import { type CSSProperties, type ReactNode, useId, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
@@ -33,6 +33,7 @@ import {
   audienceText,
   effectiveText,
   type FieldAudience,
+  policyShownFor,
   summaryCurrentFor,
 } from "../model/summary";
 import { Banner, PendingBadge, useOutboxSave } from "../parts";
@@ -44,7 +45,7 @@ import {
   type WalkedPages,
   walkPages,
 } from "../summaries";
-import { SummaryNotes } from "../summary-notes";
+import { SummaryNotes, timeOf } from "../summary-notes";
 import { FieldValueView } from "./FieldValueView";
 import { HeldChanges } from "./HeldChanges";
 import { IdentityHeader } from "./IdentityHeader";
@@ -375,6 +376,11 @@ function AudiencedRows({
   );
 }
 
+/** "Field | Value | Who can see it | actions" from tablet width: the template is a variable, so its rule in the shared stylesheet is short. */
+const FIELD_COLUMNS = {
+  "--field-columns": "minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr) auto",
+} as CSSProperties;
+
 function FieldRows({
   rows,
   person,
@@ -406,7 +412,8 @@ function FieldRows({
     <div className="flex flex-col gap-1">
       <div
         aria-hidden="true"
-        className="hidden gap-3 px-3 text-[12px] text-ink-2 tablet:grid tablet:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)_auto]"
+        className="hidden gap-3 px-3 text-[12px] text-ink-2 tablet:grid tablet:grid-cols-(--field-columns)"
+        style={FIELD_COLUMNS}
       >
         <span>{copy.COLUMN_FIELD}</span>
         <span>{copy.COLUMN_VALUE}</span>
@@ -457,7 +464,14 @@ function FieldRow({
   const [sharing, setSharing] = useState(false);
   const row = field.row;
   const nameId = useId();
-  const read = env.memory.policies.get(row.id);
+  const known = env.memory.policies.get(row.id);
+  // What this page's policy read said, only while no later policy version of the field is known (review 3, finding 3: never an audience
+  // the device already knows is old), and said with the time it was read (C6: never presented as live).
+  const read =
+    known !== undefined &&
+    policyShownFor(known, row, env.memory.summaryFloors.get(row.id))
+      ? known
+      : undefined;
   const home = primaryHousehold(defaults.record);
   // The field audiences' own sharing first; else what this page's policy read said (D-11a-13); else the question.
   const audience =
@@ -483,7 +497,10 @@ function FieldRow({
       className="list-none rounded-row border border-hairline bg-panel px-3 py-2.5"
       data-field-row={row.id}
     >
-      <div className="grid grid-cols-1 gap-2 tablet:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)_auto] tablet:items-center tablet:gap-3">
+      <div
+        className="grid grid-cols-1 gap-2 tablet:grid-cols-(--field-columns) tablet:items-center tablet:gap-3"
+        style={FIELD_COLUMNS}
+      >
         <span className="flex flex-col gap-1">
           <span id={nameId} className="text-[13.5px] font-medium text-ink-1">
             {row.label}
@@ -508,6 +525,11 @@ function FieldRow({
               {audience}
             </button>
           )}
+          {summary === null && read !== undefined && !field.projected ? (
+            <span className="text-[12px] text-ink-2" data-field-checked="">
+              {copy.AUDIENCE_CHECKED_AT(timeOf(read.checkedAt))}
+            </span>
+          ) : null}
           {reach !== null ? (
             <span className="text-[12px] text-ink-2" data-field-reach="">
               {reach}
@@ -549,8 +571,12 @@ function FieldRow({
           open={sharing}
           onOpenChange={(open) => {
             setSharing(open);
-            // What the editor sent (its commands are online, outside the queue) changes the summaries shown.
-            if (!open) env.memory.invalidateSummaries();
+            // What the editor sent (its commands are online, outside the queue) changes the summaries shown, and this page's own read of
+            // the field's policy may be old now (C6): neither is shown again until read again.
+            if (!open) {
+              env.memory.policies.delete(row.id);
+              env.memory.invalidateSummaries();
+            }
           }}
         />
       )}

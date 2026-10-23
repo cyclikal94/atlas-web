@@ -328,6 +328,20 @@ export const HELD_UNREADABLE =
   "A held change on this device can't be read any more. Discard it."; // PROVISIONAL
 export const HELD_SAVE_FAILED =
   "Couldn't keep this on the device. Try again, or save it now."; // PROVISIONAL
+// Review 3 of 22 October 2026 (findings 1 and 2; the design assessment's C3b/C3c and C6)
+export const HELD_BUSY =
+  "Another change to this field is being saved or sent. Try again in a moment."; // PROVISIONAL
+export const HELD_REPLACED = (name: string) =>
+  `A later held change to who can see ${name} replaced this one.`; // PROVISIONAL
+export const HELD_UNRESOLVED = (name: string) =>
+  `An earlier change to who can see ${name} may already have been made. Check it to be sure.`; // PROVISIONAL
+export const CHECK_NOW = "Check now"; // PROVISIONAL
+export const HELD_CHECKED_MADE = (name: string) =>
+  `Checked: who can see ${name} was changed.`; // PROVISIONAL
+export const HELD_CHECKED_NOT_MADE = (name: string) =>
+  `Checked: who can see ${name} wasn't changed by it.`; // PROVISIONAL
+export const HELD_CHECK_FAILED = "Couldn't check it now. Try again."; // PROVISIONAL
+export const AUDIENCE_CHECKED_AT = (time: string) => `Checked at ${time}`; // PROVISIONAL (C6: a page's own policy read, never live)
 export const HELD_FAILED: Record<string, string> = {
   changed: SHARING_CHANGED,
   conflict: SHARING_CHANGED,

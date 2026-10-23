@@ -13,7 +13,9 @@ import {
   forgetAllPeopleMemory,
   peopleMemory,
 } from "../../../src/features/people/memory";
+import { toWirePolicy } from "../../../src/features/sharing";
 import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
+import { nextAttempt } from "../../../src/features/sharing/model/submission";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import { HOME, ME, record } from "../../support/people/records";
@@ -778,6 +780,8 @@ const heldChange = (over: Partial<HeldChange> = {}): HeldChange => ({
   heldAt: "2026-10-13T09:00:00.000Z",
   rev: 0,
   queued: false,
+  seq: 0,
+  retired: false,
   ...over,
 });
 
@@ -862,11 +866,24 @@ describe("finding 2: a discarded held change is never continued", () => {
     await w.mount(`/people/${P}`);
     const row = await waitFor(() => heldRow() as HTMLElement);
     fireEvent.click(within(row).getByRole("button", { name: "Discard" }));
-    await waitFor(() => expect(w.held()).toEqual([]));
+    // Revision 3 (review 3 C3c): the attempt is kept DURABLY, as a reconciliation record with no content, not only in page memory.
+    await waitFor(() =>
+      expect(w.held()).toEqual([
+        expect.objectContaining({
+          holdId: HOLD,
+          retired: true,
+          attempt,
+          value: { kind: "text", text: "" },
+        }),
+      ]),
+    );
     expect(peopleMemory(w.people.identity).attempts.get(`policy:${F}`)).toEqual(
       attempt,
     );
     await said("may already have been made");
+    await waitFor(() =>
+      expect(document.querySelector("[data-held-retired]")).not.toBeNull(),
+    );
     expect(w.sharing.sent).toEqual([]);
   });
 });
@@ -1198,6 +1215,7 @@ describe("finding 6: a held change is durable for its account", () => {
     peopleMemory(w.people.identity).policies.set(F, {
       version: 6,
       policy: HOME_VIEW,
+      checkedAt: Date.now(),
     });
     await w.mount(`/people/${P}/fields/${F}`);
     const d = await dialog();
@@ -1555,5 +1573,415 @@ describe("finding 7: every record stays reachable", () => {
     await screen.findByText("Field 149");
     fireEvent.click(screen.getByRole("button", { name: "Previous fields" }));
     await screen.findByText("Field 000");
+  });
+});
+
+// ---- review 3 of 22 October 2026 -----------------------------------------------------------------------------------------------------
+
+describe("review 3, finding 1: leaving the page never discards a held change (H1, H2)", () => {
+  test("navigating to the list while its first policy read is on its way: the hold is kept as held, nothing is sent, and it runs again back on the person", async () => {
+    const w = heldWorld();
+    const read = deferred<unknown>();
+    w.sharing.next.policy.push(
+      () => read.promise as never,
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    const { router } = await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toHaveLength(
+        1,
+      ),
+    );
+    await act(async () => {
+      await router.navigate({ to: "/people" });
+    });
+    await waitFor(() => expect(heldRow()).toBeNull());
+    await act(async () => read.release(ok({ version: 6, policy: HOME_VIEW })));
+    await settle();
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.built).toEqual([]);
+    expect(w.held()).toEqual([
+      expect.objectContaining({
+        holdId: HOLD,
+        value: { kind: "text", text: "Secret held text" },
+        to: PRIVATE,
+        retired: false,
+        queued: false,
+      }),
+    ]);
+    await act(async () => {
+      await router.navigate({
+        to: "/people/$personId",
+        params: { personId: P },
+      });
+    });
+    // Its authority is this page's (D1): back on the person, it runs, once.
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.sent).toHaveLength(1);
+    await waitFor(() => expect(w.held()).toEqual([]));
+  });
+
+  test("control: an explicit Discard at the same moment ends it", async () => {
+    const w = heldWorld();
+    const read = deferred<unknown>();
+    w.sharing.next.policy.push(() => read.promise as never);
+    await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toHaveLength(
+        1,
+      ),
+    );
+    fireEvent.click(
+      within(heldRow() as HTMLElement).getByRole("button", { name: "Discard" }),
+    );
+    await act(async () => read.release(ok({ version: 6, policy: HOME_VIEW })));
+    await waitFor(() => expect(w.held()).toEqual([]));
+    expect(w.sharing.sent).toEqual([]);
+  });
+
+  test("another page of held changes unmounts the running row: it is kept, and runs again when its page is shown", async () => {
+    const w = heldWorld();
+    // 120 recovered holds of fields whose contexts sort AFTER F's: F's hold is on the first page, the rest continue.
+    for (let i = 0; i < 120; i += 1)
+      w.putHeld(
+        heldChange({
+          holdId: `bbbbbbbb-0000-4000-8000-${String(i).padStart(12, "0")}`,
+          fieldId: `9-${String(i).padStart(3, "0")}`,
+        }),
+      );
+    const read = deferred<unknown>();
+    w.sharing.next.policy.push(
+      () => read.promise as never,
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toHaveLength(
+        1,
+      ),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show more held changes" }),
+    );
+    await waitFor(() => expect(heldRow()).toBeNull());
+    await act(async () => read.release(ok({ version: 6, policy: HOME_VIEW })));
+    await settle();
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.held().find((h) => h.holdId === HOLD)).toMatchObject({
+      value: { kind: "text", text: "Secret held text" },
+      retired: false,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Back to the first held changes" }),
+    );
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+});
+
+describe("review 3, finding 2: one current hold per field (H4)", () => {
+  async function holdFromEditor(
+    w: ReturnType<typeof peopleWorld>,
+    text: string,
+  ) {
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: text },
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await within(d).findByText(
+      "You're offline, so the audience can't change yet",
+    );
+    fireEvent.click(within(d).getByRole("button", { name: "Hold as draft" }));
+    return d;
+  }
+  function offlineWorld() {
+    const w = peopleWorld({ online: false });
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    peopleMemory(w.people.identity).policies.set(F, {
+      version: 6,
+      policy: HOME_VIEW,
+      checkedAt: Date.now(),
+    });
+    return w;
+  }
+
+  test("the field's lock is taken (another page's save or run): 'Hold as draft' writes nothing, says why and keeps the edit open as typed", async () => {
+    const w = offlineWorld();
+    w.heldElsewhere.add(`atlas-people-held:${ME}:${F}`);
+    const d = await holdFromEditor(w, "Typed while busy");
+    await waitFor(() =>
+      expect(
+        within(d).queryByText(
+          "Another change to this field is being saved or sent. Try again in a moment.",
+        ),
+      ).not.toBeNull(),
+    );
+    expect(w.held()).toEqual([]);
+    expect(
+      (within(d).getByRole("textbox", { name: "Value" }) as HTMLInputElement)
+        .value,
+    ).toBe("Typed while busy");
+  });
+
+  test("control: with the lock free, a later hold replaces the earlier one of the field (one live copy, the later generation)", async () => {
+    const w = offlineWorld();
+    w.putHeld(heldChange({ holdId: "hold-earlier", seq: 1 }));
+    await holdFromEditor(w, "Later");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(w.held().map((h) => [h.value, h.seq])).toEqual([
+      [{ kind: "text", text: "Later" }, 2],
+    ]);
+  });
+
+  test("an earlier hold this page may run, kept beside a later one: online it is NOT run; it is retired as the later one's predecessor", async () => {
+    const w = heldWorld(heldChange({ holdId: "hold-earlier", seq: 1 }));
+    w.putHeld(heldChange({ holdId: "hold-later", seq: 2 }));
+    await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(w.held().map((h) => h.holdId)).toEqual(["hold-later"]),
+    );
+    await said("A later held change to who can see Note replaced this one.");
+    expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toEqual([]);
+    expect(w.built).toEqual([]);
+  });
+});
+
+describe("review 3: an unresolved attempt is kept on the device until checked (C3c, H8)", () => {
+  const ATTEMPT = { key: "k-1", body: "[]" };
+  const retired = () =>
+    heldChange({
+      attempt: ATTEMPT,
+      retired: true,
+      value: { kind: "text", text: "" },
+    });
+
+  test("after a reload (fresh page memory) the record is shown, never run; 'Check now' reads the policy once, says it was made, and ends it", async () => {
+    const w = heldWorld(retired(), { authorised: false });
+    w.sharing.next.policy.push(ok({ version: 7, policy: PRIVATE }));
+    await w.mount(`/people/${P}`);
+    const row = await waitFor(() => {
+      const found = document.querySelector("[data-held-retired]");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(row.textContent).toContain(
+      "An earlier change to who can see Note may already have been made.",
+    );
+    await settle();
+    expect(w.sharing.calls).toEqual([]);
+    fireEvent.click(within(row).getByRole("button", { name: "Check now" }));
+    await said("Checked: who can see Note was changed.");
+    await waitFor(() => expect(w.held()).toEqual([]));
+    expect(w.sharing.calls.map((c) => c.op)).toEqual(["readPolicy"]);
+    expect(w.sharing.sent).toEqual([]);
+  });
+
+  test("'Check now' finds the policy still at the version the attempt was guarded by: it was not made; the record ends", async () => {
+    const w = heldWorld(retired(), { authorised: false });
+    w.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    await w.mount(`/people/${P}`);
+    const row = await waitFor(
+      () => document.querySelector("[data-held-retired]") as HTMLElement,
+    );
+    fireEvent.click(within(row).getByRole("button", { name: "Check now" }));
+    await said("Checked: who can see Note wasn't changed by it.");
+    await waitFor(() => expect(w.held()).toEqual([]));
+  });
+
+  test("'Check now' finds another policy at a later version: it was not made (it never can be now); the record ends", async () => {
+    const w = heldWorld(retired(), { authorised: false });
+    w.sharing.next.policy.push(
+      ok({
+        version: 8,
+        policy: { grants: [], exclude_accounts: ["someone-else"] },
+      }),
+    );
+    await w.mount(`/people/${P}`);
+    const row = await waitFor(
+      () => document.querySelector("[data-held-retired]") as HTMLElement,
+    );
+    fireEvent.click(within(row).getByRole("button", { name: "Check now" }));
+    await said("Checked: who can see Note wasn't changed by it.");
+    await waitFor(() => expect(w.held()).toEqual([]));
+  });
+
+  test("'Check now' that cannot read the policy keeps the record and says so; offline it needs a connection", async () => {
+    const w = heldWorld(retired(), { authorised: false });
+    w.sharing.next.policy.push({ ok: false, kind: "uncertain" } as never);
+    await w.mount(`/people/${P}`);
+    const row = await waitFor(
+      () => document.querySelector("[data-held-retired]") as HTMLElement,
+    );
+    fireEvent.click(within(row).getByRole("button", { name: "Check now" }));
+    await said("Couldn't check it now. Try again.");
+    expect(w.held()).toHaveLength(1);
+    w.setOnline(false);
+    await waitFor(() =>
+      expect(
+        within(
+          document.querySelector("[data-held-retired]") as HTMLElement,
+        ).getByRole("button", { name: "Check now" }),
+      ).toBeDisabled(),
+    );
+  });
+
+  for (const kept of [true, false])
+    test(`a direct change of the same audience in the editor ${kept ? "sends the kept attempt's key and body (the record on the device, not page memory)" : "control: with no record on the device, a new key"}`, async () => {
+      const w = peopleWorld();
+      w.setCache([
+        person({ id: P, label: "Ada" }),
+        fieldRow({
+          id: F,
+          parent_id: P,
+          label: "Note",
+          version: 4,
+          policy_version: 6,
+        }),
+      ]);
+      w.env.setDefaults(record());
+      const attempt = nextAttempt(
+        null,
+        [
+          {
+            kind: "replace_policy",
+            id: F,
+            expected_version: 6,
+            policy: toWirePolicy(PRIVATE),
+          },
+        ],
+        () => "k-durable",
+      );
+      if (kept) w.putHeld(heldChange({ attempt, retired: true }));
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      await w.mount(`/people/${P}/fields/${F}`);
+      const d = await dialog();
+      await within(d).findByRole("radio", {
+        name: "Home · can view",
+        checked: true,
+      });
+      fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+      if (kept) expect(w.sharing.sent[0]?.key).toBe("k-durable");
+      else expect(w.sharing.sent[0]?.key).not.toBe("k-durable");
+    });
+});
+
+describe("review 3, finding 3: a field's audience is never named from a policy known to be old (C6, A1, A2)", () => {
+  async function shown(options: {
+    read: number;
+    cached: number;
+    floor?: number;
+    online?: boolean;
+  }) {
+    const w = peopleWorld({ online: options.online ?? false });
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: options.cached,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    const memory = peopleMemory(w.people.identity);
+    memory.policies.set(F, {
+      version: options.read,
+      policy: PRIVATE,
+      checkedAt: Date.parse("2026-10-22T09:41:00Z"),
+    });
+    if (options.floor !== undefined)
+      memory.summaryFloors.set(F, { version: 4, policyVersion: options.floor });
+    await w.mount(`/people/${P}`);
+    const button = await waitFor(() => {
+      const found = document.querySelector(
+        `[data-field-row="${F}"] [data-people-action="field-audience"]`,
+      );
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    return { w, button };
+  }
+
+  test("the reviewer's case: a read at policy version 6, the cached field at 7, offline: never 'Only you'", async () => {
+    const { button } = await shown({ read: 6, cached: 7 });
+    expect(button.textContent).toBe("Who can see it?");
+    expect(document.querySelector("[data-field-checked]")).toBeNull();
+  });
+
+  test("control: the read IS the cached version: its audience, said with when it was read (never as live)", async () => {
+    const { button } = await shown({ read: 6, cached: 6 });
+    expect(button.textContent).toBe("Only you");
+    expect(
+      document.querySelector("[data-field-checked]")?.textContent ?? "",
+    ).toMatch(/^Checked at /);
+  });
+
+  test("a later policy version a summary applied (the floor) also makes the read old", async () => {
+    const { button } = await shown({ read: 6, cached: 6, floor: 7 });
+    expect(button.textContent).toBe("Who can see it?");
+  });
+
+  test("a read AHEAD of a lagging cache (this page's own confirmed change) is kept", async () => {
+    const { button } = await shown({ read: 8, cached: 7 });
+    expect(button.textContent).toBe("Only you");
+  });
+
+  test("closing the shared policy editor (which may have changed it) withdraws the page's own read until it is read again", async () => {
+    const { button } = await shown({ read: 6, cached: 6 });
+    expect(button.textContent).toBe("Only you");
+    fireEvent.click(button);
+    const editor = await screen.findByRole("dialog");
+    fireEvent.keyDown(editor, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() =>
+      expect(
+        document.querySelector(
+          `[data-field-row="${F}"] [data-people-action="field-audience"]`,
+        )?.textContent,
+      ).toBe("Who can see it?"),
+    );
+  });
+
+  test("a policy version published while the page shows the read (sync) withdraws it at once, without a new read", async () => {
+    const { w, button } = await shown({ read: 6, cached: 6 });
+    expect(button.textContent).toBe("Only you");
+    w.putCache(
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 7,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        document.querySelector(
+          `[data-field-row="${F}"] [data-people-action="field-audience"]`,
+        )?.textContent,
+      ).toBe("Who can see it?"),
+    );
   });
 });

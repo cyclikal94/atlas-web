@@ -31,6 +31,18 @@ import { type FieldValue, parseFieldValue } from "../model/values";
  * `failed`): the screens claim a hold ended, or a step admitted, only when the store committed it. Its progress is a state of the copy:
  * the uncertain policy attempt is written BEFORE it is sent (`attempt`), and the content step is recorded as admitted (`queued`) BEFORE
  * it is queued, so a page that ends the hold afterwards says truthfully what may already have happened.
+ *
+ * ONE CURRENT HOLD PER FIELD (review 3 of 22 October 2026, finding 2). Each hold carries its field's GENERATION (`seq`), given under the
+ * field's lock from every hold of the field stored then (`holdChange`), so the new copy and its place after every earlier one are ONE
+ * write: the field's current hold is its live hold of the highest generation. Only it may run; an earlier one that is still kept (a page
+ * closed before it was retired, a retirement that was refused) is never run, and is retired by the next run of its field. Copies of the
+ * first shapes (v 1, v 2) are generation 0.
+ *
+ * AN UNRESOLVED ATTEMPT OUTLIVES ITS CONTENT (finding 2 of review 3; the design assessment's C3c). A hold whose policy step MAY have been
+ * made (its attempt has no definite answer) is never ended by a discard or a replacement: it is RETIRED (`retired`), a reconciliation
+ * record that keeps the attempt, the audience asked for and the version it was guarded by, and no content (its value is cleared). It never
+ * runs and never queues anything; the person checks it ("Check now", one owner-only read) or discards it, and a later hold of exactly the
+ * same change takes its attempt over (the same key and body) before it is ended.
  */
 export const HELD_FORM = "people-held:";
 
@@ -72,6 +84,10 @@ export interface HeldChange {
   rev: number;
   /** The content step was admitted: its draft may be queued (an end after it says so). */
   queued: boolean;
+  /** The field's generation of this hold: the live hold of the highest one is the field's current hold (0: a copy of the first shapes). */
+  seq: number;
+  /** Retired with its policy attempt unresolved: a reconciliation record, never run (its content is cleared). */
+  retired: boolean;
 }
 
 /** A held change with the digest of the stored state it was read as: the only state a write of it may replace. */
@@ -164,11 +180,21 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
   } catch {
     return null;
   }
-  if (!isObject(raw) || (raw.v !== 1 && raw.v !== 2)) return null;
-  // The first shape (v 1) had no state number and no content admission: it is read as state 0, not admitted.
+  if (!isObject(raw) || (raw.v !== 1 && raw.v !== 2 && raw.v !== 3))
+    return null;
+  // The first shape (v 1) had no state number and no content admission: it is read as state 0, not admitted. Neither it nor v 2 had a
+  // generation or a retirement: generation 0, live.
   const rev = raw.v === 1 ? 0 : raw.rev;
   const queued = raw.v === 1 ? false : raw.queued;
-  if (!isVersion(rev) || typeof queued !== "boolean") return null;
+  const seq = raw.v === 3 ? raw.seq : 0;
+  const retired = raw.v === 3 ? raw.retired : false;
+  if (
+    !isVersion(rev) ||
+    typeof queued !== "boolean" ||
+    !isVersion(seq) ||
+    typeof retired !== "boolean"
+  )
+    return null;
   const value = parseFieldValue(raw.value);
   const fromRaw = raw.from;
   const from =
@@ -223,6 +249,8 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
     heldAt: raw.heldAt,
     rev,
     queued,
+    seq,
+    retired,
   };
 }
 
@@ -230,9 +258,11 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
 export function encodeHeld(change: HeldChange): Record<string, string> {
   return {
     held: JSON.stringify({
-      v: 2,
+      v: 3,
       rev: change.rev,
       queued: change.queued,
+      seq: change.seq,
+      retired: change.retired,
       fieldId: change.fieldId,
       personId: change.personId,
       label: change.label,
@@ -252,7 +282,7 @@ export function encodeHeld(change: HeldChange): Record<string, string> {
 /**
  * The held changes of the displayed account (production: the CONDITIONAL port over the account's database). Every answer is typed and
  * none is inferred: `create` writes a hold whose copy must not exist yet; `update` writes the next state of the one read as `from` (its
- * `rev` is `from`'s plus one, whatever `next` says); `end` makes the copy read as `digest` terminal; `read` says what is stored; `list` is
+ * `rev` is `from`'s plus one and its `seq` is `from`'s, whatever `next` says; a retired hold stays retired); `end` makes the copy read as `digest` terminal; `read` says what is stored; `list` is
  * one bounded, resumable page of a person's (or one field's) holds, or null when it could not be read.
  */
 export interface HeldStore {
@@ -304,6 +334,9 @@ export function heldStoreOver(
           personId: from.change.personId,
           fieldId: from.change.fieldId,
           rev: from.change.rev + 1,
+          // A hold keeps its place among its field's holds; a retired one is never live again.
+          seq: from.change.seq,
+          retired: from.change.retired || next.retired,
         },
         from.digest,
       ),

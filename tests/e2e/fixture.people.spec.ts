@@ -1701,3 +1701,232 @@ test.describe("E-P24: held changes past a thousand ended copies stay reachable i
       recordEvidence(info, "e-p24", { ended });
     });
 });
+
+/** The live (non-terminal) held copies of the account in real IndexedDB, decoded. */
+const liveHolds = async (page: Page) =>
+  (
+    (await page.evaluate(
+      (account) => window.__atlasData?.rows(account, "form_recovery"),
+      ME,
+    )) as Array<{ terminal: boolean; fields: { held?: string } }>
+  )
+    .filter((row) => !row.terminal)
+    .map(
+      (row) => JSON.parse(row.fields.held ?? "{}") as Record<string, unknown>,
+    );
+
+/** Waits until no page holds the field's lock (Web Locks): every run and save of the field's holds has finished its last write. */
+const fieldSettled = (page: Page) =>
+  page.evaluate(
+    ({ account, field }) =>
+      navigator.locks.request(
+        `atlas-people-held:${account}:${field}`,
+        async () => undefined,
+      ),
+    { account: ME, field: F },
+  );
+
+/** Holds "Only you" for the field offline from its open editor, with `text` typed. */
+async function holdOffline(page: Page, text: string) {
+  const dialog = page.getByRole("dialog", { name: "Edit Note" });
+  await dialog.getByRole("textbox", { name: "Value" }).fill(text);
+  await dialog.getByRole("radio", { name: "Only you", exact: true }).click();
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog.getByRole("button", { name: "Hold as draft" }).click();
+  return dialog;
+}
+
+const heldSetup = (context: Parameters<typeof setup>[0]) =>
+  setup(
+    context,
+    `/people/${P}/fields/${F}`,
+    [
+      personP(P, "Ada"),
+      fieldP(
+        F,
+        P,
+        "Note",
+        { kind: "text", text: "Original" },
+        { version: 4, policy_version: 6 },
+      ),
+    ],
+    { arrange: (s) => s.policies.set(F, { version: 6, policy: HOME_VIEW }) },
+  );
+
+test.describe("E-P25: leaving the page never discards a held change (review 3, finding 1)", () => {
+  for (const leave of [true, false])
+    test(`${leave ? "navigating to the list while its first policy read is held keeps the input in real IndexedDB; it is listed again" : "control: an explicit Discard at the same moment ends it"}`, async ({
+      context,
+    }, info) => {
+      const { page, served } = await heldSetup(context);
+      const dialog = page.getByRole("dialog", { name: "Edit Note" });
+      await expect(
+        dialog.getByRole("radio", { name: "Home · can view" }),
+      ).toBeChecked();
+      await connectivity(context, page, false);
+      await holdOffline(page, "Retain this unsent input");
+      await expect(dialog).toBeHidden();
+      const row = page.locator(`[data-held-field="${F}"]`);
+      await expect(row).toBeVisible();
+      expect(await liveHolds(page)).toHaveLength(1);
+      const held = gate();
+      served.policyScript.push(() => ({
+        status: 200,
+        body: { version: 6, policy: HOME_VIEW },
+        after: held.after,
+      }));
+      const before = served.log.length;
+      await connectivity(context, page, true);
+      await expect
+        .poll(() => served.log.slice(before).filter(notSummary))
+        .toEqual([`GET /policies/${F}`]);
+      if (leave) {
+        await navigateInApp(page, "/people");
+        await expect(row).toHaveCount(0);
+      } else await row.getByRole("button", { name: "Discard" }).click();
+      held.open();
+      // The run's last write is done once the field's lock is free (the run holds it until then).
+      await fieldSettled(page);
+      const after = await liveHolds(page);
+      recordEvidence(info, "e-p25", { leave, after, log: served.log });
+      expect(served.management).toEqual([]);
+      expect(await draftsOf(page)).toEqual([]);
+      if (!leave) {
+        expect(after).toEqual([]);
+        return;
+      }
+      expect(after).toHaveLength(1);
+      expect(after[0]).toMatchObject({
+        value: { kind: "text", text: "Retain this unsent input" },
+        to: PRIVATE,
+        retired: false,
+        queued: false,
+      });
+      // Offline again, back on the person: it is listed as it was held (with this page's authority it would run once online).
+      await connectivity(context, page, false);
+      await navigateInApp(page, `/people/${P}`);
+      await expect(row).toContainText("Waiting to change who can see Note");
+    });
+});
+
+test.describe("E-P26: one current hold per field, under the field's lock (review 3, finding 2)", () => {
+  test("while another holder has the field's lock 'Hold as draft' writes nothing and keeps the edit; once it is free the new hold replaces the earlier one", async ({
+    context,
+  }, info) => {
+    const { page } = await heldSetup(context);
+    const dialog = page.getByRole("dialog", { name: "Edit Note" });
+    await expect(
+      dialog.getByRole("radio", { name: "Home · can view" }),
+    ).toBeChecked();
+    await connectivity(context, page, false);
+    await holdOffline(page, "First");
+    await expect(dialog).toBeHidden();
+    expect((await liveHolds(page)).map((h) => [h.value, h.seq])).toEqual([
+      [{ kind: "text", text: "First" }, 1],
+    ]);
+    // Another holder of the field's lock (as another page's run or save would be).
+    await page.evaluate(
+      ({ account, field }) => {
+        const w = window as unknown as { __releaseField?: () => void };
+        void navigator.locks.request(
+          `atlas-people-held:${account}:${field}`,
+          () =>
+            new Promise<void>((resolve) => {
+              w.__releaseField = resolve;
+            }),
+        );
+      },
+      { account: ME, field: F },
+    );
+    await page.waitForFunction(
+      () =>
+        typeof (window as unknown as { __releaseField?: () => void })
+          .__releaseField === "function",
+    );
+    await navigateInApp(page, `/people/${P}/fields/${F}`);
+    await expect(dialog).toBeVisible();
+    await holdOffline(page, "Second");
+    await expect(dialog).toContainText(
+      "Another change to this field is being saved or sent. Try again in a moment.",
+    );
+    await expect(dialog.getByRole("textbox", { name: "Value" })).toHaveValue(
+      "Second",
+    );
+    expect((await liveHolds(page)).map((h) => h.value)).toEqual([
+      { kind: "text", text: "First" },
+    ]);
+    await page.evaluate(() =>
+      (window as unknown as { __releaseField: () => void }).__releaseField(),
+    );
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await dialog.getByRole("button", { name: "Hold as draft" }).click();
+    await expect(dialog).toBeHidden();
+    await fieldSettled(page);
+    const after = await liveHolds(page);
+    recordEvidence(info, "e-p26", { after });
+    expect(after.map((h) => [h.value, h.seq])).toEqual([
+      [{ kind: "text", text: "Second" }, 2],
+    ]);
+  });
+});
+
+test.describe("E-P27: an unresolved policy attempt outlives its discarded content (review 3, C3c)", () => {
+  test("discarded after an uncertain replace_policy, the attempt is kept as a record that survives the page closing; 'Check now' reads once and ends it", async ({
+    context,
+  }, info) => {
+    const { page, served } = await heldSetup(context);
+    const dialog = page.getByRole("dialog", { name: "Edit Note" });
+    await expect(
+      dialog.getByRole("radio", { name: "Home · can view" }),
+    ).toBeChecked();
+    await connectivity(context, page, false);
+    await holdOffline(page, "Confidential");
+    await expect(dialog).toBeHidden();
+    const row = page.locator(`[data-held-field="${F}"]`);
+    served.policyScript.push(() => ({
+      status: 200,
+      body: { version: 6, policy: HOME_VIEW },
+    }));
+    served.managementScript.push("abort");
+    await connectivity(context, page, true);
+    await expect.poll(() => served.management.length).toBe(1);
+    await expect(row.getByRole("button", { name: "Try again" })).toBeVisible();
+    await row.getByRole("button", { name: "Discard" }).click();
+    await expect(row).toContainText(
+      "An earlier change to who can see Note may already have been made.",
+    );
+    await fieldSettled(page);
+    const kept = await liveHolds(page);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({
+      retired: true,
+      value: { kind: "text", text: "" },
+      attempt: { key: served.management[0]?.key },
+    });
+    // The page goes; a new page of the same profile finds the record in real IndexedDB, and asks nothing by itself.
+    await page.close();
+    served.policyScript.push(() => ({
+      status: 200,
+      body: { version: 7, policy: PRIVATE },
+    }));
+    const since = served.log.length;
+    const reopened = await bootAt(context, `/people/${P}`);
+    // The harness's handle on the reopened page's account database (as E-P15 opens it); nothing is queued here.
+    await startOutbox(reopened);
+    const record = reopened.locator(`[data-held-field="${F}"]`);
+    await expect(record).toContainText(
+      "An earlier change to who can see Note may already have been made.",
+    );
+    expect(
+      served.log.slice(since).filter((line) => line === `GET /policies/${F}`),
+    ).toEqual([]);
+    await record.getByRole("button", { name: "Check now" }).click();
+    await expect(reopened.locator("body")).toContainText(
+      "Checked: who can see Note was changed.",
+    );
+    await expect(record).toHaveCount(0);
+    expect(served.management).toHaveLength(1);
+    expect(await liveHolds(reopened)).toEqual([]);
+    recordEvidence(info, "e-p27", { log: served.log });
+  });
+});

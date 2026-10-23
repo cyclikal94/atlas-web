@@ -16879,12 +16879,12 @@ export const UNIT = [
     ],
     expect:
       /discarded while its policy read was on its way|Discard while its policy read is on its way/,
-    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "isCurrentMemory(memory) && !run.cancelled && deps.mounted();",
-        "isCurrentMemory(memory) && deps.mounted();",
+        "  const owns = () => !run.cancelled && present();",
+        "  const owns = () => present();",
       ),
   },
   {
@@ -17014,12 +17014,12 @@ export const UNIT = [
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect:
       /'Hold as draft' writes the change, with the versions it began on, to the account's database/,
-    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "      const kept = await env.held.create({",
-        '      const kept: { kind: string } = { kind: "saved" };\n      void ({',
+        "        kept = await holdChange(env, {",
+        '        kept = {\n          kind: "held",\n          copy: { change: { holdId: "never-written" } },\n          complete: true,\n        } as unknown as HoldOutcome;\n        void ({',
       ),
   },
   {
@@ -17639,14 +17639,15 @@ export const UNIT = [
     id: "MU-2210",
     title:
       "WEB-11a R2 F2: a hold is taken for ended whatever the store answered",
-    file: "src/features/people/detail/HeldChanges.tsx",
+    file: "src/features/people/field/held.ts",
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect: /end FAILS/,
+    // Re-anchored in WEB-11a revision 3 (review 3 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        '  end.kind === "ended" || (end.kind === "changed" && end.stored !== "live");',
-        "  true;",
+        "export const isSettled = (answer: HeldSettle): boolean =>\n",
+        "export const isSettled = (answer: HeldSettle): boolean =>\n  true ||\n",
       ),
   },
   {
@@ -17707,11 +17708,12 @@ export const UNIT = [
     file: "src/features/people/field/held.ts",
     tests: ["tests/features/people/held-run.test.ts"],
     expect: /moved on by another page/,
+    // Re-anchored in WEB-11a revision 3 (review 3 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        '  if (stored.copy.digest !== shown.digest) return { kind: "stale" };\n',
-        "",
+        "  if (stored.copy.digest !== shown.digest || stored.copy.change.retired)\n",
+        "  if (stored.copy.change.retired)\n",
       ),
   },
   {
@@ -17857,8 +17859,13 @@ export const UNIT = [
     file: "src/features/people/field/held.ts",
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect: /replaces the earlier one/,
+    // Re-anchored in WEB-11a revision 3 (review 3 rewrite of the code it mutates); the same intent.
     patch: (t) =>
-      sub(t, "      if (holdId === keep) continue;", "      continue;"),
+      sub(
+        t,
+        "    if (change.holdId === winner.holdId || change.seq >= winner.seq) continue;",
+        "    continue;",
+      ),
   },
   {
     id: "MU-2226",
@@ -19784,6 +19791,289 @@ export const UNIT = [
         t,
         "    !revoked && slots.get(ticket.source)?.owner === ticket;\n",
         "    !revoked && slots.get(ticket.source)?.owner.key === ticket.key;\n",
+      ),
+  },
+  {
+    id: "MU-2231",
+    title:
+      "WEB-11a R3 F1: leaving the page ends the hold (suspension routed back to the terminal discard)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /navigat(ed|ing) away|navigating to the list|another page of held changes unmounts/,
+    patch: (t) =>
+      sub(
+        t,
+        '    run.cancelled && isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+        '    isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+      ),
+  },
+  {
+    id: "MU-2232",
+    title:
+      "WEB-11a R3 F1: a stop inside the content step leaves its admission (queued) standing",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /left inside the content step's transaction/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (isCurrentMemory(memory)) await write({ ...copy.change, queued: false });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2233",
+    title:
+      "WEB-11a R3 F2: 'Hold as draft' writes the new hold without the field's lock (create before lock)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect: /cannot interleave|the field's lock is taken/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const answer = await env.exclusive(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const store = env.held;",
+        "  const answer = await (async <T,>(_name: string, go: () => Promise<T>) => go())(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const store = env.held;",
+      ),
+  },
+  {
+    id: "MU-2234",
+    title:
+      "WEB-11a R3 F2: a run no longer compares its hold with the field's later holds (an earlier hold runs)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect: /create A, create B|retirement is refused|kept beside a later one/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const later = laterThan(field, copy.change);",
+        "  const later: HeldChange[] = [];",
+      ),
+  },
+  {
+    id: "MU-2235",
+    title:
+      "WEB-11a R3 F2: a save retires the earlier holds although its own new hold was ended elsewhere meanwhile",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /another page ended before its earlier ones were retired/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (now.kind !== "live" || now.copy.digest !== created.copy.digest)\n        return { kind: "changed" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2236",
+    title:
+      "WEB-11a R3 F2: a refused retirement of an earlier hold is reported as complete",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /retirement is refused is kept \(incomplete/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!isSettled(settled)) {\n      complete = false;",
+        "    if (false) {\n      complete = false;",
+      ),
+  },
+  {
+    id: "MU-2237",
+    title:
+      "WEB-11a R3 H7: a retry of the same attempt is sent without checking that the hold is still stored as read",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /fast path checks the stored state/,
+    patch: (t) =>
+      sub(t, "            ? await unchanged()\n", "            ? true\n"),
+  },
+  {
+    id: "MU-2238",
+    title:
+      "WEB-11a R3 C3c: a discard ends a hold whose policy attempt is unresolved (the attempt is kept only in page memory)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /RETIRED|keeps its attempt for recovery|ANOTHER change does not take it/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!unresolved) return store.end(keyOf(change), copy.digest);",
+        "  if (unresolved || !unresolved) return store.end(keyOf(change), copy.digest);",
+      ),
+  },
+  {
+    id: "MU-2239",
+    title:
+      "WEB-11a R3 C3c (the assessment's outstanding fresh-key mutant): a retry of an unchanged attempt gets a fresh key",
+    file: "src/features/sharing/model/submission.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect:
+      /same key and byte-identical body|H7 control|takes the unresolved attempt over/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (uncertain !== null && uncertain.body === body) return uncertain;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2240",
+    title:
+      "WEB-11a R3 C3c: a new hold of exactly the same change does not take the earlier hold's unresolved attempt over",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /takes the unresolved attempt over/,
+    patch: (t) =>
+      sub(
+        t,
+        "        attempt: taken?.change.attempt ?? null,",
+        "        attempt: null,",
+      ),
+  },
+  {
+    id: "MU-2241",
+    title:
+      "WEB-11a R3 C3c: a retired hold (a reconciliation record) can run again",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /never ended/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (stored.copy.digest !== shown.digest || stored.copy.change.retired)\n",
+        "  if (stored.copy.digest !== shown.digest)\n",
+      ),
+  },
+  {
+    id: "MU-2242",
+    title:
+      "WEB-11a R3 C3c: a direct audience change ignores the unresolved attempt kept on the device",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /sends the kept attempt's key/,
+    patch: (t) =>
+      sub(
+        t,
+        "          (await heldAttemptOf(\n            env,\n            person.row.id,",
+        "          (null && heldAttemptOf(\n            env,\n            person.row.id,",
+      ),
+  },
+  {
+    id: "MU-2243",
+    title:
+      "WEB-11a R3 H11: a run writes progress after another identity is displayed",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /another identity is displayed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!isCurrentMemory(memory)) return { kind: "suspended" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2244",
+    title:
+      "WEB-11a R3 F3: a field's audience is named from a page's policy read whatever later policy version is known",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /reviewer's case|summary applied \(the floor\)|withdraws it at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    policyShownFor(known, row, env.memory.summaryFloors.get(row.id))\n",
+        "    true\n",
+      ),
+  },
+  {
+    id: "MU-2245",
+    title: "WEB-11a R3 F3: a late, older policy read replaces a later one kept",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/memory.test.ts"],
+    expect: /late policy read never lowers/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known === undefined || read.version >= known.version)\n",
+        "  if (true)\n",
+      ),
+  },
+  {
+    id: "MU-2246",
+    title:
+      "WEB-11a R3 F3: the policy version a summary applied (the floor) is not compared",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /summary applied \(the floor\)/,
+    patch: (t) =>
+      sub(t, "    read.version >= (floor?.policyVersion ?? 0)\n", "    true\n"),
+  },
+  {
+    id: "MU-2247",
+    title:
+      "WEB-11a R3 F3: closing the shared policy editor keeps the page's own read of the field's policy",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /closing the shared policy editor/,
+    patch: (t) =>
+      sub(t, "              env.memory.policies.delete(row.id);\n", ""),
+  },
+  {
+    id: "MU-2248",
+    title:
+      "WEB-11a R3 C6: the page's own policy read is named without when it was read",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /said with when it was read/,
+    patch: (t) =>
+      sub(
+        t,
+        "          {summary === null && read !== undefined && !field.projected ? (",
+        "          {false && read !== undefined && !field.projected ? (",
+      ),
+  },
+  {
+    id: "MU-2249",
+    title:
+      "WEB-11a R3 C3c: 'Check now' says the attempt was made whenever the policy version moved",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /another policy at a later version/,
+    patch: (t) =>
+      sub(
+        t,
+        "        read.value.version !== change.from.version &&\n        samePolicy(read.value.policy, change.to);",
+        "        read.value.version !== change.from.version;",
+      ),
+  },
+  {
+    id: "MU-2250",
+    title:
+      "WEB-11a R3 B1: an edit in place is not judged against the draft as stored inside its transaction (expectDraft ignored)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-reviewed-edit-delay.test.ts"],
+    expect: /while this edit waits|confirmed while the edit waits/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (request.expectDraft !== undefined && !request.expectDraft(draft))\n    return { kind: "refused", reason: "draft_changed" };\n  let built: BuildResult;',
+        "  let built: BuildResult;",
       ),
   },
 ];
@@ -22525,12 +22815,12 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P15:",
     expect: /E-P15:/,
-    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "      const kept = await env.held.create({",
-        '      const kept: { kind: string } = { kind: "saved" };\n      void ({',
+        "        kept = await holdChange(env, {",
+        '        kept = {\n          kind: "held",\n          copy: { change: { holdId: "never-written" } },\n          complete: true,\n        } as unknown as HoldOutcome;\n        void ({',
       ),
   },
   {
@@ -22541,12 +22831,12 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P16:",
     expect: /E-P16:/,
-    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        "isCurrentMemory(memory) && !run.cancelled && deps.mounted();",
-        "isCurrentMemory(memory) && deps.mounted();",
+        "  const owns = () => !run.cancelled && present();",
+        "  const owns = () => present();",
       ),
   },
   // MU-2162 (a person's screen not keyed, E-P17) was RETIRED after campaign 6 (pool request request-5ce6cedd4a164dbeb1a7): it survived with
@@ -22970,6 +23260,50 @@ export const ENGINE = [
         ),
         "      attachment.detach();\n",
         "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
+      ),
+  },
+  {
+    id: "MU-2251",
+    title: "WEB-11a R3 F1: (REAL ENGINE) leaving the page ends the hold",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P25:",
+    expect: /E-P25: .*navigating to the list/,
+    patch: (t) =>
+      sub(
+        t,
+        '    run.cancelled && isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+        '    isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+      ),
+  },
+  {
+    id: "MU-2252",
+    title:
+      "WEB-11a R3 F2: (REAL ENGINE) 'Hold as draft' writes without the field's lock",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P26:",
+    expect: /E-P26:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const answer = await env.exclusive(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const store = env.held;",
+        "  const answer = await (async <T,>(_name: string, go: () => Promise<T>) => go())(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const store = env.held;",
+      ),
+  },
+  {
+    id: "MU-2253",
+    title:
+      "WEB-11a R3 C3c: (REAL ENGINE) a discard ends a hold whose policy attempt is unresolved",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P27:",
+    expect: /E-P27:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!unresolved) return store.end(keyOf(change), copy.digest);",
+        "  if (unresolved || !unresolved) return store.end(keyOf(change), copy.digest);",
       ),
   },
 ];

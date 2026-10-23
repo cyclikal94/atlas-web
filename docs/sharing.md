@@ -36,9 +36,10 @@ defaultsReviewCase, reviewKinds, parseDefaultsContext, TEMPLATE_KINDS and the sn
 
 ### Extensions for WEB-11a
 
-WEB-11a needs a QUICK change of one field's audience ("Only you" / "Home · can view") and the same online-only call rules the editors use; these are exported from the index rather than written twice (D-11a-8):
+WEB-11a needs a QUICK change of one field's audience ("Only you" / "Home · can view") and the same online-only call rules the editors use; these are exported rather than written twice (D-11a-8). The call rules are exported from the index; `applyPolicyChange` is the slice's second public module, imported from `src/features/sharing/apply-policy-change` (only the lazy people screens use it, and a re-export from the index would put it in the entry chunk: WEB-11a review 3, the merged fixture shell's initial budget):
 
 ```ts
+// src/features/sharing/apply-policy-change
 applyPolicyChange({ api, newId }, { resourceId, from: { version, policy }, to, attempt, isCurrent?, admit? })
   // -> { result: { ok: true, policyVersion } | { ok: false, kind: "changed" | "conflict" | "forbidden" | "not_found" | "invalid"
   //                                                            | "uncertain" | "offline" | "not_sent" | "closed" }, attempt }

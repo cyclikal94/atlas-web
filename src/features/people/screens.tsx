@@ -47,7 +47,10 @@ function PeopleLayout() {
     return (
       <div className="flex flex-col gap-5">
         <ListHeader />
-        <div className="grid grid-cols-[380px_minmax(0,1fr)] gap-6">
+        <div
+          className="grid gap-6"
+          style={{ gridTemplateColumns: "380px minmax(0, 1fr)" }}
+        >
           <PeopleList selectedId={personId} />
           <div className="min-w-0">
             {personId === null ? (

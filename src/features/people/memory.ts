@@ -41,6 +41,13 @@ export interface HeldRun {
   policyDone: boolean;
 }
 
+/** A field policy this page read (or confirmed by its own change), with its version and the time it was read (`env.now()`). */
+export interface PolicyRead {
+  version: number;
+  policy: Policy;
+  checkedAt: number;
+}
+
 /** One summary read, by its query (`summaries.tsx`): what it answered under the generation it was asked at. */
 export interface SummaryEntry {
   generation: number;
@@ -74,8 +81,12 @@ export class PeopleMemory {
    */
   readonly heldAuthority = new Set<string>();
   readonly drafts = new Map<string, unknown>();
-  /** Field policies this page read (owner-only `GET /policies/{id}`), with their versions: the only audiences the table names. */
-  readonly policies = new Map<string, { version: number; policy: Policy }>();
+  /**
+   * Field policies this page read or confirmed (owner-only `GET /policies/{id}`), with their versions and when they were read: the only
+   * audiences the table names besides the summaries, and only while no later policy version of the field is known (`policyShownFor`).
+   * Written through `notePolicy`, so a late answer never replaces a later one.
+   */
+  readonly policies = new Map<string, PolicyRead>();
   /** Policy reads on their way, shared by every editor that asks (never made twice). */
   readonly policyReads = new Set<string>();
   /** Policy reads that did not answer with a policy (`403`: remembered for the page; others until the next try). */
@@ -136,6 +147,17 @@ export class PeopleMemory {
     this.dismissed.set(otherId, back);
     this.touch();
   }
+}
+
+/** Keeps `read` as the field's policy unless a later version of it is already kept (an answer that arrives late never lowers it). */
+export function notePolicy(
+  memory: PeopleMemory,
+  fieldId: string,
+  read: PolicyRead,
+): void {
+  const known = memory.policies.get(fieldId);
+  if (known === undefined || read.version >= known.version)
+    memory.policies.set(fieldId, read);
 }
 
 let current: PeopleMemory | null = null;

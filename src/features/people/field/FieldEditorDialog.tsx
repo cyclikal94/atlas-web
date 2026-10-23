@@ -13,14 +13,11 @@ import {
   useDraftWithCommand,
   useSharingDefaults,
 } from "../../../data";
-import {
-  applyPolicyChange,
-  ResourcePolicyEditor,
-  untilSent,
-} from "../../sharing";
+import { ResourcePolicyEditor, untilSent } from "../../sharing";
+import { applyPolicyChange } from "../../sharing/apply-policy-change";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
-import { isCurrentMemory, useMemoryRevision } from "../memory";
+import { isCurrentMemory, notePolicy, useMemoryRevision } from "../memory";
 import {
   type AudienceClass,
   audienceLabel,
@@ -69,7 +66,7 @@ import {
 import { sendOnline, sentSomething } from "../online";
 import { Banner, Choices, FieldError, useOutboxSave } from "../parts";
 import { OutstandingChain, usePersonLinkage } from "../reads";
-import { endEarlierHolds, lockOf } from "./held";
+import { type HoldOutcome, heldAttemptOf, holdChange } from "./held";
 import { ValueInput } from "./ValueInput";
 
 /**
@@ -89,6 +86,9 @@ import { ValueInput } from "./ValueInput";
  *    changed, or after another save of the field was queued, writes nothing; the person reviews the current value and audience and chooses
  *    "Save mine on the current version" (re-binding) or "Discard mine".
  */
+/** The type select's 16 px chevron, centred on it (inline: a one-off positioning utility would add rules to the shared stylesheet). */
+const CHEVRON_CENTRED = { top: "calc(50% - 8px)" };
+
 export function FieldEditorDialog({
   personId,
   fieldId,
@@ -308,7 +308,11 @@ function Editor({
     void untilSent(() => env.sharing.readPolicy(existing.id)).then((result) => {
       if (!isCurrentMemory(memory)) return;
       memory.policyReads.delete(existing.id);
-      if (result.ok) memory.policies.set(existing.id, result.value);
+      if (result.ok)
+        notePolicy(memory, existing.id, {
+          ...result.value,
+          checkedAt: env.now(),
+        });
       else
         memory.policyRefusals.set(
           existing.id,
@@ -623,42 +627,44 @@ function Editor({
         if (!contentChanged) return close();
         return queued(bound.policyVersion);
       }
-      // "Hold as draft": kept DURABLY in the account's database (finding 6), and this page may run it by itself (D1). Earlier holds of this
-      // field are then ended, each from the state it is stored in, while no run of the field holds its lock; one that stays is said so.
+      // "Hold as draft": ONE operation of the field under its lock (`holdChange`, review 3 of 22 October 2026, finding 2): kept DURABLY
+      // in the account's database as the field's current hold (finding 6), its earlier holds retired; only then may this page run it by
+      // itself (D1). A taken lock, a failure or a hold changed elsewhere keeps the edit open here, as typed.
       setSaving(true);
-      const holdId = env.newId();
-      const kept = await env.held.create({
-        holdId,
-        fieldId: existing.id,
-        personId: person.row.id,
-        label: ready.label,
-        value: ready.value,
-        sameKind,
-        version: bound.version,
-        expectedBase: bound.expectedBase,
-        from: { version: shownPolicy.version, policy: shownPolicy.policy },
-        to: target,
-        attempt: null,
-        status: { kind: "waiting" },
-        heldAt: new Date(env.now()).toISOString(),
-        rev: 0,
-        queued: false,
-      });
-      if (kept.kind !== "saved") {
+      const memory = env.memory;
+      let kept: HoldOutcome;
+      try {
+        kept = await holdChange(env, {
+          holdId: env.newId(),
+          fieldId: existing.id,
+          personId: person.row.id,
+          label: ready.label,
+          value: ready.value,
+          sameKind,
+          version: bound.version,
+          expectedBase: bound.expectedBase,
+          from: { version: shownPolicy.version, policy: shownPolicy.policy },
+          to: target,
+          status: { kind: "waiting" },
+          heldAt: new Date(env.now()).toISOString(),
+          rev: 0,
+          queued: false,
+        });
+      } catch {
+        kept = { kind: "failed", refused: false };
+      } finally {
         setSaving(false);
-        return fail(
-          kept.kind === "refused"
-            ? copy.REFUSED.closing
-            : copy.HELD_SAVE_FAILED,
-        );
       }
-      env.memory.heldAuthority.add(holdId);
-      env.memory.touch();
-      const replaced = await env.exclusive(lockOf(env, existing.id), () =>
-        endEarlierHolds(env, person.row.id, existing.id, holdId),
-      );
-      setSaving(false);
-      if (replaced !== true)
+      if (kept.kind === "busy") return fail(copy.HELD_BUSY);
+      if (kept.kind === "changed") return fail(copy.HELD_CHANGED_ELSEWHERE);
+      if (kept.kind === "failed")
+        return fail(
+          kept.refused ? copy.REFUSED.closing : copy.HELD_SAVE_FAILED,
+        );
+      if (!isCurrentMemory(memory)) return;
+      memory.heldAuthority.add(kept.copy.change.holdId);
+      memory.touch();
+      if (!kept.complete)
         announcer.announce(copy.HELD_KEPT_EARLIER(ready.label), "polite");
       return succeeded(copy.HELD_WAITING(ready.label), ticket);
     }
@@ -670,7 +676,16 @@ function Editor({
         resourceId: existing.id,
         from: { version: shownPolicy.version, policy: shownPolicy.policy },
         to: target,
-        attempt: memory.attempts.get(`policy:${existing.id}`) ?? null,
+        // The same change's unresolved attempt, kept by this page or by a hold (a reconciliation record) on this device: its key and body.
+        attempt:
+          memory.attempts.get(`policy:${existing.id}`) ??
+          (await heldAttemptOf(
+            env,
+            person.row.id,
+            existing.id,
+            shownPolicy.version,
+            target,
+          )),
         isCurrent: () => isCurrentMemory(memory),
       },
     );
@@ -700,9 +715,10 @@ function Editor({
         result.requestId,
       );
     }
-    memory.policies.set(existing.id, {
+    notePolicy(memory, existing.id, {
       version: result.policyVersion,
       policy: target,
+      checkedAt: env.now(),
     });
     memory.touch();
     // The edit is now bound to the audience the person just confirmed (its new policy version); the content base is unchanged.
@@ -973,7 +989,8 @@ function Editor({
               <ChevronDown
                 aria-hidden="true"
                 size={16}
-                className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-2"
+                className="pointer-events-none absolute right-3 text-ink-2"
+                style={CHEVRON_CENTRED}
               />
             </span>
           </div>

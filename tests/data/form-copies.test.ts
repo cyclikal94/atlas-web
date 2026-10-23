@@ -100,6 +100,8 @@ const change = (over: Partial<HeldChange> = {}): HeldChange => ({
   heldAt: "2026-10-13T09:00:00.000Z",
   rev: 0,
   queued: false,
+  seq: 0,
+  retired: false,
   ...over,
 });
 

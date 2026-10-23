@@ -16,6 +16,10 @@ export interface HeldPortDouble {
   failPuts: Array<"failed" | "refused">;
   /** The next ends answer this instead of ending. */
   failEnds: Array<"failed" | "refused">;
+  /** The next list reads fail (answer null) while this is above 0 (each read counts it down). */
+  failLists: { count: number };
+  /** Called before each list read is answered (a place to let another page act first). */
+  beforeList(hook: () => void): void;
   /** Called before each put is judged (a place to let another page act first). */
   beforePut(hook: () => void): void;
   /** Another page ends the hold now (a terminal write from whatever is stored). */
@@ -32,6 +36,8 @@ export function heldPortDouble(): HeldPortDouble {
   const failPuts: Array<"failed" | "refused"> = [];
   const failEnds: Array<"failed" | "refused"> = [];
   let hook = () => {};
+  let listHook = () => {};
+  const failLists = { count: 0 };
   const state = (row: FormRecoveryRow | undefined) =>
     row === undefined ? "absent" : row.terminal ? "ended" : "live";
   const port: ConditionalFormPort = {
@@ -88,8 +94,20 @@ export function heldPortDouble(): HeldPortDouble {
           ? { kind: "ended" }
           : { kind: "live", row: structuredClone(stored) };
     },
-    async list() {
-      return null;
+    // One page of the family's live copies in primary-key order (the real read's order; the paging itself is tested on the real plan).
+    async list(prefix) {
+      listHook();
+      if (failLists.count > 0) {
+        failLists.count -= 1;
+        return null;
+      }
+      const copies = [...rows.entries()]
+        .filter(
+          ([, row]) => !row.terminal && row.form_context.startsWith(prefix),
+        )
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([, row]) => structuredClone(row));
+      return { copies, next: null, more: false };
     },
   };
   return {
@@ -98,6 +116,10 @@ export function heldPortDouble(): HeldPortDouble {
     writes,
     failPuts,
     failEnds,
+    failLists,
+    beforeList: (next) => {
+      listHook = next;
+    },
     beforePut: (next) => {
       hook = next;
     },

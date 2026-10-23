@@ -560,6 +560,22 @@ export function effectiveText(
 }
 
 /**
+ * Whether a field policy this page read (or confirmed by its own change) may still name the field's audience beside its cached row
+ * (review 3 of 22 October 2026, finding 3; the design assessment's C6): no LATER policy version of the field is known, neither the cached
+ * row's nor one a summary applied (`floor`). A read ahead of a lagging cache is kept. PURE.
+ */
+export function policyShownFor(
+  read: { version: number },
+  cached: { policy_version?: number },
+  floor: { policyVersion: number } | undefined,
+): boolean {
+  return (
+    read.version >= (cached.policy_version ?? 0) &&
+    read.version >= (floor?.policyVersion ?? 0)
+  );
+}
+
+/**
  * Whether a summary row may be shown beside a cached projection: it is not OLDER than what this device shows. A newer one is the
  * server's later state (the cache catches up); an older one waits for the re-read the projection change has already asked for.
  */

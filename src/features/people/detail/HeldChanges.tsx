@@ -11,16 +11,18 @@ import {
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
 import {
+  checkRetired,
   type HeldResult,
-  keyOf,
+  type HeldSettle,
+  isSettled,
   lockOf,
   progressOf,
   runHeldChange,
+  settleHold,
 } from "../field/held";
 import {
   type HeldChange,
   type HeldCopy,
-  type HeldEnd,
   heldOf,
   heldPrefixOf,
 } from "../field/held-store";
@@ -38,9 +40,13 @@ import { useOutboxSave } from "../parts";
  *    person chose "Send now" or "Try again" for here, runs when the page is online and writable, one at a time, by one page of the browser
  *    at a time per field (`exclusive`, held for the whole run and its last write). Any other hold (after a reload, an account switch back,
  *    one held in another page, one whose discard could not be written) waits for "Send now".
- *  - Every outcome is the store's own: a discard is said only when the hold's copy ENDED (a conditional end from the state shown); one that
- *    the store refused or failed stays visible, with its reason, and never runs again by itself. Each run reads its own field directly
- *    (finding 5) and the hold again under the lock (`runHeldChange`).
+ *  - Every outcome is the store's own: a discard is said only when the hold's copy ENDED (a conditional end from the state shown) or was
+ *    RETIRED (its policy step may have been made: the attempt is kept as a reconciliation record, review 3 C3c); one that the store
+ *    refused or failed stays visible, with its reason, and never runs again by itself. Each run reads its own field directly (finding 5)
+ *    and the hold again under the lock (`runHeldChange`).
+ *  - LEAVING IS NOT DISCARDING (review 3 of 22 October 2026, finding 1): a row that unmounts (another person, the list, another page of
+ *    held changes) only stops its run (`suspended`); nothing is ended, and the hold is listed again, with its authority in this page.
+ *  - A reconciliation record ("may already have been made") offers "Check now" (one owner-only read, nothing sent) and "Discard".
  */
 export function HeldChanges({ personId }: { personId: string }) {
   const env = usePeopleEnv();
@@ -70,6 +76,8 @@ export function HeldChanges({ personId }: { personId: string }) {
                 holdId={row.tab_instance_id}
                 digest={row.content_digest}
               />
+            ) : held.change.retired ? (
+              <RetiredHeld key={held.change.holdId} env={env} held={held} />
             ) : (
               <HeldRow key={held.change.holdId} env={env} held={held} />
             );
@@ -95,10 +103,6 @@ export function HeldChanges({ personId }: { personId: string }) {
     </div>
   );
 }
-
-/** Whether an end left the hold's copy terminal (by this call, or already by another page). */
-const isEnded = (end: HeldEnd): boolean =>
-  end.kind === "ended" || (end.kind === "changed" && end.stored !== "live");
 
 /** Why an end or a write did not commit, in the row. */
 const notCommitted = (kind: "changed" | "refused" | "failed"): string =>
@@ -136,7 +140,7 @@ function UnreadableHeld({
     setNote(null);
     const end = await env.held.end({ personId, fieldId, holdId }, digest);
     setBusy(false);
-    if (!isEnded(end))
+    if (!isSettled(end))
       setNote(notCommitted(end.kind as "changed" | "refused" | "failed"));
   };
   return (
@@ -211,7 +215,12 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
         });
       } else if (result.kind === "waiting") setPausedFor(env);
       else if (result.kind === "stale") setStale(shown.digest);
-      else if (result.kind === "failed") {
+      // Stopped because the row left the page (or the identity changed): nothing ended, nothing to say; it is listed again as it is.
+      else if (result.kind === "suspended") return;
+      else if (result.kind === "superseded") {
+        if (result.ended) message = copy.HELD_REPLACED(change.label);
+        else setNote(copy.HELD_DISCARD_FAILED);
+      } else if (result.kind === "failed") {
         if (!result.kept) setNote(copy.HELD_FAILED[result.reason] ?? null);
       } else if (result.kind === "done") {
         message = copy.SAVED_NOT_SENT;
@@ -222,7 +231,8 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
         }
       } else if (result.kind === "cancelled") {
         if (result.ended) {
-          memory.heldEnded.add(holdId);
+          // A retired hold is listed again as its reconciliation record.
+          if (!result.retired) memory.heldEnded.add(holdId);
           // Its uncertain policy attempt outlives the hold: a later audience change of the field sends the same key and body.
           if (result.attempt !== null && result.policy === "maybe")
             memory.attempts.set(`policy:${change.fieldId}`, result.attempt);
@@ -338,12 +348,18 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
     setNote(null);
     setDiscarding(true);
     const shown = heldRef.current;
-    const end = await env.held.end(keyOf(shown.change), shown.digest);
+    let end: HeldSettle;
+    try {
+      end = await settleHold(env.held, shown);
+    } catch {
+      end = { kind: "failed" };
+    }
     setDiscarding(false);
     if (!isCurrentMemory(memory)) return;
-    if (isEnded(end)) {
-      memory.heldEnded.add(holdId);
-      if (end.kind === "ended") {
+    if (isSettled(end)) {
+      // A retired hold (its policy step may have been made) is listed again as its reconciliation record.
+      if (end.kind !== "retired") memory.heldEnded.add(holdId);
+      if (end.kind === "ended" || end.kind === "retired") {
         // Its uncertain policy attempt outlives the hold: a later audience change of the field sends the same key and body.
         if (
           shown.change.attempt !== null &&
@@ -410,6 +426,95 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
           )
         ) : null}
         {stopping || discarding ? (
+          <Button variant="quiet" disabled reason={copy.SAVING}>
+            {copy.DISCARD}
+          </Button>
+        ) : (
+          <Button variant="quiet" onClick={() => void discard()}>
+            {copy.DISCARD}
+          </Button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/**
+ * A RETIRED hold (review 3, C3c): its content was discarded or replaced while its policy step may have been made, so its attempt is kept
+ * on this device. Never run. "Check now" reads the field's policy once (nothing is sent) and says what the attempt did; "Discard" forgets
+ * it (the person's explicit choice: a later change of the audience is still guarded by its policy version).
+ */
+function RetiredHeld({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
+  const memory = env.memory;
+  const change = held.change;
+  const announcer = useAnnouncer();
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const check = async () => {
+    setBusy(true);
+    setNote(null);
+    let found: Awaited<ReturnType<typeof checkRetired>>;
+    try {
+      found = await checkRetired(env, held);
+    } catch {
+      found = "kept";
+    }
+    setBusy(false);
+    if (!isCurrentMemory(memory)) return;
+    if (found === "made" || found === "not_made") {
+      memory.heldEnded.add(change.holdId);
+      announcer.announce(
+        found === "made"
+          ? copy.HELD_CHECKED_MADE(change.label)
+          : copy.HELD_CHECKED_NOT_MADE(change.label),
+        "polite",
+      );
+      memory.touch();
+    } else setNote(found === "busy" ? copy.HELD_BUSY : copy.HELD_CHECK_FAILED);
+  };
+  const discard = async () => {
+    setBusy(true);
+    setNote(null);
+    let end: HeldSettle;
+    try {
+      end = await settleHold(env.held, held);
+    } catch {
+      end = { kind: "failed" };
+    }
+    setBusy(false);
+    if (!isCurrentMemory(memory)) return;
+    if (isSettled(end)) {
+      memory.heldEnded.add(change.holdId);
+      memory.touch();
+    } else setNote(notCommitted(end.kind as "changed" | "refused" | "failed"));
+  };
+  if (memory.heldEnded.has(change.holdId)) return null;
+  return (
+    <li
+      data-held-change={change.holdId}
+      data-held-field={change.fieldId}
+      data-held-retired=""
+      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+    >
+      <p className="text-[13px] text-ink-1">
+        {copy.HELD_UNRESOLVED(change.label)}
+      </p>
+      {note !== null ? (
+        <p className="text-[12.5px] text-conflict-text">{note}</p>
+      ) : null}
+      <div className="flex flex-wrap gap-2">
+        {busy ? (
+          <Button disabled reason={copy.SAVING}>
+            {copy.CHECK_NOW}
+          </Button>
+        ) : env.online ? (
+          <Button onClick={() => void check()}>{copy.CHECK_NOW}</Button>
+        ) : (
+          <Button disabled reason={copy.NEEDS_CONNECTION}>
+            {copy.CHECK_NOW}
+          </Button>
+        )}
+        {busy ? (
           <Button variant="quiet" disabled reason={copy.SAVING}>
             {copy.DISCARD}
           </Button>

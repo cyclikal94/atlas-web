@@ -11,16 +11,11 @@ export {
   untilSent,
 } from "./api";
 /**
- * WEB-11a's narrow extensions (docs/sharing.md, "Extensions for WEB-11a"): the quick policy change (D-11a-8), and the online-only call
- * rules the people screens share with the sharing editors (answer classification, the bounded `not_sent` retry, one attempt per body),
- * so a second copy of them is never written.
+ * WEB-11a's narrow extensions (docs/sharing.md, "Extensions for WEB-11a"): the online-only call rules the people screens share with the
+ * sharing editors (answer classification, the bounded `not_sent` retry, one attempt per body), so a second copy of them is never written.
+ * The quick policy change (D-11a-8) is the slice's OTHER public module, `./apply-policy-change`, imported from there: only the lazy people
+ * screens use it, and a re-export here would put it in the entry chunk (WEB-11a review 3: the merged fixture shell's initial budget).
  */
-export {
-  applyPolicyChange,
-  type PolicyChangeInput,
-  type PolicyChangeOutcome,
-  type PolicyChangeResult,
-} from "./apply-policy-change";
 export { DefaultsReview } from "./DefaultsReview";
 export {
   SharingBoundary,

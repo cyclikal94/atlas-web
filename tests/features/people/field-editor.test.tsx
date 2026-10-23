@@ -457,6 +457,8 @@ describe("updating a field", () => {
       heldAt: "2026-10-13T09:00:00.000Z",
       rev: 0,
       queued: false,
+      seq: 0,
+      retired: false,
     });
     // Held in this page (D1: it may run by itself).
     peopleMemory(w.people.identity).heldAuthority.add("hold-1");

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import {
   forgetAllPeopleMemory,
   isCurrentMemory,
+  notePolicy,
   peopleMemory,
 } from "../../../src/features/people/memory";
 
@@ -53,5 +54,23 @@ describe("page memory", () => {
     });
     peopleMemory("acct:2");
     expect(seen).toBe(1);
+  });
+});
+
+describe("review 3, finding 3: a late policy read never lowers the one kept (C6, A1)", () => {
+  test("notePolicy keeps the higher version; an equal or higher one replaces it", () => {
+    const memory = peopleMemory("acct:1");
+    const policy = { grants: [], exclude_accounts: [] };
+    notePolicy(memory, "f", { version: 7, policy, checkedAt: 2 });
+    notePolicy(memory, "f", { version: 6, policy, checkedAt: 3 });
+    expect(memory.policies.get("f")).toMatchObject({
+      version: 7,
+      checkedAt: 2,
+    });
+    notePolicy(memory, "f", { version: 7, policy, checkedAt: 4 });
+    expect(memory.policies.get("f")).toMatchObject({
+      version: 7,
+      checkedAt: 4,
+    });
   });
 });
