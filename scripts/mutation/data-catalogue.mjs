@@ -20304,7 +20304,13 @@ export const UNIT = [
     file: "src/features/people/archived/ArchivedItems.tsx",
     tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
     expect: /Try again reads afresh/,
-    patch: (t) => sub(t, "              setReading((n) => n + 1);\n", ""),
+    // Re-expressed in revision 5: the reading and its reports are one state (`setLedger`); the old `setReading` anchor is gone.
+    patch: (t) =>
+      sub(
+        t,
+        "                reading: previous.reading + 1,\n",
+        "                reading: previous.reading,\n",
+      ),
   },
   {
     id: "MU-2274",
@@ -20333,6 +20339,74 @@ export const UNIT = [
         "      from.change.legacy && !next.retired\n",
         "      (false as boolean)\n",
       ),
+  },
+  {
+    id: "MU-2279",
+    title:
+      "WEB-11a R5 F1: a run that is SUSPENDED (its row left the page) does not publish its end (the reviewer's defect: a waiting authorised hold never runs)",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /U12 \(the reviewer's schedule\): leaving the person|U12: another page of held changes unmounts the running A/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (isCurrentMemory(memory)) memory.touch();\n      }\n    })();\n",
+        '        if (isCurrentMemory(memory) && result?.kind !== "suspended")\n          memory.touch();\n      }\n    })();\n',
+      ),
+  },
+  {
+    id: "MU-2280",
+    title:
+      "WEB-11a R5 F2: a field's parent read still on its way counts as 'not visible' (the reviewer's defect: 'Nothing archived' on an earlier answer)",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
+    expect:
+      /U1\/U2: after a (hidden|failed) parent|U2: the SAME parent read again by a new watch|U3: a field that leaves the list/,
+    patch: (t) =>
+      sub(
+        t,
+        '    parent.status === "loading"\n      ? "loading"\n',
+        '    parent.status === "loading"\n      ? "hidden"\n',
+      ),
+  },
+  {
+    id: "MU-2281",
+    title:
+      "WEB-11a R5 F2: an EARLIER owner's late report replaces the current owner's",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/archive-reports.test.tsx"],
+    expect: /earlier one's LATE REPORT/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known !== undefined && known.owner > owner) return previous;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2282",
+    title:
+      "WEB-11a R5 F2: an earlier owner's cleanup withdraws the current owner's report",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/archive-reports.test.tsx"],
+    expect: /earlier owner's LATE CLEANUP/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known !== undefined && known.owner > owner) return previous;\n  if (next === null) {\n    if (known?.owner !== owner) return previous;\n",
+        "  if (next === null) {\n    if (known === undefined) return previous;\n",
+      ),
+  },
+  {
+    id: "MU-2283",
+    title:
+      "WEB-11a R5 F2: the ledger applies a report of an earlier reading (checked only when it was made, not when it is applied)",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/archive-reports.test.tsx"],
+    expect: /applies a kind's report only for its own reading/,
+    patch: (t) =>
+      sub(t, "  if (previous.reading !== of) return previous;\n", ""),
   },
 ];
 
@@ -23627,6 +23701,36 @@ export const ENGINE = [
         t,
         "      handOffOf(copy, head),\n    ),\n  );\n",
         '    ),\n  );\n  if (saved.ok) await store.end(key, copy.digest, "transferred", copy.change.seq);\n',
+      ),
+  },
+  {
+    id: "MU-2284",
+    title:
+      "WEB-11a R5 F1: (REAL ENGINE) a suspended run does not publish its end: the next authorised hold waits for ever",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P30:",
+    expect: /E-P30: .*leaving the person while A's run waits/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (isCurrentMemory(memory)) memory.touch();\n      }\n    })();\n",
+        '        if (isCurrentMemory(memory) && result?.kind !== "suspended")\n          memory.touch();\n      }\n    })();\n',
+      ),
+  },
+  {
+    id: "MU-2285",
+    title:
+      "WEB-11a R5 F2: (REAL ENGINE) a parent read on its way counts as 'not visible': 'Nothing archived' is shown with the field",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P31:",
+    expect: /E-P31: .*moves the field to a visible person/,
+    patch: (t) =>
+      sub(
+        t,
+        '    parent.status === "loading"\n      ? "loading"\n',
+        '    parent.status === "loading"\n      ? "hidden"\n',
       ),
   },
 ];

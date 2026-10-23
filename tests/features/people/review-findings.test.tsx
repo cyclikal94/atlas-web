@@ -2197,3 +2197,305 @@ describe("review 4 (the assessment's C9, C10): legacy copies and attempt lookups
     });
   });
 });
+
+describe("review 5, finding 1: a run that ends in ANY way lets the next authorised hold run (C13, U12, U13)", () => {
+  const G = "66666666-6666-4666-8666-666666666667";
+  const B = "aaaaaaaa-0000-4000-8000-000000000002";
+  const unchanged = { from: { version: 6, policy: PRIVATE }, to: PRIVATE };
+  const holdA = () =>
+    heldChange({ ...unchanged, value: { kind: "text", text: "A text" } });
+  const holdB = (over: Partial<HeldChange> = {}) =>
+    heldChange({
+      ...unchanged,
+      holdId: B,
+      fieldId: G,
+      value: { kind: "text", text: "B text" },
+      ...over,
+    });
+  const sentB = (w: ReturnType<typeof peopleWorld>) =>
+    w.built.filter((item) => JSON.stringify(item).includes("B text"));
+  /**
+   * A (field F of Ada) and B (field G of `bOn`), both held as drafts; A's first durable read under its lock waits for `release`, so A is
+   * positively this page's one run while the schedule moves on. `authorisedB`: B was made in this page (D1); otherwise recovered.
+   */
+  function twoHolds({
+    bOn = Q,
+    authorisedB = true,
+    a = holdA(),
+    gated = true,
+  }: {
+    bOn?: string;
+    authorisedB?: boolean;
+    a?: HeldChange;
+    gated?: boolean;
+  } = {}) {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      person({ id: Q, label: "Bea" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+      fieldRow({
+        id: G,
+        parent_id: bOn,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    w.putHeld(a);
+    w.putHeld(holdB({ personId: bOn }));
+    const memory = peopleMemory(w.people.identity);
+    memory.heldAuthority.add(HOLD);
+    if (authorisedB) memory.heldAuthority.add(B);
+    const gate = deferred<void>();
+    let entered = false;
+    const original = w.people.held.pinned.bind(w.people.held);
+    w.people.held.pinned = () => {
+      const bound = original();
+      return {
+        ...bound,
+        read: async (key) => {
+          if (key.holdId === HOLD && !entered) {
+            entered = true;
+            if (gated) await gate.promise;
+          }
+          return bound.read(key);
+        },
+      };
+    };
+    return {
+      w,
+      memory,
+      entered: () => entered,
+      release: () => act(async () => gate.release()),
+    };
+  }
+  const rowOf = (holdId: string) =>
+    document.querySelector(
+      `[data-held-change="${holdId}"]`,
+    ) as HTMLElement | null;
+
+  for (const leaveEarly of [true, false])
+    test(`U12 (the reviewer's schedule): ${leaveEarly ? "leaving the person while A runs suspends A, and B on the next person then runs by itself" : "control: A completes before leaving, then B runs"}`, async () => {
+      const { w, memory, entered, release } = twoHolds();
+      const { router } = await w.mount(`/people/${P}`);
+      await waitFor(() => expect(entered()).toBe(true));
+      expect([...memory.heldRuns.keys()]).toEqual([HOLD]);
+      if (!leaveEarly) {
+        await release();
+        await waitFor(() => expect(w.built).toHaveLength(1));
+      }
+      await act(async () => {
+        await router.navigate({
+          to: "/people/$personId",
+          params: { personId: Q },
+        });
+      });
+      await screen.findByRole("heading", { name: "Bea" });
+      if (leaveEarly) {
+        // B is listed and waits for A's run (one run at a time in the page).
+        await waitFor(() => expect(rowOf(B)).not.toBeNull());
+        expect(sentB(w)).toEqual([]);
+        expect(memory.heldRuns.has(HOLD)).toBe(true);
+        await release();
+      }
+      await waitFor(() => expect(sentB(w)).toHaveLength(1));
+      expect(sentB(w)[0]?.command).toMatchObject({
+        command: { id: G, value: { kind: "text", text: "B text" } },
+      });
+      if (leaveEarly) {
+        // A was only stopped: its input is kept as held, nothing of it sent.
+        expect(
+          w.built.filter((item) => JSON.stringify(item).includes("A text")),
+        ).toEqual([]);
+        expect(w.held().find((h) => h.holdId === HOLD)).toMatchObject({
+          value: { kind: "text", text: "A text" },
+          retired: false,
+        });
+      }
+    });
+
+  test("U12: another page of held changes unmounts the running A; B, listed on that page, then runs by itself", async () => {
+    const w = peopleWorld();
+    // B sorts after 120 recovered holds of the same person: A (field F) is on the first page, B on the second.
+    const LATE = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+      fieldRow({
+        id: LATE,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    w.putHeld(holdA());
+    for (let i = 0; i < 120; i += 1)
+      w.putHeld(
+        heldChange({
+          holdId: `bbbbbbbb-0000-4000-8000-${String(i).padStart(12, "0")}`,
+          fieldId: `9-${String(i).padStart(3, "0")}`,
+        }),
+      );
+    w.putHeld(holdB({ fieldId: LATE }));
+    const memory = peopleMemory(w.people.identity);
+    memory.heldAuthority.add(HOLD);
+    memory.heldAuthority.add(B);
+    const gate = deferred<void>();
+    let entered = false;
+    const original = w.people.held.pinned.bind(w.people.held);
+    w.people.held.pinned = () => {
+      const bound = original();
+      return {
+        ...bound,
+        read: async (key) => {
+          if (key.holdId === HOLD && !entered) {
+            entered = true;
+            await gate.promise;
+          }
+          return bound.read(key);
+        },
+      };
+    };
+    await w.mount(`/people/${P}`);
+    await waitFor(() => expect(entered).toBe(true));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show more held changes" }),
+    );
+    await waitFor(() => expect(rowOf(B)).not.toBeNull());
+    expect(rowOf(HOLD)).toBeNull();
+    await settle();
+    expect(sentB(w)).toEqual([]);
+    await act(async () => gate.release());
+    await waitFor(() => expect(sentB(w)).toHaveLength(1));
+    expect(w.held().find((h) => h.holdId === HOLD)).toMatchObject({
+      value: { kind: "text", text: "A text" },
+      retired: false,
+    });
+  });
+
+  test("U12: leaving while A's policy step waits for its answer: A sends nothing more and is kept; B then runs", async () => {
+    // A changes the audience (Home → Only you): its policy read is held.
+    const { w, memory } = twoHolds({
+      a: heldChange({ value: { kind: "text", text: "A text" } }),
+      gated: false,
+    });
+    const read = deferred<unknown>();
+    w.sharing.next.policy.push(() => read.promise as never);
+    const { router } = await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toHaveLength(
+        1,
+      ),
+    );
+    expect([...memory.heldRuns.keys()]).toEqual([HOLD]);
+    await act(async () => {
+      await router.navigate({
+        to: "/people/$personId",
+        params: { personId: Q },
+      });
+    });
+    await waitFor(() => expect(rowOf(B)).not.toBeNull());
+    expect(sentB(w)).toEqual([]);
+    await act(async () => read.release(ok({ version: 6, policy: HOME_VIEW })));
+    await waitFor(() => expect(sentB(w)).toHaveLength(1));
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.held().find((h) => h.holdId === HOLD)).toMatchObject({
+      value: { kind: "text", text: "A text" },
+      retired: false,
+    });
+  });
+
+  for (const exit of ["failed", "cancelled", "lock-busy"] as const)
+    test(`U13: A's run ends ${exit === "failed" ? "in a failure (its field is gone)" : exit === "cancelled" ? "discarded by the person" : "finding its field's lock taken by another page"}: B (same person) then runs by itself`, async () => {
+      const { w, memory, entered, release } = twoHolds({ bOn: P });
+      if (exit === "lock-busy")
+        w.heldElsewhere.add(`atlas-people-held:${ME}:${F}`);
+      await w.mount(`/people/${P}`);
+      if (exit !== "lock-busy") {
+        await waitFor(() => expect(entered()).toBe(true));
+        await waitFor(() => expect(rowOf(B)).not.toBeNull());
+        expect(sentB(w)).toEqual([]);
+        if (exit === "failed")
+          w.setCache([
+            person({ id: P, label: "Ada" }),
+            fieldRow({
+              id: G,
+              parent_id: P,
+              label: "Note",
+              version: 4,
+              policy_version: 6,
+            }),
+          ]);
+        else
+          fireEvent.click(
+            within(rowOf(HOLD) as HTMLElement).getByRole("button", {
+              name: "Discard",
+            }),
+          );
+        await release();
+      }
+      await waitFor(() => expect(sentB(w)).toHaveLength(1));
+      expect(memory.heldRuns.size).toBe(0);
+      expect(
+        w.built.filter((item) => JSON.stringify(item).includes("A text")),
+      ).toEqual([]);
+    });
+
+  test("U13: a RECOVERED B (no authority in this page) gains none when A's run ends: it waits for Send now", async () => {
+    const { w, memory, entered, release } = twoHolds({ authorisedB: false });
+    const { router } = await w.mount(`/people/${P}`);
+    await waitFor(() => expect(entered()).toBe(true));
+    await act(async () => {
+      await router.navigate({
+        to: "/people/$personId",
+        params: { personId: Q },
+      });
+    });
+    await waitFor(() => expect(rowOf(B)).not.toBeNull());
+    await release();
+    await waitFor(() => expect(memory.heldRuns.size).toBe(0));
+    await settle();
+    expect(sentB(w)).toEqual([]);
+    expect(
+      within(rowOf(B) as HTMLElement).getByRole("button", { name: "Send now" }),
+    ).toBeInTheDocument();
+  });
+
+  test("U13: B discarded while it waited for A is never sent when A's run ends", async () => {
+    const { w, memory, entered, release } = twoHolds({ bOn: P });
+    await w.mount(`/people/${P}`);
+    await waitFor(() => expect(entered()).toBe(true));
+    await waitFor(() => expect(rowOf(B)).not.toBeNull());
+    fireEvent.click(
+      within(rowOf(B) as HTMLElement).getByRole("button", { name: "Discard" }),
+    );
+    await waitFor(() =>
+      expect(w.held().some((h) => h.holdId === B)).toBe(false),
+    );
+    await release();
+    await waitFor(() => expect(memory.heldRuns.size).toBe(0));
+    await waitFor(() =>
+      expect(
+        w.built.filter((item) => JSON.stringify(item).includes("A text")),
+      ).toHaveLength(1),
+    );
+    await settle();
+    expect(sentB(w)).toEqual([]);
+  });
+});

@@ -228,6 +228,7 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
       } else if (result.kind === "waiting") setPausedFor(env);
       else if (result.kind === "stale") setStale(shown.digest);
       // Stopped because the row left the page (or the identity changed): nothing ended, nothing to say; it is listed again as it is.
+      // (Its end is still published by the run's finalisation, so a row that waited for it looks again: review 5, finding 1.)
       else if (result.kind === "suspended") return;
       else if (result.kind === "superseded") {
         if (result.ended) message = copy.HELD_REPLACED(change.label);
@@ -256,7 +257,6 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
         } else setNote(copy.HELD_DISCARD_FAILED);
       }
       if (message !== null) announcer.announce(message, "polite");
-      memory.touch();
     },
     [env, memory, holdId, change.fieldId, change.label, announcer],
   );
@@ -284,7 +284,13 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
         if (memory.heldRuns.get(holdId) === mine)
           memory.heldRuns.delete(holdId);
       }
-      finish(result, mine, shown);
+      // Whatever the outcome (a suspended run returns early from `finish`), its end is published to this identity's rows once the outcome is
+      // applied: a row that waited for this run looks again (review 5, finding 1). Never to another identity's memory; it grants nothing.
+      try {
+        finish(result, mine, shown);
+      } finally {
+        if (isCurrentMemory(memory)) memory.touch();
+      }
     })();
   }, [env, memory, holdId, save, finish]);
 

@@ -380,6 +380,18 @@ export interface PeopleWorld {
     match?: (input: Record<string, unknown>) => boolean,
   ): void;
   restoreReads(): void;
+  /**
+   * A controlled read boundary (review 5, finding 2): every NEW watch of `plan` whose input `match` accepts starts `loading` and stays so
+   * (one stable snapshot) until `releaseReads`, as a live query's first answer does; watches made earlier answer as before. `gated` lists
+   * the inputs of the watches it held and that were read, so a test knows the new read exists before it looks.
+   */
+  holdReads(
+    plan: string,
+    match?: (input: Record<string, unknown>) => boolean,
+  ): void;
+  /** The held watches answer (and the next new ones are not held). */
+  releaseReads(): void;
+  readonly gated: Record<string, unknown>[];
   /** The sync engine applied a page of changes (`sync_state.applied_revision` moves): the summaries' invalidation signal. */
   advanceRevision(): void;
   mount(path: string): Promise<{ router: ReturnType<typeof createAppRouter> }>;
@@ -409,6 +421,13 @@ export function peopleWorld(
   };
   const memo = new Map<string, { version: number; value: Loadable<unknown> }>();
   const FAILED: Loadable<unknown> = { status: "unavailable", reason: "error" };
+  const LOADING: Loadable<unknown> = { status: "loading" };
+  const holds: Array<{
+    plan: string;
+    match: (input: Record<string, unknown>) => boolean;
+  }> = [];
+  let holding = 0;
+  const gated: Record<string, unknown>[] = [];
   const faults: Array<{
     plan: string;
     match: (input: Record<string, unknown>) => boolean;
@@ -519,10 +538,22 @@ export function peopleWorld(
         const compute = plans[plan.name];
         // A watch that answered a `failRead` fault stays failed (a live query ENDS at its first error): only a new watch reads again.
         let ended = false;
+        // A watch made while a `holdReads` gate matches it answers only once that gate is released.
+        const gate = holds.some(
+          (hold) => hold.plan === plan.name && hold.match(input),
+        )
+          ? holding
+          : null;
+        let seen = false;
         return {
           get: () => {
             if (compute === undefined)
               return { status: "loading" } as Loadable<unknown>;
+            if (gate !== null && gate === holding) {
+              if (!seen) gated.push(input);
+              seen = true;
+              return LOADING;
+            }
             if (
               ended ||
               faults.some(
@@ -1046,6 +1077,15 @@ export function peopleWorld(
       failing = false;
       act(() => notify());
     },
+    holdReads(plan, match = () => true) {
+      holds.push({ plan, match });
+    },
+    releaseReads() {
+      holds.length = 0;
+      holding += 1;
+      act(() => notify());
+    },
+    gated,
     advanceRevision() {
       appliedRevision += 1;
       act(() => notify());

@@ -2165,3 +2165,218 @@ test.describe("E-P29: the field's head never goes back (review 4, finding 2)", (
       }
     });
 });
+
+test.describe("E-P30: a run that stops lets the next authorised hold run (review 5, finding 1)", () => {
+  const Q2 = "55555555-5555-4555-8555-555555555556";
+  const G = "66666666-6666-4666-8666-666666666667";
+  for (const leaveEarly of [true, false])
+    test(`${leaveEarly ? "leaving the person while A's run waits for its policy answer suspends A, and B on the next person then runs" : "control: A completes before leaving, then B runs"}`, async ({
+      context,
+    }, info) => {
+      const { page, served } = await setup(
+        context,
+        `/people/${Q2}/fields/${G}`,
+        [
+          personP(P, "Ada"),
+          personP(Q2, "Bea"),
+          fieldP(
+            F,
+            P,
+            "Note A",
+            { kind: "text", text: "Original A" },
+            { version: 4, policy_version: 6 },
+          ),
+          fieldP(
+            G,
+            Q2,
+            "Note B",
+            { kind: "text", text: "Original B" },
+            { version: 4, policy_version: 6 },
+          ),
+        ],
+        {
+          arrange: (s) => {
+            s.policies.set(F, { version: 6, policy: HOME_VIEW });
+            s.policies.set(G, { version: 6, policy: HOME_VIEW });
+          },
+        },
+      );
+      const hold = async (label: string, text: string) => {
+        const d = page.getByRole("dialog", { name: `Edit ${label}` });
+        await expect(
+          d.getByRole("radio", { name: "Home · can view" }),
+        ).toBeChecked();
+        await connectivity(context, page, false);
+        await d.getByRole("textbox", { name: "Value" }).fill(text);
+        await d.getByRole("radio", { name: "Only you", exact: true }).click();
+        await d.getByRole("button", { name: "Save", exact: true }).click();
+        await d.getByRole("button", { name: "Hold as draft" }).click();
+        await expect(d).toBeHidden();
+      };
+      await hold("Note B", "B text");
+      // A's audience is read online before its offline hold is made (B's row is not shown on A's person: it cannot run there).
+      await navigateInApp(page, `/people/${P}/fields/${F}`);
+      await connectivity(context, page, true);
+      await hold("Note A", "A text");
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      served.policyScript.push((id) => {
+        expect(id).toBe(F);
+        return {
+          status: 200,
+          body: { version: 6, policy: HOME_VIEW },
+          after: gate,
+        };
+      });
+      for (let n = 0; n < 6; n += 1)
+        served.policyScript.push((id) => ({
+          status: 200,
+          body: served.management.some((m) =>
+            JSON.stringify(m.body).includes(id),
+          )
+            ? { version: 7, policy: PRIVATE }
+            : { version: 6, policy: HOME_VIEW },
+        }));
+      const start = served.log.length;
+      await connectivity(context, page, true);
+      // A's run is positively under way: its policy read was asked.
+      await expect
+        .poll(() => served.log.slice(start).includes(`GET /policies/${F}`))
+        .toBe(true);
+      if (!leaveEarly) {
+        release();
+        await expect.poll(() => draftsOf(page)).toHaveLength(1);
+      }
+      await navigateInApp(page, `/people/${Q2}`);
+      const row = page.locator(`[data-held-field="${G}"]`);
+      if (leaveEarly) {
+        await expect(row).toBeVisible();
+        expect(await draftsOf(page)).toEqual([]);
+        release();
+        // A's run has let go of A's field lock: it has ended (suspended) and nothing else will make the page render.
+        await page.evaluate(
+          async ({ me, f }) =>
+            navigator.locks.request(
+              `atlas-people-held:${me}:${f}`,
+              async () => {},
+            ),
+          { me: ME, f: F },
+        );
+      }
+      // The reviewer's five-second observation, unchanged.
+      await expect
+        .poll(async () => JSON.stringify(await draftsOf(page)), {
+          timeout: 5000,
+        })
+        .toContain(G);
+      const drafts = await draftsOf(page);
+      recordEvidence(info, "e-p30", {
+        leaveEarly,
+        drafts,
+        management: served.management,
+        log: served.log,
+      });
+      const bodies = JSON.stringify(drafts);
+      expect(bodies).toContain("B text");
+      if (leaveEarly) {
+        // A was only stopped: nothing of it queued, its input kept as held.
+        expect(bodies).not.toContain("A text");
+        expect(drafts).toHaveLength(1);
+      }
+    });
+});
+
+test.describe("E-P31: an archived field's new parent is not complete until it is read (review 5, finding 2)", () => {
+  const X = "12121212-1212-4121-8121-121212121212";
+  for (const reparent of [true, false])
+    test(`${reparent ? "a synced projection moves the field to a visible person: 'Nothing archived' is withdrawn before the field is listed, and never shown with it" : "control: a synced change of the field under the same absent person keeps 'Nothing archived'"}`, async ({
+      context,
+    }, info) => {
+      const { page, net } = await setup(context, "/settings/archived", [
+        fieldP(
+          F,
+          X,
+          "Old phone",
+          { kind: "text", text: "07700 900461" },
+          { archived: true },
+        ),
+      ]);
+      const empty = page.locator('[data-archived-state="empty"]');
+      await expect(empty).toBeVisible();
+      // Every DOM change from here on, as the ledger showed it at that moment (MutationObserver: no paint or timer is involved).
+      await page.evaluate(() => {
+        const seen: Array<{ empty: boolean; row: boolean }> = [];
+        (window as unknown as { __ep31: typeof seen }).__ep31 = seen;
+        new MutationObserver(() => {
+          seen.push({
+            empty:
+              document.querySelector('[data-archived-state="empty"]') !== null,
+            row: (
+              document.querySelector("[data-archived-items]")?.textContent ?? ""
+            ).includes("Old phone · Bea"),
+          });
+        }).observe(document.body, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+        });
+      });
+      await publish(
+        page,
+        net,
+        reparent
+          ? [
+              personP(Q, "Bea"),
+              fieldP(
+                F,
+                Q,
+                "Old phone",
+                { kind: "text", text: "07700 900461" },
+                { archived: true, version: 2 },
+              ),
+            ]
+          : [
+              fieldP(
+                F,
+                X,
+                "Old phone",
+                { kind: "text", text: "07700 900462" },
+                { archived: true, version: 2 },
+              ),
+            ],
+      );
+      if (reparent)
+        await expect(page.locator(`[data-archived-row="${F}"]`)).toContainText(
+          "Old phone · Bea",
+        );
+      else
+        await expect
+          .poll(async () => {
+            const rows = (await page.evaluate(
+              (a) => window.__atlasData?.rows(a, "cache"),
+              ME,
+            )) as Array<{ id: string; version: number }>;
+            return rows.find((row) => row.id === F)?.version;
+          })
+          .toBe(2);
+      const seen = (await page.evaluate(
+        () => (window as unknown as { __ep31: unknown }).__ep31,
+      )) as Array<{ empty: boolean; row: boolean }>;
+      recordEvidence(info, "e-p31", { reparent, seen });
+      if (reparent) {
+        expect(seen.filter((s) => s.empty && s.row)).toEqual([]);
+        const withdrawn = seen.findIndex((s) => !s.empty);
+        const listed = seen.findIndex((s) => s.row);
+        expect(withdrawn).toBeGreaterThanOrEqual(0);
+        expect(listed).toBeGreaterThan(withdrawn);
+        expect(seen[listed - 1]?.empty).toBe(false);
+        await expect(empty).toHaveCount(0);
+      } else {
+        expect(seen.every((s) => s.empty && !s.row)).toBe(true);
+        await expect(empty).toBeVisible();
+      }
+    });
+});

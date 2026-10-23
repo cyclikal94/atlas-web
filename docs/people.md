@@ -102,6 +102,16 @@ reopens it with its draft), and `/settings/archived`.
   "Couldn't read every archived item on this device. Anything that could be read is listed." with "Try again", which mounts every kind
   afresh (a failed live read has ended; clearing the message alone would read nothing). A person that could not be read still hides its
   field (never disclosed) and makes the inventory incomplete.
+  - **A report belongs to its current read** (review 5 of 23 October 2026, finding 2; the fourth design assessment's C12). A field's
+    parent report is `loading | shown | hidden | failed`, owned by that row's CURRENT read of THAT parent (a new owner for every mount
+    and every parent read; a later owner outranks an earlier one). It is published, including `loading`, and withdrawn on unmount,
+    before the browser paints (layout effects; store-driven commits also flush passive effects synchronously in React 19, so this is
+    belt and braces). A report counts only while its field is listed with that parent; anything else is `loading`. So an answer about
+    an earlier parent (a synced projection may move a field: the backend's person merge does), an earlier mount (a step back, a restore
+    queued then discarded) or another service binding never completes the inventory. An earlier owner's late report or cleanup is
+    ignored when APPLIED, and so is a kind's report of an earlier reading: the ledger's reading and its reports are one state.
+  - Every registered kind follows the same contract (`archived/ledger.ts`): report `loading` until each read it needs answered for its
+    current inputs, never keep an answer of an earlier input, and withdraw on unmount.
 - **D-11a-12** "Hold it as a draft until I'm online" is DURABLE for its account (revision 1, finding 6; Kieran's decision of 13 October 2026:
   durable, in WEB-11a). A held change is a form copy of the account's own database (`field/held-store.ts`: `form_context`
   `people-held:<person>:<field>`, `tab_instance_id` the hold's id), written through WEB-09a's `FormRecoveryPort` and listed live by
@@ -183,6 +193,10 @@ reopens it with its draft), and `/settings/archived`.
     version of Atlas is kept on this device. It can't be sent from here: discard it, or make the change again."), never run, never written
     again (except retired by Discard, keeping an unresolved attempt) and never retired automatically. No action recreates their content.
   - A row waiting while another row of the page runs looks again when that run ends (before, a second authorised hold never started).
+    However the run ends (review 5 of 23 October 2026, finding 1; C13): after its outcome is applied, the runner removes its own entry and
+    publishes the end to the SAME identity's memory, also when the run was only suspended (its row left the page: navigation, another page
+    of held changes). It grants nothing: a recovered hold still waits for Send now, a discarded one never runs, and another identity's
+    memory is never touched.
 - **D-11a-13a** (review 3 of 22 October 2026, finding 3; C6) The page's own policy read names a field's audience only while no later
   policy version of the field is known (the cached row's `policy_version` or a version a summary applied), a late older read never
   replaces a later one (`notePolicy`), closing the shared policy editor withdraws it (it may have changed the policy), and it is said with

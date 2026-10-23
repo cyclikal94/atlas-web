@@ -2,8 +2,8 @@ import { Link } from "@tanstack/react-router";
 import {
   type ReactNode,
   useCallback,
-  useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -71,14 +71,40 @@ export function ArchivedItems() {
 /**
  * The ledger: every registered kind's rows, and what their REPORTS say together (review 4, finding 5). "Nothing archived" only when every
  * kind of THIS reading reported `complete` with nothing shown; a kind that failed says so, with "Try again", which mounts every kind afresh
- * (new reads, not a cleared message); a report of an earlier reading is ignored.
+ * (new reads, not a cleared message). A report of an earlier reading is ignored when it is APPLIED, not only when it is made (review 5,
+ * finding 2): the reading and its reports are one state.
  */
+export interface LedgerState {
+  reading: number;
+  reports: Record<string, LedgerReport>;
+}
+
+/** A kind's report (or its withdrawal, null) of reading `of`, applied to the ledger now: nothing when the ledger reads afresh since. */
+export function ledgerReported(
+  previous: LedgerState,
+  of: number,
+  id: string,
+  report: LedgerReport | null,
+): LedgerState {
+  if (previous.reading !== of) return previous;
+  const known = previous.reports[id];
+  if (report === null) {
+    if (known === undefined) return previous;
+    const { [id]: _gone, ...rest } = previous.reports;
+    return { reading: of, reports: rest };
+  }
+  return known?.count === report.count && known.state === report.state
+    ? previous
+    : { reading: of, reports: { ...previous.reports, [id]: report } };
+}
+
 function Ledger({ headingId }: { headingId: string }) {
   const kinds = archivedLedgerKinds.list();
-  const [reading, setReading] = useState(0);
-  const current = useRef(reading);
-  current.current = reading;
-  const [reports, setReports] = useState<Record<string, LedgerReport>>({});
+  const [ledger, setLedger] = useState<LedgerState>({
+    reading: 0,
+    reports: {},
+  });
+  const { reading, reports } = ledger;
   // One STABLE reporter per kind and reading (a kind reports again whenever its reporter changes, and withdraws the old one).
   const reporters = useRef(
     new Map<string, (report: LedgerReport | null) => void>(),
@@ -87,20 +113,8 @@ function Ledger({ headingId }: { headingId: string }) {
     const name = `${id}:${of}`;
     let reporter = reporters.current.get(name);
     if (reporter === undefined) {
-      reporter = (report) => {
-        if (of !== current.current) return;
-        setReports((previous) => {
-          const known = previous[id];
-          if (report === null) {
-            if (known === undefined) return previous;
-            const { [id]: _gone, ...rest } = previous;
-            return rest;
-          }
-          return known?.count === report.count && known.state === report.state
-            ? previous
-            : { ...previous, [id]: report };
-        });
-      };
+      reporter = (report) =>
+        setLedger((previous) => ledgerReported(previous, of, id, report));
       reporters.current.set(name, reporter);
     }
     return reporter;
@@ -146,10 +160,12 @@ function Ledger({ headingId }: { headingId: string }) {
             {copy.ARCHIVED_FAILED}
           </p>
           <Button
-            onClick={() => {
-              setReports({});
-              setReading((n) => n + 1);
-            }}
+            onClick={() =>
+              setLedger((previous) => ({
+                reading: previous.reading + 1,
+                reports: {},
+              }))
+            }
           >
             {copy.TRY_AGAIN}
           </Button>
@@ -356,32 +372,79 @@ function ArchivedPeople({
   );
 }
 
-/** Whether a field's person is on this device and visible: `failed` when that could not be read (never "not visible"). */
-type ParentState = "shown" | "hidden" | "failed";
+/**
+ * What a field's parent read says now (review 5, finding 2): `loading` until it answers, `shown` (a person this device holds and can
+ * see), `hidden` (none: PPL-5) or `failed` (it could not be read: never "not visible").
+ */
+export type ParentState = "loading" | "shown" | "hidden" | "failed";
+
+/**
+ * One field row's report of its parent read, owned by that row's CURRENT read of THAT parent: `owner` is new for every mount and every
+ * parent the row reads (a later owner of the field outranks an earlier one), and `parent` is the parent read. A report counts only while
+ * its field is listed with that parent; anything else (no report, another parent, an earlier owner) is still loading.
+ */
+export interface ParentReport {
+  owner: number;
+  parent: string;
+  state: ParentState;
+}
+let parentOwners = 0;
+
+/**
+ * Owner `owner`'s report of `field` (or its withdrawal, null), applied to the CURRENT reports: an earlier owner neither replaces a later
+ * one's report nor withdraws it.
+ */
+export function parentReported(
+  previous: ReadonlyMap<string, ParentReport>,
+  field: string,
+  owner: number,
+  next: Omit<ParentReport, "owner"> | null,
+): ReadonlyMap<string, ParentReport> {
+  const known = previous.get(field);
+  if (known !== undefined && known.owner > owner) return previous;
+  if (next === null) {
+    if (known?.owner !== owner) return previous;
+    const rest = new Map(previous);
+    rest.delete(field);
+    return rest;
+  }
+  if (
+    known?.owner === owner &&
+    known.parent === next.parent &&
+    known.state === next.state
+  )
+    return previous;
+  return new Map(previous).set(field, { owner, ...next });
+}
 
 function ArchivedFields({
   report,
 }: {
   report(report: LedgerReport | null): void;
 }) {
-  const [visible, setVisible] = useState<Record<string, ParentState>>({});
-  const onVisible = useCallback(
-    (id: string, shown: ParentState) =>
-      setVisible((previous) =>
-        previous[id] === shown ? previous : { ...previous, [id]: shown },
-      ),
+  const [parents, setParents] = useState<ReadonlyMap<string, ParentReport>>(
+    () => new Map(),
+  );
+  const onParent = useCallback(
+    (field: string, owner: number, next: Omit<ParentReport, "owner"> | null) =>
+      setParents((previous) => parentReported(previous, field, owner, next)),
     [],
   );
   return (
     <ArchivedSteps kind="field">
       {(rows, state, more) => {
-        const parents = rows.map((row) => visible[row.row.id]);
+        const states = rows.map((row) => {
+          const known = parents.get(row.row.id);
+          return known !== undefined &&
+            known.parent === (row.row.parent_id ?? "")
+            ? known.state
+            : "loading";
+        });
         const count =
-          parents.filter((parent) => parent === "shown").length +
-          (more ? 1 : 0);
-        const known: StepState = parents.includes("failed")
+          states.filter((parent) => parent === "shown").length + (more ? 1 : 0);
+        const known: StepState = states.includes("failed")
           ? "failed"
-          : parents.includes(undefined)
+          : states.includes("loading")
             ? "loading"
             : "complete";
         return (
@@ -400,7 +463,7 @@ function ArchivedFields({
               <FieldLedgerRow
                 key={row.row.id}
                 shown={row}
-                onVisible={onVisible}
+                onParent={onParent}
               />
             ))}
           </Reported>
@@ -413,29 +476,42 @@ function ArchivedFields({
 /** PPL-5: a field is listed only under a person this device holds and can see. */
 function FieldLedgerRow({
   shown,
-  onVisible,
+  onParent,
 }: {
   shown: ShownRow;
-  onVisible(id: string, shown: ParentState): void;
+  onParent(
+    field: string,
+    owner: number,
+    next: Omit<ParentReport, "owner"> | null,
+  ): void;
 }) {
+  const field = shown.row.id;
   const parentId = shown.row.parent_id ?? "";
   const parent = useCachedResource(parentId);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new owner for every parent this row reads (and every mount)
+  const owner = useMemo(() => ++parentOwners, [parentId]);
   const person: CacheRow | null =
     parent.status === "ready" && parent.value.merged?.kind === "person"
       ? parent.value.merged
       : null;
-  // A person that could not be read hides the field's details all the same, but the inventory is then not complete.
-  const state: ParentState | null =
+  // The row and its report come from the SAME read: what is listed is what is counted. A person that could not be read hides the
+  // field's details all the same, but the inventory is then not complete; one still on its way is not complete either.
+  const state: ParentState =
     parent.status === "loading"
-      ? null
+      ? "loading"
       : parent.status === "unavailable"
         ? "failed"
         : person !== null
           ? "shown"
           : "hidden";
-  useEffect(() => {
-    if (state !== null) onVisible(shown.row.id, state);
-  }, [state, shown.row.id, onVisible]);
+  // Published (and withdrawn) before the browser paints: the ledger never shows an answer of an earlier read as the current one.
+  useLayoutEffect(() => {
+    onParent(field, owner, { parent: parentId, state });
+  }, [onParent, field, owner, parentId, state]);
+  useLayoutEffect(
+    () => () => onParent(field, owner, null),
+    [onParent, field, owner],
+  );
   if (person === null) return null;
   return (
     <LedgerRow
@@ -446,7 +522,10 @@ function FieldLedgerRow({
   );
 }
 
-/** Reports a kind's state on every change, and withdraws it when the kind unmounts (no earlier count outlives its reading). */
+/**
+ * Reports a kind's state on every change, and withdraws it when the kind unmounts (no earlier count outlives its reading). Both before the
+ * browser paints (review 5, finding 2): an inner report that changed reaches the ledger in the same commit.
+ */
 function Reported({
   count,
   state,
@@ -458,10 +537,10 @@ function Reported({
   report(report: LedgerReport | null): void;
   children: ReactNode;
 }) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     report({ count, state });
   }, [count, state, report]);
-  useEffect(() => () => report(null), [report]);
+  useLayoutEffect(() => () => report(null), [report]);
   return <>{children}</>;
 }
 

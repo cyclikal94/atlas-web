@@ -11,6 +11,11 @@ import type { ComponentType } from "react";
  * `loading` while any is still on its way; `failed` when one failed or could not be completed (what it shows is then partial). It reports
  * again on every change (a new step, a reload) and withdraws its report (`null`) when it unmounts, so an earlier count is never taken for
  * the current one. The ledger says "Nothing archived" only when every kind is `complete` with nothing shown.
+ *
+ * AN ANSWER BELONGS TO ITS CURRENT INPUT (review 5, finding 2): a read that decides what a kind shows (a row's parent, say) counts only
+ * for the input it was asked for and the read that answered it. When the input changes, the row mounts again or the read is made anew,
+ * the kind reports `loading` until the new read answers; it never completes on an earlier answer. Report before the browser paints
+ * (a layout effect), so no frame says "Nothing archived" on a stale report.
  */
 export interface LedgerReport {
   /** How many rows it shows now (a kind with a further step to move to counts one more: it is never empty). */
