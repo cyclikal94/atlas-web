@@ -1,12 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import {
-  type ReactNode,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -23,6 +16,7 @@ import * as copy from "../copy";
 import { DETAIL_COPY } from "../detail/TaskDetail";
 import { useTaskDetail } from "../detail/useTaskDetail";
 import { useTasksEnv } from "../env";
+import { completeKept, keptEntry, keptKey, useKeptInput } from "../kept-input";
 import {
   commandOf,
   createTask,
@@ -49,6 +43,7 @@ import {
   visibleFields,
 } from "../model/form";
 import { occurrenceId, progressId } from "../model/ids";
+import { taskFormContext } from "../model/recovery";
 import { firstSlot, todayIn } from "../model/time";
 import { editable } from "../reasons";
 import { knownZones } from "../today/TodayPage";
@@ -120,12 +115,19 @@ export function TaskFormPage({ mode }: { mode: Mode }) {
   return <NewTask />;
 }
 
+/** The new-task form's editor (R33): one per identity. Its picker's choice is kept apart, until a stage is chosen. */
+const NEW_FORM = "task-form:new";
+const NEW_PICK = "task-form:new:preset";
+
 function NewTask() {
   const env = useTasksEnv();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const navigate = useNavigate();
-  const [stage, setStage] = useState<"pick" | { preset: TaskPreset | null }>(
-    "pick",
+  // A form kept through a visit to the sync screens is the stage the person had reached: it resumes, never the picker again (R33).
+  const [stage, setStage] = useState<
+    "pick" | "kept" | { preset: TaskPreset | null }
+  >(() =>
+    keptEntry(keptKey(env.identity, NEW_FORM)) === null ? "pick" : "kept",
   );
   const base = useMemo(
     () => emptyForm(zone, todayIn(zone, env.now())),
@@ -137,6 +139,7 @@ function NewTask() {
         <PageHeading>{FORM_COPY.newTitle}</PageHeading>
         <PresetPicker
           zone={zone}
+          keptAs={keptKey(env.identity, NEW_PICK)}
           onUse={(preset) => setStage({ preset })}
           onScratch={() => setStage({ preset: null })}
           onClose={() => void navigate({ to: "/tasks", search: {} })}
@@ -144,7 +147,7 @@ function NewTask() {
       </>
     );
   const initial =
-    stage.preset === null
+    stage === "kept" || stage.preset === null
       ? base
       : fromDefinition(stage.preset.title, stage.preset.definition, base);
   return <TaskForm initial={initial} mode={{ kind: "new" }} />;
@@ -222,6 +225,12 @@ type FormMode =
       editable: boolean;
     };
 
+/** A form's editing session (R33): the values it began from (a locked choice is judged against them) and what is typed now. */
+interface FormInput {
+  initial: TaskFormState;
+  state: TaskFormState;
+}
+
 const select =
   "min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 text-[14px] text-ink-1";
 
@@ -293,27 +302,38 @@ function TaskForm({
   const actions = useTaskActions();
   const defaults = useSharingDefaults();
   const navigate = useNavigate();
-  const [state, setState] = useState<TaskFormState>(initial);
-  const revision = useRef(0);
-  // Whether this form is still mounted (revision 2): a save that completes after the person left (another form, another task) never
-  // navigates them away from where they are now.
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
+  // What was typed is the editing session's (revision 18, R33; `kept-input.ts`), not this mount's: a visit to the sync screens keeps it,
+  // whole and raw, and coming back shows it again, as is the new form's stage. Every edit moves the session's revision; a save consumes the
+  // session, and closes the form onto its task, only if nothing was typed after what it submitted, and only the form mounted then (if
+  // any) moves: a save that completes after the person left never navigates them away from where they are now (revision 2).
+  const kept = useKeptInput<FormInput>(
+    keptKey(
+      env.identity,
+      mode.kind === "new" ? NEW_FORM : taskFormContext(mode.taskId),
+    ),
+    env.identity,
+    () => ({ initial, state: initial }),
+    {
+      consumed: (_, taskId) => {
+        if (taskId !== null)
+          void navigate({
+            to: "/tasks/$taskId",
+            params: { taskId },
+            search: {},
+          });
+        return null;
+      },
+      unedited: mode.kind === "new",
+    },
+  );
+  const { state } = kept.value;
   const [errors, setErrors] = useState<FormErrors>({});
-  const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { note: notice, setNote: setNotice, busy } = kept;
   const id = useId();
   const zones = useMemo(knownZones, []);
   const show = visibleFields(state);
-  const set = (patch: Partial<TaskFormState>) => {
-    revision.current += 1;
-    setState((s) => ({ ...s, ...patch }));
-  };
+  const set = (patch: Partial<TaskFormState>) =>
+    kept.edit((input) => ({ ...input, state: { ...input.state, ...patch } }));
   const fid = (name: string) => `${id}-${name}`;
   const described = (name: FormField, hint = false) => {
     const ids = [
@@ -391,11 +411,13 @@ function TaskForm({
       return;
     }
     setErrors({});
-    const ticket = revision.current;
-    setBusy(true);
+    const ticket = kept.submit();
+    if (ticket === null) return;
+    let ok = false;
+    let note: string | null = null;
+    let taskId: string | null = null;
     try {
       let request: EnqueueRequest;
-      let taskId: string;
       if (mode.kind === "new" || queuedCreate !== undefined) {
         // Ids before enqueue (§4.3): task and details are new UUIDs; the first occurrence and my progress are deterministic.
         const original =
@@ -437,7 +459,6 @@ function TaskForm({
         });
       }
       const coalesce = queuedCreate ?? queuedRevise;
-      let ok = false;
       let review = false;
       if (coalesce !== undefined) {
         const outbox = data.outbox();
@@ -454,7 +475,7 @@ function TaskForm({
           : null;
         if (edited?.kind === "edited") ok = true;
         else
-          setNotice(
+          note =
             edited?.kind === "refused" && edited.reason === "retargeted"
               ? FORM_COPY.retargeted
               : edited?.kind === "refused" && edited.reason === "denied"
@@ -464,8 +485,7 @@ function TaskForm({
                   ? FORM_COPY.changedElsewhere
                   : (copy.refusalMessage(
                       edited?.kind === "refused" ? edited.reason : "storage",
-                    ) ?? null),
-          );
+                    ) ?? null);
       } else {
         // A create captured from defaults this device never fetched is held for review in the queue (WEB-12a).
         review = mode.kind === "new" && defaults.record === null;
@@ -474,15 +494,15 @@ function TaskForm({
           review ? FORM_COPY.reviewNeeded : FORM_COPY.saved,
         );
         ok = saved.ok;
-        if (!saved.ok) setNotice(saved.message);
+        if (!saved.ok) note = saved.message;
       }
-      if (!ok || !mounted.current) return;
-      // A success closes the form only if nothing was typed after the save began; newer edits stay open.
-      if (ticket === revision.current)
-        void navigate({ to: "/tasks/$taskId", params: { taskId }, search: {} });
-      else setNotice(FORM_COPY.newerEdits);
     } finally {
-      setBusy(false);
+      // The owner decides (R33): it consumes only this exact session and revision (the form then closes onto its task), and otherwise
+      // keeps the newer input, or the refused one, with what to say.
+      completeKept(ticket, ok, {
+        note: ok ? FORM_COPY.newerEdits : note,
+        detail: taskId,
+      });
     }
   };
 
@@ -528,7 +548,7 @@ function TaskForm({
                 .filter(
                   (r) =>
                     !lockedRepeat ||
-                    repeatFamily(r) === repeatFamily(initial.repeat),
+                    repeatFamily(r) === repeatFamily(kept.value.initial.repeat),
                 )
                 .map((r) => (
                   <option key={r} value={r}>
@@ -906,6 +926,7 @@ function TaskForm({
         <Button
           variant="quiet"
           onClick={() =>
+            // Cancel leaves for the task (or the list), which discards what was typed; a save already made stays queued.
             void (mode.kind === "edit"
               ? navigate({
                   to: "/tasks/$taskId",

@@ -3,6 +3,7 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
+import { useKeptInput } from "../kept-input";
 import { noteIfRefused, refusalOf } from "../memory";
 import type { TaskDefinition, TaskPreset } from "../model/contract";
 import { todayIn } from "../model/time";
@@ -51,14 +52,19 @@ export function describeDefinition(definition: TaskDefinition): string {
  * Q21 `task-presets.html`: six presets from `GET /task-presets` for today in the display zone, as radio cards. "Use preset" fills the form
  * (every field stays editable); "Start from scratch instead" opens an empty form. There is NO built-in list: offline or on failure,
  * "Start from scratch" stays available. A preset is submitted as an ordinary `create_task` (TASK-29).
+ *
+ * The person's choice of preset is an editing session (`keptAs`, revision 18, R33): the in-dialog sync control keeps it, and the picker
+ * opened again shows it (while that preset is still offered). Escape and the close icon leave for the task list, which discards it.
  */
 export function PresetPicker({
   zone,
+  keptAs,
   onUse,
   onScratch,
   onClose,
 }: {
   zone: string;
+  keptAs: string;
   onUse(preset: TaskPreset): void;
   onScratch(): void;
   onClose(): void;
@@ -70,7 +76,9 @@ export function PresetPicker({
     | { kind: "failed"; requestId?: string }
     | { kind: "offline" }
   >(env.online ? { kind: "loading" } : { kind: "offline" });
-  const [chosen, setChosen] = useState<string>("");
+  const choice = useKeptInput<string>(keptAs, env.identity, () => "", {
+    consumed: () => null,
+  });
   useEffect(() => {
     if (!env.online) {
       setState({ kind: "offline" });
@@ -88,10 +96,8 @@ export function PresetPicker({
       .then((result) => {
         noteIfRefused(env.identity, PRESETS, result);
         if (!live) return;
-        if (result.ok) {
-          setState({ kind: "ready", presets: result.value });
-          setChosen(result.value[0]?.id ?? "");
-        } else if (result.kind === "offline") setState({ kind: "offline" });
+        if (result.ok) setState({ kind: "ready", presets: result.value });
+        else if (result.kind === "offline") setState({ kind: "offline" });
         else if (result.kind !== "closed")
           setState({
             kind: "failed",
@@ -104,6 +110,13 @@ export function PresetPicker({
       live = false;
     };
   }, [env.api, env.online, zone, env]);
+  // The person's choice while it is offered, else the first preset.
+  const chosen =
+    state.kind !== "ready"
+      ? ""
+      : state.presets.some((p) => p.id === choice.value)
+        ? choice.value
+        : (state.presets[0]?.id ?? "");
   const preset =
     state.kind === "ready"
       ? state.presets.find((p) => p.id === chosen)
@@ -160,7 +173,7 @@ export function PresetPicker({
                   name="task-preset"
                   value={p.id}
                   checked={chosen === p.id}
-                  onChange={() => setChosen(p.id)}
+                  onChange={() => choice.edit(() => p.id)}
                   className="mt-0.5 size-[15px]"
                 />
                 <span className="flex flex-col gap-0.5">

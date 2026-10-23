@@ -101,14 +101,17 @@ describe("the Record progress amount", () => {
   ): Promise<ReturnType<typeof vi.fn<TaskActions["record"]>>> {
     const save = held<SaveResult>();
     const record = vi.fn<TaskActions["record"]>(() => save.promise);
+    // Revision 18 (R33, harness only): the card's input is its editing session's, keyed by the displayed identity the tasks env names.
     render(
-      <RecordCard
-        row={await rowFor(cups)}
-        actions={{ record }}
-        now={Date.now()}
-        zone="UTC"
-        writable
-      />,
+      <TasksEnvProvider value={tasksEnv(fakeApi())}>
+        <RecordCard
+          row={await rowFor(cups)}
+          actions={{ record }}
+          now={Date.now()}
+          zone="UTC"
+          writable
+        />
+      </TasksEnvProvider>,
     );
     fireEvent.change(amount(), { target: { value: "2" } });
     fireEvent.click(screen.getByRole("button", { name: "Record" }));

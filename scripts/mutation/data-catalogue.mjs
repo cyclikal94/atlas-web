@@ -7,6 +7,7 @@
 
 import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
 import { ENGINE_R17, UNIT_R17 } from "./catalogue-web10a-r17.mjs";
+import { ENGINE_R18, UNIT_R18 } from "./catalogue-web10a-r18.mjs";
 
 export class PatchError extends Error {}
 
@@ -18594,11 +18595,12 @@ export const UNIT = [
     file: "src/features/tasks/form/TaskFormPage.tsx",
     tests: ["tests/features/tasks/task-screens.test.tsx"],
     expect: /a refused save keeps every value/,
+    // Re-expressed in revision 18 (same intent): the form's values now live in its editing session (`kept-input.ts`, R33).
     patch: (t) =>
       sub(
         t,
-        "        if (!saved.ok) setNotice(saved.message);",
-        "        if (!saved.ok) {\n          setNotice(saved.message);\n          setState(initial);\n        }",
+        "        if (!saved.ok) note = saved.message;",
+        "        if (!saved.ok) {\n          note = saved.message;\n          kept.edit(() => ({ initial, state: initial }));\n        }",
       ),
   },
 
@@ -18890,11 +18892,12 @@ export const UNIT = [
     file: "src/features/tasks/detail/RecordCard.tsx",
     tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
     expect: /typed while the save was pending stays after its success/,
+    // Re-expressed in revision 18 (same intent): the amount and its revision now live in the card's editing session (R33).
     patch: (t) =>
       sub(
         t,
-        "                      if (saved.ok && edits.current === submitted)",
-        "                      if (saved.ok)",
+        "                        completeKept(ticket, ok);",
+        '                        completeKept(ticket, ok);\n                        if (ok) input.edit((v) => ({ ...v, amount: "" }));',
       ),
   },
 
@@ -19479,11 +19482,12 @@ export const UNIT = [
     file: "src/features/tasks/form/TaskFormPage.tsx",
     tests: ["tests/features/tasks/correction-ownership.test.tsx"],
     expect: /went to the task list/,
+    // Re-expressed in revision 18 (same intent): only the form mounted when the owner consumes the session closes onto the task (R33).
     patch: (t) =>
       sub(
         t,
-        "      if (!ok || !mounted.current) return;",
-        "      if (!ok) return;",
+        "        detail: taskId,\n      });\n    }\n  };",
+        '        detail: taskId,\n      });\n      if (ok && taskId !== null)\n        void navigate({ to: "/tasks/$taskId", params: { taskId }, search: {} });\n    }\n  };',
       ),
   },
 
@@ -21796,6 +21800,7 @@ export const UNIT = [
   // WEB-10a revision 16 (R30, R31, DA-A1..A3): MU-2268..MU-2298, kept in their own module (this file reached Biome's size limit).
   ...UNIT_R16,
   ...UNIT_R17,
+  ...UNIT_R18,
 ];
 
 /**
@@ -25244,4 +25249,5 @@ export const ENGINE = [
   // WEB-10a revision 16 (R30, R31): MU-2299..MU-2303, in their own module.
   ...ENGINE_R16,
   ...ENGINE_R17,
+  ...ENGINE_R18,
 ];

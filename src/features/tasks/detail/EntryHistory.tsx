@@ -6,6 +6,7 @@ import type { TasksResult } from "../api";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { momentLabel } from "../format";
+import { useLeftForSync } from "../kept-input";
 import { forgetRefusal, noteIfRefused } from "../memory";
 import { pendingEvidenceOf } from "../model/commands";
 import type {
@@ -169,6 +170,68 @@ interface OpenFix {
   error: string | null;
 }
 
+/**
+ * The fix input of one stream kept through a visit to the sync screens (revision 18, R33; ia.md §1.3.3), by its owner `(identity, progress
+ * id)`: the open fix holding input (typed and not acknowledged, or with its save pending) and the parked draft. Page memory only. The next
+ * history of the same owner takes it: the open fix opens again as it was (same session and draft) when its entry is still a recent one
+ * this device may fix, otherwise its draft is parked for the entry's next Fix, as Back to recent parks it (D6-1). Other identities' are
+ * forgotten. Session and draft numbers are the page's, never reused, so a late save's answer can only ever match its own draft.
+ */
+interface KeptFix {
+  open: { entry: Shown; session: number; draft: Draft } | null;
+  parked: Draft | null;
+}
+
+/** A save's answer, for the draft and revision it submitted (D6-2). */
+interface Settlement {
+  draftId: number;
+  session: number;
+  rev: number;
+  ok: boolean;
+}
+
+const keptFixes = new Map<string, KeptFix>();
+const fixSettled = new Set<(answer: Settlement) => void>();
+let fixSessions = 0;
+let fixDrafts = 0;
+
+/**
+ * A save's answer reaches its draft wherever it is now (D6-2, R33): in a mounted history of the owner, or kept while the person is in the
+ * sync screens (the same rule as `settle` below: consumed only at the revision submitted, else only the pending mark goes).
+ */
+function settleFix(owner: string, answer: Settlement): void {
+  const kept = keptFixes.get(owner);
+  if (kept !== undefined) {
+    const { draftId, session, rev, ok } = answer;
+    const p = kept.parked;
+    const parked =
+      p === null || p.id !== draftId
+        ? p
+        : ok && p.rev === rev
+          ? null
+          : { ...p, saving: null };
+    let open = kept.open;
+    if (open !== null && open.draft.id === draftId)
+      open =
+        ok && open.draft.rev === rev
+          ? open.session === session
+            ? null
+            : {
+                ...open,
+                draft: { ...open.draft, unsaved: false, saving: null },
+              }
+          : { ...open, draft: { ...open.draft, saving: null } };
+    if (open === null && parked === null) keptFixes.delete(owner);
+    else keptFixes.set(owner, { open, parked });
+  }
+  for (const listener of [...fixSettled]) listener(answer);
+}
+
+/** For tests: forget every kept fix (numbers are still never reused). */
+export function forgetKeptFixes(): void {
+  keptFixes.clear();
+}
+
 /** What the save decision reads: the CURRENT journal, version, connection, write permission, local read and recent tail. */
 interface SaveFacts {
   journal: Journal | null;
@@ -265,6 +328,7 @@ export function EntryHistory({
   current?: boolean;
 }) {
   const env = useTasksEnv();
+  const leftForSync = useLeftForSync();
   const heading = useId();
   const goal = row.data.definition.goal;
   const owner = `${env.identity}\u0000${row.progressId}`;
@@ -299,8 +363,6 @@ export function EntryHistory({
   const fix = openFix?.draft.owner === owner ? openFix : null;
   const fixRef = useRef(fix);
   fixRef.current = fix;
-  const sessions = useRef(0);
-  const drafts = useRef(0);
   // A full-history fix closed by a refusal or Back to recent leaves its draft here (memory only), for the same owner and entry (D6-1).
   const parked = useRef<Draft | null>(null);
   const recentRef = useRef<ReadonlySet<string>>(new Set());
@@ -622,15 +684,15 @@ export function EntryHistory({
     const kept =
       held?.owner === owner && held.entryId === entry.id ? held : null;
     if (kept !== null) parked.current = null;
-    sessions.current += 1;
-    drafts.current += 1;
+    fixSessions += 1;
+    fixDrafts += 1;
     const next: OpenFix = {
       entry,
-      session: sessions.current,
+      session: fixSessions,
       draft: kept ?? {
         owner,
         entryId: entry.id,
-        id: drafts.current,
+        id: fixDrafts,
         amount: entry.evidence.kind === "quantity" ? entry.evidence.amount : "",
         rev: 0,
         unsaved: false,
@@ -873,9 +935,60 @@ export function EntryHistory({
         await actions.record(row, evidence, open.entry.id, HISTORY_COPY.fixed)
       ).ok;
     } finally {
-      settle(id, session, rev, ok);
+      // Told to every history mounted now (this one, or the one the person came back to) and to the owner's kept fix (R33).
+      settleFix(open.draft.owner, { draftId: id, session, rev, ok });
     }
   };
+  // Every save's answer, whichever history made it (draft numbers are the page's, so only its own draft can match).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `settle` works on refs and state updates only; one listener per mount
+  useEffect(() => {
+    const hear = (answer: Settlement) =>
+      settle(answer.draftId, answer.session, answer.rev, answer.ok);
+    fixSettled.add(hear);
+    return () => {
+      fixSettled.delete(hear);
+    };
+  }, []);
+  /**
+   * A visit to the sync screens keeps the fix input (R33): taken back by this owner's next history, given to it when the person leaves for
+   * the sync screens. Any other departure drops it, as before.
+   */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the owner (which names the identity) is the reason; the rest is read through refs
+  useEffect(() => {
+    for (const other of [...keptFixes.keys()])
+      if (!other.startsWith(`${env.identity}\u0000`)) keptFixes.delete(other);
+    const kept = keptFixes.get(owner);
+    keptFixes.delete(owner);
+    if (kept !== undefined) {
+      parked.current = kept.parked;
+      const back = kept.open;
+      if (
+        back !== null &&
+        writableRef.current &&
+        recentRef.current.has(back.entry.id)
+      ) {
+        const reopened: OpenFix = { ...back, error: null };
+        fixRef.current = reopened;
+        setFix(reopened);
+      } else if (
+        back !== null &&
+        (back.draft.unsaved ||
+          (back.draft.saving !== null && parked.current?.unsaved !== true))
+      )
+        parked.current = back.draft;
+    }
+    return () => {
+      if (!leftForSync()) return;
+      const held = fixRef.current;
+      const open =
+        held !== null && (held.draft.unsaved || held.draft.saving !== null)
+          ? { entry: held.entry, session: held.session, draft: held.draft }
+          : null;
+      const parkedNow = parked.current?.owner === owner ? parked.current : null;
+      if (open !== null || parkedNow !== null)
+        keptFixes.set(owner, { open, parked: parkedNow });
+    };
+  }, [owner]);
   const fixForm =
     fix === null ? null : (
       <FixForm

@@ -366,6 +366,13 @@ already on screen refused before the outbox is asked); native E-T39 (Close, Reop
 connection after they were offered, their editor controls, and an existing participant of a read-only occurrence) in three engines; unit
 MU-2304…MU-2326 and real-engine MU-2327…MU-2329 (`scripts/mutation/catalogue-web10a-r17.mjs`; MU-2268, MU-2270–MU-2272 and MU-2299
 re-anchored, same intent).
+Revision 18 (Review 18's R33 `task-sync-navigation-draft-loss`; decision 44): `sync-visit-retention.test.tsx` (through the app's router:
+the new form, its stage and a hidden interval, the edit form's raw invalid name, the record amount and mode, and an open fix, each kept
+through a visit to `/sync` and Back, nothing queued; a save pending when the person left consumed only at its revision, a refusal kept with
+its note; the controls: any other departure, Cancel, an unedited form, another identity, another task; the preset picker's in-dialog sync
+control); native E-T40 (Review 18's witnesses through the visible sync control and browser Back, with save-without-navigation controls) in
+three engines; unit MU-2330…MU-2349 and real-engine MU-2350…MU-2352 (`scripts/mutation/catalogue-web10a-r18.mjs`; MU-2022, MU-2043 and
+MU-2084 re-expressed, same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -460,6 +467,22 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     (`CommandSpec.admission`, applied by the data controller), with no new stored field: drafts stored before this revision are covered
     the same way. A denial already on screen is refused by the act itself before the outbox is asked. Exclusion has no occurrence
     requirement; closure still has no generic rebuild. No online check is added.
+44. **Checking sync state keeps unfinished task input (R33, Review 18; ia.md §1.3.3, task states I1; revision 18).** The new-task and
+    edit forms, the Record progress amount (with the chosen "Log an amount" / "Just checked on it") and an open entry fix are no longer
+    their mounts' state but an editing SESSION in page memory (`kept-input.ts`; the fix's in `EntryHistory`), keyed by the displayed
+    identity and the editor (`task-form:new`, `task-form:<task>`, `record:<progress>`, the history's `(identity, progress)` owner). When
+    the editor unmounts because the router went to the sync screens (`/sync`, whichever control took the person there), a session that
+    holds something of the person's (an edit, a pending save, the new form's chosen stage) is KEPT and the next editor of the same key
+    resumes it: Back (or the queue's own close control) shows the same raw values, invalid and conditionally hidden ones included, at the
+    same stage, the open fix open again (for a recent entry this device may fix; otherwise parked for its next Fix, as Back to recent
+    parks it). Nothing is submitted by coming back. Leaving for anywhere else drops it as before (Cancel, Escape and the close icon
+    leave, so they discard it); an unedited session is not kept, so a definition synced meanwhile is what the person comes back to.
+    A save takes a ticket of the session and revision it submitted; its answer, whichever mount made it and whether or not any editor is
+    mounted then, consumes the session only at that revision (the form then closes onto its task only if the person is on it; the
+    amount clears), and otherwise keeps the newer input with what the save had to say (a refusal, "Saved. Your newer changes are still
+    here."). A fix's answer reaches its draft wherever it is (session and draft numbers are the page's, never reused). Opening an editor
+    forgets every other identity's kept input; a reload forgets all of it (page memory only; Q4 recovery is WEB-14a's). The preset
+    picker's choice is kept through its own in-dialog sync control the same way. The occurrence correction keeps its own reviewed owner.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -557,6 +580,10 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 - **Device time-zone data** can differ from the server's bundled data; server values win wherever they exist.
 - **Two `/daily` reads per view**, not profiled here (WEB-09c owns measurements).
 - **A `403` re-check of the session** closes and reopens the display: a screen remounts, by design of the session.
+- **Unfinished input is kept for a sync visit only (decision 44, revision 18).** ia.md §1.3.3 requires it for checking sync state; a
+  `403` re-check's remount at the same address, a reload, a crash or another tab keep nothing new here (the enrolment draft and the
+  correction keep their own owners; Q4 update recovery is WEB-14a's). A kept session lasts until its editor opens again, a save consumes
+  it, another identity opens an editor or the page is reloaded.
 
 ## Not claimed
 

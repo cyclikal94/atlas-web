@@ -5281,3 +5281,203 @@ test.describe("E-T39: a known denial of the occurrence admits no closure and no 
       .toBe(1);
   });
 });
+
+test.describe("E-T40: checking sync state keeps unfinished task input (ia.md §1.3.3, task states I1; R33 of revision 18)", () => {
+  // Review 18's witnesses, maintained: an unfinished new task (its stage too), a changed task name, a progress amount and an open entry
+  // fix, each left through the VISIBLE sync control for the queue and brought back with the browser's Back, in the same document. The
+  // input is shown again, raw, and nothing was queued by the visit or by coming back. The control of each saves the same input without
+  // navigating. Each case acts once the session and protected tree are quiet (`untilTreeSettled`, R34): a readiness boundary of the
+  // harness, not a wait on the behaviour under test.
+  const ENTRY = "80000000-0000-4000-8000-000000000001";
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  async function visitSync(page: Page, back: RegExp) {
+    await page.evaluate(() => {
+      (window as unknown as { __r33Document?: string }).__r33Document =
+        "same document";
+    });
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(back);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __r33Document?: string }).__r33Document,
+      ),
+    ).toBe("same document");
+  }
+  const name = (page: Page) => page.getByLabel("Name", { exact: true });
+  const progressTask = (n: number) => {
+    const task = buildTask({
+      n,
+      title: "Keep my progress input",
+      goal: { kind: "numeric", minimum: "10", maximum: null, unit: "cups" },
+      action: { outcome: "incomplete", amount: "1", checked: [] },
+    });
+    const progress = (
+      task.upserts as Array<{
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "progress")?.resource.value;
+    if (progress === undefined) throw new Error("setup: no progress");
+    progress.recent_entries = [
+      {
+        id: ENTRY,
+        evidence: { kind: "quantity", amount: "1" },
+        happened_at: Math.floor(Date.now() / 1000),
+        recorded_by: ACCOUNT,
+      },
+    ];
+    progress.entry_count = 1;
+    return task;
+  };
+
+  for (const visit of [true, false])
+    test(`new task: ${visit ? "the form, its title and a hidden interval come back after the queue; nothing queued" : "control: saved without navigating, it is queued"}`, async ({
+      context,
+    }) => {
+      const { page } = await setup(context, "/tasks/new", []);
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await page
+        .getByRole("button", {
+          name: "Start from scratch instead",
+          exact: true,
+        })
+        .click();
+      await name(page).fill("Keep this unfinished title");
+      await expect(name(page)).toHaveValue("Keep this unfinished title");
+      const repeats = page.getByLabel("Repeats", { exact: true });
+      await repeats.selectOption("daily");
+      await page.getByLabel("Every how many", { exact: true }).fill("3x");
+      await repeats.selectOption("none");
+      await expect(
+        page.getByLabel("Every how many", { exact: true }),
+      ).toHaveCount(0);
+      if (visit) {
+        await visitSync(page, /\/tasks\/new$/);
+        await expect(name(page)).toHaveValue("Keep this unfinished title");
+        await expect(
+          page.getByRole("button", { name: "Start from scratch instead" }),
+        ).toHaveCount(0);
+        await repeats.selectOption("daily");
+        await expect(
+          page.getByLabel("Every how many", { exact: true }),
+        ).toHaveValue("3x");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page.getByRole("radio", { name: "Only me" }).check();
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map((b) => b.command.command.title),
+          )
+          .toContain("Keep this unfinished title");
+      }
+    });
+
+  for (const visit of [true, false])
+    test(`edit task: ${visit ? "the changed name comes back after the queue, not the saved one; nothing queued" : "control: saved without navigating, the change is queued"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 101 + (visit ? 0 : 1),
+        title: "Original title",
+      });
+      const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [
+        task,
+      ]);
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      await name(page).fill("Keep this unfinished title");
+      await expect(name(page)).toHaveValue("Keep this unfinished title");
+      if (visit) {
+        await visitSync(page, new RegExp(`/tasks/${task.taskId}/edit$`));
+        await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+        await expect(name(page)).toHaveValue("Keep this unfinished title");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map((b) => b.command.command.title),
+          )
+          .toContain("Keep this unfinished title");
+      }
+    });
+
+  for (const visit of [true, false])
+    test(`progress amount: ${visit ? "the amount typed comes back after the queue; nothing recorded" : "control: recorded without navigating, it is queued"}`, async ({
+      context,
+    }) => {
+      const task = progressTask(103 + (visit ? 0 : 1));
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      const amount = page.getByLabel("Amount (cups)", { exact: true });
+      await amount.fill("7");
+      await expect(amount).toHaveValue("7");
+      if (visit) {
+        await visitSync(page, new RegExp(`/tasks/${task.taskId}\\?`));
+        await expect(page.locator("[data-task-detail]")).toBeVisible();
+        await expect(amount).toHaveValue("7");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page
+          .locator("[data-record-card]")
+          .getByRole("button", { name: "Record", exact: true })
+          .click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map(
+              (b) =>
+                (b.command.command.evidence as { amount?: string })?.amount,
+            ),
+          )
+          .toContain("7");
+      }
+    });
+
+  for (const visit of [true, false])
+    test(`entry fix: ${visit ? "the open fix and its value come back after the queue; nothing queued" : "control: saved without navigating, the fix is queued"}`, async ({
+      context,
+    }) => {
+      const task = progressTask(105 + (visit ? 0 : 1));
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await page
+        .getByRole("button", { name: "Fix this entry", exact: true })
+        .click();
+      const value = page.getByLabel("New value (cups)", { exact: true });
+      await value.fill("7");
+      await expect(value).toHaveValue("7");
+      if (visit) {
+        await visitSync(page, new RegExp(`/tasks/${task.taskId}\\?`));
+        await expect(page.locator("[data-task-detail]")).toBeVisible();
+        await expect(value).toHaveValue("7");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page
+          .getByRole("button", { name: "Save the fix", exact: true })
+          .click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map(
+              (b) =>
+                (b.command.command.evidence as { amount?: string })?.amount,
+            ),
+          )
+          .toContain("7");
+      }
+    });
+});
