@@ -5481,3 +5481,215 @@ test.describe("E-T40: checking sync state keeps unfinished task input (ia.md §1
       }
     });
 });
+
+test.describe("E-T41: coming back from the sync screens finds the day and the entry the input was typed for (A8, A14; DA19-I1/N1 of revision 19)", () => {
+  // The design assessment of Review 19's witnesses in real engines over the real IndexedDB: the VISIBLE sync control, the browser's Back
+  // in the same document, and (Q6) a second real tab of the same account. Q3: the detail without an occurrence in its address shows its
+  // default day; the person types for it and checks the queue, and a later day is synced meanwhile. Back shows the SAME day and input,
+  // and the save names that day (control: with nothing typed, the visit chooses the later day). Q6: the person's open fix of entry E is
+  // kept through the visit while the other tab queues its own fix of E; back, the value is shown and Save is withheld with the reason,
+  // nothing added (control: without the other tab's fix, Save queues exactly one). Each case acts once the trees are quiet
+  // (`untilTreeSettled`): a readiness boundary of the harness, not a wait on the behaviour under test.
+  const ENTRY = "80000000-0000-4000-8000-000000000041";
+  const LATER = "eeeeeeee-0000-4000-8000-000000000041";
+  const DAY = 24 * 60 * 60;
+  const dayBefore = (days: number) =>
+    new Date(Date.parse(`${TODAY}T00:00:00Z`) - days * DAY * 1000)
+      .toISOString()
+      .slice(0, 10);
+  const CUPS = { kind: "numeric", minimum: "10", maximum: null, unit: "cups" };
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  async function visitSync(page: Page, whileAway: () => Promise<void>) {
+    const back = page.url();
+    await page.evaluate(() => {
+      (window as unknown as { __da19Document?: string }).__da19Document =
+        "same document";
+    });
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await whileAway();
+    await page.goBack();
+    await expect(page).toHaveURL(back);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __da19Document?: string }).__da19Document,
+      ),
+    ).toBe("same document");
+  }
+  const withEntry = (task: BuiltTask) => {
+    const progress = (
+      task.upserts as Array<{
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "progress")?.resource.value;
+    if (progress === undefined) throw new Error("setup: no progress");
+    progress.recent_entries = [
+      {
+        id: ENTRY,
+        evidence: { kind: "quantity", amount: "1" },
+        happened_at: Math.floor(Date.now() / 1000),
+        recorded_by: ACCOUNT,
+      },
+    ];
+    progress.entry_count = 1;
+    return task;
+  };
+  /** A daily task whose only saved day (A, two days ago, open for recording) is not today's slot: the default is the latest saved day. */
+  const dailyTask = (n: number) => {
+    const date = dayBefore(2);
+    const task = withEntry(
+      buildTask({
+        n,
+        title: "Keep my day",
+        date,
+        goal: CUPS,
+        action: { outcome: "incomplete", amount: "1", checked: [] },
+        slotKey: "day-a",
+        closesAt: Math.floor(Date.now() / 1000) + 5 * DAY,
+      }),
+    );
+    const definition = (
+      task.data as { definition: { schedule: Record<string, unknown> } }
+    ).definition;
+    definition.schedule.repeat = { frequency: "daily", interval: 1 };
+    return task;
+  };
+  /** Day B (yesterday) of the same task, as the next sync page carries it. */
+  const laterDay = (task: BuiltTask) => {
+    const occurrence = (
+      task.upserts as Array<{ resource: Record<string, unknown> }>
+    ).find((u) => u.resource.kind === "occurrence")?.resource;
+    if (occurrence === undefined) throw new Error("setup: no occurrence");
+    const data = occurrence.value as Record<string, unknown>;
+    const date = dayBefore(1);
+    return {
+      kind: "upsert",
+      resource: {
+        ...occurrence,
+        id: LATER,
+        value: {
+          ...data,
+          slot: { ...(data.slot as object), key: "day-b", date },
+        },
+      },
+    };
+  };
+  const daySelect = (page: Page) => page.locator("[data-day-picker] select");
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (cups)", { exact: true });
+
+  for (const typed of [true, false])
+    test(`Q3: ${typed ? "the amount typed for day A is shown on day A after a later day was synced; its record names day A" : "control: with nothing typed, the visit chooses the later day"}`, async ({
+      context,
+    }) => {
+      const task = dailyTask(141 + (typed ? 0 : 1));
+      const { page, net } = await setup(context, `/tasks/${task.taskId}`, [
+        task,
+      ]);
+      await untilTreeSettled(page);
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await expect(daySelect(page)).toHaveCount(0);
+      if (typed) {
+        await amount(page).fill("7");
+        await expect(amount(page)).toHaveValue("7");
+      }
+      await visitSync(page, () => commitDelta(page, net, 2, [laterDay(task)]));
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      await expect(daySelect(page)).toHaveCount(1);
+      if (!typed) {
+        await expect(daySelect(page)).toHaveValue(LATER);
+        await expect(amount(page)).toHaveValue("");
+        expect(await draftsOf(page)).toEqual([]);
+        return;
+      }
+      await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+      await expect(amount(page)).toHaveValue("7");
+      expect(await draftsOf(page)).toEqual([]);
+      await page
+        .locator("[data-record-card]")
+        .getByRole("button", { name: "Record", exact: true })
+        .click();
+      await expect.poll(async () => (await recordsOf(page)).length).toBe(1);
+      expect((await recordsOf(page))[0]?.command).toMatchObject({
+        occurrence_id: task.occurrenceId,
+        evidence: { kind: "quantity", amount: "7" },
+      });
+    });
+
+  for (const other of [true, false])
+    test(`Q6: ${other ? "the other tab queued its fix of E while the person was away: the kept fix shows 7, Save is withheld, nothing added" : "control: no other fix of E: the kept fix of 7 is queued once"}`, async ({
+      context,
+    }) => {
+      const task = withEntry(
+        buildTask({
+          n: 143 + (other ? 0 : 1),
+          title: "Keep my fix",
+          goal: CUPS,
+          action: { outcome: "incomplete", amount: "1", checked: [] },
+        }),
+      );
+      const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      // B holds the fixture leader that caches the task; A boots after it, then both trees are let settle (a booting page remounts the
+      // other's tree) before anything is typed.
+      const writer = await bootAt(context, path);
+      await cacheTasks(writer, net, [task]);
+      const page = await bootAt(context, path);
+      await expect(page.locator(`[data-entry="${ENTRY}"]`)).toBeVisible();
+      await untilTreeSettled(page);
+      await untilTreeSettled(writer);
+      await goOfflineAtBoundary(page);
+      await goOfflineAtBoundary(writer);
+      await page
+        .getByRole("button", { name: "Fix this entry", exact: true })
+        .click();
+      const value = page.getByLabel("New value (cups)", { exact: true });
+      await value.fill("7");
+      await expect(value).toHaveValue("7");
+      await visitSync(page, async () => {
+        if (!other) return;
+        await writer
+          .getByRole("button", { name: "Fix this entry", exact: true })
+          .click();
+        await writer.getByLabel("New value (cups)", { exact: true }).fill("5");
+        await writer
+          .getByRole("button", { name: "Save the fix", exact: true })
+          .click();
+        await expect.poll(async () => (await recordsOf(writer)).length).toBe(1);
+      });
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      await expect(value).toHaveValue("7");
+      const save = page.getByRole("button", {
+        name: "Save the fix",
+        exact: true,
+      });
+      if (!other) {
+        await expect(save).toBeEnabled();
+        expect(await recordsOf(page)).toEqual([]);
+        await save.click();
+        await expect.poll(async () => (await recordsOf(page)).length).toBe(1);
+        expect((await recordsOf(page))[0]?.command).toMatchObject({
+          replaces: ENTRY,
+          evidence: { kind: "quantity", amount: "7" },
+        });
+        return;
+      }
+      // A's own read knows B's queued fix before anything is pressed: shown as not sent yet, E as corrected.
+      await expect(page.locator("[data-entry-pending]")).toHaveCount(1);
+      await expect(save).toBeDisabled();
+      await expect(page.locator("[data-fix-form]")).toContainText(
+        "This entry has been corrected since. Fix its correction instead.",
+      );
+      await save.click({ force: true });
+      const records = await recordsOf(page);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.command).toMatchObject({
+        replaces: ENTRY,
+        evidence: { kind: "quantity", amount: "5" },
+      });
+    });
+});

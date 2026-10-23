@@ -227,12 +227,18 @@ function settleFix(owner: string, answer: Settlement): void {
   for (const listener of [...fixSettled]) listener(answer);
 }
 
+/** Whether a fix input of this owner `(identity, progress id)` is kept through a visit to the sync screens (the detail's return day). */
+export const hasKeptFix = (owner: string): boolean => keptFixes.has(owner);
+
 /** For tests: forget every kept fix (numbers are still never reused). */
 export function forgetKeptFixes(): void {
   keptFixes.clear();
 }
 
-/** What the save decision reads: the CURRENT journal, version, connection, write permission, local read and recent tail. */
+/**
+ * What the save decision reads: the CURRENT journal, version, connection, write permission, local read, recent tail and the replacements
+ * this device has queued.
+ */
 interface SaveFacts {
   journal: Journal | null;
   version: number | null;
@@ -241,6 +247,11 @@ interface SaveFacts {
   /** The detail shown is the last complete read of this device's data: no later read is due, running or failed. */
   current: boolean;
   recent: ReadonlySet<string>;
+  /**
+   * The entries a record queued on this device (in any tab, by any editor, this one's own save included) replaces (revision 19,
+   * DA19-N1): shown as corrected, so a fix of them is never offered and never saved, as for a committed correction.
+   */
+  pendingReplaced: ReadonlySet<string>;
 }
 
 const holds = (pages: Page[], test: (e: JournalEntry) => boolean) =>
@@ -273,15 +284,17 @@ export function fullAuthority(f: SaveFacts): boolean {
  * Why the fix of `entryId` cannot be saved now, or null (revision 6, R17): ONE decision for the Save shown and the save admitted (read
  * synchronously when Save is pressed). A recent entry has its own authority (offline and while the history is read again, as approved); an
  * entry known only from the full history needs a current full history AND evidence that no later correction of THIS entry exists: a check of
- * the rest of the journal at the current version, or a window that reaches the end and holds it. A committed correction blocks for good.
+ * the rest of the journal at the current version, or a window that reaches the end and holds it. A committed correction blocks for good;
+ * a queued one blocks while it is queued (revision 19, DA19-N1), for a recent entry too: the same facts that hide its Fix.
  */
 export function saveBlock(f: SaveFacts, entryId: string): string | null {
   if (!f.writable) return copy.NOT_WRITABLE;
   const j = f.journal;
   if (
-    j !== null &&
-    (j.checks[entryId]?.found === "replaced" ||
-      holds(j.pages, (e) => e.replaces === entryId))
+    f.pendingReplaced.has(entryId) ||
+    (j !== null &&
+      (j.checks[entryId]?.found === "replaced" ||
+        holds(j.pages, (e) => e.replaces === entryId)))
   )
     return HISTORY_COPY.correctedSince;
   if (f.recent.has(entryId)) return null;
@@ -366,6 +379,7 @@ export function EntryHistory({
   // A full-history fix closed by a refusal or Back to recent leaves its draft here (memory only), for the same owner and entry (D6-1).
   const parked = useRef<Draft | null>(null);
   const recentRef = useRef<ReadonlySet<string>>(new Set());
+  const pendingReplacedRef = useRef<ReadonlySet<string>>(new Set());
   const factsNow = (): SaveFacts => ({
     journal: journalNow(),
     version: versionRef.current,
@@ -373,6 +387,7 @@ export function EntryHistory({
     writable: writableRef.current,
     current: currentRef.current,
     recent: recentRef.current,
+    pendingReplaced: pendingReplacedRef.current,
   });
   // The one check of the rest of the journal shown as running, by the selection that asked for it.
   const [scan, setScan] = useState<{ entryId: string; sel: number } | null>(
@@ -823,6 +838,10 @@ export function EntryHistory({
     }
   const recentIds = new Set(recent.map((e) => e.id));
   recentRef.current = recentIds;
+  const pendingReplaced = new Set<string>();
+  for (const p of pending)
+    if (p !== null && p.replaces !== null) pendingReplaced.add(p.replaces);
+  pendingReplacedRef.current = pendingReplaced;
   // An entry known only from the full history is fixable only while that history is a current answer: online, not failed, and read at
   // the stream's committed version (an older or mixed window, or one kept from before the connection went, certifies nothing).
   const fullCurrent =
@@ -836,6 +855,7 @@ export function EntryHistory({
     !entry.pending &&
     !entry.unchecked &&
     !entry.replaced &&
+    !pendingReplaced.has(entry.id) &&
     entry.evidence.kind !== "observe" &&
     entry.recordedBy === env.accountId &&
     (recentIds.has(entry.id) || fullCurrent);
@@ -886,6 +906,7 @@ export function EntryHistory({
             writable,
             current,
             recent: recentIds,
+            pendingReplaced,
           },
           fix.entry.id,
         );
@@ -951,7 +972,9 @@ export function EntryHistory({
   }, []);
   /**
    * A visit to the sync screens keeps the fix input (R33): taken back by this owner's next history, given to it when the person leaves for
-   * the sync screens. Any other departure drops it, as before.
+   * the sync screens. Any other departure drops it, as before. Taking it back is not leave to save it (revision 19, DA19-N1): the editor
+   * opens again, readable, and its Save is the one decision above, so an entry corrected meanwhile (committed, or queued by another tab)
+   * blocks it as it would a mounted editor; the input is never moved to the correction.
    */
   // biome-ignore lint/correctness/useExhaustiveDependencies: the owner (which names the identity) is the reason; the rest is read through refs
   useEffect(() => {

@@ -100,6 +100,8 @@ export function TaskDetail({
   // The day the correction dialog was opened for (revision 2): it never follows another day under the person.
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [sharing, setSharing] = useState<string | null>(null);
+  // "Show this task's days" chose the default day in place (DA19-I1): its control is gone, so the day's record card takes focus.
+  const [choseAgain, setChoseAgain] = useState(false);
   const dayId = useId();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   // A correction that met another one (version conflict): what the person submitted is read from the queued operation itself (revision 2,
@@ -331,14 +333,29 @@ export function TaskDetail({
       ) : view.selection === "unavailable" ? (
         <div className="flex flex-col gap-2" data-day-unavailable="">
           <p className="text-[13px] text-ink-2">{DETAIL_COPY.dayUnavailable}</p>
-          <Link
-            to="/tasks/$taskId"
-            params={{ taskId: task.id }}
-            search={{}}
-            className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13px] text-ink-2 hover:text-ink-1"
-          >
-            {DETAIL_COPY.showDays}
-          </Link>
+          {view.returned ? (
+            // The day kept with the person's input is gone here (DA19-I1): this address already names no day, so choose again in place.
+            <span>
+              <Button
+                variant="quiet"
+                onClick={() => {
+                  setChoseAgain(true);
+                  view.chooseAgain();
+                }}
+              >
+                {DETAIL_COPY.showDays}
+              </Button>
+            </span>
+          ) : (
+            <Link
+              to="/tasks/$taskId"
+              params={{ taskId: task.id }}
+              search={{}}
+              className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13px] text-ink-2 hover:text-ink-1"
+            >
+              {DETAIL_COPY.showDays}
+            </Link>
+          )}
         </div>
       ) : view.unreadable ? (
         <p className="text-[13px] text-ink-2">{copy.UNREADABLE}</p>
@@ -368,7 +385,7 @@ export function TaskDetail({
             now={view.now}
             zone={zone}
             writable={env.writable}
-            focus={focusRecord === true}
+            focus={focusRecord === true || choseAgain}
           />
           <EntryHistory
             key={`history:${row.id}`}

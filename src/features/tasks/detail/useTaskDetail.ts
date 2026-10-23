@@ -16,6 +16,7 @@ import {
 } from "../../../data";
 import { useBoundaryClock } from "../clock";
 import { useTasksEnv } from "../env";
+import { keptEntry, keptKey, useKeptInput } from "../kept-input";
 import { useScopedRead } from "../local-read";
 import { type JointAnswer, jointOf } from "../memory";
 import { QUEUED_KINDS } from "../model/commands";
@@ -38,6 +39,8 @@ import {
   patched,
   type RowModel,
 } from "../view";
+import { correctionKey, resumable } from "./correction-owner";
+import { hasKeptFix } from "./EntryHistory";
 
 /**
  * Everything the task detail shows (WF-TASK-01), from the cache and the outstanding drafts (a task created offline shows at once, projected,
@@ -61,6 +64,12 @@ import {
  * The default day is chosen once for the visit (revision 2, enforced in revision 4): moving it at midnight, or to a day synced later, while
  * the person is on the page would retarget an open record card or correction. Later reads keep it while it is still this task's day. The
  * DISPLAYED day's own window is followed by the clock (`now`); the next visit, or the day picker, chooses again.
+ *
+ * A visit to the sync screens is part of the visit when it holds the person's input (revision 19, DA19-I1; ia.md §1.3.3): the day chosen
+ * is kept with the screen (`kept-input.ts`), and coming back shows THAT day again when an amount, a fix or a correction typed for it is
+ * kept, before any default is chosen, so the input is found where it was typed. If that day is no longer this task's here, the view says
+ * so (`unavailable`, `returned`) rather than showing another day in its place; the input stays with its own day, never moved to another.
+ * Without kept input the next visit chooses afresh. A day in the address is the address's.
  *
  * The day picker's FIRST page is part of the same read; a later page is a read of its own (it lists days to navigate to; it never chooses the
  * displayed one): its failure is shown with Try again and never says there are no more days.
@@ -88,6 +97,10 @@ export interface TaskDetailView {
   };
   /** How the displayed day was chosen; `unavailable` and `loading` show no day. */
   selection: "explicit" | "default" | "loading" | "unavailable";
+  /** `unavailable` because the day kept with the person's input through a sync visit is no longer this task's here (DA19-I1). */
+  returned: boolean;
+  /** Lets go of that day: the visit chooses its default day again (the kept input stays with its own day). */
+  chooseAgain(): void;
   row: RowModel | null;
   unreadable: boolean;
   /**
@@ -139,6 +152,8 @@ interface DetailInputs {
   /** The day picker's first page of saved days. */
   firstPage: ResourcePage | null;
   selection: "explicit" | "default" | "unavailable";
+  /** `unavailable` because the day kept with input through a sync visit is no longer this task's here. */
+  returned: boolean;
   chosen: string | null;
   chosenData: OccurrenceData | null;
   progressId: string | null;
@@ -170,6 +185,10 @@ async function readDetail(
     taskId: string;
     occurrenceParam: string | undefined;
     pinned: string | null;
+    /** The day this screen showed when the person left for the sync screens, or null. */
+    returned: string | null;
+    /** Whether input typed for that day (my progress there, or its correction) is kept for this screen. */
+    keeps(occurrenceId: string, progressId: string): boolean;
     me: string;
     now: number;
   },
@@ -234,6 +253,7 @@ async function readDetail(
   };
 
   let selection: DetailInputs["selection"] = "default";
+  let returned = false;
   let chosen: string | null = null;
   let chosenRow: CacheRow | null = null;
   if (occurrenceParam !== undefined) {
@@ -253,7 +273,23 @@ async function readDetail(
         chosenRow = kept.value;
       }
     }
-    if (chosen === null) {
+    const back = input.returned;
+    if (
+      chosen === null &&
+      back !== null &&
+      input.keeps(back, await progressIdFor(back, input.me))
+    ) {
+      const kept = await dayById(back);
+      if (!kept.ok) return kept;
+      if (belongs(kept.value)) {
+        chosen = back;
+        chosenRow = kept.value;
+      } else {
+        selection = "unavailable";
+        returned = true;
+      }
+    }
+    if (chosen === null && !returned) {
       // Today's slot (or `once`), read by its id; else the latest by date of every saved day.
       const day = todayIn(definition.schedule.timezone, input.now);
       const todaysId = await occurrenceIdOf(
@@ -270,7 +306,7 @@ async function readDetail(
         chosenRow = todays.value;
       }
     }
-    if (chosen === null) {
+    if (chosen === null && !returned) {
       let best: { id: string; date: string; row: CacheRow } | null = null;
       const end = await scanResources(
         data,
@@ -351,6 +387,7 @@ async function readDetail(
       executionId,
       firstPage,
       selection,
+      returned,
       chosen,
       chosenData:
         chosenRow === null ? null : parseOccurrenceData(chosenRow.value),
@@ -376,6 +413,25 @@ export function useTaskDetail(
   // A complete read belongs to one identity, database incarnation, task and address: another one keeps nothing of it.
   const scope = `${env.identity}\u0000${data.service()?.incarnationId ?? "-"}\u0000${taskId}\u0000${occurrenceParam ?? ""}`;
   const pinned = useRef<{ scope: string; id: string } | null>(null);
+  // The visit's default day, kept with this screen through a visit to the sync screens (revision 19, DA19-I1; `kept-input.ts`). Coming
+  // back, it is read before any default is chosen, and only while input typed for it is kept.
+  const day = useKeptInput<string | null>(
+    keptKey(env.identity, `detail-day:${taskId}`),
+    env.identity,
+    () => null,
+    { consumed: () => null, unedited: true },
+  );
+  const dayRef = useRef(day);
+  dayRef.current = day;
+  const keeps = (occurrenceId: string, progressId: string) => {
+    const amount = keptEntry(keptKey(env.identity, `record:${progressId}`));
+    return (
+      (amount !== null &&
+        (amount.revision > 0 || amount.submitting !== null)) ||
+      hasKeptFix(`${env.identity}\u0000${progressId}`) ||
+      resumable(correctionKey(env.identity, occurrenceId)) !== null
+    );
+  };
   const [attempt, setAttempt] = useState(0);
   const read = useScopedRead<DetailInputs>(
     scope,
@@ -391,6 +447,9 @@ export function useTaskDetail(
               occurrenceParam,
               pinned:
                 pinned.current?.scope === scope ? pinned.current.id : null,
+              // Only before this screen has chosen a day: coming back from the sync screens (its own pin governs after).
+              returned: pinned.current === null ? day.value : null,
+              keeps,
               me: env.accountId,
               now: env.now(),
             },
@@ -407,8 +466,11 @@ export function useTaskDetail(
       inputs !== null &&
       occurrenceParam === undefined &&
       inputs.chosen !== null
-    )
-      pinned.current = { scope, id: inputs.chosen };
+    ) {
+      const chosen = inputs.chosen;
+      pinned.current = { scope, id: chosen };
+      if (dayRef.current.value !== chosen) dayRef.current.edit(() => chosen);
+    }
   }, [inputs, occurrenceParam, scope]);
   const readError: TaskDetailView["readError"] =
     read.latest === "failed" || read.latest === "unstable" ? read.latest : null;
@@ -552,6 +614,11 @@ export function useTaskDetail(
       retry: () => setPickerAttempt((n) => n + 1),
     },
     selection: inputs === null ? "loading" : inputs.selection,
+    returned: inputs?.returned ?? false,
+    chooseAgain: () => {
+      day.edit(() => null);
+      setAttempt((n) => n + 1);
+    },
     row,
     unreadable,
     readError,

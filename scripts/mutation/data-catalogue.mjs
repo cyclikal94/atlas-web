@@ -8,6 +8,7 @@
 import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
 import { ENGINE_R17, UNIT_R17 } from "./catalogue-web10a-r17.mjs";
 import { ENGINE_R18, UNIT_R18 } from "./catalogue-web10a-r18.mjs";
+import { ENGINE_R19, UNIT_R19 } from "./catalogue-web10a-r19.mjs";
 
 export class PatchError extends Error {}
 
@@ -20067,12 +20068,13 @@ export const UNIT = [
     file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: ["tests/features/tasks/journal-window.test.tsx"],
     expect: /corrected since \(a saved correction\)/,
-    // Re-expressed in revision 6 (same intent): the committed-replacement block is now the first test of the one save decision.
+    // Re-expressed in revision 6 (same intent): the committed-replacement block is now the first test of the one save decision. Re-anchored
+    // in revision 19 (same intent): the committed facts are now the second operand of that test, after the queued corrections (DA19-N1).
     patch: (t) =>
       sub(
         t,
-        '  if (\n    j !== null &&\n    (j.checks[entryId]?.found === "replaced" ||',
-        '  if (\n    (false as boolean) &&\n    j !== null &&\n    (j.checks[entryId]?.found === "replaced" ||',
+        '    (j !== null &&\n      (j.checks[entryId]?.found === "replaced" ||',
+        '    ((false as boolean) &&\n      j !== null &&\n      (j.checks[entryId]?.found === "replaced" ||',
       ),
   },
 
@@ -21801,6 +21803,7 @@ export const UNIT = [
   ...UNIT_R16,
   ...UNIT_R17,
   ...UNIT_R18,
+  ...UNIT_R19,
 ];
 
 /**
@@ -25250,4 +25253,5 @@ export const ENGINE = [
   ...ENGINE_R16,
   ...ENGINE_R17,
   ...ENGINE_R18,
+  ...ENGINE_R19,
 ];
