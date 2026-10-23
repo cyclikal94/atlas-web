@@ -1,0 +1,198 @@
+{
+  "purpose": "Trimmed copies of genuine saved Playwright JSON reports of the held-operation probes (WEB-08d revision 22's two full qualification campaigns, attempts 3 and 6 on fingerprint 2e862754...3692, and review r22's real-browser negative controls and healthy control), used by scripts/validation/held-operation-qualification.test.mjs. Each bundle embeds the exact probe spec text its runs used, hash-checked when built.",
+  "tool": {
+    "path": ".agtx/evidence/revision-23/tools/trim.mjs",
+    "sha256": "331590d2235a52825dd24288605848c3c7b47d4ad9fb682c861d612eeced5c18",
+    "built": "2026-10-23, WEB-08d revision 23"
+  },
+  "trimming": "suites/specs/tests/results with status, errors (message, stack, location), attachment names/content types and the held-operations body; report-level errors",
+  "sources": {
+    "r22-attempt-6/control/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/control/report.json",
+      "sha256": "22277f2332b71ececf318d030c6a62c2a01371f4183a3b117c9802fda863444d"
+    },
+    "r22-attempt-6/copy-control/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/copy-control/report.json",
+      "sha256": "e2d69aa0b270b763596501424da7ea41301dc933893b44033011c957653db1c6"
+    },
+    "r22-attempt-6/HM1/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM1/browser/report.json",
+      "sha256": "c205d75926baaa1adc918409bf5eb540c51adf953d2de81d92d53a4e8167ee7b"
+    },
+    "r22-attempt-6/HM2/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM2/browser/report.json",
+      "sha256": "c4fe54430c23d8fedc000455c20fda496af5d65314f69757bb0abcc4b300eae7"
+    },
+    "r22-attempt-6/HM3/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM3/browser/report.json",
+      "sha256": "b41fabd772c4f4449980b7f0e84853f33d93d79fbc8c7d3bb362424b7560a3f8"
+    },
+    "r22-attempt-6/HM4/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM4/browser/report.json",
+      "sha256": "3f09be9f99483fdca6eeba24d0a7ff2c5b5e61add909127effdf4318bbc2248e"
+    },
+    "r22-attempt-6/HM5/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM5/browser/report.json",
+      "sha256": "8d98f6db047876bbc89b649a159a7fd02392df05f2edb70bc9a9024bee6985ae"
+    },
+    "r22-attempt-6/HM6/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM6/browser/report.json",
+      "sha256": "44c28b75b23e9dcf15d1617dac74ab65baab925c6d04d35e180d2a6977539c93"
+    },
+    "r22-attempt-6/HM9/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM9/browser/report.json",
+      "sha256": "130fa5a7db7e82bdd197dfcbbe643a6caaeeb01c0c4de52f39062037b1942dec"
+    },
+    "r22-attempt-6/HM10/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM10/browser/report.json",
+      "sha256": "d80715f911514340865ab90d16c0ccd7bce66f92a6a104429e1b23c59c5c350b"
+    },
+    "r22-attempt-6/HM11/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM11/browser/report.json",
+      "sha256": "bc0af7d049d4527c505ee4b3bf3386ff3fc4dea2f91c8db52923f689100325b8"
+    },
+    "r22-attempt-6/HM12/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM12/browser/report.json",
+      "sha256": "a1f23273eaae0cadbed4e9f1aa1b555ee72c4bedf20203ed548f562ce67a3697"
+    },
+    "r22-attempt-6/HM13/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM13/browser/report.json",
+      "sha256": "654ecae9af3c56ef195f016972adc077a1ddba593399b90639103ee5547e94c2"
+    },
+    "r22-attempt-6/HM7/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM7/browser/report.json",
+      "sha256": "02e80dc64e137a5f89f61ee08acbd55cd4c230a3f4e4d391cfd58cf97cf0a55c"
+    },
+    "r22-attempt-6/HM8/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM8/browser/report.json",
+      "sha256": "eedd64cb267e3a70f496c146b324b92d70776e0f274964808eb794fcce1868ca"
+    },
+    "r22-attempt-6/HM14/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/HM14/browser/report.json",
+      "sha256": "e59b03bb9a3f84a855a8ea3dd06cfcc2b4874d7547250fd51652ac52adcb062e"
+    },
+    "r22-attempt-6/FM1/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/FM1/browser/report.json",
+      "sha256": "2548afb3cf622bc72d2e723e5b76bb1c03ed4c5b13760cf145388613ef906e16"
+    },
+    "r22-attempt-6/FM2/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/FM2/browser/report.json",
+      "sha256": "451118301db1df9ac03b43a8bfd762470927fccd2f1d406d33fcc65691425bde"
+    },
+    "r22-attempt-6/FM3/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/FM3/browser/report.json",
+      "sha256": "ef78badc33f5345c6894fda8ffc710dac8719aafcf4923a753e739a6051329b7"
+    },
+    "r22-attempt-6/probe-results.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-23T01-16-24.539Z-952938d0/q-probes/runs/2026-10-23T01-17-15.622Z-0f9e2a2d/probe-results.json",
+      "sha256": "10046b3964b79d95eb3fd57b1f399691a8d2ef46922d431d366d0b424a1c74e3"
+    },
+    "r22-attempt-3/control/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/control/report.json",
+      "sha256": "355a559d50243f570d5ae42bc77264ac4aa7180f0306c451a720895ce2c0ac9c"
+    },
+    "r22-attempt-3/copy-control/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/copy-control/report.json",
+      "sha256": "65a1d25fb6bf171205b63df360a7c4db9fd04a948b30d4373b60adffe07c41f7"
+    },
+    "r22-attempt-3/HM1/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM1/browser/report.json",
+      "sha256": "f73c392ac2513012648e848049b609c1f81ccd95a06c4d5d7dcbe71f09af3449"
+    },
+    "r22-attempt-3/HM2/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM2/browser/report.json",
+      "sha256": "4b8dd65bcddb6bf37680ff14cb553d81ad52b90a71c627171b07e0d13d3c71b3"
+    },
+    "r22-attempt-3/HM3/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM3/browser/report.json",
+      "sha256": "fda2bf84d942f60c5261c1390a8ddd5a8cc7470f95f77402cdf65d8a74d2506a"
+    },
+    "r22-attempt-3/HM4/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM4/browser/report.json",
+      "sha256": "80bf30b0f6afad2018d8aa92a107a3ad445c3c63a957345f020ec92615046143"
+    },
+    "r22-attempt-3/HM5/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM5/browser/report.json",
+      "sha256": "131d59d4fd1093ae3e09471ff4fbaad6ec1974965867573600b898bf163235f9"
+    },
+    "r22-attempt-3/HM6/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM6/browser/report.json",
+      "sha256": "6029646234faecec665be2c3738b6cba314469255f1fc631863307cf41e83d26"
+    },
+    "r22-attempt-3/HM9/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM9/browser/report.json",
+      "sha256": "54bcedaf43268fa293c662206e3d1f8f0075868782c0165543f950b912697e55"
+    },
+    "r22-attempt-3/HM10/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM10/browser/report.json",
+      "sha256": "68711f08e67e6b45c632378871a83f03abb2cab2712eaa405cbe2a60162b7b1b"
+    },
+    "r22-attempt-3/HM11/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM11/browser/report.json",
+      "sha256": "a591fc770ef3490e34c1c9cd89e8d47aa2d356eea25b3693b1713863ce272b60"
+    },
+    "r22-attempt-3/HM12/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM12/browser/report.json",
+      "sha256": "aedc91a78af3df897b5a750207f3f9f569f58fafbd721bb9992ad36aaa0cbf67"
+    },
+    "r22-attempt-3/HM13/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM13/browser/report.json",
+      "sha256": "282096d01f1c6ea8d2f27bcab2a9ac526acf4feccac4965ff90e6056c98b1932"
+    },
+    "r22-attempt-3/HM7/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM7/browser/report.json",
+      "sha256": "a3bea17c8c5272d37b5b731de6542e847ac23cc09a97039753f384835bfc743a"
+    },
+    "r22-attempt-3/HM8/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM8/browser/report.json",
+      "sha256": "84ec719187c38fd9de0c306ec826794069bdd65cbefb4895d092138d55b1f511"
+    },
+    "r22-attempt-3/HM14/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/HM14/browser/report.json",
+      "sha256": "70e4535a1ecf90bed602c7669cf34cf42f2a1e106b7a19336a7fdebaa6eb9571"
+    },
+    "r22-attempt-3/FM1/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/FM1/browser/report.json",
+      "sha256": "a634be1246b0babe8c276eb51a91797c92766743fc98bb6a1835ab98603dab1b"
+    },
+    "r22-attempt-3/FM2/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/FM2/browser/report.json",
+      "sha256": "5bed5b7c67bf9785a14cfac03f060df79bf563ca58cdb4764aab4ca7c293ccfd"
+    },
+    "r22-attempt-3/FM3/browser/report.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/FM3/browser/report.json",
+      "sha256": "58cbe5a755fead1bd3a7b746ff8452817b78641f88d23dbd9e1c063e163b0a83"
+    },
+    "r22-attempt-3/probe-results.json": {
+      "path": ".agtx/evidence/revision-22/validation/runs/2026-10-22T13-17-42.425Z-4f3aa327/q-probes/runs/2026-10-22T13-19-08.528Z-075a9fba/probe-results.json",
+      "sha256": "e1973f6a4ecd4f3cbacfb2e26afb9dac2ca477081acf580d01f765dd0e925296"
+    },
+    "review-r22/runtime": {
+      "path": ".agtx/evidence/review-r22/targeted-v2/runs/2026-10-23T02-41-00.831Z-666109b8/reporter-integrity/runtime/report.json",
+      "sha256": "83f01bdea791f70ba62fca8fc1fd6feba1e3de98e95085d32e004da5714ded27",
+      "exit_from": {
+        "path": ".agtx/evidence/review-r22/targeted-v2/runs/2026-10-23T02-41-00.831Z-666109b8/reporter-integrity/runtime-judgement.json",
+        "sha256": "672cbd61abaabd023b0442824ffaf2a8df4ae27eee9f56a34db43e1afd40a902"
+      }
+    },
+    "review-r22/timeout": {
+      "path": ".agtx/evidence/review-r22/targeted-v2/runs/2026-10-23T02-41-00.831Z-666109b8/reporter-integrity/timeout/report.json",
+      "sha256": "ac156d3e123d4f763c7c0e86dc7d4b495fa46d24e694fc24cef63ebbe00dd019",
+      "exit_from": {
+        "path": ".agtx/evidence/review-r22/targeted-v2/runs/2026-10-23T02-41-00.831Z-666109b8/reporter-integrity/timeout-judgement.json",
+        "sha256": "b4d6c367fd5a81e84fdf8b25dbe685b3fa5734725a9f1e660f5ce8580ffd9653"
+      }
+    },
+    "review-r22/control": {
+      "path": ".agtx/evidence/review-r22/targeted-v2/runs/2026-10-23T02-41-00.831Z-666109b8/reporter-integrity/control/report.json",
+      "sha256": "be50db8e19636526e360f465adb5c551b960f5b88048be47315d5f2c63f17537",
+      "exit_from": {
+        "path": ".agtx/evidence/review-r22/targeted-v2/runs/2026-10-23T02-41-00.831Z-666109b8/reporter-integrity/control-judgement.json",
+        "sha256": "c191bdda86eea13711d07df28a5d1517f40ad87912af20b3e330af34a99d6fb1"
+      }
+    }
+  },
+  "held-operation-r22-attempt-6.json.gz": "368d573a3d0ee8555491ce4c5ecf219518f9249dab81a74d920b059e502682a3",
+  "held-operation-r22-attempt-3.json.gz": "495c9e6f49dcf847717ea8cdd6f1ac77f3368f530c8e5581380fc2ea41aeda79",
+  "held-operation-review-r22.json.gz": "c65114fbff61aeb841aa777a5f9e8369e7801f736fc2fc5995c142b5370b3129"
+}

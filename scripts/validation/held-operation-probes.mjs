@@ -5,444 +5,55 @@
 // tests/e2e/probe.held-operation.spec.ts.
 //
 // 1. control: the live tree's probes against an unmutated fixture build. Every `P..` control must pass and
-//    every `S..` reporter-shape probe must fail EXACTLY as its oracle says (errors, their kinds, their text, the
-//    all-error reader's verdict for the case: scripts/validation/engine-results.mjs, unchanged).
+//    every `S..` reporter-shape probe must fail EXACTLY as its healthy profile says.
 // 2. copy-control: the same probes from an UNMUTATED copy of the test tree (under .agtx/, never beside the live
 //    specs), so that a mutant's deviation cannot come from the copy itself (review r19 H1).
 // 3. helper mutants: a patched copy of the owner or its ledger; fixture mutants: a patched copy of the harness in a
-//    mutant build (vite.mutant.config.ts, as the native runner builds). A mutant is caught only when EVERY case
-//    of its named probes deviates from its oracle in every engine, a control (P..) by a failed assertion of its
-//    own (never a timeout or a crash), in a complete run (one attempt, the exact cases discovered).
-// The source fingerprint must be unchanged at the end. One worker, no retries; a failed control stops the run
-// before any mutant. Nothing is cached.
+//    mutant build (vite.mutant.config.ts, as the native runner builds).
+// The source fingerprint must be unchanged at the end. One worker, no retries; a failed part stops the run
+// before the next. Nothing is cached.
 //
-// Revision 22 (review r21 R21-N1; design assessment 58bc72cc Q2-Q4, Q10): each shape probe's oracle also
-// requires the whole-mutant verdict of the UNCHANGED `classifyMutant` over that probe's cases (all engines,
-// with and without a matching case expectation): a catch exactly for the genuine assertion shapes (S1, S7,
-// S17, S18, S20) and never for a shape whose failure involves an operation's runtime failure. P14/P15 and
-// S10-S21 qualify the runtime-origin witness (H7); HM10-HM14 remove or misapply it.
+// Revision 22 (review r21 R21-N1; design assessment 58bc72cc Q2-Q4, Q10): each shape's profile also requires the
+// whole-mutant verdict of the UNCHANGED `classifyMutant` over that probe's cases. P14/P15 and S10-S21 qualify the
+// runtime-origin witness (H7); HM10-HM14 remove or misapply it.
+//
+// Revision 23 (review r22 R22-N1; design assessment 3bef3bd4 steps 1-7, Q4-Q9): a mutant is no longer "caught" because
+// every case merely deviated from its healthy oracle (an error before the body, or a hook timeout, deviates too). The
+// pure evaluator scripts/validation/held-operation-qualification.mjs holds every mutant's versioned contract and
+// judges each run `caught`, `survived` or `invalid` from the full evidence (every error, its kind, origin, source line
+// and own test; the ledger; the exact inventory; the unchanged reader's verdict). Before any mutant, four negative
+// controls (NC1-NC4) inject an unrelated fault through a hook appended to a COPY of the probe spec, and each must be
+// judged invalid. Anything but a sound control, refused negative controls and caught mutants exits 1.
+//
+// Usage: node scripts/validation/held-operation-probes.mjs [--check] [--stage all|controls|negatives]
+//          [--probes P01,S7,...] [--only HM10,...] [--browsers chromium,firefox,webkit] --out <dir>
+//   --check      preflight only: every contract is total and every patch applies once; nothing is built.
+//   --stage      all (default): controls, negative controls, then mutants; controls: the live and copy controls;
+//                negatives: the negative controls alone.
+//   --probes     restricts the controls of --stage controls to these probes (exact case titles still required).
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort } from "../integration/free-port.mjs";
-import { classifyMutant, inspectReport } from "./engine-results.mjs";
+import {
+  CONTRACT_VERSION,
+  campaignOutcome,
+  FAULT_HOOK,
+  HARNESS,
+  judgeControl,
+  judgeMutant,
+  judgeNegative,
+  MUTANTS,
+  mutantOf,
+  NEGATIVE_CONTROLS,
+  normalise,
+  PROBE_IDS,
+  PROBE_SPEC,
+  validateContracts,
+} from "./held-operation-qualification.mjs";
 import { fingerprint, json, newRun, processes } from "./runtime.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const HELPER = "tests/e2e/held-operation.ts";
-const LEDGER = "tests/e2e/held-operation-ledger.ts";
-const HARNESS = "src/fixture/data-harness/main.ts";
-const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-
-const sub = (text, from, to) => {
-  const count = text.split(from).length - 1;
-  if (count !== 1)
-    throw new Error(`anchor found ${count} times: ${JSON.stringify(from)}`);
-  return text.replace(from, to);
-};
-
-/** The cases each probe id names (P03 is parameterised twice). */
-const CASES = {
-  P01: 1,
-  P02: 1,
-  P03: 2,
-  P04: 1,
-  P05: 1,
-  P06: 1,
-  P07: 1,
-  P08: 1,
-  P09: 1,
-  P10: 1,
-  P11: 1,
-  P12: 1,
-  P13: 1,
-  P14: 1,
-  P15: 1,
-  S1: 1,
-  S2: 1,
-  S3: 1,
-  S4: 1,
-  S5: 1,
-  S6: 1,
-  S7: 1,
-  S8: 1,
-  S9: 1,
-  S10: 1,
-  S11: 1,
-  S12: 1,
-  S13: 1,
-  S14: 1,
-  S15: 1,
-  S16: 1,
-  S17: 1,
-  S18: 1,
-  S19: 1,
-  S20: 1,
-  S21: 1,
-};
-
-/** The shapes the unchanged whole-mutant reader must accept as a catch: a genuine assertion alone. Every other shape must be refused. */
-const CATCHES = new Set(["S1", "S7", "S17", "S18", "S20"]);
-/** The operation each witnessed shape (H7) must name, by call id, and the text its escaped first error keeps. */
-const WITNESSED = {
-  S10: { calls: ["s1.c1"], first: "inside the operation" },
-  S11: { calls: ["s1.c1"], first: "probe operation failure after edited" },
-  S12: { calls: ["s1.c1"], first: "inside the operation callback" },
-  S13: { calls: ["s1.c1"], first: "thrown synchronously" },
-  S14: { calls: ["s1.c1"], first: "as a string" },
-  S15: {
-    calls: ["s1.c1"],
-    first: "inside the operation",
-    cleanup: "the operation the second failure failed",
-  },
-  S16: {
-    calls: ["s1.c1"],
-    first: "inside the operation",
-    cleanup: "the harness answered a release with undefined",
-  },
-  S19: { calls: ["s1.c1"], first: "the probe's intended assertion" },
-  S21: { calls: ["s1.c1"], first: "inside the operation" },
-};
-
-/** What each probe must report: `null` when it does, otherwise why not. */
-function oracle(id, c) {
-  const kinds = c.errors.map((e) => e.kind).join(",");
-  const text = (i) => c.full[i] ?? "";
-  const need = (ok, why) => (ok ? null : why);
-  if (id.startsWith("P"))
-    return need(
-      c.status === "passed" && c.errors.length === 0,
-      `control ${c.status} with ${c.errors.length} error(s)`,
-    );
-  // The unchanged reader's whole-mutant verdict over this probe's cases (computed once per probe in `probes`).
-  if (c.verdict !== (CATCHES.has(id) ? "caught" : "refused"))
-    return `${id}: the whole-mutant reader's verdict is ${c.verdict}`;
-  const ledger = c.attachments["held-operations"];
-  if (CATCHES.has(id) && ledger !== undefined && ledger.escaped?.length !== 0)
-    return `${id}: a genuine assertion shape witnessed ${JSON.stringify(ledger.escaped)}`;
-  const witnessed = WITNESSED[id];
-  if (witnessed !== undefined) {
-    const last = text(c.errors.length - 1);
-    const scope = ledger?.scopes?.[0];
-    const call = scope?.calls?.[0];
-    return need(
-      c.status === "failed" &&
-        c.errors.length === 2 &&
-        c.errors[1].kind === "error" &&
-        c.kind === "error" &&
-        text(0).includes(witnessed.first) &&
-        last.includes("held-operation runtime failure") &&
-        witnessed.calls.every((callId) =>
-          last.includes(`operation ${callId} (`),
-        ) &&
-        // The witness never repeats the rejection's text.
-        !last.includes(witnessed.first) &&
-        last.includes("held-operation cleanup failed") ===
-          (witnessed.cleanup !== undefined) &&
-        (witnessed.cleanup === undefined || last.includes(witnessed.cleanup)) &&
-        JSON.stringify(scope?.escaped) === JSON.stringify(witnessed.calls) &&
-        ledger?.escaped?.length === witnessed.calls.length &&
-        call?.state === "rejected" &&
-        call?.joined === true &&
-        typeof call?.rejection?.message === "string",
-      `${id}: ${c.status} [${kinds}] case ${c.kind}; first ${JSON.stringify(text(0).split("\n")[0])}; last ${JSON.stringify(last.split("\n")[0])}; scope escaped ${JSON.stringify(scope?.escaped)}`,
-    );
-  }
-  switch (id) {
-    case "S1": {
-      const ledger = c.attachments["held-operations"];
-      const scope = ledger?.scopes?.[0];
-      const cleanup = scope?.holds?.[0]?.events?.find(
-        (e) => e.event === "cleanup-release",
-      )?.detail;
-      return need(
-        c.status === "failed" &&
-          kinds === "assertion" &&
-          c.kind === "assertion" &&
-          ledger?.errors?.length === 0 &&
-          scope?.calls?.[0]?.state === "fulfilled" &&
-          scope?.calls?.[0]?.joined === true &&
-          cleanup?.outcome === "released",
-        `S1: ${c.status} [${kinds}] case ${c.kind}, cleanup ${JSON.stringify(cleanup)}, call ${JSON.stringify(scope?.calls?.[0]?.state)}/${scope?.calls?.[0]?.joined}`,
-      );
-    }
-    case "S2":
-      return need(
-        c.status === "failed" &&
-          kinds === "error" &&
-          c.kind === "error" &&
-          text(0).includes("the operation the failing edit failed") &&
-          text(0).includes("probe operation failure after edited"),
-        `S2: ${c.status} [${kinds}] ${text(0).split("\n")[0]}`,
-      );
-    case "S3":
-    case "S4":
-    case "S5":
-    case "S8": {
-      const expected = {
-        S3: "probe operation failure after edited",
-        S4: "did not settle within 1000 ms",
-        S5: "releasing the held data.editQueuedDraft answer failed",
-        S8: "expect (received).toBe(expected) inside the operation",
-      }[id];
-      return need(
-        c.status === "failed" &&
-          kinds === "assertion,error" &&
-          c.kind === "error" &&
-          text(1).includes("held-operation cleanup failed") &&
-          text(1).includes(expected),
-        `${id}: ${c.status} [${kinds}] case ${c.kind}: ${text(1).split("\n")[0]}`,
-      );
-    }
-    case "S6":
-      return need(
-        c.status === "timedOut" &&
-          c.kind === "timeout" &&
-          c.full.some((t) =>
-            t.includes("a held-operation scope never finished"),
-          ),
-        `S6: ${c.status} case ${c.kind} [${kinds}]`,
-      );
-    case "S17":
-    case "S18":
-    case "S20": {
-      const scope = ledger?.scopes?.[0];
-      const call = scope?.calls?.[0];
-      const expected = {
-        S17: { first: "the probe's intended assertion", state: "fulfilled" },
-        S18: { first: "a message the operation never had", state: "rejected" },
-        S20: { first: "the probe's intended assertion", state: "rejected" },
-      }[id];
-      return need(
-        c.status === "failed" &&
-          kinds === "assertion" &&
-          c.kind === "assertion" &&
-          text(0).includes(expected.first) &&
-          ledger?.errors?.length === 0 &&
-          ledger?.escaped?.length === 0 &&
-          call?.state === expected.state &&
-          call?.joined === true &&
-          call?.rejectionExpected === (id !== "S17"),
-        `${id}: ${c.status} [${kinds}] case ${c.kind}; first ${JSON.stringify(text(0).split("\n")[0])}; ledger ${JSON.stringify({ errors: ledger?.errors, escaped: ledger?.escaped })}`,
-      );
-    }
-    case "S7":
-      return need(
-        c.status === "failed" &&
-          kinds === "assertion" &&
-          c.kind === "assertion",
-        `S7: ${c.status} [${kinds}]`,
-      );
-    case "S9":
-      return need(
-        c.status === "failed" &&
-          kinds === "error" &&
-          c.kind === "error" &&
-          text(0).includes(
-            "expect (received).toBe(expected) inside the operation",
-          ),
-        `S9: ${c.status} [${kinds}] ${text(0).split("\n")[0]}`,
-      );
-    default:
-      return `no oracle for ${id}`;
-  }
-}
-
-/** Helper mutants (patched copies of the test tree) and fixture mutants (patched harness, mutant build). */
-const MUTANTS = [
-  {
-    id: "HM1",
-    title: "a failed body's cleanup releases nothing (the R20-N1 defect)",
-    file: HELPER,
-    probes: ["P03", "S1"],
-    patch: (t) =>
-      sub(
-        t,
-        "if (held.released && !bodyFailed) continue;",
-        "if (held.released || bodyFailed) continue;",
-      ),
-  },
-  {
-    id: "HM2",
-    title: "the cleanup never joins the operations",
-    file: HELPER,
-    probes: ["P03", "S1"],
-    patch: (t) =>
-      sub(
-        t,
-        "for (const { record: call, outcome } of calls) {",
-        "for (const { record: call, outcome } of calls.slice(calls.length)) {",
-      ),
-  },
-  {
-    id: "HM3",
-    title: "an operation's rejection is swallowed by `settled()`",
-    file: HELPER,
-    probes: ["P06"],
-    patch: (t) =>
-      sub(
-        t,
-        'event: "rejection-delivered" });\n            throw settled.error;',
-        'event: "rejection-delivered" });\n            return undefined as T;',
-      ),
-  },
-  {
-    id: "HM4",
-    title:
-      "a failed body's cleanup failures are dropped (never reach the ledger)",
-    file: HELPER,
-    probes: ["P07", "S3", "S5"],
-    patch: (t) => sub(t, "    ledger.errors.push(...problems);\n", ""),
-  },
-  {
-    id: "HM5",
-    title:
-      "the cleanup releases without its token (whatever hold the page has now)",
-    file: HELPER,
-    probes: ["P09"],
-    patch: (t) => sub(t, "{ kind, token },", "{ kind, token: undefined },"),
-  },
-  {
-    id: "HM6",
-    title: "the body's own failure is replaced by a cleanup error",
-    file: HELPER,
-    probes: ["P02", "S1"],
-    patch: (t) =>
-      sub(
-        t,
-        "    throw failure;",
-        '    throw new Error("held operations failed");',
-      ),
-  },
-  {
-    id: "HM9",
-    title: "the owner trusts a release answer that is not a hold release",
-    file: HELPER,
-    probes: ["P13"],
-    patch: (t) =>
-      sub(
-        t,
-        "  if (!isRelease(released))",
-        "  if (released === Symbol.for(String(released)))",
-      ),
-  },
-  {
-    id: "HM10",
-    title:
-      "an explicitly joined rejection that escapes the body is not witnessed (the R21-N1 defect)",
-    file: HELPER,
-    probes: ["S10", "S11", "S12", "S13", "S14", "S21"],
-    patch: (t) =>
-      sub(
-        t,
-        "        failed !== null &&\n        (call.rejectionsDelivered",
-        "        failed === Symbol.for(String(failed)) &&\n        (call.rejectionsDelivered",
-      ),
-  },
-  {
-    id: "HM11",
-    title:
-      "a rejection `settled()` handed to the body is witnessed only when it is the body's failure (observing taken for expecting)",
-    file: HELPER,
-    probes: ["P15", "S19"],
-    patch: (t) =>
-      sub(
-        t,
-        "(call.rejectionsDelivered > 0 || carries(",
-        "(call.rejectionsDelivered < 0 || carries(",
-      ),
-  },
-  {
-    id: "HM12",
-    title:
-      "the body's failure is never matched to an operation's rejection (only deliveries by `settled()` are witnessed)",
-    file: HELPER,
-    probes: ["S21"],
-    patch: (t) =>
-      sub(
-        t,
-        "    if (current === error) return true;",
-        "    if (current === Symbol.for(String(error))) return true;",
-      ),
-  },
-  {
-    id: "HM13",
-    title:
-      "an expected rejection is witnessed like any other (`expectRejection()` counted as a delivery)",
-    file: HELPER,
-    probes: ["P14", "S20"],
-    patch: (t) =>
-      sub(
-        t,
-        "          call.rejectionExpected = true;\n",
-        "          call.rejectionExpected = true;\n          call.rejectionsDelivered += 1;\n",
-      ),
-  },
-  {
-    id: "HM7",
-    title: "the ledger is attached but its failures are never reported",
-    file: LEDGER,
-    probes: ["S3", "S4", "S5", "S6", "S10"],
-    patch: (t) => sub(t, "  if (parts.length > 0)", "  if (parts.length < 0)"),
-  },
-  {
-    id: "HM8",
-    title:
-      "an operation error that reads like an assertion is reported as written",
-    file: LEDGER,
-    probes: ["S8", "S9"],
-    patch: (t) =>
-      sub(t, '  text.replaceAll("expect(", "expect (");', "  text;"),
-  },
-  {
-    id: "HM14",
-    title: "the ledger's runtime-origin witnesses are never published",
-    file: LEDGER,
-    probes: ["S10", "S12", "S15", "S16"],
-    patch: (t) =>
-      sub(
-        t,
-        "    ...(ledger.escaped.length > 0",
-        "    ...(ledger.escaped.length < 0",
-      ),
-  },
-  {
-    id: "FM1",
-    title: "the fixture's release of an unreached arm leaves it armed",
-    file: HARNESS,
-    probes: ["P02", "P10", "P11"],
-    patch: (t) =>
-      sub(
-        t,
-        '    hold.plan = null;\n    outcome = "disarmed";',
-        '    outcome = "disarmed";',
-      ),
-  },
-  {
-    id: "FM2",
-    title: "the fixture lets a second arm replace a live one",
-    file: HARNESS,
-    probes: ["P10"],
-    patch: (t) =>
-      sub(
-        t,
-        "  if (hold.plan !== null || hold.held)\n",
-        "  if (hold.plan === Symbol.for(String(hold.held)))\n",
-      ),
-  },
-  {
-    id: "FM3",
-    title: "the fixture's release ignores whose token it is",
-    file: HARNESS,
-    probes: ["P05", "P09", "P10"],
-    patch: (t) =>
-      sub(
-        t,
-        "  const stale =\n    token !== undefined &&",
-        "  const stale =\n    token === Symbol.for(String(token)) &&",
-      ),
-  },
-];
 
 const args = process.argv.slice(2);
 const value = (name, fallback) => {
@@ -454,14 +65,15 @@ const value = (name, fallback) => {
 };
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--check") continue;
-  if (!["--out", "--browsers", "--only"].includes(args[i]))
+  if (
+    !["--out", "--browsers", "--only", "--stage", "--probes"].includes(args[i])
+  )
     throw new Error(`Unknown option: ${args[i]}`);
   i += 1;
 }
-const outDir = resolve(
-  root,
-  value("--out", ".agtx/evidence/held-operation-probes"),
-);
+if (!args.includes("--out"))
+  throw new Error("--out is required (no default evidence directory)");
+const outDir = resolve(root, value("--out"));
 const browsers = value("--browsers", "chromium,firefox,webkit").split(",");
 if (
   !browsers.length ||
@@ -469,10 +81,27 @@ if (
   new Set(browsers).size !== browsers.length
 )
   throw new Error("Invalid or duplicate --browsers");
+const stage = value("--stage", "all");
+if (!["all", "controls", "negatives"].includes(stage))
+  throw new Error("--stage must be all, controls or negatives");
 const only = value("--only", "").split(",").filter(Boolean);
-if (only.some((id) => !MUTANTS.some((m) => m.id === id)))
-  throw new Error("Unknown --only mutant ID");
-const selected = MUTANTS.filter((m) => !only.length || only.includes(m.id));
+for (const id of only) mutantOf(id);
+if (only.length && stage !== "all")
+  throw new Error("--only selects mutants: it needs --stage all");
+const probeIds = value("--probes", "").split(",").filter(Boolean);
+if (
+  probeIds.some((id) => !PROBE_IDS.includes(id)) ||
+  new Set(probeIds).size !== probeIds.length
+)
+  throw new Error("Unknown or duplicate --probes ID");
+if (probeIds.length && stage !== "controls")
+  throw new Error("--probes restricts the controls: it needs --stage controls");
+const controlIds = probeIds.length ? probeIds : PROBE_IDS;
+const selected =
+  stage === "all"
+    ? MUTANTS.filter((m) => !only.length || only.includes(m.id))
+    : [];
+const negatives = stage === "controls" ? [] : NEGATIVE_CONTROLS;
 const checkOnly = args.includes("--check");
 
 const runDir = newRun(outDir);
@@ -489,7 +118,7 @@ console.log(`Evidence: ${runDir}`);
 const proc = processes(root);
 const started = Date.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const record = { control: null, copy_control: null, mutants: [] };
+const record = { controls: [], negatives: [], mutants: [] };
 let fatal = null;
 let preflight = false;
 let interrupted = false;
@@ -573,7 +202,7 @@ async function withPreview(buildDir, action) {
   }
 }
 /** An unmutated (or patched) copy of what Playwright loads: the config and tests/e2e. */
-function copyTree(name, patch) {
+function copyTree(name, patches = []) {
   const tree = join(trees, name);
   mkdirSync(tree, { recursive: true });
   cpSync(join(root, "tests/e2e"), join(tree, "tests/e2e"), {
@@ -583,56 +212,15 @@ function copyTree(name, patch) {
     join(root, "playwright.config.ts"),
     join(tree, "playwright.config.ts"),
   );
-  if (patch) writeFileSync(join(tree, patch.file), patch.text);
+  for (const patch of patches)
+    writeFileSync(join(tree, patch.file), patch.text);
   return tree;
 }
-/** Every case of the report, with what the oracle reads: each error's full text and the parsed attachments. */
-function casesOf(report, exit) {
-  const inspected = inspectReport(report, browsers, exit);
-  const raw = new Map();
-  const visit = (suite, parents = []) => {
-    for (const spec of suite.specs ?? [])
-      for (const test of spec.tests ?? []) {
-        const last = (test.results ?? []).at(-1);
-        const title = [...parents, suite.title, spec.title]
-          .filter(Boolean)
-          .join(" › ");
-        const attachments = {};
-        for (const a of last?.attachments ?? [])
-          if (a.contentType === "application/json" && a.body)
-            try {
-              attachments[a.name] = JSON.parse(
-                Buffer.from(a.body, "base64").toString("utf8"),
-              );
-            } catch {
-              attachments[a.name] = "unparseable";
-            }
-        raw.set(`${test.projectName}::${title}`, {
-          full: (last?.errors ?? []).map((e) =>
-            String(e?.message ?? "").replace(ANSI, ""),
-          ),
-          attachments,
-          spec: spec.title,
-        });
-      }
-    for (const child of suite.suites ?? [])
-      visit(child, [...parents, suite.title].filter(Boolean));
-  };
-  for (const suite of report.suites ?? []) visit(suite);
-  return {
-    inspected,
-    cases: inspected.cases.map((c) => {
-      const extra = raw.get(`${c.engine}::${c.title}`);
-      return {
-        ...c,
-        id: extra?.spec.split(" ")[0],
-        full: extra?.full ?? [],
-        attachments: extra?.attachments ?? {},
-      };
-    }),
-  };
-}
-async function probes(url, cwd, ids, directory) {
+/**
+ * Runs the named probes from `cwd` in every selected engine (one worker, no retries) and returns the normalised report: every case with
+ * its full evidence (scripts/validation/held-operation-qualification.mjs). A report that cannot be read is an error of the run.
+ */
+async function probes(url, cwd, ids, directory, env = {}) {
   mkdirSync(directory, { recursive: true });
   const reportPath = join(directory, "report.json");
   // A probe's id begins its title ("P03 ...", "S1 shape: ..."), and no other title of the file has it.
@@ -659,78 +247,43 @@ async function probes(url, cwd, ids, directory) {
       ATLAS_E2E_BROWSERS: "all",
       ATLAS_EVIDENCE_DIR: join(directory, "evidence"),
       PLAYWRIGHT_JSON_OUTPUT_FILE: reportPath,
+      ...env,
     },
   );
   writeFileSync(join(directory, "playwright.log"), result.output);
-  const report = JSON.parse(readFileSync(reportPath, "utf8"));
-  const { inspected, cases } = casesOf(report, result.code);
-  // The exact cases: every named probe, its parameterisations, in every engine; no other case.
-  const expected = browsers.flatMap((b) =>
-    ids.flatMap((id) =>
-      Array.from({ length: CASES[id] }, () => `fixture-${b}::${id}`),
-    ),
+  // The exact spec text that ran (the tree's own copy) bounds each test's lines.
+  const specText = readFileSync(join(cwd, PROBE_SPEC), "utf8");
+  return normalise(
+    JSON.parse(readFileSync(reportPath, "utf8")),
+    browsers,
+    result.code,
+    specText,
   );
-  const got = cases.map((c) => `${c.engine}::${c.id}`);
-  const inventory =
-    JSON.stringify([...got].sort()) === JSON.stringify([...expected].sort());
-  // The unchanged reader's whole-mutant verdict for each shape probe, as `run-engine-mutants.mjs` would reach it if the probe's cases were
-  // a mutant's: with a case expectation matching the probe's title and without one; "caught" only when both catch.
-  const verdicts = {};
-  for (const id of ids.filter((i) => i.startsWith("S"))) {
-    const mine = cases.filter((c) => c.id === id);
-    const subset = {
-      code: result.code,
-      complete: inspected.complete && mine.length === browsers.length,
-      cases: mine,
-      failures: mine.filter((c) => c.status !== "passed"),
-      failed: mine.filter((c) => c.status !== "passed").map((c) => c.engine),
-      passed: mine.filter((c) => c.status === "passed").map((c) => c.engine),
-    };
-    const matching = classifyMutant(
-      { expect: { source: `(?:^|\\s)${id}\\s`, flags: "" } },
-      subset,
-      browsers,
-    );
-    const any = classifyMutant({}, subset, browsers);
-    verdicts[id] = {
-      verdict:
-        matching.caught && any.caught
-          ? "caught"
-          : !matching.caught && !any.caught
-            ? "refused"
-            : "inconsistent",
-      matching,
-      any,
-    };
-  }
-  const judged = cases.map((c) => {
-    const verdict = verdicts[c.id]?.verdict;
-    return {
-      engine: c.engine,
-      id: c.id,
-      title: c.title,
-      status: c.status,
-      attempts: c.attempts,
-      kind: c.kind,
-      errors: c.errors,
-      verdict,
-      deviation: oracle(c.id, { ...c, verdict }),
-    };
-  });
-  return {
-    exit: result.code,
-    complete: inspected.complete && inventory,
-    inventory_matches: inventory,
-    verdicts,
-    cases: judged,
-  };
 }
+/** A judged part's record: the judgement with the normalised cases' error lists kept beside it for the reviewer. */
+const recorded = (name, run, judgement) => ({
+  name,
+  exit: run.exit,
+  complete: run.complete,
+  ...judgement,
+  errors: run.cases.map((c) => ({
+    engine: c.engine,
+    id: c.id,
+    status: c.status,
+    errors: c.errors.map((e) => ({
+      kind: e.kind,
+      first: e.first,
+      location: e.location,
+    })),
+  })),
+});
 
 try {
-  // Every patch applies to the current text before anything is built.
+  // Every contract is total and every patch applies to the current text before anything is built.
+  const contractProblems = validateContracts();
   const patches = [];
   const failures = [];
-  for (const mutant of selected) {
+  for (const mutant of MUTANTS) {
     try {
       const text = readFileSync(join(root, mutant.file), "utf8");
       const patched = mutant.patch(text);
@@ -740,34 +293,79 @@ try {
       failures.push({ id: mutant.id, patch_failed: String(error.message) });
     }
   }
+  const spec = readFileSync(join(root, PROBE_SPEC), "utf8");
   json(join(runDir, "preflight.json"), {
+    contract: CONTRACT_VERSION,
+    stage,
+    controls: stage === "negatives" ? [] : controlIds,
+    negatives: negatives.map((n) => n.id),
     selected: selected.map((m) => m.id),
+    contract_problems: contractProblems,
     failures,
   });
+  if (contractProblems.length)
+    throw new Error(
+      `${contractProblems.length} contract problem(s): ${contractProblems[0]}`,
+    );
   if (failures.length)
     throw new Error(`${failures.length} probe mutation(s) failed preflight`);
   preflight = true;
   if (!checkOnly) {
-    const ALL = Object.keys(CASES);
     const controlBuild = join(runDir, "control-build");
     await build(null, controlBuild, join(runDir, "control-build.log"));
-    const sound = (run) =>
-      run.complete && run.cases.every((c) => c.deviation === null);
-    record.control = await withPreview(controlBuild, (url) =>
-      probes(url, root, ALL, join(runDir, "control")),
-    );
-    console.log(`control ${sound(record.control) ? "passes" : "FAILS"}`);
-    if (!sound(record.control)) throw new Error("Probe control failed");
-    const copy = copyTree("copy-control");
-    record.copy_control = await withPreview(controlBuild, (url) =>
-      probes(url, copy, ALL, join(runDir, "copy-control")),
-    );
-    console.log(
-      `copy control ${sound(record.copy_control) ? "passes" : "FAILS"}`,
-    );
-    if (!sound(record.copy_control))
-      throw new Error("Probe copy control failed");
-    for (const { mutant, text } of patches) {
+    if (stage !== "negatives") {
+      for (const [name, cwd] of [
+        ["control", root],
+        ["copy-control", copyTree("copy-control")],
+      ]) {
+        const run = await withPreview(controlBuild, (url) =>
+          probes(url, cwd, controlIds, join(runDir, name)),
+        );
+        const judged = recorded(
+          name,
+          run,
+          judgeControl(run, controlIds, browsers),
+        );
+        json(join(runDir, name, "judgement.json"), judged);
+        record.controls.push(judged);
+        console.log(`${name} ${judged.ok ? "healthy" : "NOT HEALTHY"}`);
+        if (!judged.ok) throw new Error(`Probe ${name} is not healthy`);
+      }
+    }
+    for (const nc of negatives) {
+      const directory = join(runDir, nc.id);
+      const faulted = { file: PROBE_SPEC, text: `${spec}${FAULT_HOOK}` };
+      const installed = nc.mutant
+        ? [
+            {
+              file: mutantOf(nc.mutant).file,
+              text: patches.find((p) => p.mutant.id === nc.mutant).text,
+            },
+          ]
+        : [];
+      if (installed.some((p) => p.file === HARNESS))
+        throw new Error(
+          `${nc.id}: a negative control installs helper or ledger mutants only`,
+        );
+      const tree = copyTree(nc.id, [faulted, ...installed]);
+      const run = await withPreview(controlBuild, (url) =>
+        probes(url, tree, nc.probes, join(directory, "browser"), {
+          ATLAS_PROBE_FAULT: nc.fault,
+          ATLAS_PROBE_FAULT_IDS: nc.probes.join(","),
+        }),
+      );
+      const judged = recorded(nc.id, run, judgeNegative(nc, run, browsers));
+      json(join(directory, "result.json"), { title: nc.title, ...judged });
+      record.negatives.push(judged);
+      console.log(
+        `${judged.refused ? "refused" : "NOT REFUSED"} ${nc.id} (${judged.verdict})`,
+      );
+      if (!judged.refused)
+        throw new Error(`Negative control not refused: ${nc.id}`);
+    }
+    for (const { mutant, text } of patches.filter((p) =>
+      selected.includes(p.mutant),
+    )) {
       const directory = join(runDir, mutant.id);
       let run;
       if (mutant.file === HARNESS) {
@@ -780,33 +378,25 @@ try {
           probes(url, root, mutant.probes, join(directory, "browser")),
         );
       } else {
-        const tree = copyTree(mutant.id, { file: mutant.file, text });
+        const tree = copyTree(mutant.id, [{ file: mutant.file, text }]);
         run = await withPreview(controlBuild, (url) =>
           probes(url, tree, mutant.probes, join(directory, "browser")),
         );
       }
-      // A control (P..) deviates only by a failed assertion of its own; a shape probe by any oracle mismatch.
-      const caught =
-        run.exit !== 0 &&
-        run.complete &&
-        run.cases.every(
-          (c) =>
-            c.deviation !== null &&
-            (!c.id.startsWith("P") ||
-              (c.status === "failed" && c.kind === "assertion")),
-        );
-      const result = {
-        id: mutant.id,
+      const judged = recorded(
+        mutant.id,
+        run,
+        judgeMutant(mutant.id, run, browsers),
+      );
+      json(join(directory, "result.json"), {
         title: mutant.title,
         file: mutant.file,
-        probes: mutant.probes,
-        caught,
-        ...run,
-      };
-      json(join(directory, "result.json"), result);
-      record.mutants.push(result);
-      console.log(`${caught ? "caught" : "FAILED"} ${mutant.id}`);
-      if (!caught) throw new Error(`Probe mutant not caught: ${mutant.id}`);
+        ...judged,
+      });
+      record.mutants.push(judged);
+      console.log(`${judged.verdict} ${mutant.id}`);
+      if (judged.verdict !== "caught")
+        throw new Error(`Probe mutant ${judged.verdict}: ${mutant.id}`);
     }
   }
 } catch (error) {
@@ -818,32 +408,49 @@ try {
 const after = fingerprint(root);
 json(join(runDir, "inputs-after.json"), after);
 const unchanged = before.sha256 === after.sha256;
-const passed =
-  !interrupted &&
-  !fatal &&
-  preflight &&
-  unchanged &&
-  (checkOnly ||
-    (record.mutants.length === selected.length &&
-      record.mutants.every((m) => m.caught)));
+const outcome = checkOnly
+  ? {
+      passed: preflight && !fatal && !interrupted && unchanged,
+      reasons: [],
+    }
+  : campaignOutcome({
+      preflight,
+      fatal,
+      interrupted,
+      sourceUnchanged: unchanged,
+      planned: {
+        controls: stage === "negatives" ? 0 : 2,
+        negatives: negatives.map((n) => n.id),
+        mutants: selected.map((m) => m.id),
+      },
+      controls: record.controls,
+      negatives: record.negatives,
+      mutants: record.mutants,
+    });
 const summary = {
   layer:
-    "held-operation owner and fixture hold seam (WEB-08d r21, R20-N1): real engines, probe controls, reporter shapes, helper/fixture mutants",
+    "held-operation owner and fixture hold seam (WEB-08d r21-r23): real engines, probe controls, reporter shapes, negative controls, helper/fixture mutants judged by versioned contracts",
+  contract: CONTRACT_VERSION,
   browsers,
   check_only: checkOnly,
+  stage,
   preflight_pass: preflight,
+  controls: record.controls.map((c) => ({ name: c.name, ok: c.ok })),
+  negatives: record.negatives.map((n) => ({
+    id: n.negative_control,
+    verdict: n.verdict,
+    refused: n.refused,
+  })),
   selected: selected.map((m) => m.id),
-  control_ok:
-    record.control?.complete === true &&
-    record.control.cases.every((c) => c.deviation === null),
-  copy_control_ok:
-    record.copy_control?.complete === true &&
-    record.copy_control.cases.every((c) => c.deviation === null),
   run: record.mutants.length,
-  caught: record.mutants.filter((m) => m.caught).length,
+  verdicts: Object.fromEntries(
+    record.mutants.map((m) => [m.mutant, m.verdict]),
+  ),
+  caught: record.mutants.filter((m) => m.verdict === "caught").length,
   source_unchanged: unchanged,
   trees,
-  passed,
+  passed: outcome.passed,
+  reasons: outcome.reasons,
   fatal,
   elapsed_ms: Date.now() - started,
   at: new Date().toISOString(),
@@ -851,4 +458,4 @@ const summary = {
 };
 json(join(runDir, "probe-results.json"), { summary, ...record });
 console.log(JSON.stringify(summary));
-process.exitCode = passed ? 0 : 1;
+process.exitCode = outcome.passed ? 0 : 1;
