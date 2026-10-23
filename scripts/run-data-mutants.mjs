@@ -12,10 +12,13 @@
 // throws something else, a suite that does not load) or a timeout is NOT evidence that a mutant was caught (validation policy
 // VP-20261003), so each failure is classified:
 //
-//   assertion   an `AssertionError`, or the plain `Error` that vitest's `rejects`, `resolves` and the jest-dom matchers throw (recognised
-//               by their assertion frames): the test said the behaviour is wrong
+//   assertion   an error the framework constructed as the RESULT of a failed comparison: chai's `AssertionError` (every built-in
+//               matcher, `resolves`/`rejects`, `assert`) or the `JestExtendError` of an `expect.extend` matcher such as jest-dom's,
+//               recognised since WEB-14a revision 28 only by the origin the worker records for this run (vitest-origin-setup.mjs),
+//               never by name, frames or text: the test said the behaviour is wrong
 //   timeout     the test timed out
-//   error       anything else the test threw (a TypeError of the mutated code, a setup failure)
+//   error       anything else the test threw (a TypeError of the mutated code, a setup failure, a matcher that crashed or refused its
+//               input before comparing, such as jest-dom given `null`)
 //
 // and, since WEB-14a revision 27 (DA-H2), every error OUTSIDE a test is counted too: a module or nested suite error (a file that does
 // not load, a failing beforeAll/afterAll), an unhandled error, an error Vitest logs while shutting down. Each run is a supervised child

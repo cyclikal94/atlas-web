@@ -11,9 +11,20 @@
 // unhandled errors recorded after the run and process-level error events, with a bound on shutdown. Only after all of that is the
 // envelope written (atomically, then the process exits with the code it records). A crash, kill or exit before that point leaves NO
 // envelope, which every consumer refuses.
+//
+// Revision 28 (review r27 R31, design assessment C1): every project's FIRST setup file is vitest-origin-setup.mjs, which records in
+// the worker which framework class produced each assertion error, bound to this request's nonce (passed to the workers in the
+// environment). The setup is prepended by a `configureVitest` hook, so the config's own setup files still run, in their order, after
+// it. A project without it is an unsupported lifecycle (no admissible envelope).
+import { createHash } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { searchForWorkspaceRoot } from "vite";
 import {
   ENVELOPE_SCHEMA,
+  ORIGIN_NONCE_ENV,
+  ORIGIN_SCHEMA,
+  ORIGIN_SETUP,
   PINNED_VITEST,
   project,
   REQUEST_SCHEMA,
@@ -26,6 +37,41 @@ if (request.schema !== REQUEST_SCHEMA) {
   );
   process.exit(70);
 }
+
+if (typeof request.nonce !== "string" || request.nonce.length === 0) {
+  console.error("vitest-supervised: the request has no nonce");
+  process.exit(70);
+}
+// Workers inherit this process's environment: the origin setup binds every record it writes to this request.
+process.env[ORIGIN_NONCE_ENV] = request.nonce;
+const origin = {
+  schema: ORIGIN_SCHEMA,
+  setupFile: ORIGIN_SETUP,
+  setupSha256: createHash("sha256")
+    .update(readFileSync(ORIGIN_SETUP))
+    .digest("hex"),
+  projects: [],
+  installed: false,
+};
+const originPlugin = {
+  name: "atlas-assertion-origin",
+  // The setup lives beside this script, which may be outside the run's root (qualification fixtures): its directory is ADDED to the
+  // files Vite may serve. Vite's own default (the workspace root) is kept when the config names none, and merged lists concatenate.
+  config(config) {
+    const allow = config.server?.fs?.allow ?? [
+      searchForWorkspaceRoot(config.root ?? request.root ?? process.cwd()),
+    ];
+    return {
+      server: { fs: { allow: [...allow, dirname(ORIGIN_SETUP)] } },
+    };
+  },
+  configureVitest({ project }) {
+    project.config.setupFiles = [
+      ORIGIN_SETUP,
+      ...project.config.setupFiles.filter((file) => file !== ORIGIN_SETUP),
+    ];
+  },
+};
 
 let phase = "run";
 const processEvents = [];
@@ -147,9 +193,20 @@ try {
           }
         : {}),
     },
-    {},
+    { plugins: [originPlugin] },
     {},
   );
+  origin.projects = (ctx.projects ?? []).map((p) => ({
+    name: p.name ?? "",
+    setupFiles: [...(p.config?.setupFiles ?? [])],
+  }));
+  origin.installed =
+    origin.projects.length > 0 &&
+    origin.projects.every((p) => p.setupFiles[0] === ORIGIN_SETUP);
+  if (!origin.installed)
+    unsupported.push(
+      "the assertion-origin setup is not the first setup file of every project",
+    );
   if (ctx.version !== PINNED_VITEST)
     unsupported.push(`Vitest ${ctx.version}, qualified ${PINNED_VITEST}`);
   for (const method of ["error", "printError"]) {
@@ -238,6 +295,7 @@ const envelope = {
   startError,
   closeError,
   closeTimedOut,
+  origin,
   vitestExitCode: process.exitCode ?? 0,
   exitCode,
   complete:

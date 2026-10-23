@@ -8,12 +8,32 @@
 // admitted runs with errors beside an intended assertion. Here an error is present because it was COUNTED, never because its value
 // printed as something (invariant I1), every channel is counted (I2), and only a terminal envelope written after an owned shutdown can
 // be admitted (I3).
+//
+// Revision 28 (review r27 R31 incomplete_fix, design assessment C1-C3): an error is an ASSERTION only on positive evidence of the
+// framework class that produced it, recorded in the worker (vitest-origin-setup.mjs) and bound to this run's nonce. Wrapper frames,
+// names and messages are kept for diagnostics and message oracles, never as proof: a matcher that crashed before comparing carries
+// the same frames as one that compared and failed. Evidence without the origin capability (envelope schema 1) is refused.
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const REQUEST_SCHEMA = "atlas-vitest-request/1";
-export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/1";
+export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/2";
 /** The lifecycle this adapter was qualified against. Any other version is refused, not assumed compatible. */
 export const PINNED_VITEST = "5.0.1";
+
+/** The per-error origin record written by the worker setup (vitest-origin-setup.mjs), and the producers it may name. */
+export const ORIGIN_SCHEMA = "atlas-assertion-origin/1";
+export const ORIGIN_KEY = "__atlasAssertionOrigin";
+export const ORIGIN_NONCE_ENV = "ATLAS_VITEST_ORIGIN_NONCE";
+export const PRODUCERS = Object.freeze({
+  chai: "chai.AssertionError",
+  extend: "vitest.JestExtendError",
+});
+export const ORIGIN_SETUP = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "vitest-origin-setup.mjs",
+);
 
 /**
  * A JSON-safe record of one thrown value. Presence is never decided here: callers count the values before projecting them, and a
@@ -31,6 +51,7 @@ export function project(value) {
       };
     const text = (key) => {
       const v = value[key];
+      if (typeof v === "function") return `Function<${v.name || "anonymous"}>`;
       return typeof v === "string" ? v : v === undefined ? null : safeString(v);
     };
     return {
@@ -39,9 +60,43 @@ export function project(value) {
       message: text("message"),
       type: text("type"),
       stack: text("stack"),
+      constructor: text("constructor"),
+      origin: originOf(value),
+      assertionName: assertionNameOf(value),
     };
   } catch {
     return { kind: "unserialisable" };
+  }
+}
+
+/**
+ * The origin record of one serialised error, read without trusting it: `null` when absent, `{ invalid: true }` when present but not
+ * a record of strings (or unreadable), else exactly `{ schema, producer, nonce }`. Whether it ADMITS the error is `classify`'s decision.
+ */
+function originOf(value) {
+  let record;
+  try {
+    record = value[ORIGIN_KEY];
+  } catch {
+    return { invalid: true };
+  }
+  if (record === undefined || record === null) return null;
+  try {
+    const { schema, producer, nonce } = record;
+    if (![schema, producer, nonce].every((v) => typeof v === "string"))
+      return { invalid: true };
+    return { schema, producer, nonce };
+  } catch {
+    return { invalid: true };
+  }
+}
+
+function assertionNameOf(value) {
+  try {
+    const name = value.__vitest_error_context__?.assertionName;
+    return typeof name === "string" ? name : null;
+  } catch {
+    return null;
   }
 }
 
@@ -60,26 +115,46 @@ export function firstLine(error) {
 }
 
 /**
- * The kind of ONE error of a test (each error is classified separately, so an assertion never conceals another error, DA-H2):
- *   assertion  an AssertionError, or the plain Error that `rejects`, `resolves` and extended matchers throw (their assertion frames)
- *   inverted   Vitest's own failure of a `test.fails` case that passed: that case's assertion, admissible only for a test.fails case
- *   timeout    a test or hook time-out
- *   error      anything else, whatever its text says
+ * Why ONE projected error is or is not an assertion of this run: `null` when its origin admits it, else the reason. An assertion
+ * needs the origin record of a qualified producer class, written in the worker of THIS run (its nonce), and the shape that class
+ * gives its errors. Absent, invalid, foreign, stale or unknown origin is never an assertion, whatever the name, frames or text say.
  */
-export function classify(error, { fails = false } = {}) {
+export function originProblem(error, nonce) {
+  if (error?.kind !== "object") return "not an object";
+  const origin = error.origin;
+  if (origin === null || origin === undefined) return "no assertion origin";
+  if (origin.invalid === true) return "invalid assertion origin";
+  if (origin.schema !== ORIGIN_SCHEMA)
+    return `unsupported origin schema ${JSON.stringify(origin.schema)}`;
+  if (typeof nonce !== "string" || origin.nonce !== nonce)
+    return "assertion origin of another run";
+  if (origin.producer === PRODUCERS.chai)
+    return error.name === "AssertionError"
+      ? null
+      : "chai assertion origin on an error not named AssertionError";
+  if (origin.producer === PRODUCERS.extend)
+    return error.constructor === "Function<JestExtendError>" &&
+      typeof error.assertionName === "string" &&
+      error.assertionName.length > 0
+      ? null
+      : "extended-matcher origin without its class or assertion name";
+  return `unknown assertion producer ${JSON.stringify(origin.producer)}`;
+}
+
+/**
+ * The kind of ONE error of a test (each error is classified separately, so an assertion never conceals another error, DA-H2):
+ *   timeout    a test or hook time-out (a veto; recognised by its text, which can only refuse, never admit)
+ *   inverted   Vitest's own failure of a `test.fails` case that passed: that case's assertion, admissible only for a test.fails case
+ *   assertion  an error whose origin record names a qualified producer of THIS run (`originProblem` is null)
+ *   error      anything else, whatever its name, frames or text say
+ */
+export function classify(error, { fails = false, nonce } = {}) {
   if (error?.kind !== "object") return "error";
   const message = error.message ?? "";
   if (/timed out/i.test(message.split("\n")[0] ?? "")) return "timeout";
   if (fails && error.name === "Error" && message === "Expect test to fail")
     return "inverted";
-  if (error.name === "AssertionError") return "assertion";
-  if (
-    /__VITEST_(REJECTS|RESOLVES|EXTEND_ASSERTION)__|\b_Assertion\./.test(
-      error.stack ?? "",
-    )
-  )
-    return "assertion";
-  return "error";
+  return originProblem(error, nonce) === null ? "assertion" : "error";
 }
 
 const isCount = (n) => Number.isInteger(n) && n >= 0;
@@ -166,6 +241,18 @@ export function validateEnvelope(
     fail("start/close error records missing");
   if (typeof envelope.closeTimedOut !== "boolean")
     fail("close time-out record missing");
+  const o = envelope.origin;
+  if (!o || typeof o !== "object") fail("no assertion-origin record");
+  else {
+    if (o.schema !== ORIGIN_SCHEMA)
+      fail(`unsupported assertion-origin schema ${JSON.stringify(o.schema)}`);
+    if (o.installed !== true)
+      fail(
+        "the assertion-origin setup was not the first setup of every project",
+      );
+    if (typeof o.setupFile !== "string" || typeof o.setupSha256 !== "string")
+      fail("assertion-origin setup file not recorded");
+  }
   return problems;
 }
 
@@ -211,10 +298,15 @@ export function readRun({
     status: t.state,
     fails: t.fails === true,
     ms: t.ms ?? null,
-    errors: t.errors.map((e) => ({
-      kind: classify(e, { fails: t.fails === true }),
-      firstLine: firstLine(e),
-    })),
+    errors: t.errors.map((e) => {
+      const kind = classify(e, { fails: t.fails === true, nonce });
+      return {
+        kind,
+        firstLine: firstLine(e),
+        producer: kind === "assertion" ? e.origin.producer : null,
+        ...(kind === "error" ? { why: originProblem(e, nonce) } : {}),
+      };
+    }),
   }));
   // The JSON report is kept for inspection and must describe exactly the same cases, outcomes and number of failures.
   const keyOf = (moduleId, name) => `${moduleId}\u0000${name}`;
@@ -358,7 +450,8 @@ export function controlVerdict(run) {
  * whose JSON full name matches it; without (an earlier revision's mutant), any assertion, and a run with failures but no assertion is
  * `crash_only` (listed, never counted). New with DA-H2: a catch must also be clean, so any time-out, non-assertion error or error
  * outside a test beside the assertions makes the run `tainted` (never caught), and incomplete evidence is `incomplete`. A `test.fails`
- * inversion counts as an assertion only for a case the mutant's own `expect` names (I5).
+ * inversion counts as an assertion only for a case the mutant's own `expect` names (I5). Revision 28: an assertion is an error whose
+ * worker-recorded origin names a qualified producer of this run (`classify`), so a matcher that crashed is an error here.
  */
 export function unitVerdict(run, mutant) {
   if (!run.complete) return { verdict: "incomplete", reasons: run.problems };
@@ -391,6 +484,18 @@ export function unitVerdict(run, mutant) {
   const anyAssertion = failed.some((c) =>
     c.errors.some((e) => admissible(c, e)),
   );
+  // Why each error of a failed case was not an assertion (revision 28: its origin), so a refusal says what it saw.
+  const whys = new Map();
+  for (const c of failed)
+    for (const e of c.errors)
+      if (e.kind === "error")
+        whys.set(e.why ?? "unknown", (whys.get(e.why ?? "unknown") ?? 0) + 1);
+  const whyText =
+    whys.size > 0
+      ? [
+          `not assertions: ${[...whys].map(([why, n]) => `${n}x ${why}`).join("; ")}`,
+        ]
+      : [];
   if (!anyAssertion)
     return {
       ...base,
@@ -398,6 +503,7 @@ export function unitVerdict(run, mutant) {
       reasons: [
         ...run.taint,
         `${kinds.timeout} time-out(s), ${kinds.error} error(s), ${kinds.inverted} inversion(s) no oracle names, no assertion`,
+        ...whyText,
       ],
     };
   if (dirty)
@@ -407,6 +513,7 @@ export function unitVerdict(run, mutant) {
       reasons: [
         ...run.taint,
         `${kinds.timeout} time-out(s) and ${kinds.error} non-assertion error(s) beside the assertions`,
+        ...whyText,
       ],
     };
   if (run.exitCode === 0)

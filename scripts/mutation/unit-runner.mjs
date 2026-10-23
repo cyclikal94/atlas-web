@@ -8,6 +8,8 @@
 //   a tainted catch of such a mutant, incomplete evidence) LATCHES: no further control or mutant is started, mutants already running
 //   are joined and recorded, and everything else is recorded `not_run`;
 // - the output directory is claimed exclusively (an existing one, such as the historical default, is refused).
+// Revision 28 (review r27 R31): an assertion is admitted only by its worker-recorded origin (vitest-origin-setup.mjs), so a matcher
+// that crashed before comparing is an error here, alone (`crash_only`) or beside an assertion (`tainted`), and latches the run.
 //
 // Kept from the earlier runner: patched copies, never the tree; one unmutated control per distinct set of tests; the catalogue's
 // `expect` rule; an earlier revision's mutant (no `expect`) that is not cleanly caught is LISTED (crash_only_legacy, tainted_legacy),
@@ -19,6 +21,7 @@ import { dirname, join } from "node:path";
 import {
   controlVerdict,
   namePatternOf,
+  REQUEST_SCHEMA,
   readRun,
   selectionProblems,
   unitVerdict,
@@ -131,7 +134,7 @@ export async function supervisedRun({
 }) {
   mkdirSync(dir, { recursive: true });
   const request = {
-    schema: "atlas-vitest-request/1",
+    schema: REQUEST_SCHEMA,
     nonce: randomUUID(),
     label,
     root,
