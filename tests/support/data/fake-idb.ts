@@ -27,6 +27,7 @@ import {
   type WriteSink,
 } from "../../../src/data/store/port";
 import type { ConnectionRegistry } from "../../../src/data/store/registry";
+import { ownedByTest } from "../lifetime";
 import type { World } from "../session/world";
 import {
   compareKeys,
@@ -226,18 +227,83 @@ export class FakeIdb {
    */
   autoDrive = false;
   private pumping = false;
+  private drain: Promise<void> | null = null;
+  /**
+   * The automatic driver's state between drains (R30/DA-H1, revision 25). A drain delivers what is runnable; when it ends with work
+   * still queued but none of it deliverable (a future timer, a frozen page's event), the driver PARKS on the world's wake instead of
+   * draining again and again without progress, and the next event scheduled, released, thawed or destroyed resumes it. That is the
+   * delivery the old restart-while-anything-is-queued loop gave, without the loop: it never advances fake time (only `advance` does).
+   */
+  private parked = false;
+  private unwake: (() => void) | null = null;
+  private disposed = false;
+  /** The first error a drain of the automatic driver threw: it stops the driver and is the owning test's failure (`dispose`). */
+  pumpFailure: unknown = null;
+  private failureReported = false;
+  /** Drains the automatic driver ran, and how many of them delivered nothing (a diagnostic and a regression oracle). */
+  readonly pumpStats = { drains: 0, idleDrains: 0 };
 
   /** @internal */
   pump(): void {
-    if (!this.autoDrive || this.pumping) return;
+    if (!this.autoDrive || this.pumping || this.disposed) return;
+    if (this.pumpFailure !== null) return;
     this.pumping = true;
-    void this.world.runUntilIdle().finally(() => {
-      this.pumping = false;
-      if (this.world.pendingCount() > 0) this.pump();
+    this.parked = false;
+    this.unwake ??= this.world.onWake(() => {
+      if (this.parked) this.pump();
     });
+    this.drain = this.world.runUntilIdle().then(
+      (steps) => {
+        this.pumpStats.drains += 1;
+        if (steps === 0) this.pumpStats.idleDrains += 1;
+        this.pumping = false;
+        // Decided synchronously, so work that arrived while the drain was finishing is either seen here or wakes the park.
+        if (this.world.hasRunnable()) this.pump();
+        else if (this.world.pendingCount() > 0 && !this.disposed)
+          this.parked = true;
+      },
+      (error: unknown) => {
+        this.pumping = false;
+        this.pumpFailure ??= error;
+      },
+    );
   }
 
-  constructor(readonly world: World) {}
+  /** Whether the automatic driver is draining or parked on the world's wake (not stopped, not disposed). */
+  get driving(): boolean {
+    return this.pumping || this.parked;
+  }
+
+  /**
+   * End this double's automatic driving (the test that owns it is over): no drain starts again, a parked driver is released, and a
+   * drain in flight finishes without restarting. The committed data stays (a simulated reload keeps it; disposal is not a reload).
+   * Throws the drain failure, if there was one, once: whoever disposes first reports it (the test, or else its teardown).
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.parked = false;
+    this.unwake?.();
+    this.unwake = null;
+    if (this.pumpFailure !== null && !this.failureReported) {
+      this.failureReported = true;
+      throw this.pumpFailure;
+    }
+  }
+
+  constructor(readonly world: World) {
+    // The test that made this double ends its driving, passed or failed (`tests/setup.ts`), so no driver outlives its test.
+    ownedByTest(() => this.disposeAndWait());
+  }
+
+  /** Stop restarting, join the active drain, then report failures before the owning test finishes. */
+  async disposeAndWait(): Promise<void> {
+    try {
+      this.dispose();
+    } finally {
+      await this.drain;
+      this.dispose();
+    }
+  }
 
   // ---- faults and inspection ----------------------------------------------------------------------------------------
   inject(injection: Injection): () => void {
@@ -722,13 +788,14 @@ export class FakeIdb {
     // A transaction that is already COMMITTING refuses (`InvalidStateError`) and completes: its data lands when the engine says.
     if (tx.over || tx.committing) return;
     tx.aborted = true;
-    const rejectLater = (): void =>
+    const rejectLater = (): void => {
       this.world.schedule(
         "D0",
         tx.info.page,
         { label: tx.info.label, tx: tx.info.order },
         () => tx.reject(new StoreFailure("abort")),
       );
+    };
     // Stuck, or its body has begun (reading, or awaiting something inside `apply`): IndexedDB aborts the transaction at once and the
     // caller hears of it whatever the body is waiting for; the body, if it resumes, stops at its next checkpoint and does nothing.
     if (db.running === tx && (tx.begun || db.stuck === tx)) {

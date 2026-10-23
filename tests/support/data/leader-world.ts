@@ -166,6 +166,7 @@ export function leaderWorld(): LeaderWorld {
         open: (a, o) => pageEnv.open(a, o),
       });
       const cancelled = new Set<number>();
+      const scheduled = new Map<number, number>();
       let timerSeq = 0;
       const compat = {
         get: (): ApiCompatibility => ({
@@ -241,19 +242,26 @@ export function leaderWorld(): LeaderWorld {
           setTimeout: (fn, ms) => {
             timerSeq += 1;
             const timer = timerSeq;
-            world.schedule(
-              "timer",
-              id,
-              { timer },
-              () => {
-                if (!cancelled.has(timer)) fn();
-              },
-              ms,
+            scheduled.set(
+              timer,
+              world.schedule(
+                "timer",
+                id,
+                { timer },
+                () => {
+                  scheduled.delete(timer);
+                  if (!cancelled.has(timer)) fn();
+                },
+                ms,
+              ),
             );
             return timer;
           },
           clearTimeout: (handle) => {
             cancelled.add(handle as number);
+            // Withdrawn from the world, as `clearTimeout` removes a timer (R30/DA-H1, revision 25): not delivered later as a no-op.
+            world.cancel(scheduled.get(handle as number) ?? 0);
+            scheduled.delete(handle as number);
           },
         },
         yield: () =>

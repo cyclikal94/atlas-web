@@ -29,6 +29,7 @@ import type {
   StampedRequestError,
   Store,
 } from "../../../src/session";
+import { ownedByTest } from "../lifetime";
 import { EPOCH_BASE } from "../session/env";
 import { FakeMarkerStorage, pageMarkers } from "./marker-storage";
 import { type PageWorld, pageWorld } from "./page-world";
@@ -116,6 +117,7 @@ export async function outboxWorld(
   const listeners = new Set<() => void>();
   const onlineListeners = new Set<() => void>();
   const cancelled = new Set<number>();
+  const scheduled = new Map<number, number>();
   let timerSeq = 0;
   let revision = 100;
   const abort = new AbortController();
@@ -238,19 +240,26 @@ export async function outboxWorld(
       setTimeout: (fn, ms) => {
         timerSeq += 1;
         const id = timerSeq;
-        world.schedule(
-          "timer",
-          "A",
-          { timer: id },
-          () => {
-            if (!cancelled.has(id)) fn();
-          },
-          ms,
+        scheduled.set(
+          id,
+          world.schedule(
+            "timer",
+            "A",
+            { timer: id },
+            () => {
+              scheduled.delete(id);
+              if (!cancelled.has(id)) fn();
+            },
+            ms,
+          ),
         );
         return id;
       },
       clearTimeout: (handle) => {
         cancelled.add(handle as number);
+        // Withdrawn from the world, as `clearTimeout` removes a timer (R30/DA-H1, revision 25): not delivered later as a no-op.
+        world.cancel(scheduled.get(handle as number) ?? 0);
+        scheduled.delete(handle as number);
       },
     },
     yield: () =>
@@ -289,6 +298,14 @@ export async function outboxWorld(
     });
   };
   build();
+  // The world ends with its test (R30/DA-H1, revision 25): the dispatcher of the moment stops and the facade stops observing, so no
+  // producer of this world outlives the test that made it. Registered after the double of IndexedDB, so it ends first.
+  ownedByTest(() => {
+    out.dispatcher.stop();
+    out.outbox.disposeObservation();
+    onlineListeners.clear();
+    listeners.clear();
+  });
   out.rebuild = () => {
     out.dispatcher.stop();
     // The facade that is replaced stops observing, as a page's owner lets it go (R55, revision 36).

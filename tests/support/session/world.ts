@@ -80,10 +80,29 @@ export class World {
   markDestroyed(id: string): void {
     const state = this.pages.get(id);
     if (state) state.destroyed = true;
+    this.wake();
   }
   setFrozen(id: string, frozen: boolean): void {
     const state = this.pages.get(id);
     if (state) state.frozen = frozen;
+    this.wake();
+  }
+
+  private wakers = new Set<() => void>();
+  /**
+   * Run `waker` synchronously whenever the queue may have gained deliverable work: an event scheduled or released, a page thawed or
+   * destroyed (R30/DA-H1, revision 25). An automatic driver parks on it instead of polling a queue that holds only future, frozen or
+   * cancelled work. Returns the unsubscribe.
+   */
+  onWake(waker: () => void): () => void {
+    this.wakers.add(waker);
+    return () => {
+      this.wakers.delete(waker);
+    };
+  }
+  private wake(): void {
+    if (this.wakers.size === 0) return;
+    for (const waker of [...this.wakers]) waker();
   }
 
   /** Add a delay rule. The first matching rule wins; later `setKnob` calls take priority over earlier ones. */
@@ -130,15 +149,18 @@ export class World {
     return full;
   }
 
-  /** Schedule a delivery. `page` is the destination; a destroyed page never receives it, a frozen page later. */
+  /**
+   * Schedule a delivery. `page` is the destination; a destroyed page never receives it, a frozen page later. Returns the event's id,
+   * which `cancel` takes (0 when the world is halted and nothing was scheduled).
+   */
   schedule(
     kind: DeliveryKind,
     page: string | null,
     meta: EventMeta,
     run: () => void,
     explicitDelay?: Knob,
-  ): void {
-    if (this.livelocked) return;
+  ): number {
+    if (this.livelocked) return 0;
     const fullMeta = { ...meta, page };
     const delay = explicitDelay ?? this.delayFor(kind, fullMeta);
     const event: WorldEvent = {
@@ -151,7 +173,26 @@ export class World {
       run,
     };
     if (delay === "unbounded") this.held.push(event);
-    else this.insert(event);
+    else {
+      this.insert(event);
+      this.wake();
+    }
+    return event.id;
+  }
+
+  /**
+   * Withdraw a scheduled delivery that has not run (a cleared timer), queued or held: as `clearTimeout` does, it is gone, not
+   * delivered later as a no-op. Returns whether it was still pending.
+   */
+  cancel(id: number): boolean {
+    for (const list of [this.queue, this.held]) {
+      const index = list.findIndex((event) => event.id === id);
+      if (index >= 0) {
+        list.splice(index, 1);
+        return true;
+      }
+    }
+    return false;
   }
 
   private insert(event: WorldEvent): void {
@@ -173,6 +214,7 @@ export class World {
       } else keep.push(event);
     }
     this.held = keep;
+    if (count > 0) this.wake();
     return count;
   }
   heldCount(
@@ -194,13 +236,11 @@ export class World {
     return before - this.held.length;
   }
 
-  private takeNext(
-    maxTime: number | null,
-    includeTimers: boolean,
-  ): WorldEvent | null {
+  /** The index of the next deliverable event (pruning destroyed pages' events on the way), or -1. */
+  private findNext(maxTime: number | null, includeTimers: boolean): number {
     for (let index = 0; index < this.queue.length; index += 1) {
       const event = this.queue[index] as WorldEvent;
-      if (maxTime !== null && event.time > maxTime) return null;
+      if (maxTime !== null && event.time > maxTime) return -1;
       if (event.kind === "timer" && !includeTimers && event.time > this.time)
         continue;
       if (this.isDestroyed(event.page)) {
@@ -209,10 +249,26 @@ export class World {
         continue;
       }
       if (this.isFrozen(event.page)) continue;
-      this.queue.splice(index, 1);
-      return event;
+      return index;
     }
-    return null;
+    return -1;
+  }
+
+  private takeNext(
+    maxTime: number | null,
+    includeTimers: boolean,
+  ): WorldEvent | null {
+    const index = this.findNext(maxTime, includeTimers);
+    if (index < 0) return null;
+    return this.queue.splice(index, 1)[0] as WorldEvent;
+  }
+
+  /**
+   * Whether `runUntilIdle` would deliver anything now. Pending is not runnable: a timer still in the future, an event for a frozen
+   * page and a held delivery are all pending and none is deliverable (R30/DA-H1, revision 25). False once the world is halted.
+   */
+  hasRunnable(): boolean {
+    return !this.livelocked && this.findNext(null, false) >= 0;
   }
 
   /** Deliver one event, then let every resulting microtask run. Returns false when nothing was deliverable. */
