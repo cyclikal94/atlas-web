@@ -613,16 +613,28 @@ describe("a late answer belongs to the form that sent it (S10, S13)", () => {
     for (const queued of [false, true]) {
       const w = await calendarWorld({ cache: [sourceRow()] });
       const dialog = await openManage(w);
-      w.replies.set(
-        "/calendar-commands",
-        Array.from({ length: 12 }, () => ({
+      // Harness precondition (DELEGATED-WEB11A-CALENDAR-PRECONDITION-20261023, WEB-11a revision 4): in the queued variant the first
+      // answer is HELD until the waiting change is committed and observed, then released as `not_sent`, so the production 50 ms retry
+      // always begins after the source has a waiting change (the schedule this case is about). The control's answers are unchanged.
+      let first: (reply: WireReply) => void = () => undefined;
+      w.replies.set("/calendar-commands", [
+        ...(queued
+          ? [
+              {
+                wait: new Promise<WireReply>((resolve) => {
+                  first = resolve;
+                }),
+              },
+            ]
+          : []),
+        ...Array.from({ length: queued ? 11 : 12 }, () => ({
           throws: new StampedRequestError("not_sent"),
         })),
-      );
+      ]);
       press(dialog, copy.REMOVE);
       press(dialog, copy.REMOVE_SUBMIT);
       expect(commands(w)).toHaveLength(1);
-      if (queued)
+      if (queued) {
         await enqueue(
           w,
           configureSourceRequest(sourceRow(), {
@@ -630,6 +642,14 @@ describe("a late answer belongs to the form that sent it (S10, S13)", () => {
             enabled: true,
           }),
         );
+        // Observed: Manage now shows the source's waiting change (what its admission reads).
+        await waitFor(() =>
+          expect(
+            within(dialog).queryAllByText(copy.WAITING_CHANGES_FIRST).length,
+          ).toBeGreaterThan(0),
+        );
+        first({ throws: new StampedRequestError("not_sent") });
+      }
       await pause(500);
       if (queued) expect(commands(w)).toHaveLength(1);
       else expect(commands(w).length).toBeGreaterThan(2);

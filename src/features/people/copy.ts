@@ -336,10 +336,18 @@ export const HELD_REPLACED = (name: string) =>
 export const HELD_UNRESOLVED = (name: string) =>
   `An earlier change to who can see ${name} may already have been made. Check it to be sure.`; // PROVISIONAL
 export const CHECK_NOW = "Check now"; // PROVISIONAL
-export const HELD_CHECKED_MADE = (name: string) =>
-  `Checked: who can see ${name} was changed.`; // PROVISIONAL
-export const HELD_CHECKED_NOT_MADE = (name: string) =>
-  `Checked: who can see ${name} wasn't changed by it.`; // PROVISIONAL
+// Review 4 of 23 October 2026 (finding 4): a check says what the audience IS now, never what the earlier attempt did.
+export const HELD_CHECKED_UNCHANGED = (name: string) =>
+  `Checked: who can see ${name} hasn't changed since this was asked for, so it may still be made. It stays here until you discard it.`; // PROVISIONAL
+export const HELD_CHECKED_MATCHES = (name: string) =>
+  `Checked: who can see ${name} is now what this asked for. Whether this change made it can't be told from here.`; // PROVISIONAL
+export const HELD_CHECKED_OTHER = (name: string) =>
+  `Checked: who can see ${name} has changed since to something else, so this can't be made any more.`; // PROVISIONAL
+// Review 4 (the assessment's C9/C10): an earlier shape is never sent; an attempt that could not be looked up blocks a fresh one.
+export const HELD_LEGACY = (name: string) =>
+  `A held change to who can see ${name} from an earlier version of Atlas is kept on this device. It can't be sent from here: discard it, or make the change again.`; // PROVISIONAL
+export const HELD_ATTEMPT_UNKNOWN =
+  "Couldn't check this device for an earlier try of this change. Try again."; // PROVISIONAL
 export const HELD_CHECK_FAILED = "Couldn't check it now. Try again."; // PROVISIONAL
 export const AUDIENCE_CHECKED_AT = (time: string) => `Checked at ${time}`; // PROVISIONAL (C6: a page's own policy read, never live)
 export const HELD_FAILED: Record<string, string> = {
@@ -401,6 +409,8 @@ export const ARCHIVED_ITEMS = "Archived items";
 export const ARCHIVED_ITEMS_DESCRIPTION = "People and fields you've archived."; // PROVISIONAL
 export const ARCHIVED_EMPTY =
   "Nothing archived. Archiving hides an item without deleting it — its history stays intact.";
+export const ARCHIVED_FAILED =
+  "Couldn't read every archived item on this device. Anything that could be read is listed."; // PROVISIONAL (review 4, finding 5)
 export const ARCHIVED_NOTE =
   "History, receipts and sync content survive archiving — this list is a reversible-action ledger, not a delete confirmation."; // PROVISIONAL
 export const COLUMN_KIND = "Kind";

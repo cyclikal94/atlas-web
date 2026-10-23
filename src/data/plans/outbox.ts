@@ -48,6 +48,7 @@ import type {
   DraftError,
   DraftRow,
   DraftWithCommand,
+  FormRecoveryRow,
   JsonObject,
   LocalId,
   PendingEffectRow,
@@ -55,7 +56,7 @@ import type {
   ResourceKind,
   SyncStateRow,
 } from "../model/types";
-import { type Reader, range, w } from "../store/port";
+import { type Reader, range, type Write, w } from "../store/port";
 import {
   bulkGetWindowed,
   collectIndex,
@@ -206,16 +207,44 @@ function endedStreak(
 // ---- W2: enqueue ---------------------------------------------------------------------------------------------------------------
 export type EnqueueResult =
   | { kind: "queued"; localId: LocalId; createdSeq: number; duplicate: boolean }
-  /** `changed`: the request stated what its caller saw (`observed`), and this transaction read something else; nothing was written. */
-  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" | "changed" }
+  /**
+   * `changed`: the request stated what its caller saw (`observed`), and this transaction read something else; nothing was written.
+   * `source_changed`: a hand-off's form copies are not stored as its caller read them, or a draft already has its local id (`transferDraft`).
+   */
+  | {
+      kind: "refused";
+      reason: "fenced" | "closing" | "no_base" | "changed" | "source_changed";
+    }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
+
+/**
+ * A HAND-OFF (WEB-11a review 4 of 23 October 2026, finding 1; the design assessment's C8): the save takes over the content of a form copy
+ * that holds an operation (a held audience change), and the copy ENDS in the SAME transaction as the draft is written. Every row of
+ * `expect` must be stored exactly as its caller read it (the source first, live; then the field's head); the source is replaced by
+ * `tombstone`, a terminal row that keeps for ever that it was handed off (its fields are the caller's: the local id and why). Otherwise
+ * nothing is written (`source_changed`), and nor when a draft already has the local id (no draft is adopted as a hand-off). Once this commits nothing can make the copy run again (an edit, a discard, a supersession or a receipt of
+ * the draft only ever touches the outbox), and before it commits nothing was queued: there is no state in between.
+ */
+export interface FormHandOff {
+  /** The rows as they must be stored: the source first (live), then the others (`also`). */
+  expect: ReadonlyArray<{
+    formContext: string;
+    tabInstanceId: string;
+    terminal: boolean;
+    digest: string;
+  }>;
+  /** The source's terminal row, written in place of it. */
+  tombstone: FormRecoveryRow;
+}
 
 interface EnqueueReads {
   existing: DraftRow | undefined;
   touched: Touched;
   /** The token of what the request said its caller saw, read here (`readObservation`), or null when it said nothing. */
   observed: string | null;
+  /** A hand-off's rows as stored now, in the order of its `expect` (empty without a hand-off). */
+  handed: Array<FormRecoveryRow | undefined>;
 }
 
 /** The observation a request states, read again inside the writing transaction (WEB-13a revision 2), or null when it states none. */
@@ -237,41 +266,74 @@ const stillObserved = (
 ): boolean =>
   request.observed === undefined || request.observed.token === observed;
 
+interface EnqueueInput {
+  incarnationId: string;
+  request: EnqueueRequest;
+  localId: LocalId;
+  accountId: string;
+  now: string;
+  /** What the facade reserved from the quota: the command built here may not be larger, nor written once the hold ended (see `overBound`). */
+  maxBytes?: number;
+  leaseLive?: () => boolean;
+  /** `transferDraft` only. */
+  handOff?: FormHandOff;
+}
+
 /**
  * ONE atomic read-increment-write over `drafts`, `resource_versions` and `cache` (read): every base is read and every record
  * raised in the same transaction, so two tabs enqueuing for one resource serialise on the one durable record (F-O1). The draft
  * fence refuses a new draft here (FEN), and a save that already happened under the same local id is recognised and not made twice.
  */
-export const enqueueDraft = singletonPlan<
-  {
-    incarnationId: string;
-    request: EnqueueRequest;
-    localId: LocalId;
-    accountId: string;
-    now: string;
-    /** What the facade reserved from the quota: the command built here may not be larger, nor written once the hold ended (see `overBound`). */
-    maxBytes?: number;
-    leaseLive?: () => boolean;
+const enqueueSpec = {
+  durability: "strict" as const,
+  read: async (reader: Reader, input: EnqueueInput): Promise<EnqueueReads> => {
+    const handed: Array<FormRecoveryRow | undefined> = [];
+    for (const row of input.handOff?.expect ?? [])
+      handed.push(
+        await reader.get("form_recovery", [row.formContext, row.tabInstanceId]),
+      );
+    return {
+      existing: await reader.get("drafts", input.localId),
+      touched: await readTouched(
+        reader,
+        input.request.targets.map((target) => target.resourceId),
+        new Set([input.localId]),
+      ),
+      observed: await observedNow(reader, input.incarnationId, input.request),
+      handed,
+    };
   },
-  EnqueueReads,
-  EnqueueResult
->({
-  name: "data.enqueueDraft",
-  meta: { writer: "W2", guards: ["INC", "FEN"], quota: "input" },
-  scope: ["drafts", "draft_commands", "resource_versions", "cache"],
-  durability: "strict",
-  read: async (reader, input) => ({
-    existing: await reader.get("drafts", input.localId),
-    touched: await readTouched(
-      reader,
-      input.request.targets.map((target) => target.resourceId),
-      new Set([input.localId]),
-    ),
-    observed: await observedNow(reader, input.incarnationId, input.request),
-  }),
-  decide: ({ sync, reads, input }) => {
+  decide: ({
+    sync,
+    reads,
+    input,
+  }: {
+    sync: SyncStateRow | undefined;
+    reads: EnqueueReads;
+    input: EnqueueInput;
+  }): {
+    writes?: readonly Write[];
+    sync?: SyncStateRow | null;
+    result: EnqueueResult;
+  } => {
     if (sync === undefined)
       return { result: { kind: "refused", reason: "no_base" } };
+    const handOff = input.handOff;
+    if (handOff !== undefined) {
+      // The copy's own guard (CLS): nothing is handed off while signing out.
+      if (sync.draft_fence?.closing === true)
+        return { result: { kind: "refused", reason: "closing" } };
+      // The copy is not as its caller read it, or a draft already has this id: no draft is adopted as this hand-off, nothing is written.
+      if (
+        reads.existing !== undefined ||
+        !handOff.expect.every(
+          (want, index) =>
+            reads.handed[index]?.terminal === want.terminal &&
+            reads.handed[index]?.content_digest === want.digest,
+        )
+      )
+        return { result: { kind: "refused", reason: "source_changed" } };
+    }
     const planned = planEnqueue(input.request, {
       sync,
       cache: reads.touched.cache,
@@ -317,6 +379,9 @@ export const enqueueDraft = singletonPlan<
         ...(planned.versionPuts.length
           ? [w.bulkPut("resource_versions", planned.versionPuts)]
           : []),
+        ...(handOff === undefined
+          ? []
+          : [w.put("form_recovery", handOff.tombstone)]),
       ],
       sync: withoutStreaks(planned.sync, ended) ?? planned.sync,
       result: {
@@ -327,6 +392,35 @@ export const enqueueDraft = singletonPlan<
       },
     };
   },
+};
+
+export const enqueueDraft = singletonPlan<
+  EnqueueInput,
+  EnqueueReads,
+  EnqueueResult
+>({
+  ...enqueueSpec,
+  name: "data.enqueueDraft",
+  meta: { writer: "W2", guards: ["INC", "FEN"], quota: "input" },
+  scope: ["drafts", "draft_commands", "resource_versions", "cache"],
+});
+
+/** `enqueueDraft` with a HAND-OFF (`FormHandOff`): the draft and the end of the copy it takes over are one commit. */
+export const transferDraft = singletonPlan<
+  EnqueueInput,
+  EnqueueReads,
+  EnqueueResult
+>({
+  ...enqueueSpec,
+  name: "data.transferDraft",
+  meta: { writer: "W2", guards: ["INC", "FEN", "CLS"], quota: "input" },
+  scope: [
+    "drafts",
+    "draft_commands",
+    "resource_versions",
+    "cache",
+    "form_recovery",
+  ],
 });
 
 // ---- W3: edit a queued command ----------------------------------------------------------------------------------------------

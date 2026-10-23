@@ -13,8 +13,11 @@ import {
   useDraftWithCommand,
   useSharingDefaults,
 } from "../../../data";
-import { ResourcePolicyEditor, untilSent } from "../../sharing";
-import { applyPolicyChange } from "../../sharing/apply-policy-change";
+import { canonicalBody, ResourcePolicyEditor, untilSent } from "../../sharing";
+import {
+  applyPolicyChange,
+  policyChangeCommands,
+} from "../../sharing/apply-policy-change";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
 import { isCurrentMemory, notePolicy, useMemoryRevision } from "../memory";
@@ -670,22 +673,35 @@ function Editor({
     }
     setSaving(true);
     const memory = env.memory;
+    // The same change's unresolved attempt, kept by this page or by a hold (a reconciliation record) on this device: its key and body. A
+    // page attempt counts only for EXACTLY this body (review 4; the assessment's C9: one of another change never hides a held one), and a
+    // device lookup that could not be completed sends nothing (a fresh key could repeat a change that may already have been made).
+    const body = canonicalBody(
+      policyChangeCommands(existing.id, shownPolicy.version, target),
+    );
+    const remembered = memory.attempts.get(`policy:${existing.id}`) ?? null;
+    let attempt = remembered?.body === body ? remembered : null;
+    if (attempt === null) {
+      const kept = await heldAttemptOf(
+        env,
+        person.row.id,
+        existing.id,
+        shownPolicy.version,
+        target,
+      );
+      if (kept.kind === "unknown") {
+        setSaving(false);
+        return fail(copy.HELD_ATTEMPT_UNKNOWN);
+      }
+      attempt = kept.kind === "found" ? kept.attempt : remembered;
+    }
     const changed = await applyPolicyChange(
       { api: env.sharing, newId: env.newId },
       {
         resourceId: existing.id,
         from: { version: shownPolicy.version, policy: shownPolicy.policy },
         to: target,
-        // The same change's unresolved attempt, kept by this page or by a hold (a reconciliation record) on this device: its key and body.
-        attempt:
-          memory.attempts.get(`policy:${existing.id}`) ??
-          (await heldAttemptOf(
-            env,
-            person.row.id,
-            existing.id,
-            shownPolicy.version,
-            target,
-          )),
+        attempt,
         isCurrent: () => isCurrentMemory(memory),
       },
     );

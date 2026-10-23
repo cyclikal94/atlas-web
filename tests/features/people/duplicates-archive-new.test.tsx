@@ -196,6 +196,119 @@ describe("Settings → Archived items", () => {
   });
 });
 
+describe("review 4, finding 5: the ledger says 'Nothing archived' only after every read it needs succeeded (T15)", () => {
+  const EMPTY = /Nothing archived/;
+  const failedState = () =>
+    document.querySelector('[data-archived-state="failed"]');
+  const settleLedger = () => new Promise((resolve) => setTimeout(resolve, 0));
+  async function opened(w: ReturnType<typeof peopleWorld>) {
+    await w.mount("/settings/archived");
+    await screen.findByRole("heading", { level: 1, name: "Archived items" });
+    await waitFor(() =>
+      expect(failedState() ?? screen.queryByText(EMPTY)).not.toBeNull(),
+    );
+  }
+
+  for (const failed of [true, false])
+    test(`the reviewer's case: ${failed ? "the archive read fails: never 'Nothing archived'; the failure is said, with Try again" : "control: a read that succeeds with nothing archived says so"}`, async () => {
+      const w = peopleWorld();
+      w.setCache(
+        failed
+          ? [person({ id: Q, label: "Archived Ada", archived: true })]
+          : [person({ id: P, label: "Mo" })],
+      );
+      if (failed) w.failReads();
+      await opened(w);
+      if (failed) {
+        expect(screen.queryByText(EMPTY)).toBeNull();
+        expect(failedState()).toHaveTextContent(
+          "Couldn't read every archived item on this device.",
+        );
+        expect(
+          within(failedState() as HTMLElement).getByRole("button", {
+            name: "Try again",
+          }),
+        ).toBeInTheDocument();
+      } else {
+        expect(screen.getByText(EMPTY)).toBeInTheDocument();
+        expect(failedState()).toBeNull();
+      }
+    });
+
+  test("Try again reads afresh: once the reads succeed the archived person is listed (the failure, and no false empty, before)", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: Q, label: "Archived Ada", archived: true })]);
+    w.failRead("data.readResourceList");
+    await opened(w);
+    expect(screen.queryByText(EMPTY)).toBeNull();
+    // The failed reads have ended: restoring the store alone changes nothing on the page.
+    w.restoreReads();
+    await settleLedger();
+    expect(failedState()).not.toBeNull();
+    expect(document.querySelector(`[data-archived-row="${Q}"]`)).toBeNull();
+    fireEvent.click(
+      within(failedState() as HTMLElement).getByRole("button", {
+        name: "Try again",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-archived-row="${Q}"]`),
+      ).not.toBeNull(),
+    );
+    expect(failedState()).toBeNull();
+    expect(screen.queryByText(EMPTY)).toBeNull();
+  });
+
+  test("one kind fails, the other is read: what was read is listed, and the inventory is said to be incomplete", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: Q, label: "Former lodger", archived: true })]);
+    w.failRead("data.readResourceList", (input) => input.kind === "field");
+    await opened(w);
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-archived-row="${Q}"]`),
+      ).not.toBeNull(),
+    );
+    expect(failedState()).not.toBeNull();
+    expect(screen.queryByText(EMPTY)).toBeNull();
+  });
+
+  test("the outstanding drafts folded over the rows cannot be read: never 'Nothing archived'", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Mo" })]);
+    w.failRead("data.readOutstandingCreates");
+    await opened(w);
+    expect(screen.queryByText(EMPTY)).toBeNull();
+    expect(failedState()).not.toBeNull();
+  });
+
+  for (const parent of ["failed", "absent"] as const)
+    test(`an archived field whose person ${parent === "failed" ? "cannot be read is hidden, and the inventory is incomplete (never 'Nothing archived')" : "is not on this device is hidden (PPL-5): control, a complete empty ledger"}`, async () => {
+      const w = peopleWorld();
+      const parentId = "12121212-1212-4121-8121-121212121212";
+      w.setCache([
+        fieldRow({
+          id: R,
+          parent_id: parentId,
+          label: "Old emergency contact",
+          archived: true,
+        }),
+      ]);
+      if (parent === "failed")
+        w.failRead("data.readMerged", (input) => input.id === parentId);
+      await opened(w);
+      expect(screen.queryByText(/Old emergency contact/)).toBeNull();
+      if (parent === "failed") {
+        expect(screen.queryByText(EMPTY)).toBeNull();
+        expect(failedState()).not.toBeNull();
+      } else {
+        expect(screen.getByText(EMPTY)).toBeInTheDocument();
+        expect(failedState()).toBeNull();
+      }
+    });
+});
+
 describe("new person", () => {
   test("one /commands batch, person first then the shown note, capturing person and field defaults; it opens the new person", async () => {
     const w = peopleWorld();

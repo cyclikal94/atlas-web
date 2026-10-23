@@ -5,6 +5,7 @@ import {
   useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
@@ -28,7 +29,7 @@ import {
 } from "../model/project";
 import { PendingBadge, useOutboxSave } from "../parts";
 import { OutstandingChain, ResourceScan } from "../reads";
-import { archivedLedgerKinds } from "./ledger";
+import { archivedLedgerKinds, type LedgerReport } from "./ledger";
 
 /** "Kind | Name | Restore" (inline: a one-off column template would add a rule to the shared production stylesheet). */
 const ARCHIVED_COLUMNS = { gridTemplateColumns: "96px minmax(0, 1fr) auto" };
@@ -67,20 +68,53 @@ export function ArchivedItems() {
   );
 }
 
+/**
+ * The ledger: every registered kind's rows, and what their REPORTS say together (review 4, finding 5). "Nothing archived" only when every
+ * kind of THIS reading reported `complete` with nothing shown; a kind that failed says so, with "Try again", which mounts every kind afresh
+ * (new reads, not a cleared message); a report of an earlier reading is ignored.
+ */
 function Ledger({ headingId }: { headingId: string }) {
   const kinds = archivedLedgerKinds.list();
-  const [counts, setCounts] = useState<Record<string, number>>({});
-  const reporters = kinds.map((kind) => kind.id).join(",");
-  // biome-ignore lint/correctness/useExhaustiveDependencies: one reporter per registered kind
-  const reportFor = useCallback(
-    (id: string) => (count: number) =>
-      setCounts((previous) =>
-        previous[id] === count ? previous : { ...previous, [id]: count },
-      ),
-    [reporters],
+  const [reading, setReading] = useState(0);
+  const current = useRef(reading);
+  current.current = reading;
+  const [reports, setReports] = useState<Record<string, LedgerReport>>({});
+  // One STABLE reporter per kind and reading (a kind reports again whenever its reporter changes, and withdraws the old one).
+  const reporters = useRef(
+    new Map<string, (report: LedgerReport | null) => void>(),
   );
-  const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
-  const reported = kinds.every((kind) => counts[kind.id] !== undefined);
+  const reportFor = (id: string, of: number) => {
+    const name = `${id}:${of}`;
+    let reporter = reporters.current.get(name);
+    if (reporter === undefined) {
+      reporter = (report) => {
+        if (of !== current.current) return;
+        setReports((previous) => {
+          const known = previous[id];
+          if (report === null) {
+            if (known === undefined) return previous;
+            const { [id]: _gone, ...rest } = previous;
+            return rest;
+          }
+          return known?.count === report.count && known.state === report.state
+            ? previous
+            : { ...previous, [id]: report };
+        });
+      };
+      reporters.current.set(name, reporter);
+    }
+    return reporter;
+  };
+  const total = Object.values(reports).reduce(
+    (sum, report) => sum + report.count,
+    0,
+  );
+  const failed = Object.values(reports).some(
+    (report) => report.state === "failed",
+  );
+  const complete = kinds.every(
+    (kind) => reports[kind.id]?.state === "complete",
+  );
   return (
     <section aria-labelledby={headingId} className="flex flex-col gap-2">
       <h2 id={headingId} className="sr-only">
@@ -97,10 +131,30 @@ function Ledger({ headingId }: { headingId: string }) {
       </div>
       <List className="flex flex-col gap-1">
         {kinds.map((kind) => (
-          <kind.Rows key={kind.id} report={reportFor(kind.id)} />
+          <kind.Rows
+            key={`${kind.id}:${reading}`}
+            report={reportFor(kind.id, reading)}
+          />
         ))}
       </List>
-      {reported && total === 0 ? (
+      {failed ? (
+        <div
+          data-archived-state="failed"
+          className="flex flex-col items-start gap-2"
+        >
+          <p className="text-[13px] leading-[1.6] text-ink-2">
+            {copy.ARCHIVED_FAILED}
+          </p>
+          <Button
+            onClick={() => {
+              setReports({});
+              setReading((n) => n + 1);
+            }}
+          >
+            {copy.TRY_AGAIN}
+          </Button>
+        </div>
+      ) : complete && total === 0 ? (
         <p
           data-archived-state="empty"
           className="text-[13px] leading-[1.6] text-ink-2"
@@ -168,13 +222,16 @@ function LedgerRow({
 }
 
 /** Archived rows of one kind, one bounded step at a time, with "Next items" / "Previous items" (Q9, finding 7): every one reachable. */
+/** What one step knows: `complete` only when its rows AND the drafts folded over them were read whole. */
+type StepState = LedgerReport["state"];
+
 function ArchivedSteps({
   kind,
   children,
 }: {
   kind: "person" | "field";
   /** `more`: there is a step to move to (a kind with one is never "empty"). */
-  children(rows: ShownRow[], settled: boolean, more: boolean): ReactNode;
+  children(rows: ShownRow[], state: StepState, more: boolean): ReactNode;
 }) {
   const [starts, setStarts] = useState<(string | null)[]>([null]);
   const start = starts.at(-1) ?? null;
@@ -184,6 +241,14 @@ function ArchivedSteps({
         <ArchivedStep
           kind={kind}
           changes={changesOfAll(outstanding.rows)}
+          drafts={
+            outstanding.status === "failed" ||
+            (outstanding.status === "ready" && !outstanding.complete)
+              ? "failed"
+              : outstanding.complete
+                ? "complete"
+                : "loading"
+          }
           start={start}
           onPrevious={
             starts.length > 1 ? () => setStarts(starts.slice(0, -1)) : null
@@ -200,6 +265,7 @@ function ArchivedSteps({
 function ArchivedStep({
   kind,
   changes,
+  drafts,
   start,
   onPrevious,
   onNext,
@@ -207,11 +273,13 @@ function ArchivedStep({
 }: {
   kind: "person" | "field";
   changes: Change[];
+  /** The outstanding drafts folded over the rows: read whole, still loading, or failed (or past their bound). */
+  drafts: StepState;
   start: string | null;
   onPrevious: (() => void) | null;
   onNext(next: string): void;
   /** `more`: there is a step to move to (a kind with one is never "empty"). */
-  children(rows: ShownRow[], settled: boolean, more: boolean): ReactNode;
+  children(rows: ShownRow[], state: StepState, more: boolean): ReactNode;
 }) {
   const byId = useMemo(() => changesById(changes), [changes]);
   const keep = useCallback(
@@ -229,13 +297,16 @@ function ArchivedStep({
       {(step) => {
         const rows = step.rows.map((row) => foldOne(row, byId));
         const next = step.settled ? step.next : null;
+        // A failed read is never a settled inventory (review 4, finding 5): its rows so far are shown, and the step says it failed.
+        const state: StepState =
+          step.status === "failed" || drafts === "failed"
+            ? "failed"
+            : step.settled && drafts === "complete"
+              ? "complete"
+              : "loading";
         return (
           <>
-            {children(
-              rows,
-              step.settled || step.status === "failed",
-              onPrevious !== null || next !== null,
-            )}
+            {children(rows, state, onPrevious !== null || next !== null)}
             {onPrevious !== null || next !== null ? (
               <li
                 className="flex list-none flex-wrap gap-2"
@@ -258,12 +329,17 @@ function ArchivedStep({
   );
 }
 
-function ArchivedPeople({ report }: { report(count: number): void }) {
+function ArchivedPeople({
+  report,
+}: {
+  report(report: LedgerReport | null): void;
+}) {
   return (
     <ArchivedSteps kind="person">
-      {(rows, settled, more) => (
+      {(rows, state, more) => (
         <Reported
-          count={settled ? rows.length + (more ? 1 : 0) : null}
+          count={rows.length + (more ? 1 : 0)}
+          state={state}
           report={report}
         >
           {rows.map((row) => (
@@ -280,10 +356,17 @@ function ArchivedPeople({ report }: { report(count: number): void }) {
   );
 }
 
-function ArchivedFields({ report }: { report(count: number): void }) {
-  const [visible, setVisible] = useState<Record<string, boolean>>({});
+/** Whether a field's person is on this device and visible: `failed` when that could not be read (never "not visible"). */
+type ParentState = "shown" | "hidden" | "failed";
+
+function ArchivedFields({
+  report,
+}: {
+  report(report: LedgerReport | null): void;
+}) {
+  const [visible, setVisible] = useState<Record<string, ParentState>>({});
   const onVisible = useCallback(
-    (id: string, shown: boolean) =>
+    (id: string, shown: ParentState) =>
       setVisible((previous) =>
         previous[id] === shown ? previous : { ...previous, [id]: shown },
       ),
@@ -291,13 +374,28 @@ function ArchivedFields({ report }: { report(count: number): void }) {
   );
   return (
     <ArchivedSteps kind="field">
-      {(rows, settled, more) => {
+      {(rows, state, more) => {
+        const parents = rows.map((row) => visible[row.row.id]);
         const count =
-          !settled || rows.some((row) => visible[row.row.id] === undefined)
-            ? null
-            : rows.filter((row) => visible[row.row.id]).length + (more ? 1 : 0);
+          parents.filter((parent) => parent === "shown").length +
+          (more ? 1 : 0);
+        const known: StepState = parents.includes("failed")
+          ? "failed"
+          : parents.includes(undefined)
+            ? "loading"
+            : "complete";
         return (
-          <Reported count={count} report={report}>
+          <Reported
+            count={count}
+            state={
+              state === "failed" || known === "failed"
+                ? "failed"
+                : state === "complete" && known === "complete"
+                  ? "complete"
+                  : "loading"
+            }
+            report={report}
+          >
             {rows.map((row) => (
               <FieldLedgerRow
                 key={row.row.id}
@@ -318,7 +416,7 @@ function FieldLedgerRow({
   onVisible,
 }: {
   shown: ShownRow;
-  onVisible(id: string, shown: boolean): void;
+  onVisible(id: string, shown: ParentState): void;
 }) {
   const parentId = shown.row.parent_id ?? "";
   const parent = useCachedResource(parentId);
@@ -326,10 +424,18 @@ function FieldLedgerRow({
     parent.status === "ready" && parent.value.merged?.kind === "person"
       ? parent.value.merged
       : null;
-  const settled = parent.status !== "loading";
+  // A person that could not be read hides the field's details all the same, but the inventory is then not complete.
+  const state: ParentState | null =
+    parent.status === "loading"
+      ? null
+      : parent.status === "unavailable"
+        ? "failed"
+        : person !== null
+          ? "shown"
+          : "hidden";
   useEffect(() => {
-    if (settled) onVisible(shown.row.id, person !== null);
-  }, [settled, person, shown.row.id, onVisible]);
+    if (state !== null) onVisible(shown.row.id, state);
+  }, [state, shown.row.id, onVisible]);
   if (person === null) return null;
   return (
     <LedgerRow
@@ -340,18 +446,22 @@ function FieldLedgerRow({
   );
 }
 
+/** Reports a kind's state on every change, and withdraws it when the kind unmounts (no earlier count outlives its reading). */
 function Reported({
   count,
+  state,
   report,
   children,
 }: {
-  count: number | null;
-  report(count: number): void;
+  count: number;
+  state: StepState;
+  report(report: LedgerReport | null): void;
   children: ReactNode;
 }) {
   useEffect(() => {
-    if (count !== null) report(count);
-  }, [count, report]);
+    report({ count, state });
+  }, [count, state, report]);
+  useEffect(() => () => report(null), [report]);
   return <>{children}</>;
 }
 

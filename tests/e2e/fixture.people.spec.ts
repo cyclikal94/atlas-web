@@ -1680,8 +1680,12 @@ test.describe("E-P24: held changes past a thousand ended copies stay reachable i
       await navigateInApp(page, "/people");
       await navigateInApp(page, `/people/${P}`);
       const held = page.locator(`[data-held-field="${F}"]`);
+      // Adapted (review 4): the seeded copy is of the v 2 shape, which is now LEGACY (shown and discardable, never sent): its row says so
+      // instead of "Waiting to change who can see Note". What this case proves (it is reachable past the ended copies) is unchanged.
+      const LEGACY =
+        "A held change to who can see Note from an earlier version of Atlas is kept on this device.";
       if (ended < 1000) {
-        await expect(held).toContainText("Waiting to change who can see Note");
+        await expect(held).toContainText(LEGACY);
       } else {
         await expect(page.locator("[data-held-page]")).toContainText(
           "More held changes may be kept on this device.",
@@ -1690,7 +1694,7 @@ test.describe("E-P24: held changes past a thousand ended copies stay reachable i
         await page
           .getByRole("button", { name: "Show more held changes" })
           .click();
-        await expect(held).toContainText("Waiting to change who can see Note");
+        await expect(held).toContainText(LEGACY);
       }
       // The ended copies are kept (they order late writes).
       const stored = (await page.evaluate(
@@ -1796,11 +1800,13 @@ test.describe("E-P25: leaving the page never discards a held change (review 3, f
         return;
       }
       expect(after).toHaveLength(1);
+      // Adapted (review 4, finding 1): `queued: false` (no content admission) is not part of the v 4 copy any more; its content is handed
+      // off in one commit with its draft, so a copy that is still live was not handed off (and no draft exists, asserted above).
       expect(after[0]).toMatchObject({
+        v: 4,
         value: { kind: "text", text: "Retain this unsent input" },
         to: PRIVATE,
         retired: false,
-        queued: false,
       });
       // Offline again, back on the person: it is listed as it was held (with this page's authority it would run once online).
       await connectivity(context, page, false);
@@ -1871,7 +1877,9 @@ test.describe("E-P26: one current hold per field, under the field's lock (review
 });
 
 test.describe("E-P27: an unresolved policy attempt outlives its discarded content (review 3, C3c)", () => {
-  test("discarded after an uncertain replace_policy, the attempt is kept as a record that survives the page closing; 'Check now' reads once and ends it", async ({
+  // Adapted (review 4, finding 4): "Check now" no longer ends the record or says the attempt was made; it says what the audience IS now and
+  // keeps the record, and only "Discard" forgets it. Its intent (one owner-only read, nothing sent, the record survives the page) is kept.
+  test("discarded after an uncertain replace_policy, the attempt is kept as a record that survives the page closing; 'Check now' reads once and keeps it (adapted, review 4)", async ({
     context,
   }, info) => {
     const { page, served } = await heldSetup(context);
@@ -1921,12 +1929,239 @@ test.describe("E-P27: an unresolved policy attempt outlives its discarded conten
       served.log.slice(since).filter((line) => line === `GET /policies/${F}`),
     ).toEqual([]);
     await record.getByRole("button", { name: "Check now" }).click();
-    await expect(reopened.locator("body")).toContainText(
-      "Checked: who can see Note was changed.",
+    await expect(record).toContainText(
+      "Checked: who can see Note is now what this asked for. Whether this change made it can't be told from here.",
     );
-    await expect(record).toHaveCount(0);
+    await expect(record).toHaveCount(1);
+    expect(
+      served.log.slice(since).filter((line) => line === `GET /policies/${F}`),
+    ).toHaveLength(1);
     expect(served.management).toHaveLength(1);
+    expect(await liveHolds(reopened)).toMatchObject([
+      { retired: true, attempt: { key: served.management[0]?.key } },
+    ]);
+    // Only the person's Discard forgets it.
+    await record.getByRole("button", { name: "Discard" }).click();
+    await expect(record).toHaveCount(0);
     expect(await liveHolds(reopened)).toEqual([]);
+    expect(served.management).toHaveLength(1);
     recordEvidence(info, "e-p27", { log: served.log });
   });
+});
+
+/** The tombstone an ended hold keeps in real IndexedDB (its `held_end`), by hold id. */
+const endedHolds = async (page: Page) =>
+  (
+    (await page.evaluate(
+      (account) => window.__atlasData?.rows(account, "form_recovery"),
+      ME,
+    )) as Array<{
+      terminal: boolean;
+      tab_instance_id: string;
+      fields: { held_end?: string };
+    }>
+  )
+    .filter((row) => row.terminal && row.fields.held_end !== undefined)
+    .map((row) => ({
+      holdId: row.tab_instance_id,
+      ...(JSON.parse(row.fields.held_end ?? "{}") as {
+        seq?: number | null;
+        cause?: string | null;
+        localId?: string | null;
+      }),
+    }));
+
+/** The next real IndexedDB transaction that writes `match`'s row into `form_recovery` is ABORTED (once): nothing it wrote is kept. */
+const abortNextFormWrite = (page: Page, match: "transferred" | "replaced") =>
+  page.evaluate((cause) => {
+    const put = IDBObjectStore.prototype.put;
+    const w = window as unknown as { __aborted?: number };
+    w.__aborted = 0;
+    IDBObjectStore.prototype.put = function (
+      this: IDBObjectStore,
+      value: { terminal?: boolean; fields?: { held_end?: string } },
+      ...rest: unknown[]
+    ) {
+      if (
+        this.name === "form_recovery" &&
+        value?.terminal === true &&
+        String(value.fields?.held_end ?? "").includes(`"cause":"${cause}"`)
+      ) {
+        IDBObjectStore.prototype.put = put;
+        w.__aborted = 1;
+        this.transaction.abort();
+        throw new DOMException("injected: aborted", "AbortError");
+      }
+      return (put as (...a: unknown[]) => IDBRequest).call(
+        this,
+        value,
+        ...rest,
+      );
+    } as typeof put;
+  }, match);
+
+test.describe("E-P28: a held change's content is handed off in ONE transaction, never again after Sync's decision (review 4, finding 1)", () => {
+  for (const discard of [true, false])
+    test(`${discard ? "the draft discarded in Sync is never recreated: the person's page shows no hold to send again" : "control: the draft kept stays single"}`, async ({
+      context,
+    }, info) => {
+      const { page, served } = await heldSetup(context);
+      const dialog = page.getByRole("dialog", { name: "Edit Note" });
+      await expect(
+        dialog.getByRole("radio", { name: "Home · can view" }),
+      ).toBeChecked();
+      await connectivity(context, page, false);
+      await holdOffline(page, "Handed off once");
+      await expect(dialog).toBeHidden();
+      const row = page.locator(`[data-held-field="${F}"]`);
+      served.policyScript.push(
+        () => ({ status: 200, body: { version: 6, policy: HOME_VIEW } }),
+        () => ({ status: 200, body: { version: 7, policy: PRIVATE } }),
+      );
+      await connectivity(context, page, true);
+      await expect(row).toHaveCount(0);
+      await fieldSettled(page);
+      const drafts = await draftsOf(page);
+      expect(drafts.map((d) => d.local_id)).toHaveLength(1);
+      const localId = drafts[0]?.local_id as string;
+      // The copy ended in the same commit, and keeps for ever that it was handed off under that local id.
+      expect(await endedHolds(page)).toMatchObject([
+        { holdId: localId, cause: "transferred", localId },
+      ]);
+      expect(await liveHolds(page)).toEqual([]);
+      if (discard) {
+        await startOutbox(page, ME, { start: false });
+        expect(
+          await page.evaluate(
+            (id) => window.__atlasData?.discardDraft(id),
+            localId,
+          ),
+        ).toMatchObject({ kind: "discarded" });
+        expect(await draftsOf(page)).toEqual([]);
+      }
+      // The person's page again (the same identity): nothing is offered to send again, and nothing is queued again.
+      await navigateInApp(page, "/people");
+      await navigateInApp(page, `/people/${P}`);
+      await expect(page.getByRole("heading", { name: "Ada" })).toBeVisible();
+      await fieldSettled(page);
+      await expect(row).toHaveCount(0);
+      const after = await draftsOf(page);
+      recordEvidence(info, "e-p28", { discard, drafts, after });
+      expect(after).toHaveLength(discard ? 0 : 1);
+      expect(served.management).toHaveLength(1);
+      expect(await endedHolds(page)).toHaveLength(1);
+    });
+
+  test("a hand-off whose transaction is aborted keeps the hold and queues nothing; Try again then hands it off once", async ({
+    context,
+  }, info) => {
+    const { page, served } = await heldSetup(context);
+    const dialog = page.getByRole("dialog", { name: "Edit Note" });
+    await expect(
+      dialog.getByRole("radio", { name: "Home · can view" }),
+    ).toBeChecked();
+    await connectivity(context, page, false);
+    await holdOffline(page, "Kept through an abort");
+    await expect(dialog).toBeHidden();
+    const row = page.locator(`[data-held-field="${F}"]`);
+    await abortNextFormWrite(page, "transferred");
+    served.policyScript.push(
+      () => ({ status: 200, body: { version: 6, policy: HOME_VIEW } }),
+      () => ({ status: 200, body: { version: 7, policy: PRIVATE } }),
+    );
+    await connectivity(context, page, true);
+    await expect(row).toContainText("Couldn't save on this device. Try again.");
+    await fieldSettled(page);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __aborted?: number }).__aborted,
+      ),
+    ).toBe(1);
+    expect(await draftsOf(page)).toEqual([]);
+    expect(await liveHolds(page)).toMatchObject([
+      { value: { kind: "text", text: "Kept through an abort" } },
+    ]);
+    await row.getByRole("button", { name: "Try again" }).click();
+    await expect(row).toHaveCount(0);
+    await fieldSettled(page);
+    const drafts = await draftsOf(page);
+    recordEvidence(info, "e-p28-abort", { drafts, log: served.log });
+    expect(drafts).toHaveLength(1);
+    expect(await endedHolds(page)).toMatchObject([{ cause: "transferred" }]);
+    expect(served.management).toHaveLength(1);
+  });
+});
+
+test.describe("E-P29: the field's head never goes back (review 4, finding 2)", () => {
+  for (const discardWinner of [true, false])
+    test(`an earlier hold whose retirement was aborted ${discardWinner ? "never runs after the newer hold is discarded" : "never runs while the newer hold is kept (control)"}`, async ({
+      context,
+    }, info) => {
+      const { page, served } = await heldSetup(context);
+      const dialog = page.getByRole("dialog", { name: "Edit Note" });
+      await expect(
+        dialog.getByRole("radio", { name: "Home · can view" }),
+      ).toBeChecked();
+      await connectivity(context, page, false);
+      await holdOffline(page, "First");
+      await expect(dialog).toBeHidden();
+      // The replacement's cleanup of the first hold is aborted: the first stays live (generation 1), the second is current (2).
+      await abortNextFormWrite(page, "replaced");
+      await navigateInApp(page, `/people/${P}/fields/${F}`);
+      await expect(dialog).toBeVisible();
+      await holdOffline(page, "Second");
+      await expect(dialog).toBeHidden();
+      await fieldSettled(page);
+      expect(
+        (await liveHolds(page)).map((h) => [h.value, h.seq]).sort(),
+      ).toEqual(
+        [
+          [{ kind: "text", text: "First" }, 1],
+          [{ kind: "text", text: "Second" }, 2],
+        ].sort(),
+      );
+      const second = page.locator(`[data-held-field="${F}"]`, {
+        hasText: "Second",
+      });
+      if (discardWinner) {
+        const rows = page.locator(`[data-held-field="${F}"]`);
+        await expect(rows).toHaveCount(2);
+        // The newer hold is discarded (the person's choice, before going online).
+        const ids = await liveHolds(page);
+        expect(ids).toHaveLength(2);
+        await rows.nth(1).getByRole("button", { name: "Discard" }).click();
+        await expect(rows).toHaveCount(1);
+      }
+      served.policyScript.push(
+        () => ({ status: 200, body: { version: 6, policy: HOME_VIEW } }),
+        () => ({ status: 200, body: { version: 7, policy: PRIVATE } }),
+      );
+      await connectivity(context, page, true);
+      await expect
+        .poll(async () => (await liveHolds(page)).length, { timeout: 10_000 })
+        .toBe(0);
+      await fieldSettled(page);
+      const drafts = await draftsOf(page);
+      recordEvidence(info, "e-p29", {
+        discardWinner,
+        drafts,
+        management: served.management,
+        ended: await endedHolds(page),
+      });
+      // The first hold never ran: if anything was sent, it was the second's (only while it was kept), and no draft is the first's.
+      const ended = await endedHolds(page);
+      const first = ended.find((h) => h.seq === 1);
+      expect(first?.cause).toBe("replaced");
+      if (discardWinner) {
+        expect(served.management).toEqual([]);
+        expect(drafts).toEqual([]);
+      } else {
+        expect(served.management).toHaveLength(1);
+        expect(drafts).toHaveLength(1);
+        expect(drafts[0]?.local_id).toBe(
+          ended.find((h) => h.seq === 2)?.holdId,
+        );
+        await expect(second).toHaveCount(0);
+      }
+    });
 });

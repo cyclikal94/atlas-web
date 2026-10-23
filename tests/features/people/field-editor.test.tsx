@@ -459,6 +459,7 @@ describe("updating a field", () => {
       queued: false,
       seq: 0,
       retired: false,
+      legacy: false,
     });
     // Held in this page (D1: it may run by itself).
     peopleMemory(w.people.identity).heldAuthority.add("hold-1");

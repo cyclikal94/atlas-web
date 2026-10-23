@@ -96,6 +96,23 @@ function failure<T>(
   }
 }
 
+/**
+ * The commands of a quick change of `resourceId`'s policy to `to`, guarded by `version`: what an attempt's body is the canonical JSON of
+ * (a caller that looks for an uncertain attempt of exactly this change compares bodies, never just keys). PURE.
+ */
+export const policyChangeCommands = (
+  resourceId: string,
+  version: number,
+  to: Policy,
+) => [
+  {
+    kind: "replace_policy" as const,
+    id: resourceId,
+    expected_version: version,
+    policy: toWirePolicy(to),
+  },
+];
+
 export async function applyPolicyChange(
   env: { api: SharingApi; newId(): string },
   input: PolicyChangeInput,
@@ -121,14 +138,11 @@ export async function applyPolicyChange(
       };
     return { result: { ok: false, kind: "changed" }, attempt: input.attempt };
   }
-  const commands = [
-    {
-      kind: "replace_policy" as const,
-      id: input.resourceId,
-      expected_version: read.value.version,
-      policy: toWirePolicy(input.to),
-    },
-  ];
+  const commands = policyChangeCommands(
+    input.resourceId,
+    read.value.version,
+    input.to,
+  );
   const attempt = nextAttempt(input.attempt, commands, env.newId);
   if (
     (input.admit !== undefined && !(await input.admit(attempt))) ||

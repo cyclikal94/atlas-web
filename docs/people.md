@@ -33,9 +33,9 @@ usePersonLinkage(personId): { linkage, retry() }       // from GET /people/{id} 
 personPath(id), duplicatesPath(id)                     // deep links
 parseFieldValue, valueProblem, labelProblem, formatValue, formatDate, type FieldValue, type FieldKind
 PeopleBoundary, PeopleEnvProvider, type PeopleEnv      // the people env (over the sharing env); a test or fixture may provide its own
-archivedLedgerKinds.register({ id, order, Rows })      // add a kind to Settings → "Archived items"
+archivedLedgerKinds.register({ id, order, Rows })      // add a kind to Settings → "Archived items"; Rows reports a LedgerReport (or null)
 registerPeopleCommands(registry)                       // the queue registrations; called once by the protected tree
-type LinkageState, type PersonDetailSlots, type ArchivedLedgerKind
+type LinkageState, type PersonDetailSlots, type ArchivedLedgerKind, type LedgerReport
 ```
 
 The screens are one lazy chunk (`screens.tsx`, Settings → "Archived items" included): `route.tsx` and `archived/section.tsx` import only
@@ -95,7 +95,13 @@ reopens it with its draft), and `/settings/archived`.
 - **D-11a-9** "Not the same" is page memory: nothing is stored or sent.
 - **D-11a-10** Archive and restore are queued `archive` commands with no confirmation. A person's archive does not archive its fields.
 - **D-11a-11** Settings → "Archived items" (order 72, owner WEB-11): "Kind | Name" and Restore, no date (the projection has none). A field is
-  listed only under a person this device holds.
+  listed only under a person this device holds. Each kind REPORTS an inventory state, not a number (review 4, finding 5: `LedgerReport`
+  `{ count, state: "loading" | "failed" | "complete" }`, re-reported on every change and withdrawn with `null` when it unmounts):
+  `complete` only when its rows, the outstanding drafts folded over them and every person a field's visibility depends on were read
+  whole. "Nothing archived" is said only when every kind of the current reading is `complete` with nothing shown; any `failed` kind says
+  "Couldn't read every archived item on this device. Anything that could be read is listed." with "Try again", which mounts every kind
+  afresh (a failed live read has ended; clearing the message alone would read nothing). A person that could not be read still hides its
+  field (never disclosed) and makes the inventory incomplete.
 - **D-11a-12** "Hold it as a draft until I'm online" is DURABLE for its account (revision 1, finding 6; Kieran's decision of 13 October 2026:
   durable, in WEB-11a). A held change is a form copy of the account's own database (`field/held-store.ts`: `form_context`
   `people-held:<person>:<field>`, `tab_instance_id` the hold's id), written through WEB-09a's `FormRecoveryPort` and listed live by
@@ -114,7 +120,8 @@ reopens it with its draft), and `/settings/archived`.
   typed (`saved`/`ended`, `changed`, `refused`, `failed`). The rows hold the highest writer generation, so the ordinary form port cannot
   claim or revive them. A run holds the FIELD's lock (`atlas-people-held:<account>:<field>`) until its last write, reads the hold again under
   it and runs only the state shown; the exact policy attempt is written BEFORE it may be sent (`applyPolicyChange`'s `admit`), the confirmed
-  audience after it, and the content step is recorded as admitted (`queued`) before it is queued. A discard is said only when the end
+  audience after it, and (until review 4, D-11a-12c) the content step was recorded as admitted (`queued`) before it was queued. A discard
+  is said only when the end
   committed; a failed or refused end keeps the row visible with its reason. An end from another page before an admission makes the run's
   next write fail (`changed`, nothing more sent); after one, that page says what may already have happened (audience may have changed,
   edit may be queued). A new hold of a field ends the earlier ones from their stored states under the field's lock (a bounded, resumable
@@ -137,14 +144,45 @@ reopens it with its draft), and `/settings/archived`.
     run that finds the later one, never run; the current hold's run retires such leftovers first. Copies this page cannot read are kept
     (shown, discardable, never run; explicit Discard ends the copy as it is, by its digest).
   - **An unresolved attempt outlives its content.** A hold whose policy step may have been made is never ended by a discard or a
-    replacement: it is RETIRED (`settleHold`), a reconciliation record that keeps the attempt, the audience asked for and its guard
-    version, with the content cleared, counted as unsynced local work like any form copy. It is shown as "An earlier change to who can see
-    {name} may already have been made. Check it to be sure." with "Check now" (one owner-only `GET /policies/{id}` under the field's lock;
-    nothing is sent; "Checked: who can see {name} was changed." when the policy now is the one asked for at a later version, else
-    "Checked: who can see {name} wasn't changed by it."; the record then ends) and "Discard" (forgets it). A new hold of EXACTLY the same
+    replacement: it is RETIRED (`discardHold`, `retireForReplacement`), a reconciliation record that keeps the attempt, the audience asked
+    for and its guard version, with the content cleared, counted as unsynced local work like any form copy. It is shown as "An earlier
+    change to who can see {name} may already have been made. Check it to be sure." with "Check now" and "Discard" (forgets THAT record
+    only, `forgetRecord`). "Check now" is observational since review 4 (D-11a-12c). A new hold of EXACTLY the same
     change (same policy version, same audience asked for) takes the attempt over (same key and body) and the earlier hold then ends; a
     direct change of the same audience in the editor sends the kept attempt's key and body too. A retry of an identical attempt is sent only
     while the hold is still stored as the run read it (a discard elsewhere wins, as it does against a write). No background policy change.
+- **D-11a-12c** (review 4 of 23 October 2026, findings 1–4; the third design assessment's C7–C10) What may run, and what already
+  happened, are durable facts, never inferred from which copies are still live (`field/held-store.ts`, `field/held.ts`):
+  - **The field's head.** Each field has a HEAD: a terminal form row `[people-held:<person>:<field>, "~head"]` (never listed, restored or
+    counted as unsynced work) holding the field's generation and its CURRENT hold. "Hold as draft" writes the new hold AND the head naming
+    it in ONE transaction (`HeldStore.create` through the conditional port's `apply`, `data.saveFormOperation`), only while the head is as
+    read, under the field's lock. The head never goes back: ending, retiring or handing off the current hold leaves it in place, so an
+    earlier hold (one whose cleanup failed) can never run again. A run runs only the head's current hold; any other live hold of the field
+    is retired as its predecessor (housekeeping, never authority: a field whose holds cannot all be listed is cleaned up by a later run).
+  - **One transaction to the outbox.** The content is HANDED OFF: the draft (the hold's id as its local id, the confirmed policy version)
+    and the end of the hold's copy are ONE transaction (`outbox.enqueue(request, handOff)` → `data.transferDraft`, a W2 writer with the
+    form copy's CLS guard), only while the copy and the head are as read. There is no content admission (`queued`) any more. The ended copy
+    keeps a TOMBSTONE (`held_end`: generation, cause `transferred`, local id), so a lost answer is read back from the copy and a retry never
+    queues it again, whatever Sync did with the draft since (edited, discarded, superseded, sent). A draft that already has the id is never
+    adopted. Every ended hold keeps its cause (`discarded`, `replaced`, `forgotten`, `transferred`).
+  - **Three transitions, not one end.** `discardHold` (the person's Discard of a hold: retires it when its attempt is unresolved, else
+    ends it), `retireForReplacement` (automatic cleanup: a reconciliation record is KEPT unless the successor carries its exact attempt)
+    and `forgetRecord` (the person's Discard of one record: only that record ends). Unresolved attempts are kept by their records only (no
+    copy into the page's memory slot of the field, where one could replace another).
+  - **"Check now" observes.** One owner-only read of the policy, noted with its time. It says only what the audience IS now ("…hasn't
+    changed since this was asked for, so it may still be made…", "…is now what this asked for. Whether this change made it can't be told
+    from here.", "…has changed since to something else, so this can't be made any more."), sends nothing and ENDS NOTHING: an unchanged
+    version may still be changed by the attempt, a matching policy may be someone else's change, a different one may have followed it.
+  - **Lookups are found, none or unknown.** `heldAttemptOf` matches the canonical body of exactly this change; a failed or bounded read,
+    a copy this page cannot read, or two different attempts are `unknown`, and the direct editor then sends nothing ("Couldn't check this
+    device for an earlier try of this change. Try again."). The page's own attempt counts only for exactly the same body.
+  - **One binding per operation.** A run, a "Hold as draft" and a Check take ONE binding of the store (`HeldStore.pinned`, over the
+    conditional port's `pinned`): once another account or database is displayed every later call fails; nothing reaches the new one.
+  - **Legacy copies.** Copies of the earlier shapes (v 1–3: before heads and tombstones) cannot say whether they were already queued and
+    discarded in Sync or replaced by a hold that has since ended. They are shown ("A held change to who can see {name} from an earlier
+    version of Atlas is kept on this device. It can't be sent from here: discard it, or make the change again."), never run, never written
+    again (except retired by Discard, keeping an unresolved attempt) and never retired automatically. No action recreates their content.
+  - A row waiting while another row of the page runs looks again when that run ends (before, a second authorised hold never started).
 - **D-11a-13a** (review 3 of 22 October 2026, finding 3; C6) The page's own policy read names a field's audience only while no later
   policy version of the field is known (the cached row's `policy_version` or a version a summary applied), a late older read never
   replaces a later one (`notePolicy`), closing the shared policy editor withdraws it (it may have changed the policy), and it is said with
@@ -225,8 +263,9 @@ archive is folded over its row. A projected row is never a base for a version-ch
 - The page memory (linkage answers, policies read, editor drafts) is per identity and dropped for any other identity; the held audience
   changes are not in it (they are durable, D-11a-12). An open, unsaved editor's typed text is page memory: it survives a remount, not an
   account switch or a reload (WEB-14a's Q4 recovery covers the update reload).
-- A held change discarded in one page after another page's run recorded its content admission may still be queued there; the discarding
-  page says so ("may already be queued. Check Sync"), and that draft is an ordinary queued change, shown in Sync and discardable.
+- A held change whose content was handed off is no longer a hold: its draft is an ordinary queued change, shown in Sync and discardable,
+  and nothing on the person's page queues it again (D-11a-12c). A LEGACY copy (v 3) whose content admission was recorded may still have
+  been queued; its Discard says so ("may already be queued. Check Sync").
 - A new draft that FOLLOWS a still-queued save the edit began on (held for the defaults review, or after the audience was just changed) is
   allowed only while the outstanding read shows that save with the body the edit read; another page's edit of it in the one transaction's
   window before the new draft is written is not detected (an edit in place is judged inside its own transaction, `reviewedDraft`).

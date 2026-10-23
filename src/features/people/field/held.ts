@@ -1,6 +1,9 @@
 import type { CacheRow, EnqueueOutcome, Outbox, Policy } from "../../../data";
-import { samePolicy, untilSent } from "../../sharing";
-import { applyPolicyChange } from "../../sharing/apply-policy-change";
+import { canonicalBody, samePolicy, untilSent } from "../../sharing";
+import {
+  applyPolicyChange,
+  policyChangeCommands,
+} from "../../sharing/apply-policy-change";
 import type { PeopleEnv } from "../env";
 import { type HeldRun, isCurrentMemory, notePolicy } from "../memory";
 import type { Attempt } from "../model/attempt";
@@ -14,47 +17,47 @@ import {
   type HeldKey,
   type HeldStore,
   type HeldWrite,
+  handOffOf,
   heldOf,
 } from "./held-store";
 
 /**
  * Runs ONE held audience change (D-11a-12; WF-PEOPLE-03 "Hold it as a draft until I'm online"): the audience first, then the content.
  * The caller holds the field's lock (one run of the field's holds at a time, in every page of the browser) for the WHOLE run, including
- * its last durable write: nothing here lets go of it before the outcome is committed.
+ * its last durable write: nothing here lets go of it before the outcome is committed. Every store call of the run goes through ONE binding
+ * taken at its start (`HeldStore.pinned`, review 4 C10): once another account or database is displayed, nothing more is written.
  *
- * THE DURABLE STATE GOVERNS (review 2 of 22 October 2026, finding 2). The run begins by READING the hold again under the lock and runs
- * only if the stored state is exactly the one the page showed (`shown.digest`), and only if it is its field's CURRENT hold (no live hold
- * of the field has a later generation, review 3 finding 2: an earlier hold still kept is retired instead, never run). Every step is a
- * CONDITIONAL write of the next state (`HeldStore.update`, from the last state this run read or wrote), and the run stops on any answer
- * but `saved`, without claiming anything it did not commit:
+ * THE DURABLE STATE GOVERNS (review 2 of 22 October 2026, finding 2; review 4 of 23 October 2026, findings 1–3). The run begins by READING
+ * the hold again under the lock and runs only if the stored state is exactly the one the page showed (`shown.digest`) and the field's
+ * HEAD names it as the field's current hold (review 4 finding 2: the head never goes back, so an earlier hold never becomes current again
+ * when a later one ends; it is retired instead, never run). Every step is a CONDITIONAL write of the next state (`HeldStore.update`, from
+ * the last state this run read or wrote), and the run stops on any answer but `saved`, without claiming anything it did not commit:
  *
  *  1. The field must still be the one the edit began on (else `content_changed`, or `gone` when it is no longer on this device).
  *  2. The policy change, through the sharing slice (`applyPolicyChange`: read, version guard against the policy shown, one replace_policy,
  *     confirming read). Its EXACT attempt is written to the hold BEFORE it may be sent (`admit`), so an end of the hold after that point
  *     says the audience may already have changed. The confirmed audience (or the attempt still uncertain) is written after it.
- *  3. The field is checked again; the content step is recorded as ADMITTED (`queued`) before it is queued, with
- *     `expected_policy_version` = the CONFIRMED policy version (Q1), under the hold's id as its local id, and its base guarded inside the
- *     outbox transaction (`expectedBase`). A repeat after a lost completion is the same save, and a repeat after the save landed is refused
- *     by its own version guard.
- *  4. The hold is ended (a conditional terminal write) only after that: the content is the outbox's now (completion), so this end is
- *     written even when the row has gone from the page meanwhile.
+ *  3. The field is checked again, and the content is HANDED OFF to the outbox (review 4 finding 1; the assessment's C8): the draft
+ *     (`expected_policy_version` = the CONFIRMED policy version, Q1; the hold's id as its local id; its base guarded inside the outbox
+ *     transaction) and the end of the hold's copy (`transferred`) are ONE transaction, only while the copy and the field's head are as this
+ *     run read them. Nothing is queued unless the hold ends with it, and once it has ended nothing can queue it again: a lost answer is
+ *     read back from the copy's own tombstone, never retried, whatever Sync did with the draft since (edited, discarded, superseded, sent).
  *
  * STOPPING IS NOT DISCARDING (review 3 of 22 October 2026, finding 1). Two different things stop a run at its admission boundaries (after
  * the policy read, before the policy write, before the content step and inside its writing transaction):
  *
- *  - `run.cancelled`: the person discarded the hold in THIS page while it ran. The run ends it there (`settleHold`: a terminal write, or a
+ *  - `run.cancelled`: the person discarded the hold in THIS page while it ran. The run ends it there (`discardHold`: a terminal write, or a
  *    reconciliation record when its policy step may have been made) and says truthfully what was already done.
  *  - Losing the page: the row unmounted (navigation, another page of the held list) or another identity is displayed. The run only STOPS
  *    (`suspended`): nothing is ended, its input stays exactly as stored, an admitted attempt and its answer are written as progress (under
- *    the same identity only), and an admitted content step that queued nothing is withdrawn. It runs again where it may (D1: in the page
- *    whose authority it has, or after "Send now").
+ *    the same identity only). It runs again where it may (D1: in the page whose authority it has, or after "Send now").
  *
  * A discard in ANOTHER page is a conditional write from the state that page showed: before an admission it wins and this run's next
- * write is refused (`changed`, nothing more is sent); after one it is told what may already have happened. A policy step that was
- * confirmed cannot be taken back; the run says so.
+ * write (or its hand-off) is refused (`changed`, nothing more is sent or queued); after one it is told what may already have happened. A
+ * policy step that was confirmed cannot be taken back; the run says so.
  */
 export type HeldResult =
-  /** The content is queued. `ended`: the hold's copy ended; otherwise it stays, and a repeat is refused by its own guard. */
+  /** The content is queued and the hold's copy ended with it (one commit; `ended` is always true). */
   | { kind: "done"; ended: boolean }
   /** Not sent (offline, held back, closing): the hold is as it was. */
   | { kind: "waiting" }
@@ -70,7 +73,7 @@ export type HeldResult =
       policy: "none" | "maybe" | "done";
       ended: boolean;
       retired: boolean;
-      /** The policy attempt that may have been sent (kept by the page for a later change of the field's audience), or null. */
+      /** The policy attempt that may have been sent (kept durably by the reconciliation record), or null. */
       attempt: Attempt | null;
     }
   /**
@@ -79,11 +82,11 @@ export type HeldResult =
    */
   | { kind: "suspended" }
   /**
-   * A later hold of its field is the field's current one: this one did not run. `ended`/`retired` as for `cancelled` (it was retired as
-   * the later hold's predecessor), or neither when that write was not committed (it stays, and never runs).
+   * The field's head names another hold as its current one: this one did not run. `ended`/`retired` as for `cancelled` (it was retired as
+   * that hold's predecessor), or neither when that write was not committed (it stays, and never runs).
    */
   | { kind: "superseded"; ended: boolean; retired: boolean }
-  /** The stored hold is not the one the page showed (moved on elsewhere, or a reconciliation record): nothing was done. */
+  /** The stored hold is not the one the page showed (moved on elsewhere, a reconciliation record, a legacy copy): nothing was done. */
   | { kind: "stale" };
 
 export interface HeldDeps {
@@ -99,9 +102,10 @@ export interface HeldDeps {
 }
 
 /**
- * What a hold's stored state says was already done: its audience step was confirmed (`done`: a hold is made only for a change of audience,
- * so an audience that is now the one asked for was changed by it), may have been made (`maybe`: an attempt was admitted and has no definite
- * answer), or was never sent (`none`); `content`: its content step was admitted (its draft may be queued). PURE.
+ * What a hold's stored state says was already done: the field's audience is already the one asked for (`done`: established by this
+ * hold's run, which is what its content step needs; it says nothing about WHO changed it), its attempt may have been made (`maybe`: an
+ * attempt was admitted and has no definite answer), or none was sent (`none`); `content`: a LEGACY copy's content step was admitted (its
+ * draft may be queued). PURE.
  */
 export function progressOf(change: HeldChange): {
   policy: "none" | "maybe" | "done";
@@ -129,8 +133,14 @@ export const keyOf = (change: HeldChange): HeldKey => ({
   holdId: change.holdId,
 });
 
-/** Retiring one hold: `ended` (terminal), `retired` (kept as a reconciliation record), or why nothing was written. */
-export type HeldSettle = HeldEnd | { kind: "retired"; copy: HeldCopy };
+/**
+ * Settling one hold: `ended` (terminal), `retired` (kept as a reconciliation record), `kept` (a reconciliation record that automatic
+ * cleanup leaves as it is), or why nothing was written.
+ */
+export type HeldSettle =
+  | HeldEnd
+  | { kind: "retired"; copy: HeldCopy }
+  | { kind: "kept" };
 
 /** Whether the hold's content is gone after `answer` (ended or retired here, or already ended by another page). PURE. */
 export const isSettled = (answer: HeldSettle): boolean =>
@@ -138,30 +148,23 @@ export const isSettled = (answer: HeldSettle): boolean =>
   answer.kind === "retired" ||
   (answer.kind === "changed" && answer.stored !== "live");
 
-/**
- * Discards (or replaces) ONE hold from the state it was read in. It ENDS (a terminal write), unless its policy step may have been made
- * and nothing else keeps that attempt: then it is RETIRED (review 3, C3c): a reconciliation record that keeps the attempt, the audience
- * asked for and its guard, with the content cleared, never run. `successor`: the new hold that replaces it; when that hold carries the
- * same attempt (the same change: it took the attempt over), this one simply ends. A reconciliation record that is discarded ends.
- */
-export async function settleHold(
-  store: HeldStore,
-  copy: HeldCopy,
-  successor: HeldChange | null = null,
-): Promise<HeldSettle> {
-  const change = copy.change;
-  const attempt = change.attempt;
-  const unresolved =
-    !change.retired &&
+/** `copy`'s policy attempt may have been made and nothing else here keeps it: `carrier` is a hold that carries the same key and body. */
+const unresolvedIn = (copy: HeldCopy, carrier: HeldChange | null): boolean => {
+  const attempt = copy.change.attempt;
+  return (
     attempt !== null &&
-    progressOf(change).policy === "maybe" &&
+    progressOf(copy.change).policy === "maybe" &&
     !(
-      successor?.attempt?.key === attempt.key &&
-      successor.attempt.body === attempt.body
-    );
-  if (!unresolved) return store.end(keyOf(change), copy.digest);
+      carrier?.attempt?.key === attempt.key &&
+      carrier.attempt.body === attempt.body
+    )
+  );
+};
+
+/** Retires `copy` (content cleared, attempt, audience asked for and guard kept), from the state it was read in. */
+async function retire(store: HeldStore, copy: HeldCopy): Promise<HeldSettle> {
   const written = await store.update(copy, {
-    ...change,
+    ...copy.change,
     retired: true,
     value: { kind: "text", text: "" },
     status: { kind: "waiting" },
@@ -169,6 +172,45 @@ export async function settleHold(
   return written.kind === "saved"
     ? { kind: "retired", copy: written.copy }
     : written;
+}
+
+/**
+ * The person DISCARDED a hold's content (review 3, C3c; review 4 finding 3: three different transitions, never one generic end). It ENDS
+ * (`discarded`), unless its policy step may have been made: then it is RETIRED, a reconciliation record that keeps the attempt, the
+ * audience asked for and its guard, with the content cleared, never run.
+ */
+export function discardHold(
+  store: HeldStore,
+  copy: HeldCopy,
+): Promise<HeldSettle> {
+  return unresolvedIn(copy, null)
+    ? retire(store, copy)
+    : store.end(keyOf(copy.change), copy.digest, "discarded", copy.change.seq);
+}
+
+/** The person chose "Discard" on ONE reconciliation record: only that record ends (`forgotten`); nothing else is touched. */
+export const forgetRecord = (
+  store: HeldStore,
+  copy: HeldCopy,
+): Promise<HeldEnd> =>
+  store.end(keyOf(copy.change), copy.digest, "forgotten", copy.change.seq);
+
+/**
+ * AUTOMATIC cleanup of an earlier hold that `successor` (the field's current hold) replaced: housekeeping, never authority (the head
+ * already decided), and never a way to forget an unresolved attempt (review 4 finding 3). A reconciliation record is KEPT as it is,
+ * unless the successor carries its exact attempt; a live hold whose attempt is unresolved and not carried is retired; anything else ends
+ * (`replaced`). `successor` null: the replacing hold is not known here (nothing is taken to be carried).
+ */
+export function retireForReplacement(
+  store: HeldStore,
+  copy: HeldCopy,
+  successor: HeldChange | null,
+): Promise<HeldSettle> {
+  const carried = !unresolvedIn(copy, successor);
+  if (copy.change.retired && !carried) return Promise.resolve({ kind: "kept" });
+  return !copy.change.retired && !carried
+    ? retire(store, copy)
+    : store.end(keyOf(copy.change), copy.digest, "replaced", copy.change.seq);
 }
 
 /** The bound on the pages one read of a field's holds makes (each at most 1,000 rows): beyond it the field's holds are not known. */
@@ -182,7 +224,7 @@ interface FieldHolds {
 
 /**
  * Every live hold of ONE field, through bounded, resumable reads of the field's own copies (never a display page), or null when they
- * could not all be read (a page failed, or more than the bound): an incomplete read never says who the field's current hold is.
+ * could not all be read (a page failed, or more than the bound). Never authority: who is current is the head's to say.
  */
 async function holdsOf(
   store: HeldStore,
@@ -211,25 +253,15 @@ async function holdsOf(
   return null;
 }
 
-/** The live holds of `field` that come AFTER `change` (a later generation, not retired): any one makes `change` an earlier hold. PURE. */
-const laterThan = (field: FieldHolds, change: HeldChange): HeldChange[] =>
-  field.holds
-    .map((copy) => copy.change)
-    .filter(
-      (other) =>
-        other.holdId !== change.holdId &&
-        !other.retired &&
-        other.seq > change.seq,
-    );
-
 /**
- * Retires every hold of `field` that came BEFORE `winner` (an earlier generation), each from the state it was read in, and tells this
- * page's memory (they never run here; an ended one is not shown while the list catches up; an unresolved attempt is also kept for the
- * field's next audience change). Holds of the same generation (two copies of the first shapes) and copies this page cannot read are
- * kept. True when no earlier or unreadable hold is left.
+ * Retires every other hold of `field` as `winner`'s predecessor (`winner` is the field's current hold: the head names it), each from the
+ * state it was read in, and tells this page's memory (they never run here; an ended one is not shown while the list catches up).
+ * Reconciliation records that the winner does not carry are kept as they are; LEGACY copies and copies this page cannot read are kept.
+ * True when no earlier hold is left (a kept record is not a hold).
  */
 async function retireEarlier(
   env: PeopleEnv,
+  store: HeldStore,
   winner: HeldChange,
   field: FieldHolds,
 ): Promise<boolean> {
@@ -237,16 +269,19 @@ async function retireEarlier(
   let complete = field.unreadable.length === 0;
   for (const earlier of field.holds) {
     const change = earlier.change;
-    if (change.holdId === winner.holdId || change.seq >= winner.seq) continue;
-    const settled = await settleHold(env.held, earlier, winner);
+    if (change.holdId === winner.holdId) continue;
+    if (change.legacy) {
+      complete = false;
+      continue;
+    }
+    const settled = await retireForReplacement(store, earlier, winner);
+    if (settled.kind === "kept") continue;
     if (!isSettled(settled)) {
       complete = false;
       continue;
     }
     memory.heldAuthority.delete(change.holdId);
     if (settled.kind !== "retired") memory.heldEnded.add(change.holdId);
-    if (change.attempt !== null && progressOf(change).policy === "maybe")
-      memory.attempts.set(`policy:${change.fieldId}`, change.attempt);
   }
   if (isCurrentMemory(memory)) memory.touch();
   return complete;
@@ -259,7 +294,7 @@ export async function runHeldChange(
   deps: HeldDeps,
 ): Promise<HeldResult> {
   const memory = env.memory;
-  const store = env.held;
+  const store = env.held.pinned();
   const key = keyOf(shown.change);
   /** This page still runs it: its identity is the one displayed and its row is shown. */
   const present = () => isCurrentMemory(memory) && deps.mounted();
@@ -276,12 +311,13 @@ export async function runHeldChange(
     refusal = answer;
     return false;
   };
-  /** The hold is still stored exactly as this run last read or wrote it (a check with no write), else why not (as a refused write). */
-  const unchanged = async (): Promise<boolean> => {
-    const now = await store.read(key);
-    if (now.kind === "live" && now.copy.digest === copy.digest) return true;
-    refusal =
-      now.kind === "failed"
+  /** Why the hold is not stored as this run last read or wrote it, as a refused write (or null: it is). */
+  const differs = (
+    now: Awaited<ReturnType<HeldStore["read"]>>,
+  ): HeldWrite | null =>
+    now.kind === "live" && now.copy.digest === copy.digest
+      ? null
+      : now.kind === "failed"
         ? { kind: "failed" }
         : {
             kind: "changed",
@@ -290,7 +326,10 @@ export async function runHeldChange(
                 ? "live"
                 : now.kind,
           };
-    return false;
+  /** The hold is still stored exactly as this run last read or wrote it (a check with no write), else why not (as a refused write). */
+  const unchanged = async (): Promise<boolean> => {
+    refusal = differs(await store.read(key));
+    return refusal === null;
   };
   const policyState = (): "none" | "maybe" | "done" =>
     run.policyDone ? "done" : progressOf(copy.change).policy;
@@ -298,8 +337,8 @@ export async function runHeldChange(
   const cancel = async (): Promise<HeldResult> => {
     // A policy step this run saw confirmed is resolved (whatever is stored yet): the hold simply ends.
     const settled = run.policyDone
-      ? await store.end(key, copy.digest)
-      : await settleHold(store, copy);
+      ? await store.end(key, copy.digest, "discarded", copy.change.seq)
+      : await discardHold(store, copy);
     return {
       kind: "cancelled",
       policy: policyState(),
@@ -349,25 +388,33 @@ export async function runHeldChange(
   if (stored.kind === "unreadable" || stored.kind === "absent")
     return { kind: "stale" };
   if (stored.kind === "ended")
-    return {
-      kind: "cancelled",
-      policy: "none",
-      ended: true,
-      retired: false,
-      attempt: null,
-    };
-  if (stored.copy.digest !== shown.digest || stored.copy.change.retired)
+    // Handed off already (an earlier run whose answer was lost): it is done, and never queued again.
+    return stored.tombstone.cause === "transferred"
+      ? { kind: "done", ended: true }
+      : {
+          kind: "cancelled",
+          policy: "none",
+          ended: true,
+          retired: false,
+          attempt: null,
+        };
+  if (
+    stored.copy.digest !== shown.digest ||
+    stored.copy.change.retired ||
+    stored.copy.change.legacy
+  )
     return { kind: "stale" };
   copy = stored.copy;
   if (!owns()) return stop();
-  // Only the field's CURRENT hold runs (review 3, finding 2): a later hold of the field retires this one instead.
-  const field = await holdsOf(store, key.personId, key.fieldId);
-  if (field === null)
+  // Only the field's CURRENT hold runs (review 4, finding 2): the head names it, and it never goes back.
+  const headRead = await store.head(key.personId, key.fieldId);
+  if (headRead.kind === "failed")
     return { kind: "failed", reason: "not_saved", kept: false };
-  const later = laterThan(field, copy.change);
-  if (later.length > 0) {
-    const winner = later.reduce((a, b) => (b.seq > a.seq ? b : a));
-    const settled = await settleHold(store, copy, winner);
+  // A hold of this shape is always written with its head: without one, nothing says it may run.
+  if (headRead.kind === "none") return { kind: "stale" };
+  const head = headRead.head;
+  if (head.current !== key.holdId) {
+    const settled = await retireForReplacement(store, copy, null);
     if (isSettled(settled)) {
       memory.heldAuthority.delete(key.holdId);
       if (settled.kind !== "retired") memory.heldEnded.add(key.holdId);
@@ -379,7 +426,9 @@ export async function runHeldChange(
     };
   }
   // The current hold: anything earlier of its field that a replacement left (a page closed in between, a refused write) is retired now.
-  await retireEarlier(env, copy.change, field);
+  // Housekeeping only: a field whose holds cannot all be read is cleaned up by a later run.
+  const field = await holdsOf(store, key.personId, key.fieldId);
+  if (field !== null) await retireEarlier(env, store, copy.change, field);
   if (!owns()) return stop();
   const before = bound();
   if (before !== null) return fail(before);
@@ -457,8 +506,7 @@ export async function runHeldChange(
   const after = bound();
   if (after !== null) return fail(after);
   if (!owns()) return stop();
-  // The content step is ADMITTED before it is queued: an end of the hold from here on says the content may be saved.
-  if (!(await write({ ...copy.change, queued: true }))) return refused();
+  // The HAND-OFF: the draft and the end of this copy are one commit, only while the copy and the field's head are as read here.
   const held = copy.change;
   const guard = baseGuard(held.expectedBase);
   const request = putFieldUpdateRequest({
@@ -470,47 +518,57 @@ export async function runHeldChange(
     sameKind: held.sameKind,
     guard,
   });
-  let refusedByOwner = !owns();
-  const saved = refusedByOwner
-    ? null
-    : await deps.enqueue((outbox) =>
-        outbox.enqueue({
-          ...request,
-          localId: held.holdId,
-          build: (bases) => {
-            // The last admission boundary, inside the writing transaction: a hold discarded or left here meanwhile queues nothing.
-            if (!owns()) {
-              refusedByOwner = true;
-              throw new Error("the held change is no longer owned by this run");
-            }
-            return request.build(bases);
-          },
-        }),
-      );
-  if (refusedByOwner || saved === null) {
-    // Nothing was queued: the admission is withdrawn first, so nobody is told the content may be saved.
-    if (isCurrentMemory(memory)) await write({ ...copy.change, queued: false });
-    return stop();
-  }
-  if (saved.ok) {
-    const ended = await store.end(key, copy.digest);
-    return { kind: "done", ended: isSettled(ended) };
-  }
-  await write({ ...copy.change, queued: false });
+  let refusedByOwner = false;
+  const saved = await deps.enqueue((outbox) =>
+    outbox.enqueue(
+      {
+        ...request,
+        localId: held.holdId,
+        build: (bases) => {
+          // The last admission boundary, inside the writing transaction: a hold discarded or left here meanwhile queues nothing.
+          if (!owns()) {
+            refusedByOwner = true;
+            throw new Error("the held change is no longer owned by this run");
+          }
+          return request.build(bases);
+        },
+      },
+      handOffOf(copy, head),
+    ),
+  );
+  if (saved.ok) return { kind: "done", ended: true };
+  // Not queued, or its answer was lost: the copy's own state says which (a committed hand-off ended it as `transferred`).
+  const now = await store.read(key);
+  if (now.kind === "ended" && now.tombstone.cause === "transferred")
+    return { kind: "done", ended: true };
+  refusal = differs(now);
+  if (refusal !== null) return refused();
+  if (refusedByOwner) return stop();
   return fail(guard.moved ? "content_changed" : "not_saved");
 }
 
-/** `earlier` keeps an unresolved attempt of exactly the change from policy version `from` to `to`. PURE. */
+/** `earlier` keeps an unresolved attempt of exactly the change from policy version `from` to `to` (its body included). PURE. */
 const unresolvedFor = (earlier: HeldChange, from: number, to: Policy) =>
   earlier.attempt !== null &&
   progressOf(earlier).policy === "maybe" &&
   earlier.from.version === from &&
-  samePolicy(earlier.to, to);
+  samePolicy(earlier.to, to) &&
+  earlier.attempt.body ===
+    canonicalBody(policyChangeCommands(earlier.fieldId, from, to));
+
+/** What `heldAttemptOf` found. */
+export type AttemptLookup =
+  | { kind: "found"; attempt: Attempt }
+  /** Every hold of the field was read, and none keeps an unresolved attempt of this change. */
+  | { kind: "none" }
+  /** The holds could not all be read (a failed or bounded read, a copy this page cannot read), or two different attempts match. */
+  | { kind: "unknown" };
 
 /**
  * The unresolved attempt a hold of this field on this device (a kept hold or a reconciliation record) carries for EXACTLY the change from
- * policy version `from` to `to`, for a direct change of the field's audience (the same key and body, never a second attempt beside it),
- * or null (none, or the holds could not be read).
+ * policy version `from` to `to`, for a direct change of the field's audience (the same key and body, never a second attempt beside it).
+ * A read that could not establish it is `unknown`, never `none` (review 4; the assessment's C9): a fresh key is never made for a change
+ * whose earlier attempt may exist.
  */
 export async function heldAttemptOf(
   env: PeopleEnv,
@@ -518,86 +576,107 @@ export async function heldAttemptOf(
   fieldId: string,
   from: number,
   to: Policy,
-): Promise<Attempt | null> {
+): Promise<AttemptLookup> {
   const field = await holdsOf(env.held, personId, fieldId);
-  return (
-    field?.holds.find(({ change }) => unresolvedFor(change, from, to))?.change
-      .attempt ?? null
-  );
+  if (field === null || field.unreadable.length > 0) return { kind: "unknown" };
+  const found = new Map<string, Attempt>();
+  for (const { change } of field.holds)
+    if (unresolvedFor(change, from, to) && change.attempt !== null)
+      found.set(change.attempt.key, change.attempt);
+  const [first, ...others] = [...found.values()];
+  if (first === undefined) return { kind: "none" };
+  return others.length === 0
+    ? { kind: "found", attempt: first }
+    : { kind: "unknown" };
 }
 
 /** What `holdChange` did. */
 export type HoldOutcome =
-  /** Kept, as its field's current hold. `complete`: every earlier hold of the field was retired; otherwise some are still kept (said). */
+  /** Kept, as its field's current hold. `complete`: no earlier hold of the field is left; otherwise some are still kept (said). */
   | { kind: "held"; copy: HeldCopy; complete: boolean }
   /** The field's lock is taken (a run of its holds, another page's hold): nothing was written, and the editor keeps the edit. */
   | { kind: "busy" }
-  /** Nothing was kept: `refused` while signing out (D-16); otherwise the store failed or the field's holds could not all be read. */
+  /** Nothing was kept: `refused` while signing out (D-16); otherwise the store failed, or the field's head or holds could not be read. */
   | { kind: "failed"; refused: boolean }
-  /** Kept, but another page changed or ended the new hold before its earlier ones were retired: none of them was retired. */
+  /** The field's head or the new copy changed under it (another page): nothing was written, and the editor keeps the edit. */
   | { kind: "changed" };
 
 /**
- * "Hold as draft" (D-11a-12): ONE operation of the field, under the field's lock from before the hold is written until its earlier holds
- * are retired (review 3 of 22 October 2026, finding 2: two pages' saves can no longer interleave and retire each other's holds).
+ * "Hold as draft" (D-11a-12): ONE operation of the field, under the field's lock (review 3 of 22 October 2026, finding 2), through ONE
+ * binding (`pinned`).
  *
- *  1. Every live hold of the field is read (bounded; an incomplete read keeps nothing new: the field's current hold would not be known).
- *  2. The new hold is written as the field's NEXT generation, in the same write as its content: from this commit it is the field's current
- *     hold, and every earlier one can never run again, even if what follows is cut short (a closed page, a refused write).
- *     An unresolved attempt of an earlier hold of exactly this change (the same policy version and audience asked for) is taken over.
- *  3. Only while the new hold is still stored as written, every earlier one is retired from the state it was read in (`settleHold`).
+ *  1. The field's head and every live hold of the field are read (bounded; an incomplete read keeps nothing new).
+ *  2. CREATE AND PROMOTE (review 4, finding 2): the new hold and the field's head naming it, at the next generation, are ONE transaction,
+ *     only while the head is as read. From this commit it is the field's current hold, and no earlier one can ever run again, whatever
+ *     follows (a closed page, a refused cleanup, the new hold itself ending later: the head never goes back). An unresolved attempt of an
+ *     earlier hold of exactly this change is carried over in the same write.
+ *  3. Earlier holds are retired as housekeeping (`retireForReplacement`): reconciliation records it does not carry are kept as they are.
  *
  * The page's authority to run it (D1) is the caller's to give, after this answers `held`.
  */
 export async function holdChange(
   env: PeopleEnv,
-  change: Omit<HeldChange, "seq" | "retired" | "attempt">,
+  change: Omit<HeldChange, "seq" | "retired" | "attempt" | "legacy">,
 ): Promise<HoldOutcome> {
+  const store = env.held.pinned();
   const answer = await env.exclusive(
     lockOf(env, change.fieldId),
     async (): Promise<HoldOutcome> => {
-      const store = env.held;
+      const headRead = await store.head(change.personId, change.fieldId);
+      if (headRead.kind === "failed") return { kind: "failed", refused: false };
       const field = await holdsOf(store, change.personId, change.fieldId);
       if (field === null) return { kind: "failed", refused: false };
+      const head = headRead.kind === "head" ? headRead.head : null;
+      // Above the head and above every copy still kept (a field's first head comes after its legacy copies).
       const seq =
-        field.holds.reduce((top, copy) => Math.max(top, copy.change.seq), 0) +
-        1;
+        field.holds.reduce(
+          (top, copy) => Math.max(top, copy.change.seq),
+          head?.seq ?? 0,
+        ) + 1;
+      if (!Number.isSafeInteger(seq)) return { kind: "failed", refused: false };
       const taken = field.holds.find(({ change: earlier }) =>
         unresolvedFor(earlier, change.from.version, change.to),
       );
-      const created = await store.create({
-        ...change,
-        attempt: taken?.change.attempt ?? null,
-        seq,
-        retired: false,
-      });
+      const created = await store.create(
+        {
+          ...change,
+          attempt: taken?.change.attempt ?? null,
+          seq,
+          retired: false,
+          legacy: false,
+        },
+        head,
+      );
+      if (created.kind === "changed") return { kind: "changed" };
       if (created.kind !== "saved")
         return { kind: "failed", refused: created.kind === "refused" };
-      const now = await store.read(keyOf(created.copy.change));
-      if (now.kind !== "live" || now.copy.digest !== created.copy.digest)
-        return { kind: "changed" };
-      const complete = await retireEarlier(env, created.copy.change, field);
+      const complete = await retireEarlier(
+        env,
+        store,
+        created.copy.change,
+        field,
+      );
       return { kind: "held", copy: created.copy, complete };
     },
   );
   return answer ?? { kind: "busy" };
 }
 
-/** What "Check now" of a reconciliation record found. */
+/** What "Check now" of a reconciliation record observed. */
 export type CheckResult =
-  /** The field's audience now IS the one asked for (the attempt, or the same change made elsewhere): the record ended. */
-  | "made"
-  /** It is not: still the version the attempt was guarded by (nothing of it was committed), or another one (it never can be): ended. */
-  | "not_made"
-  /** The field's lock is taken: nothing was read or written. */
-  | "busy"
-  /** The policy could not be read, or the record could not be ended: it is kept. */
-  | "kept";
+  /**
+   * The field's policy as it is NOW (owner-only read; noted with its time): `unchanged` = still the version the attempt was guarded by
+   * (the attempt may still be made), `matches` = it is the audience the attempt asked for. Neither says whether the attempt was made.
+   */
+  | { kind: "observed"; unchanged: boolean; matches: boolean }
+  /** The policy could not be read (offline, refused, failed), or another identity is displayed. */
+  | { kind: "failed" };
 
 /**
- * "Check now" of a RETIRED hold (a reconciliation record, `settleHold`): one owner-only read of the field's policy, under the field's
- * lock, decides what its unresolved attempt did, and the record then ends from the state it was read in. Nothing is sent: the attempt is
- * never sent again from here (D1: no background policy change).
+ * "Check now" of a RETIRED hold (a reconciliation record): one owner-only read of the field's policy. It says what the audience IS now
+ * and nothing about what the attempt did (review 4, finding 4; the assessment's C9): an unchanged version may still be changed by it, a
+ * matching policy may have been set by someone else, and a different one may have been set after it. The record is KEPT: nothing is sent
+ * and nothing is ended (D1: no background policy change); only "Discard" forgets it.
  */
 export async function checkRetired(
   env: PeopleEnv,
@@ -605,30 +684,16 @@ export async function checkRetired(
 ): Promise<CheckResult> {
   const memory = env.memory;
   const change = shown.change;
-  const answer = await env.exclusive(
-    lockOf(env, change.fieldId),
-    async (): Promise<CheckResult> => {
-      const read = await untilSent(() =>
-        env.sharing.readPolicy(change.fieldId),
-      );
-      if (!read.ok || !isCurrentMemory(memory)) return "kept";
-      notePolicy(memory, change.fieldId, {
-        ...read.value,
-        checkedAt: env.now(),
-      });
-      const made =
-        read.value.version !== change.from.version &&
-        samePolicy(read.value.policy, change.to);
-      if (!isSettled(await env.held.end(keyOf(change), shown.digest)))
-        return "kept";
-      if (
-        memory.attempts.get(`policy:${change.fieldId}`)?.key ===
-        change.attempt?.key
-      )
-        memory.attempts.delete(`policy:${change.fieldId}`);
-      memory.touch();
-      return made ? "made" : "not_made";
-    },
-  );
-  return answer ?? "busy";
+  const read = await untilSent(() => env.sharing.readPolicy(change.fieldId));
+  if (!read.ok || !isCurrentMemory(memory)) return { kind: "failed" };
+  notePolicy(memory, change.fieldId, {
+    ...read.value,
+    checkedAt: env.now(),
+  });
+  memory.touch();
+  return {
+    kind: "observed",
+    unchanged: read.value.version === change.from.version,
+    matches: samePolicy(read.value.policy, change.to),
+  };
 }

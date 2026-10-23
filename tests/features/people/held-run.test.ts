@@ -4,20 +4,27 @@ import type {
   CacheRow,
   EnqueueOutcome,
   EnqueueRequest,
+  HandOff,
   Outbox,
+  Policy,
 } from "../../../src/data";
 import { createConditionalFormPort } from "../../../src/data/ports/conditional-form";
 import type { PeopleEnv } from "../../../src/features/people/env";
 import {
+  checkRetired,
+  discardHold,
+  forgetRecord,
   heldAttemptOf,
   holdChange,
+  keyOf,
   runHeldChange,
-  settleHold,
 } from "../../../src/features/people/field/held";
 import {
   decodeHeld,
+  decodeTombstone,
   type HeldChange,
   type HeldCopy,
+  type HeldStore,
   heldContextOf,
   heldStoreOver,
 } from "../../../src/features/people/field/held-store";
@@ -38,7 +45,7 @@ import {
   canonicalBody,
   nextAttempt,
 } from "../../../src/features/sharing/model/submission";
-import { pageWorld } from "../../support/data/page-world";
+import { outboxWorld } from "../../support/data/outbox-world";
 import { cacheRow, draftRow } from "../../support/data/rows";
 import { heldPortDouble } from "../../support/people/held-port";
 import { fakeSharingApi, ok } from "../../support/sharing/fake-api";
@@ -76,6 +83,7 @@ const held = (over: Partial<HeldChange> = {}): HeldChange => ({
   queued: false,
   seq: 0,
   retired: false,
+  legacy: false,
   ...over,
 });
 const CONTEXT = heldContextOf(P, F);
@@ -106,20 +114,49 @@ function world() {
     now: () => Date.parse("2026-10-22T09:00:00.000Z"),
     held: heldStoreOver(store.port, () => "2026-10-22T09:00:00.000Z"),
   } as unknown as PeopleEnv;
-  const queued: Array<{ request: EnqueueRequest; command: unknown }> = [];
+  const queued: Array<{
+    request: EnqueueRequest;
+    command: unknown;
+    handOff?: HandOff;
+  }> = [];
   let current: CacheRow | null = field();
   let mounted = true;
   const run: HeldRun = { holdId: "h", cancelled: false, policyDone: false };
-  /** Called just before the content step's transaction (a hook for the schedules below). */
-  let beforeWrite = () => {};
-  const outbox = {
-    enqueue: async (request: EnqueueRequest): Promise<EnqueueOutcome> => {
+  /** Called just before the content step's transaction (a hook for the schedules below; awaited by the production outbox wrapper). */
+  let beforeWrite: () => void | Promise<void> = () => {};
+  /** What the next enqueue answers AFTER it committed (a lost answer), when set. */
+  let lostAnswer: EnqueueOutcome | null = null;
+  let outbox = {
+    // `transferDraft`'s order: the build inside the transaction (it may refuse), the hand-off's check and end, then the draft, as one step.
+    enqueue: async (
+      request: EnqueueRequest,
+      handOff?: HandOff,
+    ): Promise<EnqueueOutcome> => {
       beforeWrite();
       const command = request.build({ [F]: current?.version ?? 0 }).command;
-      queued.push({ request, command });
-      return { kind: "queued", localId: request.localId ?? "x", createdSeq: 1 };
+      if (
+        handOff !== undefined &&
+        (queued.some((q) => q.request.localId === request.localId) ||
+          !store.handOff(handOff))
+      )
+        return { kind: "refused", reason: "source_changed" };
+      queued.push({
+        request,
+        command,
+        ...(handOff === undefined ? {} : { handOff }),
+      });
+      const answer = lostAnswer;
+      lostAnswer = null;
+      return (
+        answer ?? {
+          kind: "queued",
+          localId: request.localId ?? "x",
+          createdSeq: 1,
+        }
+      );
     },
   } as unknown as Outbox;
+  const fakeOutbox = outbox;
   const deps = {
     current: () => current,
     mounted: () => mounted,
@@ -140,7 +177,11 @@ function world() {
   };
   /** The hold as it is stored now (put through the real held store, as the page that held it did). */
   const hold = async (change = held()): Promise<HeldCopy> => {
-    const created = await env.held.create(change);
+    const head = await env.held.head(change.personId, change.fieldId);
+    const created = await env.held.create(
+      change,
+      head.kind === "head" ? head.head : null,
+    );
     if (created.kind !== "saved") throw new Error("not held");
     return created.copy;
   };
@@ -164,9 +205,18 @@ function world() {
     unmount: () => {
       mounted = false;
     },
-    onBeforeWrite: (hook: () => void) => {
+    onBeforeWrite: (hook: () => void | Promise<void>) => {
       beforeWrite = hook;
     },
+    /** The next enqueue commits, and its caller is told this instead (the answer was lost). */
+    loseAnswer: (answer: EnqueueOutcome) => {
+      lostAnswer = answer;
+    },
+    /** The run's outbox from now on (null: the world's own double again). */
+    setOutbox: (next: Outbox | null) => {
+      outbox = next ?? fakeOutbox;
+    },
+    beforeWrite: () => beforeWrite(),
   };
 }
 
@@ -218,10 +268,15 @@ describe("runHeldChange: ownership (finding 2)", () => {
     expect((durableAtSend as unknown as HeldChange).attempt?.key).toBe(
       w.sharing.sent[0]?.key,
     );
-    // Then the confirmed audience, then the content's admission, written in that order before the content was queued.
-    expect(w.store.writes.map((write) => write.rev)).toEqual([0, 1, 2, 3]);
+    // Then the confirmed audience, written in that order before the content was queued. Adapted (review 4, finding 1): the content's
+    // admission is no longer a write of its own; it is the hand-off, which queued the draft and ended the copy in one commit.
+    expect(w.store.writes.map((write) => write.rev)).toEqual([0, 1, 2]);
     expect(w.store.writes[2]).toMatchObject({ attempt: null, to: PRIVATE });
-    expect(w.store.writes[3]).toMatchObject({ queued: true });
+    expect(w.queued[0]?.handOff?.source.tabInstanceId).toBe(HOLD);
+    expect(decodeTombstone(w.stored()?.fields ?? {})).toMatchObject({
+      cause: "transferred",
+      localId: HOLD,
+    });
   });
 
   test("discarded while its policy read was on its way: nothing is sent, nothing is queued, and the hold ENDS", async () => {
@@ -266,6 +321,7 @@ describe("runHeldChange: ownership (finding 2)", () => {
   });
 
   test("discarded at the last moment, inside the content step's transaction: its build refuses, the admission is withdrawn, the hold ends", async () => {
+    // Adapted (review 4, finding 1): there is no separate admission to withdraw; the refused hand-off commits nothing, and the hold ends.
     const w = world();
     const shown = await w.hold();
     w.sharing.next.policy.push(
@@ -283,7 +339,8 @@ describe("runHeldChange: ownership (finding 2)", () => {
       attempt: null,
     });
     expect(w.queued).toEqual([]);
-    expect(w.store.writes.at(-1)).toMatchObject({ queued: false });
+    expect(w.store.writes.some((write) => write.queued === true)).toBe(false);
+    expect(decodeTombstone(w.stored()?.fields ?? {}).cause).toBe("discarded");
   });
 
   test("ended by another page before the run read it: nothing is sent (the stored state governs, not the list)", async () => {
@@ -414,19 +471,43 @@ describe("runHeldChange: ownership (finding 2)", () => {
     expect(w.queued).toEqual([]);
   });
 
-  test("queued, but the hold's end failed: done, NOT ended (the copy stays, and a repeat is the same save)", async () => {
+  // Successors of "queued, but the hold's end failed: done, NOT ended" (review 4, finding 1): the queue and the end are one commit now, so
+  // there is no end left to fail after the draft is written. Its intent (a lost completion is never a second save) is kept below.
+  test("the hand-off committed but its answer was lost: done (read from the copy's tombstone), and nothing is queued again", async () => {
     const w = world();
     const shown = await w.hold();
     w.sharing.next.policy.push(
       ok({ version: 6, policy: HOME_VIEW }),
       ok({ version: 7, policy: PRIVATE }),
     );
-    w.store.failEnds.push("failed");
+    w.loseAnswer({ kind: "refused", reason: "storage" });
     expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
       kind: "done",
-      ended: false,
+      ended: true,
     });
-    expect(w.storedHeld()).toMatchObject({ queued: true, attempt: null });
+    expect(w.queued).toHaveLength(1);
+    // A later run of the same shown copy finds it handed off: done, and the outbox is not asked again.
+    const again: HeldRun = { holdId: "h", cancelled: false, policyDone: false };
+    expect(await runHeldChange(w.env, shown, again, w.deps)).toEqual({
+      kind: "done",
+      ended: true,
+    });
+    expect(w.queued).toHaveLength(1);
+  });
+
+  test("control: a hand-off that did not commit (the copy changed) queues nothing and the run says so", async () => {
+    const w = world();
+    const shown = await w.hold();
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    w.onBeforeWrite(() => w.store.changeElsewhere(CONTEXT, HOLD));
+    expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
+      kind: "stale",
+    });
+    expect(w.queued).toEqual([]);
+    expect(w.stored()?.terminal).toBe(false);
   });
 
   test("discarded while it ran, but the end failed: cancelled and NOT ended (the page keeps it visible)", async () => {
@@ -619,14 +700,32 @@ describe("an edit's snapshot (finding 1)", () => {
 
 // ---- review 3 of 22 October 2026 (findings 1 and 2; the design assessment's C3a/C3b/C3c, schedules H1-H11) --------------------------
 
-/** The held store over the REAL conditional port and the real W9 plans, on the IndexedDB double (the reviewer's composition). */
+/**
+ * The held store over the REAL conditional port and the real W9 plans, on the IndexedDB double (the reviewer's composition), and the
+ * PRODUCTION outbox facade over the same database (review 4: the hand-off is `transferDraft`, one transaction with the copy's end). What
+ * it queues is recorded in `w.queued` as the world's double records it.
+ */
 async function realHeld(w: ReturnType<typeof world>) {
-  const real = await pageWorld();
+  const real = await outboxWorld();
   const now = () => "2026-10-22T12:00:00.000Z";
   w.env.held = heldStoreOver(
     createConditionalFormPort({ service: () => real.service, now }),
     now,
   );
+  real.put("cache", [field()]);
+  w.setOutbox({
+    enqueue: async (request: EnqueueRequest, handOff?: HandOff) => {
+      await w.beforeWrite();
+      const outcome = await real.outbox.enqueue(request, handOff);
+      if (outcome.kind === "queued")
+        w.queued.push({
+          request,
+          command: real.commandOf(outcome.localId),
+          ...(handOff === undefined ? {} : { handOff }),
+        });
+      return outcome;
+    },
+  } as unknown as Outbox);
   return real;
 }
 
@@ -655,6 +754,12 @@ function holder(w: ReturnType<typeof world>) {
   const lock = locks();
   Object.assign(w.env, { accountId: "acct", exclusive: lock.exclusive });
   return lock;
+}
+
+/** A hold written as "Hold as draft" writes it: with the field's head naming it (created after every hold already there). */
+async function promote(w: ReturnType<typeof world>, change: HeldChange) {
+  const head = await w.env.held.head(change.personId, change.fieldId);
+  return w.env.held.create(change, head.kind === "head" ? head.head : null);
 }
 
 const live = async (w: ReturnType<typeof world>) =>
@@ -827,7 +932,7 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
     // A is inside its operation (its read of the field's holds is held): B's save finds the lock taken.
     const listing = w.env.held.list.bind(w.env.held);
     let first = true;
-    w.env.held = {
+    const gated: HeldStore = {
       ...w.env.held,
       list: async (...args) => {
         if (first) {
@@ -836,7 +941,10 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
         }
         return listing(...args);
       },
+      // Harness (review 4): an operation takes one binding of the store (`pinned`); the gated store is its own binding.
+      pinned: () => gated,
     };
+    w.env.held = gated;
     const a = holdChange(w.env, fresh("hold-a", "First"));
     // A has begun its read of the field's holds (inside its operation).
     await until(() => !first);
@@ -874,14 +982,16 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
     await realHeld(w);
     holder(w);
     // A cut-short replacement: B is the field's current hold (generation 2), A (1) is still kept.
-    const a = await w.env.held.create(
+    const a = await promote(
+      w,
       held({
         holdId: "hold-a",
         value: { kind: "text", text: "First" },
         seq: 1,
       }),
     );
-    const b = await w.env.held.create(
+    const b = await promote(
+      w,
       held({
         holdId: "hold-b",
         value: { kind: "text", text: "Second" },
@@ -918,8 +1028,8 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
   test("the current hold's run retires an earlier one a closed page left, then runs", async () => {
     const w = world();
     holder(w);
-    await w.env.held.create(held({ holdId: "hold-a", seq: 1 }));
-    const b = await w.env.held.create(held({ holdId: "hold-b", seq: 2 }));
+    await promote(w, held({ holdId: "hold-a", seq: 1 }));
+    const b = await promote(w, held({ holdId: "hold-b", seq: 2 }));
     if (b.kind !== "saved") throw new Error("setup");
     w.sharing.next.policy.push(
       ok({ version: 6, policy: HOME_VIEW }),
@@ -937,21 +1047,51 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
     expect(w.sharing.sent).toHaveLength(1);
   });
 
-  test("a save whose new hold another page ended before its earlier ones were retired retires nothing and says so (changed)", async () => {
+  // Adapted (review 4, finding 2): this case expected a save whose new hold another page ended at once to retire NOTHING (`changed`), which
+  // left the earlier hold able to run again once the new one was gone. The new hold and the head naming it are one commit now: the
+  // earlier hold is retired all the same and can never run (its intent, "a stale save never claims success it did not commit", is kept by
+  // the create's own condition below).
+  test("a save whose new hold another page ended at once still retires the earlier one, which never runs again (the head stays)", async () => {
+    const w = world();
+    holder(w);
+    const a = await holdChange(w.env, fresh("hold-a", "First"));
+    if (a.kind !== "held") throw new Error("setup");
+    expect(await holdChange(w.env, fresh("hold-b", "Second"))).toMatchObject({
+      kind: "held",
+    });
+    // Another page discards the new hold.
+    w.store.endElsewhere(heldContextOf(P, F), "hold-b");
+    expect(await live(w)).toEqual([]);
+    expect(
+      await runHeldChange(
+        w.env,
+        a.copy,
+        { ...w.run, holdId: "hold-a" },
+        w.deps,
+      ),
+    ).toMatchObject({ kind: "cancelled", ended: true });
+    expect(w.sharing.calls).toEqual([]);
+    expect(w.queued).toEqual([]);
+  });
+
+  test("a save whose head moved since it was read (another page's save) writes nothing (changed) and keeps the edit", async () => {
     const w = world();
     holder(w);
     expect((await holdChange(w.env, fresh("hold-a", "First"))).kind).toBe(
       "held",
     );
-    const reading = w.env.held.read.bind(w.env.held);
-    w.env.held = {
-      ...w.env.held,
-      read: async (key) => {
-        if (key.holdId === "hold-b")
-          w.store.endElsewhere(heldContextOf(P, F), "hold-b");
-        return reading(key);
-      },
-    };
+    // Another page's save lands between this save's reads and its write (a page whose lock was not this one's, modelled directly).
+    let once = true;
+    w.store.beforePut(() => {
+      if (!once) return;
+      once = false;
+      const head = w.store.rows.get(`${heldContextOf(P, F)}\u0000~head`);
+      if (head !== undefined)
+        w.store.rows.set(`${heldContextOf(P, F)}\u0000~head`, {
+          ...head,
+          content_digest: `${head.content_digest}:moved`,
+        });
+    });
     expect(await holdChange(w.env, fresh("hold-b", "Second"))).toEqual({
       kind: "changed",
     });
@@ -980,11 +1120,41 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
     expect((await live(w)).map((h) => h?.holdId)).toEqual(["hold-b"]);
   });
 
-  test("copies of the first shape (generation 0) are retired by a new hold; an unreadable copy is kept and the save says so", async () => {
+  // Adapted (review 4; the assessment's C10): copies of the first shapes are LEGACY now. Whether one was already queued and discarded in
+  // Sync, or replaced by a hold that has since ended, cannot be known, so a new hold no longer retires them: they are kept (inert, shown,
+  // discardable) and the save says that earlier copies are still kept. The unreadable copy is kept as before.
+  test("copies of the first shape (generation 0) are kept by a new hold, never retired or run; an unreadable copy is kept and the save says so", async () => {
     const w = world();
     holder(w);
-    await w.env.held.create(held({ holdId: "old-1", seq: 0 }));
-    await w.env.held.create(held({ holdId: "old-2", seq: 0 }));
+    for (const id of ["old-1", "old-2"]) {
+      const {
+        seq: _seq,
+        retired: _retired,
+        legacy: _legacy,
+        ...v2
+      } = held({
+        holdId: id,
+      });
+      const fields = {
+        held: JSON.stringify({
+          ...v2,
+          v: 2,
+          failed: null,
+          holdId: undefined,
+        }),
+      };
+      w.store.rows.set(`${heldContextOf(P, F)}\u0000${id}`, {
+        form_context: heldContextOf(P, F),
+        tab_instance_id: id,
+        fields,
+        redacted: [],
+        saved_at: "2026-10-22T09:00:00.000Z",
+        capture_seq: 0,
+        writer_gen: Number.MAX_SAFE_INTEGER,
+        terminal: false,
+        content_digest: `d-${id}`,
+      });
+    }
     // A copy this page cannot read (a damaged value), put as another page wrote it.
     w.store.rows.set(`${heldContextOf(P, F)}\u0000unreadable`, {
       form_context: heldContextOf(P, F),
@@ -1003,8 +1173,16 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
     });
     expect(
       (await w.env.held.list(P, F, null))?.copies.map((r) => r.tab_instance_id),
-    ).toEqual(["hold-n", "unreadable"]);
+    ).toEqual(["hold-n", "old-1", "old-2", "unreadable"]);
     expect((await live(w)).find((h) => h?.holdId === "hold-n")?.seq).toBe(1);
+    expect(
+      (await live(w))
+        .filter((h) => h?.legacy)
+        .map((h) => [h?.holdId, h?.retired]),
+    ).toEqual([
+      ["old-1", false],
+      ["old-2", false],
+    ]);
   });
 
   test("the field's holds cannot all be read: nothing is kept (failed), the editor keeps the edit", async () => {
@@ -1018,16 +1196,32 @@ describe("review 3 finding 2: one current hold per field (H4, H5)", () => {
     expect(w.store.writes).toEqual([]);
   });
 
+  // Adapted (review 4, finding 2): the field's HEAD says which hold is current now, not the list of its live copies. The intent (a run
+  // that cannot know it is the current hold does not run) is kept by the head read; a failed list only defers housekeeping.
   test("a run that cannot read its field's holds does not run (it cannot know it is the current one)", async () => {
     const w = world();
     const shown = await w.hold();
-    w.store.failLists.count = 1;
+    w.store.failHeadReads.count = 1;
     expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
       kind: "failed",
       reason: "not_saved",
       kept: false,
     });
     expect(w.sharing.calls).toEqual([]);
+  });
+
+  test("control: a run whose field's head is read but whose other holds cannot be listed runs (cleanup is housekeeping, not authority)", async () => {
+    const w = world();
+    const shown = await w.hold();
+    w.store.failLists.count = 1;
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
+      kind: "done",
+      ended: true,
+    });
   });
 });
 
@@ -1049,7 +1243,7 @@ describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", ()
   test("discarded while its attempt is unresolved: RETIRED (attempt, audience asked for and guard kept, content cleared), never ended", async () => {
     const w = world();
     const shown = await w.hold(held({ attempt: ATTEMPT }));
-    const settled = await settleHold(w.env.held, shown);
+    const settled = await discardHold(w.env.held, shown);
     expect(settled.kind).toBe("retired");
     expect(w.storedHeld()).toMatchObject({
       retired: true,
@@ -1077,20 +1271,18 @@ describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", ()
   test("control: a hold with nothing unresolved simply ends; a discarded reconciliation record ends", async () => {
     const w = world();
     const shown = await w.hold();
-    expect((await settleHold(w.env.held, shown)).kind).toBe("ended");
+    expect((await discardHold(w.env.held, shown)).kind).toBe("ended");
     const w2 = world();
     const retired = await w2.hold(held({ attempt: ATTEMPT }));
-    const record = await settleHold(w2.env.held, retired);
+    const record = await discardHold(w2.env.held, retired);
     if (record.kind !== "retired") throw new Error("setup");
-    expect((await settleHold(w2.env.held, record.copy)).kind).toBe("ended");
+    expect((await forgetRecord(w2.env.held, record.copy)).kind).toBe("ended");
   });
 
   test("a new hold of EXACTLY the same change takes the unresolved attempt over (same key and body) and the earlier one ends", async () => {
     const w = world();
     holder(w);
-    await w.env.held.create(
-      held({ holdId: "hold-a", seq: 1, attempt: ATTEMPT }),
-    );
+    await promote(w, held({ holdId: "hold-a", seq: 1, attempt: ATTEMPT }));
     const b = await holdChange(w.env, fresh("hold-b", "Second"));
     expect(b).toMatchObject({ kind: "held", complete: true });
     expect((await live(w)).map((h) => [h?.holdId, h?.attempt])).toEqual([
@@ -1109,9 +1301,7 @@ describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", ()
   test("a new hold of ANOTHER change does not take it: the earlier hold is retired, its attempt kept on the device", async () => {
     const w = world();
     holder(w);
-    await w.env.held.create(
-      held({ holdId: "hold-a", seq: 1, attempt: ATTEMPT }),
-    );
+    await promote(w, held({ holdId: "hold-a", seq: 1, attempt: ATTEMPT }));
     const other = {
       ...fresh("hold-b", "Second"),
       to: HOME_VIEW,
@@ -1131,10 +1321,15 @@ describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", ()
   test("the attempt is found again after the page forgot everything (a reload), for a direct change of the same audience", async () => {
     const w = world();
     const shown = await w.hold(held({ attempt: ATTEMPT }));
-    await settleHold(w.env.held, shown);
+    await discardHold(w.env.held, shown);
     forgetAllPeopleMemory();
-    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual(ATTEMPT);
-    expect(await heldAttemptOf(w.env, P, F, 6, HOME_VIEW)).toBeNull();
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "found",
+      attempt: ATTEMPT,
+    });
+    expect(await heldAttemptOf(w.env, P, F, 6, HOME_VIEW)).toEqual({
+      kind: "none",
+    });
   });
 
   test("another page retires it after this run's attempt was admitted: this run is stale and queues nothing (the record keeps the attempt)", async () => {
@@ -1146,7 +1341,7 @@ describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", ()
     );
     w.sharing.next.management.push(async () => {
       const now = w.storedHeld() as HeldChange;
-      await settleHold(w.env.held, {
+      await discardHold(w.env.held, {
         change: now,
         digest: w.stored()?.content_digest ?? "",
       });
@@ -1218,5 +1413,600 @@ describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", ()
     expect(w.sharing.sent).toHaveLength(1);
     expect(w.sharing.sent[0]?.key).toBe(kept.attempt?.key);
     expect(canonicalBody(w.sharing.sent[0]?.commands)).toBe(kept.attempt?.body);
+  });
+});
+
+// ---- review 4 of 23 October 2026 (findings 1-4; the third design assessment's C7-C10, schedules T1, T3, T5, T6, T8, T9, T13) -------
+
+/** The attempt the runner builds for the change from policy version 6 to PRIVATE (the canonical body; key `key`). */
+const attemptOf = (key: string, version = 6, to: Policy = PRIVATE) =>
+  nextAttempt(
+    null,
+    [
+      {
+        kind: "replace_policy",
+        id: F,
+        expected_version: version,
+        policy: toWirePolicy(to),
+      },
+    ],
+    () => key,
+  );
+
+/** The world's held store, with `end` of one hold failing while `armed` (one binding: `pinned` is itself). */
+function failingEndOf(w: ReturnType<typeof world>, holdId: string) {
+  const armed = { on: true };
+  const base = w.env.held;
+  const store: HeldStore = {
+    ...base,
+    end: (key, digest, cause, seq) =>
+      armed.on && key.holdId === holdId
+        ? Promise.resolve({ kind: "failed" })
+        : base.end(key, digest, cause, seq),
+    pinned: () => store,
+  };
+  w.env.held = store;
+  return armed;
+}
+
+const freshRun = (holdId: string): HeldRun => ({
+  holdId,
+  cancelled: false,
+  policyDone: false,
+});
+
+describe("review 4 finding 1: a hand-off is one commit and is never repeated (T3, H9)", () => {
+  for (const discard of [false, true])
+    test(`real port and outbox: ${discard ? "Sync discards the queued draft; the offered retry of the same hold queues NOTHING" : "control: the draft is kept, and the retry adds nothing beside it"}`, async () => {
+      const w = world();
+      const real = await realHeld(w);
+      const shown = await w.hold();
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
+        kind: "done",
+        ended: true,
+      });
+      expect(real.drafts().map((d) => d.local_id)).toEqual([HOLD]);
+      const seq = real.drafts()[0]?.created_seq;
+      if (discard) {
+        expect((await real.outbox.discard(HOLD)).kind).toBe("discarded");
+        expect(real.drafts()).toEqual([]);
+      }
+      // A reload: the page forgets everything, and the hold it showed is run again ("Try again", "Send now").
+      forgetAllPeopleMemory();
+      w.env.memory = peopleMemory("acct:1");
+      expect(await runHeldChange(w.env, shown, freshRun(HOLD), w.deps)).toEqual(
+        { kind: "done", ended: true },
+      );
+      expect(real.drafts().map((d) => d.created_seq)).toEqual(
+        discard ? [] : [seq],
+      );
+      expect(w.sharing.sent).toHaveLength(1);
+    });
+
+  test("real port and outbox: the page dies after the hand-off committed (its answer never comes); a new page finds it handed off, Sync then discards the draft, a retry queues nothing", async () => {
+    const w = world();
+    const real = await realHeld(w);
+    const shown = await w.hold();
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    real.env.idb.inject({
+      match: (tx) => tx.label === "data.transferDraft",
+      mode: "commit_then_lose_completion",
+      times: 1,
+    });
+    // The first page's run never hears back (it is gone): it is not awaited.
+    void runHeldChange(w.env, shown, w.run, w.deps);
+    await until(() => real.drafts().length === 1);
+    forgetAllPeopleMemory();
+    w.env.memory = peopleMemory("acct:1");
+    expect(await runHeldChange(w.env, shown, freshRun(HOLD), w.deps)).toEqual({
+      kind: "done",
+      ended: true,
+    });
+    expect(real.drafts()).toHaveLength(1);
+    expect((await real.outbox.discard(HOLD)).kind).toBe("discarded");
+    expect(await runHeldChange(w.env, shown, freshRun(HOLD), w.deps)).toEqual({
+      kind: "done",
+      ended: true,
+    });
+    expect(real.drafts()).toEqual([]);
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+
+  for (const fault of [true, false])
+    test(`real port and outbox: ${fault ? "a hand-off that fails inside its transaction leaves the hold and NO draft; Try again then hands it off once" : "control: a healthy hand-off"}`, async () => {
+      const w = world();
+      const real = await realHeld(w);
+      const shown = await w.hold();
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      if (fault)
+        real.env.idb.inject({
+          match: (tx) => tx.label === "data.transferDraft",
+          mode: { kind: "throw_on_write", n: 3, as: "error" },
+          times: 1,
+        });
+      const first = await runHeldChange(w.env, shown, w.run, w.deps);
+      if (!fault) {
+        expect(first).toEqual({ kind: "done", ended: true });
+        expect(real.drafts()).toHaveLength(1);
+        return;
+      }
+      expect(first).toEqual({
+        kind: "failed",
+        reason: "not_saved",
+        kept: true,
+      });
+      expect(real.drafts()).toEqual([]);
+      const kept = await w.env.held.read(keyOfHeld());
+      if (kept.kind !== "live") throw new Error("not kept");
+      expect(kept.copy.change.value).toEqual(shown.change.value);
+      // Try again: written back as waiting, then run (the policy is already the one asked for: only the hand-off remains).
+      const again = await w.env.held.update(kept.copy, {
+        ...kept.copy.change,
+        status: { kind: "waiting" },
+      });
+      if (again.kind !== "saved") throw new Error("not saved");
+      expect(
+        await runHeldChange(w.env, again.copy, freshRun(HOLD), w.deps),
+      ).toEqual({ kind: "done", ended: true });
+      expect(real.drafts()).toHaveLength(1);
+      expect(w.sharing.sent).toHaveLength(1);
+    });
+
+  test("real port and outbox (T5): another page discards the hold after the policy was confirmed and before the hand-off: nothing is queued", async () => {
+    const w = world();
+    const real = await realHeld(w);
+    const shown = await w.hold();
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    // Another page's discard commits just before the hand-off's transaction is made.
+    w.onBeforeWrite(async () => {
+      const now = await w.env.held.read(keyOfHeld());
+      if (now.kind === "live")
+        await w.env.held.end(keyOfHeld(), now.copy.digest, "discarded");
+    });
+    expect(await runHeldChange(w.env, shown, w.run, w.deps)).toMatchObject({
+      kind: "cancelled",
+      policy: "done",
+      ended: true,
+    });
+    expect(real.drafts()).toEqual([]);
+  });
+});
+
+describe("review 4 finding 2: the field's head never goes back (T1, H5)", () => {
+  for (const winner of ["kept", "discarded", "retired", "completed"] as const)
+    test(`real port: A's retirement failed when B replaced it; ${winner === "kept" ? "control: B kept" : `B is then ${winner}`}: A never runs (no policy change, no draft)`, async () => {
+      const w = world();
+      const real = await realHeld(w);
+      holder(w);
+      const a = await holdChange(w.env, fresh("hold-a", "First"));
+      if (a.kind !== "held") throw new Error("setup");
+      const armed = failingEndOf(w, "hold-a");
+      const b = await holdChange(w.env, {
+        ...fresh("hold-b", "Second"),
+        ...(winner === "retired" ? {} : {}),
+      });
+      if (b.kind !== "held") throw new Error("setup");
+      expect(b).toMatchObject({ complete: false });
+      expect(b.copy.change.seq).toBe(2);
+      armed.on = false;
+      if (winner === "discarded")
+        expect((await discardHold(w.env.held, b.copy)).kind).toBe("ended");
+      if (winner === "retired") {
+        const withAttempt = await w.env.held.update(b.copy, {
+          ...b.copy.change,
+          attempt: attemptOf("k-b"),
+        });
+        if (withAttempt.kind !== "saved") throw new Error("setup");
+        expect((await discardHold(w.env.held, withAttempt.copy)).kind).toBe(
+          "retired",
+        );
+      }
+      if (winner === "completed") {
+        w.sharing.next.policy.push(
+          ok({ version: 6, policy: HOME_VIEW }),
+          ok({ version: 7, policy: PRIVATE }),
+        );
+        expect(
+          await runHeldChange(w.env, b.copy, freshRun("hold-b"), w.deps),
+        ).toEqual({ kind: "done", ended: true });
+      }
+      const sent = w.sharing.sent.length;
+      const drafts = real.drafts().map((d) => d.local_id);
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      const result = await runHeldChange(
+        w.env,
+        a.copy,
+        freshRun("hold-a"),
+        w.deps,
+      );
+      // Superseded here (retired as B's predecessor), or already ended by B's own run (completed): never run either way.
+      expect(result).toMatchObject({ ended: true });
+      expect(["superseded", "cancelled"]).toContain(result.kind);
+      expect(w.sharing.sent).toHaveLength(sent);
+      expect(real.drafts().map((d) => d.local_id)).toEqual(drafts);
+      expect(drafts.includes("hold-a")).toBe(false);
+    });
+
+  test("a later save is above the head even when every hold of the field has ended (the generation never goes back)", async () => {
+    const w = world();
+    holder(w);
+    const a = await holdChange(w.env, fresh("hold-a", "First"));
+    const b = await holdChange(w.env, fresh("hold-b", "Second"));
+    if (a.kind !== "held" || b.kind !== "held") throw new Error("setup");
+    expect((await discardHold(w.env.held, b.copy)).kind).toBe("ended");
+    expect(await live(w)).toEqual([]);
+    const c = await holdChange(w.env, fresh("hold-c", "Third"));
+    expect(c).toMatchObject({ kind: "held" });
+    if (c.kind !== "held") throw new Error("setup");
+    expect(c.copy.change.seq).toBe(3);
+  });
+});
+
+describe("review 4 finding 3: automatic cleanup never forgets an unresolved attempt (T6, T7, H8)", () => {
+  const A1 = attemptOf("k-a1");
+
+  test("real port: A's attempt retired; unrelated holds B and C are made, B discarded, C completed; after a reload A's exact attempt is still found and A is still a record", async () => {
+    const w = world();
+    await realHeld(w);
+    holder(w);
+    const a = await w.hold(held({ holdId: "hold-a", attempt: A1 }));
+    expect((await discardHold(w.env.held, a)).kind).toBe("retired");
+    const other = (id: string, version: number) => ({
+      ...fresh(id, id),
+      from: { version, policy: PRIVATE },
+      to: HOME_VIEW,
+    });
+    const b = await holdChange(w.env, other("hold-b", 7));
+    const c = await holdChange(w.env, other("hold-c", 7));
+    if (b.kind !== "held" || c.kind !== "held") throw new Error("setup");
+    expect((await discardHold(w.env.held, b.copy)).kind).not.toBe("failed");
+    w.sharing.next.policy.push(
+      ok({ version: 7, policy: PRIVATE }),
+      ok({ version: 8, policy: HOME_VIEW }),
+    );
+    expect(
+      await runHeldChange(w.env, c.copy, freshRun("hold-c"), w.deps),
+    ).toEqual({ kind: "done", ended: true });
+    forgetAllPeopleMemory();
+    w.env.memory = peopleMemory("acct:1");
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "found",
+      attempt: A1,
+    });
+    const stored = await w.env.held.read(keyOf(a.change));
+    expect(stored).toMatchObject({
+      kind: "live",
+      copy: { change: { retired: true, attempt: A1 } },
+    });
+  });
+
+  test("two unresolved attempts of the field (two changes) are both kept by a third save; each is found by its own change", async () => {
+    const w = world();
+    holder(w);
+    const A2 = attemptOf("k-a2", 7, HOME_VIEW);
+    const a = await w.hold(held({ holdId: "hold-a", attempt: A1 }));
+    expect((await discardHold(w.env.held, a)).kind).toBe("retired");
+    const d = await promote(
+      w,
+      held({
+        holdId: "hold-d",
+        seq: 2,
+        attempt: A2,
+        from: { version: 7, policy: PRIVATE },
+        to: HOME_VIEW,
+      }),
+    );
+    if (d.kind !== "saved") throw new Error("setup");
+    expect((await discardHold(w.env.held, d.copy)).kind).toBe("retired");
+    expect(
+      await holdChange(w.env, {
+        ...fresh("hold-e", "Third"),
+        from: { version: 9, policy: HOME_VIEW },
+        to: PRIVATE,
+      }),
+    ).toMatchObject({ kind: "held", complete: true });
+    forgetAllPeopleMemory();
+    w.env.memory = peopleMemory("acct:1");
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "found",
+      attempt: A1,
+    });
+    expect(await heldAttemptOf(w.env, P, F, 7, HOME_VIEW)).toEqual({
+      kind: "found",
+      attempt: A2,
+    });
+    expect(
+      (await live(w)).filter((h) => h?.retired).map((h) => h?.holdId),
+    ).toEqual(["hold-a", "hold-d"]);
+  });
+
+  test("control: a save of EXACTLY A's change carries A's attempt; only then does A's record end", async () => {
+    const w = world();
+    holder(w);
+    const a = await w.hold(held({ holdId: "hold-a", attempt: A1 }));
+    expect((await discardHold(w.env.held, a)).kind).toBe("retired");
+    const b = await holdChange(w.env, fresh("hold-b", "Again"));
+    expect(b).toMatchObject({ kind: "held", complete: true });
+    expect((await live(w)).map((h) => [h?.holdId, h?.attempt])).toEqual([
+      ["hold-b", A1],
+    ]);
+  });
+
+  test("Discard of ONE record forgets that record only (T7)", async () => {
+    const w = world();
+    const a = await w.hold(held({ holdId: "hold-a", attempt: A1 }));
+    const record = await discardHold(w.env.held, a);
+    if (record.kind !== "retired") throw new Error("setup");
+    const d = await promote(
+      w,
+      held({
+        holdId: "hold-d",
+        seq: 2,
+        attempt: attemptOf("k-a2", 7, HOME_VIEW),
+        from: { version: 7, policy: PRIVATE },
+        to: HOME_VIEW,
+      }),
+    );
+    if (d.kind !== "saved") throw new Error("setup");
+    const other = await discardHold(w.env.held, d.copy);
+    expect(other.kind).toBe("retired");
+    expect((await forgetRecord(w.env.held, record.copy)).kind).toBe("ended");
+    expect((await live(w)).map((h) => h?.holdId)).toEqual(["hold-d"]);
+    expect(await w.env.held.read(keyOf(a.change))).toMatchObject({
+      kind: "ended",
+      tombstone: { cause: "forgotten" },
+    });
+  });
+});
+
+describe("review 4 (C9): a lookup that cannot be completed is never 'none' (T8)", () => {
+  const A1 = attemptOf("k-a1");
+
+  test("control: nothing kept is `none`; the exact attempt is `found`", async () => {
+    const w = world();
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "none",
+    });
+    const a = await w.hold(held({ attempt: A1 }));
+    await discardHold(w.env.held, a);
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "found",
+      attempt: A1,
+    });
+  });
+
+  test("a failed read, a copy this page cannot read, two different attempts of the same change, or an attempt of another body: never `found` by guess", async () => {
+    const w = world();
+    const a = await w.hold(held({ attempt: A1 }));
+    await discardHold(w.env.held, a);
+    w.store.failLists.count = 1;
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "unknown",
+    });
+    w.store.rows.set(`${CONTEXT}\u0000unreadable`, {
+      form_context: CONTEXT,
+      tab_instance_id: "unreadable",
+      fields: { held: "{not json" },
+      redacted: [],
+      saved_at: "2026-10-22T09:00:00.000Z",
+      capture_seq: 0,
+      writer_gen: Number.MAX_SAFE_INTEGER,
+      terminal: false,
+      content_digest: "d-unreadable",
+    });
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "unknown",
+    });
+    w.store.rows.delete(`${CONTEXT}\u0000unreadable`);
+    const twin = await promote(
+      w,
+      held({ holdId: "hold-twin", seq: 2, attempt: attemptOf("k-other") }),
+    );
+    if (twin.kind !== "saved") throw new Error("setup");
+    expect(await heldAttemptOf(w.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "unknown",
+    });
+    // An attempt whose body is not this change's (a damaged record) is not this change's attempt.
+    const w2 = world();
+    const odd = await w2.hold(held({ attempt: { key: "k-odd", body: "[]" } }));
+    await discardHold(w2.env.held, odd);
+    expect(await heldAttemptOf(w2.env, P, F, 6, PRIVATE)).toEqual({
+      kind: "none",
+    });
+  });
+});
+
+describe("review 4 finding 4: 'Check now' observes, it never attributes or ends (T9)", () => {
+  const A1 = attemptOf("k-a1");
+
+  test("unchanged version: `unchanged`, the record kept; the attempt then commits late: `matches` at a later version, the record STILL kept; nothing is sent", async () => {
+    const w = world();
+    const a = await w.hold(held({ attempt: A1 }));
+    const record = await discardHold(w.env.held, a);
+    if (record.kind !== "retired") throw new Error("setup");
+    w.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    expect(await checkRetired(w.env, record.copy)).toEqual({
+      kind: "observed",
+      unchanged: true,
+      matches: false,
+    });
+    expect(await w.env.held.read(keyOf(a.change))).toMatchObject({
+      kind: "live",
+      copy: { change: { retired: true, attempt: A1 } },
+    });
+    // The request was admitted before: it commits now (or someone else made the same change: a read cannot tell which).
+    w.sharing.next.policy.push(ok({ version: 7, policy: PRIVATE }));
+    expect(await checkRetired(w.env, record.copy)).toEqual({
+      kind: "observed",
+      unchanged: false,
+      matches: true,
+    });
+    expect((await w.env.held.read(keyOf(a.change))).kind).toBe("live");
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.sharing.calls.map((c) => c.op)).toEqual([
+      "readPolicy",
+      "readPolicy",
+    ]);
+  });
+
+  test("control: another policy at a later version is `observed`, neither unchanged nor matching; a failed read is `failed`; the record is kept each time", async () => {
+    const w = world();
+    const a = await w.hold(held({ attempt: A1 }));
+    const record = await discardHold(w.env.held, a);
+    if (record.kind !== "retired") throw new Error("setup");
+    w.sharing.next.policy.push(
+      ok({ version: 8, policy: { grants: [], exclude_accounts: ["x"] } }),
+      { ok: false, kind: "offline" } as never,
+    );
+    expect(await checkRetired(w.env, record.copy)).toEqual({
+      kind: "observed",
+      unchanged: false,
+      matches: false,
+    });
+    expect(await checkRetired(w.env, record.copy)).toEqual({ kind: "failed" });
+    expect((await w.env.held.read(keyOf(a.change))).kind).toBe("live");
+  });
+});
+
+describe("review 4 (C10): one binding per operation (T13, H11)", () => {
+  for (const rebound of [true, false])
+    test(`real port: ${rebound ? "the displayed database changes while the run's policy read is on its way: nothing is written to the new one and nothing is sent" : "control: the same database throughout runs it"}`, async () => {
+      const w = world();
+      const x = await outboxWorld();
+      const y = await outboxWorld();
+      let displayed = x.service;
+      const now = () => "2026-10-23T12:00:00.000Z";
+      w.env.held = heldStoreOver(
+        createConditionalFormPort({ service: () => displayed, now }),
+        now,
+      );
+      x.put("cache", [field()]);
+      w.setOutbox({
+        enqueue: (request: EnqueueRequest, handOff?: HandOff) =>
+          x.outbox.enqueue(request, handOff),
+      } as unknown as Outbox);
+      const shown = await w.hold();
+      const read = pending();
+      w.sharing.next.policy.push(
+        read.answer,
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      const running = runHeldChange(w.env, shown, w.run, w.deps);
+      await until(() => w.sharing.calls.length === 1);
+      if (rebound) displayed = y.service;
+      read.release(ok({ version: 6, policy: HOME_VIEW }));
+      const result = await running;
+      if (rebound) {
+        expect(result).toEqual({
+          kind: "failed",
+          reason: "not_saved",
+          kept: false,
+        });
+        expect(w.sharing.sent).toEqual([]);
+        expect(y.rows("form_recovery" as never)).toEqual([]);
+      } else {
+        expect(result).toEqual({ kind: "done", ended: true });
+        expect(w.sharing.sent).toHaveLength(1);
+      }
+    });
+
+  for (const rebound of [true, false])
+    test(`real port: ${rebound ? "the displayed database changes as 'Hold as draft' takes the field's lock: NOTHING is written to the new one (failed)" : "control: the same database throughout holds it there"}`, async () => {
+      const w = world();
+      const x = await outboxWorld();
+      const y = await outboxWorld();
+      let displayed = x.service;
+      const now = () => "2026-10-23T12:00:00.000Z";
+      w.env.held = heldStoreOver(
+        createConditionalFormPort({ service: () => displayed, now }),
+        now,
+      );
+      Object.assign(w.env, {
+        accountId: "acct",
+        exclusive: async <T>(_name: string, go: () => Promise<T>) => {
+          if (rebound) displayed = y.service;
+          return go();
+        },
+      });
+      const outcome = await holdChange(w.env, fresh("hold-a", "First"));
+      const rows = (world_: typeof x) =>
+        (world_.snapshot()?.form_recovery ?? []) as object[];
+      if (rebound) {
+        expect(outcome).toEqual({ kind: "failed", refused: false });
+        expect(rows(y)).toEqual([]);
+        expect(rows(x)).toEqual([]);
+      } else {
+        expect(outcome).toMatchObject({ kind: "held" });
+        expect(rows(x)).toHaveLength(2);
+      }
+    });
+});
+
+describe("review 4 (C10): legacy copies are never written back as runnable holds", () => {
+  test("a legacy copy is never written again except to be retired: a write is refused (failed); retirement keeps its attempt", async () => {
+    const w = world();
+    const legacy = (attempt: HeldChange["attempt"]) => {
+      const { seq: _s, retired: _r, legacy: _l, ...rest } = held({ attempt });
+      const fields = {
+        held: JSON.stringify({
+          ...rest,
+          holdId: undefined,
+          v: 3,
+          seq: 1,
+          retired: false,
+          failed: null,
+        }),
+      };
+      w.store.rows.set(`${CONTEXT}\u0000${HOLD}`, {
+        form_context: CONTEXT,
+        tab_instance_id: HOLD,
+        fields,
+        redacted: [],
+        saved_at: "2026-10-22T09:00:00.000Z",
+        capture_seq: 0,
+        writer_gen: Number.MAX_SAFE_INTEGER,
+        terminal: false,
+        content_digest: `legacy:${attempt?.key ?? "none"}`,
+      });
+    };
+    legacy(null);
+    const read = await w.env.held.read(keyOfHeld());
+    if (read.kind !== "live") throw new Error("setup");
+    expect(read.copy.change.legacy).toBe(true);
+    expect(
+      await w.env.held.update(read.copy, {
+        ...read.copy.change,
+        status: { kind: "waiting" },
+      }),
+    ).toEqual({ kind: "failed" });
+    expect((await w.env.held.read(keyOfHeld())).kind).toBe("live");
+    expect(w.stored()?.content_digest).toBe("legacy:none");
+    // An unresolved attempt of a legacy copy is kept as a record when it is discarded.
+    legacy(attemptOf("k-legacy"));
+    const withAttempt = await w.env.held.read(keyOfHeld());
+    if (withAttempt.kind !== "live") throw new Error("setup");
+    expect((await discardHold(w.env.held, withAttempt.copy)).kind).toBe(
+      "retired",
+    );
+    expect(w.storedHeld()).toMatchObject({
+      retired: true,
+      attempt: { key: "k-legacy" },
+    });
   });
 });

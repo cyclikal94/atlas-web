@@ -96,7 +96,11 @@ describe("the conditional form port", () => {
     expect(await port.end(CONTEXT, TAB, first.digest)).toEqual({
       kind: "ended",
     });
-    expect(await port.read(CONTEXT, TAB)).toEqual({ kind: "ended" });
+    // Adapted (review 4): an ended row is read as `ended` with what its terminal write kept (nothing, without a tombstone).
+    expect(await port.read(CONTEXT, TAB)).toMatchObject({
+      kind: "ended",
+      fields: {},
+    });
     expect(await port.end(CONTEXT, TAB, first.digest)).toEqual({
       kind: "changed",
       stored: "ended",
@@ -212,4 +216,169 @@ describe("the conditional form port", () => {
     expect(await ordinary.save(snap({ held: "revived" }))).toBe("failed");
     expect(await rowsOf(w)).toEqual([]);
   });
+});
+
+describe("review 4: several rows in one transaction, tombstones and one binding per operation (the assessment's C7, C10)", () => {
+  const head = (values: Record<string, string>) => ({
+    snapshot: { ...snap(values, "~head") },
+    terminal: true,
+  });
+
+  test("`apply` writes every row or none: a second row not as read leaves the first unwritten", async () => {
+    const w = await pageWorld();
+    const port = portOf(w);
+    expect(
+      await port.apply([
+        {
+          snapshot: snap({ held: "a" }),
+          terminal: false,
+          expect: { state: "absent" },
+        },
+        {
+          ...head({ h: "1" }),
+          expect: { state: "ended", digest: "not-there" },
+        },
+      ]),
+    ).toEqual({ kind: "changed", index: 1, stored: "absent" });
+    expect(await rowsOf(w)).toEqual([]);
+    expect(await port.read(CONTEXT, TAB)).toEqual({ kind: "absent" });
+    // Control: both as read, both written.
+    const both = await port.apply([
+      {
+        snapshot: snap({ held: "a" }),
+        terminal: false,
+        expect: { state: "absent" },
+      },
+      { ...head({ h: "1" }), expect: { state: "absent" } },
+    ]);
+    expect(both).toEqual({
+      kind: "saved",
+      digests: [digestOf({ held: "a" }), digestOf({ h: "1" })],
+    });
+    expect(await port.read(CONTEXT, "~head")).toEqual({
+      kind: "ended",
+      fields: { h: "1" },
+      digest: digestOf({ h: "1" }),
+    });
+    // A terminal row is never listed (a head is not a held change).
+    expect((await rowsOf(w)).map((row) => row.tab_instance_id)).toEqual([TAB]);
+  });
+
+  test("`apply` replaces a TERMINAL row only from the digest read (a field's head), never from another", async () => {
+    const w = await pageWorld();
+    const port = portOf(w);
+    await port.apply([{ ...head({ h: "1" }), expect: { state: "absent" } }]);
+    expect(
+      await port.apply([
+        { ...head({ h: "2" }), expect: { state: "ended", digest: "stale" } },
+      ]),
+    ).toEqual({ kind: "changed", index: 0, stored: "ended" });
+    expect(
+      await port.apply([
+        {
+          ...head({ h: "2" }),
+          expect: { state: "ended", digest: digestOf({ h: "1" }) },
+        },
+      ]),
+    ).toMatchObject({ kind: "saved" });
+    expect(await port.read(CONTEXT, "~head")).toMatchObject({
+      fields: { h: "2" },
+    });
+  });
+
+  test("`apply` is refused while signing out, and a failure inside the store is `failed` with nothing written", async () => {
+    const w = await pageWorld();
+    const port = portOf(w);
+    await w.service.store.run(setClosing, {
+      incarnationId: w.service.incarnationId,
+      now: 1,
+      token: "t",
+    });
+    expect(
+      await port.apply([
+        {
+          snapshot: snap({ held: "a" }),
+          terminal: false,
+          expect: { state: "absent" },
+        },
+      ]),
+    ).toEqual({ kind: "refused" });
+    const w2 = await pageWorld();
+    const run = w2.service.store.run.bind(w2.service.store);
+    w2.service.store.run = ((plan: { name: string }, input: never) =>
+      plan.name === "data.saveFormOperation"
+        ? Promise.reject(new Error("injected storage failure"))
+        : run(plan as never, input)) as typeof w2.service.store.run;
+    expect(
+      await portOf(w2).apply([
+        {
+          snapshot: snap({ held: "a" }),
+          terminal: false,
+          expect: { state: "absent" },
+        },
+      ]),
+    ).toEqual({ kind: "failed" });
+    expect(await rowsOf(w2)).toEqual([]);
+  });
+
+  test("an end keeps the caller's tombstone, and a read of the ended row says what it kept", async () => {
+    const w = await pageWorld();
+    const port = portOf(w);
+    const first = await port.put(snap({ held: "a" }), null);
+    if (first.kind !== "saved") throw new Error("setup");
+    expect(
+      await port.end(CONTEXT, TAB, first.digest, { held_end: "why" }),
+    ).toEqual({ kind: "ended" });
+    expect(await port.read(CONTEXT, TAB)).toEqual({
+      kind: "ended",
+      fields: { held_end: "why" },
+      digest: digestOf({ held_end: "why" }),
+    });
+    // Still terminal for every writer.
+    expect(await port.put(snap({ held: "late" }), null)).toEqual({
+      kind: "changed",
+      stored: "ended",
+    });
+  });
+
+  for (const moved of [true, false])
+    test(`a PINNED port ${moved ? "fails every call once another service is displayed: nothing reaches the new one" : "control: keeps working while its service is displayed"} (C10)`, async () => {
+      const x = await pageWorld();
+      const y = await pageWorld();
+      let displayed = x.service;
+      const port = createConditionalFormPort({
+        service: () => displayed,
+        now: () => NOW,
+      }).pinned();
+      expect((await port.put(snap({ held: "a" }), null)).kind).toBe("saved");
+      if (moved) displayed = y.service;
+      const answers = [
+        await port.put(snap({ held: "b" }, "hold-2"), null),
+        await port.apply([
+          {
+            snapshot: snap({ held: "c" }, "hold-3"),
+            terminal: false,
+            expect: { state: "absent" },
+          },
+        ]),
+        await port.read(CONTEXT, TAB),
+      ];
+      if (moved) {
+        expect(answers.map((answer) => answer.kind)).toEqual([
+          "failed",
+          "failed",
+          "failed",
+        ]);
+        expect(await port.list("people-held:", null)).toBeNull();
+        expect(await rowsOf(y)).toEqual([]);
+        expect((await rowsOf(x)).map((row) => row.tab_instance_id)).toEqual([
+          TAB,
+        ]);
+      } else
+        expect(answers.map((answer) => answer.kind)).toEqual([
+          "saved",
+          "saved",
+          "live",
+        ]);
+    });
 });

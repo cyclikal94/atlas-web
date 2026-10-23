@@ -99,6 +99,7 @@ export type {
   DiscardOutcome,
   EditOutcome,
   EnqueueOutcome,
+  HandOff,
   Outbox,
   SupersedeOutcome,
 } from "./outbox/outbox";
@@ -129,8 +130,10 @@ export type {
 } from "./plans/pending-reads";
 // The conditional port of WEB-11a's held changes (form copies that are operations): only lazy screens import it.
 export {
+  type ConditionalApply,
   type ConditionalEnd,
   type ConditionalFormPort,
+  type ConditionalOperation,
   type ConditionalPut,
   createConditionalFormPort,
   type FormRowRead,

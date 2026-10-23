@@ -18,6 +18,7 @@ import {
   type WriteFailureMarkers,
   witnessStops,
 } from "../engine/write-failure-marker";
+import { digestOf } from "../model/canonical";
 import { DATA_CONFIG, type DataConfig } from "../model/config";
 import {
   type EnqueueRequest,
@@ -43,6 +44,7 @@ import {
   type EnqueueResult,
   editQueuedDraft,
   enqueueDraft,
+  type FormHandOff,
   type LocalWriteRecord,
   type QueuePage,
   type Readmit,
@@ -51,6 +53,7 @@ import {
   readQueuePage,
   readQueueSummary,
   supersedeDraft,
+  transferDraft,
 } from "../plans/outbox";
 import { recordLocalWriteOutcome } from "../plans/retry-state";
 import {
@@ -78,7 +81,25 @@ export type RefusalReason =
    * The request stated what its caller saw (`EnqueueRequest.observed`) and the resource has changed since: nothing was stored. The
    * caller reads the resource again and the person decides again (WEB-13a revision 2); it is never resubmitted on their behalf.
    */
-  | "changed";
+  | "changed"
+  /** A hand-off's form copies are not as its caller read them, or a draft already has the id (`HandOff`): nothing was stored. */
+  | "source_changed";
+
+/**
+ * The form copy a save TAKES OVER (WEB-11a review 4, finding 1; `FormHandOff`): `source` (live, exactly as read) ends in the SAME
+ * transaction as the draft is written, keeping `tombstone` as its fields; `also` must be stored exactly as read too. A form copy of the
+ * conditional family only (the highest writer generation).
+ */
+export interface HandOff {
+  source: { formContext: string; tabInstanceId: string; digest: string };
+  tombstone: Record<string, string>;
+  also: ReadonlyArray<{
+    formContext: string;
+    tabInstanceId: string;
+    terminal: boolean;
+    digest: string;
+  }>;
+}
 
 export type EnqueueOutcome =
   | { kind: "queued"; localId: LocalId; createdSeq: number }
@@ -166,7 +187,8 @@ export type ConfirmReviewOutcome =
     };
 
 export interface Outbox {
-  enqueue(request: EnqueueRequest): Promise<EnqueueOutcome>;
+  /** `handOff`: the save takes over that form copy, which ends in the same transaction (nothing is queued unless it does). */
+  enqueue(request: EnqueueRequest, handOff?: HandOff): Promise<EnqueueOutcome>;
   /** The body of a `queued` draft only; the change of anything else is a new draft. */
   editQueued(localId: LocalId, next: EnqueueRequest): Promise<EditOutcome>;
   discard(localId: LocalId): Promise<DiscardOutcome>;
@@ -392,6 +414,33 @@ function createPagedQueue(
       move(() => {
         after = trail.pop() ?? null;
       });
+    },
+  };
+}
+
+/** A caller's hand-off as the plan writes it (copied now: what is checked is what is written). PURE. */
+function handOffOf(
+  given: HandOff | undefined,
+  now: string,
+): FormHandOff | undefined {
+  if (given === undefined) return undefined;
+  const fields = { ...given.tombstone };
+  return {
+    expect: [{ ...given.source, terminal: false }, ...given.also].map(
+      (row) => ({ ...row }),
+    ),
+    tombstone: {
+      form_context: given.source.formContext,
+      tab_instance_id: given.source.tabInstanceId,
+      fields,
+      redacted: [],
+      saved_at: now,
+      capture_seq: 0,
+      // The conditional family's generation (`MAX_WRITER_GEN`, the highest): written as the value, because importing the form-recovery
+      // plans here would move them into the initial chunk (measured: +904 B gzip for the fixture build).
+      writer_gen: Number.MAX_SAFE_INTEGER,
+      terminal: true,
+      content_digest: digestOf(fields),
     },
   };
 }
@@ -975,10 +1024,14 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     }
   }
 
-  async function enqueue(given: EnqueueRequest): Promise<EnqueueOutcome> {
+  async function enqueue(
+    given: EnqueueRequest,
+    givenHandOff?: HandOff,
+  ): Promise<EnqueueOutcome> {
     // The request is copied before anything is awaited: what is validated is what is stored (R39, revision 22).
     const request = snapshotRequest(given);
     validateRequest(request);
+    const handOff = handOffOf(givenHandOff, deps.clock.iso());
     if (!service.live)
       return {
         kind: "refused",
@@ -993,15 +1046,19 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         let written = false;
         const issued = issue([operation]);
         const run = (): Promise<EnqueueResult> =>
-          service.store.run(enqueueDraft, {
-            incarnationId: service.incarnationId,
-            request,
-            localId,
-            accountId: service.account,
-            now: deps.clock.iso(),
-            maxBytes,
-            leaseLive: () => reservation.live(),
-          });
+          service.store.run(
+            handOff === undefined ? enqueueDraft : transferDraft,
+            {
+              incarnationId: service.incarnationId,
+              request,
+              localId,
+              accountId: service.account,
+              now: deps.clock.iso(),
+              maxBytes,
+              leaseLive: () => reservation.live(),
+              ...(handOff === undefined ? {} : { handOff }),
+            },
+          );
         try {
           let result = await run();
           if (result.kind === "refused" && result.reason === "fenced")

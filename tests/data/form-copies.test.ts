@@ -102,6 +102,7 @@ const change = (over: Partial<HeldChange> = {}): HeldChange => ({
   queued: false,
   seq: 0,
   retired: false,
+  legacy: false,
   ...over,
 });
 
@@ -250,21 +251,27 @@ describe("a held change is a durable form copy of the account (Q3, Q20)", () => 
   test("held through the real conditional port, it is listed and read back exactly; an end from its stored state ends it", async () => {
     const w = await pageWorld();
     const store = heldStore(w);
-    const created = await store.create(change());
+    const created = await store.create(change(), null);
     expect(created.kind).toBe("saved");
     const page = await list(w, heldPrefixOf(P));
     expect(page.copies).toHaveLength(1);
     expect(decodeHeld(page.copies[0] as FormRecoveryRow)).toEqual(change());
     const digest = (page.copies[0] as FormRecoveryRow).content_digest;
     expect(created.kind === "saved" && created.copy.digest).toBe(digest);
-    expect(await store.end(KEY, digest)).toEqual({ kind: "ended" });
+    expect(await store.end(KEY, digest, "discarded", 0)).toEqual({
+      kind: "ended",
+    });
     expect((await list(w, heldPrefixOf(P))).copies).toEqual([]);
-    expect(await store.read(KEY)).toEqual({ kind: "ended" });
+    // Adapted (review 4): an ended hold keeps WHY it ended (its tombstone); it is still `ended`, never live or absent.
+    expect(await store.read(KEY)).toEqual({
+      kind: "ended",
+      tombstone: { seq: 0, cause: "discarded", localId: null },
+    });
   });
 
   test("it is unsynced local work: a logout warns about it and its consent binds to it (category form_copy)", async () => {
     const w = await pageWorld();
-    await heldStore(w).create(change());
+    await heldStore(w).create(change(), null);
     const copies = (await list(w, heldPrefixOf(P))).copies;
     expect(population([], copies)).toEqual([
       { kind: "form", category: "form_copy", row: copies[0] },
@@ -291,7 +298,8 @@ describe("a held change is a durable form copy of the account (Q3, Q20)", () => 
         }),
       },
     });
-    expect(decodeHeld(first)).toEqual(change());
+    // Adapted (review 4): an earlier shape is read as before, and marked LEGACY (never run).
+    expect(decodeHeld(first)).toEqual({ ...change(), legacy: true });
   });
 
   test("a copy that is not a held change this page can read is never decoded as one", () => {

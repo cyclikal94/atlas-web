@@ -9,6 +9,11 @@ import {
   readFormCopies,
 } from "../plans/form-copies";
 import {
+  type FormOperation,
+  type FormState,
+  saveFormOperation,
+} from "../plans/form-operations";
+import {
   type FormWriteResult,
   MAX_WRITER_GEN,
   saveFormRecovery,
@@ -24,10 +29,18 @@ import { type FormRecoveryPortDeps, recoveryWriteBytes } from "./form-recovery";
  *
  *  - `put`: `saved` (with the new digest, the caller's next `expect`), `changed` (another state is stored: nothing written, and what is
  *    there), `refused` (`closing`: signing out, D-16), `failed` (no service, the quota guard refused, the write failed).
- *  - `end`: the row becomes TERMINAL (its fields cleared; kept, never hard-deleted) only from the state the caller read; `ended`, or
- *    `changed`/`refused`/`failed` as above. A row that is already terminal answers `changed` with `stored: "ended"`.
- *  - `read`: `live` (the row), `ended`, `absent`, or `failed` (no service, the read failed): a failure is never absence.
+ *  - `end`: the row becomes TERMINAL (kept, never hard-deleted) only from the state the caller read; `ended`, or `changed`/`refused`/
+ *    `failed` as above. A row that is already terminal answers `changed` with `stored: "ended"`. Its content is cleared; what it keeps is
+ *    only the caller's small `tombstone` (WEB-11a review 4: WHY the operation ended, so that an ended operation is never taken for one
+ *    that can run again). A tombstone is far smaller than any live copy of the family, so ending needs no room.
+ *  - `read`: `live` (the row), `ended` (with what its tombstone kept), `absent`, or `failed` (no service, the read failed): a failure is
+ *    never absence.
+ *  - `apply`: several rows in ONE transaction, each only while it is stored as read (`saveFormOperation`): all are written or none.
  *  - `list`: one bounded, resumable page of the family (`readFormCopies`), or null when it could not be read.
+ *
+ * ONE BINDING PER OPERATION (WEB-11a review 4; the design assessment's C10): `pinned()` is a port bound to the service displayed when it is
+ * called. An operation that makes several calls (a held change's run, its replacement) takes one at its start, so a call made after the
+ * displayed account or its database changed FAILS instead of reaching whichever service is current then.
  *
  * The rows are admitted like any recovery copy (the WHOLE row is sized and reserved with the quota guard before it is written, and written
  * only while that hold stands, R28/R33), are counted in the unsynced local work, refused while signing out, and deleted only with the
@@ -49,8 +62,23 @@ export type ConditionalEnd =
 
 export type FormRowRead =
   | { kind: "live"; row: FormRecoveryRow }
-  | { kind: "ended" }
+  | { kind: "ended"; fields: Record<string, string>; digest: string }
   | { kind: "absent" }
+  | { kind: "failed" };
+
+/** One row of an `apply`: the copy to store, whether it is terminal, and what must be stored now. */
+export interface ConditionalOperation {
+  snapshot: RecoverySnapshot;
+  terminal: boolean;
+  expect: FormOperation["expect"];
+}
+
+export type ConditionalApply =
+  /** Every row was written; `digests` are their new `content_digest`s, in order. */
+  | { kind: "saved"; digests: string[] }
+  /** Row `index` is not stored as expected: nothing was written. */
+  | { kind: "changed"; index: number; stored: FormState }
+  | { kind: "refused" }
   | { kind: "failed" };
 
 export interface ConditionalFormPort {
@@ -62,12 +90,16 @@ export interface ConditionalFormPort {
     formContext: string,
     tabInstanceId: string,
     expect: string,
+    tombstone?: Record<string, string>,
   ): Promise<ConditionalEnd>;
   read(formContext: string, tabInstanceId: string): Promise<FormRowRead>;
+  apply(operations: readonly ConditionalOperation[]): Promise<ConditionalApply>;
   list(
     prefix: string,
     after: FormCopyCursor | null,
   ): Promise<FormCopiesPage | null>;
+  /** This port bound to the service displayed NOW: once another one is displayed, every call fails. */
+  pinned(): ConditionalFormPort;
 }
 
 /** How many times one copy is admitted when the hold it was admitted under ends before the write begins (the outbox's bound, R28). */
@@ -82,6 +114,25 @@ const unwritten = (result: FormWriteResult): ConditionalPut | null =>
         ? null
         : { kind: "failed" };
 
+/** The row a conditional copy is stored as (the highest writer generation; a terminal one keeps `values` as its tombstone). */
+const rowOf = (
+  snapshot: RecoverySnapshot,
+  terminal: boolean,
+): FormRecoveryRow => {
+  const fields = { ...snapshot.values };
+  return {
+    form_context: snapshot.formContext,
+    tab_instance_id: snapshot.tabInstanceId,
+    fields,
+    redacted: [],
+    saved_at: snapshot.savedAt,
+    capture_seq: 0,
+    writer_gen: MAX_WRITER_GEN,
+    terminal,
+    content_digest: digestOf(fields),
+  };
+};
+
 export function createConditionalFormPort(
   deps: FormRecoveryPortDeps,
 ): ConditionalFormPort {
@@ -92,18 +143,7 @@ export function createConditionalFormPort(
       // The capture is fixed NOW (the caller may go on changing its object): what is sized and written is this copy.
       let row: FormRecoveryRow;
       try {
-        const fields = { ...snapshot.values };
-        row = {
-          form_context: snapshot.formContext,
-          tab_instance_id: snapshot.tabInstanceId,
-          fields,
-          redacted: [],
-          saved_at: snapshot.savedAt,
-          capture_seq: 0,
-          writer_gen: MAX_WRITER_GEN,
-          terminal: false,
-          content_digest: digestOf(fields),
-        };
+        row = rowOf(snapshot, false);
       } catch {
         return { kind: "failed" };
       }
@@ -136,24 +176,23 @@ export function createConditionalFormPort(
       }
     },
 
-    async end(formContext, tabInstanceId, expect) {
+    async end(formContext, tabInstanceId, expect, tombstone = {}) {
       const service = deps.service();
       if (!service) return { kind: "failed" };
       try {
-        // It replaces a live row with less, so it needs no room; with no row it writes nothing (`mayCreate: false`).
+        // It replaces a live row with less (a tombstone is far smaller than a copy), so it needs no room; with no row it writes nothing
+        // (`mayCreate: false`).
         const result = await service.store.run(saveFormRecovery, {
           incarnationId: service.incarnationId,
-          row: {
-            form_context: formContext,
-            tab_instance_id: tabInstanceId,
-            fields: {},
-            redacted: [],
-            saved_at: deps.now(),
-            capture_seq: 0,
-            writer_gen: MAX_WRITER_GEN,
-            terminal: true,
-            content_digest: digestOf({}),
-          },
+          row: rowOf(
+            {
+              formContext,
+              tabInstanceId,
+              values: tombstone,
+              savedAt: deps.now(),
+            },
+            true,
+          ),
           expect: { digest: expect },
           mayCreate: false,
         });
@@ -182,6 +221,52 @@ export function createConditionalFormPort(
       }
     },
 
+    async apply(operations) {
+      const service = deps.service();
+      if (!service) return { kind: "failed" };
+      let rows: FormRecoveryRow[];
+      try {
+        rows = operations.map((operation) =>
+          rowOf(operation.snapshot, operation.terminal),
+        );
+      } catch {
+        return { kind: "failed" };
+      }
+      // Every row is reserved whole: an `apply` creates rows (a new hold, a field's first head).
+      const bytes = rows.reduce((sum, row) => sum + recoveryWriteBytes(row), 0);
+      for (let round = 1; ; round += 1) {
+        let reservation: QuotaReservation | undefined;
+        let written = false;
+        try {
+          reservation = await deps.quota?.reserve("input", bytes);
+          if (reservation?.verdict === "refuse") return { kind: "failed" };
+          const held = reservation;
+          const result = await service.store.run(saveFormOperation, {
+            incarnationId: service.incarnationId,
+            operations: rows.map((row, index) => ({
+              row,
+              expect: (operations[index] as ConditionalOperation).expect,
+            })),
+            ...(held === undefined ? {} : { leaseLive: () => held.live() }),
+          });
+          if (result.kind !== "lease_lapsed") {
+            written = result.kind === "saved";
+            return result.kind === "saved"
+              ? {
+                  kind: "saved",
+                  digests: rows.map((row) => row.content_digest),
+                }
+              : result;
+          }
+        } catch {
+          return { kind: "failed" };
+        } finally {
+          reservation?.settle(written ? "written" : "not_written");
+        }
+        if (round >= ADMISSION_ROUNDS) return { kind: "failed" };
+      }
+    },
+
     async list(prefix, after) {
       const service = deps.service();
       if (!service) return null;
@@ -194,6 +279,17 @@ export function createConditionalFormPort(
       } catch {
         return null;
       }
+    },
+
+    pinned() {
+      const bound = deps.service();
+      return createConditionalFormPort({
+        ...deps,
+        service: () => {
+          const now = deps.service();
+          return bound !== null && now === bound ? bound : null;
+        },
+      });
     },
   };
 }

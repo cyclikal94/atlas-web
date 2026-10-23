@@ -8,6 +8,7 @@ import "../../src/data/plans/fence";
 import "../../src/data/plans/commit-page";
 import "../../src/data/plans/defaults";
 import "../../src/data/plans/form-recovery";
+import "../../src/data/plans/form-operations";
 import "../../src/data/plans/outbox";
 import "../../src/data/plans/pending-reads";
 import "../../src/data/plans/profile";
@@ -249,6 +250,28 @@ describe("F-S7: the writer inventory", () => {
     expect(by("data.editQueuedDraft")?.guards).toEqual(
       expect.arrayContaining(["INC", "FEN"]),
     );
+    // WEB-11a review 4: the hand-off also ends a form copy, so it carries that writer's guard (CLS) and its store.
+    expect(by("data.transferDraft")?.guards).toEqual(
+      expect.arrayContaining(["INC", "FEN", "CLS"]),
+    );
+    expect([...(by("data.transferDraft")?.scope ?? [])].sort()).toEqual(
+      [
+        "cache",
+        "draft_commands",
+        "drafts",
+        "form_recovery",
+        "resource_versions",
+        "sync_state",
+      ].sort(),
+    );
+    expect(by("data.saveFormOperation")).toMatchObject({
+      writer: "W9",
+      durability: "strict",
+    });
+    expect([...(by("data.saveFormOperation")?.scope ?? [])].sort()).toEqual([
+      "form_recovery",
+      "sync_state",
+    ]);
     expect(by("data.supersedeDraft")?.guards).toEqual(
       expect.arrayContaining(["INC", "FEN"]),
     );
@@ -282,9 +305,13 @@ describe("F-S7: the writer inventory", () => {
       "data.commitStagingPage",
       "data.activateSnapshot",
       "data.enqueueDraft",
+      // WEB-11a review 4: a held change's hand-off (the draft and its copy's end, one transaction), admitted like an enqueue.
+      "data.transferDraft",
       "data.editQueuedDraft",
       "data.supersedeDraft",
       "data.saveFormRecovery",
+      // WEB-11a review 4: several conditional copies in one transaction (a hold and its field's head), admitted by the conditional port.
+      "data.saveFormOperation",
       // WEB-12a: the B5 sharing snapshot is server-sized (up to 32 households of 100 members), admitted as a cache write by the defaults source.
       "data.writeDefaults",
     ];

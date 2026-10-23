@@ -12,6 +12,7 @@ import {
   type EnqueueOutcome,
   type EnqueueRequest,
   type FormRecoveryRow,
+  type HandOff,
   type JsonObject,
   type Loadable,
 } from "../../../src/data";
@@ -35,6 +36,7 @@ import {
 import {
   decodeHeld,
   encodeHeld,
+  HEAD_TAB,
   type HeldChange,
   type HeldStore,
   heldContextOf,
@@ -369,6 +371,15 @@ export interface PeopleWorld {
   noDatabase(): void;
   /** Every list read fails (the store's `error`). */
   failReads(): void;
+  /**
+   * Reads of `plan` whose input `match` accepts fail (the store's `error`) until `restoreReads` (review 4, finding 5: an archive inventory
+   * read that fails, for one kind, one parent or the outstanding drafts).
+   */
+  failRead(
+    plan: string,
+    match?: (input: Record<string, unknown>) => boolean,
+  ): void;
+  restoreReads(): void;
   /** The sync engine applied a page of changes (`sync_state.applied_revision` moves): the summaries' invalidation signal. */
   advanceRevision(): void;
   mount(path: string): Promise<{ router: ReturnType<typeof createAppRouter> }>;
@@ -397,6 +408,11 @@ export function peopleWorld(
     for (const listener of [...listeners]) listener();
   };
   const memo = new Map<string, { version: number; value: Loadable<unknown> }>();
+  const FAILED: Loadable<unknown> = { status: "unavailable", reason: "error" };
+  const faults: Array<{
+    plan: string;
+    match: (input: Record<string, unknown>) => boolean;
+  }> = [];
   const answer = (key: string, compute: () => Loadable<unknown>) => {
     const known = memo.get(key);
     if (known !== undefined && known.version === version) return known.value;
@@ -501,11 +517,23 @@ export function peopleWorld(
       watch: (plan: { name: string }, input: Record<string, unknown>) => {
         const key = `${plan.name}:${JSON.stringify(input)}`;
         const compute = plans[plan.name];
+        // A watch that answered a `failRead` fault stays failed (a live query ENDS at its first error): only a new watch reads again.
+        let ended = false;
         return {
-          get: () =>
-            compute === undefined
-              ? ({ status: "loading" } as Loadable<unknown>)
-              : answer(key, () => compute(input)),
+          get: () => {
+            if (compute === undefined)
+              return { status: "loading" } as Loadable<unknown>;
+            if (
+              ended ||
+              faults.some(
+                (fault) => fault.plan === plan.name && fault.match(input),
+              )
+            ) {
+              ended = true;
+              return FAILED;
+            }
+            return answer(key, () => compute(input));
+          },
           subscribe: (listener: Listener) => {
             listeners.add(listener);
             return () => {
@@ -576,15 +604,47 @@ export function peopleWorld(
   };
   let outboxAvailable = true;
   const outbox = {
-    enqueue: async (request: EnqueueRequest) => {
+    enqueue: async (request: EnqueueRequest, handOff?: HandOff) => {
       const scripted = outcomes.shift();
       if (scripted !== undefined && scripted.kind === "refused")
         return scripted;
       const localId = request.localId ?? nextLocalId();
+      // A hand-off (`transferDraft`): its copies must be as read and no draft may have the id; then the draft and the copy's end are one step.
+      if (handOff !== undefined) {
+        const wanted = [
+          { ...handOff.source, terminal: false },
+          ...handOff.also,
+        ];
+        const holds = wanted.every((want) => {
+          const row = copies.get(copyKey(want.formContext, want.tabInstanceId));
+          return (
+            row !== undefined &&
+            row.terminal === want.terminal &&
+            row.content_digest === want.digest
+          );
+        });
+        if (!holds || drafts.some((d) => d.local_id === localId))
+          return {
+            kind: "refused",
+            reason: "source_changed",
+          } as EnqueueOutcome;
+      }
       // The same save again (a retry after a lost completion): nothing is added.
-      if (drafts.some((d) => d.local_id === localId))
+      else if (drafts.some((d) => d.local_id === localId))
         return { kind: "queued", localId, createdSeq: seq } as EnqueueOutcome;
       const result = record("enqueue", request, localId);
+      if (handOff !== undefined) {
+        const key = copyKey(
+          handOff.source.formContext,
+          handOff.source.tabInstanceId,
+        );
+        copies.set(key, {
+          ...(copies.get(key) as FormRecoveryRow),
+          fields: { ...handOff.tombstone },
+          terminal: true,
+          content_digest: digestOf(handOff.tombstone),
+        });
+      }
       drafts = [
         ...drafts,
         {
@@ -724,7 +784,7 @@ export function peopleWorld(
       later();
       return { kind: "saved", digest };
     },
-    async end(formContext, tab, expect) {
+    async end(formContext, tab, expect, tombstone = {}) {
       const answer = heldEnds.shift();
       if (answer !== undefined) return { kind: answer };
       const key = copyKey(formContext, tab);
@@ -734,9 +794,9 @@ export function peopleWorld(
         return { kind: "changed", stored: state };
       copies.set(key, {
         ...(stored as FormRecoveryRow),
-        fields: {},
+        fields: { ...tombstone },
         terminal: true,
-        content_digest: digestOf({}),
+        content_digest: digestOf(tombstone),
       });
       later();
       return { kind: "ended" };
@@ -746,8 +806,56 @@ export function peopleWorld(
       return stored === undefined
         ? { kind: "absent" }
         : stored.terminal
-          ? { kind: "ended" }
+          ? {
+              kind: "ended",
+              fields: { ...stored.fields },
+              digest: stored.content_digest,
+            }
           : { kind: "live", row: { ...stored, fields: { ...stored.fields } } };
+    },
+    async apply(operations) {
+      const answer = heldSaves.shift() ?? "write";
+      if (answer === "failed" || answer === "refused") return { kind: answer };
+      for (const [index, operation] of operations.entries()) {
+        const stored = copies.get(
+          copyKey(
+            operation.snapshot.formContext,
+            operation.snapshot.tabInstanceId,
+          ),
+        );
+        const state = stateOf(stored);
+        const want = operation.expect;
+        if (
+          want.state !== state ||
+          (want.state !== "absent" && stored?.content_digest !== want.digest)
+        )
+          return { kind: "changed", index, stored: state };
+      }
+      const digests = operations.map((operation) => {
+        const digest = digestOf(operation.snapshot.values);
+        copies.set(
+          copyKey(
+            operation.snapshot.formContext,
+            operation.snapshot.tabInstanceId,
+          ),
+          {
+            form_context: operation.snapshot.formContext,
+            tab_instance_id: operation.snapshot.tabInstanceId,
+            fields: { ...operation.snapshot.values },
+            redacted: [],
+            saved_at: new Date(Date.now() + copies.size).toISOString(),
+            capture_seq: 0,
+            terminal: operation.terminal,
+            content_digest: digest,
+          },
+        );
+        return digest;
+      });
+      later();
+      return { kind: "saved", digests };
+    },
+    pinned() {
+      return heldPort;
     },
     async list(prefix, after) {
       return copiesPage(prefix, after);
@@ -868,6 +976,26 @@ export function peopleWorld(
         terminal: false,
         content_digest: digestOf(fields),
       });
+      // As "Hold as draft" writes it: the field's head names the hold put last (a retired record is never current).
+      if (!change.retired) {
+        const head = {
+          held_head: JSON.stringify({
+            v: 1,
+            seq: change.seq,
+            current: change.holdId,
+          }),
+        };
+        copies.set(copyKey(context, HEAD_TAB), {
+          form_context: context,
+          tab_instance_id: HEAD_TAB,
+          fields: head,
+          redacted: [],
+          saved_at: new Date().toISOString(),
+          capture_seq: 0,
+          terminal: true,
+          content_digest: digestOf(head),
+        });
+      }
       act(() => notify());
     },
     putBody(localId, command) {
@@ -907,6 +1035,15 @@ export function peopleWorld(
     },
     failReads() {
       failing = true;
+      act(() => notify());
+    },
+    failRead(plan, match = () => true) {
+      faults.push({ plan, match });
+      act(() => notify());
+    },
+    restoreReads() {
+      faults.length = 0;
+      failing = false;
       act(() => notify());
     },
     advanceRevision() {

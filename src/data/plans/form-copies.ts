@@ -120,13 +120,14 @@ function sortCopies(rows: FormRecoveryRow[]): FormRecoveryRow[] {
 /**
  * One form copy as it is stored (review 2 of 22 October 2026, finding 2): `live` with its row, `ended` (terminal: discarded or finished)
  * or `absent`, kept apart, because an operation that ended must never be taken for one that was never there, nor a failed read for
- * either (the caller's failure). READONLY.
+ * either (the caller's failure). An ended row's `fields` are what its last terminal write kept (empty for a discarded form; WEB-11a review
+ * 4: a held operation keeps WHY it ended, and a field's head lives in a terminal row). READONLY.
  */
 export const inspectFormRecovery = readPlan<
   { incarnationId: string; formContext: string; tabInstanceId: string },
   FormRecoveryRow | undefined,
   | { kind: "live"; row: FormRecoveryRow }
-  | { kind: "ended" }
+  | { kind: "ended"; fields: Record<string, string>; digest: string }
   | { kind: "absent" }
 >({
   name: "data.inspectFormRecovery",
@@ -137,6 +138,10 @@ export const inspectFormRecovery = readPlan<
     stored === undefined
       ? { kind: "absent" }
       : stored.terminal
-        ? { kind: "ended" }
+        ? {
+            kind: "ended",
+            fields: stored.fields,
+            digest: stored.content_digest,
+          }
         : { kind: "live", row: stored },
 });

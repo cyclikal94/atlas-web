@@ -12,6 +12,7 @@
 export {
   type ArchivedLedgerKind,
   archivedLedgerKinds,
+  type LedgerReport,
 } from "./archived/ledger";
 export type { PersonDetailSlots } from "./detail/PersonDetail";
 export { PeopleBoundary, type PeopleEnv, PeopleEnvProvider } from "./env";

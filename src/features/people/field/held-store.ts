@@ -3,6 +3,7 @@ import type {
   FormCopiesPage,
   FormCopyCursor,
   FormRecoveryRow,
+  HandOff,
   Policy,
 } from "../../../data";
 import type { Attempt } from "../model/attempt";
@@ -43,8 +44,24 @@ import { type FieldValue, parseFieldValue } from "../model/values";
  * record that keeps the attempt, the audience asked for and the version it was guarded by, and no content (its value is cleared). It never
  * runs and never queues anything; the person checks it ("Check now", one owner-only read) or discards it, and a later hold of exactly the
  * same change takes its attempt over (the same key and body) before it is ended.
+ *
+ * DURABLE AUTHORITY AND OUTCOMES (review 4 of 23 October 2026, findings 1–3; the third design assessment's C7–C10). What may run, and
+ * what already happened, are never inferred from which copies are still live:
+ *
+ *  - Each field has a HEAD (`HeldHead`: a terminal row `~head` of the field's context, so it is never listed, restored or counted as
+ *    unsynced work): the field's generation and its CURRENT hold. A hold and the head that makes it current are written in ONE
+ *    transaction (`create`, through the port's `apply`); the head never goes back, so ending, retiring or handing off the current hold
+ *    never makes an earlier one current again. Only the head's current hold may run.
+ *  - An ended hold keeps a TOMBSTONE (`HeldTombstone`): its generation and WHY it ended (`discarded`, `replaced`, `forgotten`, or
+ *    `transferred` to the outbox under its local id). A hand-off ends the copy in the same transaction as its draft is written (`handOffOf`,
+ *    the outbox's `HandOff`), so it is never queued twice, whatever Sync does with the draft afterwards.
+ *  - Copies of the earlier shapes (v 1–3) are LEGACY: they were written before heads and tombstones, so whether they were already queued
+ *    and discarded in Sync, or replaced by a hold that has since ended, cannot be known. They are kept, shown and discardable, never run,
+ *    never written again and never retired automatically.
  */
 export const HELD_FORM = "people-held:";
+/** The tab id of a field's head row (sorts after every hold id: hold ids are UUIDs). */
+export const HEAD_TAB = "~head";
 
 export const heldPrefixOf = (personId: string): string =>
   `${HELD_FORM}${personId}:`;
@@ -88,7 +105,38 @@ export interface HeldChange {
   seq: number;
   /** Retired with its policy attempt unresolved: a reconciliation record, never run (its content is cleared). */
   retired: boolean;
+  /** Read from an earlier shape (v 1–3, before heads and tombstones): kept and discardable, never run or written again. Never stored. */
+  legacy: boolean;
 }
+
+/** Why a hold ended (its tombstone), or null for a copy ended before tombstones (its fields were cleared). */
+export type HeldEndCause =
+  | "discarded"
+  | "replaced"
+  | "transferred"
+  | "forgotten";
+
+export interface HeldTombstone {
+  /** The ended hold's generation, or null when not known (an unreadable copy, or an end before tombstones). */
+  seq: number | null;
+  cause: HeldEndCause | null;
+  /** `transferred`: the local id its content was queued under. */
+  localId: string | null;
+}
+
+/** A field's head: its generation and its current hold, with the digest of the stored row (the only state a create may replace). */
+export interface HeldHead {
+  seq: number;
+  current: string;
+  digest: string;
+}
+
+export type HeadRead =
+  | { kind: "head"; head: HeldHead }
+  /** No hold of this field was ever made by this shape: its holds (if any) are legacy. */
+  | { kind: "none" }
+  /** The head could not be read, or cannot be understood: nothing about the field's current hold is known. */
+  | { kind: "failed" };
 
 /** A held change with the digest of the stored state it was read as: the only state a write of it may replace. */
 export interface HeldCopy {
@@ -121,7 +169,7 @@ export type HeldRead =
   | { kind: "live"; copy: HeldCopy }
   /** A live copy this page cannot read (an older shape, a damaged value): it can only be ended, from its digest. */
   | { kind: "unreadable"; digest: string }
-  | { kind: "ended" }
+  | { kind: "ended"; tombstone: HeldTombstone }
   | { kind: "absent" }
   /** The store could not be read: never taken for absence. */
   | { kind: "failed" };
@@ -180,14 +228,17 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
   } catch {
     return null;
   }
-  if (!isObject(raw) || (raw.v !== 1 && raw.v !== 2 && raw.v !== 3))
+  if (
+    !isObject(raw) ||
+    (raw.v !== 1 && raw.v !== 2 && raw.v !== 3 && raw.v !== 4)
+  )
     return null;
   // The first shape (v 1) had no state number and no content admission: it is read as state 0, not admitted. Neither it nor v 2 had a
-  // generation or a retirement: generation 0, live.
+  // generation or a retirement: generation 0, live. v 4 has no content admission (a hand-off is one commit with its draft).
   const rev = raw.v === 1 ? 0 : raw.rev;
-  const queued = raw.v === 1 ? false : raw.queued;
-  const seq = raw.v === 3 ? raw.seq : 0;
-  const retired = raw.v === 3 ? raw.retired : false;
+  const queued = raw.v === 1 || raw.v === 4 ? false : raw.queued;
+  const seq = raw.v === 3 || raw.v === 4 ? raw.seq : 0;
+  const retired = raw.v === 3 || raw.v === 4 ? raw.retired : false;
   if (
     !isVersion(rev) ||
     typeof queued !== "boolean" ||
@@ -251,6 +302,7 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
     queued,
     seq,
     retired,
+    legacy: raw.v !== 4,
   };
 }
 
@@ -258,9 +310,8 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
 export function encodeHeld(change: HeldChange): Record<string, string> {
   return {
     held: JSON.stringify({
-      v: 3,
+      v: 4,
       rev: change.rev,
-      queued: change.queued,
       seq: change.seq,
       retired: change.retired,
       fieldId: change.fieldId,
@@ -279,6 +330,94 @@ export function encodeHeld(change: HeldChange): Record<string, string> {
   };
 }
 
+const CAUSES: ReadonlySet<string> = new Set<HeldEndCause>([
+  "discarded",
+  "replaced",
+  "transferred",
+  "forgotten",
+]);
+
+/** The fields an ended hold keeps. PURE. */
+export const encodeTombstone = (
+  seq: number | null,
+  cause: HeldEndCause,
+  localId: string | null = null,
+): Record<string, string> => ({
+  held_end: JSON.stringify({ v: 1, seq, cause, localId }),
+});
+
+/** What an ended copy's fields say; an end before tombstones (cleared fields) or one this page cannot read says nothing. PURE. */
+export function decodeTombstone(fields: Record<string, string>): HeldTombstone {
+  const unknown: HeldTombstone = { seq: null, cause: null, localId: null };
+  const text = fields.held_end;
+  if (typeof text !== "string") return unknown;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return unknown;
+  }
+  if (!isObject(raw) || raw.v !== 1) return unknown;
+  return {
+    seq: isVersion(raw.seq) ? raw.seq : null,
+    cause:
+      typeof raw.cause === "string" && CAUSES.has(raw.cause)
+        ? (raw.cause as HeldEndCause)
+        : null,
+    localId: typeof raw.localId === "string" ? raw.localId : null,
+  };
+}
+
+const encodeHead = (seq: number, current: string): Record<string, string> => ({
+  held_head: JSON.stringify({ v: 1, seq, current }),
+});
+
+/** A field's head from its row's fields, or null when they cannot be understood. PURE. */
+export function decodeHead(
+  fields: Record<string, string>,
+  digest: string,
+): HeldHead | null {
+  const text = fields.held_head;
+  if (typeof text !== "string") return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return isObject(raw) &&
+    raw.v === 1 &&
+    isVersion(raw.seq) &&
+    typeof raw.current === "string"
+    ? { seq: raw.seq, current: raw.current, digest }
+    : null;
+}
+
+/**
+ * The outbox HAND-OFF of a hold's content (review 4, finding 1): the hold's copy, live exactly as `copy` was read, ends as `transferred`
+ * (with the local id) in the same transaction as its draft is written, and only while the field's head is still `head`. PURE.
+ */
+export const handOffOf = (copy: HeldCopy, head: HeldHead): HandOff => ({
+  source: {
+    formContext: heldContextOf(copy.change.personId, copy.change.fieldId),
+    tabInstanceId: copy.change.holdId,
+    digest: copy.digest,
+  },
+  tombstone: encodeTombstone(
+    copy.change.seq,
+    "transferred",
+    copy.change.holdId,
+  ),
+  also: [
+    {
+      formContext: heldContextOf(copy.change.personId, copy.change.fieldId),
+      tabInstanceId: HEAD_TAB,
+      terminal: true,
+      digest: head.digest,
+    },
+  ],
+});
+
 /**
  * The held changes of the displayed account (production: the CONDITIONAL port over the account's database). Every answer is typed and
  * none is inferred: `create` writes a hold whose copy must not exist yet; `update` writes the next state of the one read as `from` (its
@@ -286,15 +425,30 @@ export function encodeHeld(change: HeldChange): Record<string, string> {
  * one bounded, resumable page of a person's (or one field's) holds, or null when it could not be read.
  */
 export interface HeldStore {
-  create(change: HeldChange): Promise<HeldWrite>;
+  /**
+   * CREATE AND PROMOTE: the new hold (whose copy must not exist yet) and its field's head (`seq` = the hold's, `current` = the hold) in ONE
+   * transaction, only while the head is exactly `head` (null: the field has none yet). `changed` otherwise; nothing written.
+   */
+  create(change: HeldChange, head: HeldHead | null): Promise<HeldWrite>;
+  /** The next state. A legacy copy is only ever RETIRED (its content cleared, its attempt kept); any other write of one is `failed`. */
   update(from: HeldCopy, next: HeldChange): Promise<HeldWrite>;
-  end(hold: HeldKey, digest: string): Promise<HeldEnd>;
+  /** Ends the copy read as `digest`, keeping its tombstone (`seq`: its generation, when known). */
+  end(
+    hold: HeldKey,
+    digest: string,
+    cause: HeldEndCause,
+    seq?: number | null,
+  ): Promise<HeldEnd>;
   read(hold: HeldKey): Promise<HeldRead>;
+  /** The field's head. */
+  head(personId: string, fieldId: string): Promise<HeadRead>;
   list(
     personId: string,
     fieldId: string | null,
     after: FormCopyCursor | null,
   ): Promise<FormCopiesPage | null>;
+  /** This store bound to the account service displayed now (one per operation: a later call under another binding fails). */
+  pinned(): HeldStore;
 }
 
 /** The hold a live copy carries, with its digest, or the copy's digest alone when this page cannot read it. PURE. */
@@ -324,29 +478,80 @@ export function heldStoreOver(
       ? { kind: "saved", copy: { change, digest: answer.digest } }
       : answer;
   };
+  const headKey = (personId: string, fieldId: string) =>
+    [heldContextOf(personId, fieldId), HEAD_TAB] as const;
   return {
-    create: (change) => write(change, null),
-    update: (from, next) =>
-      write(
+    create: async (change, head) => {
+      const [context, tab] = headKey(change.personId, change.fieldId);
+      const savedAt = now();
+      const answer = await port.apply([
         {
-          ...next,
-          holdId: from.change.holdId,
-          personId: from.change.personId,
-          fieldId: from.change.fieldId,
-          rev: from.change.rev + 1,
-          // A hold keeps its place among its field's holds; a retired one is never live again.
-          seq: from.change.seq,
-          retired: from.change.retired || next.retired,
+          snapshot: {
+            formContext: context,
+            tabInstanceId: change.holdId,
+            values: encodeHeld(change),
+            savedAt,
+          },
+          terminal: false,
+          expect: { state: "absent" },
         },
-        from.digest,
+        {
+          snapshot: {
+            formContext: context,
+            tabInstanceId: tab,
+            values: encodeHead(change.seq, change.holdId),
+            savedAt,
+          },
+          terminal: true,
+          expect:
+            head === null
+              ? { state: "absent" }
+              : { state: "ended", digest: head.digest },
+        },
+      ]);
+      if (answer.kind === "saved")
+        return {
+          kind: "saved",
+          copy: {
+            change: { ...change, legacy: false },
+            digest: answer.digests[0] as string,
+          },
+        };
+      return answer.kind === "changed"
+        ? { kind: "changed", stored: answer.stored }
+        : answer;
+    },
+    update: (from, next) =>
+      from.change.legacy && !next.retired
+        ? Promise.resolve({ kind: "failed" })
+        : write(
+            {
+              ...next,
+              holdId: from.change.holdId,
+              personId: from.change.personId,
+              fieldId: from.change.fieldId,
+              rev: from.change.rev + 1,
+              // A hold keeps its place among its field's holds; a retired one is never live again.
+              seq: from.change.seq,
+              retired: from.change.retired || next.retired,
+              legacy: false,
+            },
+            from.digest,
+          ),
+    end: (hold, digest, cause, seq = null) =>
+      port.end(
+        heldContextOf(hold.personId, hold.fieldId),
+        hold.holdId,
+        digest,
+        encodeTombstone(seq, cause),
       ),
-    end: (hold, digest) =>
-      port.end(heldContextOf(hold.personId, hold.fieldId), hold.holdId, digest),
     read: async (hold) => {
       const stored = await port.read(
         heldContextOf(hold.personId, hold.fieldId),
         hold.holdId,
       );
+      if (stored.kind === "ended")
+        return { kind: "ended", tombstone: decodeTombstone(stored.fields) };
       if (stored.kind !== "live") return stored;
       const copy = heldOf(stored.row);
       return copy === null ||
@@ -367,5 +572,14 @@ export function heldStoreOver(
             copies: page.copies.filter((row) => row.form_context === context),
           };
     },
+    head: async (personId, fieldId) => {
+      const [context, tab] = headKey(personId, fieldId);
+      const stored = await port.read(context, tab);
+      if (stored.kind === "absent") return { kind: "none" };
+      if (stored.kind !== "ended") return { kind: "failed" };
+      const head = decodeHead(stored.fields, stored.digest);
+      return head === null ? { kind: "failed" } : { kind: "head", head };
+    },
+    pinned: () => heldStoreOver(port.pinned(), now),
   };
 }

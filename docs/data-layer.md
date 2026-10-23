@@ -86,14 +86,14 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | Writer | Plans | Guards |
 | --- | --- | --- |
 | W1 | `commitPage` (the delta page commit) | INC, CLS, CAS, GEN, OWN, EPO |
-| W2 | `enqueueDraft` (header and body together) | INC, FEN |
+| W2 | `enqueueDraft` (header and body together); `transferDraft` (WEB-11a review 4: the same, with a form copy's HAND-OFF: the copy, read again in the transaction, ends with its tombstone in the same commit) | INC, FEN (transfer also CLS) |
 | W3 | `editQueuedDraft` (header and body together) | INC, FEN |
 | W4 | `discardDraft`, `supersedeDraft` (a supersession stores a new command and is held to the quota reserve) | INC (supersede also FEN) |
 | W5 | `markInFlight`, `unclaimDraft` | INC, CLS |
 | W6 | `admitReceipt` | INC, CLS, EPO |
 | W7 | `recordOutcome` | INC, CLS, EPO |
 | W8 | `recordFailureOfSend`, `resumeDrafts` | INC |
-| W9 | `saveFormRecovery`, `claimFormWriter` | INC, CLS |
+| W9 | `saveFormRecovery`, `claimFormWriter`, `saveFormOperation` (WEB-11a review 4: several conditional copies, all or none) | INC, CLS |
 | W10 | the draft fence: `summariseWork`, `readBaseline`, `setDraftFence`, `setClosing`, `releaseFence`, `reconcileStaleFence` | INC |
 | W11 | the retry state: `recordReadOutcome`, `resumeReadCaller`, `resumeReadCallerOnOnline`, `resumeAllReadCallers`, `recordLocalWriteOutcome` | INC (the first also CLS, EPO) |
 | W12 | `writeProfile` | INC, CLS, EPO |
