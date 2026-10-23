@@ -34,6 +34,15 @@
 // report's digest. --stage negatives needs --controls-evidence: a passed --stage controls run of the same source and
 // engines whose controls covered every injected probe. Nothing is reused from an earlier run otherwise.
 //
+// Revision 25 (review r24 R24-N1; design assessment 91d0404c C1-C5): that provenance was a receipt checked only against itself. Each
+// control and negative control is now a published evidence BUNDLE (held-operation-evidence.mjs): the execution record is written when
+// Playwright closes (exit, signal, its digest of the report, argv, selection environment); the source fingerprint, the live spec (and
+// NC4's live helper) snapshotted at preparation, the spec (and installed file) that ran and the copied tree's inventories before and after
+// are written beside the report; the manifest naming every artefact's digest is published last and exclusively. The part is then judged
+// ONLY from the bundle re-read from disk (qualifyNegative, judgeControlEvidence), exactly as a replay judges it, bound to this invocation
+// and source; campaignOutcome admits only verified parts of this invocation. A --stage negatives prerequisite is re-verified and
+// re-judged from its raw control bundles before anything is built.
+//
 // Usage: node scripts/validation/held-operation-probes.mjs [--check] [--stage all|controls|negatives]
 //          [--probes P01,S7,...] [--only HM10,...] [--browsers chromium,firefox,webkit]
 //          [--controls-evidence <the --out of a --stage controls run>] --out <dir>
@@ -41,7 +50,6 @@
 //   --stage      all (default): controls, negative controls, then mutants; controls: the live and copy controls;
 //                negatives: the negative controls alone (with --controls-evidence).
 //   --probes     restricts the controls of --stage controls to these probes (exact case titles still required).
-import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -54,13 +62,24 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort } from "../integration/free-port.mjs";
 import {
+  inventoryOf,
+  judgeControlEvidence,
+  MANIFEST,
+  probeArgv,
+  publishBundle,
+  qualifyNegative,
+  readBundle,
+  SELECTION_ENV,
+  sha256,
+  writeArtefact,
+} from "./held-operation-evidence.mjs";
+import {
   CONTRACT_VERSION,
   campaignOutcome,
+  EVIDENCE_SCHEMA,
   FAULT_HOOK,
   HARNESS,
-  judgeControl,
   judgeMutant,
-  judgeNegative,
   MUTANTS,
   mutantOf,
   NEGATIVE_CONTRACT_VERSION,
@@ -152,11 +171,13 @@ const trees = join(
 );
 const before = fingerprint(root);
 json(join(runDir, "inputs.json"), before);
+// This invocation's identity and source fingerprint, as every one of its bundles records them.
+const invocation = runDir.split("/").at(-1);
+const sourceBytes = readFileSync(join(runDir, "inputs.json"));
 console.log(`Evidence: ${runDir}`);
 const proc = processes(root);
 const started = Date.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 const record = { controls: [], negatives: [], mutants: [] };
 let fatal = null;
 let preflight = false;
@@ -241,53 +262,6 @@ async function withPreview(buildDir, action) {
     clearTimeout(timer);
   }
 }
-/** Every file under `dir` (relative paths, sorted); a link or anything but a regular file is reported as such. */
-function filesUnder(dir) {
-  return readdirSync(dir, { recursive: true, withFileTypes: true })
-    .filter((e) => !e.isDirectory())
-    .map((e) => {
-      const rel = join(e.parentPath ?? e.path, e.name).slice(dir.length + 1);
-      return e.isFile() ? rel : `${rel} (not a regular file)`;
-    })
-    .sort();
-}
-/**
- * Why a copied tree is not exactly what Playwright should load: the live config and tests/e2e, file for file, except the patched files,
- * each with exactly its patch's text (design assessment C3: checked before and after the run).
- */
-function copyProblems(tree, patches) {
-  const expected = new Map();
-  for (const rel of filesUnder(join(root, "tests/e2e")))
-    expected.set(
-      join("tests/e2e", rel),
-      sha256(readFileSync(join(root, "tests/e2e", rel))),
-    );
-  expected.set(
-    "playwright.config.ts",
-    sha256(readFileSync(join(root, "playwright.config.ts"))),
-  );
-  for (const patch of patches) expected.set(patch.file, sha256(patch.text));
-  const actual = new Map();
-  for (const rel of filesUnder(join(tree, "tests/e2e")))
-    actual.set(
-      join("tests/e2e", rel),
-      rel.endsWith(")")
-        ? null
-        : sha256(readFileSync(join(tree, "tests/e2e", rel))),
-    );
-  if (existsSync(join(tree, "playwright.config.ts")))
-    actual.set(
-      "playwright.config.ts",
-      sha256(readFileSync(join(tree, "playwright.config.ts"))),
-    );
-  const problems = [];
-  for (const file of new Set([...expected.keys(), ...actual.keys()]))
-    if (!expected.has(file)) problems.push(`${file}: not in the live tree`);
-    else if (!actual.has(file)) problems.push(`${file}: missing from the copy`);
-    else if (expected.get(file) !== actual.get(file))
-      problems.push(`${file}: differs from what was copied`);
-  return problems;
-}
 /** An unmutated (or patched) copy of what Playwright loads: the config and tests/e2e. */
 function copyTree(name, patches = []) {
   const tree = join(trees, name);
@@ -306,52 +280,123 @@ function copyTree(name, patches = []) {
 /**
  * Runs the named probes from `cwd` in every selected engine (one worker, no retries) and returns the normalised report: every case with
  * its full evidence (scripts/validation/held-operation-qualification.mjs). A report that cannot be read is an error of the run.
+ * With `part` (revision 25), the execution record is written into that bundle directory as soon as Playwright closes, before anything
+ * is judged: the exit and signal observed, its own digest of the report, the argv and the selection environment.
  */
-async function probes(url, cwd, ids, directory, env = {}) {
+async function probes(url, cwd, ids, directory, env = {}, part = null) {
   mkdirSync(directory, { recursive: true });
   const reportPath = join(directory, "report.json");
-  // A probe's id begins its title ("P03 ...", "S1 shape: ..."), and no other title of the file has it.
-  const grep = `(?:^|\\s)(?:${ids.join("|")})\\s`;
-  const result = await proc.run(
-    "pnpm",
-    [
-      "exec",
-      "playwright",
-      "test",
-      "--config",
-      join(cwd, "playwright.config.ts"),
-      ...browsers.map((b) => `--project=fixture-${b}`),
-      "-g",
-      grep,
-      "--workers=1",
-      "--retries=0",
-      "--reporter=json",
-      `--output=${join(directory, "test-results")}`,
-    ],
-    {
-      ATLAS_E2E_PROBES: "held-operation",
-      ATLAS_FIXTURE_URL: url,
-      ATLAS_E2E_BROWSERS: "all",
-      ATLAS_EVIDENCE_DIR: join(directory, "evidence"),
-      PLAYWRIGHT_JSON_OUTPUT_FILE: reportPath,
-      ...env,
-    },
+  const argv = probeArgv(
+    join(cwd, "playwright.config.ts"),
+    browsers,
+    ids,
+    join(directory, "test-results"),
   );
+  const selection = { ATLAS_E2E_PROBES: "held-operation", ...env };
+  const result = await proc.run("pnpm", argv, {
+    ...selection,
+    ATLAS_FIXTURE_URL: url,
+    ATLAS_E2E_BROWSERS: "all",
+    ATLAS_EVIDENCE_DIR: join(directory, "evidence"),
+    PLAYWRIGHT_JSON_OUTPUT_FILE: reportPath,
+  });
   writeFileSync(join(directory, "playwright.log"), result.output);
+  // This invocation's own report (its directory is new): a missing or unreadable one fails the run, after its execution is recorded.
+  let report = null;
+  try {
+    report = readFileSync(reportPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (part)
+    writeArtefact(
+      part,
+      "execution.json",
+      `${JSON.stringify(
+        {
+          exit: result.code,
+          signal: result.signal ?? null,
+          report_sha256: report ? sha256(report) : null,
+          argv,
+          env: Object.fromEntries(
+            Object.entries(selection).filter(([k]) =>
+              SELECTION_ENV.includes(k),
+            ),
+          ),
+          closed_at: new Date().toISOString(),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  if (!report) throw new Error(`No report: ${reportPath}`);
   // The exact spec text that ran (the tree's own copy) bounds each test's lines.
   const specText = readFileSync(join(cwd, PROBE_SPEC), "utf8");
-  // This invocation's own report (its directory is new): a missing or unreadable one fails the run.
-  const reportText = readFileSync(reportPath, "utf8");
   const run = normalise(
-    JSON.parse(reportText),
+    JSON.parse(report.toString("utf8")),
     browsers,
     result.code,
     specText,
     result.signal ?? null,
   );
-  run.report_sha256 = sha256(reportText);
+  run.report_sha256 = sha256(report);
   run.spec_sha256 = sha256(specText);
   return run;
+}
+/**
+ * Completes a part's bundle and publishes it (revision 25): the source fingerprint, the spec that ran and the installed files as they are
+ * in `cwd` now, the copied tree's inventories, the live snapshots taken at preparation (`bases`), then the manifest, last. Returns the
+ * bundle re-read from disk: the only thing the part is judged from.
+ */
+function publishPart(
+  part,
+  kind,
+  name,
+  cwd,
+  report,
+  { inventory, bases = [], installed = [] } = {},
+) {
+  const artefacts = {
+    report,
+    execution: "execution.json",
+    source: "bundle/source.json",
+    spec: `bundle/ran/${PROBE_SPEC}`,
+  };
+  writeArtefact(part, artefacts.source, sourceBytes);
+  writeArtefact(part, artefacts.spec, readFileSync(join(cwd, PROBE_SPEC)));
+  if (inventory) {
+    artefacts.inventory = "bundle/inventory.json";
+    writeArtefact(
+      part,
+      artefacts.inventory,
+      `${JSON.stringify(inventory, null, 2)}\n`,
+    );
+  }
+  for (const { file, bytes } of bases) {
+    artefacts[`base:${file}`] = `bundle/base/${file}`;
+    writeArtefact(part, artefacts[`base:${file}`], bytes);
+  }
+  for (const file of installed) {
+    artefacts[`installed:${file}`] = `bundle/installed/${file}`;
+    writeArtefact(
+      part,
+      artefacts[`installed:${file}`],
+      readFileSync(join(cwd, file)),
+    );
+  }
+  publishBundle(
+    part,
+    {
+      kind,
+      part: name,
+      contract:
+        kind === "negative" ? NEGATIVE_CONTRACT_VERSION : CONTRACT_VERSION,
+      invocation,
+      source_sha256: before.sha256,
+    },
+    artefacts,
+  );
+  return readBundle(join(part, MANIFEST));
 }
 /** A judged part's record: the judgement with the normalised cases' error lists kept beside it for the reviewer. */
 const recorded = (name, run, judgement) => ({
@@ -380,15 +425,18 @@ try {
   const failures = [];
   for (const mutant of MUTANTS) {
     try {
-      const text = readFileSync(join(root, mutant.file), "utf8");
+      const base = readFileSync(join(root, mutant.file));
+      const text = base.toString("utf8");
       const patched = mutant.patch(text);
       if (patched === text) throw new Error("patch changed nothing");
-      patches.push({ mutant, text: patched });
+      patches.push({ mutant, text: patched, base });
     } catch (error) {
       failures.push({ id: mutant.id, patch_failed: String(error.message) });
     }
   }
-  const spec = readFileSync(join(root, PROBE_SPEC), "utf8");
+  // The live spec's bytes, snapshotted now: a negative control's bundle binds its copy to them and them to the source fingerprint.
+  const specBytes = readFileSync(join(root, PROBE_SPEC));
+  const spec = specBytes.toString("utf8");
   json(join(runDir, "preflight.json"), {
     contract: CONTRACT_VERSION,
     stage,
@@ -421,6 +469,15 @@ try {
       try {
         evidence = {
           path: dir,
+          invocation: runs[0],
+          // Both controls' raw evidence, re-verified and re-judged now: the summary is only a derived view (revision 25, C5).
+          controls: ["control", "copy-control"].map((name) =>
+            judgeControlEvidence(readBundle(join(dir, name, MANIFEST)), {
+              part: name,
+              invocation: runs[0],
+              source: before.sha256,
+            }),
+          ),
           summary: JSON.parse(
             readFileSync(join(dir, "probe-results.json"), "utf8"),
           ).summary,
@@ -444,7 +501,17 @@ try {
           probes: [...new Set(negatives.flatMap((n) => n.probes))],
         }),
       );
-    prerequisite = { evidence: evidence?.path ?? controlsEvidence, problems };
+    prerequisite = {
+      evidence: evidence?.path ?? controlsEvidence,
+      invocation: evidence?.invocation ?? null,
+      controls: (evidence?.controls ?? []).map((c) => ({
+        name: c.name,
+        ok: c.ok,
+        evidence: c.evidence,
+        problems: c.problems.slice(0, 20),
+      })),
+      problems,
+    };
     json(join(runDir, "prerequisite.json"), prerequisite);
     if (problems.length)
       throw new Error(`Prerequisite controls not met: ${problems[0]}`);
@@ -457,13 +524,24 @@ try {
         ["control", root],
         ["copy-control", copyTree("copy-control")],
       ]) {
+        const part = join(runDir, name);
+        const inventory =
+          name === "copy-control" ? { before: inventoryOf(cwd) } : undefined;
         const run = await withPreview(controlBuild, (url) =>
-          probes(url, cwd, controlIds, join(runDir, name)),
+          probes(url, cwd, controlIds, part, {}, part),
         );
+        if (inventory) inventory.after = inventoryOf(cwd);
+        const bundle = publishPart(part, "control", name, cwd, "report.json", {
+          inventory,
+        });
         const judged = recorded(
           name,
           run,
-          judgeControl(run, controlIds, browsers),
+          judgeControlEvidence(bundle, {
+            part: name,
+            invocation,
+            source: before.sha256,
+          }),
         );
         json(join(runDir, name, "judgement.json"), judged);
         record.controls.push(judged);
@@ -474,13 +552,11 @@ try {
     for (const nc of negatives) {
       const directory = join(runDir, nc.id);
       const faulted = { file: PROBE_SPEC, text: `${spec}${FAULT_HOOK}` };
-      const installed = nc.mutant
-        ? [
-            {
-              file: mutantOf(nc.mutant).file,
-              text: patches.find((p) => p.mutant.id === nc.mutant).text,
-            },
-          ]
+      const mutantPatch = nc.mutant
+        ? patches.find((p) => p.mutant.id === nc.mutant)
+        : null;
+      const installed = mutantPatch
+        ? [{ file: mutantPatch.mutant.file, text: mutantPatch.text }]
         : [];
       if (installed.some((p) => p.file === HARNESS))
         throw new Error(
@@ -491,44 +567,50 @@ try {
         ATLAS_PROBE_FAULT: nc.fault,
         ATLAS_PROBE_FAULT_IDS: nc.probes.join(","),
       };
-      const copyBefore = copyProblems(tree, [faulted, ...installed]);
+      mkdirSync(directory, { recursive: true });
+      const inventory = { before: inventoryOf(tree) };
       const run = await withPreview(controlBuild, (url) =>
-        probes(url, tree, nc.probes, join(directory, "browser"), env),
-      );
-      const provenance = {
-        negative_control: nc.id,
-        fault: env.ATLAS_PROBE_FAULT,
-        fault_ids: env.ATLAS_PROBE_FAULT_IDS.split(","),
-        installed: nc.mutant ? [nc.mutant] : [],
-        live_spec_sha256: sha256(spec),
-        hook_sha256: sha256(FAULT_HOOK),
-        expected_spec_sha256: sha256(faulted.text),
-        copied_spec_sha256: run.spec_sha256,
-        installed_sha256: Object.fromEntries(
-          installed.map((p) => [p.file, sha256(p.text)]),
+        probes(
+          url,
+          tree,
+          nc.probes,
+          join(directory, "browser"),
+          env,
+          directory,
         ),
-        copy_problems: {
-          before: copyBefore,
-          after: copyProblems(tree, [faulted, ...installed]),
-        },
+      );
+      inventory.after = inventoryOf(tree);
+      const bundle = publishPart(
+        directory,
+        "negative",
+        nc.id,
         tree,
-        exit: run.exit,
-        signal: run.signal,
-        report_sha256: run.report_sha256,
-      };
+        "browser/report.json",
+        {
+          inventory,
+          bases: [
+            { file: PROBE_SPEC, bytes: specBytes },
+            ...(mutantPatch
+              ? [{ file: mutantPatch.mutant.file, bytes: mutantPatch.base }]
+              : []),
+          ],
+          installed: installed.map((p) => p.file),
+        },
+      );
+      // Judged only from the bundle as re-read from disk, bound to this invocation and source (exactly as a replay judges it).
       const judged = recorded(
         nc.id,
         run,
-        judgeNegative(nc, run, browsers, provenance),
+        qualifyNegative(nc, bundle, { invocation, source: before.sha256 }),
       );
       json(join(directory, "result.json"), {
         title: nc.title,
-        provenance,
+        tree,
         ...judged,
       });
       record.negatives.push(judged);
       console.log(
-        `${judged.qualified ? "qualified" : "NOT QUALIFIED"} ${nc.id} (integrity ${judged.integrity.valid}, scenario ${judged.scenario.valid}, ${nc.contract} ${judged.classifier.verdict})`,
+        `${judged.qualified ? "qualified" : "NOT QUALIFIED"} ${nc.id} (evidence ${judged.evidence?.status}, integrity ${judged.integrity.valid}, scenario ${judged.scenario.valid}, ${nc.contract} ${judged.classifier.verdict})`,
       );
       if (!judged.qualified)
         throw new Error(
@@ -594,6 +676,7 @@ const outcome = checkOnly
         ? (prerequisite ?? { problems: ["the prerequisite was never checked"] })
         : null,
       planned: {
+        invocation,
         controls: stage === "negatives" ? [] : ["control", "copy-control"],
         negatives: negatives.map((n) => n.id),
         mutants: selected.map((m) => m.id),
@@ -604,15 +687,22 @@ const outcome = checkOnly
     });
 const summary = {
   layer:
-    "held-operation owner and fixture hold seam (WEB-08d r21-r24): real engines, probe controls, reporter shapes, negative controls qualified by their own scenarios, helper/fixture mutants judged by versioned contracts",
+    "held-operation owner and fixture hold seam (WEB-08d r21-r25): real engines, probe controls, reporter shapes, negative controls qualified by their own scenarios over verified evidence bundles, helper/fixture mutants judged by versioned contracts",
   contract: CONTRACT_VERSION,
   negative_contract: NEGATIVE_CONTRACT_VERSION,
+  evidence_schema: EVIDENCE_SCHEMA,
+  invocation,
   browsers,
   check_only: checkOnly,
   stage,
   preflight_pass: preflight,
   control_probes: stage === "negatives" ? [] : controlIds,
-  controls: record.controls.map((c) => ({ name: c.name, ok: c.ok })),
+  controls: record.controls.map((c) => ({
+    name: c.name,
+    ok: c.ok,
+    evidence: c.evidence?.status,
+    manifest_sha256: c.evidence?.manifest_sha256,
+  })),
   prerequisite,
   negatives: record.negatives.map((n) => ({
     id: n.negative_control,
@@ -621,6 +711,8 @@ const summary = {
     integrity: n.integrity.valid,
     scenario: n.scenario.valid,
     classifier: n.classifier.verdict,
+    evidence: n.evidence?.status,
+    manifest_sha256: n.evidence?.manifest_sha256,
   })),
   selected: selected.map((m) => m.id),
   run: record.mutants.length,

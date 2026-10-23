@@ -23,10 +23,23 @@
 // profile: its status, every error at its line of the appended hook, NC2's original 30 s beforeEach timeout, NC4's genuine HM2 delta
 // with the teardown error, and no ledger where none is published), and the classifier (the named mutant's contract refuses it). A
 // negative control is `qualified` only when all three hold; nothing else is admitted.
+//
+// Revision 25 (review r24 R24-N1; design assessment 91d0404c, invariants I1-I10, correction C1-C7): a recorded invocation was checked
+// only against itself and only when supplied, so a receipt with the wrong report digest, exit, spec, hook or installed patch, a receipt
+// of another invocation, or none at all, still qualified. Integrity now requires the VERIFIED evidence bundle of this very run
+// (held-operation-evidence.mjs: every claim compared with the bytes and the execution record it names, and the judged report, spec, exit
+// and signal being exactly the bundle's). Without it a judgement is a labelled diagnostic and never qualified; the campaign admits only
+// verified parts of its own invocation, and a --stage negatives prerequisite is the predecessor's raw controls, re-verified and re-judged.
 import { classifyMutant, inspectReport } from "./engine-results.mjs";
 
 export const CONTRACT_VERSION = "web08d-held-operation-qualification/1";
-export const NEGATIVE_CONTRACT_VERSION = "web08d-held-operation-negative/1";
+export const NEGATIVE_CONTRACT_VERSION = "web08d-held-operation-negative/2";
+/** The evidence bundle's schema (held-operation-evidence.mjs): a part's report, spec, execution record, source and copy inventories. */
+export const EVIDENCE_SCHEMA = "web08d-held-operation-evidence/1";
+/** The integrity problem of a judgement made without a verified evidence bundle: a diagnostic, never a qualification. */
+export const NO_EVIDENCE =
+  "no verified invocation evidence: a diagnostic judgement, never admissible";
+const DIGEST = /^[0-9a-f]{64}$/;
 export const ENGINES = ["chromium", "firefox", "webkit"];
 export const HELPER = "tests/e2e/held-operation.ts";
 export const LEDGER = "tests/e2e/held-operation-ledger.ts";
@@ -2179,47 +2192,56 @@ const sameList = (a, b) =>
   a.every((x, i) => x === b[i]);
 
 /**
- * What the runner records about the invocation of one negative control (held-operation-probes.mjs), checked against the control: the
- * fault and probes the hook was given, the mutant installed, the copy's spec being exactly the live spec with the hook appended, and the
- * copied tree identical to the live one (apart from those files) both before and after Playwright ran.
+ * Why a judged run is not the run its verified evidence bundle records (revision 25, design assessment C3, I2, I3): the bundle must be a
+ * verified negative-control bundle of this very control (held-operation-evidence.mjs verifyBundle), and the report, spec, exit and signal
+ * that were judged must be exactly the ones it binds. A supplied record is never its own proof: `status` is the verifier's result over the
+ * bytes, and every digest is compared with the run's own.
  */
-export function provenanceProblems(nc, provenance) {
+export function evidenceProblems(nc, run, evidence) {
+  if (evidence === null || typeof evidence !== "object")
+    return ["no invocation evidence"];
   const problems = [];
-  if (provenance === null || typeof provenance !== "object")
-    return ["no invocation provenance"];
-  if (provenance.negative_control !== nc.id)
+  if (evidence.schema !== EVIDENCE_SCHEMA)
+    problems.push(`evidence schema ${evidence.schema}, not ${EVIDENCE_SCHEMA}`);
+  if (evidence.status !== "verified")
     problems.push(
-      `provenance names ${provenance.negative_control}, not ${nc.id}`,
+      `the invocation evidence is ${evidence.status ?? "unverified"}`,
     );
-  if (provenance.fault !== nc.fault)
+  for (const p of Array.isArray(evidence.problems)
+    ? evidence.problems
+    : ["the evidence lists no problems array"])
+    problems.push(`evidence: ${p}`);
+  if (evidence.kind !== "negative" || evidence.part !== nc.id)
     problems.push(
-      `the hook was given fault ${provenance.fault}, not ${nc.fault}`,
+      `the evidence is ${evidence.kind} part ${evidence.part}, not negative control ${nc.id}`,
     );
-  if (!sameList(provenance.fault_ids, nc.probes))
-    problems.push(
-      `the hook was given probes ${JSON.stringify(provenance.fault_ids)}, not ${JSON.stringify(nc.probes)}`,
-    );
-  if (!sameList(provenance.installed, nc.mutant ? [nc.mutant] : []))
-    problems.push(
-      `installed ${JSON.stringify(provenance.installed)}, expected ${JSON.stringify(nc.mutant ? [nc.mutant] : [])}`,
-    );
+  for (const name of ["manifest_sha256", "source_sha256"])
+    if (!DIGEST.test(String(evidence[name])))
+      problems.push(`the evidence has no ${name}`);
+  if (typeof evidence.invocation !== "string" || !evidence.invocation)
+    problems.push("the evidence names no invocation");
   if (
-    typeof provenance.copied_spec_sha256 !== "string" ||
-    provenance.copied_spec_sha256 !== provenance.expected_spec_sha256
+    !DIGEST.test(String(run.report_sha256)) ||
+    run.report_sha256 !== evidence.report_sha256
   )
     problems.push(
-      "the copy's spec is not the live spec with exactly the fault hook appended",
+      `the judged report (${run.report_sha256}) is not the bundle's (${evidence.report_sha256})`,
     );
-  for (const when of ["before", "after"])
-    if (
-      !Array.isArray(provenance.copy_problems?.[when]) ||
-      provenance.copy_problems[when].length > 0
-    )
-      problems.push(
-        `the copied tree ${when} the run: ${JSON.stringify(provenance.copy_problems?.[when] ?? "unchecked")}`,
-      );
-  if (provenance.signal)
-    problems.push(`Playwright was ended by ${provenance.signal}`);
+  if (
+    !DIGEST.test(String(run.spec_sha256)) ||
+    run.spec_sha256 !== evidence.spec_sha256
+  )
+    problems.push(
+      `the judged spec (${run.spec_sha256}) is not the bundle's (${evidence.spec_sha256})`,
+    );
+  if (run.exit !== evidence.execution?.exit)
+    problems.push(
+      `the judged exit ${run.exit} is not the recorded execution's ${evidence.execution?.exit}`,
+    );
+  if (run.signal !== evidence.execution?.signal)
+    problems.push(
+      `the judged signal ${run.signal} is not the recorded execution's ${evidence.execution?.signal}`,
+    );
   return problems;
 }
 
@@ -2227,12 +2249,12 @@ export function provenanceProblems(nc, provenance) {
  * A negative control's run (revision 24, design assessment C2): three separate judgements, all of which must hold.
  *  - integrity: complete, the exact inventory in all three engines (a narrower selection is a diagnostic, never a qualification), one
  *    attempt each, no report error or signal, exit 1, the spec that ran being a spec with exactly the fault hook appended once at its
- *    end, and (when given) the invocation's provenance;
+ *    end, and its verified evidence bundle (evidenceProblems; revision 25: without one the judgement is a diagnostic, never qualified);
  *  - scenario: every case is the control's affirmative `scenario` profile (the fault really happened, where and as injected, alone);
  *  - classifier: the named mutant's contract (judgeMutant, unchanged) refuses the run, every case `invalid`.
  * `qualified` is their conjunction, and the only result any consumer admits. A classifier refusal alone proves nothing.
  */
-export function judgeNegative(nc, run, browsers, provenance) {
+export function judgeNegative(nc, run, browsers, evidence) {
   const integrity = runProblems(run, nc.probes, browsers);
   const coverage =
     browsers.length === ENGINES.length &&
@@ -2250,8 +2272,8 @@ export function judgeNegative(nc, run, browsers, provenance) {
     integrity.push(
       "the spec that ran is not a spec with exactly the fault hook appended once at its end",
     );
-  if (provenance !== undefined)
-    integrity.push(...provenanceProblems(nc, provenance));
+  if (evidence === undefined) integrity.push(NO_EVIDENCE);
+  else integrity.push(...evidenceProblems(nc, run, evidence));
   const cases = run.cases.map((c) => {
     const why = nc.probes.includes(c.id)
       ? profileMismatch(nc.scenario, c)
@@ -2281,7 +2303,8 @@ export function judgeNegative(nc, run, browsers, provenance) {
     fault: nc.fault,
     probes: nc.probes,
     coverage,
-    provenance_checked: provenance !== undefined,
+    mode: evidence === undefined ? "diagnostic" : "bound",
+    evidence: evidence ?? null,
     integrity: { valid: integrity.length === 0, problems: integrity },
     scenario: { valid: scenario.length === 0, problems: scenario, cases },
     classifier: {
@@ -2325,6 +2348,10 @@ function identityProblems(kind, planned, got) {
 /**
  * A `--stage negatives` run's prerequisite (design assessment C3): a passed `--stage controls` run of the same source, engines and
  * contract whose live and copy controls covered every probe the negative controls inject into. Returns why it is not.
+ *
+ * Revision 25 (design assessment 91d0404c C5, I7): its summary is a derived view and never enough. `evidence.controls` must be both
+ * controls' RAW evidence, re-read, re-verified (held-operation-evidence.mjs judgeControlEvidence) and re-judged healthy now: each a
+ * verified bundle of that run (`evidence.invocation`) on this source, in these engines, covering the probes, and agreeing with the summary.
  */
 export function prerequisiteProblems(evidence, { source, browsers, probes }) {
   const problems = [];
@@ -2358,6 +2385,51 @@ export function prerequisiteProblems(evidence, { source, browsers, probes }) {
   const missing = probes.filter((p) => !covered.includes(p));
   if (missing.length)
     problems.push(`its controls did not cover ${missing.join(", ")}`);
+  const raw = Array.isArray(evidence.controls) ? evidence.controls : [];
+  problems.push(
+    ...identityProblems(
+      "re-verified control",
+      ["control", "copy-control"],
+      raw.map((c) => c.name),
+    ),
+  );
+  for (const c of raw) {
+    const e = c.evidence;
+    if (e?.status !== "verified")
+      problems.push(
+        `control ${c.name}'s raw evidence is ${e?.status ?? "missing"}: ${(e?.problems ?? []).slice(0, 3).join("; ")}`,
+      );
+    if (e?.invocation !== evidence.invocation || !evidence.invocation)
+      problems.push(
+        `control ${c.name}'s evidence is invocation ${e?.invocation}, not the prerequisite run ${evidence.invocation}`,
+      );
+    if (e?.source_sha256 !== source)
+      problems.push(
+        `control ${c.name}'s evidence ran on source ${e?.source_sha256}, not ${source}`,
+      );
+    if (c.ok !== true)
+      problems.push(
+        `control ${c.name} re-judged from its raw report is not healthy`,
+      );
+    if (!sameList(c.browsers, browsers))
+      problems.push(
+        `control ${c.name}'s raw evidence ran in ${JSON.stringify(c.browsers)}, not ${JSON.stringify(browsers)}`,
+      );
+    const unseen = probes.filter((p) => !(c.probes ?? []).includes(p));
+    if (unseen.length)
+      problems.push(
+        `control ${c.name}'s raw evidence did not cover ${unseen.join(", ")}`,
+      );
+    if (!sameList(c.probes, covered))
+      problems.push(
+        `control ${c.name}'s raw evidence ran ${JSON.stringify(c.probes)}, but its summary says ${JSON.stringify(covered)}`,
+      );
+    const said = (summary.controls ?? []).find((x) => x.name === c.name);
+    if (said && said.ok !== c.ok)
+      problems.push(
+        `control ${c.name}'s summary says ok ${said.ok}, its raw evidence ${c.ok}`,
+      );
+  }
   return problems;
 }
 
@@ -2366,6 +2438,10 @@ export function prerequisiteProblems(evidence, { source, browsers, probes }) {
  * holds, and EXACTLY the planned parts ran, each once and sound: each control healthy, each negative control `qualified` under the
  * current negative contract, each mutant caught under the current contract. Identities, not counts: a part run twice, an unplanned
  * part, or one that never ran fails it, so the shared driver stops before later work.
+ *
+ * Revision 25 (design assessment 91d0404c C5): each control and negative control must also carry the VERIFIED evidence of its own bundle
+ * in this invocation (`planned.invocation`), one bundle per part. A `qualified: true` without it (a legacy record, a diagnostic, another
+ * invocation's part) is not admitted.
  */
 export function campaignOutcome({
   preflight,
@@ -2404,13 +2480,36 @@ export function campaignOutcome({
       mutants.map((m) => m.mutant),
     ),
   );
-  for (const c of controls)
+  const bound = (part, name, kind) => {
+    const e = part.evidence;
+    if (
+      e?.status !== "verified" ||
+      e.kind !== kind ||
+      e.part !== name ||
+      !planned.invocation ||
+      e.invocation !== planned.invocation ||
+      !DIGEST.test(String(e.manifest_sha256))
+    )
+      reasons.push(
+        `${kind} ${name} has no verified evidence of this invocation (${e?.status ?? "none"}, invocation ${e?.invocation})`,
+      );
+    return e?.manifest_sha256;
+  };
+  const manifests = [];
+  for (const c of controls) {
     if (c.ok !== true) reasons.push(`control ${c.name} is not healthy`);
-  for (const n of negatives)
+    manifests.push(bound(c, c.name, "control"));
+  }
+  for (const n of negatives) {
     if (n.contract !== NEGATIVE_CONTRACT_VERSION || n.qualified !== true)
       reasons.push(
         `negative control ${n.negative_control} is ${n.contract === NEGATIVE_CONTRACT_VERSION ? (n.outcome ?? "unjudged") : `judged under ${n.contract}`}, not qualified`,
       );
+    manifests.push(bound(n, n.negative_control, "negative"));
+  }
+  const digests = manifests.filter(Boolean);
+  if (new Set(digests).size !== digests.length)
+    reasons.push("one evidence bundle stands for more than one part");
   for (const m of mutants)
     if (m.contract !== CONTRACT_VERSION || m.verdict !== "caught")
       reasons.push(

@@ -1,0 +1,268 @@
+// WEB-08d revision 25 (review r24 R24-N1; design assessment 91d0404c Q1-Q5, Q7): evidence bundles for the held-operation qualification's
+// tests, built in memory exactly as scripts/validation/held-operation-probes.mjs publishes them (held-operation-evidence.mjs).
+//
+// Each bundle is SYNTHETIC-CONSISTENT: its report is a GENUINE saved report (fixtures/held-operation-*.json.gz) with the evidence-run
+// metadata the trimmed copies lost restored for this bundle, its digests are real SHA-256 digests of the bytes it carries, its execution
+// record has the controller's shape (exit, signal, report digest, argv, selection environment), and its source fingerprint is a small
+// synthetic tree whose spec is the genuine live spec and whose helper is the current tests/e2e/held-operation.ts. These bundles qualify
+// the verifier and the judgements; they are not browser runs. Fresh genuine bundles come from the runner itself.
+//
+// Every builder takes an `edit(parts)` step applied BEFORE the manifest is computed (a consistent change the derived relations must
+// refuse) and a `tamper(bundle)` step applied AFTER it (bytes that are no longer the manifest's).
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { MANIFEST, probeArgv, sha256 } from "./held-operation-evidence.mjs";
+import {
+  CONTRACT_VERSION,
+  ENGINES,
+  EVIDENCE_SCHEMA,
+  FAULT_HOOK,
+  HELPER,
+  mutantOf,
+  NEGATIVE_CONTRACT_VERSION,
+  PROBE_SPEC,
+} from "./held-operation-qualification.mjs";
+
+const root = resolve(import.meta.dirname, "../..");
+/** The current helper's bytes (NC4 installs HM2 into them). */
+export const HELPER_BYTES = readFileSync(join(root, HELPER));
+/** Invocation ids shaped like the runner's run directories. */
+export const INVOCATION = "2026-10-23T09-00-00.000Z-aaaaaaaa";
+export const OTHER_INVOCATION = "2026-10-23T09-30-00.000Z-bbbbbbbb";
+
+/** A synthetic source fingerprint whose spec is `spec` and helper HELPER_BYTES, with the shape of runtime.mjs fingerprint(). */
+export function sourceOf(spec, extra = {}) {
+  const files = {
+    "playwright.config.ts": sha256("synthetic config"),
+    "src/fixture/data-harness/main.ts": sha256("synthetic harness"),
+    "tests/e2e/helpers.ts": sha256("synthetic helpers"),
+    [HELPER]: sha256(HELPER_BYTES),
+    [PROBE_SPEC]: sha256(spec),
+    ...extra,
+  };
+  const sorted = Object.fromEntries(
+    Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
+  return {
+    sha256: sha256(JSON.stringify(sorted)),
+    files: sorted,
+    node: "v22.23.2",
+    platform: "darwin",
+    arch: "arm64",
+  };
+}
+/** The copied tree a source implies (its config and tests/e2e), with `patched` files replaced. */
+export function treeOf(source, patched = {}) {
+  const out = {};
+  for (const [file, digest] of Object.entries(source.files))
+    if (file === "playwright.config.ts" || file.startsWith("tests/e2e/"))
+      out[file] = digest;
+  return { ...out, ...patched };
+}
+const bytesOf = (v) =>
+  Buffer.isBuffer(v)
+    ? v
+    : Buffer.from(
+        typeof v === "string" ? v : `${JSON.stringify(v, null, 2)}\n`,
+      );
+/** The report a part wrote, with the evidence-run metadata of `invocation`'s `part` (the trimmed fixtures lost their config). */
+export function reportOf(report, invocation, part, dir = "browser/") {
+  const copy = structuredClone(report);
+  copy.config = {
+    ...(copy.config ?? {}),
+    metadata: {
+      atlasEvidenceRun: `/w/.agtx/evidence/runs/${invocation}/${part}/${dir}evidence/runs/run-1`,
+      actualWorkers: 1,
+    },
+  };
+  return copy;
+}
+/** The base (live) spec of a negative-control run: its spec up to the appended hook (the whole spec when it has none). */
+export function baseSpecOf(entry) {
+  const at = entry.spec.indexOf(FAULT_HOOK);
+  return at < 0 ? entry.spec : entry.spec.slice(0, at);
+}
+
+/** Computes the manifest of `parts` and returns the bundle in readBundle's shape. */
+function finish(parts, tamper) {
+  const files = {};
+  const manifest = {
+    schema: EVIDENCE_SCHEMA,
+    ...parts.header,
+    artefacts: {},
+  };
+  for (const [name, { path, bytes }] of Object.entries(parts.files)) {
+    files[name] = bytesOf(bytes);
+    manifest.artefacts[name] = { path, sha256: sha256(files[name]) };
+  }
+  parts.manifest?.(manifest);
+  const bundle = {
+    root: null,
+    manifest_bytes: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`),
+    files,
+    read_problems: [],
+    paths: Object.fromEntries(
+      Object.entries(parts.files).map(([n, f]) => [n, f.path]),
+    ),
+  };
+  tamper?.(bundle);
+  return bundle;
+}
+
+/**
+ * A negative control's bundle over a genuine run `entry` ({ exit, report, spec, signal? }): what the runner publishes for it. The spec
+ * that ran is `entry.spec` (normally the live spec with the hook appended; an edited entry's spec is recorded as it ran, consistently).
+ * `edit(parts)` changes the parts consistently before the manifest; `tamper(bundle)` changes bytes after it.
+ */
+export function negativeBundle(
+  nc,
+  entry,
+  {
+    invocation = INVOCATION,
+    exit = entry.exit,
+    signal = entry.signal ?? null,
+    browsers = ENGINES,
+    source,
+    edit,
+    tamper,
+  } = {},
+) {
+  const base = Buffer.from(baseSpecOf(entry));
+  const spec = Buffer.from(entry.spec);
+  const src = source ?? sourceOf(base);
+  const patched = { [PROBE_SPEC]: sha256(spec) };
+  const parts = {
+    header: {
+      kind: "negative",
+      part: nc.id,
+      contract: NEGATIVE_CONTRACT_VERSION,
+      invocation,
+      source_sha256: src.sha256,
+    },
+    files: {},
+  };
+  const report = bytesOf(reportOf(entry.report, invocation, nc.id));
+  parts.files.report = { path: "browser/report.json", bytes: report };
+  parts.files.source = { path: "bundle/source.json", bytes: src };
+  parts.files.spec = { path: `bundle/ran/${PROBE_SPEC}`, bytes: spec };
+  parts.files[`base:${PROBE_SPEC}`] = {
+    path: `bundle/base/${PROBE_SPEC}`,
+    bytes: base,
+  };
+  if (nc.mutant) {
+    const file = mutantOf(nc.mutant).file;
+    const installed = Buffer.from(
+      mutantOf(nc.mutant).patch(HELPER_BYTES.toString("utf8")),
+    );
+    patched[file] = sha256(installed);
+    parts.files[`base:${file}`] = {
+      path: `bundle/base/${file}`,
+      bytes: HELPER_BYTES,
+    };
+    parts.files[`installed:${file}`] = {
+      path: `bundle/installed/${file}`,
+      bytes: installed,
+    };
+  }
+  const tree = treeOf(src, patched);
+  parts.files.inventory = {
+    path: "bundle/inventory.json",
+    bytes: { before: tree, after: tree },
+  };
+  parts.execution = {
+    exit,
+    signal,
+    report_sha256: sha256(report),
+    argv: probeArgv(
+      `/w/.agtx/held-operation-probe-trees/${invocation}/${nc.id}/playwright.config.ts`,
+      browsers,
+      nc.probes,
+      `/w/.agtx/evidence/runs/${invocation}/${nc.id}/browser/test-results`,
+    ),
+    env: {
+      ATLAS_E2E_PROBES: "held-operation",
+      ATLAS_PROBE_FAULT: nc.fault,
+      ATLAS_PROBE_FAULT_IDS: nc.probes.join(","),
+    },
+    closed_at: "2026-10-23T09:00:00.000Z",
+  };
+  edit?.(parts);
+  // The execution record is written after edits so that an edit of the report is seen (or deliberately not) by it.
+  if (!parts.files.execution && parts.execution !== null)
+    parts.files.execution = {
+      path: "execution.json",
+      bytes: parts.execution,
+    };
+  return finish(parts, tamper);
+}
+
+/** A control part's bundle (`control`: the live tree; `copy-control`: an unmutated copy) over a genuine control run `entry`. */
+export function controlBundle(
+  part,
+  entry,
+  ids,
+  { invocation = INVOCATION, source, browsers = ENGINES, edit, tamper } = {},
+) {
+  const spec = Buffer.from(entry.spec);
+  const src = source ?? sourceOf(spec);
+  const report = bytesOf(reportOf(entry.report, invocation, part, ""));
+  const parts = {
+    header: {
+      kind: "control",
+      part,
+      contract: CONTRACT_VERSION,
+      invocation,
+      source_sha256: src.sha256,
+    },
+    files: {
+      report: { path: "report.json", bytes: report },
+      source: { path: "bundle/source.json", bytes: src },
+      spec: { path: `bundle/ran/${PROBE_SPEC}`, bytes: spec },
+    },
+    execution: {
+      exit: entry.exit,
+      signal: null,
+      report_sha256: sha256(report),
+      argv: probeArgv(
+        "/w/playwright.config.ts",
+        browsers,
+        ids,
+        `/w/.agtx/evidence/runs/${invocation}/${part}/test-results`,
+      ),
+      env: { ATLAS_E2E_PROBES: "held-operation" },
+      closed_at: "2026-10-23T09:00:00.000Z",
+    },
+  };
+  if (part === "copy-control") {
+    const tree = treeOf(src);
+    parts.files.inventory = {
+      path: "bundle/inventory.json",
+      bytes: { before: tree, after: tree },
+    };
+  }
+  edit?.(parts);
+  if (!parts.files.execution && parts.execution !== null)
+    parts.files.execution = { path: "execution.json", bytes: parts.execution };
+  return finish(parts, tamper);
+}
+
+/** Writes a bundle to `dir` as the runner would leave it (its manifest last), returning the manifest's path. */
+export function writeBundle(dir, bundle, { manifest = true } = {}) {
+  for (const [name, bytes] of Object.entries(bundle.files)) {
+    const path = bundle.paths[name];
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), bytes);
+  }
+  if (manifest) writeFileSync(join(dir, MANIFEST), bundle.manifest_bytes);
+  return join(dir, MANIFEST);
+}
+
+/** Rewrites a bundle's manifest object (after it was computed): the bytes no longer change with it. */
+export function withManifest(bundle, change) {
+  const m = JSON.parse(bundle.manifest_bytes.toString("utf8"));
+  change(m);
+  return {
+    ...bundle,
+    manifest_bytes: Buffer.from(`${JSON.stringify(m, null, 2)}\n`),
+  };
+}
