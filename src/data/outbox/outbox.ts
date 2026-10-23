@@ -23,6 +23,7 @@ import {
   type EnqueueRequest,
   estimateDraftBytes,
   snapshotRequest,
+  type TargetNeeds,
   validateRequest,
 } from "../model/outbox";
 import type { QueueSummary } from "../model/queue-summary";
@@ -33,7 +34,7 @@ import {
   isReviewedDraft,
   type ReviewConfirmation,
 } from "../model/review-confirmation";
-import type { LocalId } from "../model/types";
+import type { DraftWithCommand, LocalId } from "../model/types";
 import { readReviewDraft } from "../plans/defaults";
 import { reconcileStaleFence } from "../plans/fence";
 import {
@@ -195,10 +196,13 @@ export interface Outbox {
    * `defaults_revision` replaced by the reviewed revision, its context replaced and its review block cleared, through `editQueued` (a draft
    * blocked locally) or `supersede` (a draft refused with `defaults_changed`; pass the same `replacementId` on a retry). It never rebuilds a
    * body on versions the draft was not built on. Nothing else unblocks a defaults review: a background fetch is not approval.
+   * `admission`: what the draft's slice says its commands need of the person's access (`CommandRegistry.admission`), applied to the draft
+   * read here, so a known denial refuses the confirmation (`denied`) as it would the slice's own save (WEB-10a DA17-N2).
    */
   confirmDefaultsReview(
     localId: LocalId,
     confirmation: ReviewConfirmation,
+    admission?: (draft: DraftWithCommand) => TargetNeeds,
   ): Promise<ConfirmReviewOutcome>;
   /**
    * "Retry now" for a paused draft or a blocked one; without an id, every paused draft. It also lifts the local-write stops of the
@@ -1204,6 +1208,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   async function confirmDefaultsReview(
     localId: LocalId,
     confirmation: ReviewConfirmation,
+    admission?: (draft: DraftWithCommand) => TargetNeeds,
   ): Promise<ConfirmReviewOutcome> {
     if (!service.live)
       return {
@@ -1237,6 +1242,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       found.command,
       new Map(found.basis),
       confirmation,
+      admission?.({ ...found.draft, command: found.command }) ?? {},
     );
     try {
       if (path === "edit") {

@@ -1044,7 +1044,10 @@ export function createDataEnv(
       const facade = leader.outbox ?? outbox;
       if (facade === null)
         return { kind: "refused", reason: "closed" } as ConfirmReviewOutcome;
-      return facade.confirmDefaultsReview(localId, confirmation);
+      // What the draft's commands need of the person's access, from the slices' registry (WEB-10a DA17-N2).
+      return facade.confirmDefaultsReview(localId, confirmation, (draft) =>
+        commands.admission(draft),
+      );
     },
     discard: async (localId) => {
       const facade = outbox;

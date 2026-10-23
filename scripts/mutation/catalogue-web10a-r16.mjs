@@ -22,8 +22,8 @@ export const UNIT_R16 = [
     patch: (t) =>
       sub(
         t,
-        `  return targets.some(\n    (target) =>\n      target.requiresEdit && cache?.get`,
-        `  return false && targets.some(\n    (target) =>\n      target.requiresEdit && cache?.get`,
+        `  return targets.some(\n    (target) =>\n      (target.requiresEdit && denied(target.resourceId)) ||`,
+        `  return false && targets.some(\n    (target) =>\n      (target.requiresEdit && denied(target.resourceId)) ||`,
       ),
   },
 
@@ -55,7 +55,7 @@ export const UNIT_R16 = [
     patch: (t) =>
       sub(
         t,
-        `  if (knownDenial(request.targets, cache))\n    return { kind: "refused", reason: "denied" };\n`,
+        `  if (knownDenial(request.targets, cache, others))\n    return { kind: "refused", reason: "denied" };\n`,
         ``,
       ),
   },
@@ -73,8 +73,8 @@ export const UNIT_R16 = [
     patch: (t) =>
       sub(
         t,
-        `        .filter((target) => target.requiresEdit)`,
-        `        .filter(() => false)`,
+        `    const rows = await bulkGetWindowed(reader, "cache", ids);`,
+        `    const rows = await bulkGetWindowed(reader, "cache", []);`,
       ),
   },
 
@@ -93,7 +93,7 @@ export const UNIT_R16 = [
     patch: (t) =>
       sub(
         t,
-        `  if (knownDenial(request.targets, facts.cache))\n    return { kind: "refused", reason: "denied" };\n`,
+        `  if (knownDenial(request.targets, facts.cache, facts.related))\n    return { kind: "refused", reason: "denied" };\n`,
         ``,
       ),
   },
@@ -476,8 +476,8 @@ export const ENGINE_R16 = [
     patch: (t) =>
       sub(
         t,
-        `  return targets.some(\n    (target) =>\n      target.requiresEdit && cache?.get`,
-        `  return false && targets.some(\n    (target) =>\n      target.requiresEdit && cache?.get`,
+        `  return targets.some(\n    (target) =>\n      (target.requiresEdit && denied(target.resourceId)) ||`,
+        `  return false && targets.some(\n    (target) =>\n      (target.requiresEdit && denied(target.resourceId)) ||`,
       ),
   },
 

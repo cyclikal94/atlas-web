@@ -355,6 +355,17 @@ with `current-read.test.ts` and `recovery-screens.test.tsx` U-6b for the read's 
 occurrence, the editor control, a permission lost while the dialog is open, a denial committed by another tab's own connection before Save
 and before Save mine, a denial delivered with the newer version) and E-T38 (07:30:45 and 07:30:00 task and occurrence, an explicit time
 edit) in three engines; unit MU-2268…MU-2298 and real-engine MU-2299…MU-2303 (`scripts/mutation/catalogue-web10a-r16.mjs`).
+Revision 17 (the design assessment's DA17-N1 `occurrence-closure-permission-admission` and DA17-N2 `anyone-first-record-permission-admission`;
+decision 43): `closure-record-admission.test.ts` (the rule; W2 Close/Reopen and an Anyone occurrence's first record under a denial committed
+before their transaction, with editor controls and a denial after the write; an existing participant, an admitted first record and a
+reviewed read as known participation, a settled or rejected first record as none; my stream's own denial for a record and an exclusion; the
+defaults review's confirmation of a held first record (W3) and the replacement of a conflicted one (W4); the registry stating what each
+builder states) and `closure-record-screens.test.tsx` (the same over the production data controller and screens: Close, Reopen and a first
+amount offered, then denied by another tab; an existing participant still recording; the confirmation through the controller; a denial
+already on screen refused before the outbox is asked); native E-T39 (Close, Reopen and a first Anyone record denied by another tab's own
+connection after they were offered, their editor controls, and an existing participant of a read-only occurrence) in three engines; unit
+MU-2304…MU-2326 and real-engine MU-2327…MU-2329 (`scripts/mutation/catalogue-web10a-r17.mjs`; MU-2268, MU-2270–MU-2272 and MU-2299
+re-anchored, same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -435,6 +446,20 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     sent again whole with the date. The minute input itself is unchanged (no seconds editor). Recovery values carry the kept time; one saved
     before it existed keeps its visible time and waits for the person to confirm it ("Check the time of day, then save."), never a guess.
     Durable queued bodies are not repaired: one already truncated stays as it was sent.
+43. **Closing a day and joining an Anyone occurrence need the occurrence; recording writes my own stream (DA17-N1, DA17-N2; revision
+    17).** Close and Reopen (`resolve`) need write access to the occurrence, as the server checks: the occurrence is `requiresEdit`. A
+    record and an exclusion write my progress stream, so a known denial of my stream refuses them, never the occurrence's. The record that
+    CREATES my stream (an Anyone occurrence's first) also needs the occurrence (`TargetSpec.joinRequiresEdit`, the server's
+    `ensure_own_participation`), decided in the writing transaction from what it reads there, not from what the screen thought: my
+    participation is known when the cache holds my stream, an unsettled OLDER draft writes it (an admitted first record; a later one stands
+    on the one being edited and is no evidence) or the replacement is based on an authorised read of it; then the occurrence's permission is
+    not needed and an existing participant records as before. Otherwise a cached `can_edit: false` of the occurrence refuses it as `denied`:
+    nothing is queued, no stream is seeded, no "You" appears, the amount typed stays and "You can't change this. Nothing was saved." is
+    said. A settled draft (a rejected first record) is no participation; an absent occurrence row is no denial. The defaults review's
+    confirmation rebuilds a stored draft without its builder, so the slice's registry states the needs again from the stored draft
+    (`CommandSpec.admission`, applied by the data controller), with no new stored field: drafts stored before this revision are covered
+    the same way. A denial already on screen is refused by the act itself before the outbox is asked. Exclusion has no occurrence
+    requirement; closure still has no generic rebuild. No online check is added.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream

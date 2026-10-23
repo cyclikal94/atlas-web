@@ -5162,3 +5162,122 @@ test.describe("E-T38: an untouched time keeps its seconds (A7, A9; R31 of revisi
       expect(slot?.intended_time).toBe(`07:30:${seconds}`);
     });
 });
+
+test.describe("E-T39: a known denial of the occurrence admits no closure and no first Anyone record (A8, A10; DA17-N1/N2 of revision 17)", () => {
+  // The design assessment's S8/S9/S10 schedules in each engine: the detail page offers Close/Reopen or an Anyone occurrence's first
+  // record; another tab then commits the occurrence's denial through its own connection (this page is not told); only the writing
+  // transaction can refuse it. The editor is the control of each; an existing participant records without the occurrence's edit access.
+  // Each case acts only once the page's session and protected tree are quiet (`untilTreeSettled`, R34): the tree remounts when the session's
+  // own boot steps finish, and a Firefox control that typed before that lost its amount (revision 17, run 2's MU-2329 control; trace in
+  // the run's evidence). A readiness boundary of the harness, not a wait on the behaviour under test.
+  const refusal = (page: Page) =>
+    page.getByText("You can't change this. Nothing was saved.", {
+      exact: true,
+    });
+  const ofKind = async (page: Page, kind: string) =>
+    (await draftsOf(page)).filter((d) => d.kind === kind);
+
+  for (const resolved of [false, true])
+    for (const denied of [false, true]) {
+      const label = resolved ? "Reopen" : "Close without completing";
+      test(`${label}: ${denied ? "another tab committed a denial after it was offered: nothing is queued, the refusal is said" : "control: an editor queues one resolve"}`, async ({
+        context,
+      }) => {
+        const task = buildTask({
+          n: 90 + (resolved ? 2 : 0) + (denied ? 1 : 0),
+          title: "Closure permission",
+          participation: "everyone",
+        });
+        task.data.resolved = resolved;
+        const { page } = await setup(
+          context,
+          `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+          [task],
+        );
+        await untilTreeSettled(page);
+        await goOfflineAtBoundary(page);
+        const button = page.getByRole("button", { name: label, exact: true });
+        await expect(button).toBeEnabled();
+        if (denied) await denyFromAnotherTab(context, task.occurrenceId);
+        await button.click();
+        if (denied) {
+          await expect(refusal(page)).toHaveCount(1);
+          expect(await ofKind(page, "resolve")).toHaveLength(0);
+        } else {
+          await expect
+            .poll(async () => (await ofKind(page, "resolve")).length)
+            .toBe(1);
+          expect((await bodiesOf(page))[0]?.command.command).toMatchObject({
+            kind: "resolve",
+            resolved: !resolved,
+          });
+        }
+      });
+    }
+
+  const anyone = (n: number, stream: boolean) => {
+    const task = buildTask({
+      n,
+      title: "Anyone may record",
+      participation: "anyone",
+      stream,
+      goal: { kind: "numeric", minimum: "8", maximum: null, unit: "glasses" },
+    });
+    if (!stream) task.data.participants = [OTHER];
+    return task;
+  };
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (glasses)", { exact: true });
+  const record = (page: Page) =>
+    page
+      .locator("[data-record-card]")
+      .getByRole("button", { name: "Record", exact: true });
+
+  for (const denied of [false, true])
+    test(`the first record of an Anyone occurrence: ${denied ? "another tab committed a denial after it was offered: no record, the amount stays, the refusal is said" : "control: an editor's first amount is queued once"}`, async ({
+      context,
+    }) => {
+      const task = anyone(denied ? 95 : 94, false);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await amount(page).fill("2");
+      await expect(amount(page)).toHaveValue("2");
+      await expect(record(page)).toBeEnabled();
+      if (denied) await denyFromAnotherTab(context, task.occurrenceId);
+      await record(page).click();
+      if (denied) {
+        await expect(refusal(page)).toHaveCount(1);
+        await expect(amount(page)).toHaveValue("2");
+        expect(await ofKind(page, "record")).toHaveLength(0);
+      } else {
+        await expect
+          .poll(async () => (await ofKind(page, "record")).length)
+          .toBe(1);
+        await expect(amount(page)).toHaveValue("");
+      }
+    });
+
+  test("an existing participant whose occurrence is read-only still records (S10)", async ({
+    context,
+  }) => {
+    const task = readOnly(anyone(96, true), ["occurrence"]);
+    const { page } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await untilTreeSettled(page);
+    await goOfflineAtBoundary(page);
+    await amount(page).fill("2");
+    await expect(amount(page)).toHaveValue("2");
+    await record(page).click();
+    await expect
+      .poll(async () => (await ofKind(page, "record")).length)
+      .toBe(1);
+  });
+});

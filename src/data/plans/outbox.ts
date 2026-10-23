@@ -33,7 +33,7 @@ import {
   type QueueSummary,
   summaryFromCounts,
 } from "../model/queue-summary";
-import { OldestDrafts } from "../model/related";
+import { OldestDrafts, TargetFold } from "../model/related";
 import {
   draftOperations,
   failureVersion,
@@ -355,8 +355,13 @@ export type EditResult =
 
 interface EditReads {
   draft: DraftRow | undefined;
-  /** The cached rows of the targets the request needs to write (`requiresEdit`), read in this transaction. */
+  /**
+   * The cached rows of the targets the request needs to write (`requiresEdit`), and of the participations it would create
+   * (`joinRequiresEdit`) and the resources they name, read in this transaction.
+   */
   cache: Map<ResourceId, CacheRow>;
+  /** The other unsettled drafts that write such a participation (`TargetFold` stand-ins; never the edited draft). */
+  others: DraftRow[];
 }
 
 export const editQueuedDraft = singletonPlan<
@@ -379,21 +384,49 @@ export const editQueuedDraft = singletonPlan<
     const draft = await reader.get("drafts", input.localId);
     // The permission an edit needs is read in the SAME transaction that writes it (R30): a denial committed before it is honoured.
     // (A request's target ids are distinct: `validateRequest`.)
-    const rows = await bulkGetWindowed(
-      reader,
-      "cache",
-      input.request.targets
-        .filter((target) => target.requiresEdit)
-        .map((target) => target.resourceId),
+    // A participation the edit would create is known from the cache or another unsettled draft that writes it (DA17-N2), read here too.
+    const joins = input.request.targets.filter(
+      (target) => target.joinRequiresEdit !== undefined,
     );
+    const ids = input.request.targets.flatMap((target) =>
+      target.joinRequiresEdit !== undefined
+        ? [target.resourceId, target.joinRequiresEdit]
+        : target.requiresEdit
+          ? [target.resourceId]
+          : [],
+    );
+    const rows = await bulkGetWindowed(reader, "cache", ids);
     const cache = new Map<ResourceId, CacheRow>();
     for (const row of rows) if (row) cache.set(row.id, row);
-    return { draft, cache };
+    const others = new Map<LocalId, DraftRow>();
+    for (const target of joins) {
+      const fold = new TargetFold(target.resourceId);
+      await walkIndex(
+        reader,
+        "drafts",
+        "index_targets",
+        range.only(target.resourceId),
+        // Only a draft OLDER than the edited one is evidence: a later one that writes the stream stands on the edited draft (it depends on
+        // it), and the edited draft is not its own evidence (left in as the latest, either would also hide an older one from the fold).
+        (row) => {
+          if (draft !== undefined && row.created_seq < draft.created_seq)
+            fold.add(row);
+        },
+      );
+      for (const row of fold.rows()) others.set(row.local_id, row);
+    }
+    return { draft, cache, others: [...others.values()] };
   },
   decide: ({ sync, reads, input }) => {
     if (sync === undefined)
       return { result: { kind: "refused", reason: "not_found" } };
-    const planned = planEdit(input.request, reads.draft, sync, reads.cache);
+    const planned = planEdit(
+      input.request,
+      reads.draft,
+      sync,
+      reads.cache,
+      reads.others,
+    );
     if (planned.kind !== "edited") return { result: planned };
     const over = overBound(input, {
       draft: planned.draft,

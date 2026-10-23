@@ -70,10 +70,25 @@ export function useTaskActions(): TaskActions {
       if (message) announcer.announce(message, "assertive");
       return { ok: false, message };
     };
+    /**
+     * A known denial already on screen admits nothing (DA17-N1/N2): the outbox is not asked. The writing transaction is what decides a
+     * denial committed after the screen was drawn; this is the act's own check of what it was offered.
+     */
+    const denied = async (): Promise<SaveOutcome> => {
+      const message = copy.refusalMessage("denied");
+      if (message) announcer.announce(message, "assertive");
+      return { ok: false, message };
+    };
     return {
       enqueue,
-      record: (row, evidence, replaces = null, announce) =>
-        enqueue(
+      record: (row, evidence, replaces = null, announce) => {
+        const firstAnyoneStream =
+          row.data.definition.participation === "anyone" &&
+          !row.streamPresent &&
+          !row.streamPending;
+        // Joining an Anyone occurrence by its first record needs its edit access; an existing participant records without it.
+        if (firstAnyoneStream && !row.canEdit) return denied();
+        return enqueue(
           commands.record({
             occurrenceId: row.id,
             progressId: row.progressId,
@@ -83,16 +98,17 @@ export function useTaskActions(): TaskActions {
             // The instant of the person's act, taken now (never at send).
             happenedAt: Math.floor(env.now() / 1000),
             replaces,
-            firstAnyoneStream:
-              row.data.definition.participation === "anyone" &&
-              !row.streamPresent &&
-              !row.streamPending,
+            firstAnyoneStream,
             defaults: record,
           }),
           announce,
-        ),
+        );
+      },
+      // Closing or reopening a day needs the occurrence's edit access.
       resolve: (row, resolved) =>
-        enqueue(commands.resolve({ occurrenceId: row.id, resolved })),
+        row.canEdit
+          ? enqueue(commands.resolve({ occurrenceId: row.id, resolved }))
+          : denied(),
       exclude: (row, excluded) =>
         enqueue(
           commands.exclude({

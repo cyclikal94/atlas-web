@@ -271,12 +271,16 @@ export function record(input: RecordInput): EnqueueRequest {
     endpoint: TASK_ENDPOINT,
     targets: [
       // Every record raises my stream's version on the server, so it always raises the local record: checked as the primary, otherwise
-      // as a side effect (no `expected_version` is sent then).
+      // as a side effect (no `expected_version` is sent then). It writes my stream, so a known denial of it refuses the record; and the
+      // record that CREATES it (an Anyone occurrence's first) needs the occurrence's edit access, decided in the writing transaction from
+      // whether this device knows my participation there, not from what the screen thought (DA17-N2).
       {
         resourceId: input.progressId,
         role: checked ? "primary" : "side_effect",
         basis: "progress_stream",
         versionChecked: true,
+        requiresEdit: true,
+        joinRequiresEdit: input.occurrenceId,
         ...(input.firstAnyoneStream ? { seedIfUntracked: 1 } : {}),
       },
       // The occurrence orders the record after any queued change of it (a correction, a closure); it is not version-checked.
@@ -321,11 +325,13 @@ export function exclude(input: {
   return {
     endpoint: TASK_ENDPOINT,
     targets: [
+      // An exclusion writes my stream (the server checks my write access to it), never the occurrence.
       {
         resourceId: input.progressId,
         role: "primary",
         basis: "progress_stream",
         versionChecked: true,
+        requiresEdit: true,
       },
       // Named so the occurrence's outstanding work includes it (not version-checked).
       {
@@ -358,12 +364,14 @@ export function resolve(input: {
 }): EnqueueRequest {
   return {
     endpoint: TASK_ENDPOINT,
+    // Closing or reopening a day needs write access to the occurrence (DA17-N1): a known denial refuses it in the writing transaction.
     targets: [
       {
         resourceId: input.occurrenceId,
         role: "primary",
         basis: "resource",
         versionChecked: true,
+        requiresEdit: true,
       },
     ],
     build: (bases: Bases) => ({

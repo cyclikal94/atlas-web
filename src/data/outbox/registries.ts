@@ -1,4 +1,4 @@
-import type { EnqueueRequest } from "../model/outbox";
+import type { EnqueueRequest, TargetNeeds } from "../model/outbox";
 import { projectionTarget } from "../model/overlay";
 import type {
   CacheRow,
@@ -61,6 +61,12 @@ export interface CommandSpec {
     draft: DraftWithCommand,
     io: CurrentReadIo,
   ): Promise<CurrentRead>;
+  /**
+   * What the kind's commands need of the person's access, by target (`TargetSpec.requiresEdit`/`joinRequiresEdit`), derived from the
+   * STORED draft and its body (WEB-10a DA17-N2): a request the data layer rebuilds itself from a stored draft (the defaults review's
+   * confirmation) states them again, so a known denial refuses it as it refuses the slice's own save. None: nothing is required.
+   */
+  admission?(draft: DraftWithCommand): TargetNeeds;
 }
 
 /** What the data layer gives a slice's `readCurrent`: one ordinary, stamped, authorised `GET` for the displayed account and epoch. */
@@ -118,6 +124,8 @@ export interface CommandRegistry {
   onlineOnly(draft: Pick<DraftRow, "kind">): boolean;
   /** The kind's authorised current-state read (R7); `failed`/`unavailable` when it registered none, `failed`/`error` if it threw. */
   readCurrent(draft: DraftWithCommand, io: CurrentReadIo): Promise<CurrentRead>;
+  /** What the draft's commands need of the person's access (`CommandSpec.admission`); `{}` when its kind registered none. */
+  admission(draft: DraftWithCommand): TargetNeeds;
 }
 
 export function createCommandRegistry(): CommandRegistry {
@@ -141,6 +149,8 @@ export function createCommandRegistry(): CommandRegistry {
     rebuild: (draft, current, related) =>
       specs.get(commandKind(draft))?.rebuild?.(draft, current, related) ?? null,
     onlineOnly: (draft) => specs.get(commandKind(draft))?.onlineOnly === true,
+    admission: (draft) =>
+      specs.get(commandKind(draft))?.admission?.(draft) ?? {},
     async readCurrent(draft, io) {
       const read = specs.get(commandKind(draft))?.readCurrent;
       if (read === undefined) return { kind: "failed", reason: "unavailable" };

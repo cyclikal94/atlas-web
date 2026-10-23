@@ -6,6 +6,7 @@
 // code a mutant targets fails LOUDLY here instead of silently turning the mutant into a no-op ("patch applied" is asserted).
 
 import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
+import { ENGINE_R17, UNIT_R17 } from "./catalogue-web10a-r17.mjs";
 
 export class PatchError extends Error {}
 
@@ -21794,6 +21795,7 @@ export const UNIT = [
   },
   // WEB-10a revision 16 (R30, R31, DA-A1..A3): MU-2268..MU-2298, kept in their own module (this file reached Biome's size limit).
   ...UNIT_R16,
+  ...UNIT_R17,
 ];
 
 /**
@@ -25241,4 +25243,5 @@ export const ENGINE = [
   },
   // WEB-10a revision 16 (R30, R31): MU-2299..MU-2303, in their own module.
   ...ENGINE_R16,
+  ...ENGINE_R17,
 ];

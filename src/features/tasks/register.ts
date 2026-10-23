@@ -7,6 +7,7 @@ import type {
   DraftWithCommand,
   EnqueueRequest,
   JsonObject,
+  TargetNeeds,
 } from "../../data";
 import {
   archive,
@@ -266,6 +267,48 @@ function asReplacement(
 
 const isString = (value: unknown): value is string => typeof value === "string";
 
+/**
+ * What a STORED task command needs of my access, exactly as its builder states it (`model/commands`; WEB-10a DA17-N1/N2): the defaults
+ * review's confirmation rebuilds a stored draft without the builder, so the needs are derived again from the draft and its body. A record
+ * writes my stream and, when it creates it, needs the occurrence (`joinRequiresEdit`, decided from what the writing transaction knows);
+ * an exclusion writes my stream; a closure and a correction need the occurrence; a revision the task and its details; an archive the
+ * task. A create needs nothing (its rows are its own). A body this cannot read needs nothing more than what the server decides.
+ */
+function admissionOf(draft: DraftWithCommand): TargetNeeds {
+  const command = commandOf(draft);
+  if (command === null) return {};
+  const occurrence = command.occurrence_id;
+  const stream = streamOf(draft, occurrence);
+  switch (command.kind) {
+    case "record":
+      return isString(occurrence) && stream !== undefined
+        ? { [stream]: { requiresEdit: true, joinRequiresEdit: occurrence } }
+        : {};
+    case "exclude":
+      return stream === undefined ? {} : { [stream]: { requiresEdit: true } };
+    case "resolve":
+      return isString(occurrence)
+        ? { [occurrence]: { requiresEdit: true } }
+        : {};
+    case "revise_occurrence":
+    case "archive":
+      return isString(command.id)
+        ? { [command.id]: { requiresEdit: true } }
+        : {};
+    case "revise_task": {
+      if (!isString(command.id)) return {};
+      const needs: Record<string, { requiresEdit: true }> = {
+        [command.id]: { requiresEdit: true },
+      };
+      for (const id of Object.keys(draft.side_effect_bases ?? {}))
+        needs[id] = { requiresEdit: true };
+      return needs;
+    }
+    default:
+      return {};
+  }
+}
+
 function rebuildRecord(
   draft: DraftWithCommand,
   current: CacheRow | null,
@@ -412,25 +455,32 @@ export function taskCommandSpecs(): Record<string, CommandSpec> {
       describe: describe("revise_task"),
       readCurrent: readTaskCurrent,
       rebuild: rebuildReviseTask,
+      admission: admissionOf,
     },
     record: {
       describe: describe("record"),
       readCurrent: readProgressCurrent,
       rebuild: rebuildRecord,
+      admission: admissionOf,
     },
     exclude: {
       describe: describe("exclude"),
       readCurrent: readProgressCurrent,
       rebuild: rebuildExclude,
+      admission: admissionOf,
     },
     // No authorised read of one occurrence exists for its draft (`/occurrences` lists by task, which the draft does not name), so a
     // closure cannot be rebuilt on a reviewed version: only discarded (R5, revision 1; it was never rebuildable without one).
-    resolve: { describe: describe("resolve") },
-    revise_occurrence: { describe: describe("revise_occurrence") },
+    resolve: { describe: describe("resolve"), admission: admissionOf },
+    revise_occurrence: {
+      describe: describe("revise_occurrence"),
+      admission: admissionOf,
+    },
     archive: {
       describe: describe("archive"),
       readCurrent: readTaskCurrent,
       rebuild: rebuildArchive,
+      admission: admissionOf,
     },
   };
 }

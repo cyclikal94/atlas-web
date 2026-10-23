@@ -29,6 +29,7 @@ export type {
   Bases,
   BuildResult,
   EnqueueRequest,
+  TargetNeeds,
   TargetSpec,
 } from "./model/outbox";
 export { OutboxRequestError } from "./model/outbox";
