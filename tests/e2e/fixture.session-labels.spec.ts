@@ -527,6 +527,82 @@ test.describe("L-5 the named confirmations", () => {
           await expect(dialog).toHaveCount(0);
         }
       });
+
+  // WEB-08d revision 26 (review r25 R25-N2): retirement is online-only (WF-SETTINGS-02; the approved IA's disabled-with-the-reason rule).
+  // With a retirement dialog open, losing the connection disables its confirmation, which is described by the reason; reconnecting
+  // enables it again and confirms nothing by itself. Logging out stays possible offline. tests/features/settings/
+  // retirement-connectivity.test.tsx covers the click queued before the `offline` event, which a real engine cannot order on demand.
+  test("L-5b real offline: both retirement confirmations are disabled with the reason, reconnecting confirms nothing, and Log out stays available", async ({
+    page,
+  }) => {
+    const reason = "Retiring a device needs a connection.";
+    const describedBy = (button: Locator) =>
+      button.evaluate((el) =>
+        (el.getAttribute("aria-describedby") ?? "")
+          .split(" ")
+          .filter(Boolean)
+          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .join(" "),
+      );
+    const setOnline = async (online: boolean) => {
+      await page.context().setOffline(!online);
+      await expect
+        .poll(() => page.evaluate(() => navigator.onLine))
+        .toBe(online);
+    };
+    await page.goto("/settings/sessions");
+    await ready(page);
+    for (const [opener, title, confirmName] of [
+      [
+        `Retire ${isolate("Kieran's phone")}, last synced 3 hours ago`,
+        `Retire ${isolate("Kieran's phone")}?`,
+        "Retire device",
+      ],
+      [
+        "Retire this device, Chrome on macOS",
+        "Retire this device?",
+        "Retire this device",
+      ],
+    ] as const) {
+      await page.getByRole("button", { name: opener }).click();
+      const dialog = page.getByRole("dialog", { name: title });
+      const confirm = dialog.getByRole("button", { name: confirmName });
+      await expect(confirm).toBeEnabled();
+      await setOnline(false);
+      await expect(confirm).toBeDisabled();
+      expect(await describedBy(confirm)).toBe(reason);
+      await expect(dialog.getByText(reason)).toBeVisible();
+      await setOnline(true);
+      await expect(confirm).toBeEnabled();
+      expect(await confirm.getAttribute("aria-describedby")).toBeNull();
+      // Reconnecting confirmed nothing: the dialog is still open over an unchanged list.
+      await page.waitForTimeout(300);
+      await expect(dialog).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByRole("button", { name: opener })).toBeEnabled();
+    }
+    // Offline: the openers are disabled with the reason; signing out of this browser is not.
+    await setOnline(false);
+    for (const opener of [
+      `Retire ${isolate("Kieran's phone")}, last synced 3 hours ago`,
+      "Retire this device, Chrome on macOS",
+    ]) {
+      const button = page.getByRole("button", { name: opener });
+      await expect(button).toBeDisabled();
+      expect(await describedBy(button)).toBe(reason);
+    }
+    await page
+      .getByRole("button", {
+        name: "Sign out of this browser, Chrome on macOS",
+      })
+      .click();
+    const logout = page.getByRole("dialog", { name: "Log out?" });
+    await expect(logout.getByRole("button", { name: "Log out" })).toBeEnabled();
+    await page.keyboard.press("Escape");
+    await expect(logout).toHaveCount(0);
+    await setOnline(true);
+  });
 });
 
 test.describe("L-6 Auto", () => {

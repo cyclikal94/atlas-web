@@ -18,6 +18,14 @@
 // judgeNegative compares them again. Live runs (held-operation-probes.mjs) and replays (held-operation-judge.mjs) use this same path.
 // This is a local integrity check of the runner's own evidence, not remote attestation: a producer that rewrites every input and digest
 // consistently is outside it.
+//
+// Revision 26 (review r25 R25-N1; design assessment 26f1a626 I1-I6, steps 2-4): integrity of the bytes says nothing about WHICH runtime
+// produced them. A `/2` bundle also carries the run's applicability record (held-operation-applicability.mjs: controller and child Node,
+// pnpm, installed Playwright/Vite trees, browser installations, behavioural environment), and its report's own runtime witness
+// (tests/e2e/evidence-run.ts runtimeWitness) must agree with that record, or the bundle contradicts itself and is refused. Whether the
+// evidence APPLIES to a consumer is a separate fact (I2): applicabilityOf compares the record with a target the caller collected from its
+// own environment, field by field; without a target the result is `unassessed` (a historical replay, never an admission). A `/1` bundle
+// still verifies as historical evidence; its applicability is `unknown`, never backfilled from today's machine.
 import { createHash } from "node:crypto";
 import {
   linkSync,
@@ -31,12 +39,21 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
+  applicabilityReasons,
+  COMPARISON_VERSION,
+  canonical,
+  compareApplicability,
+  witnessProblems,
+} from "./held-operation-applicability.mjs";
+import {
   CONTRACT_VERSION,
   ENGINES,
   EVIDENCE_SCHEMA,
   FAULT_HOOK,
   judgeControl,
   judgeNegative,
+  LEGACY_EVIDENCE_SCHEMAS,
+  LEGACY_NEGATIVE_CONTRACTS,
   mutantOf,
   NEGATIVE_CONTRACT_VERSION,
   normalise,
@@ -80,9 +97,10 @@ export const SELECTION_ENV = [
   "ATLAS_PROBE_FAULT_IDS",
 ];
 
-/** The artefacts a part's bundle must hold, exactly. */
-export function artefactNames({ kind, part, nc }) {
+/** The artefacts a part's bundle must hold, exactly (a revision 25 `/1` bundle has no applicability record). */
+export function artefactNames({ kind, part, nc }, schema = EVIDENCE_SCHEMA) {
   const names = ["report", "execution", "source", "spec"];
+  if (schema === EVIDENCE_SCHEMA) names.push("applicability");
   if (kind === "negative" || part === "copy-control") names.push("inventory");
   if (kind === "negative") {
     names.push(`base:${PROBE_SPEC}`);
@@ -238,6 +256,7 @@ export function verifyBundle(bundle, expect) {
   const problems = [...(bundle?.read_problems ?? [])];
   const out = {
     schema: EVIDENCE_SCHEMA,
+    legacy: false,
     status: "refused",
     problems,
     kind: expect.kind,
@@ -252,6 +271,7 @@ export function verifyBundle(bundle, expect) {
     probes: null,
     report: null,
     spec: null,
+    applicability: null,
   };
   const done = () => {
     out.status = problems.length ? "refused" : "verified";
@@ -274,14 +294,24 @@ export function verifyBundle(bundle, expect) {
     problems.push("the manifest is not an object");
     return done();
   }
-  if (m.schema !== EVIDENCE_SCHEMA) {
+  if (
+    m.schema !== EVIDENCE_SCHEMA &&
+    !LEGACY_EVIDENCE_SCHEMAS.includes(m.schema)
+  ) {
     problems.push(
       `the manifest's schema is ${JSON.stringify(m.schema)}, not ${EVIDENCE_SCHEMA} (a legacy receipt is never verifiable evidence)`,
     );
     return done();
   }
+  out.schema = m.schema;
+  out.legacy = m.schema !== EVIDENCE_SCHEMA;
+  // A legacy bundle was published under its own era's negative contract; its applicability is unknown either way (applicabilityOf).
   const contract =
-    expect.kind === "negative" ? NEGATIVE_CONTRACT_VERSION : CONTRACT_VERSION;
+    expect.kind !== "negative"
+      ? CONTRACT_VERSION
+      : out.legacy
+        ? LEGACY_NEGATIVE_CONTRACTS[m.schema]
+        : NEGATIVE_CONTRACT_VERSION;
   if (m.kind !== expect.kind)
     problems.push(`the bundle is a ${m.kind} part, not a ${expect.kind}`);
   if (m.part !== expect.part)
@@ -306,7 +336,7 @@ export function verifyBundle(bundle, expect) {
     );
 
   // Every artefact: exactly the required set, each a plain relative path whose bytes are the digest named.
-  const required = artefactNames(expect);
+  const required = artefactNames(expect, m.schema);
   const artefacts = object(m.artefacts) ? m.artefacts : {};
   if (!object(m.artefacts)) problems.push("the manifest lists no artefacts");
   for (const name of required)
@@ -339,6 +369,17 @@ export function verifyBundle(bundle, expect) {
         `${name}: its bytes (${actual}) are not the manifest's (${a.sha256})`,
       );
     else bytes[name] = b;
+  }
+
+  // The run's applicability record (revision 26): readable; whether it applies to a consumer is judged apart (applicabilityOf).
+  let record = null;
+  if (bytes.applicability) {
+    try {
+      record = parse(bytes.applicability);
+      out.applicability = { sha256: sha256(bytes.applicability), record };
+    } catch {
+      problems.push("the applicability record is not JSON");
+    }
   }
 
   // The source fingerprint: internally consistent and the manifest's.
@@ -457,7 +498,8 @@ export function verifyBundle(bundle, expect) {
         `the supplied report (${expect.report_sha256}) is not the bundle's (${out.report_sha256})`,
       );
     try {
-      const run = parse(bytes.report)?.config?.metadata?.atlasEvidenceRun;
+      const metadata = parse(bytes.report)?.config?.metadata;
+      const run = metadata?.atlasEvidenceRun;
       if (
         typeof run !== "string" ||
         !run.includes(`/${m.invocation}/${m.part}/`)
@@ -465,6 +507,9 @@ export function verifyBundle(bundle, expect) {
         problems.push(
           `the report's evidence run ${JSON.stringify(run)} is not this invocation's ${m.part}`,
         );
+      // The runtime the Playwright run reports for itself is the one its applicability record names (a `/2` bundle only).
+      if (!out.legacy && record)
+        problems.push(...witnessProblems(metadata?.atlasRuntime, record));
     } catch {
       problems.push("the report is not JSON");
     }
@@ -551,10 +596,59 @@ export function verifyBundle(bundle, expect) {
   return done();
 }
 
-/** The verifier's result without the bytes: what judgements and records carry. */
+/** The verifier's result without the bytes: what judgements and records carry (the applicability record by its digest). */
 export function evidenceSummary(v) {
-  const { report: _r, spec: _s, ...rest } = v;
-  return { ...rest, problems: [...v.problems] };
+  const { report: _r, spec: _s, applicability, ...rest } = v;
+  return {
+    ...rest,
+    problems: [...v.problems],
+    applicability_sha256: applicability?.sha256 ?? null,
+  };
+}
+
+/** The digest a target applicability record has when written (canonical bytes). */
+export const targetDigest = (target) => sha256(canonical(target));
+
+/**
+ * Whether a verified bundle's evidence applies to a consumer (design assessment step 3, I2-I4): its recorded applicability compared with
+ * `target`, the record the CONSUMER collected from its own environment. No target: `unassessed` (a historical replay, never an
+ * admission). A `/1` bundle or one with no readable record: `unknown`. Only `applicable` admits.
+ */
+export function applicabilityOf(v, target) {
+  const record_sha256 = v.applicability?.sha256 ?? null;
+  if (target === undefined)
+    return {
+      comparison: COMPARISON_VERSION,
+      decision: "unassessed",
+      target_sha256: null,
+      record_sha256,
+      reasons: [
+        "no consuming target was given: a historical replay, never an admission",
+      ],
+    };
+  const target_sha256 =
+    target && typeof target === "object" ? targetDigest(target) : null;
+  const c = v.legacy
+    ? {
+        comparison: COMPARISON_VERSION,
+        decision: "unknown",
+        differences: [],
+        unknown: [
+          {
+            field: "schema",
+            side: "record",
+            why: `a ${v.schema} bundle records no applicability`,
+          },
+        ],
+        locations: [],
+      }
+    : compareApplicability(target, v.applicability?.record);
+  return {
+    ...c,
+    target_sha256,
+    record_sha256,
+    reasons: applicabilityReasons(c),
+  };
 }
 
 /** The verified bytes normalised with the recorded exit and signal (null when there is nothing verified to normalise). */
@@ -592,6 +686,7 @@ function unjudged(nc, evidence, why) {
       cases: [],
       native: {},
     },
+    applicability: evidence.applicability,
     qualified: false,
     outcome: "unqualified",
     problems: integrity.map((p) => `integrity: ${p}`),
@@ -601,16 +696,19 @@ function unjudged(nc, evidence, why) {
 /**
  * A negative control judged from its bundle (design assessment C1, C3): verified, then the verified bytes normalised with the recorded
  * exit and signal and judged by judgeNegative, which compares them with the evidence again. The live runner and the replay CLI both call
- * this; nothing else qualifies a negative control.
+ * this; nothing else qualifies a negative control. Revision 26: `expect.target` is the consumer's own applicability record; without it the
+ * judgement's applicability is `unassessed` and it is never qualified.
  */
 export function qualifyNegative(nc, bundle, expect = {}) {
+  const { target, ...binding } = expect;
   const v = verifyBundle(bundle, {
-    ...expect,
+    ...binding,
     kind: "negative",
     part: nc.id,
     nc,
   });
   const evidence = evidenceSummary(v);
+  evidence.applicability = applicabilityOf(v, target);
   let run;
   try {
     run = runOf(v);
@@ -633,13 +731,18 @@ export function qualifyNegative(nc, bundle, expect = {}) {
 /**
  * A control part judged from its bundle (design assessment C5): verified, re-normalised from the verified bytes and judged healthy over
  * the probes its run selected. A --stage negatives prerequisite reads both controls this way; a summary's `ok` is never enough.
+ * Revision 26: `healthy` is the bundle's own fact; `ok` also needs its applicability to `expect.target` (the consumer's record).
  */
 export function judgeControlEvidence(bundle, expect) {
-  const v = verifyBundle(bundle, { ...expect, kind: "control" });
+  const { target, ...binding } = expect;
+  const v = verifyBundle(bundle, { ...binding, kind: "control" });
   const evidence = evidenceSummary(v);
+  evidence.applicability = applicabilityOf(v, target);
   const result = {
     name: expect.part,
     ok: false,
+    healthy: false,
+    applicability: evidence.applicability,
     probes: v.probes,
     browsers: v.browsers,
     evidence,
@@ -662,8 +765,17 @@ export function judgeControlEvidence(bundle, expect) {
   result.problems.push(...judged.problems);
   if (run.report_sha256 !== v.report_sha256 || run.exit !== v.execution.exit)
     result.problems.push("the judged run is not the bundle's");
-  result.ok =
+  // Healthy is the bytes' own fact; ok (what admits) also needs the evidence to apply to this consumer (revision 26, I2).
+  result.healthy =
     v.status === "verified" && judged.ok && result.problems.length === 0;
+  if (evidence.applicability.decision !== "applicable")
+    result.problems.push(
+      ...evidence.applicability.reasons.map(
+        (r) => `applicability ${evidence.applicability.decision}: ${r}`,
+      ),
+    );
+  result.ok =
+    result.healthy && evidence.applicability.decision === "applicable";
   result.cases = judged.cases;
   result.native = judged.native;
   return result;

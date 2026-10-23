@@ -64,6 +64,11 @@ export const ON_DEVICE = "On";
 export const NAME_ACTION = "Name…"; // [P]
 export const RENAME_ACTION = "Rename…"; // [P]
 export const NAME_OFFLINE_REASON = "Naming a device needs a connection."; // [P]
+/**
+ * [W] why a retirement control is disabled while the browser believes it is offline (WEB-08a's row reason, WF-SETTINGS-02: retirement is
+ * online-only). WEB-08d revision 26 (review r25 R25-N2): both retirement confirmations say it too, so it lives here, not in a dialog.
+ */
+export const RETIRE_OFFLINE_REASON = "Retiring a device needs a connection.";
 export const NAME_LABEL = "Device name"; // [P]
 export const NAME_DESCRIPTION =
   "Only people signed in to this account can see it. Up to 64 characters."; // [P]

@@ -1,5 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
-import { configureEvidenceRun } from "./tests/e2e/evidence-run";
+import { configureEvidenceRun, runtimeWitness } from "./tests/e2e/evidence-run";
 import { PARALLEL_UI } from "./tests/e2e/scheduling";
 import { neededTargets } from "./tests/e2e/targets";
 
@@ -78,7 +78,10 @@ const browserEvidenceRun = configureEvidenceRun();
 export default defineConfig({
   testDir: "./tests/e2e",
   outputDir: `${browserEvidenceRun}/test-results`,
-  metadata: { atlasEvidenceRun: browserEvidenceRun },
+  metadata: {
+    atlasEvidenceRun: browserEvidenceRun,
+    atlasRuntime: runtimeWitness(),
+  },
   globalSetup: "./tests/e2e/evidence-run.ts",
   reporter: "list",
   fullyParallel: false,

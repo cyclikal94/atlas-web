@@ -17,11 +17,23 @@
 // `--diagnostic` judges a saved report's scenario and classifier without evidence: labelled, never admissible (`admission_eligible:
 // false`); its exit 0 means only that the scenario held and the classifier refused. The revision 24 receipt (`--provenance`) is refused.
 //
+// Revision 26 (review r25 R25-N1; design assessment 26f1a626 step 3, H7, H8): verifying a bundle says what its bytes show, not that they
+// apply HERE. `--evidence` now needs exactly one of:
+//   --target current | <applicability.json>   ADMISSION: the bundle's runtime record must be applicable, field by field, to this machine's
+//                                             own record (`current`: collected now, as the runner collects it) or to the named one;
+//                                             unknown or incompatible exits 1. Only this mode can be `admission_eligible`.
+//   --historical                              a labelled historical replay on any host: integrity, scenario and classifier (a control:
+//                                             its health) are judged; applicability is `unassessed`; exit 0 means `historical-holds`
+//                                             (`historical-healthy`), never admission.
+// `--source current` binds the source alone; it never implies a runtime.
+//
 // Usage: node scripts/validation/held-operation-judge.mjs
-//          --negative <NC id> --evidence <manifest.json> [--report <report.json>] [--spec <spec>] [--exit <n>]
+//          --negative <NC id> --evidence <manifest.json> (--target current|<applicability.json> | --historical)
+//                             [--report <report.json>] [--spec <spec>] [--exit <n>]
 //                             [--invocation <run id>] [--source <fingerprint sha256 | current>]
 //        | --negative <NC id> --diagnostic --report <report.json> --exit <n> --spec <spec> [--browsers ...]
-//        | --control --evidence <manifest.json> --part control|copy-control [--invocation <id>] [--source <sha256 | current>]
+//        | --control --evidence <manifest.json> --part control|copy-control (--target ... | --historical)
+//                             [--invocation <id>] [--source <sha256 | current>]
 //        | --control --report <report.json> --exit <n> --spec <spec> [--probes P01,...] [--expect healthy|unhealthy] [--browsers ...]
 //        | --mutant <ID> --report <report.json> --exit <n> --spec <spec> [--probes S10,...] [--expect caught|survived|invalid] [--browsers ...]
 //        [--out <judgement.json>]
@@ -29,11 +41,13 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { collectApplicability } from "./held-operation-applicability.mjs";
 import {
   judgeControlEvidence,
   qualifyNegative,
   readBundle,
   sha256,
+  verifyBundle,
 } from "./held-operation-evidence.mjs";
 import {
   CONTRACT_VERSION,
@@ -49,7 +63,7 @@ import {
 import { fingerprint } from "./runtime.mjs";
 
 const args = process.argv.slice(2);
-const flags = new Set(["--control", "--diagnostic"]);
+const flags = new Set(["--control", "--diagnostic", "--historical"]);
 const options = new Map();
 for (let i = 0; i < args.length; i++) {
   if (flags.has(args[i])) {
@@ -75,6 +89,7 @@ for (let i = 0; i < args.length; i++) {
       "--part",
       "--invocation",
       "--source",
+      "--target",
     ].includes(args[i])
   )
     throw new Error(`Unknown option: ${args[i]}`);
@@ -113,8 +128,18 @@ if (bound)
     if (options.has(o))
       throw new Error(`${o}: a bundle's selection is its own recorded run's`);
 if (!bound)
-  for (const o of ["--part", "--invocation", "--source"])
+  for (const o of [
+    "--part",
+    "--invocation",
+    "--source",
+    "--target",
+    "--historical",
+  ])
     if (options.has(o)) throw new Error(`${o} binds --evidence`);
+if (bound && options.has("--target") === options.has("--historical"))
+  throw new Error(
+    "--evidence needs exactly one of --target current|<applicability.json> (an admission: the bundle's runtime must apply here) and --historical (a replay, never an admission)",
+  );
 if (
   bound &&
   mode === "--control" &&
@@ -175,19 +200,45 @@ if (bound) {
     exit,
   };
   const bundle = readBundle(options.get("--evidence"));
-  label =
-    "a verified replay of a published evidence bundle: its own recorded run, not a fresh browser run";
+  const historical = options.has("--historical");
+  if (!historical) {
+    const given = options.get("--target");
+    if (given === "current") {
+      // This machine's own record, collected as the runner collects it, for the engines the bundle's own run selected.
+      const selection = verifyBundle(bundle, {
+        kind: nc ? "negative" : "control",
+        part: nc ? nc.id : options.get("--part"),
+        nc,
+      }).browsers;
+      expect.target = collectApplicability({
+        root,
+        browsers: selection?.length ? selection : browsers,
+      });
+    } else expect.target = JSON.parse(readFileSync(given, "utf8"));
+  }
+  label = historical
+    ? "a HISTORICAL replay of a published evidence bundle: what its own recorded run shows, with no applicability to this host assessed; never an admission, not a fresh browser run"
+    : "a verified replay of a published evidence bundle, admitted only if its runtime applies to the named target: its own recorded run, not a fresh browser run";
   if (nc) {
     judgement = qualifyNegative(nc, bundle, expect);
-    outcome = judgement.outcome;
-    expected = "qualified";
+    outcome =
+      historical && judgement.outcome === "historical"
+        ? "historical-holds"
+        : judgement.outcome;
+    expected = historical ? "historical-holds" : "qualified";
   } else {
     judgement = judgeControlEvidence(bundle, {
       ...expect,
       part: options.get("--part"),
     });
-    outcome = judgement.ok ? "healthy" : "unhealthy";
-    expected = "healthy";
+    outcome = historical
+      ? judgement.healthy
+        ? "historical-healthy"
+        : "unhealthy"
+      : judgement.ok
+        ? "healthy"
+        : "unhealthy";
+    expected = historical ? "historical-healthy" : "healthy";
   }
 } else {
   const run = normalise(
@@ -232,7 +283,10 @@ const result = {
   outcome,
   expected,
   passed: outcome === expected,
-  admission_eligible: bound && outcome === expected,
+  // Admission needs a target the bundle's runtime applies to (revision 26): a historical replay never admits.
+  admission_eligible: bound && options.has("--target") && outcome === expected,
+  applicability:
+    judgement.applicability ?? judgement.evidence?.applicability ?? null,
   judgement,
 };
 const text = `${JSON.stringify(result, null, 2)}\n`;

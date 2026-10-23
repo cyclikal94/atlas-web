@@ -3,7 +3,8 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { List } from "../../../components/ui/list";
 import { type DeviceRow, useSession } from "../../../session";
-import { retireOtherTitle } from "./label-copy";
+import { isOnlineNow, useOnline } from "../../authentication/use-online";
+import { RETIRE_OFFLINE_REASON, retireOtherTitle } from "./label-copy";
 import { deviceInSentence } from "./labels";
 import { outcomeUnknown } from "./outcome";
 import { type Interaction, reconcileLists } from "./ownership";
@@ -32,6 +33,11 @@ export const RETIRE_OTHER_FAILED =
  * undone by closing the dialog: when its answer shows it applied (or cannot show it did not), the lists are read again (R1) whoever
  * is looking, but only the dialog that is still current shows the outcome or closes itself, so a late answer never closes or changes
  * a newer dialog (this device's retirement included).
+ *
+ * WEB-08d revision 26 (review r25 R25-N2): retirement is online-only (WF-SETTINGS-02). While the browser believes it is offline the
+ * confirmation is disabled and says why, and a confirmation is not begun when the browser already says so before its `offline` event has
+ * rendered. That gates a NEW confirmation only: a retirement already confirmed keeps its working state and its own fate (a `not_sent`
+ * wait, a sent request and its answer), and reconnecting re-enables the button without confirming anything.
  */
 export function RetireOtherDialog({
   device,
@@ -44,12 +50,13 @@ export function RetireOtherDialog({
   onClose(): void;
 }) {
   const session = useSession();
+  const online = useOnline();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const inflight = useRef(false);
 
   const confirm = async () => {
-    if (inflight.current || !interaction.current()) return;
+    if (inflight.current || !isOnlineNow() || !interaction.current()) return;
     inflight.current = true;
     setBusy(true);
     setMessage(null);
@@ -99,6 +106,10 @@ export function RetireOtherDialog({
           </Button>
           {busy ? (
             <Button variant="primary" disabled reason="Working…">
+              Retire device
+            </Button>
+          ) : !online ? (
+            <Button variant="primary" disabled reason={RETIRE_OFFLINE_REASON}>
               Retire device
             </Button>
           ) : (

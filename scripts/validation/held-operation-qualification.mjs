@@ -30,16 +30,32 @@
 // (held-operation-evidence.mjs: every claim compared with the bytes and the execution record it names, and the judged report, spec, exit
 // and signal being exactly the bundle's). Without it a judgement is a labelled diagnostic and never qualified; the campaign admits only
 // verified parts of its own invocation, and a --stage negatives prerequisite is the predecessor's raw controls, re-verified and re-judged.
+import { createHash } from "node:crypto";
 import { classifyMutant, inspectReport } from "./engine-results.mjs";
+import {
+  applicabilityReasons,
+  canonical,
+  compareApplicability,
+} from "./held-operation-applicability.mjs";
 
 export const CONTRACT_VERSION = "web08d-held-operation-qualification/1";
-export const NEGATIVE_CONTRACT_VERSION = "web08d-held-operation-negative/2";
-/** The evidence bundle's schema (held-operation-evidence.mjs): a part's report, spec, execution record, source and copy inventories. */
-export const EVIDENCE_SCHEMA = "web08d-held-operation-evidence/1";
+export const NEGATIVE_CONTRACT_VERSION = "web08d-held-operation-negative/3";
+/**
+ * The evidence bundle's schema (held-operation-evidence.mjs): a part's report, spec, execution record, source, copy inventories and
+ * (revision 26) the run's runtime applicability record. A revision 25 bundle (`/1`) is still read and verified as historical evidence,
+ * but it records no applicability and is never admitted.
+ */
+export const EVIDENCE_SCHEMA = "web08d-held-operation-evidence/2";
+export const LEGACY_EVIDENCE_SCHEMAS = ["web08d-held-operation-evidence/1"];
+/** The negative contract each legacy evidence schema was published under (a revision 25 bundle names negative/2). */
+export const LEGACY_NEGATIVE_CONTRACTS = {
+  "web08d-held-operation-evidence/1": "web08d-held-operation-negative/2",
+};
 /** The integrity problem of a judgement made without a verified evidence bundle: a diagnostic, never a qualification. */
 export const NO_EVIDENCE =
   "no verified invocation evidence: a diagnostic judgement, never admissible";
 const DIGEST = /^[0-9a-f]{64}$/;
+const sha256Of = (text) => createHash("sha256").update(text).digest("hex");
 export const ENGINES = ["chromium", "firefox", "webkit"];
 export const HELPER = "tests/e2e/held-operation.ts";
 export const LEDGER = "tests/e2e/held-operation-ledger.ts";
@@ -2201,7 +2217,11 @@ export function evidenceProblems(nc, run, evidence) {
   if (evidence === null || typeof evidence !== "object")
     return ["no invocation evidence"];
   const problems = [];
-  if (evidence.schema !== EVIDENCE_SCHEMA)
+  // A revision 25 bundle is still verifiable evidence of its own bytes; it records no applicability, so it is never admitted (I5).
+  if (
+    evidence.schema !== EVIDENCE_SCHEMA &&
+    !LEGACY_EVIDENCE_SCHEMAS.includes(evidence.schema)
+  )
     problems.push(`evidence schema ${evidence.schema}, not ${EVIDENCE_SCHEMA}`);
   if (evidence.status !== "verified")
     problems.push(
@@ -2253,6 +2273,11 @@ export function evidenceProblems(nc, run, evidence) {
  *  - scenario: every case is the control's affirmative `scenario` profile (the fault really happened, where and as injected, alone);
  *  - classifier: the named mutant's contract (judgeMutant, unchanged) refuses the run, every case `invalid`.
  * `qualified` is their conjunction, and the only result any consumer admits. A classifier refusal alone proves nothing.
+ *
+ * Revision 26 (review r25 R25-N1; design assessment 26f1a626 I2): a fourth, separate fact, the evidence's runtime APPLICABILITY to its
+ * consumer (held-operation-evidence.mjs applicabilityOf: the bundle's record compared with the consumer's own). Integrity, scenario and
+ * classifier say what the bytes show; applicability says whether they apply here. `qualified` needs it to be `applicable`; a judgement
+ * whose other three hold is `historical` without a target and `inapplicable` with a target it does not match.
  */
 export function judgeNegative(nc, run, browsers, evidence) {
   const integrity = runProblems(run, nc.probes, browsers);
@@ -2296,7 +2321,20 @@ export function judgeNegative(nc, run, browsers, evidence) {
     judged.verdict === "invalid" &&
     judged.cases.length > 0 &&
     judged.cases.every((c) => c.role === "invalid");
-  const qualified = integrity.length === 0 && scenario.length === 0 && refused;
+  const applicability =
+    evidence === undefined
+      ? {
+          decision: "unassessed",
+          reasons: ["a diagnostic without evidence has no applicability"],
+        }
+      : evidence?.applicability && typeof evidence.applicability === "object"
+        ? evidence.applicability
+        : {
+            decision: "unknown",
+            reasons: ["the evidence carries no applicability decision"],
+          };
+  const holds = integrity.length === 0 && scenario.length === 0 && refused;
+  const qualified = holds && applicability.decision === "applicable";
   return {
     contract: NEGATIVE_CONTRACT_VERSION,
     negative_control: nc.id,
@@ -2316,11 +2354,24 @@ export function judgeNegative(nc, run, browsers, evidence) {
       cases: judged.cases,
       native: judged.native,
     },
+    applicability,
     qualified,
-    outcome: qualified ? "qualified" : "unqualified",
+    outcome: qualified
+      ? "qualified"
+      : !holds
+        ? "unqualified"
+        : applicability.decision === "unassessed"
+          ? "historical"
+          : "inapplicable",
     problems: [
       ...integrity.map((p) => `integrity: ${p}`),
       ...scenario.map((p) => `scenario: ${p}`),
+      ...(applicability.decision === "applicable" || evidence === undefined
+        ? []
+        : (Array.isArray(applicability.reasons) && applicability.reasons.length
+            ? applicability.reasons
+            : [`decision ${applicability.decision}`]
+          ).map((r) => `applicability ${applicability.decision}: ${r}`)),
       ...(refused
         ? []
         : [
@@ -2352,11 +2403,66 @@ function identityProblems(kind, planned, got) {
  * Revision 25 (design assessment 91d0404c C5, I7): its summary is a derived view and never enough. `evidence.controls` must be both
  * controls' RAW evidence, re-read, re-verified (held-operation-evidence.mjs judgeControlEvidence) and re-judged healthy now: each a
  * verified bundle of that run (`evidence.invocation`) on this source, in these engines, covering the probes, and agreeing with the summary.
+ *
+ * Revision 26 (review r25 R25-N1; design assessment 26f1a626 I3-I6, step 4): and of a runtime that applies HERE. `target` is the
+ * applicability record this consumer collected from its own environment before anything is built. The producing run's records before
+ * and after it ran (`evidence.applicability.before/after`, its applicability.json and applicability-after.json) must be complete and
+ * agree with each other and with the target, field by field; each control's bundle must carry exactly that run's record and be judged
+ * applicable to this target; its inputs' Node/platform/architecture must be its record's. A missing record (a revision 25 run) is
+ * unknown, never equal. Source equality says nothing about any of this.
  */
-export function prerequisiteProblems(evidence, { source, browsers, probes }) {
+export function prerequisiteProblems(
+  evidence,
+  { source, browsers, probes, target },
+) {
   const problems = [];
   const summary = evidence?.summary;
   if (!summary) return ["no controls evidence"];
+  const targetSha =
+    target && typeof target === "object" ? sha256Of(canonical(target)) : null;
+  if (!targetSha)
+    problems.push(
+      "no consuming target: this consumer's own runtime applicability was not collected",
+    );
+  const before = evidence.applicability?.before;
+  const after = evidence.applicability?.after;
+  if (!before?.record)
+    problems.push(
+      "the controls run recorded no applicability before it ran (a revision 25 or earlier run, or an unreadable record): its runtime is unknown",
+    );
+  if (!after?.record)
+    problems.push(
+      "the controls run recorded no applicability after it ran: its runtime at the end is unknown",
+    );
+  if (before?.record && after?.record) {
+    const c = compareApplicability(before.record, after.record);
+    if (c.decision !== "applicable")
+      problems.push(
+        ...applicabilityReasons(c).map(
+          (r) => `its runtime changed during the run (${c.decision}): ${r}`,
+        ),
+      );
+  }
+  if (before?.record && targetSha) {
+    const c = compareApplicability(target, before.record);
+    if (c.decision !== "applicable")
+      problems.push(
+        ...applicabilityReasons(c).map(
+          (r) =>
+            `its controls do not apply to this consumer (${c.decision}): ${r}`,
+        ),
+      );
+  }
+  if (before?.record)
+    for (const key of ["node", "platform", "arch"])
+      if (evidence.inputs_runtime?.[key] !== before.record.controller?.[key])
+        problems.push(
+          `its inputs record ${key} ${JSON.stringify(evidence.inputs_runtime?.[key])}, but its applicability record's controller ${JSON.stringify(before.record.controller?.[key])}`,
+        );
+  if (summary.applicability_sha256 !== before?.sha256)
+    problems.push(
+      `its summary names applicability ${summary.applicability_sha256}, not its recorded ${before?.sha256}`,
+    );
   if (summary.passed !== true) problems.push("the controls run did not pass");
   if (summary.stage !== "controls")
     problems.push(`the evidence is a ${summary.stage} run, not a controls run`);
@@ -2407,9 +2513,22 @@ export function prerequisiteProblems(evidence, { source, browsers, probes }) {
       problems.push(
         `control ${c.name}'s evidence ran on source ${e?.source_sha256}, not ${source}`,
       );
-    if (c.ok !== true)
+    if (c.healthy !== true)
       problems.push(
         `control ${c.name} re-judged from its raw report is not healthy`,
+      );
+    const a = c.applicability ?? e?.applicability;
+    if (a?.decision !== "applicable")
+      problems.push(
+        `control ${c.name}'s raw evidence is ${a?.decision ?? "unassessed"} for this consumer: ${(a?.reasons ?? []).slice(0, 3).join("; ")}`,
+      );
+    if (!targetSha || a?.target_sha256 !== targetSha)
+      problems.push(
+        `control ${c.name} was judged against applicability target ${a?.target_sha256}, not this consumer's ${targetSha}`,
+      );
+    if (!before?.sha256 || e?.applicability_sha256 !== before.sha256)
+      problems.push(
+        `control ${c.name}'s bundle carries applicability ${e?.applicability_sha256}, not its run's recorded ${before?.sha256}`,
       );
     if (!sameList(c.browsers, browsers))
       problems.push(
@@ -2425,9 +2544,9 @@ export function prerequisiteProblems(evidence, { source, browsers, probes }) {
         `control ${c.name}'s raw evidence ran ${JSON.stringify(c.probes)}, but its summary says ${JSON.stringify(covered)}`,
       );
     const said = (summary.controls ?? []).find((x) => x.name === c.name);
-    if (said && said.ok !== c.ok)
+    if (said && said.ok !== c.healthy)
       problems.push(
-        `control ${c.name}'s summary says ok ${said.ok}, its raw evidence ${c.ok}`,
+        `control ${c.name}'s summary says ok ${said.ok}, its raw evidence ${c.healthy}`,
       );
   }
   return problems;
@@ -2442,12 +2561,18 @@ export function prerequisiteProblems(evidence, { source, browsers, probes }) {
  * Revision 25 (design assessment 91d0404c C5): each control and negative control must also carry the VERIFIED evidence of its own bundle
  * in this invocation (`planned.invocation`), one bundle per part. A `qualified: true` without it (a legacy record, a diagnostic, another
  * invocation's part) is not admitted.
+ *
+ * Revision 26 (review r25 R25-N1; design assessment 26f1a626 I5, I6, H8): `planned.applicability` is the digest of this run's own
+ * applicability record (collected before anything was built); every control and negative control must carry exactly that record and be
+ * judged `applicable` against exactly that target, and `applicability.after` (the record collected again at the end, compared with it)
+ * must be `applicable`: a runtime that changed during the run, or that could not be collected again, fails it.
  */
 export function campaignOutcome({
   preflight,
   fatal,
   interrupted,
   sourceUnchanged,
+  applicability,
   prerequisite,
   planned,
   controls,
@@ -2459,6 +2584,19 @@ export function campaignOutcome({
   if (fatal) reasons.push(`failed: ${fatal.split("\n")[0]}`);
   if (!preflight) reasons.push("preflight did not pass");
   if (!sourceUnchanged) reasons.push("the source changed during the run");
+  if (!DIGEST.test(String(planned.applicability)))
+    reasons.push(
+      "the plan names no applicability target: this run's own runtime was not collected",
+    );
+  if (applicability?.after?.decision !== "applicable")
+    reasons.push(
+      ...(applicability?.after
+        ? applicabilityReasons(applicability.after).map(
+            (r) =>
+              `the runtime changed during the run (${applicability.after.decision}): ${r}`,
+          )
+        : ["the runtime after the run is unknown (not collected again)"]),
+    );
   if (prerequisite?.problems.length)
     reasons.push(
       ...prerequisite.problems.map((p) => `prerequisite controls: ${p}`),
@@ -2492,6 +2630,17 @@ export function campaignOutcome({
     )
       reasons.push(
         `${kind} ${name} has no verified evidence of this invocation (${e?.status ?? "none"}, invocation ${e?.invocation})`,
+      );
+    const a = e?.applicability;
+    if (
+      a?.decision !== "applicable" ||
+      !DIGEST.test(String(planned.applicability)) ||
+      a?.target_sha256 !== planned.applicability ||
+      a?.record_sha256 !== planned.applicability ||
+      e.applicability_sha256 !== planned.applicability
+    )
+      reasons.push(
+        `${kind} ${name}'s evidence is not applicable to this run's own runtime (${a?.decision ?? "none"}, record ${e?.applicability_sha256}, target ${a?.target_sha256})`,
       );
     return e?.manifest_sha256;
   };

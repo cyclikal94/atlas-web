@@ -10,6 +10,7 @@ import {
   NAME_ACTION,
   NAME_OFFLINE_REASON,
   RENAME_ACTION,
+  RETIRE_OFFLINE_REASON,
   THIS_DEVICE_TAG,
 } from "./label-copy";
 import { deviceDisplay, devicePhrase, hasDuplicateTitles } from "./labels";
@@ -32,7 +33,7 @@ import { WipeConfirmDialog } from "./WipeConfirmDialog";
 export const DEVICES_HEADING = "Devices that sync";
 export const DEVICES_EXPLANATION =
   "Separate from the sign-ins above: a device can hold synced content and a place for syncing with no active session at all — its login may simply have expired.";
-export const OFFLINE_REASON = "Retiring a device needs a connection.";
+export const OFFLINE_REASON = RETIRE_OFFLINE_REASON;
 
 export const deviceMeta = (row: DeviceRow, now: Date): string =>
   [
@@ -183,7 +184,10 @@ export function DevicesSection() {
                       {online ? (
                         <Button
                           aria-label={retireLabel}
-                          onClick={() => openRetiring(row)}
+                          onClick={() => {
+                            // As for naming: the hook's state can lag the browser by a render (review r25 R25-N2).
+                            if (navigator.onLine) openRetiring(row);
+                          }}
                         >
                           Retire…
                         </Button>

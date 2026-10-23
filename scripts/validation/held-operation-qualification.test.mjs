@@ -31,20 +31,30 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
+import * as applicabilityModule from "./held-operation-applicability.mjs";
+import {
+  canonical,
+  compareApplicability,
+} from "./held-operation-applicability.mjs";
 import * as evidenceModule from "./held-operation-evidence.mjs";
 import * as evaluator from "./held-operation-qualification.mjs";
 import {
+  applicabilityRecord,
   controlBundle,
   INVOCATION,
   negativeBundle,
   OTHER_INVOCATION,
   sourceOf,
+  TARGET,
   withManifest,
   writeBundle,
 } from "./held-operation-test-bundles.mjs";
 
 const B = ["chromium", "firefox", "webkit"];
 const root = resolve(import.meta.dirname, "../..");
+/** Revision 26: the consumer's applicability target of every bound judgement here, its digest, and its comparison with itself. */
+const TARGET_SHA = evidenceModule.targetDigest(TARGET);
+const APPLICABLE = compareApplicability(TARGET, TARGET);
 /** A bundle of saved runs; each run carries the exact text of the probe spec it ran (hash-checked when the bundle was built). */
 function fixture(name) {
   const bundle = JSON.parse(
@@ -398,10 +408,14 @@ const judgeNeg = (q, id, entry, { browsers = B } = {}) =>
     q.normalise(entry.report, browsers, entry.exit, entry.spec, entry.signal),
     browsers,
   );
-/** A negative control judged from its (synthetic-consistent) bundle over a saved run, as the runner and the replay CLI judge it. */
+/**
+ * A negative control judged from its (synthetic-consistent) bundle over a saved run, as the runner and the replay CLI judge it. Revision
+ * 26: the consumer's target is named explicitly (TARGET, the record the bundle carries) unless `expect` replaces it.
+ */
 const bound = (q, e, id, entry, options = {}, expect = {}) =>
   e.qualifyNegative(ncOf(q, id), negativeBundle(ncOf(q, id), entry, options), {
     invocation: options.invocation ?? INVOCATION,
+    target: TARGET,
     ...expect,
   });
 /** One engine's case `id` with every reported error moved to `line` of the spec (its code frame too). */
@@ -842,6 +856,7 @@ const controlOf = (e, part, options = {}) =>
       part,
       invocation: options.invocation ?? INVOCATION,
       source: (options.source ?? CONTROL_SOURCE).sha256,
+      target: TARGET,
     },
   );
 /** A campaign's recorded parts as the runner records them (genuine judgements of genuine runs, each from its own bundle). */
@@ -851,9 +866,11 @@ function campaignParts(q, e) {
     fatal: null,
     interrupted: false,
     sourceUnchanged: true,
+    applicability: { target_sha256: TARGET_SHA, after: APPLICABLE },
     prerequisite: null,
     planned: {
       invocation: INVOCATION,
+      applicability: TARGET_SHA,
       controls: ["control", "copy-control"],
       negatives: ["NC1", "NC2", "NC3", "NC4"],
       mutants: ["HM1", "HM2"],
@@ -867,6 +884,7 @@ function campaignParts(q, e) {
 }
 const CONTROLS_SUMMARY = {
   passed: true,
+  applicability_sha256: TARGET_SHA,
   stage: "controls",
   contract: evaluator.CONTRACT_VERSION,
   source_unchanged: true,
@@ -916,11 +934,26 @@ const prerequisite = (
               CONTROLS_SUMMARY.control_probes,
               { invocation: INVOCATION, source: CONTROL_SOURCE },
             ),
-            { part, invocation: INVOCATION, source: CONTROL_SOURCE.sha256 },
+            {
+              part,
+              invocation: INVOCATION,
+              source: CONTROL_SOURCE.sha256,
+              target: TARGET,
+            },
           ),
         ),
+      applicability: {
+        before: { sha256: TARGET_SHA, record: TARGET },
+        after: { sha256: TARGET_SHA, record: TARGET },
+      },
+      inputs_runtime: { node: "v22.23.2", platform: "darwin", arch: "arm64" },
     },
-    { source: CONTROL_SOURCE.sha256, browsers: B, probes: NEGATIVE_PROBES },
+    {
+      source: CONTROL_SOURCE.sha256,
+      browsers: B,
+      probes: NEGATIVE_PROBES,
+      target: TARGET,
+    },
   );
 
 // --- revision 25: the evidence boundary (design assessment 91d0404c Q2-Q5) ------------------------------------------------------------
@@ -939,7 +972,11 @@ const rewrite = (bytes, change) => {
   return Buffer.from(JSON.stringify(v, null, 2));
 };
 const judgeBundle = (q, e, id, bundle, expect = {}) =>
-  e.qualifyNegative(ncOf(q, id), bundle, { invocation: INVOCATION, ...expect });
+  e.qualifyNegative(ncOf(q, id), bundle, {
+    invocation: INVOCATION,
+    target: TARGET,
+    ...expect,
+  });
 /** Replaces the copy's spec consistently: its bytes, and the inventory that records the copied tree. */
 const ranSpec = (p, text) => {
   p.files.spec.bytes = Buffer.from(text);
@@ -1610,8 +1647,696 @@ const FORGED_EVIDENCE = [
   ["null evidence", () => null],
 ];
 
+// --- revision 26: runtime applicability (review r25 R25-N1; design assessment 26f1a626 Q1, Q2, Q5) -------------------------------------
+/** A copy of TARGET with `field` (a dotted path) set to `value`, or deleted when `value` is DELETE. */
+const DELETE = Symbol("delete");
+function withField(record, field, value) {
+  const copy = structuredClone(record);
+  const keys = field.split(".");
+  let at = copy;
+  for (const k of keys.slice(0, -1)) at = at[k];
+  if (value === DELETE) delete at[keys.at(-1)];
+  else at[keys.at(-1)] = value;
+  return copy;
+}
+/** A value of the same shape as `v` that is not `v` (a different runtime fact, still well formed). */
+const otherValue = (field, v) =>
+  /node$/.test(field)
+    ? "v22.18.0"
+    : /sha256$/.test(field)
+      ? sha(`other ${field}`)
+      : `${v} (other)`;
+/** The comparison with its digests, as a bundle's verifier would judge `record` for the consumer `target`. */
+const decided = (a, target, record) => a.compareApplicability(target, record);
+/** The canonical list of compared fields (from the unmutated module: a mutant that drops a field must not drop its check). */
+const REQUIRED_FIELDS = applicabilityModule.FIELDS;
+
+/** Every applicability check (comparator, verifier, judgements, prerequisite, campaign) the evaluator must pass. */
+function applicabilityAssessments(q, e, a, check) {
+  const T = TARGET;
+  check(
+    "applicability: identical complete records are applicable",
+    () => decided(a, T, structuredClone(T)).decision === "applicable",
+  );
+  for (const [field] of REQUIRED_FIELDS) {
+    check(`applicability: a changed ${field} is incompatible`, () => {
+      const v = field.split(".").reduce((o, k) => o?.[k], T);
+      const c = decided(a, T, withField(T, field, otherValue(field, v)));
+      return (
+        c.decision === "incompatible" &&
+        c.differences.some((d) => d.field === field)
+      );
+    });
+    check(`applicability: a missing ${field} is unknown`, () => {
+      const c = decided(a, T, withField(T, field, DELETE));
+      return (
+        c.decision === "unknown" &&
+        c.unknown.some((u) => u.field === field && u.side === "record")
+      );
+    });
+  }
+  check(
+    "applicability: two records missing the same field are unknown, never equal",
+    () => {
+      const r = withField(T, "child.node", DELETE);
+      const c = decided(a, r, structuredClone(r));
+      return c.decision === "unknown" && c.unknown.length === 2;
+    },
+  );
+  check("applicability: a mistyped version is unknown", () => {
+    const c = decided(a, T, withField(T, "controller.node", 22));
+    return c.decision === "unknown";
+  });
+  check("applicability: an 'unknown' word is unknown, not a value", () => {
+    const c = decided(a, T, withField(T, "child.user_agent", "unknown"));
+    return c.decision === "unknown";
+  });
+  check("applicability: a malformed digest is unknown", () => {
+    const c = decided(a, T, withField(T, "child.exec_sha256", "abc"));
+    return c.decision === "unknown";
+  });
+  check("applicability: an unsupported schema is unknown on its side", () => {
+    const c = decided(a, T, { ...structuredClone(T), schema: "other/9" });
+    return (
+      c.decision === "unknown" &&
+      c.unknown.some((u) => u.field === "schema" && u.side === "record")
+    );
+  });
+  check("applicability: no target is unknown", () => {
+    const c = decided(a, undefined, T);
+    return (
+      c.decision === "unknown" &&
+      c.unknown.some((u) => u.field === "schema" && u.side === "target")
+    );
+  });
+  check(
+    "applicability: another supported Node patch (v22.22.2) is incompatible",
+    () =>
+      decided(a, T, withField(T, "controller.node", "v22.22.2")).decision ===
+      "incompatible",
+  );
+  check(
+    "applicability: a location alone is no difference, and is reported",
+    () => {
+      const c = decided(
+        a,
+        T,
+        withField(T, "controller.exec_path", "/elsewhere/node"),
+      );
+      return (
+        c.decision === "applicable" &&
+        c.locations.some((l) => l.field === "controller.exec_path")
+      );
+    },
+  );
+  check("applicability: Corepack in the chain or not differs", () => {
+    const c = decided(a, T, withField(T, "child.corepack_tree_sha256", "none"));
+    return c.decision === "incompatible";
+  });
+  check("applicability: another browser build is incompatible", () => {
+    const c = decided(
+      a,
+      T,
+      withField(T, "browsers.webkit.directories", {
+        "webkit-2251": sha("old"),
+      }),
+    );
+    return (
+      c.decision === "incompatible" &&
+      c.differences.some((d) => d.field.startsWith("browsers.webkit"))
+    );
+  });
+  check("applicability: a changed browser installation is incompatible", () => {
+    const c = decided(
+      a,
+      T,
+      withField(
+        T,
+        "browsers.chromium.directories.chromium_headless_shell-1243",
+        sha("x"),
+      ),
+    );
+    return c.decision === "incompatible";
+  });
+  check(
+    "applicability: an engine missing from one side is incompatible",
+    () => {
+      const r = structuredClone(T);
+      delete r.browsers.firefox;
+      return decided(a, T, r).decision === "incompatible";
+    },
+  );
+  check("applicability: malformed browsers are unknown", () => {
+    const c = decided(a, T, withField(T, "browsers", []));
+    return c.decision === "unknown";
+  });
+  check("applicability: an added behavioural variable is incompatible", () => {
+    const c = decided(
+      a,
+      T,
+      withField(T, "env", { ...T.env, FORCE_COLOR: "1" }),
+    );
+    return (
+      c.decision === "incompatible" &&
+      c.differences.some((d) => d.field === "env.FORCE_COLOR")
+    );
+  });
+  check("applicability: a changed behavioural variable is incompatible", () => {
+    const c = decided(a, T, withField(T, "env", { LANG: "C" }));
+    return c.decision === "incompatible";
+  });
+  check("applicability: a non-string variable is unknown", () => {
+    const c = decided(a, T, withField(T, "env", { LANG: 1 }));
+    return c.decision === "unknown";
+  });
+  check(
+    "applicability: the behavioural environment leaves locations and selections out",
+    () => {
+      const env = a.behaviouralEnv({
+        NODE_OPTIONS: "--x",
+        PLAYWRIGHT_JSON_OUTPUT_FILE: "/r.json",
+        ATLAS_PROBE_FAULT: "runtime",
+        ATLAS_E2E_WORKERS: "1",
+        TMPDIR: "/t",
+        HOME: "/h",
+        LANG: "C",
+      });
+      return (
+        JSON.stringify(env) ===
+        JSON.stringify({
+          ATLAS_E2E_WORKERS: "1",
+          LANG: "C",
+          NODE_OPTIONS: "--x",
+        })
+      );
+    },
+  );
+  check("applicability: canonical bytes do not depend on key order", () => {
+    const shuffled = Object.fromEntries(Object.entries(T).reverse());
+    return a.canonical(shuffled) === a.canonical(T);
+  });
+
+  // The verifier: the record is a required artefact, read as JSON, and the report's own witness must agree with it.
+  const nc1 = ncOf(q, "NC1");
+  const verify = (b) =>
+    e.verifyBundle(b, { kind: "negative", part: "NC1", nc: nc1 });
+  const witnessEdit = (change) => (p) => {
+    const r = json(p.files.report.bytes);
+    change(r.config.metadata);
+    p.files.report.bytes = Buffer.from(JSON.stringify(r));
+    p.execution.report_sha256 = sha(p.files.report.bytes);
+  };
+  check("verifier: a `/2` bundle with its record verifies", () => {
+    const v = verify(negativeBundle(nc1, ENTRY("NC1")));
+    return (
+      v.status === "verified" &&
+      v.legacy === false &&
+      v.applicability?.sha256 === TARGET_SHA
+    );
+  });
+  check("verifier: a report witness of another Node is refused", () => {
+    const v = verify(
+      negativeBundle(nc1, ENTRY("NC1"), {
+        edit: witnessEdit((m) => {
+          m.atlasRuntime.node = "v22.18.0";
+        }),
+      }),
+    );
+    return (
+      v.status === "refused" &&
+      v.problems.some((p) => p.includes("runtime witness has node"))
+    );
+  });
+  check("verifier: a report witness of another Playwright is refused", () => {
+    const v = verify(
+      negativeBundle(nc1, ENTRY("NC1"), {
+        edit: witnessEdit((m) => {
+          m.atlasRuntime.playwright = "1.62.0";
+        }),
+      }),
+    );
+    return v.status === "refused";
+  });
+  check("verifier: a `/2` report without a witness is refused", () => {
+    const v = verify(
+      negativeBundle(nc1, ENTRY("NC1"), {
+        edit: witnessEdit((m) => {
+          delete m.atlasRuntime;
+        }),
+      }),
+    );
+    return (
+      v.status === "refused" &&
+      v.problems.some((p) => p.includes("no runtime witness"))
+    );
+  });
+  check("verifier: a `/2` bundle without its record is refused", () => {
+    const v = verify(
+      negativeBundle(nc1, ENTRY("NC1"), {
+        edit: (p) => {
+          delete p.files.applicability;
+        },
+      }),
+    );
+    return (
+      v.status === "refused" &&
+      v.problems.some((p) => p.includes("no applicability artefact"))
+    );
+  });
+  check("verifier: a record that is not JSON is refused", () => {
+    const v = verify(
+      negativeBundle(nc1, ENTRY("NC1"), {
+        edit: (p) => {
+          p.files.applicability.bytes = Buffer.from("{ not json");
+        },
+      }),
+    );
+    return (
+      v.status === "refused" &&
+      v.problems.includes("the applicability record is not JSON")
+    );
+  });
+  check(
+    "verifier: a `/2` bundle under the earlier negative contract is refused",
+    () => {
+      const v = verify(
+        negativeBundle(nc1, ENTRY("NC1"), {
+          edit: (p) => {
+            p.header.contract = "web08d-held-operation-negative/2";
+          },
+        }),
+      );
+      return (
+        v.status === "refused" &&
+        v.problems.some((p) => p.includes("the bundle's contract is"))
+      );
+    },
+  );
+  check("verifier: a revision 25 `/1` bundle still verifies, as legacy", () => {
+    const v = verify(negativeBundle(nc1, ENTRY("NC1"), { legacy: true }));
+    return v.status === "verified" && v.legacy === true && !v.applicability;
+  });
+
+  // The judgements: applicability is a fact of its own (I2), against the consumer's target only.
+  const judgedWith = (options, target) =>
+    e.qualifyNegative(nc1, negativeBundle(nc1, ENTRY("NC1"), options), {
+      invocation: INVOCATION,
+      ...(target === undefined ? {} : { target }),
+    });
+  const node25 = applicabilityRecord((r) => {
+    r.controller.node = "v25.8.2";
+  });
+  check("judgement: the bundle's own runtime as target qualifies", () => {
+    const j = judgedWith({}, T);
+    return (
+      j.qualified &&
+      j.outcome === "qualified" &&
+      j.applicability.decision === "applicable" &&
+      j.applicability.target_sha256 === TARGET_SHA &&
+      j.applicability.record_sha256 === TARGET_SHA
+    );
+  });
+  check("judgement: without a target it is historical, never qualified", () => {
+    const j = judgedWith({});
+    return (
+      !j.qualified &&
+      j.outcome === "historical" &&
+      j.applicability.decision === "unassessed"
+    );
+  });
+  check(
+    "judgement: genuine controls under Node 22 judged for a Node 25 consumer are inapplicable (review r25's counterexample)",
+    () => {
+      const j = judgedWith({}, node25);
+      return (
+        !j.qualified &&
+        j.outcome === "inapplicable" &&
+        j.applicability.decision === "incompatible" &&
+        j.applicability.differences.some(
+          (d) => d.field === "controller.node",
+        ) &&
+        j.problems.some((p) => p.includes("controller.node"))
+      );
+    },
+  );
+  check(
+    "judgement: a bundle of another runtime is inapplicable to this target",
+    () => !judgedWith({ applicability: node25 }, T).qualified,
+  );
+  check(
+    "judgement: the target's digest is the target's own, not the record's",
+    () =>
+      judgedWith({}, node25).applicability.target_sha256 ===
+      e.targetDigest(node25),
+  );
+  check(
+    "judgement: a revision 25 bundle is never qualified, even with a target",
+    () => {
+      const j = judgedWith({ legacy: true }, T);
+      return !j.qualified && j.applicability.decision === "unknown";
+    },
+  );
+  check(
+    "judgement: a revision 25 bundle is historical without a target",
+    () => {
+      const j = judgedWith({ legacy: true });
+      return j.outcome === "historical";
+    },
+  );
+  check(
+    "judgement: evidence carrying no applicability decision is unknown, not qualified",
+    () => {
+      const j = judgedWith({}, T);
+      const run = q.normalise(
+        ENTRY("NC1").report,
+        B,
+        ENTRY("NC1").exit,
+        ENTRY("NC1").spec,
+        null,
+      );
+      run.report_sha256 = j.evidence.report_sha256;
+      run.spec_sha256 = j.evidence.spec_sha256;
+      const { applicability: _a, ...bare } = j.evidence;
+      const again = q.judgeNegative(nc1, run, B, bare);
+      return !again.qualified && again.applicability.decision === "unknown";
+    },
+  );
+  check(
+    "control: healthy bytes for another consumer are healthy but not admitted",
+    () => {
+      const c = e.judgeControlEvidence(
+        controlBundle("control", A6.control, q.PROBE_IDS),
+        {
+          part: "control",
+          invocation: INVOCATION,
+          source: CONTROL_SOURCE.sha256,
+          target: node25,
+        },
+      );
+      return c.healthy === true && c.ok === false;
+    },
+  );
+  check("control: without a target it is never admitted", () => {
+    const c = e.judgeControlEvidence(
+      controlBundle("control", A6.control, q.PROBE_IDS),
+      {
+        part: "control",
+        invocation: INVOCATION,
+        source: CONTROL_SOURCE.sha256,
+      },
+    );
+    return c.healthy === true && c.ok === false;
+  });
+
+  // The split-stage prerequisite: the producing run's own records, both controls' bundles and this consumer's target.
+  const prereq = (change = (x) => x, target = T) => {
+    const evidence = {
+      summary: { ...CONTROLS_SUMMARY },
+      source: CONTROL_SOURCE.sha256,
+      invocation: INVOCATION,
+      controls: ["control", "copy-control"].map((part) =>
+        e.judgeControlEvidence(
+          controlBundle(
+            part,
+            select(
+              part === "control" ? A6.control : A6.copy_control,
+              CONTROLS_SUMMARY.control_probes,
+            ),
+            CONTROLS_SUMMARY.control_probes,
+            { invocation: INVOCATION, source: CONTROL_SOURCE },
+          ),
+          {
+            part,
+            invocation: INVOCATION,
+            source: CONTROL_SOURCE.sha256,
+            target,
+          },
+        ),
+      ),
+      applicability: {
+        before: { sha256: TARGET_SHA, record: T },
+        after: { sha256: TARGET_SHA, record: T },
+      },
+      inputs_runtime: { node: "v22.23.2", platform: "darwin", arch: "arm64" },
+    };
+    change(evidence);
+    return q.prerequisiteProblems(evidence, {
+      source: CONTROL_SOURCE.sha256,
+      browsers: B,
+      probes: NEGATIVE_PROBES,
+      target,
+    });
+  };
+  check(
+    "prerequisite: matching controls, records and target are met",
+    () => prereq().length === 0,
+  );
+  check("prerequisite: no consumer target is not met", () =>
+    prereq(undefined, null).some((p) => p.includes("no consuming target")),
+  );
+  check(
+    "prerequisite: a Node 25 consumer of Node 22 controls is not met, by field",
+    () =>
+      prereq(undefined, node25).some(
+        (p) =>
+          p.includes("do not apply to this consumer") &&
+          p.includes("controller.node"),
+      ),
+  );
+  check("prerequisite: controls judged without a target are not met", () =>
+    prereq((ev) => {
+      ev.controls = ev.controls.map((c) => ({
+        ...c,
+        applicability: { decision: "unassessed", reasons: [] },
+      }));
+    }).some((p) => p.includes("unassessed for this consumer")),
+  );
+  check(
+    "prerequisite: controls judged against another target object are not met",
+    () =>
+      prereq((ev) => {
+        ev.controls = ev.controls.map((c) => ({
+          ...c,
+          applicability: { ...c.applicability, target_sha256: sha("other") },
+        }));
+      }).some((p) => p.includes("was judged against applicability target")),
+  );
+  check("prerequisite: a run with no record before it ran is not met", () =>
+    prereq((ev) => {
+      ev.applicability.before = null;
+    }).some((p) => p.includes("no applicability before it ran")),
+  );
+  check("prerequisite: a run with no record after it ran is not met", () =>
+    prereq((ev) => {
+      ev.applicability.after = null;
+    }).some((p) => p.includes("no applicability after it ran")),
+  );
+  check("prerequisite: a runtime that changed during the run is not met", () =>
+    prereq((ev) => {
+      ev.applicability.after = {
+        sha256: sha("after"),
+        record: withField(T, "child.node", "v22.18.0"),
+      };
+    }).some(
+      (p) => p.includes("changed during the run") && p.includes("child.node"),
+    ),
+  );
+  check(
+    "prerequisite: a run whose inputs name another Node than its record is not met",
+    () =>
+      prereq((ev) => {
+        ev.inputs_runtime = { ...ev.inputs_runtime, node: "v25.8.2" };
+      }).some((p) => p.includes("its inputs record node")),
+  );
+  check("prerequisite: a summary naming another record is not met", () =>
+    prereq((ev) => {
+      ev.summary.applicability_sha256 = sha("other");
+    }).some((p) => p.includes("its summary names applicability")),
+  );
+  check(
+    "prerequisite: a control whose bundle carries other record bytes is not met, though they compare applicable",
+    () =>
+      prereq((ev) => {
+        ev.controls[1] = e.judgeControlEvidence(
+          controlBundle(
+            "copy-control",
+            select(A6.copy_control, CONTROLS_SUMMARY.control_probes),
+            CONTROLS_SUMMARY.control_probes,
+            {
+              invocation: INVOCATION,
+              source: CONTROL_SOURCE,
+              applicability: withField(T, "controller.exec_path", "/elsewhere"),
+            },
+          ),
+          {
+            part: "copy-control",
+            invocation: INVOCATION,
+            source: CONTROL_SOURCE.sha256,
+            target: T,
+          },
+        );
+      }).some((p) => p.includes("copy-control's bundle carries applicability")),
+  );
+  check(
+    "prerequisite: a control of another runtime among good ones is not met",
+    () =>
+      prereq((ev) => {
+        ev.controls[0] = e.judgeControlEvidence(
+          controlBundle(
+            "control",
+            select(A6.control, CONTROLS_SUMMARY.control_probes),
+            CONTROLS_SUMMARY.control_probes,
+            {
+              invocation: INVOCATION,
+              source: CONTROL_SOURCE,
+              applicability: node25,
+            },
+          ),
+          {
+            part: "control",
+            invocation: INVOCATION,
+            source: CONTROL_SOURCE.sha256,
+            target: T,
+          },
+        );
+      }).some((p) =>
+        p.includes("control control's raw evidence is incompatible"),
+      ),
+  );
+
+  // The campaign: every admitted part applicable to exactly this run's record, and the record unchanged at the end.
+  const base = campaignParts(q, e);
+  const passes = (c) => q.campaignOutcome(c).passed;
+  check("campaign: applicable parts and an unchanged runtime pass", () =>
+    passes(base),
+  );
+  check(
+    "campaign: an empty plan naming no applicability target fails",
+    () =>
+      !passes({
+        ...base,
+        planned: {
+          invocation: INVOCATION,
+          applicability: null,
+          controls: [],
+          negatives: [],
+          mutants: [],
+        },
+        controls: [],
+        negatives: [],
+        mutants: [],
+      }),
+  );
+  check(
+    "campaign: a plan naming no applicability target fails",
+    () =>
+      !passes({ ...base, planned: { ...base.planned, applicability: null } }),
+  );
+  check(
+    "campaign: a runtime that changed during the run fails",
+    () =>
+      !passes({
+        ...base,
+        applicability: {
+          target_sha256: TARGET_SHA,
+          after: a.compareApplicability(
+            T,
+            withField(T, "child.node", "v22.18.0"),
+          ),
+        },
+      }),
+  );
+  check(
+    "campaign: a runtime not collected again fails",
+    () =>
+      !passes({
+        ...base,
+        applicability: { target_sha256: TARGET_SHA, after: null },
+      }),
+  );
+  check(
+    "campaign: a negative control judged for another target fails",
+    () =>
+      !passes({
+        ...base,
+        negatives: base.negatives.map((n, i) =>
+          i
+            ? n
+            : {
+                ...n,
+                evidence: {
+                  ...n.evidence,
+                  applicability: {
+                    ...n.evidence.applicability,
+                    target_sha256: sha("x"),
+                  },
+                },
+              },
+        ),
+      }),
+  );
+  check(
+    "campaign: a control carrying another record fails",
+    () =>
+      !passes({
+        ...base,
+        controls: base.controls.map((c, i) =>
+          i
+            ? c
+            : {
+                ...c,
+                evidence: { ...c.evidence, applicability_sha256: sha("x") },
+              },
+        ),
+      }),
+  );
+  check(
+    "campaign: a part whose comparison names another record fails",
+    () =>
+      !passes({
+        ...base,
+        controls: base.controls.map((c, i) =>
+          i
+            ? c
+            : {
+                ...c,
+                evidence: {
+                  ...c.evidence,
+                  applicability: {
+                    ...c.evidence.applicability,
+                    record_sha256: sha("x"),
+                  },
+                },
+              },
+        ),
+      }),
+  );
+  check(
+    "campaign: a part claimed qualified whose applicability is unknown fails",
+    () =>
+      !passes({
+        ...base,
+        negatives: base.negatives.map((n, i) =>
+          i
+            ? n
+            : {
+                ...n,
+                qualified: true,
+                evidence: {
+                  ...n.evidence,
+                  applicability: {
+                    ...n.evidence.applicability,
+                    decision: "unknown",
+                  },
+                },
+              },
+        ),
+      }),
+  );
+}
+
 /** Every check the evaluator must pass, by name: the evaluator's own mutants must fail at least one (design assessment Q3). */
-function assessments(q, e) {
+function assessments(q, e, a = applicabilityModule) {
   const failed = [];
   const check = (name, ok) => {
     try {
@@ -1794,6 +2519,7 @@ function assessments(q, e) {
         e.readBundle(join(dir, "part", e.MANIFEST)),
         {
           invocation: INVOCATION,
+          target: TARGET,
         },
       ).qualified;
     }),
@@ -1808,6 +2534,7 @@ function assessments(q, e) {
       cpSync(join(dir, "a"), join(dir, "b"), { recursive: true });
       return e.qualifyNegative(nc, e.readBundle(join(dir, "b", e.MANIFEST)), {
         invocation: INVOCATION,
+        target: TARGET,
       }).qualified;
     }),
   );
@@ -1943,7 +2670,12 @@ function assessments(q, e) {
               CONTROLS_SUMMARY.control_probes,
               { source: CONTROL_SOURCE },
             ),
-            { part, invocation: INVOCATION, source: CONTROL_SOURCE.sha256 },
+            {
+              target: TARGET,
+              part,
+              invocation: INVOCATION,
+              source: CONTROL_SOURCE.sha256,
+            },
           ),
         ),
     ],
@@ -1964,7 +2696,7 @@ function assessments(q, e) {
               CONTROLS_SUMMARY.control_probes,
               { invocation: OTHER_INVOCATION, source: CONTROL_SOURCE },
             ),
-            { part, source: CONTROL_SOURCE.sha256 },
+            { target: TARGET, part, source: CONTROL_SOURCE.sha256 },
           ),
         ),
     ],
@@ -1989,6 +2721,7 @@ function assessments(q, e) {
       `${m.id} on healthy evidence survives`,
       () => judge(q, m.id, select(A6.control, m.probes)).verdict === "survived",
     );
+  applicabilityAssessments(q, e, a, check);
   return failed;
 }
 
@@ -2266,18 +2999,18 @@ const EVALUATOR_MUTANTS = [
   // Revision 24 (design assessment Q6): each removes one predicate of a negative control's qualification or its admission.
   [
     "EM11 a negative control qualifies without its scenario",
-    "  const qualified = integrity.length === 0 && scenario.length === 0 && refused;",
-    "  const qualified = integrity.length === 0 && refused;",
+    "  const holds = integrity.length === 0 && scenario.length === 0 && refused;",
+    "  const holds = integrity.length === 0 && refused;",
   ],
   [
     "EM12 a negative control qualifies without the run's integrity",
-    "  const qualified = integrity.length === 0 && scenario.length === 0 && refused;",
-    "  const qualified = scenario.length === 0 && refused;",
+    "  const holds = integrity.length === 0 && scenario.length === 0 && refused;",
+    "  const holds = scenario.length === 0 && refused;",
   ],
   [
     "EM13 the classifier's refusal is inverted",
-    "  const qualified = integrity.length === 0 && scenario.length === 0 && refused;",
-    "  const qualified = integrity.length === 0 && scenario.length === 0 && !refused;",
+    "  const holds = integrity.length === 0 && scenario.length === 0 && refused;",
+    "  const holds = integrity.length === 0 && scenario.length === 0 && !refused;",
   ],
   [
     "EM14 the fault hook's error may be raised on any line",
@@ -2466,8 +3199,208 @@ const EVALUATOR_MUTANTS = [
   ],
   [
     "EM47 a manifest of another schema is read",
-    "  if (m.schema !== EVIDENCE_SCHEMA) {",
+    "    m.schema !== EVIDENCE_SCHEMA &&\n    !LEGACY_EVIDENCE_SCHEMAS.includes(m.schema)\n",
+    "    false &&\n    !LEGACY_EVIDENCE_SCHEMAS.includes(m.schema)\n",
+    "E",
+  ],
+  // Revision 26 (review r25 R25-N1; design assessment 26f1a626 Q5): each applicability comparison and its forwarding removed or
+  // redirected. "A" mutates held-operation-applicability.mjs; the others import that same mutated instance.
+  [
+    "EM48 a changed applicability field is ignored",
+    "        out.differences.push({ field, target: a, record: b });",
+    "        void 0;",
+    "A",
+  ],
+  [
+    "EM49 the controller's Node is not compared",
+    '  ["controller.node", "version"],\n',
+    "",
+    "A",
+  ],
+  [
+    "EM50 the child's Node is not compared",
+    '  ["child.node", "version"],\n',
+    "",
+    "A",
+  ],
+  [
+    "EM51 the Node executable's bytes are not compared",
+    '  ["child.exec_sha256", "digest"],\n',
+    "",
+    "A",
+  ],
+  [
+    "EM52 the launched pnpm's bytes are not compared",
+    '  ["child.pnpm_sha256", "digest"],\n',
+    "",
+    "A",
+  ],
+  [
+    "EM53 the browser installations are not compared",
+    "    if (!bt && !br)\n",
+    "    if (false)\n",
+    "A",
+  ],
+  [
+    "EM54 the behavioural environment is not compared",
+    "    if (!et && !er)\n",
+    "    if (false)\n",
+    "A",
+  ],
+  [
+    "EM55 an unknown field is taken as applicable",
+    '      ? "unknown"\n      : "applicable";',
+    '      ? "applicable"\n      : "applicable";',
+    "A",
+  ],
+  [
+    "EM56 any value is a version",
+    '  version: (v) => typeof v === "string" && VERSION.test(v),',
+    "  version: (v) => v !== undefined,",
+    "A",
+  ],
+  [
+    "EM57 a record of another schema is compared as if supported",
+    "    if (!object(r) || r.schema !== APPLICABILITY_SCHEMA)",
+    "    if (!object(r))",
+    "A",
+  ],
+  [
+    "EM58 locations are compared as behaviour",
+    "        out.locations.push({ field, target: a ?? null, record: b ?? null });",
+    "        out.differences.push({ field, target: a ?? null, record: b ?? null });",
+    "A",
+  ],
+  [
+    "EM59 the word 'unknown' is a value",
+    '  word: (v) => typeof v === "string" && v.trim() !== "" && v !== "unknown",',
+    '  word: (v) => typeof v === "string" && v.trim() !== "",',
+    "A",
+  ],
+  [
+    "EM60 locations and selections are recorded as behaviour",
+    "          !NOT_BEHAVIOUR_ENV.includes(k) &&",
+    "          true &&",
+    "A",
+  ],
+  [
+    "EM61 the report's runtime witness is not checked",
+    "        problems.push(...witnessProblems(metadata?.atlasRuntime, record));",
+    "        void 0;",
+    "E",
+  ],
+  [
+    "EM62 a `/2` bundle need not carry its record",
+    '  if (schema === EVIDENCE_SCHEMA) names.push("applicability");',
+    '  if (schema === "none") names.push("applicability");',
+    "E",
+  ],
+  [
+    "EM63 the evidence is compared with itself, not with the consumer",
+    "    : compareApplicability(target, v.applicability?.record);",
+    "    : compareApplicability(v.applicability?.record, v.applicability?.record);",
+    "E",
+  ],
+  [
+    "EM64 a replay without a target is admitted",
+    '      decision: "unassessed",',
+    '      decision: "applicable",',
+    "E",
+  ],
+  [
+    "EM65 a revision 25 bundle is admitted",
+    '        decision: "unknown",',
+    '        decision: "applicable",',
+    "E",
+  ],
+  [
+    "EM66 a control is admitted on health alone",
+    '    result.healthy && evidence.applicability.decision === "applicable";',
+    "    result.healthy;",
+    "E",
+  ],
+  [
+    "EM67 the target's digest is taken from the record",
+    '    target && typeof target === "object" ? targetDigest(target) : null;',
+    '    target && typeof target === "object" ? record_sha256 : null;',
+    "E",
+  ],
+  [
+    "EM68 a negative control qualifies without applicability",
+    '  const qualified = holds && applicability.decision === "applicable";',
+    "  const qualified = holds;",
+    "Q",
+  ],
+  [
+    "EM69 the controls run's records before and after are not compared",
+    "  if (before?.record && after?.record) {",
     "  if (false) {",
+    "Q",
+  ],
+  [
+    "EM70 the controls run's record is not compared with the consumer",
+    "  if (before?.record && targetSha) {",
+    "  if (false) {",
+    "Q",
+  ],
+  [
+    "EM71 a control's applicability decision is ignored",
+    '    if (a?.decision !== "applicable")\n',
+    "    if (false)\n",
+    "Q",
+  ],
+  [
+    "EM72 the target a control was judged against is not checked",
+    "    if (!targetSha || a?.target_sha256 !== targetSha)",
+    "    if (!targetSha)",
+    "Q",
+  ],
+  [
+    "EM73 the record a control's bundle carries is not checked",
+    "    if (!before?.sha256 || e?.applicability_sha256 !== before.sha256)",
+    "    if (!before?.sha256)",
+    "Q",
+  ],
+  [
+    "EM74 the inputs' runtime is not checked against the record",
+    "      if (evidence.inputs_runtime?.[key] !== before.record.controller?.[key])",
+    "      if (false)",
+    "Q",
+  ],
+  [
+    "EM75 the summary's record is not checked",
+    "  if (summary.applicability_sha256 !== before?.sha256)",
+    "  if (false)",
+    "Q",
+  ],
+  [
+    "EM76 a campaign need not name its target",
+    "  if (!DIGEST.test(String(planned.applicability)))\n    reasons.push(",
+    "  if (false)\n    reasons.push(",
+    "Q",
+  ],
+  [
+    "EM77 a runtime that changed during the run is ignored",
+    '  if (applicability?.after?.decision !== "applicable")',
+    "  if (false)",
+    "Q",
+  ],
+  [
+    "EM78 a part's applicability decision is ignored by the campaign",
+    '      a?.decision !== "applicable" ||',
+    "      false ||",
+    "Q",
+  ],
+  [
+    "EM79 a revision 25 bundle is checked against the current negative contract",
+    "        ? LEGACY_NEGATIVE_CONTRACTS[m.schema]\n",
+    "        ? NEGATIVE_CONTRACT_VERSION\n",
+    "E",
+  ],
+  [
+    "EM80 a current bundle may name the earlier negative contract",
+    "      : out.legacy\n",
+    "      : true\n",
     "E",
   ],
 ];
@@ -2487,10 +3420,16 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
       join(import.meta.dirname, "held-operation-evidence.mjs"),
       "utf8",
     ),
+    A: readFileSync(
+      join(import.meta.dirname, "held-operation-applicability.mjs"),
+      "utf8",
+    ),
   };
+  // Revision 26: "A" names held-operation-applicability.mjs, which both of the others import (one mutated instance for all three).
   const names = {
     Q: "held-operation-qualification.mjs",
     E: "held-operation-evidence.mjs",
+    A: "held-operation-applicability.mjs",
   };
   const caughtBy = {};
   for (const [name, from, to, which = "Q"] of EVALUATOR_MUTANTS) {
@@ -2501,14 +3440,15 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
       join(import.meta.dirname, "engine-results.mjs"),
       join(sub, "engine-results.mjs"),
     );
-    for (const k of ["Q", "E"])
+    for (const k of ["Q", "E", "A"])
       writeFileSync(
         join(sub, names[k]),
         k === which ? sources[k].replace(from, to) : sources[k],
       );
     const q = await import(pathToFileURL(join(sub, names.Q)).href);
     const e = await import(pathToFileURL(join(sub, names.E)).href);
-    caughtBy[name] = assessments(q, e);
+    const a = await import(pathToFileURL(join(sub, names.A)).href);
+    caughtBy[name] = assessments(q, e, a);
     assert.ok(caughtBy[name].length > 0, `${name} survived`);
   }
   // Evidence for the reviewer: the checks each evaluator mutant fails (opt-in; the test writes nothing otherwise).
@@ -2815,6 +3755,7 @@ test("Q2 (limit, labelled): a self-consistent bundle of another source verifies 
     other,
     {
       invocation: INVOCATION,
+      target: TARGET,
     },
   );
   assert.equal(unnamed.qualified, true);
@@ -2870,7 +3811,7 @@ test("Q5: a bundle is published exclusively and last, read once, and relocates i
     const unpublished = evidenceModule.qualifyNegative(
       nc,
       evidenceModule.readBundle(join(part, evidenceModule.MANIFEST)),
-      { invocation: INVOCATION },
+      { invocation: INVOCATION, target: TARGET },
     );
     assert.equal(unpublished.qualified, false);
     assert.ok(
@@ -2901,20 +3842,25 @@ test("Q5: a bundle is published exclusively and last, read once, and relocates i
     assert.deepEqual(readFileSync(path), published);
     const read = evidenceModule.readBundle(path);
     assert.equal(
-      evidenceModule.qualifyNegative(nc, read, { invocation: INVOCATION })
-        .qualified,
+      evidenceModule.qualifyNegative(nc, read, {
+        invocation: INVOCATION,
+        target: TARGET,
+      }).qualified,
       true,
     );
     // Judged from the bytes read: a later change on disk does not change that judgement, and a new read refuses it.
     writeFileSync(join(part, "browser/report.json"), "{}");
     assert.equal(
-      evidenceModule.qualifyNegative(nc, read, { invocation: INVOCATION })
-        .qualified,
+      evidenceModule.qualifyNegative(nc, read, {
+        invocation: INVOCATION,
+        target: TARGET,
+      }).qualified,
       true,
     );
     assert.equal(
       evidenceModule.qualifyNegative(nc, evidenceModule.readBundle(path), {
         invocation: INVOCATION,
+        target: TARGET,
       }).qualified,
       false,
     );
@@ -2933,6 +3879,7 @@ test("Q5: a bundle is published exclusively and last, read once, and relocates i
     });
     const racedJudged = evidenceModule.qualifyNegative(nc, raced, {
       invocation: INVOCATION,
+      target: TARGET,
     });
     assert.equal(racedJudged.qualified, false);
     assert.ok(
@@ -2946,7 +3893,7 @@ test("Q5: a bundle is published exclusively and last, read once, and relocates i
       evidenceModule.readBundle(
         join(dir, "moved", "NC4", evidenceModule.MANIFEST),
       ),
-      { invocation: INVOCATION },
+      { invocation: INVOCATION, target: TARGET },
     );
     assert.equal(moved.qualified, true);
     assert.equal(moved.evidence.manifest_sha256, sha(published));
@@ -2973,7 +3920,7 @@ test("Q5: a bundle is published exclusively and last, read once, and relocates i
       const v = evidenceModule.qualifyNegative(
         nc,
         evidenceModule.readBundle(join(copy, evidenceModule.MANIFEST)),
-        { invocation: INVOCATION },
+        { invocation: INVOCATION, target: TARGET },
       );
       assert.equal(v.qualified, false, name);
     }
@@ -2985,6 +3932,7 @@ test("Q5: a bundle is published exclusively and last, read once, and relocates i
     assert.equal(
       evidenceModule.qualifyNegative(nc, evidenceModule.readBundle(otherPath), {
         invocation: OTHER_INVOCATION,
+        target: TARGET,
       }).qualified,
       true,
     );
@@ -2995,6 +3943,7 @@ test("Q5: a bundle is published exclusively and last, read once, and relocates i
     assert.equal(
       evidenceModule.qualifyNegative(nc, evidenceModule.readBundle(otherPath), {
         invocation: OTHER_INVOCATION,
+        target: TARGET,
       }).qualified,
       false,
     );
@@ -3051,7 +4000,12 @@ test("Q7: a control part is judged healthy only from its verified raw bundle", (
           evaluator.PROBE_IDS,
           { edit },
         ),
-        { part, invocation: INVOCATION, source: CONTROL_SOURCE.sha256 },
+        {
+          target: TARGET,
+          part,
+          invocation: INVOCATION,
+          source: CONTROL_SOURCE.sha256,
+        },
       );
       assert.equal(judged.ok, false, `${part}: ${name}`);
     }
@@ -3062,10 +4016,11 @@ test("Q7: a control part is judged healthy only from its verified raw bundle", (
       A6.mutants.HM10,
       evaluator.mutantOf("HM10").probes,
     ),
-    { part: "control", invocation: INVOCATION },
+    { part: "control", invocation: INVOCATION, target: TARGET },
   );
   assert.equal(hm10.evidence.status, "verified");
   assert.equal(hm10.ok, false);
+  assert.equal(hm10.healthy, false);
 });
 
 test("Q2: the negative contracts are total, and their hook lines are the runner's hook", () => {
@@ -3192,8 +4147,20 @@ function driverFixture(t) {
       },
     }),
   };
+  // Revision 26: the legacy (revision 25 `/1`) bundle of the same run, and bundles recorded under other runtimes.
+  bundles["nc1-legacy"] = negativeBundle(nc("NC1"), ENTRY("NC1"), {
+    legacy: true,
+  });
+  bundles["nc1-node25"] = negativeBundle(nc("NC1"), ENTRY("NC1"), {
+    applicability: applicabilityRecord((r) => {
+      r.controller.node = "v25.8.2";
+      r.controller.exec_sha256 = sha("node 25.8.2");
+    }),
+  });
   for (const [name, b] of Object.entries(bundles))
     writeBundle(join(dir, ".agtx", name), b);
+  // The consumer's own record (TARGET), as `--target <applicability.json>` reads it.
+  writeFileSync(join(dir, ".agtx/target.json"), canonical(TARGET));
   writeFileSync(
     join(dir, ".agtx/nc1-report-bytes.json"),
     bundles.nc1.files.report,
@@ -3290,7 +4257,10 @@ test("Q9: a judgement that is not the expected one exits 1 and the shared driver
   assert.equal(existsSync(join(dir, ".agtx/later")), false);
 });
 
-/** The judge over a bundle written by driverFixture (revision 25). */
+/**
+ * The judge over a bundle written by driverFixture (revision 25). Revision 26: an admission names the consumer's target (`--target
+ * .agtx/target.json`, TARGET) unless the step names its own target or `--historical`, so each case is refused for its own reason.
+ */
 const evidenceStep = (bundle, ...extra) => ({
   id: "judge",
   stage: "focused",
@@ -3301,6 +4271,9 @@ const evidenceStep = (bundle, ...extra) => ({
     "scripts/validation/held-operation-judge.mjs",
     "--evidence",
     `.agtx/${bundle}/${evidenceModule.MANIFEST}`,
+    ...(extra.includes("--historical") || extra.includes("--target")
+      ? []
+      : ["--target", ".agtx/target.json"]),
     ...extra,
   ],
 });
@@ -3345,6 +4318,46 @@ test("Q4/Q8: a labelled diagnostic of a genuine report exits 0 only as a diagnos
   assert.equal(out.admission_eligible, false);
   assert.equal(out.judgement.qualified, false);
   assert.match(out.replay, /never admissible/);
+});
+
+for (const [bundle, label] of [
+  ["nc1", "a `/2` bundle"],
+  ["nc1-legacy", "a revision 25 `/1` bundle"],
+  ["nc1-node25", "a bundle of another runtime"],
+])
+  test(`H7 (revision 26): a historical replay of ${label} exits 0 only as historical-holds: never admission-eligible`, (t) => {
+    const dir = driverFixture(t);
+    const step = evidenceStep(bundle, "--negative", "NC1", "--historical");
+    const result = driver(dir, [
+      { ...step, argv: [...step.argv, "--out", ".agtx/historical.json"] },
+      laterStep,
+    ]);
+    assert.equal(result.records[0].exit, 0);
+    const out = JSON.parse(
+      readFileSync(join(dir, ".agtx/historical.json"), "utf8"),
+    );
+    assert.equal(out.outcome, "historical-holds");
+    assert.equal(out.admission_eligible, false);
+    assert.equal(out.judgement.qualified, false);
+    assert.equal(out.judgement.applicability.decision, "unassessed");
+    assert.match(out.replay, /HISTORICAL replay/);
+  });
+
+test("H8 (revision 26): an admission to the bundle's own runtime record is admission-eligible", (t) => {
+  const dir = driverFixture(t);
+  const step = evidenceStep("nc1", "--negative", "NC1");
+  const result = driver(dir, [
+    { ...step, argv: [...step.argv, "--out", ".agtx/admitted.json"] },
+    laterStep,
+  ]);
+  assert.equal(result.records[0].exit, 0);
+  const out = JSON.parse(
+    readFileSync(join(dir, ".agtx/admitted.json"), "utf8"),
+  );
+  assert.equal(out.outcome, "qualified");
+  assert.equal(out.admission_eligible, true);
+  assert.equal(out.applicability.decision, "applicable");
+  assert.equal(out.applicability.target_sha256, TARGET_SHA);
 });
 
 for (const [name, steps] of [
@@ -3452,6 +4465,73 @@ for (const [name, steps] of [
   [
     "a bundle given an engine selection",
     [evidenceStep("nc1", "--negative", "NC1", "--browsers", "chromium")],
+  ],
+  // Revision 26 (review r25 R25-N1; design assessment 26f1a626 Q2, Q4, H7, H8): the actual CLI and the actual shared driver.
+  [
+    "a bundle judged with neither --target nor --historical (no applicability decision can be made)",
+    [
+      {
+        ...evidenceStep("nc1", "--negative", "NC1", "--historical"),
+        argv: evidenceStep(
+          "nc1",
+          "--negative",
+          "NC1",
+          "--historical",
+        ).argv.filter((a) => a !== "--historical"),
+      },
+    ],
+  ],
+  [
+    "both --target and --historical",
+    [
+      evidenceStep(
+        "nc1",
+        "--negative",
+        "NC1",
+        "--historical",
+        "--target",
+        ".agtx/target.json",
+      ),
+    ],
+  ],
+  [
+    "a bundle recorded under Node v25.8.2 admitted to a v22.23.2 target (review r25's counterexample)",
+    [evidenceStep("nc1-node25", "--negative", "NC1")],
+  ],
+  [
+    "a revision 25 bundle (no applicability recorded) admitted to a target",
+    [evidenceStep("nc1-legacy", "--negative", "NC1")],
+  ],
+  [
+    "a target that is not an applicability record",
+    [
+      evidenceStep(
+        "nc1",
+        "--negative",
+        "NC1",
+        "--target",
+        ".agtx/nc1-report-bytes.json",
+      ),
+    ],
+  ],
+  [
+    "a control bundle judged without a target or --historical",
+    [
+      {
+        id: "judge",
+        stage: "focused",
+        requirement: "control admission propagation",
+        argv: [
+          process.execPath,
+          "scripts/validation/held-operation-judge.mjs",
+          "--control",
+          "--evidence",
+          `.agtx/nc1/${evidenceModule.MANIFEST}`,
+          "--part",
+          "control",
+        ],
+      },
+    ],
   ],
 ])
   test(`Q7/Q8: ${name} exits non-zero and the shared driver admits no later work`, (t) => {

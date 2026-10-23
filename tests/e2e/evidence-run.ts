@@ -6,6 +6,7 @@ import {
   readdirSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { FullConfig, TestInfo } from "@playwright/test";
 
@@ -59,6 +60,24 @@ export function configureEvidenceRun(argv = process.argv): string {
     }
   }
   return newEvidenceRun();
+}
+
+/**
+ * WEB-08d revision 26 (review r25 R25-N1): the runtime this Playwright run is, as its own process sees it. The config records it in the
+ * report's metadata (`atlasRuntime`), so held-operation evidence can check the runtime its applicability record names against the one
+ * that actually ran (scripts/validation/held-operation-applicability.mjs witnessProblems). Metadata only: it selects and changes nothing.
+ */
+export function runtimeWitness() {
+  const version: unknown = createRequire(import.meta.url)(
+    "@playwright/test/package.json",
+  ).version;
+  return {
+    node: process.version,
+    exec_path: process.execPath,
+    platform: process.platform,
+    arch: process.arch,
+    playwright: String(version),
+  };
 }
 
 export default function setupEvidenceRun(config: FullConfig): void {

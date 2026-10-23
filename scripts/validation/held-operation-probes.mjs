@@ -43,10 +43,21 @@
 // and source; campaignOutcome admits only verified parts of this invocation. A --stage negatives prerequisite is re-verified and
 // re-judged from its raw control bundles before anything is built.
 //
+// Revision 26 (review r25 R25-N1; design assessment 26f1a626 steps 1-4, I1-I6): the source digest is not the runtime. Before anything is
+// admitted the runner collects its own applicability record (held-operation-applicability.mjs: controller and child Node, the pnpm that
+// launches the children, the installed Playwright and Vite trees, the browser installations, the behavioural environment) into
+// `applicability.json`; every bundle carries those bytes and its report's own runtime witness must agree with them; every part is judged
+// applicable to exactly that record; and the record is collected again at the end (`applicability-after.json`): a change fails the run.
+// A --stage negatives prerequisite is admitted only when its controls run's records before and after, and both controls' bundles, apply
+// to THIS consumer's record, field by field; the refusal is written to prerequisite.json before anything is built. `admission.json` is
+// written at the build boundary itself, once admission has succeeded, so a refusal is observable as its absence. With --check and
+// --controls-evidence the prerequisite is admitted the same way and nothing is built (exit 0 only when admitted).
+//
 // Usage: node scripts/validation/held-operation-probes.mjs [--check] [--stage all|controls|negatives]
 //          [--probes P01,S7,...] [--only HM10,...] [--browsers chromium,firefox,webkit]
 //          [--controls-evidence <the --out of a --stage controls run>] --out <dir>
-//   --check      preflight only: every contract is total and every patch applies once; nothing is built.
+//   --check      preflight only: every contract is total and every patch applies once; nothing is built. With --controls-evidence,
+//                the prerequisite (and its runtime applicability to this consumer) is admitted too, still without building.
 //   --stage      all (default): controls, negative controls, then mutants; controls: the live and copy controls;
 //                negatives: the negative controls alone (with --controls-evidence).
 //   --probes     restricts the controls of --stage controls to these probes (exact case titles still required).
@@ -61,6 +72,12 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort } from "../integration/free-port.mjs";
+import {
+  applicabilityReasons,
+  canonical,
+  collectApplicability,
+  compareApplicability,
+} from "./held-operation-applicability.mjs";
 import {
   inventoryOf,
   judgeControlEvidence,
@@ -183,6 +200,23 @@ let fatal = null;
 let preflight = false;
 let interrupted = false;
 let prerequisite = null;
+// This run's own runtime applicability (revision 26): collected before admission whenever anything may be admitted or built.
+const needsTarget = !checkOnly || Boolean(controlsEvidence);
+let target = null;
+let targetBytes = null;
+let targetSha = null;
+/** A run's recorded applicability file: its bytes' digest and the record, or null when it is absent or unreadable (unknown). */
+function recordAt(path) {
+  try {
+    const bytes = readFileSync(path);
+    return {
+      sha256: sha256(bytes),
+      record: JSON.parse(bytes.toString("utf8")),
+    };
+  } catch {
+    return null;
+  }
+}
 
 async function build(mutantDir, buildDir, log) {
   const result = await proc.run(
@@ -361,8 +395,10 @@ function publishPart(
     execution: "execution.json",
     source: "bundle/source.json",
     spec: `bundle/ran/${PROBE_SPEC}`,
+    applicability: "bundle/applicability.json",
   };
   writeArtefact(part, artefacts.source, sourceBytes);
+  writeArtefact(part, artefacts.applicability, targetBytes);
   writeArtefact(part, artefacts.spec, readFileSync(join(cwd, PROBE_SPEC)));
   if (inventory) {
     artefacts.inventory = "bundle/inventory.json";
@@ -453,7 +489,25 @@ try {
   if (failures.length)
     throw new Error(`${failures.length} probe mutation(s) failed preflight`);
   preflight = true;
-  if (!checkOnly && controlsEvidence) {
+  if (needsTarget) {
+    try {
+      target = collectApplicability({ root, browsers, env: process.env });
+    } catch (error) {
+      json(join(runDir, "applicability-error.json"), {
+        when: "before admission",
+        error: String(error.message ?? error),
+      });
+      throw new Error(
+        `This run's runtime applicability cannot be established (nothing is admitted or built): ${error.message}`,
+      );
+    }
+    targetBytes = canonical(target);
+    targetSha = sha256(targetBytes);
+    writeFileSync(join(runDir, "applicability.json"), targetBytes, {
+      flag: "wx",
+    });
+  }
+  if (controlsEvidence) {
     // The prerequisite controls (design assessment C3): one passed --stage controls run of this very source and these engines.
     const runs = existsSync(join(controlsEvidence, "runs"))
       ? readdirSync(join(controlsEvidence, "runs"))
@@ -476,8 +530,14 @@ try {
               part: name,
               invocation: runs[0],
               source: before.sha256,
+              target,
             }),
           ),
+          // The producing run's own records of its runtime, before and after it ran (revision 26): the raw files, never its summary.
+          applicability: {
+            before: recordAt(join(dir, "applicability.json")),
+            after: recordAt(join(dir, "applicability-after.json")),
+          },
           summary: JSON.parse(
             readFileSync(join(dir, "probe-results.json"), "utf8"),
           ).summary,
@@ -486,6 +546,14 @@ try {
           after: JSON.parse(
             readFileSync(join(dir, "inputs-after.json"), "utf8"),
           ).sha256,
+        };
+        const inputs = JSON.parse(
+          readFileSync(join(dir, "inputs.json"), "utf8"),
+        );
+        evidence.inputs_runtime = {
+          node: inputs.node,
+          platform: inputs.platform,
+          arch: inputs.arch,
         };
         if (evidence.after !== evidence.source)
           problems.push("its inputs changed during the run");
@@ -499,14 +567,27 @@ try {
           source: before.sha256,
           browsers,
           probes: [...new Set(negatives.flatMap((n) => n.probes))],
+          target,
         }),
       );
     prerequisite = {
       evidence: evidence?.path ?? controlsEvidence,
       invocation: evidence?.invocation ?? null,
+      // What this consumer compared (revision 26): its own record, the producing run's before and after, and each field's decision.
+      applicability: {
+        target_sha256: targetSha,
+        before_sha256: evidence?.applicability?.before?.sha256 ?? null,
+        after_sha256: evidence?.applicability?.after?.sha256 ?? null,
+        comparison: compareApplicability(
+          target,
+          evidence?.applicability?.before?.record,
+        ),
+      },
       controls: (evidence?.controls ?? []).map((c) => ({
         name: c.name,
         ok: c.ok,
+        healthy: c.healthy,
+        applicability: c.applicability?.decision,
         evidence: c.evidence,
         problems: c.problems.slice(0, 20),
       })),
@@ -516,6 +597,16 @@ try {
     if (problems.length)
       throw new Error(`Prerequisite controls not met: ${problems[0]}`);
   }
+  if (needsTarget)
+    // The build boundary: everything before it has admitted this run. Its absence after a run is the observable refusal.
+    json(join(runDir, "admission.json"), {
+      admitted: true,
+      stage,
+      check_only: checkOnly,
+      prerequisite: Boolean(controlsEvidence),
+      applicability_sha256: targetSha,
+      at: new Date().toISOString(),
+    });
   if (!checkOnly) {
     const controlBuild = join(runDir, "control-build");
     await build(null, controlBuild, join(runDir, "control-build.log"));
@@ -541,6 +632,7 @@ try {
             part: name,
             invocation,
             source: before.sha256,
+            target,
           }),
         );
         json(join(runDir, name, "judgement.json"), judged);
@@ -601,7 +693,11 @@ try {
       const judged = recorded(
         nc.id,
         run,
-        qualifyNegative(nc, bundle, { invocation, source: before.sha256 }),
+        qualifyNegative(nc, bundle, {
+          invocation,
+          source: before.sha256,
+          target,
+        }),
       );
       json(join(directory, "result.json"), {
         title: nc.title,
@@ -662,21 +758,53 @@ try {
 const after = fingerprint(root);
 json(join(runDir, "inputs-after.json"), after);
 const unchanged = before.sha256 === after.sha256;
+// The runtime again, at the end (revision 26): compared with the record this run was admitted and judged under.
+let applicabilityAfter = null;
+if (target) {
+  try {
+    const again = canonical(
+      collectApplicability({ root, browsers, env: process.env }),
+    );
+    writeFileSync(join(runDir, "applicability-after.json"), again, {
+      flag: "wx",
+    });
+    applicabilityAfter = compareApplicability(target, JSON.parse(again));
+  } catch (error) {
+    json(join(runDir, "applicability-error.json"), {
+      when: "after the run",
+      error: String(error.message ?? error),
+    });
+  }
+}
+const checkReasons = checkOnly
+  ? [
+      ...(preflight ? [] : ["preflight did not pass"]),
+      ...(fatal ? [`failed: ${fatal.split("\n")[0]}`] : []),
+      ...(interrupted ? ["interrupted"] : []),
+      ...(unchanged ? [] : ["the source changed during the run"]),
+      ...(needsTarget && applicabilityAfter?.decision !== "applicable"
+        ? applicabilityAfter
+          ? applicabilityReasons(applicabilityAfter).map(
+              (r) => `the runtime changed during the run: ${r}`,
+            )
+          : ["the runtime after the run is unknown (not collected again)"]
+        : []),
+    ]
+  : [];
 const outcome = checkOnly
-  ? {
-      passed: preflight && !fatal && !interrupted && unchanged,
-      reasons: [],
-    }
+  ? { passed: checkReasons.length === 0, reasons: checkReasons }
   : campaignOutcome({
       preflight,
       fatal,
       interrupted,
       sourceUnchanged: unchanged,
+      applicability: { target_sha256: targetSha, after: applicabilityAfter },
       prerequisite: controlsEvidence
         ? (prerequisite ?? { problems: ["the prerequisite was never checked"] })
         : null,
       planned: {
         invocation,
+        applicability: targetSha,
         controls: stage === "negatives" ? [] : ["control", "copy-control"],
         negatives: negatives.map((n) => n.id),
         mutants: selected.map((m) => m.id),
@@ -700,6 +828,8 @@ const summary = {
   controls: record.controls.map((c) => ({
     name: c.name,
     ok: c.ok,
+    healthy: c.healthy,
+    applicability: c.applicability?.decision,
     evidence: c.evidence?.status,
     manifest_sha256: c.evidence?.manifest_sha256,
   })),
@@ -711,6 +841,7 @@ const summary = {
     integrity: n.integrity.valid,
     scenario: n.scenario.valid,
     classifier: n.classifier.verdict,
+    applicability: n.applicability?.decision,
     evidence: n.evidence?.status,
     manifest_sha256: n.evidence?.manifest_sha256,
   })),
@@ -721,6 +852,8 @@ const summary = {
   ),
   caught: record.mutants.filter((m) => m.verdict === "caught").length,
   source_unchanged: unchanged,
+  applicability_sha256: targetSha,
+  applicability_after: applicabilityAfter?.decision ?? null,
   trees,
   passed: outcome.passed,
   reasons: outcome.reasons,

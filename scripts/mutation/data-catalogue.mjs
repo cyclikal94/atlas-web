@@ -19473,6 +19473,176 @@ export const UNIT = [
         "      setups += 1;\n",
       ),
   },
+  {
+    id: "MU-1695",
+    title:
+      "WEB-08d review r25 R25-N2: the other-device confirmation never hears of connectivity (its subscription is a constant online)",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /other device RC4 /,
+    patch: (t) =>
+      sub(t, "  const online = useOnline();\n", "  const online = true;\n"),
+  },
+  {
+    id: "MU-1696",
+    title:
+      "WEB-08d review r25 R25-N2: the other-device confirmation has no offline disabled state",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /other device RC4 /,
+    patch: (t) =>
+      sub(t, "          ) : !online ? (\n", "          ) : false ? (\n"),
+  },
+  {
+    id: "MU-1697",
+    title:
+      "WEB-08d review r25 R25-N2: the other-device confirmation does not ask the browser at the moment of use",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /other device RC3 /,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (inflight.current || !isOnlineNow() || !interaction.current()) return;\n",
+        "    if (inflight.current || !interaction.current()) return;\n",
+      ),
+  },
+  {
+    id: "MU-1698",
+    title:
+      "WEB-08d review r25 R25-N2: this device's confirmation never hears of connectivity (its subscription is a constant online)",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /current device RC4 |RC9 /,
+    patch: (t) =>
+      sub(t, "  const online = useOnline();\n", "  const online = true;\n"),
+  },
+  {
+    id: "MU-1699",
+    title:
+      "WEB-08d review r25 R25-N2: this device's confirmation has no offline disabled state",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /current device RC4 |RC9 |RC11 /,
+    patch: (t) =>
+      sub(
+        t,
+        "          {known && !busy && !offline ? (\n",
+        "          {known && !busy ? (\n",
+      ),
+  },
+  {
+    id: "MU-1700",
+    title:
+      "WEB-08d review r25 R25-N2: this device's confirmation does not ask the browser at the moment of use",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /current device RC3 /,
+    patch: (t) =>
+      sub(t, "    if (needsConnection && !isOnlineNow()) return;\n", ""),
+  },
+  {
+    id: "MU-1701",
+    title:
+      "WEB-08d review r25 R25-N2: the online rule is not scoped to retirement: logging out is blocked offline too",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /RC12 |RC13 /,
+    patch: (t) =>
+      sub(
+        t,
+        '  const needsConnection = kind === "retire";\n',
+        "  const needsConnection = true;\n",
+      ),
+  },
+  {
+    id: "MU-1702",
+    title:
+      "WEB-08d review r25 R25-N2: the online rule is scoped to the wrong kind: logging out needs a connection and retiring this device does not",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /current device RC[34] |RC12 |RC13 /,
+    patch: (t) =>
+      sub(
+        t,
+        '  const needsConnection = kind === "retire";\n',
+        '  const needsConnection = kind === "logout";\n',
+      ),
+  },
+  {
+    id: "MU-1703",
+    title:
+      "WEB-08d review r25 R25-N2: the Retire opener does not ask the browser at the moment of use",
+    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /RC2 /,
+    patch: (t) =>
+      sub(
+        t,
+        "                            if (navigator.onLine) openRetiring(row);\n",
+        "                            openRetiring(row);\n",
+      ),
+  },
+  {
+    id: "MU-1704",
+    title:
+      "WEB-08d review r25 R25-N2: this device's confirmation can be begun twice while the first is being started",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /current device RC6 /,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!known || inflight.current) return;\n",
+        "    if (!known) return;\n",
+      ),
+  },
+  {
+    id: "MU-1705",
+    title:
+      "WEB-08d review r25 R25-N2: reconnecting confirms the other-device retirement by itself",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /other device RC5 /,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          'import { useRef, useState } from "react";',
+          'import { useEffect, useRef, useState } from "react";',
+        ),
+        "  const inflight = useRef(false);\n",
+        "  const inflight = useRef(false);\n  const sawOffline = useRef(false);\n  useEffect(() => {\n    if (!online) sawOffline.current = true;\n    else if (sawOffline.current) void confirm();\n  });\n",
+      ),
+  },
+  {
+    id: "MU-1706",
+    title:
+      "WEB-08d review r25 R25-N2: reconnecting confirms this device's retirement by itself",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /current device RC5 /,
+    patch: (t) =>
+      sub(
+        t,
+        "  const offline = needsConnection && !online;\n",
+        "  const offline = needsConnection && !online;\n  const sawOffline = useRef(false);\n  useEffect(() => {\n    if (offline) sawOffline.current = true;\n    else if (sawOffline.current && known && !busy) void confirm();\n  });\n",
+      ),
+  },
+  {
+    id: "MU-1707",
+    title:
+      "WEB-08d review r25 R25-N2: an applied answer of an other-device retirement no longer reads the lists again (the issued effect's reconciliation dropped)",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
+    expect: /other device RC6 |RC7 /,
+    patch: (t) =>
+      sub(
+        t,
+        "      reconcileLists(session, interaction.scope);\n",
+        "      void 0;\n",
+      ),
+  },
 ];
 
 /**
@@ -22463,6 +22633,32 @@ export const ENGINE = [
         ),
         "  void page.then((gallery) => {\n",
         "  void page.then((gallery) => {\n    markFixturePageReady();\n",
+      ),
+  },
+  {
+    id: "MU-1708",
+    title:
+      "WEB-08d review r25 R25-N2: (REAL ENGINE) the other-device confirmation has no offline disabled state",
+    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
+    spec: "tests/e2e/fixture.session-labels.spec.ts",
+    grep: "L-5b real offline",
+    expect: /L-5b real offline/,
+    patch: (t) =>
+      sub(t, "          ) : !online ? (\n", "          ) : false ? (\n"),
+  },
+  {
+    id: "MU-1709",
+    title:
+      "WEB-08d review r25 R25-N2: (REAL ENGINE) this device's confirmation has no offline disabled state",
+    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
+    spec: "tests/e2e/fixture.session-labels.spec.ts",
+    grep: "L-5b real offline",
+    expect: /L-5b real offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "          {known && !busy && !offline ? (\n",
+        "          {known && !busy ? (\n",
       ),
   },
 ];

@@ -9,8 +9,16 @@
 //
 // Every builder takes an `edit(parts)` step applied BEFORE the manifest is computed (a consistent change the derived relations must
 // refuse) and a `tamper(bundle)` step applied AFTER it (bytes that are no longer the manifest's).
+//
+// Revision 26 (review r25 R25-N1; design assessment 26f1a626 Q1, Q2): a bundle is `/2` and carries a SYNTHETIC applicability record
+// (`applicability`, default TARGET: complete and well formed, with made-up digests) and its report the matching runtime witness. `legacy:
+// true` builds a revision 25 `/1` bundle (no record). Callers name the consumer's target explicitly; nothing defaults it for them.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import {
+  APPLICABILITY_SCHEMA,
+  canonical,
+} from "./held-operation-applicability.mjs";
 import { MANIFEST, probeArgv, sha256 } from "./held-operation-evidence.mjs";
 import {
   CONTRACT_VERSION,
@@ -18,6 +26,8 @@ import {
   EVIDENCE_SCHEMA,
   FAULT_HOOK,
   HELPER,
+  LEGACY_EVIDENCE_SCHEMAS,
+  LEGACY_NEGATIVE_CONTRACTS,
   mutantOf,
   NEGATIVE_CONTRACT_VERSION,
   PROBE_SPEC,
@@ -29,6 +39,100 @@ export const HELPER_BYTES = readFileSync(join(root, HELPER));
 /** Invocation ids shaped like the runner's run directories. */
 export const INVOCATION = "2026-10-23T09-00-00.000Z-aaaaaaaa";
 export const OTHER_INVOCATION = "2026-10-23T09-30-00.000Z-bbbbbbbb";
+
+const digest = (label) => sha256(`synthetic ${label}`);
+/**
+ * A SYNTHETIC applicability record (held-operation-applicability.mjs collectApplicability's shape): complete and well formed, its digests
+ * made up. `change(record)` edits a copy (a different runtime, a missing field, ...). TARGET is the one every builder records by default.
+ */
+export function applicabilityRecord(change) {
+  const r = {
+    schema: APPLICABILITY_SCHEMA,
+    controller: {
+      node: "v22.23.2",
+      exec_path: "/n/v22.23.2/bin/node",
+      exec_sha256: digest("node 22.23.2"),
+      platform: "darwin",
+      arch: "arm64",
+      os_type: "Darwin",
+      os_release: "25.6.0",
+      os_version: "Darwin Kernel Version 25.6.0",
+    },
+    launcher: {
+      pnpm_path: "/w/.agtx/evidence/revision-9/pnpm-shim/pnpm",
+      pnpm_realpath: "/w/.agtx/evidence/revision-9/pnpm-shim/pnpm",
+      pnpm_sha256: digest("pnpm shim"),
+    },
+    child: {
+      node: "v22.23.2",
+      exec_path: "/n/v22.23.2/bin/node",
+      exec_sha256: digest("node 22.23.2"),
+      platform: "darwin",
+      arch: "arm64",
+      user_agent: "pnpm/12.4.2 npm/? node/? darwin arm64",
+      pnpm_path: "/c/pnpm/12.4.2/pnpm-native",
+      pnpm_sha256: digest("pnpm-native 12.4.2"),
+      pnpm_tree_sha256: digest("pnpm tree 12.4.2"),
+      corepack_root: "/n/v22.23.2/lib/node_modules/corepack",
+      corepack_tree_sha256: digest("corepack tree"),
+    },
+    packages: {
+      "@playwright/test": {
+        version: "1.63.0",
+        dir: "/w/node_modules/.pnpm/@playwright+test@1.63.0/node_modules/@playwright/test",
+        tree_sha256: digest("@playwright/test 1.63.0"),
+      },
+      playwright: {
+        version: "1.63.0",
+        dir: "/w/node_modules/.pnpm/playwright@1.63.0/node_modules/playwright",
+        tree_sha256: digest("playwright 1.63.0"),
+      },
+      "playwright-core": {
+        version: "1.63.0",
+        dir: "/w/node_modules/.pnpm/playwright-core@1.63.0/node_modules/playwright-core",
+        tree_sha256: digest("playwright-core 1.63.0"),
+      },
+      vite: {
+        version: "8.3.0",
+        dir: "/w/node_modules/.pnpm/vite@8.3.0/node_modules/vite",
+        tree_sha256: digest("vite 8.3.0"),
+      },
+    },
+    installation: {
+      modules_yaml_sha256: digest(".modules.yaml"),
+      lock_yaml_sha256: digest("lock.yaml"),
+    },
+    browsers: {
+      chromium: {
+        executable: "/b/chromium-1243/chrome",
+        directories: {
+          "chromium-1243": digest("chromium-1243"),
+          "chromium_headless_shell-1243": digest("headless shell 1243"),
+        },
+      },
+      firefox: {
+        executable: "/b/firefox-1543/firefox",
+        directories: { "firefox-1543": digest("firefox-1543") },
+      },
+      webkit: {
+        executable: "/b/webkit-2359/pw_run.sh",
+        directories: { "webkit-2359": digest("webkit-2359") },
+      },
+    },
+    env: { LANG: "en_GB.UTF-8" },
+  };
+  change?.(r);
+  return r;
+}
+export const TARGET = applicabilityRecord();
+/** The runtime witness a Playwright run under `record` writes into its report (tests/e2e/evidence-run.ts runtimeWitness). */
+export const witnessOf = (record) => ({
+  node: record.child?.node,
+  exec_path: record.child?.exec_path,
+  platform: record.child?.platform,
+  arch: record.child?.arch,
+  playwright: record.packages?.["@playwright/test"]?.version,
+});
 
 /** A synthetic source fingerprint whose spec is `spec` and helper HELPER_BYTES, with the shape of runtime.mjs fingerprint(). */
 export function sourceOf(spec, extra = {}) {
@@ -65,14 +169,18 @@ const bytesOf = (v) =>
     : Buffer.from(
         typeof v === "string" ? v : `${JSON.stringify(v, null, 2)}\n`,
       );
-/** The report a part wrote, with the evidence-run metadata of `invocation`'s `part` (the trimmed fixtures lost their config). */
-export function reportOf(report, invocation, part, dir = "browser/") {
+/**
+ * The report a part wrote, with the evidence-run metadata of `invocation`'s `part` (the trimmed fixtures lost their config) and, unless
+ * `witness` is null (a revision 25 report), the runtime witness its Playwright run recorded.
+ */
+export function reportOf(report, invocation, part, dir = "browser/", witness) {
   const copy = structuredClone(report);
   copy.config = {
     ...(copy.config ?? {}),
     metadata: {
       atlasEvidenceRun: `/w/.agtx/evidence/runs/${invocation}/${part}/${dir}evidence/runs/run-1`,
       actualWorkers: 1,
+      ...(witness ? { atlasRuntime: witness } : {}),
     },
   };
   return copy;
@@ -87,7 +195,7 @@ export function baseSpecOf(entry) {
 function finish(parts, tamper) {
   const files = {};
   const manifest = {
-    schema: EVIDENCE_SCHEMA,
+    schema: parts.schema ?? EVIDENCE_SCHEMA,
     ...parts.header,
     artefacts: {},
   };
@@ -123,6 +231,8 @@ export function negativeBundle(
     signal = entry.signal ?? null,
     browsers = ENGINES,
     source,
+    applicability = TARGET,
+    legacy = false,
     edit,
     tamper,
   } = {},
@@ -132,17 +242,33 @@ export function negativeBundle(
   const src = source ?? sourceOf(base);
   const patched = { [PROBE_SPEC]: sha256(spec) };
   const parts = {
+    schema: legacy ? LEGACY_EVIDENCE_SCHEMAS[0] : EVIDENCE_SCHEMA,
     header: {
       kind: "negative",
       part: nc.id,
-      contract: NEGATIVE_CONTRACT_VERSION,
+      contract: legacy
+        ? LEGACY_NEGATIVE_CONTRACTS[LEGACY_EVIDENCE_SCHEMAS[0]]
+        : NEGATIVE_CONTRACT_VERSION,
       invocation,
       source_sha256: src.sha256,
     },
     files: {},
   };
-  const report = bytesOf(reportOf(entry.report, invocation, nc.id));
+  const report = bytesOf(
+    reportOf(
+      entry.report,
+      invocation,
+      nc.id,
+      "browser/",
+      legacy ? null : witnessOf(applicability),
+    ),
+  );
   parts.files.report = { path: "browser/report.json", bytes: report };
+  if (!legacy)
+    parts.files.applicability = {
+      path: "bundle/applicability.json",
+      bytes: canonical(applicability),
+    };
   parts.files.source = { path: "bundle/source.json", bytes: src };
   parts.files.spec = { path: `bundle/ran/${PROBE_SPEC}`, bytes: spec };
   parts.files[`base:${PROBE_SPEC}`] = {
@@ -201,12 +327,29 @@ export function controlBundle(
   part,
   entry,
   ids,
-  { invocation = INVOCATION, source, browsers = ENGINES, edit, tamper } = {},
+  {
+    invocation = INVOCATION,
+    source,
+    browsers = ENGINES,
+    applicability = TARGET,
+    legacy = false,
+    edit,
+    tamper,
+  } = {},
 ) {
   const spec = Buffer.from(entry.spec);
   const src = source ?? sourceOf(spec);
-  const report = bytesOf(reportOf(entry.report, invocation, part, ""));
+  const report = bytesOf(
+    reportOf(
+      entry.report,
+      invocation,
+      part,
+      "",
+      legacy ? null : witnessOf(applicability),
+    ),
+  );
   const parts = {
+    schema: legacy ? LEGACY_EVIDENCE_SCHEMAS[0] : EVIDENCE_SCHEMA,
     header: {
       kind: "control",
       part,
@@ -218,6 +361,14 @@ export function controlBundle(
       report: { path: "report.json", bytes: report },
       source: { path: "bundle/source.json", bytes: src },
       spec: { path: `bundle/ran/${PROBE_SPEC}`, bytes: spec },
+      ...(legacy
+        ? {}
+        : {
+            applicability: {
+              path: "bundle/applicability.json",
+              bytes: canonical(applicability),
+            },
+          }),
     },
     execution: {
       exit: entry.exit,

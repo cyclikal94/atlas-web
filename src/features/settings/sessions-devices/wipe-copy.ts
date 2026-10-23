@@ -1,4 +1,5 @@
 import type { DeviceRow, OperationStart } from "../../../session";
+import { RETIRE_OFFLINE_REASON } from "./label-copy";
 
 /**
  * The words of the warning before a wipe-producing action (WEB-04 wireframes section 4; answers Q20(a)), and the proposed
@@ -72,7 +73,7 @@ export const REFUSAL: Record<
   attempt_gating: "A sign-in is still finishing. Try again in a moment.",
   no_current_device:
     "We couldn't identify this device. Reload Atlas and try again.",
-  offline: "Retiring a device needs a connection.",
+  offline: RETIRE_OFFLINE_REASON,
   fence_exists: "This account is being checked. Try again in a moment.",
   closing_write_gave_up:
     "Another Atlas window is busy. Close any you're not using and try again.",
