@@ -2399,3 +2399,149 @@ test.describe("E-P31: an archived field's new parent is not complete until it is
       }
     });
 });
+
+test.describe("E-P32: a save's completion ends only the editor session it was made in (review 6, finding 1)", () => {
+  // Adapted from the reviewer's qualified Chromium pair (`review-6/editor-lifetime-qualified.probe.spec.ts`): the same schedule, all engines.
+  for (const completedFirst of [false, true])
+    test(`a shared create held at /task-access-commands, ${completedFirst ? "control: answered before 'Add a field' is opened again" : "Cancel and a new 'Add a field' typed in before it answers: the new editor and its input stay"}`, async ({
+      context,
+    }, info) => {
+      const { page } = await setup(context, `/people/${P}/fields/new`, [
+        personP(P, "Ada"),
+      ]);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let sent = 0;
+      await page.route("**/task-access-commands", async (route) => {
+        sent += 1;
+        await gate;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ revision: 10 }),
+        });
+      });
+      const d = page.getByRole("dialog", { name: "Add a field" });
+      const name = d.getByRole("textbox", { name: "Name", exact: true });
+      const value = d.getByRole("textbox", { name: "Value", exact: true });
+      await name.fill("First");
+      await value.fill("First saved text");
+      await d.getByRole("radio", { name: "Home · can view" }).click();
+      await d.getByRole("button", { name: "Save", exact: true }).click();
+      await expect.poll(() => sent).toBe(1);
+      if (completedFirst) {
+        release();
+        await expect(d).toBeHidden();
+      } else {
+        await d.getByRole("button", { name: "Cancel", exact: true }).click();
+        await expect(d).toBeHidden();
+      }
+      await navigateInApp(page, `/people/${P}/fields/new`);
+      await name.fill("Second");
+      await value.fill("Second unsaved text");
+      if (!completedFirst) {
+        release();
+        // The first save's answer arrived and was told.
+        await expect(page.locator('[aria-live="polite"]')).toContainText(
+          "Saved. It'll appear here once it has synced.",
+        );
+      }
+      recordEvidence(info, "e-p32", {
+        completedFirst,
+        sent,
+        url: page.url(),
+        dialogs: await d.count(),
+      });
+      expect(sent).toBe(1);
+      await expect(d).toBeVisible();
+      await expect(value).toHaveValue("Second unsaved text");
+      expect(new URL(page.url()).pathname).toBe(`/people/${P}/fields/new`);
+    });
+});
+
+test.describe("E-P33: a press is not lost when the linkage answers during it (review 6, finding 3)", () => {
+  // The reviewer's straddle schedule (`review-6/linkage-pointer.probe.spec.ts`, revision 5's E-P3 diagnostic): the person read is held,
+  // the pointer goes down on "Add a field", the answer is released and SHOWN, then the pointer comes up. "unlinked" makes the header shorter,
+  // "other" (two disabled actions with their reasons) changes it the other way; the control clicks after the answer.
+  for (const viewport of [
+    { name: "desktop", width: 1280, height: 900 },
+    { name: "phone", width: 390, height: 844 },
+  ])
+    test.describe(`${viewport.name} (${viewport.width} px)`, () => {
+      test.use({
+        viewport: { width: viewport.width, height: viewport.height },
+      });
+      for (const answer of ["unlinked", "other", "control"] as const)
+        test(`${answer === "control" ? "control: the answer shown before the click" : `pressed before and released after the answer (${answer}) is shown`}: the editor opens`, async ({
+          context,
+        }, info) => {
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          let held = 0;
+          context.on("page", (page) => {
+            void page.route(
+              `**/api/experimental/v1/people/${P}`,
+              async (route) => {
+                if (route.request().method() === "GET") {
+                  held += 1;
+                  await gate;
+                }
+                await route.fallback();
+              },
+            );
+          });
+          const { page } = await setup(
+            context,
+            `/people/${P}`,
+            [personP(P, "Ada")],
+            {
+              linked: { [P]: answer === "other" ? MO : null },
+            },
+          );
+          await expect.poll(() => held).toBeGreaterThan(0);
+          await expect(
+            detail(page).locator('[data-linkage="unknown"]'),
+          ).toBeVisible();
+          const link = detail(page).getByRole("link", { name: "Add a field" });
+          await link.scrollIntoViewIfNeeded();
+          const before = await link.boundingBox();
+          if (before === null) throw new Error("no link");
+          let pressed: { y: number } | null = null;
+          if (answer === "control") {
+            release();
+            await linkageAnswered(page);
+            await link.click();
+          } else {
+            await page.mouse.move(
+              before.x + before.width / 2,
+              before.y + before.height / 2,
+            );
+            await page.mouse.down();
+            release();
+            await expect(
+              detail(page).locator(`[data-linkage="${answer}"]`),
+            ).toBeVisible();
+            pressed = await link.boundingBox();
+            await page.mouse.up();
+          }
+          recordEvidence(info, "e-p33", {
+            viewport,
+            answer,
+            held,
+            before,
+            pressed,
+          });
+          await expect(
+            page
+              .getByRole("dialog", { name: "Add a field" })
+              .getByRole("textbox", { name: "Name", exact: true }),
+          ).toBeVisible();
+          // While pressed, with the answer shown, the action stayed where the press began.
+          if (answer !== "control") expect(pressed?.y).toBe(before.y);
+        });
+    });
+});

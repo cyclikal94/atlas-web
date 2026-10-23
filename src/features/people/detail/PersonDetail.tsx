@@ -1,5 +1,11 @@
 import { Link } from "@tanstack/react-router";
-import { type CSSProperties, type ReactNode, useId, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
@@ -50,6 +56,7 @@ import { FieldValueView } from "./FieldValueView";
 import { HeldChanges } from "./HeldChanges";
 import { IdentityHeader } from "./IdentityHeader";
 import { SharedWithSection } from "./SharedWith";
+import { useSteadyWhilePressed } from "./steady";
 
 /**
  * WF-PEOPLE-02, the person detail (§4.3): the identity header, the fields table ("Field | Value | Who can see it"), "Add a field", the
@@ -82,29 +89,89 @@ export function PersonDetail({
   /** The field editor's route, rendered over the detail. */
   children?: ReactNode;
 }) {
-  const cached = useCachedResource(personId);
+  // "Try again" after a failed read reads afresh: new watches (a live query ends at its first error), never the failed answer again.
+  const [reading, setReading] = useState(0);
   return (
     <CacheGate>
-      <OutstandingChain>
-        {(outstanding) => {
-          if (cached.status === "loading" || outstanding.status === "loading")
-            return <DetailSkeleton />;
-          const base =
-            cached.status === "ready" &&
-            cached.value.merged !== null &&
-            cached.value.merged.kind === "person"
-              ? [cached.value.merged]
-              : [];
-          const changes = changesOfAll(outstanding.rows);
-          const shown = foldRows(base, changes, "person").find(
-            (row) => row.row.id === personId,
-          );
-          if (shown === undefined) return <NotOnDevice />;
+      <PersonRead
+        key={reading}
+        personId={personId}
+        asPage={asPage}
+        slots={slots}
+        retry={() => setReading((value) => value + 1)}
+      >
+        {children}
+      </PersonRead>
+    </CacheGate>
+  );
+}
+
+/**
+ * The person's reads and what they establish (review 6, finding 2): "not on this device" only when the person's read COMPLETED without
+ * them and every unsent change of this device was read; a failed read (or one that could not be completed) says so, with "Try again".
+ */
+function PersonRead({
+  personId,
+  asPage,
+  slots,
+  retry,
+  children,
+}: {
+  personId: string;
+  asPage: boolean;
+  slots: PersonDetailSlots;
+  retry(): void;
+  children?: ReactNode;
+}) {
+  const cached = useCachedResource(personId);
+  // A read answering during a press never moves the pressed action (review 6, finding 3): `[data-steady]` boxes keep their height.
+  const root = useRef<HTMLDivElement>(null);
+  useSteadyWhilePressed(root);
+  return (
+    <OutstandingChain>
+      {(outstanding) => {
+        if (cached.status === "loading" || outstanding.status === "loading")
+          return <DetailSkeleton />;
+        // An absent database holds nobody; a failed or closed one is not evidence of anything.
+        if (cached.status === "unavailable" && cached.reason !== "absent")
           return (
-            <div
-              className="flex min-w-0 flex-col gap-6"
-              data-person-detail={personId}
-            >
+            <ReadFailed message={copy.PERSON_READ_FAILED} onRetry={retry} />
+          );
+        const base =
+          cached.status === "ready" &&
+          cached.value.merged !== null &&
+          cached.value.merged.kind === "person"
+            ? [cached.value.merged]
+            : [];
+        const changes = changesOfAll(outstanding.rows);
+        const shown = foldRows(base, changes, "person").find(
+          (row) => row.row.id === personId,
+        );
+        // Every unsent change was read (an absent database holds none): only then is a field's (or the person's) absence evidence that
+        // it is not there.
+        const changesKnown =
+          outstanding.status === "absent" ||
+          (outstanding.status === "ready" && outstanding.complete);
+        if (shown === undefined) {
+          if (outstanding.status === "failed")
+            return (
+              <ReadFailed message={copy.PERSON_READ_FAILED} onRetry={retry} />
+            );
+          if (outstanding.capped)
+            return (
+              <ReadFailed message={copy.PERSON_UNCONFIRMED} onRetry={retry} />
+            );
+          if (!changesKnown) return <DetailSkeleton />;
+          return <NotOnDevice />;
+        }
+        return (
+          <div
+            ref={root}
+            className="flex min-w-0 flex-col gap-6"
+            data-person-detail={personId}
+          >
+            {/* Everything above the fields whose height depends on a read: one steady box. */}
+            <div data-steady="" className="flex flex-col gap-6">
               <IdentityHeader
                 shown={shown}
                 asPage={asPage}
@@ -113,18 +180,26 @@ export function PersonDetail({
                   ? { headerActions: slots.headerActions }
                   : {})}
               />
+              {outstanding.status === "failed" ? (
+                <Banner
+                  message={copy.CHANGES_READ_FAILED}
+                  action={<Button onClick={retry}>{copy.TRY_AGAIN}</Button>}
+                />
+              ) : null}
               <Conflicts ids={[personId]} />
-              <FieldsSection person={shown} changes={changes} />
-              {shown.projected ? null : (
-                <SharedWithSection personId={personId} />
-              )}
-              <DefaultsPanel />
-              {children}
             </div>
-          );
-        }}
-      </OutstandingChain>
-    </CacheGate>
+            <FieldsSection
+              person={shown}
+              changes={changes}
+              changesKnown={changesKnown}
+            />
+            {shown.projected ? null : <SharedWithSection personId={personId} />}
+            <DefaultsPanel />
+            {children}
+          </div>
+        );
+      }}
+    </OutstandingChain>
   );
 }
 
@@ -142,6 +217,24 @@ function DetailSkeleton() {
           className="min-h-12 rounded-row border border-hairline bg-panel"
         />
       ))}
+    </div>
+  );
+}
+
+function ReadFailed({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry(): void;
+}) {
+  return (
+    <div
+      data-people-state="read-failed"
+      className="flex max-w-[620px] flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+    >
+      <p className="text-[13.5px] leading-[1.55] text-ink-1">{message}</p>
+      <Button onClick={onRetry}>{copy.TRY_AGAIN}</Button>
     </div>
   );
 }
@@ -206,9 +299,12 @@ function Conflicts({ ids }: { ids: readonly string[] }) {
 function FieldsSection({
   person,
   changes,
+  changesKnown,
 }: {
   person: ShownRow;
   changes: Change[];
+  /** Every unsent change of this device was read (a field only a queued create projects may otherwise be missing). */
+  changesKnown: boolean;
 }) {
   const heading = useId();
   const personId = person.row.id;
@@ -236,7 +332,11 @@ function FieldsSection({
           )}
         </span>
       </div>
-      <FieldSteps person={person} changes={changes} />
+      <FieldSteps
+        person={person}
+        changes={changes}
+        changesKnown={changesKnown}
+      />
       <HeldChanges personId={personId} />
     </section>
   );
@@ -246,17 +346,22 @@ function FieldsSection({
 function FieldSteps({
   person,
   changes,
+  changesKnown,
 }: {
   person: ShownRow;
   changes: Change[];
+  changesKnown: boolean;
 }) {
   const personId = person.row.id;
   // The cursors of the steps before this one (null: the first step), so "Previous fields" goes back without reading anything twice.
   const [starts, setStarts] = useState<(string | null)[]>([null]);
+  // "Try again" after a failed page reads the step afresh (new watches), from the same cursor.
+  const [scan, setScan] = useState(0);
   const start = starts.at(-1) ?? null;
   const byId = changesById(changes);
   return (
     <ResourceScan
+      key={scan}
       kind="field"
       parentId={personId}
       start={start}
@@ -288,8 +393,20 @@ function FieldSteps({
               start={start}
               rows={active}
               person={person}
-              settled={step.settled || step.status !== "ready"}
+              // "No fields yet" only after a COMPLETED step and every unsent change read (review 6, finding 2): a failed page, one still
+              // loading or an unread change is not "none".
+              settled={step.settled && changesKnown}
             />
+            {step.status === "failed" ? (
+              <Banner
+                message={copy.FIELDS_READ_FAILED}
+                action={
+                  <Button onClick={() => setScan((value) => value + 1)}>
+                    {copy.TRY_AGAIN}
+                  </Button>
+                }
+              />
+            ) : null}
             {starts.length > 1 || (step.settled && step.next !== null) ? (
               <div className="flex flex-wrap gap-2" data-field-steps="">
                 {starts.length > 1 ? (
@@ -409,7 +526,7 @@ function FieldRows({
       : null;
   };
   return (
-    <div className="flex flex-col gap-1">
+    <div data-steady="" className="flex flex-col gap-1">
       <div
         aria-hidden="true"
         className="hidden gap-3 px-3 text-[12px] text-ink-2 tablet:grid tablet:grid-cols-(--field-columns)"
@@ -496,6 +613,7 @@ function FieldRow({
     <li
       className="list-none rounded-row border border-hairline bg-panel px-3 py-2.5"
       data-field-row={row.id}
+      data-steady=""
     >
       <div
         className="grid grid-cols-1 gap-2 tablet:grid-cols-(--field-columns) tablet:items-center tablet:gap-3"

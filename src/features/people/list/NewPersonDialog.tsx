@@ -7,6 +7,7 @@ import { Input } from "../../../components/ui/input";
 import { useSharingDefaults } from "../../../data";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
+import { completeSession, sessionOf, useEditingSession } from "../lifetime";
 import { useMemoryRevision } from "../memory";
 import { personDefaultsLabel } from "../model/audience";
 import { createPersonRequest } from "../model/commands";
@@ -24,8 +25,14 @@ import { Choices, FieldError, useOutboxSave } from "../parts";
  * "New person" (§4.2). Name, who can see the person ("Use my defaults — {resolved}" / "Only you") and an optional first note. Saved as ONE
  * queued `/commands` batch, `create_person` then `create_field` (SHARE-10), offline-capable. A hidden note keeps its text and is not sent
  * (PRODUCT-DECISIONS item 2). The in-dialog sync control keeps the draft for this identity; Cancel, Escape and the close icon discard it.
+ * A save ends only the editing session it was made in (`lifetime.ts`, review 6, finding 1): a form opened after Cancel is another one.
  */
 const RETAINED = "new-person";
+
+interface RetainedPerson {
+  session: string;
+  form: NewPersonState;
+}
 
 export function NewPersonDialog({
   open,
@@ -45,12 +52,13 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
   const announcer = useAnnouncer();
   const navigate = useNavigate();
   const save = useOutboxSave();
-  const retained = env.memory.drafts.get(RETAINED) as
-    | NewPersonState
-    | undefined;
+  const [retained] = useState(
+    () => env.memory.drafts.get(RETAINED) as RetainedPerson | undefined,
+  );
+  const [session] = useState(() => sessionOf(retained) ?? env.newId());
   const [state, dispatch] = useReducer(
     reduceNewPerson,
-    retained ?? newPersonForm(),
+    retained?.form ?? newPersonForm(),
   );
   const restored = useRef(retained !== undefined);
   const [saving, setSaving] = useState(false);
@@ -61,6 +69,21 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
   const nameError = useId();
   const noteError = useId();
   const noteId = useId();
+  /** This session's kept input only (never a later session's). */
+  const forget = () => {
+    if (sessionOf(env.memory.drafts.get(RETAINED)) === session)
+      env.memory.drafts.delete(RETAINED);
+  };
+  // The person saved by this session is shown when the save completes, through whichever mount shows the session now.
+  useEditingSession(env.memory, session, {
+    revision: () => stateRef.current.revision,
+    close: (personId) => {
+      onClose();
+      if (personId !== null)
+        void navigate({ to: "/people/$personId", params: { personId } });
+    },
+    keep: () => setRefusal(copy.LATER_EDITS_KEPT),
+  });
 
   const resolved = personDefaultsLabel(defaults.record);
   const defaultsUnknown =
@@ -83,6 +106,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
     setProblems({});
     setRefusal(null);
     setSaving(true);
+    const memory = env.memory;
     const ticket = state.revision;
     const personId = env.newId();
     const request = createPersonRequest({
@@ -107,11 +131,16 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       reviewing ? copy.SAVED_REVIEW : copy.SAVED_NOT_SENT,
       "polite",
     );
-    env.memory.drafts.delete(RETAINED);
-    // The inputs are locked while saving, so the saved state is the one on screen (its ticket is current): nothing later is consumed.
-    if (stateRef.current.revision !== ticket) return;
-    onClose();
-    void navigate({ to: "/people/$personId", params: { personId } });
+    // Only this session ends: its kept input is forgotten and the form showing it (if any) closes onto the saved person. A form opened
+    // after Cancel is another session's and stays as typed (review 6, finding 1); input typed after the ticket stays too.
+    completeSession(
+      memory,
+      RETAINED,
+      session,
+      ticket,
+      (kept) => (kept as RetainedPerson).form.revision,
+      personId,
+    );
   };
 
   const disabledReason = !env.writable
@@ -127,15 +156,20 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       open
       title={copy.NEW_PERSON_TITLE}
       onClose={onClose}
-      onDiscard={() => env.memory.drafts.delete(RETAINED)}
-      onRetainDraft={() => env.memory.drafts.set(RETAINED, stateRef.current)}
+      onDiscard={forget}
+      onRetainDraft={() =>
+        env.memory.drafts.set(RETAINED, {
+          session,
+          form: stateRef.current,
+        } satisfies RetainedPerson)
+      }
       initialFocusSelector="input"
       footer={
         <>
           <Button
             variant="quiet"
             onClick={() => {
-              env.memory.drafts.delete(RETAINED);
+              forget();
               onClose();
             }}
           >

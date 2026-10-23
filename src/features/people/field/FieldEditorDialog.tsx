@@ -20,6 +20,7 @@ import {
 } from "../../sharing/apply-policy-change";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
+import { completeSession, sessionOf, useEditingSession } from "../lifetime";
 import { isCurrentMemory, notePolicy, useMemoryRevision } from "../memory";
 import {
   type AudienceClass,
@@ -157,6 +158,8 @@ export function FieldEditorDialog({
 }
 
 interface Retained {
+  /** The editing session this input belongs to (`lifetime.ts`): kept across a remount, new after Cancel (review 6, finding 1). */
+  session: string;
   form: FieldFormState;
   /** The id a new field is created under: one per editing session, so a retried shared create is the same field. */
   newFieldId: string;
@@ -203,7 +206,11 @@ function Editor({
   const parsed = existing === null ? null : parseFieldValue(existing.value);
   const [initial] = useState<{ retained: Retained; restored: boolean }>(() => {
     const kept = env.memory.drafts.get(draftKey) as Retained | undefined;
-    if (kept !== undefined) return { retained: kept, restored: true };
+    if (kept !== undefined)
+      return {
+        retained: { ...kept, session: sessionOf(kept) ?? env.newId() },
+        restored: true,
+      };
     const form =
       existing !== null && parsed !== null
         ? fromField({ label: existing.label, value: parsed }, env.newId)
@@ -212,6 +219,7 @@ function Editor({
           : newFieldForm();
     return {
       retained: {
+        session: env.newId(),
         form,
         newFieldId: env.newId(),
         touched: false,
@@ -246,10 +254,12 @@ function Editor({
   stateRef.current = state;
   const nameError = useId();
   const typeId = useId();
+  const session = initial.retained.session;
 
   // The draft is kept for this identity while the editor is open (a remount reopens it); dismissing the editor forgets it.
   useEffect(() => {
     env.memory.drafts.set(draftKey, {
+      session,
       form: state,
       newFieldId: initial.retained.newFieldId,
       touched,
@@ -259,17 +269,36 @@ function Editor({
   }, [
     env,
     draftKey,
+    session,
     state,
     touched,
     snapshot,
     initial.retained.newFieldId,
     initial.retained.createDigest,
   ]);
-  const forget = () => env.memory.drafts.delete(draftKey);
+  // Only this session's input is forgotten (never a later session's under the same key).
+  const forget = () => {
+    if (sessionOf(env.memory.drafts.get(draftKey)) === session)
+      env.memory.drafts.delete(draftKey);
+  };
   const close = () => {
     forget();
     onClose();
   };
+  // A save's completion ends the session it was made in, through whichever mount shows it now (review 6, finding 1).
+  useEditingSession(env.memory, session, {
+    revision: () => stateRef.current.revision,
+    close,
+    keep: () => setOutcome({ kind: "message", text: copy.LATER_EDITS_KEPT }),
+  });
+  const ended = (ticket: number | null) =>
+    completeSession(
+      env.memory,
+      draftKey,
+      session,
+      ticket,
+      (kept) => (kept as Retained).form.revision,
+    );
 
   // ---- the existing field's audience (owner-only read, while open, online and editable) ----------------------------------------
   const isNew = existing === null;
@@ -414,12 +443,9 @@ function Editor({
   };
   const succeeded = (message: string, ticket: number) => {
     announcer.announce(message, "polite");
-    // A change made while saving stays, unsaved (the ticket): only a success for the current revision ends the session.
-    if (stateRef.current.revision !== ticket) {
-      setOutcome({ kind: "message", text: copy.LATER_EDITS_KEPT });
-      return;
-    }
-    close();
+    // A change made while saving stays, unsaved (the ticket): only a success for the current revision ends the session, and only the
+    // session this save was made in (a later "Add a field" after Cancel is another session's, never closed or forgotten by this one).
+    ended(ticket);
   };
 
   /** Queues the content update bound to `bound` (its policy version and expected base). */
@@ -878,7 +904,7 @@ function Editor({
               {copy.CANCEL}
             </Button>
             {!isNew && !projected && canEdit ? (
-              <ArchiveInEditor id={existing.id} onDone={close} />
+              <ArchiveInEditor id={existing.id} onDone={() => ended(null)} />
             ) : null}
             <span className="ml-auto">
               {saveReason === null ? (

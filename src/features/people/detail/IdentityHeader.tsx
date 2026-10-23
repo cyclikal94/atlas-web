@@ -1,5 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
@@ -10,6 +17,7 @@ import { ResourcePolicyEditor } from "../../sharing";
 import type { PeopleFailure } from "../api";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
+import { completeSession, sessionOf, useEditingSession } from "../lifetime";
 import { isCurrentMemory, useMemoryRevision } from "../memory";
 import {
   archiveRequest,
@@ -319,7 +327,11 @@ function failureMessage(failure: PeopleFailure): string | null {
  * again."). `rename_profile` needs a connection (Save is disabled with the reason); the unlinked person's content edit queues.
  */
 interface RetainedRename {
+  /** The editing session (`lifetime.ts`): a completed rename ends only the session it was typed in (review 6, finding 1). */
+  session: string;
   name: string;
+  /** Bumped by every keystroke: a rename that completes for an earlier revision keeps the later name. */
+  revision: number;
   /** The versions the form opened on (Q21: captured when the form opens; finding 1 of the review of 13 October). */
   snapshot: EditSnapshot;
 }
@@ -345,17 +357,23 @@ function RenameForm({
     const kept = env.memory.drafts.get(retainedKey) as
       | RetainedRename
       | undefined;
-    return (
-      kept ?? {
-        name: person.label,
-        snapshot: snapshotOf(person, drafts, shown.latest?.localId ?? null),
-      }
-    );
+    if (kept !== undefined)
+      return { ...kept, session: sessionOf(kept) ?? env.newId() };
+    return {
+      session: env.newId(),
+      name: person.label,
+      revision: 0,
+      snapshot: snapshotOf(person, drafts, shown.latest?.localId ?? null),
+    };
   });
+  const session = initial.session;
   // The outstanding saves as they are read NOW (a save decides on the latest read, not the one of the render that started it).
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
   const [name, setName] = useState(initial.name);
+  const [revision, setRevision] = useState(initial.revision ?? 0);
+  const revisionRef = useRef(revision);
+  revisionRef.current = revision;
   const [snapshot, setSnapshot] = useState(initial.snapshot);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{
@@ -368,19 +386,36 @@ function RenameForm({
   // The typed name is kept across a remount of the tree (a 403 elsewhere), for this identity and this person only.
   useEffect(() => {
     env.memory.drafts.set(retainedKey, {
+      session,
       name,
+      revision,
       snapshot,
     } satisfies RetainedRename);
-  }, [env, retainedKey, name, snapshot]);
+  }, [env, retainedKey, session, name, revision, snapshot]);
   /** The person changed since the form opened: nothing is sent; the form is re-bound to the person as shown now, for a deliberate re-save. */
   const stale = () => {
     setSnapshot(snapshotOf(person, drafts, shown.latest?.localId ?? null));
     setMessage({ text: copy.STALE_RENAME });
   };
   const close = () => {
-    env.memory.drafts.delete(retainedKey);
+    if (sessionOf(env.memory.drafts.get(retainedKey)) === session)
+      env.memory.drafts.delete(retainedKey);
     onDone();
   };
+  useEditingSession(env.memory, session, {
+    revision: () => revisionRef.current,
+    close,
+    keep: () => setMessage({ text: copy.LATER_EDITS_KEPT }),
+  });
+  /** A save of this session at `ticket` completed: only this session ends (a later rename form is never closed by it). */
+  const ended = (ticket: number) =>
+    completeSession(
+      env.memory,
+      retainedKey,
+      session,
+      ticket,
+      (kept) => (kept as RetainedRename).revision,
+    );
 
   const submit = async () => {
     if (saving) return;
@@ -400,6 +435,7 @@ function RenameForm({
     setMessage(null);
     if (!stillBound(snapshot, person)) return stale();
     setSaving(true);
+    const ticket = revision;
     if (route.kind === "rename_profile") {
       const version = snapshot.version;
       const body = renameProfileBody({
@@ -418,7 +454,7 @@ function RenameForm({
         env.memory.drafts.set(`renaming:${person.id}`, version);
         readLinkage(env, person.id, { force: true });
         announcer.announce(copy.RENAMED, "polite");
-        close();
+        ended(ticket);
         return;
       }
       if (result.kind === "forbidden")
@@ -483,7 +519,7 @@ function RenameForm({
       return;
     }
     announcer.announce(copy.SAVED_NOT_SENT, "polite");
-    close();
+    ended(ticket);
   };
 
   const offlineBlocked = route.kind === "rename_profile" && !env.online;
@@ -510,7 +546,10 @@ function RenameForm({
           surface="panel"
           aria-invalid={message ? true : undefined}
           aria-describedby={message ? errorId : undefined}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => {
+            setName(event.target.value);
+            setRevision((value) => value + 1);
+          }}
         />
         {message ? (
           <div id={errorId} className="flex flex-col items-start gap-1">
@@ -596,6 +635,14 @@ function UnlinkDialog({
   const env = usePeopleEnv();
   const announcer = useAnnouncer();
   const [sending, setSending] = useState(false);
+  // A confirmation that completes after this dialog was closed never closes a later one (review 6, finding 1).
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [message, setMessage] = useState<{
     text: string;
     requestId?: string;
@@ -614,7 +661,7 @@ function UnlinkDialog({
     readLinkage(env, personId, { force: true });
     if (result.ok) {
       announcer.announce(copy.UNLINKED, "polite");
-      onClose();
+      if (mounted.current) onClose();
       return;
     }
     const text = failureMessage(result);

@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { Policy } from "../../data";
+import type { EditingSession } from "./lifetime";
 import type { Attempt } from "./model/attempt";
 import type { LinkageState } from "./model/linkage";
 
@@ -14,7 +15,8 @@ import type { LinkageState } from "./model/linkage";
  *  - `heldRuns`: the held audience changes this page is running now, and whether the person discarded one while it ran (the held
  *    changes themselves are DURABLE, in the account's database: `field/held-store.ts`, finding 6 of the review of 13 October);
  *  - `heldAuthority`: the holds this page may run by itself (D1 of 22 October 2026); every other hold waits for "Send now";
- *  - `drafts`: editor input kept by the in-dialog sync control or across a remount (field editor, rename);
+ *  - `drafts`: editor input kept by the in-dialog sync control or across a remount (field editor, rename, new person), each with its
+ *    editing session; `sessions`: the mounted form of each session, the only one a save's completion may close (`lifetime.ts`);
  *  - `attempts`: the uncertain attempt of an online-only command, per target (same key and body on "Try again");
  *  - `summaries`: the viewer-safe summaries read for this identity (finding 8, `summaries.tsx`), per query, for the CURRENT invalidation
  *    `summaryGeneration` only, with the highest `preferences_version` applied and each row's highest versions (the contract's
@@ -81,6 +83,8 @@ export class PeopleMemory {
    */
   readonly heldAuthority = new Set<string>();
   readonly drafts = new Map<string, unknown>();
+  /** The mounted form of each editing session (`lifetime.ts`): what a save's completion may close (review 6, finding 1). */
+  readonly sessions = new Map<string, EditingSession>();
   /**
    * Field policies this page read or confirmed (owner-only `GET /policies/{id}`), with their versions and when they were read: the only
    * audiences the table names besides the summaries, and only while no later policy version of the field is known (`policyShownFor`).

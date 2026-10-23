@@ -130,6 +130,14 @@ export const ARCHIVE = "Archive";
 export const RESTORE = "Restore";
 export const NOT_ON_DEVICE =
   "This person isn't on this device. They may not have synced yet, or you may no longer have access."; // PROVISIONAL
+// A read that failed (or could not be completed) is never "not on this device" or "no fields" (review 6, finding 2).
+export const PERSON_READ_FAILED = "Couldn't read this person on this device."; // PROVISIONAL
+export const PERSON_UNCONFIRMED =
+  "Couldn't read every unsent change on this device, so this person can't be shown."; // PROVISIONAL
+export const CHANGES_READ_FAILED =
+  "Couldn't read every unsent change on this device. What's shown may not include them."; // PROVISIONAL
+export const FIELDS_READ_FAILED =
+  "Couldn't read every field of this person on this device. Anything that could be read is listed."; // PROVISIONAL
 export const WAIT_FOR_SYNC_PERSON = "Wait for this person to finish syncing"; // PROVISIONAL
 export const WAIT_FOR_SYNC_FIELD =
   "Wait for this field to finish syncing before editing it"; // PROVISIONAL

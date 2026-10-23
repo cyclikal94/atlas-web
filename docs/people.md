@@ -67,7 +67,7 @@ reopens it with its draft), and `/settings/archived`.
 5. **Q4 recovery contexts** (`model/recovery.ts`): `people-field:<personId>:<fieldId|new:<formId>>`, `people-rename:<personId>`,
    `people-new:<formId>`. WEB-14a captures them; WEB-11a does not touch `src/lib/form-recovery`. A restore fills a form and never submits.
 
-## Decisions (D-11a-1 to D-11a-23)
+## Decisions (D-11a-1 to D-11a-26)
 
 - **D-11a-1** Every field write is a typed `put_field`; `create_field` only for the new person's first note (SHARE-10 batch); `edit` only to
   rename a person whose profile is not linked.
@@ -259,6 +259,29 @@ reopens it with its draft), and `/settings/archived`.
 - **D-11a-23** (finding 8) Layout within the budgets (production CSS within 5 bytes of its limit): the list shares the desktop screen with
   the detail (380 px), so "Account" and "Visible to" are labelled lines of each row rather than table columns; "Shared with" is a section
   of the detail below the fields rather than a right rail. No new utility class was added.
+- **D-11a-24** (review 6 of 23 October 2026, finding 1) A save's completion ends only the EDITING SESSION it was made in (`lifetime.ts`).
+  The field editor, New person and the rename form keep their input under a draft key with a session id; a remount of the tree or going
+  away and back restores the same session, while Cancel, Escape and the close icon end it (the next "Add a field", "New person" or Rename
+  begins another). The mounted form of a session registers itself in page memory (`memory.sessions`, the latest mount wins, a mount
+  withdraws only itself). When a save completes, `completeSession` ends that session only: its kept input is forgotten and the form that
+  shows it now (if any) closes, onto the saved person for New person; input typed after the saved revision stays, with "Saved. Your later
+  changes are still here and aren't saved yet."; a session that already ended or was replaced, or another identity, is not touched (the
+  save is still announced, and an admitted save is never undone). Archive from the editor ends its session whatever was typed. An unlink
+  answer closes only the confirmation it was asked from.
+- **D-11a-25** (review 6, finding 2) The person detail claims absence only from a COMPLETED read. "This person isn't on this device" needs
+  the person's read to have completed without them and every unsent change of this device read (an absent database holds none); a failed
+  or closed read says "Couldn't read this person on this device." with "Try again", a later window of unsent changes still loading shows
+  the skeleton, and more unsent changes than the 10 windows read says the person can't be shown. "No fields yet." needs the field step
+  settled and every unsent change read; a failed step keeps the readable rows and says "Couldn't read every field of this person on this
+  device. Anything that could be read is listed." with "Try again" (a new read of the same step); unreadable unsent changes beside a shown
+  person say so with "Try again". Each Try again mounts its reads afresh (a failed live read has ended). A field under a person that could
+  not be read is never shown.
+- **D-11a-26** (review 6, finding 3) A press is never lost to a read that answers during it (`detail/steady.ts`). While a pointer is down,
+  the detail's read-dependent boxes above its actions (the header with the outstanding-change notice and conflicts, the field list and
+  each field row, `[data-steady]`) keep the height they had when the press began; what they show changes at once (a taller answer
+  overflows for that moment). They are released after the click has been delivered, at once when the press is cancelled, or 500 ms after
+  a pointer released elsewhere. Keyboard activation is unaffected. The People list, the archive ledger and the duplicates view were not
+  changed (no lost press there is established).
 
 What is shown of unsent changes: a queued draft has no overlay until it is claimed, so the screens fold the bodies of the outstanding drafts
 (`useOutstandingCreates`) over the cache (`model/project.ts`): a create is projected and marked "Not sent yet"; a later rename, field update or

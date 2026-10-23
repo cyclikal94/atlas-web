@@ -20408,6 +20408,262 @@ export const UNIT = [
     patch: (t) =>
       sub(t, "  if (previous.reading !== of) return previous;\n", ""),
   },
+  {
+    id: "MU-2286",
+    title:
+      "WEB-11a R6 F1: the field editor's success closes the instance that submitted it (the reviewer's defect: a new 'Add a field' after Cancel is closed and its input forgotten)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /the reviewer's schedule: the new editor and its input stay|a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ended(ticket);\n  };\n",
+        "    if (stateRef.current.revision === ticket) close();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-2287",
+    title:
+      "WEB-11a R6 F1: an unmounted form is never withdrawn from its session (a closed editor still ends a later session's form)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /the reviewer's schedule: the new editor and its input stay|the new editor and its input stay/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (memory.sessions.get(session) === owner)\n        memory.sessions.delete(session);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2288",
+    title:
+      "WEB-11a R6 F1: the input kept under the key is taken as the session's whatever session it belongs to (a later session's input is forgotten)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const keptHere = kept !== undefined && sessionOf(kept) === session;\n",
+        "  const keptHere = kept !== undefined;\n",
+      ),
+  },
+  {
+    id: "MU-2289",
+    title:
+      "WEB-11a R6 F1: a completion for an earlier revision ends the session anyway (input typed in a remounted form after the save is lost)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /the same session remounted and typed in further|the later name stays, said so/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (ticket !== null && revision !== ticket) {\n",
+        "  if (ticket !== null && revision !== ticket && ticket < 0) {\n",
+      ),
+  },
+  {
+    id: "MU-2290",
+    title:
+      "WEB-11a R6 F1: New person's success closes the form that submitted it and shows the saved person (a new form after Cancel is closed)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /New person > after Cancel and a new form .*the new form and its input stay|kept by the in-dialog sync control and not reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "    completeSession(\n      memory,\n      RETAINED,\n      session,\n      ticket,\n      (kept) => (kept as RetainedPerson).form.revision,\n      personId,\n    );\n",
+        '    void memory;\n    env.memory.drafts.delete(RETAINED);\n    if (stateRef.current.revision !== ticket) return;\n    onClose();\n    void navigate({ to: "/people/$personId", params: { personId } });\n',
+      ),
+  },
+  {
+    id: "MU-2291",
+    title:
+      "WEB-11a R6 F1: a queued rename's success closes the form that submitted it (a reopened rename loses its later name and stays open)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /a queued rename completing after the person was left and the rename reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        '    announcer.announce(copy.SAVED_NOT_SENT, "polite");\n    ended(ticket);\n  };\n',
+        '    announcer.announce(copy.SAVED_NOT_SENT, "polite");\n    close();\n  };\n',
+      ),
+  },
+  {
+    id: "MU-2292",
+    title:
+      "WEB-11a R6 F1: an unlink confirmed in a closed dialog closes the confirmation asked again",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect: /the old answer does not close the new confirmation/,
+    patch: (t) =>
+      sub(t, "      if (mounted.current) onClose();\n", "      onClose();\n"),
+  },
+  {
+    id: "MU-2293",
+    title:
+      "WEB-11a R6 F2: a FAILED person read is taken as 'not on this device' (the reviewer's defect)",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect: /the person read FAILS: never 'not on this device'/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (cached.status === "unavailable" && cached.reason !== "absent")\n',
+        '        if (cached.status === "unavailable" && cached.reason === "closed")\n',
+      ),
+  },
+  {
+    id: "MU-2294",
+    title:
+      "WEB-11a R6 F2: a FAILED field step counts as settled: 'No fields yet.' (the reviewer's defect)",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /the field read FAILS: never 'No fields yet\.'|a later step's read FAILS/,
+    patch: (t) =>
+      sub(
+        t,
+        "              settled={step.settled && changesKnown}\n",
+        '              settled={step.settled || step.status !== "ready"}\n',
+      ),
+  },
+  {
+    id: "MU-2295",
+    title:
+      "WEB-11a R6 F2: 'No fields yet.' without every unsent change read (a field only a queued create shows may be missing)",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect: /this device's unsent changes cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        "              settled={step.settled && changesKnown}\n",
+        "              settled={step.settled}\n",
+      ),
+  },
+  {
+    id: "MU-2296",
+    title:
+      "WEB-11a R6 F2: unreadable unsent changes and no cached person: 'not on this device'",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /a person only a queued create shows, with the unsent changes unreadable/,
+    patch: (t) =>
+      sub(
+        t,
+        '          if (outstanding.status === "failed")\n            return (\n              <ReadFailed message={copy.PERSON_READ_FAILED} onRetry={retry} />\n            );\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2297",
+    title:
+      "WEB-11a R6 F2: a later window of unsent changes still on its way is taken as read: 'not on this device'",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect: /LATER window still on its way: nothing is claimed/,
+    patch: (t) =>
+      sub(t, "          if (!changesKnown) return <DetailSkeleton />;\n", ""),
+  },
+  {
+    id: "MU-2298",
+    title:
+      "WEB-11a R6 F2: more unsent changes than the chain reads is taken as all of them: 'not on this device'",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect: /more unsent changes than the chain reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (outstanding.capped)\n            return (\n              <ReadFailed message={copy.PERSON_UNCONFIRMED} onRetry={retry} />\n            );\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2299",
+    title:
+      "WEB-11a R6 F2: the person's Try again re-renders the failed read instead of reading afresh",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /the person read FAILS: never 'not on this device'|a person only a queued create shows, with the unsent changes unreadable|this device's unsent changes cannot be read/,
+    patch: (t) => sub(t, "        key={reading}\n", ""),
+  },
+  {
+    id: "MU-2300",
+    title:
+      "WEB-11a R6 F2: the fields' Try again re-renders the failed step instead of reading it afresh",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /the field read FAILS: never 'No fields yet\.'|a later step's read FAILS/,
+    patch: (t) => sub(t, "      key={scan}\n", ""),
+  },
+  {
+    id: "MU-2301",
+    title:
+      "WEB-11a R6 F2: a failed field step is not said (the readable rows look like all of them)",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /the field read FAILS: never 'No fields yet\.'|a later step's read FAILS/,
+    patch: (t) =>
+      sub(
+        t,
+        '            {step.status === "failed" ? (\n',
+        '            {step.status === ("never" as string) ? (\n',
+      ),
+  },
+  {
+    id: "MU-2302",
+    title:
+      "WEB-11a R6 F3: a press fixes no box (a read answering during it moves the pressed action: the reviewer's defect)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect:
+      /a press fixes every steady box at its height|a cancelled press releases them|a pointer released elsewhere|a second press measures afresh/,
+    patch: (t) =>
+      sub(
+        t,
+        // The anchor holds a template literal; it is spelt in two parts (no `$`+`{` inside a plain string).
+        "        box.style.height = `$" + "{heights[index]}px`;\n",
+        "        void heights[index];\n",
+      ),
+  },
+  {
+    id: "MU-2303",
+    title:
+      "WEB-11a R6 F3: a delivered click does not release the boxes (the detail stays at its old height until the fallback)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /the click reaches its target, then they are released/,
+    patch: (t) =>
+      sub(t, '    document.addEventListener("click", release);\n', ""),
+  },
+  {
+    id: "MU-2304",
+    title: "WEB-11a R6 F3: a cancelled press does not release the boxes",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /a cancelled press releases them at once/,
+    patch: (t) =>
+      sub(
+        t,
+        '    document.addEventListener("pointercancel", release, true);\n',
+        "",
+      ),
+  },
 ];
 
 /**
@@ -23731,6 +23987,38 @@ export const ENGINE = [
         t,
         '    parent.status === "loading"\n      ? "loading"\n',
         '    parent.status === "loading"\n      ? "hidden"\n',
+      ),
+  },
+  {
+    id: "MU-2305",
+    title:
+      "WEB-11a R6 F1: (REAL ENGINE) the field editor's success closes the instance that submitted it: a new 'Add a field' after Cancel is closed",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P32:",
+    expect:
+      /E-P32: .*Cancel and a new 'Add a field' typed in before it answers/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ended(ticket);\n  };\n",
+        "    if (stateRef.current.revision === ticket) close();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-2306",
+    title:
+      "WEB-11a R6 F3: (REAL ENGINE) a press fixes no box: the linkage answer moves 'Add a field' from under the pointer and the press opens nothing",
+    file: "src/features/people/detail/steady.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P33:",
+    expect: /E-P33: .*pressed before and released after the answer/,
+    patch: (t) =>
+      sub(
+        t,
+        // The anchor holds a template literal; it is spelt in two parts (no `$`+`{` inside a plain string).
+        "        box.style.height = `$" + "{heights[index]}px`;\n",
+        "        void heights[index];\n",
       ),
   },
 ];
