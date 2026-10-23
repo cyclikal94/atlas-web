@@ -40,6 +40,8 @@ interface Held extends CorrectionEntry {
 const entries = new Map<string, Held>();
 const listeners = new Map<string, Set<(event: CorrectionEvent) => void>>();
 let sessions = 0;
+/** Days held by an open visit of the task detail showing them (`holdCorrection`), by count. */
+const visits = new Map<string, number>();
 
 export const correctionKey = (identity: string, occurrenceId: string) =>
   `${identity}\u0000${occurrenceId}`;
@@ -107,6 +109,12 @@ export function releaseCorrection(key: string, session: number): void {
   held.holders = Math.max(0, held.holders - 1);
   if (held.holders > 0 || held.retained) return;
   held.releasing = true;
+  dropReleasing(key, session);
+}
+
+/** Drops a released session after the current turn if by then no dialog, sync control or visit of its day holds it. */
+function dropReleasing(key: string, session: number): void {
+  if (visits.has(key)) return;
   setTimeout(() => {
     const now = entries.get(key);
     if (
@@ -114,10 +122,35 @@ export function releaseCorrection(key: string, session: number): void {
       now.session === session &&
       now.holders === 0 &&
       now.releasing &&
-      !now.retained
+      !now.retained &&
+      !visits.has(key)
     )
       entries.delete(key);
   }, 0);
+}
+
+/**
+ * The task detail's visit of a day holds that day's correction (revision 20, DA20-I1): a dialog that unmounts because the day left this
+ * device keeps its session, still resumable by the next dialog for the day. Letting go: `keep` (the visit ended at the sync screens, or the
+ * person chose another day) retains a session holding input as the in-dialog sync control does; otherwise an unheld session is dropped.
+ */
+export function holdCorrection(key: string): (keep: boolean) => void {
+  visits.set(key, (visits.get(key) ?? 0) + 1);
+  let holding = true;
+  return (keep) => {
+    if (!holding) return;
+    holding = false;
+    const left = (visits.get(key) ?? 1) - 1;
+    if (left > 0) visits.set(key, left);
+    else visits.delete(key);
+    const held = entries.get(key);
+    if (held === undefined || held.holders > 0 || held.retained) return;
+    if (keep && (held.revision > 0 || held.submitting !== null)) {
+      entries.set(key, { ...held, retained: true });
+      return;
+    }
+    if (held.releasing) dropReleasing(key, held.session);
+  };
 }
 
 export function editCorrection(
@@ -193,4 +226,5 @@ export function subscribeCorrection(
 /** For tests and identity changes: forget every editing session (numbers are still never reused). */
 export function forgetCorrectionSessions(): void {
   entries.clear();
+  visits.clear();
 }

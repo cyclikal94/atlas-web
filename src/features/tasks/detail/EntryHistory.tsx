@@ -230,9 +230,37 @@ function settleFix(owner: string, answer: Settlement): void {
 /** Whether a fix input of this owner `(identity, progress id)` is kept through a visit to the sync screens (the detail's return day). */
 export const hasKeptFix = (owner: string): boolean => keptFixes.has(owner);
 
+/** Owners held by an open visit of the task detail showing their day (`holdKeptFix`), by count. */
+const fixVisits = new Map<string, number>();
+
+/**
+ * The task detail's visit of a day holds that day's fix input (revision 20, DA20-I1): a history that unmounts because the day left this
+ * device keeps its open fix and parked draft as a sync visit does, for the owner's next history. Letting go without `keep` (an ordinary
+ * departure) drops it after the current turn unless a visit holds it again by then; `keep` (the sync screens, or another day chosen in
+ * place) leaves it kept.
+ */
+export function holdKeptFix(owner: string): (keep: boolean) => void {
+  fixVisits.set(owner, (fixVisits.get(owner) ?? 0) + 1);
+  let holding = true;
+  return (keep) => {
+    if (!holding) return;
+    holding = false;
+    const left = (fixVisits.get(owner) ?? 1) - 1;
+    if (left > 0) fixVisits.set(owner, left);
+    else fixVisits.delete(owner);
+    if (keep) return;
+    const kept = keptFixes.get(owner);
+    setTimeout(() => {
+      if (!fixVisits.has(owner) && keptFixes.get(owner) === kept)
+        keptFixes.delete(owner);
+    }, 0);
+  };
+}
+
 /** For tests: forget every kept fix (numbers are still never reused). */
 export function forgetKeptFixes(): void {
   keptFixes.clear();
+  fixVisits.clear();
 }
 
 /**
@@ -974,7 +1002,8 @@ export function EntryHistory({
    * A visit to the sync screens keeps the fix input (R33): taken back by this owner's next history, given to it when the person leaves for
    * the sync screens. Any other departure drops it, as before. Taking it back is not leave to save it (revision 19, DA19-N1): the editor
    * opens again, readable, and its Save is the one decision above, so an entry corrected meanwhile (committed, or queued by another tab)
-   * blocks it as it would a mounted editor; the input is never moved to the correction.
+   * blocks it as it would a mounted editor; the input is never moved to the correction. A history the data hides while the detail's visit
+   * holds its day (revision 20, DA20-I1: the day left this device) keeps it the same way, for the history shown when the day comes back.
    */
   // biome-ignore lint/correctness/useExhaustiveDependencies: the owner (which names the identity) is the reason; the rest is read through refs
   useEffect(() => {
@@ -1001,7 +1030,7 @@ export function EntryHistory({
         parked.current = back.draft;
     }
     return () => {
-      if (!leftForSync()) return;
+      if (!leftForSync() && !fixVisits.has(owner)) return;
       const held = fixRef.current;
       const open =
         held !== null && (held.draft.unsaved || held.draft.saving !== null)

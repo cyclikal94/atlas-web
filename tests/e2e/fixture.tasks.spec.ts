@@ -5594,7 +5594,19 @@ test.describe("E-T41: coming back from the sync screens finds the day and the en
         await amount(page).fill("7");
         await expect(amount(page)).toHaveValue("7");
       }
-      await visitSync(page, () => commitDelta(page, net, 2, [laterDay(task)]));
+      // Adapted (revision 20, labelled; readiness only, no assertion changed): Back waits until the later day's page is COMMITTED in the
+      // queue. The nudge alone let WebKit send the page's request after Back (trace: `/sync?cursor=cursor-1` 19 ms after `goBack`), so the
+      // returned visit had already chosen day A: the control then failed, and the typed witness could have passed with no day synced away.
+      await visitSync(page, async () => {
+        await commitDelta(page, net, 2, [laterDay(task)]);
+        await expect
+          .poll(async () =>
+            ((await rowsOf(page, "cache")) as Array<{ id: string }>).some(
+              (row) => row.id === LATER,
+            ),
+          )
+          .toBe(true);
+      });
       await expect(page.locator("[data-task-detail]")).toBeVisible();
       await expect(daySelect(page)).toHaveCount(1);
       if (!typed) {
@@ -5692,4 +5704,232 @@ test.describe("E-T41: coming back from the sync screens finds the day and the en
         evidence: { kind: "quantity", amount: "5" },
       });
     });
+});
+
+test.describe("E-T42: the visit's day leaving after the person came back keeps it and its input (A8, A14; DA20-I1 of revision 20)", () => {
+  // The design assessment of Review 20 (QT5) in real engines over the real IndexedDB, with a second real tab of the same account holding
+  // the fixture leader. The person types an amount for the detail's default day A, checks the queue with the VISIBLE sync control and
+  // comes back (Back, same document): the amount is on day A. Then the other tab commits a sync page that removes day A (day B, an
+  // earlier saved day, stays): the person's tab says the day is unavailable, shows no other day and writes nothing; the next page brings
+  // day A back and the same raw amount is there; only the explicit Record writes, naming day A (control: the other tab's page brings
+  // another day instead, and day A stays shown with the amount). A reload while day A is gone forgets the unsaved amount (page memory)
+  // and sends nothing. The account database is read through the writer's harness (the person's tab opens none). Each case acts once
+  // the trees are quiet (`untilTreeSettled`), a readiness boundary of the harness.
+  const DAY = 24 * 60 * 60;
+  const EARLIER = "eeeeeeee-0000-4000-8000-000000000042";
+  const LATER = "eeeeeeee-0000-4000-8000-000000000043";
+  const dayBefore = (days: number) =>
+    new Date(Date.parse(`${TODAY}T00:00:00Z`) - days * DAY * 1000)
+      .toISOString()
+      .slice(0, 10);
+  const CUPS = { kind: "numeric", minimum: "10", maximum: null, unit: "cups" };
+  type Upsert = { kind: string; resource: Record<string, unknown> };
+  /** A daily task whose default day (A, two days ago, open for recording) is the latest saved one; day B (three days ago) is saved too. */
+  function twoDays(n: number) {
+    const task = buildTask({
+      n,
+      title: "Keep my day when it leaves",
+      date: dayBefore(2),
+      goal: CUPS,
+      action: { outcome: "incomplete", amount: "1", checked: [] },
+      slotKey: "day-a",
+      closesAt: Math.floor(Date.now() / 1000) + 5 * DAY,
+    });
+    const definition = (
+      task.data as { definition: { schedule: Record<string, unknown> } }
+    ).definition;
+    definition.schedule.repeat = { frequency: "daily", interval: 1 };
+    const occurrence = (task.upserts as Upsert[]).find(
+      (u) => u.resource.kind === "occurrence",
+    );
+    if (occurrence === undefined) throw new Error("setup: no occurrence");
+    const dayOf = (id: string, key: string, date: string): Upsert => {
+      const data = occurrence.resource.value as Record<string, unknown>;
+      return {
+        kind: "upsert",
+        resource: {
+          ...occurrence.resource,
+          id,
+          value: { ...data, slot: { ...(data.slot as object), key, date } },
+        },
+      };
+    };
+    (task.upserts as Upsert[]).push(dayOf(EARLIER, "day-b", dayBefore(3)));
+    return {
+      task,
+      dayA: structuredClone(occurrence),
+      later: dayOf(LATER, "day-c", dayBefore(1)),
+    };
+  }
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  const daySelect = (page: Page) => page.locator("[data-day-picker] select");
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (cups)", { exact: true });
+  /**
+   * The writer (another tab, on the task list) caches the task and holds the fixture leader; the person's tab boots after it; both trees
+   * settle (a page that boots remounts the other's tree) and the writer's leader is started again (WEB-09a), as in E-T15's `twoTabs`.
+   */
+  async function detailBesideWriter(
+    context: BrowserContext,
+    path: string,
+    task: BuiltTask,
+  ) {
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await seedSettled(context);
+    const writer = await bootAt(context, "/tasks");
+    await cacheTasks(writer, net, [task]);
+    const page = await bootAt(context, path);
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    return { net, writer, page };
+  }
+  /**
+   * The writer's leader commits the page, and the test waits until the account's cache holds it (the precondition, read through the
+   * writer's harness): a wake that arrives while a poll is in flight is absorbed by it (WEB-09a), so the writer is woken again until the
+   * scripted page has been taken. Nothing here waits on the person's tab.
+   */
+  async function commitOnWriter(
+    writer: Page,
+    net: SyncStub,
+    revision: number,
+    changes: unknown[],
+    landed: (ids: string[]) => boolean,
+  ) {
+    await commitDelta(writer, net, revision, changes);
+    await expect
+      .poll(async () => {
+        const ids = (
+          (await rowsOf(writer, "cache")) as Array<{ id: string }>
+        ).map((row) => row.id);
+        if (landed(ids)) return true;
+        await writer.evaluate(() => window.__atlasData?.nudgeSync());
+        return false;
+      })
+      .toBe(true);
+  }
+  /** Types the amount for day A, visits the queue by the visible sync control and comes back in the same document. */
+  async function typeAndVisit(page: Page, task: BuiltTask) {
+    await amount(page).fill("7.125");
+    await expect(amount(page)).toHaveValue("7.125");
+    const back = page.url();
+    await page.evaluate(() => {
+      (window as unknown as { __da20Document?: string }).__da20Document =
+        "same document";
+    });
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(back);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __da20Document?: string }).__da20Document,
+      ),
+    ).toBe("same document");
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(amount(page)).toHaveValue("7.125");
+  }
+
+  for (const removed of [true, false])
+    test(`${removed ? "another tab's sync page removes day A: unavailable, nothing written; day A back, the same 7.125, and Record names day A once" : "control: another tab's sync page brings another day: day A stays shown with 7.125"}`, async ({
+      context,
+    }) => {
+      const { task, dayA, later } = twoDays(145 + (removed ? 0 : 1));
+      const path = `/tasks/${task.taskId}`;
+      const { net, writer, page } = await detailBesideWriter(
+        context,
+        path,
+        task,
+      );
+      await typeAndVisit(page, task);
+      if (!removed) {
+        await commitOnWriter(writer, net, 2, [later], (ids) =>
+          ids.includes(LATER),
+        );
+        await expect(
+          daySelect(page).locator(`option[value="${LATER}"]`),
+        ).toHaveCount(1);
+        await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+        await expect(amount(page)).toHaveValue("7.125");
+        await expect(page.locator("[data-day-unavailable]")).toHaveCount(0);
+        expect(await draftsOf(writer)).toEqual([]);
+        return;
+      }
+      await commitOnWriter(
+        writer,
+        net,
+        2,
+        [{ kind: "remove", id: task.occurrenceId }],
+        (ids) => !ids.includes(task.occurrenceId),
+      );
+      await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+      await expect(page.locator("[data-record-card]")).toHaveCount(0);
+      await expect(page.locator("[data-detail-day]")).toHaveCount(0);
+      expect(await draftsOf(writer)).toEqual([]);
+      await commitOnWriter(writer, net, 3, [dayA], (ids) =>
+        ids.includes(task.occurrenceId),
+      );
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await expect(page.locator("[data-day-unavailable]")).toHaveCount(0);
+      await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+      await expect(amount(page)).toHaveValue("7.125");
+      expect(await draftsOf(writer)).toEqual([]);
+      await page
+        .locator("[data-record-card]")
+        .getByRole("button", { name: "Record", exact: true })
+        .click();
+      await expect.poll(async () => (await recordsOf(writer)).length).toBe(1);
+      expect((await recordsOf(writer))[0]?.command).toMatchObject({
+        occurrence_id: task.occurrenceId,
+        evidence: { kind: "quantity", amount: "7.125" },
+      });
+    });
+
+  test("a reload while day A is gone forgets the unsaved amount and sends nothing; day A back is shown blank", async ({
+    context,
+  }) => {
+    const { task, dayA } = twoDays(147);
+    const path = `/tasks/${task.taskId}`;
+    const { net, writer, page } = await detailBesideWriter(context, path, task);
+    await typeAndVisit(page, task);
+    await commitOnWriter(
+      writer,
+      net,
+      2,
+      [{ kind: "remove", id: task.occurrenceId }],
+      (ids) => !ids.includes(task.occurrenceId),
+    );
+    await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+    // A reload of the fixture's session page (the app route itself boots no harness).
+    await page.goto(`/__session?route=${encodeURIComponent(path)}`);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    // The reloaded page is a new visit: its day is B (the only saved day when it read). Day A back, the person picks it: nothing of the
+    // forgotten input, nothing written.
+    await expect(daySelect(page)).toHaveCount(0);
+    await commitOnWriter(writer, net, 3, [dayA], (ids) =>
+      ids.includes(task.occurrenceId),
+    );
+    await expect(daySelect(page)).toHaveCount(1);
+    await expect(daySelect(page)).toHaveValue(EARLIER);
+    await daySelect(page).selectOption(task.occurrenceId);
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await expect(amount(page)).toHaveValue("");
+    expect(await draftsOf(writer)).toEqual([]);
+  });
 });

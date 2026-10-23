@@ -13,7 +13,9 @@ import { useEffect, useRef, useState } from "react";
  * entries. A session is held by the editor mounted for it; when that editor unmounts the session is KEPT only if the router has moved to
  * the sync screens and the session holds something of the person's (an edit, a pending save, or a stage they chose), otherwise it is
  * dropped after the current turn (so React's development remount of the same editor resumes it). Cancel, Escape and the close icon leave
- * for somewhere else, so they discard it; leaving for anywhere but the sync screens does, after the person came back from them too.
+ * for somewhere else, so they discard it; leaving for anywhere but the sync screens does, after the person came back from them too. The
+ * task detail's visit also holds the sessions of the day it shows (`holdKept`, revision 20): an editor the data hides (its day gone from
+ * this device) is not a departure, and its session waits for the day to come back.
  *
  * A save takes a ticket naming the session and the revision it submitted. Its completion, whichever mount made it and whether or not any
  * editor is mounted then, consumes the session only if it is still that session at that revision; newer input stays (with the note the
@@ -53,6 +55,8 @@ interface Held {
 const entries = new Map<string, Held>();
 const listeners = new Map<string, Set<(event: KeptEvent) => void>>();
 let sessions = 0;
+/** Keys held by an open visit of the screen showing their editor's day (`holdKept`), by count. */
+const visits = new Map<string, number>();
 
 export const keptKey = (identity: string, editor: string) =>
   `${identity}\u0000${editor}`;
@@ -123,11 +127,47 @@ export function releaseKept(
     held.kept = true;
     return;
   }
-  if (held.holders > 0 || held.kept) return;
+  dropUnheld(key, held);
+}
+
+/** Drops a session after the current turn if by then no editor, sync visit or screen visit holds it. */
+function dropUnheld(key: string, held: Held): void {
+  if (held.holders > 0 || held.kept || visits.has(key)) return;
   setTimeout(() => {
-    if (entries.get(key) === held && held.holders === 0 && !held.kept)
+    if (
+      entries.get(key) === held &&
+      held.holders === 0 &&
+      !held.kept &&
+      !visits.has(key)
+    )
       entries.delete(key);
   }, 0);
+}
+
+/**
+ * The visit of the screen showing the day an editor is for holds that editor's key (revision 20, DA20-I1): while it does, an editor that
+ * unmounts because the data hid it (its day left this device and is shown unavailable) keeps its session, input and pending save, and the
+ * next editor of the key resumes it. The visit lets go when it ends or another day is chosen in place; `keep` (it ended at the sync screens,
+ * or the person chose another day) keeps a session holding input for the key's next editor, as a sync visit does; otherwise the session is
+ * dropped once nothing holds it, as any departure drops it.
+ */
+export function holdKept(key: string): (keep: boolean) => void {
+  visits.set(key, (visits.get(key) ?? 0) + 1);
+  let holding = true;
+  return (keep) => {
+    if (!holding) return;
+    holding = false;
+    const left = (visits.get(key) ?? 1) - 1;
+    if (left > 0) visits.set(key, left);
+    else visits.delete(key);
+    const held = entries.get(key);
+    if (held === undefined) return;
+    if (keep && (held.revision > 0 || held.submitting !== null)) {
+      held.kept = true;
+      return;
+    }
+    dropUnheld(key, held);
+  };
 }
 
 export function editKept<T>(key: string, session: number, value: T): void {
@@ -195,6 +235,7 @@ export function subscribeKept(
 /** For tests: forget every session (numbers are still never reused). */
 export function forgetKept(): void {
   entries.clear();
+  visits.clear();
 }
 
 /** What an editor holds of its session: the input shown, whether a save of it is pending, and the note a settled save left. */

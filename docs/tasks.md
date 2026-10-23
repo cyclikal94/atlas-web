@@ -381,6 +381,14 @@ already in the recent tail still hides Fix; the controls: nothing typed chooses 
 correction of another entry, the queued correction discarded); native E-T41 (Q3 and Q6 through the visible sync control, browser Back and
 a second real tab) in three engines; unit MU-2353…MU-2363 and real-engine MU-2364…MU-2365 (`scripts/mutation/catalogue-web10a-r19.mjs`;
 MU-2138 re-anchored, same intent).
+Revision 20 (the design assessment of Review 20: DA20-I1; decision 46): `sync-return-context.test.tsx` "DA20-I1" (the visit's day
+removed by a committed page AFTER the restored editors mounted, or with no visit, or named by the address: unavailable, no other day, no
+write; restored: the same raw amount, open fix, reopened or retained correction; a record or fix save pending across the removal settles
+only what it submitted; leaving for the sync screens or choosing again keeps the input with its own day; another identity drops it; a
+failed read stays stale, not absent; controls: the day still present, nothing typed, choosing again shows the other day blank); native
+E-T42 (another real tab's leader removes and restores the day; a reload forgets the unsaved input; E-T41 Q3 gained a commit-readiness wait,
+labelled) in three engines; unit MU-2367…MU-2376 and real-engine MU-2377…MU-2378 (`scripts/mutation/catalogue-web10a-r20.mjs`; MU-2345,
+MU-2351 and MU-2355 re-anchored, same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -503,6 +511,15 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     no Fix is offered for such an entry. Discarding the queued correction gives a fresh decision. Another tab queuing a correction after
     this tab's decision is not refused locally (no entry-specific transaction precondition); the backend's ordering and conflict
     handling decide, as before.
+46. **The visit's day and the input typed for it leave and come back together (DA20-I1, revision 20).** Once the detail has shown a day
+    (its own default, the address's, or the one kept with input through a sync visit) every later read resolves THAT day by its id: when
+    a committed sync page (in this tab or another) removes it, the view says the day is unavailable, never chooses another day in its
+    place and writes nothing; only the person chooses again ("Show this task's days") or a new visit does. The visit holds the input
+    typed for its day (the record amount and mode, an open or parked fix, an open or retained correction, and a save still pending) while
+    the data hides its editors, so the day coming back shows the same raw input, and only an explicit save writes, naming that day.
+    Leaving for the sync screens keeps it as before; any other departure drops it; choosing another day in place keeps it with its own
+    day; another identity or a reload never sees it (page memory only). A failed read is not absence: the last complete read stays,
+    marked stale. Before this, a day removed after the restored editor had mounted fell back to another day and its input was dropped.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -551,6 +568,7 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 | Revision 4: the full history's "Earlier entries", "Load more", "Refresh", "Back to recent entries", "Couldn't refresh the full history. Showing what was last loaded.", "Checking whether this entry was corrected", "Couldn't check whether this entry was corrected since.", "This entry has been corrected since. Fix its correction instead."; a fix whose page is not shown appears above the list as "Fix this entry: {value}" | `/tasks/<id>` → Full history (jsdom `journal-window.test.tsx`, native E-T15) |
 | Revision 5: after "This history isn't available to you." the "Full history" button is offered again; "Back to recent entries" (or a refusal) closes a fix of an entry known only from the full history, and opening that entry's fix again restores what was typed; offline, or while the full history is being read again for a newer version, such an entry offers no "Fix this entry" | `/tasks/<id>` → Full history (jsdom `journal-ownership.test.tsx`, native E-T18/E-T19) |
 | Revision 6: an open fix whose Save waits says why: "This fix can be saved once you're online again.", "This fix can be saved once the full history is up to date.", "Check whether this entry was corrected since, then save the fix." with "Check again" (and "Checking whether this entry was corrected" while it runs); what was typed survives every "Back to recent entries" or refusal until Cancel or a save | `/tasks/<id>` → Full history → Fix this entry (jsdom `journal-save-authority.test.tsx`, `journal-drafts.test.tsx`, native E-T21/E-T24/E-T25) |
+| Revision 20: no new copy; "This day isn't saved on this device…" with the "Show this task's days" button now also when the day this visit showed is removed while the person is on it (instead of another day) | `/tasks/<id>` → the shown day removed by a sync page (jsdom `sync-return-context.test.tsx` DA20-I1, native E-T42) |
 | Revision 19: "Show this task's days" as a button when the day kept with the person's input is gone; a kept fix of an entry corrected meanwhile (queued in another tab) reopens with "This entry has been corrected since. Fix its correction instead." | `/tasks/<id>` → type → sync → Back (jsdom `sync-return-context.test.tsx`, native E-T41) |
 | Revision 4: enrolment "Sending your change…" (the disabled reason while a change is pending) and "Try again" beside "Couldn't confirm the change. Try again." | `/tasks/<id>` of a shared task (jsdom `enrolment-attempt.test.tsx`, native E-T16) |
 | Revision 10: joining asks "Count your contribution in the shared total?" ("Yes, include my contribution" / "No, leave my contribution out of the shared total"; Join waits with "Choose whether to count your contribution first"), then "Who sees your progress from now on" with "This starts from your default sharing." (first Join) or "This starts from the sharing you had before." (rejoining) and "This applies to days from now on. A day already started keeps its own sharing (Who sees my progress)."; the default loading/unreadable lines "Loading your default sharing" / "Your default sharing couldn't be loaded." with "Try again" (Join's reason: "Who would see your progress isn't known yet"); enrolled: "Who sees your progress from now on: only you" (or "you and 1 household and 2 people, 1 excluded"), "Change…", the chooser's "Only me (private)", "Cancel" and "Save sharing" ("Nothing has changed" while unchanged) | `/tasks/<id>` of a shared task (jsdom `enrolment-policy.test.tsx`, native E-T16/E-T27/E-T28) |

@@ -51,10 +51,11 @@ export const UNIT_R19 = [
     tests: [RETURN],
     expect: /the view says the day is unavailable/,
     patch: (t) =>
+      // Re-anchored in revision 20 (same intent): the flag is `lost` now, and the visit's own day has the same branch.
       sub(
         t,
-        `        selection = "unavailable";\n        returned = true;\n`,
-        ``,
+        `        chosen = back;\n        chosenRow = kept.value;\n      } else {\n        selection = "unavailable";\n        lost = true;\n      }\n`,
+        `        chosen = back;\n        chosenRow = kept.value;\n      }\n`,
       ),
   },
 

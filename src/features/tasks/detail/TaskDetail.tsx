@@ -333,8 +333,9 @@ export function TaskDetail({
       ) : view.selection === "unavailable" ? (
         <div className="flex flex-col gap-2" data-day-unavailable="">
           <p className="text-[13px] text-ink-2">{DETAIL_COPY.dayUnavailable}</p>
-          {view.returned ? (
-            // The day kept with the person's input is gone here (DA19-I1): this address already names no day, so choose again in place.
+          {view.lost ? (
+            // The visit's own day is gone here (kept with input through a sync visit, DA19-I1, or shown by this visit, DA20-I1): this address
+            // already names no day, so choose again in place.
             <span>
               <Button
                 variant="quiet"

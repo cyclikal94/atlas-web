@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
 import type { CacheRow } from "../../../src/data";
+import { StoreFailure } from "../../../src/data/store/port";
 import {
   CORRECTION_COPY,
   forgetAllCorrections,
@@ -34,9 +35,11 @@ import { installMatchMedia } from "../../helpers/match-media";
 import {
   ME,
   mountTasks,
+  OTHER,
   type SeededTask,
   seededTask,
   TODAY,
+  tasksEnv,
 } from "../../support/tasks/world";
 
 /**
@@ -636,5 +639,384 @@ describe("DA19-N1 Q6: a correction of the entry queued by another tab", () => {
     await t.until(() => fixOf(ENTRY) === null);
     expect(fixOf(ENTRY)).toBeNull();
     expect(records(t)).toHaveLength(1);
+  });
+});
+
+/** Holds every write the screens queue until the gate opens; then the outbox's own result, or `refused` when `refuse` is set. */
+function holdWrites(t: Mounted, refuse = false) {
+  const outbox = t.data.outbox();
+  if (outbox === null) throw new Error("no outbox");
+  let open!: () => void;
+  const gate = new Promise<void>((r) => {
+    open = r;
+  });
+  const enqueue = outbox.enqueue.bind(outbox);
+  outbox.enqueue = async (request) => {
+    await gate;
+    return refuse ? { kind: "refused", reason: "quota" } : enqueue(request);
+  };
+  return { open: () => act(async () => open()) };
+}
+
+/**
+ * Revision 20 (design assessment of Review 20, DA20-I1, `incomplete_fix` of R33/DA19-I1; ia.md §1.3.3). Revision 19 protected a day that
+ * was gone when the person came back; this is the day leaving LATER, after the restored editor mounted (another tab's committed sync page,
+ * or this tab's). The visit's day and the input typed for it have one lifetime: the view says the day is unavailable, never shows or records
+ * against another day in its place, and the editors' input (amount, fix, correction, a save still pending) is not lost when the data hides
+ * them; the day back, the same raw input is there, and only an explicit save writes, naming that day. Day B (an earlier saved day) is
+ * the fallback the old code chose. Paired controls: day A still present; nothing typed; choosing again; another identity.
+ */
+describe("DA20-I1: the visit's day leaves after the person came back", () => {
+  const EARLIER = "eeeeeeee-0000-4000-8000-0000000000b3";
+  const unavailable = () =>
+    document.querySelector("[data-day-unavailable]") !== null;
+  const dialog = () => screen.queryByRole("dialog");
+  const minimum = () =>
+    within(dialog() as HTMLElement).getByLabelText(
+      CORRECTION_COPY.minimum,
+    ) as HTMLInputElement;
+  /** Day A (two days ago, my entry E there) is the default: the latest saved day. Day B (three days ago) is saved too. */
+  async function open(explicit = false) {
+    const task = await dailyCups(addDays(TODAY, -2));
+    const path = `/tasks/${task.taskId}`;
+    const t = await mountTasks({
+      path: explicit ? `${path}?occurrence=${task.occurrenceId}` : path,
+      rows: [
+        ...task.rows,
+        ...(await anotherDay(task, EARLIER, addDays(TODAY, -3))),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => recordCard() !== null && daySelect()?.value === task.occurrenceId,
+    );
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    /** To the sync screens and back, day A still here: the input is restored on day A. */
+    const away = async () => {
+      await toSync(t);
+      await back(t, path);
+      await t.until(() => detailShown() && recordCard() !== null);
+      expect(daySelect()?.value).toBe(task.occurrenceId);
+    };
+    /** A committed page removes day A (B stays); the zero-delay releases of the hidden editors are drained by `settle`. */
+    const removeA = async () => {
+      await t.commitSync([], [task.occurrenceId]);
+      expect(unavailable(), "day A is said to be unavailable").toBe(true);
+      await t.settle();
+    };
+    const restoreA = async () => {
+      await t.commitSync([task.rows[2] as CacheRow]);
+      await t.until(() => recordCard() !== null);
+    };
+    return { t, task, path, away, removeA, restoreA };
+  }
+  /** Day A is gone: the view says so; no day (and so not B) is shown, nothing can be recorded, nothing was. */
+  function saysUnavailable(t: Mounted) {
+    expect(unavailable()).toBe(true);
+    expect(recordCard()).toBeNull();
+    expect(daySelect()?.value ?? "").not.toBe(EARLIER);
+    expect(screen.queryByText(HISTORY_COPY.fix)).toBeNull();
+    expect(t.bodies()).toEqual([]);
+  }
+
+  test("the amount restored after the visit: day A leaves, the view says so; A back, the same raw amount, and its save names A once", async () => {
+    const { t, task, away, removeA, restoreA } = await open();
+    type(amount, "7.125");
+    await away();
+    expect(field(amount).value).toBe("7.125");
+    await removeA();
+    saysUnavailable(t);
+    await restoreA();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    expect(t.bodies()).toEqual([]);
+    press("Record");
+    await t.until(() => records(t).length === 1);
+    expect(records(t)).toEqual([
+      expect.objectContaining({
+        occurrence_id: task.occurrenceId,
+        evidence: { kind: "quantity", amount: "7.125" },
+      }),
+    ]);
+  });
+
+  test("the fix open again after the visit keeps its value through day A leaving and coming back; nothing is queued", async () => {
+    const { t, task, away, removeA, restoreA } = await open();
+    press(HISTORY_COPY.fix);
+    type(newValue, "4.5");
+    await away();
+    expect(field(newValue).value).toBe("4.5");
+    await removeA();
+    saysUnavailable(t);
+    await restoreA();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    await t.until(() => screen.queryByLabelText(newValue) !== null);
+    expect(field(newValue).value).toBe("4.5");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("the correction reopened after the visit keeps its value through day A leaving and coming back; nothing is queued", async () => {
+    const { t, task, away, removeA, restoreA } = await open();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    fireEvent.change(minimum(), { target: { value: "12" } });
+    const chip = within(dialog() as HTMLElement)
+      .getAllByRole("button")
+      .find((b) => b.hasAttribute("data-sync-tone"));
+    expect(chip, "the in-dialog sync control").toBeDefined();
+    fireEvent.click(chip as HTMLElement);
+    await t.until(() => dialog() === null);
+    await away();
+    // Reopened: the session is the dialog's again (no longer only retained).
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("12");
+    await removeA();
+    expect(dialog()).toBeNull();
+    saysUnavailable(t);
+    await restoreA();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    // The dialog the person had open for day A is open again, with what they typed.
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("12");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("not only after a visit: an amount typed on the shown default day survives that day leaving and coming back", async () => {
+    const { t, task, removeA, restoreA } = await open();
+    type(amount, "7.125");
+    await removeA();
+    saysUnavailable(t);
+    await restoreA();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("a day named in the address: the amount survives the day leaving (unavailable) and coming back", async () => {
+    const { t, task, removeA, restoreA } = await open(true);
+    type(amount, "7.125");
+    await removeA();
+    saysUnavailable(t);
+    await restoreA();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("a record pending when day A leaves settles where its input is: success clears only what it submitted, a refusal keeps it", async () => {
+    for (const [newer, refuse] of [
+      [null, false],
+      ["5", false],
+      [null, true],
+    ] as const) {
+      const { t, task, removeA, restoreA } = await open();
+      const gate = holdWrites(t, refuse);
+      type(amount, "2");
+      press("Record");
+      await t.settle();
+      if (newer !== null) type(amount, newer);
+      await removeA();
+      await gate.open();
+      await t.settle();
+      await restoreA();
+      expect(field(amount).value).toBe(refuse ? "2" : (newer ?? ""));
+      expect(records(t)).toEqual(
+        refuse
+          ? []
+          : [
+              expect.objectContaining({
+                occurrence_id: task.occurrenceId,
+                evidence: { kind: "quantity", amount: "2" },
+              }),
+            ],
+      );
+      cleanup();
+      forgetTaskMemory();
+      forgetKept();
+      forgetKeptFixes();
+      forgetAllCorrections();
+    }
+  });
+
+  test("a fix pending when day A leaves: its success closes it unless a newer value was typed, which is there when A is back", async () => {
+    for (const newer of [null, "9"]) {
+      const { t, task, removeA, restoreA } = await open();
+      const gate = holdWrites(t);
+      press(HISTORY_COPY.fix);
+      type(newValue, "7");
+      press(HISTORY_COPY.fixSave);
+      await t.settle();
+      if (newer !== null) type(newValue, newer);
+      await removeA();
+      await gate.open();
+      await t.settle();
+      await restoreA();
+      expect(daySelect()?.value).toBe(task.occurrenceId);
+      if (newer === null) expect(screen.queryByLabelText(newValue)).toBeNull();
+      else expect(field(newValue).value).toBe(newer);
+      expect(records(t)).toEqual([
+        expect.objectContaining({
+          replaces: ENTRY,
+          evidence: { kind: "quantity", amount: "7" },
+        }),
+      ]);
+      cleanup();
+      forgetTaskMemory();
+      forgetKept();
+      forgetKeptFixes();
+      forgetAllCorrections();
+    }
+  });
+
+  test("a correction kept by the dialog's sync control and not reopened survives day A leaving; Correct resumes it when A is back", async () => {
+    const { t, away, removeA, restoreA } = await open();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    fireEvent.change(minimum(), { target: { value: "12" } });
+    const chip = within(dialog() as HTMLElement)
+      .getAllByRole("button")
+      .find((b) => b.hasAttribute("data-sync-tone"));
+    fireEvent.click(chip as HTMLElement);
+    await t.until(() => dialog() === null);
+    await away();
+    await removeA();
+    await restoreA();
+    expect(dialog()).toBeNull();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("12");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("a failed read of the visit's day is not its absence: the last complete read stays, stale, with the input on day A", async () => {
+    const { t, task, away } = await open();
+    type(amount, "7.125");
+    await away();
+    const service = t.data.service();
+    if (service === null) throw new Error("no service");
+    const store = service.store as { run: typeof service.store.run };
+    const original = store.run.bind(service.store);
+    store.run = (async (plan, input, options) => {
+      const ids = (input as { ids?: string[] }).ids ?? [];
+      if (
+        plan.name === "data.readResourcesById" &&
+        ids.includes(task.occurrenceId)
+      )
+        throw new StoreFailure("error");
+      return original(plan, input, options);
+    }) as typeof service.store.run;
+    // A committed change (the task renamed) makes the detail read again; that read cannot read day A.
+    await t.commitSync([
+      { ...(task.rows[0] as CacheRow), label: "Renamed", version: 2 },
+    ]);
+    await t.until(
+      () => document.querySelector("[data-detail-row-stale]") !== null,
+    );
+    expect(document.querySelector("[data-detail-row-stale]")).not.toBeNull();
+    expect(unavailable()).toBe(false);
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    store.run = original;
+    await t.commitSync([
+      { ...(task.rows[0] as CacheRow), label: "Renamed again", version: 3 },
+    ]);
+    await t.until(
+      () => document.querySelector("[data-detail-row-stale]") === null,
+    );
+    expect(field(amount).value).toBe("7.125");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("control: day A still here, a later commit (another day arriving) keeps the restored amount on day A", async () => {
+    const { t, task, away } = await open();
+    type(amount, "7.125");
+    await away();
+    await t.commitSync(
+      await anotherDay(
+        task,
+        "eeeeeeee-0000-4000-8000-0000000000b4",
+        addDays(TODAY, -1),
+      ),
+    );
+    await t.settle();
+    expect(unavailable()).toBe(false);
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("with nothing typed, the visit's day leaving is said too (never replaced by another day); choosing again shows B, with none of A's input", async () => {
+    const { t, removeA } = await open();
+    await removeA();
+    saysUnavailable(t);
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    expect(document.activeElement).toBe(recordCard());
+    expect(unavailable()).toBe(false);
+    expect(field(amount).value).toBe("");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("choosing again after day A left with input: B is shown blank and stays shown (the mount's pin and the kept day both let go)", async () => {
+    const { t, away, removeA } = await open();
+    type(amount, "7.125");
+    await away();
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    expect(unavailable()).toBe(false);
+    expect(field(amount).value).toBe("");
+    // A later commit does not take the view back to the unavailable day: B is the visit's day now.
+    await t.commitSync([]);
+    await t.settle();
+    expect(unavailable()).toBe(false);
+    expect(recordCard()).not.toBeNull();
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("leaving for the sync screens while day A is gone keeps its amount: day A back meanwhile, coming back shows it on day A", async () => {
+    const { t, task, path, removeA } = await open();
+    type(amount, "7.125");
+    await removeA();
+    await toSync(t);
+    await t.commitSync([task.rows[2] as CacheRow]);
+    await back(t, path);
+    await t.until(() => detailShown() && recordCard() !== null);
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("choosing again keeps day A's amount with day A: picking day A once it is back shows it, and nothing was written", async () => {
+    const { t, task, removeA } = await open();
+    type(amount, "7.125");
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    expect(field(amount).value).toBe("");
+    await t.commitSync([task.rows[2] as CacheRow]);
+    await t.until(() => daySelect() !== null);
+    expect(daySelect()?.value).toBe(EARLIER);
+    fireEvent.change(daySelect() as HTMLSelectElement, {
+      target: { value: task.occurrenceId },
+    });
+    await t.until(() => daySelect()?.value === task.occurrenceId);
+    await t.until(() => recordCard() !== null);
+    expect(field(amount).value).toBe("7.125");
+    expect(t.bodies()).toEqual([]);
+  });
+
+  test("the input held while day A is gone is the identity's: another identity drops it, and A back shows none", async () => {
+    const { t, removeA, restoreA } = await open();
+    type(amount, "7.125");
+    await removeA();
+    t.rerender(tasksEnv(t.api, { online: false, identity: `${OTHER}:1` }));
+    await t.settle();
+    t.rerender(tasksEnv(t.api, { online: false }));
+    await t.settle();
+    await restoreA();
+    expect(field(amount).value).toBe("");
+    expect(t.bodies()).toEqual([]);
   });
 });

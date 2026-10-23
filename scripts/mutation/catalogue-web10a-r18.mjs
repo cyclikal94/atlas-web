@@ -247,7 +247,12 @@ export const UNIT_R18 = [
     tests: [RETENTION],
     expect: /an open fix is open again|success closes it unless a newer value/,
     patch: (t) =>
-      sub(t, `      if (!leftForSync()) return;\n`, `      return;\n`),
+      // Re-anchored in revision 20 (same intent): the cleanup also keeps the fix for the detail's visit of its day (DA20-I1).
+      sub(
+        t,
+        `      if (!leftForSync() && !fixVisits.has(owner)) return;\n`,
+        `      return;\n`,
+      ),
   },
 
   {
@@ -339,7 +344,12 @@ export const ENGINE_R18 = [
     grep: "E-T40: .*entry fix: the open fix",
     expect: /E-T40:/,
     patch: (t) =>
-      sub(t, `      if (!leftForSync()) return;\n`, `      return;\n`),
+      // Re-anchored in revision 20 (same intent): the cleanup also keeps the fix for the detail's visit of its day (DA20-I1).
+      sub(
+        t,
+        `      if (!leftForSync() && !fixVisits.has(owner)) return;\n`,
+        `      return;\n`,
+      ),
   },
 
   {
