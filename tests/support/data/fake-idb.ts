@@ -237,16 +237,27 @@ export class FakeIdb {
   private parked = false;
   private unwake: (() => void) | null = null;
   private disposed = false;
-  /** The first error a drain of the automatic driver threw: it stops the driver and is the owning test's failure (`dispose`). */
-  pumpFailure: unknown = null;
+  /**
+   * The first rejection of a drain of the automatic driver: it stops the driver and is the owning test's failure (`dispose`). Held in
+   * a box so that presence never depends on the value (R32, revision 26): any value can be thrown, `null` and `undefined` included.
+   */
+  private failure: { readonly reason: unknown } | null = null;
   private failureReported = false;
+  /** Whether a drain of the automatic driver has failed. */
+  get pumpFailed(): boolean {
+    return this.failure !== null;
+  }
+  /** What the first failed drain was rejected with (meaningful only when `pumpFailed`). */
+  get pumpFailure(): unknown {
+    return this.failure?.reason;
+  }
   /** Drains the automatic driver ran, and how many of them delivered nothing (a diagnostic and a regression oracle). */
   readonly pumpStats = { drains: 0, idleDrains: 0 };
 
   /** @internal */
   pump(): void {
     if (!this.autoDrive || this.pumping || this.disposed) return;
-    if (this.pumpFailure !== null) return;
+    if (this.failure !== null) return;
     this.pumping = true;
     this.parked = false;
     this.unwake ??= this.world.onWake(() => {
@@ -264,7 +275,10 @@ export class FakeIdb {
       },
       (error: unknown) => {
         this.pumping = false;
-        this.pumpFailure ??= error;
+        // The first failure is kept and ends automatic driving: no wake, request or later `pump` starts another drain.
+        this.failure ??= { reason: error };
+        this.unwake?.();
+        this.unwake = null;
       },
     );
   }
@@ -284,9 +298,9 @@ export class FakeIdb {
     this.parked = false;
     this.unwake?.();
     this.unwake = null;
-    if (this.pumpFailure !== null && !this.failureReported) {
+    if (this.failure !== null && !this.failureReported) {
       this.failureReported = true;
-      throw this.pumpFailure;
+      throw this.failure.reason;
     }
   }
 

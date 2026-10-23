@@ -19,8 +19,11 @@ export function ownedByTest(end: Ender): () => void {
   };
 }
 
-/** Run every ender of a scope, newest first; all run, and the first failure is rethrown after them. */
-async function endAll(scope: Ender[]): Promise<void> {
+/**
+ * Run every ender of a scope, newest first; all run, and the first failure is rethrown after them, whatever value it is (`null` and
+ * `undefined` included: presence is the `failed` flag, never the value). Exported for its own tests.
+ */
+export async function endAll(scope: Ender[]): Promise<void> {
   let failure: unknown = null;
   let failed = false;
   while (scope.length > 0) {

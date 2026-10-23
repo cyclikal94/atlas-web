@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
+import { endAll, ownedByTest } from "../lifetime";
 import { World } from "../session/world";
 import { FakeIdb } from "./fake-idb";
 import { outboxWorld } from "./outbox-world";
@@ -33,6 +34,54 @@ function driven(...pages: string[]) {
   return { world, idb, seen, event };
 }
 
+/** How a call or a promise ended: whether it threw or rejected, and with exactly what (compared with `Object.is`, any value). */
+type Outcome = { failed: boolean; reason: unknown };
+function attempt(run: () => void): Outcome {
+  try {
+    run();
+    return { failed: false, reason: undefined };
+  } catch (reason) {
+    return { failed: true, reason };
+  }
+}
+async function settled(promise: Promise<unknown>): Promise<Outcome> {
+  try {
+    await promise;
+    return { failed: false, reason: undefined };
+  } catch (reason) {
+    return { failed: true, reason };
+  }
+}
+
+/**
+ * Run checks that consume the double's drain failure themselves (revision 26). When they pass, no failure may be left unreported. When
+ * one fails first, the failure it did not get to consume is that same defect, and is consumed here rather than reported a second time,
+ * as a plain error, by the teardown of the test: the check that failed stays the test's only failure.
+ */
+async function consuming(idb: FakeIdb, checks: () => Promise<void>) {
+  let passed = false;
+  try {
+    await checks();
+    passed = true;
+  } finally {
+    await turns();
+    const leftover = attempt(() => idb.dispose());
+    if (passed) expect(leftover.failed).toBe(false);
+  }
+}
+
+/** Every kind of JavaScript value a drain can be rejected with (R32, revision 26): failure is never told apart by its value. */
+const rejections: [string, unknown][] = [
+  ["an Error", new Error("a delivery threw")],
+  ["null", null],
+  ["undefined", undefined],
+  ["false", false],
+  ["0", 0],
+  ["the empty string", ""],
+  ["a plain object", { reason: "object" }],
+  ["a symbol", Symbol("reason")],
+];
+
 describe("R30/DA-H1: the automatic driver delivers runnable work and parks otherwise", () => {
   test("teardown joins an in-flight drain and reports a failure delivered after disposal", async () => {
     const { world, idb } = driven();
@@ -40,9 +89,11 @@ describe("R30/DA-H1: the automatic driver delivers runnable work and parks other
       throw new Error("late drain failure");
     });
     idb.pump();
-    await expect(idb.disposeAndWait()).rejects.toThrow("late drain failure");
-    expect(idb.driving).toBe(false);
-    await expect(idb.disposeAndWait()).resolves.toBeUndefined();
+    await consuming(idb, async () => {
+      await expect(idb.disposeAndWait()).rejects.toThrow("late drain failure");
+      expect(idb.driving).toBe(false);
+      await expect(idb.disposeAndWait()).resolves.toBeUndefined();
+    });
   });
 
   test("an empty world: one drain, then the driver stops", async () => {
@@ -198,14 +249,16 @@ describe("R30/DA-H1: the automatic driver delivers runnable work and parks other
       throw new Error("a delivery threw");
     });
     idb.pump();
-    await turns();
-    expect(idb.pumpFailure).toBeInstanceOf(Error);
-    expect(idb.driving).toBe(false);
-    event("after");
-    idb.pump();
-    await turns();
-    expect(world.pendingCount()).toBe(1);
-    expect(() => idb.dispose()).toThrow("a delivery threw");
+    await consuming(idb, async () => {
+      await turns();
+      expect(idb.pumpFailure).toBeInstanceOf(Error);
+      expect(idb.driving).toBe(false);
+      event("after");
+      idb.pump();
+      await turns();
+      expect(world.pendingCount()).toBe(1);
+      expect(() => idb.dispose()).toThrow("a delivery threw");
+    });
   });
 
   test("`dispose` ends a parked driver and a drain in flight; another world keeps driving", async () => {
@@ -238,9 +291,101 @@ describe("R30/DA-H1: the automatic driver delivers runnable work and parks other
   });
 });
 
+describe("R32: a failed drain is reported whatever value it was rejected with", () => {
+  for (const [label, reason] of rejections) {
+    test(`rejected with ${label} before disposal: the first reason is kept, nothing is driven again, \`dispose\` reports it once`, async () => {
+      const { world, idb, seen, event } = driven();
+      world.schedule("misc", "A", {}, () => {
+        throw reason;
+      });
+      idb.pump();
+      await consuming(idb, async () => {
+        await turns();
+        expect(idb.pumpFailed).toBe(true);
+        expect(Object.is(idb.pumpFailure, reason)).toBe(true);
+        expect(idb.driving).toBe(false);
+        // Neither new work (a wake), a direct `pump` nor a second failing delivery starts another drain or replaces the first reason.
+        event("after");
+        idb.pump();
+        world.schedule("misc", "A", {}, () => {
+          throw new Error("a later failure");
+        });
+        idb.pump();
+        await turns();
+        // The first reason first: a later failure can replace it only through a second drain, which the next checks forbid.
+        expect(Object.is(idb.pumpFailure, reason)).toBe(true);
+        expect(seen).toEqual([]);
+        expect(world.pendingCount()).toBe(2);
+        expect(idb.pumpStats).toEqual({ drains: 0, idleDrains: 0 });
+        const first = attempt(() => idb.dispose());
+        expect(first.failed).toBe(true);
+        expect(Object.is(first.reason, reason)).toBe(true);
+        expect(attempt(() => idb.dispose()).failed).toBe(false);
+        expect((await settled(idb.disposeAndWait())).failed).toBe(false);
+      });
+    });
+
+    test(`rejected with ${label} after disposal began: joined teardown reports it once`, async () => {
+      const { world, idb } = driven();
+      world.schedule("misc", "A", {}, () => {
+        throw reason;
+      });
+      idb.pump();
+      await consuming(idb, async () => {
+        // A drain delivers nothing synchronously (it yields a turn first), so this disposal begins before the failure exists.
+        expect(idb.pumpFailed).toBe(false);
+        const joined = await settled(idb.disposeAndWait());
+        expect(joined.failed).toBe(true);
+        expect(Object.is(joined.reason, reason)).toBe(true);
+        expect(idb.pumpFailed).toBe(true);
+        expect(idb.driving).toBe(false);
+        expect((await settled(idb.disposeAndWait())).failed).toBe(false);
+        expect(attempt(() => idb.dispose()).failed).toBe(false);
+      });
+    });
+  }
+
+  test("a healthy drain in flight when teardown begins is joined and reports nothing", async () => {
+    const { idb, seen, event } = driven();
+    event("a");
+    event("b");
+    idb.pump();
+    expect((await settled(idb.disposeAndWait())).failed).toBe(false);
+    expect(seen).toEqual(["a", "b"]);
+    expect(idb.pumpFailed).toBe(false);
+  });
+
+  test("ending a scope runs every ender newest first and rethrows exactly the first failure, null and undefined included", async () => {
+    for (const [, reason] of rejections) {
+      const ran: string[] = [];
+      const scope = [
+        () => {
+          ran.push("oldest");
+          throw new Error("an older failure");
+        },
+        () => {
+          ran.push("middle");
+        },
+        async () => {
+          ran.push("newest");
+          throw reason;
+        },
+      ];
+      const ended = await settled(endAll(scope));
+      expect(ran).toEqual(["newest", "middle", "oldest"]);
+      expect(ended.failed).toBe(true);
+      expect(Object.is(ended.reason, reason)).toBe(true);
+      expect(scope).toEqual([]);
+    }
+    expect((await settled(endAll([() => undefined]))).failed).toBe(false);
+  });
+});
+
 /** Shared across the next two tests, in order: the first leaves a parked driver behind, the second sees it ended by the test setup. */
 let leftBehind: FakeIdb | null = null;
 let leftAfterFailure: FakeIdb | null = null;
+let leftAfterTimeout: FakeIdb | null = null;
+let lateNull: { idb: FakeIdb; ran: string[] } | null = null;
 
 describe("R30/DA-H1: a test's drivers end with that test", () => {
   test("a test leaves a parked driver (a future timer) without disposing it", async () => {
@@ -274,6 +419,56 @@ describe("R30/DA-H1: a test's drivers end with that test", () => {
   test("its driver was ended all the same: teardown runs for a failed test", () => {
     expect(leftAfterFailure).not.toBeNull();
     expect(leftAfterFailure?.driving).toBe(false);
+  });
+
+  test.fails("a test that TIMES OUT leaves a parked driver (this test is expected to fail, by its own short time limit)", async () => {
+    const { idb, event } = driven();
+    event("never due", "A", 60_000);
+    idb.pump();
+    await turns();
+    leftAfterTimeout = idb;
+    await new Promise<never>(() => undefined);
+  }, 200);
+
+  test("its driver was ended all the same: teardown runs for a timed-out test", () => {
+    expect(leftAfterTimeout).not.toBeNull();
+    expect(leftAfterTimeout?.driving).toBe(false);
+  });
+
+  test.fails("R32: a drain rejected with null DURING the test's teardown fails that test (this test is expected to fail, in its teardown alone)", () => {
+    const ran: string[] = [];
+    ownedByTest(() => {
+      ran.push("older ender");
+    });
+    const { world, idb, event } = driven();
+    event("never due", "A", 60_000);
+    idb.pump();
+    // Newer than the double, so teardown runs it first: the failing delivery only now becomes runnable, and wakes the parked driver.
+    ownedByTest(() => {
+      ran.push(`newer ender (failed: ${idb.pumpFailed})`);
+      world.schedule("misc", "A", {}, () => {
+        ran.push("failing delivery");
+        throw null;
+      });
+    });
+    lateNull = { idb, ran };
+    // The body itself passes: only the teardown can make this test fail.
+    expect(ran).toEqual([]);
+  });
+
+  test("its teardown joined the drain, reported the null once and still ran every other ender", async () => {
+    expect(lateNull?.ran).toEqual([
+      "newer ender (failed: false)",
+      "failing delivery",
+      "older ender",
+    ]);
+    expect(lateNull?.idb.pumpFailed).toBe(true);
+    expect(lateNull?.idb.pumpFailure).toBeNull();
+    expect(lateNull?.idb.driving).toBe(false);
+    // Already reported (by that teardown): a second disposal is quiet.
+    expect(
+      (await settled(lateNull?.idb.disposeAndWait() as Promise<void>)).failed,
+    ).toBe(false);
   });
 
   test("the outbox world's timers are withdrawn when cleared, and its dispatcher stops with the test", async () => {
