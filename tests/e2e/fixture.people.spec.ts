@@ -884,9 +884,16 @@ test.describe("E-P13: keyboard only (A21)", () => {
     context,
   }) => {
     const { page } = await setup(context, "/people", [personP(P, "Ada")]);
+    // Harness precondition (revision 5, campaign 18): the app puts focus on the page heading itself, at boot (the session hand-off
+    // focuses the protected tree's first heading once it appears, possibly after `setup` returns) and after each in-app navigation
+    // (RouteFocus, a frame later). Keyboard input starts only once that has happened, or the late focus takes the row's and Enter
+    // opens nothing. The journey and its assertions are unchanged.
+    const heading = page.getByRole("heading", { level: 1, name: "People" });
+    await expect(heading).toBeFocused();
     await page.locator(`[data-person-row="${P}"]`).focus();
     await page.keyboard.press("Enter");
     await expect(detail(page)).toBeVisible();
+    await expect(heading).toBeFocused();
     await detail(page).getByRole("link", { name: "Add a field" }).focus();
     await page.keyboard.press("Enter");
     const dialog = page.getByRole("dialog", { name: "Add a field" });
