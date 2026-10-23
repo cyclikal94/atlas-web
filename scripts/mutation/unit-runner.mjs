@@ -11,6 +11,12 @@
 // Revision 28 (review r27 R31): an assertion is admitted only by its worker-recorded origin (vitest-origin-setup.mjs), so a matcher
 // that crashed before comparing is an error here, alone (`crash_only`) or beside an assertion (`tainted`), and latches the run.
 //
+// Revision 29 (review r28 R31, design assessment C4/C5, DA-H3): the admission rule is the per-occurrence site receipt of
+// vitest-evidence.mjs `admission` (unchanged here). DA-H3: an exception of this PARENT process (a request, launch, output or result
+// write, a reporting callback) is an infrastructure failure of that control or mutant: it latches before any other child can be
+// admitted, every worker is joined (`allSettled`), the failed, unstarted and finished work stay distinct in the result, and if the
+// result file itself cannot be written the run still ends non-zero with its account on stderr, never claiming the missing file.
+//
 // Kept from the earlier runner: patched copies, never the tree; one unmutated control per distinct set of tests; the catalogue's
 // `expect` rule; an earlier revision's mutant (no `expect`) that is not cleanly caught is LISTED (crash_only_legacy, tainted_legacy),
 // never counted as caught, and does not fail the run.
@@ -172,9 +178,12 @@ export function unauthorisedSelections(selections, authorised, catalogue) {
   );
 }
 
+const messageOf = (error) => String(error?.message ?? error);
+
 /** Whether a mutant's verdict fails the run (and so latches the schedule). */
 export function failsRun(verdict, mutant) {
   if (verdict === "caught") return false;
+  if (verdict === "infrastructure") return true;
   if (
     mutant.expect === undefined &&
     (verdict === "crash_only" || verdict === "tainted")
@@ -255,38 +264,63 @@ export async function runUnitMutants({
       });
       continue;
     }
-    const { run, ms } = await supervisedRun({
-      root,
-      config,
-      files,
-      dir: join(work, `control-${index}`),
-      label: `control-${index}`,
-      closeTimeoutMs,
-      testNamePattern: pattern(selection),
-      onLaunch,
-    });
-    const inventory = selection ? selectionProblems(run, selection.cases) : [];
-    const v =
-      inventory.length > 0
-        ? { verdict: "incomplete", reasons: inventory }
-        : controlVerdict(run);
-    const record = {
-      tests: files,
-      ...(selection ? { selection: selection.cases.length } : {}),
-      verdict: v.verdict,
-      passed: v.verdict === "pass",
-      total: v.total ?? null,
-      skipped: v.skipped ?? null,
-      reasons: v.reasons,
-      ms,
-    };
-    controlResults.push(record);
-    if (!record.passed) latched = `control-${index}: ${v.verdict}`;
-    log(
-      `control ${record.passed ? "passes" : `FAILS (${v.verdict})`} (${record.total ?? "?"} tests${selection ? `, ${selection.cases.length} selected` : ""}): ${files.map((f) => f.replace("tests/data/", "")).join(" ")}`,
-    );
-    for (const reason of record.passed ? [] : v.reasons) log(`  ${reason}`);
-    onRecord?.({ kind: "control", ...record });
+    let record = null;
+    try {
+      const { run, ms } = await supervisedRun({
+        root,
+        config,
+        files,
+        dir: join(work, `control-${index}`),
+        label: `control-${index}`,
+        closeTimeoutMs,
+        testNamePattern: pattern(selection),
+        onLaunch,
+      });
+      const inventory = selection
+        ? selectionProblems(run, selection.cases)
+        : [];
+      const v =
+        inventory.length > 0
+          ? { verdict: "incomplete", reasons: inventory }
+          : controlVerdict(run);
+      record = {
+        tests: files,
+        ...(selection ? { selection: selection.cases.length } : {}),
+        verdict: v.verdict,
+        passed: v.verdict === "pass",
+        total: v.total ?? null,
+        skipped: v.skipped ?? null,
+        reasons: v.reasons,
+        ms,
+      };
+      controlResults.push(record);
+      if (!record.passed) latched = `control-${index}: ${v.verdict}`;
+      log(
+        `control ${record.passed ? "passes" : `FAILS (${v.verdict})`} (${record.total ?? "?"} tests${selection ? `, ${selection.cases.length} selected` : ""}): ${files.map((f) => f.replace("tests/data/", "")).join(" ")}`,
+      );
+      for (const reason of record.passed ? [] : v.reasons) log(`  ${reason}`);
+      onRecord?.({ kind: "control", ...record });
+    } catch (error) {
+      // DA-H3: a parent-side failure (launch/output/result write, reporting) fails this control and latches.
+      latched ??= `control-${index}: infrastructure failure: ${messageOf(error)}`;
+      try {
+        log(`INFRASTRUCTURE control-${index}: ${messageOf(error)} (latched)`);
+      } catch {
+        // the account is in the results
+      }
+      if (record === null)
+        controlResults.push({
+          tests: files,
+          ...(selection ? { selection: selection.cases.length } : {}),
+          verdict: "infrastructure",
+          passed: false,
+          reasons: [messageOf(error)],
+        });
+      else {
+        record.passed = false;
+        record.infrastructure = messageOf(error);
+      }
+    }
   }
 
   // The mutants, a few at a time; nothing new starts once a failure has latched.
@@ -295,57 +329,94 @@ export async function runUnitMutants({
   async function worker() {
     while (latched === null && queue.length > 0) {
       const mutant = queue.shift();
-      const dir = join(work, mutant.id);
-      const { run, ms, output } = await supervisedRun({
-        root,
-        config,
-        files: mutant.tests,
-        dir,
-        label: mutant.id,
-        env: { ATLAS_MUTANT_DIR: dir },
-        closeTimeoutMs,
-        testNamePattern: pattern(mutant.selection),
-        onLaunch,
-      });
-      const inventory = mutant.selection
-        ? selectionProblems(run, mutant.selection.cases)
-        : [];
-      const v =
-        inventory.length > 0
-          ? { verdict: "incomplete", reasons: inventory }
-          : unitVerdict(run, mutant);
-      const fails = failsRun(v.verdict, mutant);
-      const record = {
-        id: mutant.id,
-        title: mutant.title,
-        file: mutant.file,
-        tests: mutant.tests,
-        ...(mutant.selection
-          ? { selection: mutant.selection.cases.length }
-          : {}),
-        verdict: v.verdict,
-        caught: v.verdict === "caught",
-        crashOnly: v.verdict === "crash_only",
-        expect: mutant.expect ? String(mutant.expect) : undefined,
-        exit: run.complete ? run.exitCode : null,
-        kinds: v.kinds ?? null,
-        failedTests: (v.failedTests ?? []).slice(0, 12),
-        failedCount: v.failedTests?.length ?? null,
-        reasons: v.reasons,
-        ms,
-        ...(v.verdict === "caught" ? {} : { tail: output.slice(-400) }),
-      };
-      if (fails && latched === null) latched = `${mutant.id}: ${v.verdict}`;
-      results.push(record);
-      log(
-        `${v.verdict === "caught" ? "caught  " : fails ? v.verdict.toUpperCase().padEnd(8) : `${v.verdict} (legacy, listed)`} ${mutant.id} (${JSON.stringify(v.kinds ?? {})})  ${mutant.title}`,
-      );
-      for (const reason of v.verdict === "caught" ? [] : v.reasons.slice(0, 4))
-        log(`  ${reason}`);
-      onRecord?.({ kind: "mutant", ...record });
+      let record = null;
+      try {
+        record = await runOne(mutant);
+      } catch (error) {
+        // DA-H3: a parent-side failure is this mutant's infrastructure failure. It latches here, synchronously, before this or any
+        // other worker can take another queued mutant; a record already made keeps its verdict and is marked.
+        latched ??= `${mutant.id}: infrastructure failure: ${messageOf(error)}`;
+        try {
+          log(`INFRASTRUCTURE ${mutant.id}: ${messageOf(error)} (latched)`);
+        } catch {
+          // the account is in the results
+        }
+        if (record === null && !results.some((r) => r.id === mutant.id))
+          results.push({
+            id: mutant.id,
+            title: mutant.title,
+            file: mutant.file,
+            tests: mutant.tests,
+            verdict: "infrastructure",
+            caught: false,
+            crashOnly: false,
+            expect: mutant.expect ? String(mutant.expect) : undefined,
+            exit: null,
+            reasons: [messageOf(error)],
+          });
+        else
+          for (const r of results)
+            if (r.id === mutant.id) r.infrastructure = messageOf(error);
+      }
     }
   }
-  await Promise.all(Array.from({ length: Math.max(1, jobs) }, worker));
+  // One mutant: launched, judged, recorded and reported. Any exception propagates to its worker (DA-H3).
+  async function runOne(mutant) {
+    const dir = join(work, mutant.id);
+    const { run, ms, output } = await supervisedRun({
+      root,
+      config,
+      files: mutant.tests,
+      dir,
+      label: mutant.id,
+      env: { ATLAS_MUTANT_DIR: dir },
+      closeTimeoutMs,
+      testNamePattern: pattern(mutant.selection),
+      onLaunch,
+    });
+    const inventory = mutant.selection
+      ? selectionProblems(run, mutant.selection.cases)
+      : [];
+    const v =
+      inventory.length > 0
+        ? { verdict: "incomplete", reasons: inventory }
+        : unitVerdict(run, mutant);
+    const fails = failsRun(v.verdict, mutant);
+    const record = {
+      id: mutant.id,
+      title: mutant.title,
+      file: mutant.file,
+      tests: mutant.tests,
+      ...(mutant.selection ? { selection: mutant.selection.cases.length } : {}),
+      verdict: v.verdict,
+      caught: v.verdict === "caught",
+      crashOnly: v.verdict === "crash_only",
+      expect: mutant.expect ? String(mutant.expect) : undefined,
+      exit: run.complete ? run.exitCode : null,
+      kinds: v.kinds ?? null,
+      failedTests: (v.failedTests ?? []).slice(0, 12),
+      failedCount: v.failedTests?.length ?? null,
+      reasons: v.reasons,
+      ms,
+      ...(v.verdict === "caught" ? {} : { tail: output.slice(-400) }),
+    };
+    if (fails && latched === null) latched = `${mutant.id}: ${v.verdict}`;
+    results.push(record);
+    log(
+      `${v.verdict === "caught" ? "caught  " : fails ? v.verdict.toUpperCase().padEnd(8) : `${v.verdict} (legacy, listed)`} ${mutant.id} (${JSON.stringify(v.kinds ?? {})})  ${mutant.title}`,
+    );
+    for (const reason of v.verdict === "caught" ? [] : v.reasons.slice(0, 4))
+      log(`  ${reason}`);
+    onRecord?.({ kind: "mutant", ...record });
+    return record;
+  }
+  // Every worker is joined, whatever happened in any of them; a worker that nevertheless rejected latches too.
+  const joined = await Promise.allSettled(
+    Array.from({ length: Math.max(1, jobs) }, worker),
+  );
+  for (const outcome of joined)
+    if (outcome.status === "rejected")
+      latched ??= `worker failed: ${messageOf(outcome.reason)}`;
   const notRun = queue.map((m) => m.id);
   results.sort((a, b) => a.id.localeCompare(b.id));
 
@@ -375,15 +446,26 @@ export async function runUnitMutants({
     ...extraSummary,
     at: new Date().toISOString(),
   };
-  writeFileSync(
-    join(outDir, "unit-results.json"),
-    `${JSON.stringify({ summary, results }, null, 2)}\n`,
-  );
+  let persisted = true;
+  try {
+    writeFileSync(
+      join(outDir, "unit-results.json"),
+      `${JSON.stringify({ summary, results }, null, 2)}\n`,
+    );
+  } catch (error) {
+    // The account is still given (on stderr) and the run fails; no result file is claimed.
+    persisted = false;
+    summary.persistError = messageOf(error);
+    console.error(
+      `unit-results.json could not be written (${summary.persistError}); the run fails. Account: ${JSON.stringify({ summary, results })}`,
+    );
+  }
   const controlsOk = controlResults.every((c) => c.passed);
   log(
     `\n${summary.caught} of ${results.length} caught cleanly by an assertion; ${summary.crash_only_legacy.length} earlier mutant(s) caught by crashes alone and ${summary.tainted_legacy.length} with errors beside the assertions (listed, not counted); ${failures.length} failed (survived, wrong test, crash-only, tainted or incomplete); ${notRun.length} not run; ${unapplied.length} patches failed; controls ${controlsOk ? "all pass" : "NOT all passing"}; count ${countOk ? "ok" : "WRONG"}${latched ? `; stopped at ${latched}` : ""}`,
   );
   const ok =
+    persisted &&
     latched === null &&
     failures.length === 0 &&
     unapplied.length === 0 &&

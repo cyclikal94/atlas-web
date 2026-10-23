@@ -1167,6 +1167,7 @@ describe("R11: an explicit default can grant any household you are in (the compl
     await flush();
     const failed = () =>
       form.querySelector<HTMLElement>('[data-membership="failed"]');
+    expect(failed()).not.toBeNull();
     expect(failed()?.textContent).toContain(copy.HOUSEHOLDS_FAILED);
     expect(grantName(form, FLAT)).toBe(copy.HOUSEHOLD_UNCHECKED);
     expect(form.textContent).not.toContain(copy.HOUSEHOLD_UNKNOWN);

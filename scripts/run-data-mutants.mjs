@@ -12,13 +12,15 @@
 // throws something else, a suite that does not load) or a timeout is NOT evidence that a mutant was caught (validation policy
 // VP-20261003), so each failure is classified:
 //
-//   assertion   an error the framework constructed as the RESULT of a failed comparison: chai's `AssertionError` (every built-in
-//               matcher, `resolves`/`rejects`, `assert`) or the `JestExtendError` of an `expect.extend` matcher such as jest-dom's,
-//               recognised since WEB-14a revision 28 only by the origin the worker records for this run (vitest-origin-setup.mjs),
-//               never by name, frames or text: the test said the behaviour is wrong
+//   assertion   an error constructed by an audited framework site AFTER the intended comparison completed with a failing outcome
+//               (chai's `Assertion#assert` on an `expect()` root, Vitest's mismatch and promise-settlement sites, an `expect.extend`
+//               matcher's failing result such as jest-dom's) or by an explicit `expect.fail`, bound to that test: since WEB-14a
+//               revision 29 recognised only by the per-occurrence receipt the worker attaches at that site (vitest-origin-sites.mjs),
+//               never by class, name, frames or text: the test said the behaviour is wrong. chai's argument validation, its wrapping
+//               of an execution error, its internal precondition assertions and assertions made inside another matcher are errors
 //   timeout     the test timed out
 //   error       anything else the test threw (a TypeError of the mutated code, a setup failure, a matcher that crashed or refused its
-//               input before comparing, such as jest-dom given `null`)
+//               input before comparing, such as jest-dom given `null` or chai's "Target cannot be null or undefined.")
 //
 // and, since WEB-14a revision 27 (DA-H2), every error OUTSIDE a test is counted too: a module or nested suite error (a file that does
 // not load, a failing beforeAll/afterAll), an unhandled error, an error Vitest logs while shutting down. Each run is a supervised child

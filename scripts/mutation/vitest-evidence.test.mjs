@@ -1,6 +1,7 @@
 // Pure controls of the supervised-evidence contract (vitest-evidence.mjs) and the unit runner's verdict rule (WEB-14a revision 27,
-// review r26 R31 / design assessment DA-H2, Q3/Q4/Q6; revision 28, review r27 R31: assertion origin, C1-C3). The real Vitest boundary
-// is qualified separately with actual runs.
+// review r26 R31 / design assessment DA-H2, Q3/Q4/Q6; revision 28, review r27 R31: assertion origin, C1-C3; revision 29, review r28
+// R31: per-occurrence site receipts bound to the test and adapter, schema 3). The real Vitest boundary is qualified separately with
+// actual runs.
 //   node --test scripts/mutation/vitest-evidence.test.mjs
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -9,14 +10,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { failsRun, unauthorisedSelections } from "./unit-runner.mjs";
 import {
+  admission,
   classify,
   controlVerdict,
+  currentAdapter,
   ENVELOPE_SCHEMA,
   namePatternOf,
   ORIGIN_KEY,
   ORIGIN_SCHEMA,
-  originProblem,
-  PRODUCERS,
   project,
   readRun,
   selectionProblems,
@@ -24,18 +25,28 @@ import {
   validateEnvelope,
 } from "./vitest-evidence.mjs";
 
-// A serialised error as Vitest hands it over, with the origin record the worker setup writes (vitest-origin-setup.mjs).
-const originOf = (producer, nonce = "n") => ({
+// A serialised error as Vitest hands it over, with the receipt an audited site attaches in the worker (vitest-origin-runtime.mjs).
+// `test`/`current` "@case" stand for the id of the case the error is placed in (caseOf binds them).
+const ADAPTER = currentAdapter();
+const receiptOf = (site, role, over = {}) => ({
   schema: ORIGIN_SCHEMA,
-  producer,
-  nonce,
+  nonce: "n",
+  adapter: ADAPTER,
+  site,
+  role,
+  root: 1,
+  test: "@case",
+  current: "@case",
+  ...over,
 });
-const assertion = project({
-  name: "AssertionError",
-  message: "expected 1 to be 2",
-  stack: "AssertionError: expected 1 to be 2",
-  [ORIGIN_KEY]: originOf(PRODUCERS.chai),
-});
+const chaiError = (receipt, message = "expected 1 to be 2") =>
+  project({
+    name: "AssertionError",
+    message,
+    stack: `AssertionError: ${message}`,
+    [ORIGIN_KEY]: receipt,
+  });
+const assertion = chaiError(receiptOf("chai.Assertion#assert", "comparison"));
 const extended = project({
   name: "Error",
   message: "expect(element).toBeVisible()",
@@ -43,12 +54,33 @@ const extended = project({
     "Error: expect(element).toBeVisible()\n at Proxy.__VITEST_EXTEND_ASSERTION__ (x)",
   constructor: "Function<JestExtendError>",
   __vitest_error_context__: { assertionName: "toBeVisible" },
-  [ORIGIN_KEY]: originOf(PRODUCERS.extend),
+  [ORIGIN_KEY]: receiptOf("vitest.extend.result", "comparison"),
 });
-const SETUP = "/r/scripts/mutation/vitest-origin-setup.mjs";
+const invertedError = (over = {}) =>
+  project(
+    Object.assign(new Error("Expect test to fail"), {
+      [ORIGIN_KEY]: receiptOf("vitest.runner.fails-inversion", "inversion", {
+        root: null,
+        current: null,
+        ...over,
+      }),
+    }),
+  );
 const plain = project(new Error("boom"));
 const errors = (list) => ({ errorCount: list.length, errors: list });
+const bind = (error, id) =>
+  error?.origin && typeof error.origin === "object" && !error.origin.invalid
+    ? {
+        ...error,
+        origin: {
+          ...error.origin,
+          test: error.origin.test === "@case" ? id : error.origin.test,
+          current: error.origin.current === "@case" ? id : error.origin.current,
+        },
+      }
+    : error;
 const caseOf = (name, state, list = [], extra = {}) => ({
+  id: `t-${name}`,
   module: "tests/a.test.ts",
   moduleId: "/r/tests/a.test.ts",
   ancestors: ["S"],
@@ -56,7 +88,7 @@ const caseOf = (name, state, list = [], extra = {}) => ({
   state,
   fails: false,
   ms: 1,
-  ...errors(list),
+  ...errors(list.map((e) => bind(e, extra.id ?? `t-${name}`))),
   ...extra,
 });
 function envelope(over = {}, witness = {}) {
@@ -91,9 +123,8 @@ function envelope(over = {}, witness = {}) {
     closeTimedOut: false,
     origin: {
       schema: ORIGIN_SCHEMA,
-      setupFile: SETUP,
-      setupSha256: "0".repeat(64),
-      projects: [{ name: "", setupFiles: [SETUP] }],
+      adapter: ADAPTER,
+      projects: [{ name: "", setupFiles: ["/r/setup.mjs"], pool: "forks" }],
       installed: true,
     },
     exitCode: 1,
@@ -173,12 +204,39 @@ test("project keeps one occurrence for every thrown value, whatever it is", () =
   assert.equal(project(Symbol("s")).text, "Symbol(s)");
 });
 
-test("classify: an assertion only by the origin of this run's qualified producer, never by name, frames or text", () => {
-  const ok = { nonce: "n" };
-  assert.equal(classify(assertion, ok), "assertion");
-  assert.equal(classify(extended, ok), "assertion");
+test("admission (revision 29): an assertion only by the receipt of a completed comparison of THIS test, never by class, name, frames or text", () => {
+  const ok = { nonce: "n", adapter: ADAPTER, testId: "t-oracle" };
+  const bound = (e) => bind(e, "t-oracle");
+  assert.equal(classify(bound(assertion), ok), "assertion");
+  assert.equal(classify(bound(extended), ok), "assertion");
   assert.equal(classify(plain, ok), "error");
-  // Revision 28 (review r27 R31): what revision 27 admitted by name or by a wrapper frame is refused without its origin.
+  // Every audited comparison site of the installed framework is admissible when its receipt binds; an explicit fail by its current test.
+  for (const site of [
+    "chai.callable",
+    "vitest.toMatchObject",
+    "vitest.toHaveBeenCalled",
+    "vitest.toHaveBeenCalledWith",
+    "vitest.toThrow.did-not-throw",
+    "vitest.resolves.rejected",
+    "vitest.rejects.resolved",
+  ])
+    assert.equal(
+      classify(bound(chaiError(receiptOf(site, "comparison"))), ok),
+      "assertion",
+      site,
+    );
+  assert.equal(
+    classify(
+      bound(
+        chaiError(
+          receiptOf("chai.expect.fail", "explicit", { root: null, test: null }),
+        ),
+      ),
+      ok,
+    ),
+    "assertion",
+  );
+  // What revision 27 admitted by name or wrapper frame, and what revision 28 admitted by CLASS, is refused without a site receipt.
   assert.equal(
     classify(
       project(
@@ -208,46 +266,140 @@ test("classify: an assertion only by the origin of this run's qualified producer
       "error",
       frame,
     );
-  assert.equal(
-    classify(project(new Error("AssertionError: expected 1 to be 2")), ok),
-    "error",
-  );
-  // The origin itself must be of this run, of a known producer, and fit that producer's class.
-  assert.equal(classify(assertion), "error");
-  assert.equal(classify(assertion, { nonce: "m" }), "error");
+  // Review r28's framework-made AssertionErrors: argument validation, a wrapped predicate TypeError, internal and nested assertions.
+  const refused = [
+    [
+      chaiError(
+        receiptOf("chai.instanceOf.predicate-type-error", "execution"),
+        "The instanceof assertion needs a constructor but null was given.",
+      ),
+      /execution site/,
+    ],
+    [
+      chaiError(
+        receiptOf("chai.property.name", "precondition"),
+        "the argument to property must be a string, number, or symbol",
+      ),
+      /precondition site/,
+    ],
+    [
+      chaiError(
+        receiptOf("chai.property.target", "precondition"),
+        "Target cannot be null or undefined.",
+      ),
+      /precondition site/,
+    ],
+    [
+      chaiError(receiptOf("chai.include.invalid-combination", "precondition")),
+      /precondition site/,
+    ],
+    [
+      chaiError(receiptOf("chai.Assertion#assert", "internal", { root: null })),
+      /internal \(precondition\) assertion/,
+    ],
+    [
+      chaiError(receiptOf("chai.Assertion#assert", "nested")),
+      /nested in another matcher/,
+    ],
+    [
+      chaiError(receiptOf("chai.should.fail", "unsupported", { root: null })),
+      /unsupported site/,
+    ],
+  ];
+  for (const [error, pattern] of refused) {
+    const a = admission(bound(error), ok);
+    assert.equal(a.kind, "error", JSON.stringify(error.origin));
+    assert.match(a.why, pattern);
+  }
+  // The receipt must be of this run, this adapter, a known site, a role that site can have, this test, and fit the site's class.
+  assert.equal(classify(bound(assertion)), "error");
+  assert.equal(classify(bound(assertion), { ...ok, nonce: "m" }), "error");
   const variants = [
     [{ ...assertion, origin: { invalid: true } }, /invalid/],
     [
-      { ...assertion, origin: { ...assertion.origin, schema: "x/2" } },
+      chaiError(
+        receiptOf("chai.Assertion#assert", "comparison", {
+          schema: "atlas-assertion-origin/1",
+        }),
+      ),
       /schema/,
     ],
     [
-      { ...assertion, origin: { ...assertion.origin, nonce: "m" } },
+      chaiError(
+        receiptOf("chai.Assertion#assert", "comparison", { nonce: "m" }),
+      ),
       /another run/,
     ],
     [
-      {
-        ...assertion,
-        origin: { ...assertion.origin, producer: "node:assert" },
-      },
-      /unknown assertion producer/,
+      chaiError(
+        receiptOf("chai.Assertion#assert", "comparison", {
+          adapter: "0".repeat(64),
+        }),
+      ),
+      /another adapter/,
     ],
-    [{ ...assertion, name: "TypeError" }, /not named AssertionError/],
+    [chaiError(receiptOf("node:assert", "comparison")), /unknown site/],
     [
-      { ...extended, constructor: "Function<TypeError>" },
+      chaiError(receiptOf("chai.property.target", "comparison")),
+      /is not chai.property.target's/,
+    ],
+    [
+      chaiError(receiptOf("chai.Assertion#assert", "explicit")),
+      /is not chai.Assertion#assert's/,
+    ],
+    [
+      chaiError(
+        receiptOf("chai.Assertion#assert", "comparison", { test: "t-other" }),
+      ),
+      /another test/,
+    ],
+    [
+      chaiError(
+        receiptOf("chai.Assertion#assert", "comparison", {
+          current: "t-other",
+        }),
+      ),
+      /another test/,
+    ],
+    [
+      chaiError(
+        receiptOf("chai.Assertion#assert", "comparison", {
+          test: null,
+          current: null,
+        }),
+      ),
+      /another test/,
+    ],
+    [
+      chaiError(receiptOf("chai.expect.fail", "explicit", { current: null })),
+      /outside this test/,
+    ],
+    [{ ...bound(assertion), name: "TypeError" }, /not named AssertionError/],
+    [
+      { ...bound(extended), constructor: "Function<TypeError>" },
       /class or assertion name/,
     ],
-    [{ ...extended, assertionName: null }, /class or assertion name/],
-    [{ ...extended, assertionName: "" }, /class or assertion name/],
+    [{ ...bound(extended), assertionName: null }, /class or assertion name/],
+    [{ ...bound(extended), assertionName: "" }, /class or assertion name/],
+    [
+      project({
+        name: "AssertionError",
+        message: "x",
+        [ORIGIN_KEY]: receiptOf("vitest.extend.result", "comparison", {
+          test: "t-oracle",
+          current: "t-oracle",
+        }),
+      }),
+      /class or assertion name/,
+    ],
     [plain, /no assertion origin/],
   ];
   for (const [error, pattern] of variants) {
-    assert.equal(classify(error, ok), "error");
-    assert.match(originProblem(error, "n"), pattern);
+    const a = admission(bound(error), ok);
+    assert.equal(a.kind, "error", JSON.stringify(error.origin));
+    assert.match(a.why, pattern);
   }
-  assert.equal(originProblem(assertion, "n"), null);
-  assert.equal(originProblem(extended, "n"), null);
-  // An unreadable or malformed origin record is an occurrence with no proof, never an assertion.
+  // An unreadable or malformed receipt is an occurrence with no proof, never an assertion.
   const hostileOrigin = project({
     name: "AssertionError",
     get [ORIGIN_KEY]() {
@@ -256,9 +408,13 @@ test("classify: an assertion only by the origin of this run's qualified producer
   });
   assert.deepEqual(hostileOrigin.origin, { invalid: true });
   assert.equal(classify(hostileOrigin, ok), "error");
-  assert.deepEqual(project({ [ORIGIN_KEY]: { schema: 1 } }).origin, {
-    invalid: true,
-  });
+  for (const bad of [
+    { schema: 1 },
+    { ...receiptOf("chai.Assertion#assert", "comparison"), root: "1" },
+    { ...receiptOf("chai.Assertion#assert", "comparison"), test: 3 },
+    { ...receiptOf("chai.Assertion#assert", "comparison"), site: undefined },
+  ])
+    assert.deepEqual(project({ [ORIGIN_KEY]: bad }).origin, { invalid: true });
   assert.equal(project(new Error("x")).origin, null);
   // Time-outs are a veto recognised by text, before origin (text can only refuse, never admit).
   assert.equal(
@@ -266,12 +422,24 @@ test("classify: an assertion only by the origin of this run's qualified producer
     "timeout",
   );
   assert.equal(
-    classify({ ...assertion, message: "Hook timed out in 10000ms." }, ok),
+    classify(
+      { ...bound(assertion), message: "Hook timed out in 10000ms." },
+      ok,
+    ),
     "timeout",
   );
-  const inverted = project(new Error("Expect test to fail"));
-  assert.equal(classify(inverted, { fails: true, nonce: "n" }), "inverted");
-  assert.equal(classify(inverted, { fails: false, nonce: "n" }), "error");
+  // The test.fails inversion: from the runner site's receipt for this very test.fails case, no longer from its text.
+  const inverted = bound(invertedError());
+  assert.equal(classify(inverted, { ...ok, fails: true }), "inverted");
+  assert.equal(classify(inverted, { ...ok, fails: false }), "error");
+  assert.equal(
+    classify(bound(invertedError({ test: "t-other" })), { ...ok, fails: true }),
+    "error",
+  );
+  assert.equal(
+    classify(project(new Error("Expect test to fail")), { ...ok, fails: true }),
+    "error",
+  );
   for (const value of [null, undefined, "", 0, false])
     assert.equal(classify(project(value), ok), "error");
 });
@@ -332,17 +500,29 @@ test("a valid envelope validates; every tampered field is a problem", () => {
     [envelope({ witness: undefined }), /no witness/],
     [envelope({ schema: "atlas-vitest-evidence/1" }), /schema/],
     [envelope({ origin: undefined }), /no assertion-origin record/],
+    [envelope({ schema: "atlas-vitest-evidence/2" }), /schema/],
     [
       envelope({ origin: { ...envelope().origin, installed: false } }),
-      /first setup/,
+      /not installed/,
     ],
     [
       envelope({ origin: { ...envelope().origin, schema: "x" } }),
       /assertion-origin schema/,
     ],
     [
-      envelope({ origin: { ...envelope().origin, setupSha256: undefined } }),
-      /setup file not recorded/,
+      envelope({ origin: { ...envelope().origin, adapter: "0".repeat(64) } }),
+      /is not the current/,
+    ],
+    [
+      envelope({ origin: { ...envelope().origin, adapter: undefined } }),
+      /is not the current/,
+    ],
+    [
+      envelope(
+        {},
+        { tests: [{ ...caseOf("oracle", "failed", [assertion]), id: "" }] },
+      ),
+      /without an id/,
     ],
   ];
   for (const [env, pattern] of cases)
@@ -623,10 +803,13 @@ test("unitVerdict (revision 28): a matcher crash with assertion frames is an err
     ).verdict,
     "tainted",
   );
-  // An extended matcher's genuine comparison failure is a clean catch, and readRun records its producer.
+  // An extended matcher's genuine comparison failure is a clean catch, and readRun records its site and role.
   const run = runWith([caseOf("oracle", "failed", [extended])]);
   assert.equal(unitVerdict(run, named).verdict, "caught");
-  assert.equal(run.cases[0].errors[0].producer, PRODUCERS.extend);
+  assert.deepEqual(
+    [run.cases[0].errors[0].site, run.cases[0].errors[0].role],
+    ["vitest.extend.result", "comparison"],
+  );
   // An assertion recorded in ANOTHER run's worker is not this run's assertion.
   const foreign = runWith([
     caseOf("oracle", "failed", [
@@ -640,8 +823,48 @@ test("unitVerdict (revision 28): a matcher crash with assertion frames is an err
   );
 });
 
+test("unitVerdict (revision 29): review r28's framework-made errors are refused alone and taint a named assertion beside them", () => {
+  const execution = chaiError(
+    receiptOf("chai.instanceOf.predicate-type-error", "execution"),
+  );
+  const precondition = chaiError(
+    receiptOf("chai.property.name", "precondition"),
+  );
+  for (const error of [execution, precondition]) {
+    assert.equal(
+      unitVerdict(runWith([caseOf("oracle", "failed", [error])]), named)
+        .verdict,
+      "crash_only",
+    );
+    // The mixed review case: the intended body assertion plus an afterEach predicate TypeError wrapped by the framework.
+    assert.equal(
+      unitVerdict(
+        runWith([caseOf("oracle", "failed", [assertion, error])]),
+        named,
+      ).verdict,
+      "tainted",
+    );
+  }
+  // An assertion of the test is not borrowed by another test's case.
+  const borrowed = unitVerdict(
+    runWith([
+      caseOf("oracle", "failed", [
+        chaiError(
+          receiptOf("chai.Assertion#assert", "comparison", {
+            test: "t-other",
+            current: "t-other",
+          }),
+        ),
+      ]),
+    ]),
+    named,
+  );
+  assert.equal(borrowed.verdict, "crash_only");
+  assert.match(borrowed.reasons.join("\n"), /comparison of another test/);
+});
+
 test("unitVerdict: a test.fails inversion counts only for a case the mutant's expect names", () => {
-  const inverted = project(new Error("Expect test to fail"));
+  const inverted = invertedError();
   const run = runWith([
     caseOf("oracle", "failed", [inverted], { fails: true }),
   ]);
@@ -722,7 +945,7 @@ test("failsRun: an earlier revision's mutant that is not cleanly caught is liste
     assert.equal(failsRun(v, legacy), false);
     assert.equal(failsRun(v, named), true);
   }
-  for (const v of ["survived", "incomplete", "wrong_test"])
+  for (const v of ["survived", "incomplete", "wrong_test", "infrastructure"])
     assert.equal(failsRun(v, legacy), true);
   assert.equal(failsRun("caught", named), false);
 });

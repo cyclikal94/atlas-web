@@ -16,12 +16,20 @@
 // the worker which framework class produced each assertion error, bound to this request's nonce (passed to the workers in the
 // environment). The setup is prepended by a `configureVitest` hook, so the config's own setup files still run, in their order, after
 // it. A project without it is an unsupported lifecycle (no admissible envelope).
-import { createHash } from "node:crypto";
+//
+// Revision 29 (review r28 R31 incomplete_fix, design assessment C3): the setup no longer brands a class; each project's workers also get
+// `--import vitest-origin-register.mjs`, whose loading hook instruments the pinned framework modules so that each audited site marks
+// the error it constructs (vitest-origin-sites.mjs). The setup proves in every worker that this happened. The envelope (schema 3)
+// records the adapter digest of the exact table and files used; a project without the setup first or without the hook is unsupported.
+// Each witnessed test records its id, to which an assertion's receipt must belong.
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 import { searchForWorkspaceRoot } from "vite";
 import {
+  adapterDigest,
   ENVELOPE_SCHEMA,
+  ORIGIN_FILES,
   ORIGIN_NONCE_ENV,
   ORIGIN_SCHEMA,
   ORIGIN_SETUP,
@@ -44,12 +52,14 @@ if (typeof request.nonce !== "string" || request.nonce.length === 0) {
 }
 // Workers inherit this process's environment: the origin setup binds every record it writes to this request.
 process.env[ORIGIN_NONCE_ENV] = request.nonce;
+const REGISTER_URL = pathToFileURL(ORIGIN_FILES.register).href;
+const { digest: adapter, files: adapterFiles } = adapterDigest();
 const origin = {
   schema: ORIGIN_SCHEMA,
+  adapter,
+  files: adapterFiles,
   setupFile: ORIGIN_SETUP,
-  setupSha256: createHash("sha256")
-    .update(readFileSync(ORIGIN_SETUP))
-    .digest("hex"),
+  register: REGISTER_URL,
   projects: [],
   installed: false,
 };
@@ -69,6 +79,12 @@ const originPlugin = {
     project.config.setupFiles = [
       ORIGIN_SETUP,
       ...project.config.setupFiles.filter((file) => file !== ORIGIN_SETUP),
+    ];
+    // Read by the pool when it first starts a worker of this project, so the hook is registered before Vitest is imported there.
+    project.config.execArgv = [
+      "--import",
+      REGISTER_URL,
+      ...(project.config.execArgv ?? []),
     ];
   },
 };
@@ -136,6 +152,7 @@ const witnessReporter = {
         for (const test of module.children.allTests()) {
           const result = test.result();
           witness.tests.push({
+            id: test.id,
             module: id,
             moduleId: module.moduleId,
             ancestors: ancestorsOf(test),
@@ -199,13 +216,22 @@ try {
   origin.projects = (ctx.projects ?? []).map((p) => ({
     name: p.name ?? "",
     setupFiles: [...(p.config?.setupFiles ?? [])],
+    execArgv: [...(p.config?.execArgv ?? [])],
+    pool: p.config?.pool ?? null,
   }));
+  // Only a process pool runs the worker with these execArgv and this realm's loading hook (`threads`/`vm*` are not qualified).
   origin.installed =
     origin.projects.length > 0 &&
-    origin.projects.every((p) => p.setupFiles[0] === ORIGIN_SETUP);
+    origin.projects.every(
+      (p) =>
+        p.setupFiles[0] === ORIGIN_SETUP &&
+        p.execArgv[0] === "--import" &&
+        p.execArgv[1] === REGISTER_URL &&
+        p.pool === "forks",
+    );
   if (!origin.installed)
     unsupported.push(
-      "the assertion-origin setup is not the first setup file of every project",
+      "the assertion-origin setup and loading hook are not installed in every project (setup first, --import hook, forks pool)",
     );
   if (ctx.version !== PINNED_VITEST)
     unsupported.push(`Vitest ${ctx.version}, qualified ${PINNED_VITEST}`);

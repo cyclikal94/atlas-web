@@ -13,27 +13,40 @@
 // framework class that produced it, recorded in the worker (vitest-origin-setup.mjs) and bound to this run's nonce. Wrapper frames,
 // names and messages are kept for diagnostics and message oracles, never as proof: a matcher that crashed before comparing carries
 // the same frames as one that compared and failed. Evidence without the origin capability (envelope schema 1) is refused.
+//
+// Revision 29 (review r28 R31 incomplete_fix, design assessment C2-C4): class membership is no proof either: chai constructs its
+// assertion class for argument validation and to wrap an execution error. The origin is now a RECEIPT attached in the worker to the one
+// error an audited framework site constructed (vitest-origin-sites.mjs), naming the site and its role for that occurrence, the
+// `expect()` root and the test. An error is an assertion only when its receipt is of this run and adapter, its site's role is a
+// completed comparison (or an explicit fail) on an `expect()` root of THIS test, not nested in another matcher, and the error has the
+// class that site constructs. Precondition, execution-wrapper, internal, nested, unsupported, unknown, foreign or absent receipts are
+// errors. The `test.fails` inversion is admitted from its own runner-site receipt, no longer from its name and text. Envelope schema 3
+// binds the adapter digest, which the reader recomputes from the files it would run, so older evidence cannot satisfy this rule.
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  adapterDigest,
+  ORIGIN_FILES,
+  ORIGIN_KEY,
+  ORIGIN_NONCE_ENV,
+  ORIGIN_SCHEMA,
+  SITES,
+} from "./vitest-origin-sites.mjs";
 
+export {
+  adapterDigest,
+  ORIGIN_FILES,
+  ORIGIN_KEY,
+  ORIGIN_NONCE_ENV,
+  ORIGIN_SCHEMA,
+  SITES,
+};
 export const REQUEST_SCHEMA = "atlas-vitest-request/1";
-export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/2";
+export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/3";
 /** The lifecycle this adapter was qualified against. Any other version is refused, not assumed compatible. */
 export const PINNED_VITEST = "5.0.1";
-
-/** The per-error origin record written by the worker setup (vitest-origin-setup.mjs), and the producers it may name. */
-export const ORIGIN_SCHEMA = "atlas-assertion-origin/1";
-export const ORIGIN_KEY = "__atlasAssertionOrigin";
-export const ORIGIN_NONCE_ENV = "ATLAS_VITEST_ORIGIN_NONCE";
-export const PRODUCERS = Object.freeze({
-  chai: "chai.AssertionError",
-  extend: "vitest.JestExtendError",
-});
-export const ORIGIN_SETUP = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "vitest-origin-setup.mjs",
-);
+export const ORIGIN_SETUP = ORIGIN_FILES.setup;
+/** The adapter digest of the files as they are now: what a run's envelope and receipts must name to be read. */
+export const currentAdapter = () => adapterDigest().digest;
 
 /**
  * A JSON-safe record of one thrown value. Presence is never decided here: callers count the values before projecting them, and a
@@ -70,8 +83,9 @@ export function project(value) {
 }
 
 /**
- * The origin record of one serialised error, read without trusting it: `null` when absent, `{ invalid: true }` when present but not
- * a record of strings (or unreadable), else exactly `{ schema, producer, nonce }`. Whether it ADMITS the error is `classify`'s decision.
+ * The receipt of one serialised error, read without trusting it: `null` when absent, `{ invalid: true }` when present but not of the
+ * receipt's shape (or unreadable), else exactly `{ schema, nonce, adapter, site, role, root, test, current }`. Whether it ADMITS the
+ * error is `admission`'s decision.
  */
 function originOf(value) {
   let record;
@@ -82,10 +96,18 @@ function originOf(value) {
   }
   if (record === undefined || record === null) return null;
   try {
-    const { schema, producer, nonce } = record;
-    if (![schema, producer, nonce].every((v) => typeof v === "string"))
+    const { schema, nonce, adapter, site, role, root, test, current } = record;
+    const optional = (v) => v === null || typeof v === "string";
+    if (
+      ![schema, nonce, adapter, site, role].every(
+        (v) => typeof v === "string",
+      ) ||
+      !(root === null || Number.isInteger(root)) ||
+      !optional(test) ||
+      !optional(current)
+    )
       return { invalid: true };
-    return { schema, producer, nonce };
+    return { schema, nonce, adapter, site, role, root, test, current };
   } catch {
     return { invalid: true };
   }
@@ -114,47 +136,103 @@ export function firstLine(error) {
   return String(error.stack || error.message || "").split("\n")[0] ?? "";
 }
 
-/**
- * Why ONE projected error is or is not an assertion of this run: `null` when its origin admits it, else the reason. An assertion
- * needs the origin record of a qualified producer class, written in the worker of THIS run (its nonce), and the shape that class
- * gives its errors. Absent, invalid, foreign, stale or unknown origin is never an assertion, whatever the name, frames or text say.
- */
-export function originProblem(error, nonce) {
-  if (error?.kind !== "object") return "not an object";
-  const origin = error.origin;
-  if (origin === null || origin === undefined) return "no assertion origin";
-  if (origin.invalid === true) return "invalid assertion origin";
-  if (origin.schema !== ORIGIN_SCHEMA)
-    return `unsupported origin schema ${JSON.stringify(origin.schema)}`;
-  if (typeof nonce !== "string" || origin.nonce !== nonce)
-    return "assertion origin of another run";
-  if (origin.producer === PRODUCERS.chai)
+/** Whether a projected error has the class its site constructs (a receipt copied onto another object is refused). */
+function shapeProblem(error, constructs) {
+  if (constructs === "AssertionError")
     return error.name === "AssertionError"
       ? null
-      : "chai assertion origin on an error not named AssertionError";
-  if (origin.producer === PRODUCERS.extend)
+      : "an AssertionError site's receipt on an error not named AssertionError";
+  if (constructs === "JestExtendError")
     return error.constructor === "Function<JestExtendError>" &&
       typeof error.assertionName === "string" &&
       error.assertionName.length > 0
       ? null
-      : "extended-matcher origin without its class or assertion name";
-  return `unknown assertion producer ${JSON.stringify(origin.producer)}`;
+      : "an extended-matcher site's receipt without its class or assertion name";
+  if (constructs === "Error")
+    return error.name === "Error" && error.message === "Expect test to fail"
+      ? null
+      : "the inversion site's receipt on another error";
+  return `unknown constructed class ${JSON.stringify(constructs)}`;
 }
 
 /**
- * The kind of ONE error of a test (each error is classified separately, so an assertion never conceals another error, DA-H2):
+ * The admission of ONE projected error of the test `testId` (each error separately, so an assertion never conceals another, DA-H2):
+ * `{ kind, why, site, role }` with kind
  *   timeout    a test or hook time-out (a veto; recognised by its text, which can only refuse, never admit)
- *   inverted   Vitest's own failure of a `test.fails` case that passed: that case's assertion, admissible only for a test.fails case
- *   assertion  an error whose origin record names a qualified producer of THIS run (`originProblem` is null)
- *   error      anything else, whatever its name, frames or text say
+ *   inverted   the runner's `test.fails` inversion site, for this very test, which is a test.fails case
+ *   assertion  a completed comparison (or explicit fail) of an `expect()` root of this test, at an audited site, of this run and adapter
+ *   error      anything else, with `why`, whatever its name, frames or text say
  */
-export function classify(error, { fails = false, nonce } = {}) {
-  if (error?.kind !== "object") return "error";
+export function admission(
+  error,
+  { fails = false, nonce, adapter, testId } = {},
+) {
+  const no = (why, origin) => ({
+    kind: "error",
+    why,
+    site: origin?.site ?? null,
+    role: origin?.role ?? null,
+  });
+  if (error?.kind !== "object") return no("not an object");
   const message = error.message ?? "";
-  if (/timed out/i.test(message.split("\n")[0] ?? "")) return "timeout";
-  if (fails && error.name === "Error" && message === "Expect test to fail")
-    return "inverted";
-  return originProblem(error, nonce) === null ? "assertion" : "error";
+  if (/timed out/i.test(message.split("\n")[0] ?? ""))
+    return { kind: "timeout", why: "time-out", site: null, role: null };
+  const origin = error.origin;
+  if (origin === null || origin === undefined) return no("no assertion origin");
+  if (origin.invalid === true) return no("invalid assertion origin");
+  if (origin.schema !== ORIGIN_SCHEMA)
+    return no(`unsupported origin schema ${JSON.stringify(origin.schema)}`);
+  if (typeof nonce !== "string" || origin.nonce !== nonce)
+    return no("assertion origin of another run", origin);
+  if (typeof adapter !== "string" || origin.adapter !== adapter)
+    return no("assertion origin of another adapter", origin);
+  const spec = Object.hasOwn(SITES, origin.site) ? SITES[origin.site] : null;
+  if (spec === null)
+    return no(`unknown site ${JSON.stringify(origin.site)}`, origin);
+  const shape = shapeProblem(error, spec.constructs);
+  if (shape !== null) return no(shape, origin);
+  const derivable =
+    spec.role === "comparison" ? ["comparison", "internal", "nested"] : [];
+  if (origin.role !== spec.role && !derivable.includes(origin.role))
+    return no(`role ${origin.role} is not ${origin.site}'s`, origin);
+  const ofThisTest = (id) => typeof testId === "string" && id === testId;
+  const yes = (kind) => ({
+    kind,
+    why: null,
+    site: origin.site,
+    role: origin.role,
+  });
+  switch (origin.role) {
+    case "comparison":
+      return ofThisTest(origin.test) && ofThisTest(origin.current)
+        ? yes("assertion")
+        : no("a comparison of another test (or of none)", origin);
+    case "explicit":
+      return ofThisTest(origin.current)
+        ? yes("assertion")
+        : no("an explicit fail outside this test", origin);
+    case "inversion":
+      return fails && ofThisTest(origin.test)
+        ? yes("inverted")
+        : no("an inversion of another test or of no test.fails case", origin);
+    case "internal":
+      return no(
+        "an internal (precondition) assertion, not an expect() root",
+        origin,
+      );
+    case "nested":
+      return no("an assertion nested in another matcher's execution", origin);
+    default:
+      return no(
+        `the ${origin.role} site ${origin.site}, not a comparison`,
+        origin,
+      );
+  }
+}
+
+/** The kind alone (`admission(...).kind`). */
+export function classify(error, context = {}) {
+  return admission(error, context).kind;
 }
 
 const isCount = (n) => Number.isInteger(n) && n >= 0;
@@ -165,7 +243,7 @@ const isCount = (n) => Number.isInteger(n) && n >= 0;
  */
 export function validateEnvelope(
   envelope,
-  { nonce, label, vitest = PINNED_VITEST } = {},
+  { nonce, label, vitest = PINNED_VITEST, adapter = currentAdapter() } = {},
 ) {
   const problems = [];
   const fail = (text) => problems.push(text);
@@ -201,6 +279,10 @@ export function validateEnvelope(
     );
   if (!["passed", "failed"].includes(w.reason))
     fail(`run ended ${JSON.stringify(w.reason)}`);
+  if (Array.isArray(w.tests))
+    for (const t of w.tests)
+      if (typeof t?.id !== "string" || t.id.length === 0)
+        fail("witness test without an id");
   for (const [key, list] of [
     ["modules", w.modules],
     ["suites", w.suites],
@@ -248,10 +330,12 @@ export function validateEnvelope(
       fail(`unsupported assertion-origin schema ${JSON.stringify(o.schema)}`);
     if (o.installed !== true)
       fail(
-        "the assertion-origin setup was not the first setup of every project",
+        "the assertion-origin setup and loading hook were not installed in every project",
       );
-    if (typeof o.setupFile !== "string" || typeof o.setupSha256 !== "string")
-      fail("assertion-origin setup file not recorded");
+    if (o.adapter !== adapter)
+      fail(
+        `assertion-origin adapter ${JSON.stringify(o.adapter)} is not the current ${adapter}`,
+      );
   }
   return problems;
 }
@@ -278,7 +362,8 @@ export function readRun({
   const envelope = readJson(envelopePath, startedMs, "envelope");
   if (envelope.problem)
     return { complete: false, problems: [envelope.problem] };
-  problems.push(...validateEnvelope(envelope, { nonce, label }));
+  const adapter = currentAdapter();
+  problems.push(...validateEnvelope(envelope, { nonce, label, adapter }));
   if (child?.code !== envelope.exitCode)
     problems.push(
       `child exited ${child?.code}, envelope records ${envelope.exitCode}`,
@@ -291,6 +376,7 @@ export function readRun({
   // Case titles need not be unique (parametrised tests repeat them, files share them): cases are a list, matched to the JSON report
   // by module and name in order of appearance.
   const cases = w.tests.map((t) => ({
+    id: t.id,
     name: [...t.ancestors, t.name].join(" > "),
     jsonName: [...t.ancestors, t.name].join(" "),
     module: t.module,
@@ -299,12 +385,18 @@ export function readRun({
     fails: t.fails === true,
     ms: t.ms ?? null,
     errors: t.errors.map((e) => {
-      const kind = classify(e, { fails: t.fails === true, nonce });
+      const a = admission(e, {
+        fails: t.fails === true,
+        nonce,
+        adapter,
+        testId: t.id,
+      });
       return {
-        kind,
+        kind: a.kind,
         firstLine: firstLine(e),
-        producer: kind === "assertion" ? e.origin.producer : null,
-        ...(kind === "error" ? { why: originProblem(e, nonce) } : {}),
+        site: a.site,
+        role: a.role,
+        ...(a.kind === "error" ? { why: a.why } : {}),
       };
     }),
   }));
@@ -451,7 +543,8 @@ export function controlVerdict(run) {
  * `crash_only` (listed, never counted). New with DA-H2: a catch must also be clean, so any time-out, non-assertion error or error
  * outside a test beside the assertions makes the run `tainted` (never caught), and incomplete evidence is `incomplete`. A `test.fails`
  * inversion counts as an assertion only for a case the mutant's own `expect` names (I5). Revision 28: an assertion is an error whose
- * worker-recorded origin names a qualified producer of this run (`classify`), so a matcher that crashed is an error here.
+ * worker-recorded origin names a qualified producer of this run (`classify`), so a matcher that crashed is an error here. Revision 29:
+ * that origin is a per-occurrence site receipt (`admission`), so framework argument validation and wrapped execution errors are errors.
  */
 export function unitVerdict(run, mutant) {
   if (!run.complete) return { verdict: "incomplete", reasons: run.problems };
@@ -484,7 +577,7 @@ export function unitVerdict(run, mutant) {
   const anyAssertion = failed.some((c) =>
     c.errors.some((e) => admissible(c, e)),
   );
-  // Why each error of a failed case was not an assertion (revision 28: its origin), so a refusal says what it saw.
+  // Why each error of a failed case was not an assertion (revision 29: its receipt's site and role), so a refusal says what it saw.
   const whys = new Map();
   for (const c of failed)
     for (const e of c.errors)
