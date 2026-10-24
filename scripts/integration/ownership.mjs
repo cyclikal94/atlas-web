@@ -42,7 +42,15 @@ export function processTable() {
     {
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
-      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      // `ps` itself never carries an ownership mark: a caller whose own environment has one (the maintained runner sets its mark in
+      // process.env so every child inherits it) would otherwise find the listing process as a marked member of its own scan.
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([k]) => !/^ATLAS_IT_/.test(k)),
+        ),
+        LC_ALL: "C",
+        LANG: "C",
+      },
     },
   );
   const rows = [];

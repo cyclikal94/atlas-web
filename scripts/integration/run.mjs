@@ -152,11 +152,18 @@ async function releaseReaper() {
   reaperReleased = true;
   tellReaper({ type: "release" });
   reaper.stdin.end();
-  if (reaper.exitCode === null && reaper.signalCode === null)
+  // The bounded wait keeps the event loop alive (a referenced timer, cleared once the reaper exits): this runs under a top-level
+  // await, and with nothing referenced Node would end the process there (exit 13) before the runner's own exit status is set.
+  if (reaper.exitCode === null && reaper.signalCode === null) {
+    let timer;
     await Promise.race([
       new Promise((resolveExit) => reaper.once("exit", resolveExit)),
-      new Promise((resolveWait) => setTimeout(resolveWait, 5_000).unref()),
+      new Promise((resolveWait) => {
+        timer = setTimeout(resolveWait, 5_000);
+      }),
     ]);
+    clearTimeout(timer);
+  }
 }
 
 // WEB-08d review r6 H4b, carried over in revision 30: every process this invocation starts after this point inherits an ownership

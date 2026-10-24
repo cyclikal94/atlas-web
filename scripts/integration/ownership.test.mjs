@@ -680,3 +680,24 @@ test("Q5: an unmarked member that lost its parent is still traversed: a child it
   assert.equal(isLive(pidOf("outer")), false);
   assert.equal(result.ok, true);
 });
+
+test("revision 30: a caller whose own environment carries a mark never finds the listing process itself as a marked member", () => {
+  // The maintained runner sets ATLAS_IT_<token>=1 in its own process.env so every child inherits it; `ps` is one of those children.
+  const token = "0123456789abcdef";
+  const name = `ATLAS_IT_${token}`;
+  const before = process.env[name];
+  process.env[name] = "1";
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      const members = membersOf({
+        table: processTable(),
+        marks: new Set([`${token}=1`]),
+        never: new Set([process.pid, process.ppid]),
+      });
+      assert.deepEqual([...members.keys()], []);
+    }
+  } finally {
+    if (before === undefined) delete process.env[name];
+    else process.env[name] = before;
+  }
+});
