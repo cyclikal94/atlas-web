@@ -2897,6 +2897,56 @@ const readsOfCacheRows = (page: Page, ids: string[]) =>
             return get.call(this, key);
           } as typeof get);
   }, ids);
+/**
+ * The next real IndexedDB reads of this device's unsent changes by status (the `drafts` index `[status+created_seq]`, as the editor's chain
+ * reads them) FAIL until called again with `false`; `window.__ep36ChainFaults` counts them.
+ */
+const readsOfUnsentChanges = (page: Page, failing: boolean) =>
+  page.evaluate((on) => {
+    const w = window as unknown as {
+      __ep36Index?: {
+        getAll: typeof IDBIndex.prototype.getAll;
+        openCursor: typeof IDBIndex.prototype.openCursor;
+      };
+      __ep36ChainFaults?: number;
+    };
+    if (w.__ep36Index === undefined)
+      w.__ep36Index = {
+        getAll: IDBIndex.prototype.getAll,
+        openCursor: IDBIndex.prototype.openCursor,
+      };
+    const original = w.__ep36Index;
+    w.__ep36ChainFaults = 0;
+    const refuses = (index: IDBIndex) =>
+      on &&
+      index.objectStore.name === "drafts" &&
+      index.name === "[status+created_seq]";
+    IDBIndex.prototype.getAll = function (this: IDBIndex, ...args: never[]) {
+      if (refuses(this)) {
+        w.__ep36ChainFaults = (w.__ep36ChainFaults ?? 0) + 1;
+        throw new DOMException("injected: read refused", "UnknownError");
+      }
+      return (original.getAll as (...a: never[]) => IDBRequest).apply(
+        this,
+        args,
+      );
+    } as typeof original.getAll;
+    IDBIndex.prototype.openCursor = function (
+      this: IDBIndex,
+      ...args: never[]
+    ) {
+      if (refuses(this)) {
+        w.__ep36ChainFaults = (w.__ep36ChainFaults ?? 0) + 1;
+        throw new DOMException("injected: read refused", "UnknownError");
+      }
+      return (
+        original.openCursor as (
+          ...a: never[]
+        ) => IDBRequest<IDBCursorWithValue | null>
+      ).apply(this, args);
+    } as typeof original.openCursor;
+  }, failing);
+
 const faultsReached = (page: Page) =>
   page.evaluate(
     () => (window as unknown as { __ep36Faults?: number }).__ep36Faults ?? 0,
@@ -2988,6 +3038,61 @@ test.describe("E-P36: the field editor's target and its failed reads (review 9, 
         await navigateInApp(page, `/people/${P}`);
         const first = await (await reopened(page, F, "First")).inputValue();
         recordEvidence(info, "e-p36", { ending, reached, second, first });
+        expect(second, "the session shown was ended").toBe("Second saved");
+        expect(first, "another field's session is not touched").toBe(
+          "First kept",
+        );
+      });
+
+  // Review 9's own reproduction of finding 1: the unsent changes cannot be read (shared by both fields, so the unread view is not
+  // withdrawn while the next field's own read loads), and the router shows Second's route through the same component.
+  for (const ending of ["overlay", "Close", "Escape"] as const)
+    for (const reached of ["route reuse", "control"] as const)
+      test(`unsent changes unread, ${ending}, ${reached}: ${reached === "control" ? "the field shown" : "only the field shown"} ends its session`, async ({
+        context,
+      }, info) => {
+        const { page } = await setup(
+          context,
+          `/people/${P}`,
+          resources(),
+          policies,
+        );
+        await expect(page.locator(`[data-field-row="${G}"]`)).toBeVisible();
+        await keep(page, F, "First", "First kept");
+        await keep(page, G, "Second", "Second kept");
+        await readsOfUnsentChanges(page, true);
+        if (reached === "route reuse") {
+          await navigateInApp(page, field(F));
+          await expect(
+            page
+              .getByRole("dialog", { name: "Edit First" })
+              .locator('[data-people-state="editor-unread"]'),
+          ).toBeVisible();
+        }
+        await navigateInApp(page, field(G));
+        const d = page.getByRole("dialog", { name: "Edit Second" });
+        await expect(
+          d.locator('[data-people-state="editor-unread"]'),
+        ).toBeVisible();
+        const faults = await page.evaluate(
+          () =>
+            (window as unknown as { __ep36ChainFaults?: number })
+              .__ep36ChainFaults ?? 0,
+        );
+        expect(faults).toBeGreaterThan(0);
+        if (ending === "overlay") await page.mouse.click(8, 8);
+        else if (ending === "Close")
+          await d.getByRole("button", { name: "Close", exact: true }).click();
+        else await page.keyboard.press("Escape");
+        await expect(d).toBeHidden();
+        await expect
+          .poll(() => new URL(page.url()).pathname)
+          .toBe(`/people/${P}`);
+        await readsOfUnsentChanges(page, false);
+        const second = await (await reopened(page, G, "Second")).inputValue();
+        await navigateInApp(page, `/people/${P}`);
+        const first = await (await reopened(page, F, "First")).inputValue();
+        recordEvidence(info, "e-p36-chain", { ending, reached, second, first });
         expect(second, "the session shown was ended").toBe("Second saved");
         expect(first, "another field's session is not touched").toBe(
           "First kept",

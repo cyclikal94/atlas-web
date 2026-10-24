@@ -24928,8 +24928,11 @@ export const ENGINE = [
     file: "src/features/people/field/FieldEditorDialog.tsx",
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P36:",
+    // Revision 9: in real engines a new field's own read starts loading, which withdraws a view whose own field read failed, so the
+    // route-reuse cases whose FIELD read fails pass with this mutant (pool request-558ca1ddb06c4092bb75, MU-2369 attempt 1: caught 0); the
+    // cases whose UNSENT CHANGES cannot be read (review 9's reproduction) keep the view across the route change and are its expect.
     expect:
-      /E-P36: .*(route reuse|Back): the failed read is said, and only the field shown ends its session/,
+      /E-P36: .*unsent changes unread, .*, route reuse: only the field shown ends its session/,
     patch: (t) =>
       sub(t, /key=\{`\$\{env\.identity\}[^`]*`\}/, "key={env.identity}"),
   },
