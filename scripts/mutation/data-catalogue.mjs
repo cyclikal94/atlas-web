@@ -21505,6 +21505,12 @@ export const UNIT = [
  */
 export const RETIRED = [
   {
+    id: "MU-2305",
+    why: "(REAL ENGINE; WEB-11a revision 9, review 9 finding 1) the field editor's success closes the instance that submitted it: since revision 9 a view's `close` acts only while that view is shown (`useShown`), so the submitting instance, unmounted by Cancel, closes nothing and E-P32 passes with this mutant in three engines (campaign 27, `validation/runs/2026-10-24T07-31-15.848Z-e1ff4136`, pool `request-e1e5957c04824b419bd6`, job `mutant-mu-2305` on m4-air: caught 0, controls passing). Completion through the current owner (`completeSession`) and the view guard are two independent layers; E-P32 has no restored-mount schedule, so the single-layer mutant is equivalent for what it asserts. Its unit counterpart MU-2286 stays (restored-mount schedules)",
+    replacedBy:
+      "MU-2371 (real engine, E-P32: both layers removed) and MU-2368 (unit, both layers); MU-2286 (unit) and MU-2360 (unit, the guard alone)",
+  },
+  {
     id: "MU-2294",
     why: "(WEB-11a revision 7, the design assessment's DA7-12) a FAILED field step counts as settled: 'No fields yet.' is now said only when ONE read of the person's fields and the unsent changes together (`ConfirmedAbsence`, `data.readInventory`) agrees, and that read sees the fields, so the claim is not made; the failure is still said (its banner reads the step's own status). Survived campaign 23 (`validation/runs/2026-10-24T03-06-29.382Z-9f0f614d`, 0 failing tests, controls passing): equivalent for what the tests assert, the step's guard being defence in depth",
     replacedBy:
@@ -24844,9 +24850,9 @@ export const ENGINE = [
       ),
   },
   {
-    id: "MU-2305",
+    id: "MU-2371",
     title:
-      "WEB-11a R6 F1: (REAL ENGINE) the field editor's success closes the instance that submitted it: a new 'Add a field' after Cancel is closed",
+      "WEB-11a R9 F1 with R6 F1: (REAL ENGINE) the field editor's success closes the instance that submitted it, and a replaced view's close still acts: a new 'Add a field' after Cancel is closed",
     file: "src/features/people/field/FieldEditorDialog.tsx",
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P32:",
@@ -24854,9 +24860,13 @@ export const ENGINE = [
       /E-P32: .*Cancel and a new 'Add a field' typed in before it answers/,
     patch: (t) =>
       sub(
-        t,
-        "    ended(ticket);\n  };\n",
-        "    if (stateRef.current.revision === ticket) close();\n  };\n",
+        sub(
+          t,
+          "    ended(ticket);\n  };\n",
+          "    if (stateRef.current.revision === ticket) close();\n  };\n",
+        ),
+        "    if (!shown()) return;\n    forget();\n",
+        "    forget();\n",
       ),
   },
   {
