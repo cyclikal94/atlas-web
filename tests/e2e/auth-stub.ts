@@ -472,6 +472,32 @@ export class AuthStub {
         has_more: false,
       });
     }
+    // WEB-10a (revision 2): the protected landing page, Today, reads the day and the sharing defaults (its quick actions capture them).
+    // Answered as the released backend answers an account with nothing scheduled and private defaults, so an authentication journey that
+    // lands on /today makes no 404s for the console guard to refuse. Like `/sync` above, this double owns no task resources.
+    if (path === "/daily" && method === "GET") {
+      return json(200, {
+        items: [],
+        next_after: null,
+        revision: 1,
+        pending_tasks: [],
+      });
+    }
+    if (path === "/defaults/snapshot" && method === "GET") {
+      return json(200, {
+        defaults: {
+          revision: `${"0".repeat(63)}1`,
+          preferences_version: 1,
+          primary_household_id: null,
+          person: { kind: "private" },
+          field: { kind: "private" },
+          task: { kind: "private" },
+          list: { kind: "private" },
+          progress: { kind: "private" },
+        },
+        households: [],
+      });
+    }
     if (path === "/me" && method === "GET") {
       const account = this.accounts.get(session.account);
       if (!account) return fail(401, "unauthenticated");

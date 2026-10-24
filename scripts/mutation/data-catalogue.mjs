@@ -5,6 +5,20 @@
 // `patch(text)` returns the mutated text. `sub` refuses a patch whose anchor is missing or ambiguous, so a refactor that moves the
 // code a mutant targets fails LOUDLY here instead of silently turning the mutant into a no-op ("patch applied" is asserted).
 
+import { ENGINE_LIFECYCLE, UNIT_LIFECYCLE } from "./catalogue-web08c.mjs";
+import { ENGINE_LABELS, UNIT_LABELS } from "./catalogue-web08d.mjs";
+import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
+import { ENGINE_R17, UNIT_R17 } from "./catalogue-web10a-r17.mjs";
+import { ENGINE_R18, UNIT_R18 } from "./catalogue-web10a-r18.mjs";
+import { ENGINE_R19, UNIT_R19 } from "./catalogue-web10a-r19.mjs";
+import { ENGINE_R20, UNIT_R20 } from "./catalogue-web10a-r20.mjs";
+import { ENGINE_R21, UNIT_R21 } from "./catalogue-web10a-r21.mjs";
+import { ENGINE_R22, UNIT_R22 } from "./catalogue-web10a-r22.mjs";
+import { ENGINE_R23, UNIT_R23 } from "./catalogue-web10a-r23.mjs";
+import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
+import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
+import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
+
 export class PatchError extends Error {}
 
 /** Replaces exactly ONE occurrence of `from` (a string or a RegExp with no `g` flag). Throws when there is none or more than one. */
@@ -57,6 +71,19 @@ const PORT_TESTS = [
   "tests/data/consent-real.test.ts",
   "tests/data/fence.test.ts",
 ];
+
+/** WEB-10a revision 13 (R26): the first Join as revision 13 renders it, and as revision 12 did (MU-2252, MU-2254). */
+const FIRST_JOIN_R13 =
+  "            // One path before and after the first choice (revision 13, R26): the choice that begins the draft keeps its form, and focus.\n            <FirstJoin\n              begun={current}\n              form={(seed) =>\n                joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)\n              }\n            />\n";
+const FIRST_JOIN_R12 =
+  "            current === null ? (\n              <FirstJoin\n                begun={null}\n                form={(seed) =>\n                  joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)\n                }\n              />\n            ) : (\n              joinForm(enrolment, current.policy, CONTROLS_COPY.defaultAudience)\n            )\n";
+
+/** WEB-10a revision 15 (R28): Today's participant words as they are, and as they were before (MU-2255, MU-2266: "You" unconditionally). */
+const TODAY_WHO_R15 = `          {participation === "personal" ? "" : \` · \${whoLabel(row, me)}\`}\n`;
+const TODAY_WHO_R14 = `          {participation === "personal"\n            ? ""\n            : \` · \${data.participants.filter((id) => id !== me).length === 0 ? "You" : \`You and \${data.participants.filter((id) => id !== me).length} other\${data.participants.filter((id) => id !== me).length === 1 ? "" : "s"}\`}\`}\n`;
+/** WEB-10a revision 15 (R29): the rule that a revision needs BOTH resources editable (MU-2259, MU-2260, MU-2267). */
+const EDITABLE_R15 =
+  "  return task.can_edit && execution?.can_edit !== false;\n";
 
 /** The mutants run by vitest over the production source in the fake world (layers L1a and L1b). */
 export const UNIT = [
@@ -184,8 +211,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        'const refusal = fenceRefusal(facts.sync);\n  if (refusal !== null) return { kind: "refused", reason: refusal };\n  const resolved',
-        "const resolved",
+        'const refusal = fenceRefusal(facts.sync);\n  if (refusal !== null) return { kind: "refused", reason: refusal };\n  if (knownDenial(',
+        "if (knownDenial(",
       ),
   },
   {
@@ -16117,8 +16144,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        ".saveAsNew(draft.local_id, base)",
-        ".saveAsNew(draft.local_id, null)",
+        "        draft.local_id,\n        base,\n",
+        "        draft.local_id,\n        null,\n",
       ),
   },
   {
@@ -16350,925 +16377,7 @@ export const UNIT = [
   },
   // ---- WEB-08c (session-lifecycle integration): the switcher, the retained-account directory, 1c.ended, the return destination and
   // K-1. Each is killed by the test written for it (`expect`); the unmutated control of the same tests runs beside it. ----------------
-  {
-    id: "MU-8C-01",
-    title:
-      "WEB-08c §2.1: a rejected indeterminate listing (indexedDB.databases()) is reported as 'no other accounts'",
-    file: "src/data/store/retained-accounts.ts",
-    tests: [
-      "tests/data/retained-accounts.test.ts",
-      "tests/features/switch/switch-flow.test.tsx",
-    ],
-    expect: /MU-8C-01/,
-    patch: (t) =>
-      sub(
-        t,
-        '    names = await deps.host.list();\n  } catch {\n    return { kind: "unknown" };',
-        '    names = await deps.host.list();\n  } catch {\n    return { kind: "ok", accounts: [] };',
-      ),
-  },
-  {
-    id: "MU-8C-02",
-    title:
-      "WEB-08c §2.1: the settled account is not excluded from the retained list",
-    file: "src/data/store/retained-accounts.ts",
-    tests: ["tests/data/retained-accounts.test.ts"],
-    expect: /MU-8C-02/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (account === null || account === options.exclude || seen.has(account))",
-        "if (account === null || seen.has(account))",
-      ),
-  },
-  {
-    id: "MU-8C-03",
-    title:
-      "WEB-08c §2.1 (D-8c-01): an account without its own profile record is labelled with another account's name",
-    file: "src/data/store/retained-accounts.ts",
-    tests: ["tests/data/retained-accounts.test.ts"],
-    expect: /MU-8C-03/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (read !== null) accounts.push(read);",
-        "    if (read !== null)\n      accounts.push(\n        read.lastVerifiedName === null && accounts.length > 0\n          ? { ...read, lastVerifiedName: accounts[accounts.length - 1].lastVerifiedName }\n          : read,\n      );",
-      ),
-  },
-  {
-    id: "MU-8C-04",
-    title:
-      "WEB-08c §2.1: an account this page latched closed_for_deletion is still listed (and read)",
-    file: "src/data/store/retained-accounts.ts",
-    tests: ["tests/data/retained-accounts.test.ts"],
-    expect: /MU-8C-04/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (deps.registry.latch(account) === "closed_for_deletion") continue;\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-8C-05",
-    title:
-      "WEB-08c G-9: the rail's account control is given a name that is not verified for the current epoch (the account id)",
-    file: "src/app/protected-tree.tsx",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-05/,
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "...(label === null || account === null",
-          "...(account === null",
-        ),
-        "                label={label}",
-        "                label={label ?? account}",
-      ),
-  },
-  {
-    id: "MU-8C-06",
-    title: "WEB-08c WF-SWITCH-02: the queued caution is shown at zero",
-    file: "src/features/switch/SwitchFlow.tsx",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /MU-8C-06/,
-    patch: (t) =>
-      sub(
-        t,
-        '        {waiting !== null && waiting > 0 ? (\n          <div\n            role="note"',
-        '        {waiting !== null && waiting >= 0 ? (\n          <div\n            role="note"',
-      ),
-  },
-  {
-    id: "MU-8C-07",
-    title:
-      "WEB-08c D-8c-04: 'That sign-in didn't finish' is raised on an exit to a fence (1b, 1d, 1a, 1e) or catching up",
-    file: "src/features/authentication/attempt-end.ts",
-    tests: ["tests/features/authentication/attempt-end.test.ts"],
-    expect: /MU-8C-07/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (view.kind === "displaying") return true;\n  return view.kind === "signed_out" && view.state === null;',
-        '  return view.kind !== "booting";',
-      ),
-  },
-  {
-    id: "MU-8C-08",
-    title:
-      "WEB-08c D-8c-04: 'That sign-in didn't finish' is raised although a newer epoch settled",
-    file: "src/features/authentication/attempt-end.ts",
-    tests: ["tests/features/authentication/attempt-end.test.ts"],
-    expect: /MU-8C-08/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (advanced || !endedExit(view)) return;",
-        "if (!endedExit(view)) return;",
-      ),
-  },
-  {
-    id: "MU-8C-09",
-    title:
-      "WEB-08c D-8c-03: a return destination is applied for (or survives) another account",
-    file: "src/app/return-destination.ts",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-09/,
-    patch: (t) => sub(t, "      found.account !== account ||\n", ""),
-  },
-  {
-    id: "MU-8C-10",
-    title:
-      "WEB-08c D-8c-03: a return destination ignores the epoch it asks for",
-    file: "src/app/return-destination.ts",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-10/,
-    patch: (t) => sub(t, "    if (!due) return null;\n", ""),
-  },
-  {
-    id: "MU-8C-11",
-    title: "WEB-08c G-10: boot does not pass onReviewDevice",
-    file: "src/app/boot.tsx",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-11/,
-    patch: (t) =>
-      sub(
-        t,
-        "      onReviewDevice: () => lifecycle.reviewDevice(session),\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-8C-12",
-    title:
-      "WEB-08c D-8c-02: the switch sends the picked account's id instead of an ordinary attempt with what was typed",
-    file: "src/features/switch/SwitchFlow.tsx",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /MU-8C-12/,
-    patch: (t) =>
-      sub(
-        t,
-        "onSubmit={(credentials) => submitSwitch(session, owner, credentials)}",
-        'onSubmit={(credentials) =>\n            submitSwitch(session, owner, {\n              ...credentials,\n              username: target.kind === "retained" ? target.account_id : credentials.username,\n            })\n          }',
-      ),
-  },
-  {
-    id: "MU-8C-13",
-    title:
-      "WEB-08c G-23: 'Confirm it's you' sends whatever username the (read-only) field holds instead of this account's",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /whatever the field holds/,
-    // Anchor moved (WEB-08c, R1 of the review of 11 October 2026): the sign-in is now `confirmSignIn`'s journey; same mutation.
-    patch: (t) =>
-      sub(
-        t,
-        "confirmSignIn(session, owner, username, credentials.password)",
-        "confirmSignIn(session, owner, credentials.username, credentials.password)",
-      ),
-  },
-  {
-    id: "MU-8C-14",
-    title:
-      "WEB-08c §3: the switch flow opened by one account is shown over another account's display",
-    file: "src/features/switch/entry.tsx",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /belongs to the account it was opened for/,
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          '    if (account !== null && stage.stage !== "closed" && stage.owner !== account)\n      switchFlow.dropUnless(account);',
-          "    void switchFlow;",
-        ),
-        '  if (account === null || stage.stage === "closed" || stage.owner !== account)',
-        '  if (account === null || stage.stage === "closed")',
-      ),
-  },
-  {
-    id: "MU-8C-15",
-    title:
-      "WEB-08c D-8c-04: the password sign-in does not tell the watcher that its activation is indeterminate (a page that resolves its own activation before 1c.resolving is published raises no 1c.ended)",
-    file: "src/features/authentication/controller.ts",
-    tests: ["tests/features/authentication/attempt-end.test.ts"],
-    expect: /MU-8C-15/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (outcome.kind === "gating") attemptEnd.indeterminate(before);\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-8C-E1",
-    title:
-      "WEB-08c D-8c-05: the switch journey is imported statically into the protected tree (no behavioural difference in an engine: the static lazy-load check and check-initial-chunk are its detectors)",
-    file: "src/features/switch/entry.tsx",
-    tests: ["tests/features/switch/switch-copy.test.ts"],
-    expect: /D-8c-05/,
-    patch: (t) =>
-      sub(
-        t,
-        'const SwitchFlow = lazy(() => import("./SwitchFlow"));',
-        'import SwitchFlowEager from "./SwitchFlow";\nconst SwitchFlow = SwitchFlowEager;\nvoid lazy;',
-      ),
-  },
-  {
-    id: "MU-8C-K1a",
-    title:
-      "WEB-08c K-1: an identity read's 200-other-account / 401 answer leaves the credential_unverified entry beside the stronger fence (the unbounded re-verification)",
-    file: "src/session/kernel/identity.ts",
-    tests: [
-      "tests/session/web08c-k1.test.ts",
-      "tests/session/web08c-traces.test.ts",
-    ],
-    expect: /K-1|T21/,
-    patch: (t) => sub(t, "      replaces_unverified: inflight.fenceSeq,\n", ""),
-  },
-  {
-    id: "MU-8C-K1b",
-    title:
-      "WEB-08c K-1: the recording transaction does not replace the covered credential_unverified entries",
-    file: "src/session/model/reducers/observation.ts",
-    tests: [
-      "tests/session/web08c-k1.test.ts",
-      "tests/session/web08c-traces.test.ts",
-    ],
-    expect: /K-1|T21/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (replaces === undefined) return;",
-        "    if (replaces === undefined || (true as boolean)) return;",
-      ),
-  },
-  // WEB-08c revision 1 (review of 11 October 2026): R1 cancellation, R2 return-destination ownership, R3 recovery report and refusal continuity.
-  {
-    id: "MU-8C-R1a",
-    title:
-      "WEB-08c R1: `attempts.cancel` does not mark the attempt cancelled in page memory (a late grant activates when the clear has to wait for atlas-auth)",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-cancel.test.ts"],
-    expect:
-      /cancelled while another page holds atlas-auth|cancelled while the activating write waits/,
-    patch: (t) => sub(t, "    this.cancelled.add(handle.epoch);\n", ""),
-  },
-  {
-    id: "MU-8C-R1b",
-    title:
-      "WEB-08c R1: a cancelled attempt's grant is recorded and activated when its exchange answers",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-cancel.test.ts"],
-    expect: /cancelled while another page holds atlas-auth/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (this.cancelled.has(handle.epoch)) {",
-        "    if (this.cancelled.has(handle.epoch) && (false as boolean)) {",
-      ),
-  },
-  {
-    id: "MU-8C-R1c",
-    title:
-      "WEB-08c R1: the activating write is not abandoned for a cancellation that came while it waited for atlas-auth",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-cancel.test.ts"],
-    expect: /cancelled while the activating write waits/,
-    patch: (t) =>
-      sub(
-        t,
-        "        () => hiddenNow() || cancelledNow(),\n",
-        "        hiddenNow,\n",
-      ),
-  },
-  {
-    id: "MU-8C-R1d",
-    title:
-      "WEB-08c R1: the controller never cancels the attempt when its caller's signal aborts",
-    file: "src/features/authentication/controller.ts",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /while the exchange is outstanding|cancels it too/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const cancel = () => void session.attempts.cancel(handle);",
-        "  const cancel = () => undefined;",
-      ),
-  },
-  {
-    id: "MU-8C-R1e",
-    title:
-      "WEB-08c R1: 'Cancel — stay as …' returns to the picker without cancelling the sign-in in flight",
-    file: "src/features/switch/state.ts",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect:
-      /Cancel — stay as …' while the exchange|cancelled BEFORE `begin` returned/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (state.stage !== "sign-in" || state.owner !== owner) return;\n    abandon();\n    set({ stage: "picker", owner });',
-        '    if (state.stage !== "sign-in" || state.owner !== owner) return;\n    set({ stage: "picker", owner });',
-      ),
-  },
-  {
-    id: "MU-8C-R1f",
-    title:
-      "WEB-08c R1: Escape or Close ends the switch flow without cancelling the sign-in in flight",
-    file: "src/features/switch/state.ts",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect:
-      /Escape while the exchange is outstanding|Close while the exchange is outstanding/,
-    patch: (t) =>
-      sub(t, "  close(): void {\n    abandon();\n", "  close(): void {\n"),
-  },
-  {
-    id: "MU-8C-R1g",
-    title:
-      "WEB-08c R1: 'Confirm it's you' Cancel closes the section without cancelling the sign-in in flight",
-    file: "src/features/settings/signing-in/confirm-state.ts",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /R1: Cancel while the confirmation is in flight/,
-    patch: (t) =>
-      sub(t, "  cancel(): void {\n    abandon();\n", "  cancel(): void {\n"),
-  },
-  {
-    id: "MU-8C-R2a",
-    title:
-      "WEB-08c R2: an indeterminate (gating) re-authentication drops its return destination",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /an indeterminate activation keeps the destination/,
-    patch: (t) =>
-      sub(t, '  if (result.kind === "gating") return result;\n', ""),
-  },
-  {
-    id: "MU-8C-R2b",
-    title:
-      "WEB-08c R2: a re-authentication's terminal result drops whatever destination is pending, including a newer request's",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /R2: an older request's terminal result/,
-    patch: (t) =>
-      sub(
-        t,
-        "  returnDestination.clearIf(destination);",
-        "  returnDestination.clear();",
-      ),
-  },
-  {
-    id: "MU-8C-R3a",
-    title:
-      "WEB-08c R3: the recovery job's admission wait ignores `begin`'s own revision (a gate that ended before the first probe strands state 3)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect:
-      /R3 \((attempt_gating|operation_pending)\): begin reported the gate/,
-    patch: (t) =>
-      sub(t, "      admission.revision = baseline;", "      void baseline;"),
-  },
-  {
-    id: "MU-8C-R3b",
-    title:
-      "WEB-08c R3: the session's `recovery.begin` refusal carries no admission revision",
-    file: "src/session/kernel/recovery.ts",
-    tests: [
-      "tests/session/admission-probe.test.ts",
-      "tests/session/recovery-api.test.ts",
-    ],
-    expect:
-      /refuses with the revision of its read|a gating attempt|no fence at all/,
-    patch: (t) =>
-      sub(
-        t,
-        '        revision: admissionFrom(k, records, "recovery", account, settled.epoch)\n          .revision,',
-        "        revision: undefined,",
-      ),
-  },
-  {
-    id: "MU-8C-R3c",
-    title:
-      "WEB-08c R3: the admission revision ignores `latest_epoch` (an attempt that came and went between two probes is invisible)",
-    file: "src/session/kernel/admission.ts",
-    tests: ["tests/session/admission-probe.test.ts"],
-    expect: /still changes the revision/,
-    patch: (t) => sub(t, "        state.latest_epoch,\n", ""),
-  },
-  {
-    id: "MU-8C-R4a",
-    title:
-      "WEB-08c R4 (revision 2): the stall bound regains a 250 ms grace (a lease completing at 5,200 ms is sent; the review's regression)",
-    file: "src/session/kernel/state.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /is late: stalled \(no grace\)|NOT_COVERED, never sent/,
-    patch: (t) =>
-      sub(
-        t,
-        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);',
-        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms + 250);',
-      ),
-  },
-  {
-    id: "MU-8C-R4d",
-    title:
-      "WEB-08c R4 (revision 2): the bound's verdict waits one more timer turn (revision 1's first tie-break: an answer observed after the bound's timer still wins)",
-    file: "src/session/kernel/state.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /observed AFTER the bound's timer is late/,
-    patch: (t) =>
-      sub(
-        t,
-        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);',
-        '      const timer = this.ports.clock.setTimeout(\n        () => this.ports.clock.setTimeout(() => resolve("stalled"), 0),\n        ms,\n      );',
-      ),
-  },
-  {
-    id: "MU-8C-R4e",
-    title:
-      "WEB-08c R4 (T22-READ-BOUND-20261012): the display read keeps the 5 s recording bound (T22's 5 s read ties with the timer and fails closed)",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /is an answer: the page stays displayed/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const records = await readRecords(k, k.config.displayReadStallMs);",
-        "  const records = await readRecords(k);",
-      ),
-  },
-  {
-    id: "MU-8C-R4f",
-    title:
-      "WEB-08c R4 (T22-READ-BOUND-20261012): every record reader gets the display read's 6 s (the longer bound leaks beyond the display check)",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /every other reader keeps the hard 5 s/,
-    patch: (t) =>
-      sub(
-        t,
-        "  bound = k.config.recordingStallMs,",
-        "  bound = k.config.displayReadStallMs,",
-      ),
-  },
-  {
-    id: "MU-8C-HF1a",
-    title:
-      "WEB-08c HF-1 (HF1-SHARED-CONFIRMATION-20261013): the settlement does not share the activation's token (every other page makes its own identity read again)",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect:
-      /writes the confirmation of exactly the settled session|adopts the token and the confirmation/,
-    patch: (t) => sub(t, "            csrf_token: session.csrf_token,\n", ""),
-  },
-  {
-    id: "MU-8C-HF1b",
-    title:
-      "WEB-08c HF-1: a page adopts a shared token that names another session",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /names ANOTHER session is neither adopted/,
-    patch: (t) =>
-      sub(
-        t,
-        "    shared.session_id === settled.session_id\n  ) {",
-        "    true\n  ) {",
-      ),
-  },
-  {
-    id: "MU-8C-HF1c",
-    title: "WEB-08c HF-1: a page adopts a shared token of an older epoch",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /older epoch .* is never adopted/,
-    patch: (t) => sub(t, "    shared.epoch === settled.epoch &&\n", ""),
-  },
-  {
-    id: "MU-8C-HF1d",
-    title:
-      "WEB-08c HF-1: a confirmation of another session spares the resume verification",
-    file: "src/session/session.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /does not spare the resume verification/,
-    patch: (t) =>
-      sub(
-        t,
-        "      shared.session_id !== identity.session_id\n",
-        "      false\n",
-      ),
-  },
-  {
-    id: "MU-8C-HF1e",
-    title:
-      "WEB-08c HF-1: a confirmation dated in the future spares the resume verification",
-    file: "src/session/session.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /dated in the FUTURE/,
-    patch: (t) => sub(t, "    return age >= 0 && age <", "    return age <"),
-  },
-  {
-    id: "MU-8C-HF1f",
-    title:
-      "WEB-08c HF-1: the lease retirement records a confirmation for a session the record does not settle",
-    file: "src/session/model/reducers/observation.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /writes NO confirmation/,
-    patch: (t) =>
-      sub(
-        t,
-        "    settled.session_id === confirm.session_id;",
-        "    settled.account_id === confirm.account_id;",
-      ),
-  },
-  {
-    id: "MU-8C-HF1g",
-    title:
-      "WEB-08c HF-1: a clean identity read does not refresh the shared confirmation",
-    file: "src/session/kernel/identity.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /refreshes the shared confirmation/,
-    patch: (t) =>
-      sub(
-        t,
-        "  cleanRelease(k, inflight, {\n    account_id: inflight.account,",
-        "  cleanRelease(k, inflight, undefined && {\n    account_id: inflight.account,",
-      ),
-  },
-  {
-    id: "MU-8C-R4b",
-    title:
-      "WEB-08c R4: the resume gate's polite status never says 'Checking your account' while the local check is pending",
-    file: "src/components/ui/gate-dialog.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
-    expect: /Read pending/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (message.textContent === "") message.textContent = GATE_HEADING;',
-        "    void GATE_HEADING;",
-      ),
-  },
-  {
-    id: "MU-8C-R4c",
-    title:
-      "WEB-08c R4: a tree for a different account keeps the previous account's address (a Settings dialog route opens again; focus is not the main heading)",
-    file: "src/app/protected-tree.tsx",
-    tests: ["tests/app/protected-tree-join.test.tsx"],
-    expect: /where a tree starts/,
-    patch: (t) =>
-      sub(
-        t,
-        '        history.replaceState(null, "", "/");\n      lastMounted = account;',
-        "        void account;\n      lastMounted = account;",
-      ),
-  },
-  {
-    id: "MU-8C-R3d",
-    title:
-      "WEB-08c R3: a re-authentication refusal is not kept in page memory (lost when the activation's gate remounts the tree)",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /R3: a refusal that arrives after the activation's gate/,
-    patch: (t) =>
-      sub(
-        t,
-        "    confirmFlow.fail(journey, result.message);",
-        "    void journey;",
-      ),
-  },
-  {
-    id: "MU-8C-HF13b",
-    title:
-      "WEB-08c revision 3 (R8, HF-13): the level-0 gate does not cancel a heading attempt still waiting from the mount",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
-    expect: /a level-0 gate cancels the pending heading attempt/,
-    patch: (t) =>
-      sub(
-        t,
-        "      // The gate owns focus until the lift: a heading attempt still waiting from the mount is obsolete (HF-13).\n      focusToken += 1;\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-8C-HF13c",
-    title:
-      "WEB-08c revision 3 (R8, HF-13): a deferred heading attempt takes focus from a control the person moved to inside the tree",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
-    expect: /does not take focus from a control the person moved to/,
-    patch: (t) => sub(t, "      if (deferred && moved) return;\n", ""),
-  },
-  {
-    id: "MU-8C-HF13d",
-    title:
-      "WEB-08c revision 3 (R8, HF-13 sensitivity): a same-account lift does not restore the keyed control (the original assertion must fail)",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
-    expect:
-      /focus returns to the control that had it|the original schedule of HF-13/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (target) target.focus();\n",
-        "        if (target) void target;\n",
-      ),
-  },
-  {
-    id: "MU-8C-RR1",
-    title:
-      "WEB-08c revision 3 (R5, S9): the leading page does not announce its recovery report (a follower keeps showing 'Catching up' after the recovery stopped) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /adopts the leader's 'failed' report/,
-    patch: (t) =>
-      sub(
-        t,
-        "        failure,\n      };\n      postStatus();\n",
-        "        failure,\n      };\n",
-      ),
-  },
-  {
-    id: "MU-8C-RR2",
-    title:
-      "WEB-08c revision 3 (R5, S9): a hint for another identity replaces the page's kept report (and withdraws its card 3) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect:
-      /a report for another epoch is not adopted|a report for another account is not adopted/,
-    patch: (t) =>
-      sub(
-        t,
-        "      identity.account_id !== message.account ||\n      identity.epoch !== message.epoch\n    )\n      return;\n    const kept = ownStatus();",
-        "      false\n    )\n      return;\n    const kept = ownStatus();",
-      ),
-  },
-  {
-    id: "MU-8C-RR3",
-    title:
-      "WEB-08c revision 3 (R5, S9): the leading page applies another page's recovery report instead of showing its own job's (both leader guards: adoption and application) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /the leading page never adopts/,
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "  ): void => {\n    if (leading()) return;\n    const identity = deps.identity.get();\n",
-          "  ): void => {\n    const identity = deps.identity.get();\n",
-        ),
-        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
-        "    if (!showingRecoveryCard() || !visible()) return;\n",
-      ),
-  },
-  {
-    id: "MU-8C-RR4",
-    title:
-      "WEB-08c revision 3 (R5, S9): a page that starts after the report never asks for the standing one (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /opened AFTER the report/,
-    patch: (t) =>
-      sub(
-        t,
-        '    deps.channel.post({\n      type: "recovery_state_query",\n',
-        '    void ({\n      type: "recovery_state_query",\n',
-      ),
-  },
-  {
-    id: "MU-8C-RR5",
-    title:
-      "WEB-08c revision 3 (R5, S9): the leading page does not answer a query for its standing report (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /opened AFTER the report/,
-    patch: (t) =>
-      sub(
-        t,
-        "              };\n            postStatus();\n            return;\n",
-        "              };\n            return;\n",
-      ),
-  },
-  {
-    id: "MU-8C-RR6",
-    title:
-      "WEB-08c revision 3 (R5, S9): a page whose identity changed keeps the report kept for the previous identity (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /identity changes drops the adopted report/,
-    patch: (t) =>
-      sub(
-        t,
-        "    return kept !== null &&\n      identity !== null &&\n      kept.account === identity.account_id &&\n      kept.epoch === identity.epoch\n",
-        "    return kept !== null &&\n      identity !== null\n",
-      ),
-  },
-  {
-    id: "MU-8C-RR7",
-    title:
-      "WEB-08c revision 3 (R5, S9): a page is given a report that changes nothing it shows (every hint re-evaluates it) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /is NOT re-evaluated by a report that changes nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (failed === showsFailed) return;\n    const phase = failed",
-        "    const phase = failed",
-      ),
-  },
-  {
-    id: "MU-8C-RR8",
-    title:
-      "WEB-08c revision 3 (R5, S9; the T22 (i) regression): a page that is not showing the recovery card is given a report (a hint wakes a gated or hidden page) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /T22 \(i\): a page that is NOT showing the recovery card/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
-        "    if (leading() || !visible()) return;\n",
-      ),
-  },
-  {
-    id: "MU-8C-R9a",
-    title:
-      "WEB-08c revision 4 (R9): the session never withdraws a held recovery report at its record read (another identity's report, or one held after the fence was cleared, stays)",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/recovery-api.test.ts"],
-    expect:
-      /a report scoped to ANOTHER identity shows nothing|a report made while the account has NO fence is withdrawn/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (\n    k.neutral.recovery &&\n    !(",
-        "  if (\n    (false as boolean) &&\n    !(",
-      ),
-  },
-  {
-    id: "MU-8C-R9b",
-    title:
-      "WEB-08c revision 4 (R9): a recovery report names state 2 or 3 with no fence at all (the WEB-08a fallback that stranded the follower)",
-    file: "src/session/model/neutral-state.ts",
-    tests: ["tests/session/model/neutral-state.test.ts"],
-    expect: /the catch-up states/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (memory.waitingOnOtherWindow) return "1e.waiting";\n',
-        '  if (memory.waitingOnOtherWindow) return "1e.waiting";\n  if (memory.recovery === "catching_up") return "2";\n  if (memory.recovery === "failed") return "3";\n',
-      ),
-  },
-  {
-    id: "MU-8C-R9c",
-    title:
-      "WEB-08c revision 4 (R9, S3): the scan reads only a displaying page (a visible page on recovery state 2 or 3 waits for a hint that was lost)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/recovery-api.test.ts"],
-    expect: /S3: every hint to the follower is LOST too/,
-    patch: (t) =>
-      sub(
-        t,
-        '(view.kind === "neutral" && /^[23]$/.test(view.state))',
-        '(view.kind === "neutral" && (false as boolean))',
-      ),
-  },
-  {
-    id: "MU-8C-R9d",
-    title:
-      "WEB-08c revision 4 (R9, S8): the scan reads a hidden page too (a recovery-card scan wakes a hidden page)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/recovery-api.test.ts"],
-    expect: /a HIDDEN page on state 3 reads nothing on its own/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (\n          ports.page.isVisible() &&\n",
-        "        if (\n          (true as boolean) &&\n",
-      ),
-  },
-  {
-    id: "MU-8C-R9e",
-    title:
-      "WEB-08c revision 4 (R9, S2): a follower asks for the leader's report ONCE per card (a lost report or answer is never repaired)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S2 \(lost report\)|S2 \(lost question, then lost answer\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "        followStatus(Math.min(delay * 2, STATUS_ASK_MAX_MS));\n",
-        "        void delay;\n",
-      ),
-  },
-  {
-    id: "MU-8C-R9f",
-    title:
-      "WEB-08c revision 4 (R9, S4): reports of one producer are not ordered (a late 'none' replaces its newer 'failed')",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S4: a late report of the SAME producer/,
-    patch: (t) =>
-      sub(t, "      message.seq <= kept.seq\n", "      (false as boolean)\n"),
-  },
-  {
-    id: "MU-8C-R9g",
-    title:
-      "WEB-08c revision 4 (R9, S11): the leading page applies a follower's retry whatever failure it was pressed against (a spent retry resets the current stop)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S11: a follower's retry names the failure it saw/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (\n      target.failure !== undefined &&\n",
-        "    if (\n      (false as boolean) &&\n      target.failure !== undefined &&\n",
-      ),
-  },
-  {
-    id: "MU-8C-R9h",
-    title:
-      "WEB-08c revision 4 (R9, S8): a hidden follower is given the kept report (a hint wakes a hidden page)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S8: a HIDDEN follower neither asks nor is given a report/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
-        "    if (leading() || !showingRecoveryCard()) return;\n",
-      ),
-  },
-  {
-    id: "MU-8C-R9i",
-    title:
-      "WEB-08c revision 4 (R9): the leading page answers a question only when it has a failure or progress to report (revision 3: 'none' was never answered)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /the leader answers a question with 'none' too/,
-    patch: (t) =>
-      sub(
-        t,
-        '              announced === null ||\n              announced.account !== message.account ||\n              announced.epoch !== message.epoch\n            )\n              announced = {\n                account: message.account,\n                epoch: message.epoch,\n                phase: "none",\n                failure: null,\n              };\n',
-        '              announced === null ||\n              announced.phase === "none" ||\n              announced.account !== message.account ||\n              announced.epoch !== message.epoch\n            )\n              return;\n',
-      ),
-  },
-  {
-    id: "MU-8C-Q1",
-    title:
-      "WEB-08c revision 4 (DA-N1): a wake (a notification that changes connectivity, the view or the identity object) re-enters a recovery quota stop",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (quotaHeld()) return;\n    void tick();\n",
-        "    void tick();\n",
-      ),
-  },
-  {
-    id: "MU-8C-Q2",
-    title:
-      "WEB-08c revision 4 (DA-N1): connectivity returning re-enters a recovery quota stop",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once|D2 \(accepted limit\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "              if (alive(b) && !quotaHeld()) {\n",
-        "              if (alive(b)) {\n",
-      ),
-  },
-  {
-    id: "MU-8C-Q3",
-    title:
-      "WEB-08c revision 4 (DA-N1, S7): a recovery quota stop is not recorded in the write-failure marker (a reload or a takeover retries it)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once|S7\/S6: the stop survives a reload/,
-    patch: (t) =>
-      sub(
-        t,
-        '    const recorded = recordStop(\n      deps.markers,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
-        '    const recorded = recordStop(\n      undefined,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
-      ),
-  },
-  {
-    id: "MU-8C-Q4",
-    title:
-      "WEB-08c revision 4 (DA-N1): 'Try again' does not retire a recovery quota stop's marker (the person's act cannot end it)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once|S7\/S6: the stop survives a reload/,
-    patch: (t) =>
-      sub(
-        t,
-        '              current.cause === "storage_full") &&\n',
-        "              (false as boolean)) &&\n",
-      ),
-  },
+  ...UNIT_LIFECYCLE,
   // ---- WEB-13a: calendar sources, connections and the manual refresh (MU-1300 onwards; the range reserved for WEB-13a) ----------
   {
     id: "MU-1300",
@@ -19186,1390 +18295,3544 @@ export const UNIT = [
         "    !revoked && slots.get(ticket.source)?.owner.key === ticket.key;\n",
       ),
   },
+  // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
+
+  // ---- WEB-10a (Today view, task/occurrence core): MU-2001..MU-2030 (a range no sibling branch uses) -------------------------------
   {
-    id: "MU-1600",
+    id: "MU-2001",
     title:
-      "WEB-08d: a later MINOR enum value is kept raw instead of decoding to `unknown`",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /a later MINOR value decodes to `unknown` itself/,
+      "WEB-10a: an unobserved closed window of a goal with a maximum finalises to missed (it stays unknown)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /unobserved closed window|finalise\(evaluate\(open\)\)/,
     patch: (t) =>
       sub(
         t,
-        'typeof value === "string" && own(known, value) ? (value as T) : "unknown"',
-        'typeof value === "string" ? (value as T) : "unknown"',
+        '  goal.kind === "checkbox" || goal.kind === "checklist" || minimumOnly(goal);',
+        '  goal.kind === "checkbox" || goal.kind === "checklist" || goal.kind === "numeric";',
       ),
   },
+
   {
-    id: "MU-1601",
-    title: "WEB-08d: the `native` channel is rendered as a browser",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: [
-      "tests/features/settings/session-labels.test.ts",
-      "tests/features/settings/labels-contract.test.ts",
-    ],
-    expect: /reads Atlas app on iOS/,
+    id: "MU-2002",
+    title:
+      "WEB-10a: offline finalisation leaves a provisional result provisional after the window closes (late completion never Done)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /late completion|finalise\(evaluate\(open\)\)|nine-against-eight/,
     patch: (t) =>
       sub(
         t,
-        'if (label.channel === "native") return platform ? appOn(platform) : APP;',
-        "void APP;",
+        '    case "provisional":\n      return "complete";\n',
+        '    case "provisional":\n      return "provisional";\n',
       ),
   },
+
   {
-    id: "MU-1602",
+    id: "MU-2003",
     title:
-      "WEB-08d: the legacy fallback title is lost (an unlabelled session has an empty title)",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /a null, absent or unusable label falls back/,
+      "WEB-10a: a correction is layered as exact when the stream has more than eight entries (only eight are known)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /a correction is exact only when the whole stream is known/,
     patch: (t) =>
       sub(
         t,
-        "  return row.current ? THIS_BROWSER : ANOTHER_SIGN_IN;\n}",
-        '  return row.current ? "" : "";\n}',
+        "  if (base.entry_count > 8 || base.recent_entries.length !== base.entry_count)",
+        "  if (base.recent_entries.length > base.entry_count)",
       ),
   },
+
   {
-    id: "MU-1603",
-    title: "WEB-08d: checkDeviceName accepts U+202E (a right-to-left override)",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: [
-      "tests/features/settings/session-labels.test.ts",
-      "tests/features/settings/labels-contract.test.ts",
-    ],
-    expect: /U\+8238 forbidden: true/,
+    id: "MU-2004",
+    title:
+      "WEB-10a: my exclusion is checked before a covered day (ARCH §3.3c order inverted)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /covered comes BEFORE excluded/,
     patch: (t) =>
       sub(
         t,
-        "(cp >= 0x202a && cp <= 0x202e) ||",
-        "(cp >= 0x202a && cp <= 0x202d) ||",
+        "  if (occ.covered_by !== null && occ.participants.includes(me)) {",
+        "  if (\n    occ.covered_by !== null &&\n    occ.participants.includes(me) &&\n    !(stream?.excluded && occ.definition.allow_streak_exclusions)\n  ) {",
       ),
   },
+
   {
-    id: "MU-1604",
+    id: "MU-2005",
     title:
-      "WEB-08d: the name's length is counted in UTF-16 units, so 64 emoji are refused",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /64 emoji \(128 UTF-16 units\) are accepted/,
+      "WEB-10a: actionable ignores close_incomplete's closes_at (a closed day stays to do)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /close_incomplete is not actionable after closes_at/,
     patch: (t) =>
       sub(
         t,
-        'if (points.length > NAME_MAX_SCALARS) return "too_long";',
-        'if (value.length > NAME_MAX_SCALARS) return "too_long";',
-      ),
-  },
-  {
-    id: "MU-1605",
-    title: "WEB-08d: white space at the edge of a name is accepted",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /problems are reported in order/,
-    patch: (t) => sub(t, '    return "edge_space";', "    void 0;"),
-  },
-  {
-    id: "MU-1606",
-    title: "WEB-08d: a name the server could never send (invalid) is displayed",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /a name a correct server never sends is treated as absent/,
-    patch: (t) =>
-      sub(
-        t,
-        'return typeof raw === "string" && checkDeviceName(raw) === null ? raw : null;',
-        'return typeof raw === "string" ? raw : null;',
-      ),
-  },
-  {
-    id: "MU-1607",
-    title: "WEB-08d: `limit: null` is read as a limited capacity",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /"kind":"unlimited"/,
-    patch: (t) =>
-      sub(
-        t,
-        'if (limit === null && remaining === null) return { kind: "unlimited", used };',
-        'if (limit === null && remaining === null)\n    return { kind: "limited", limit: 0, used, remaining: 0 };',
-      ),
-  },
-  {
-    id: "MU-1608",
-    title: "WEB-08d: an absent capacity (an older server) is read as 0 of 0",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /undefined is \{"kind":"unavailable"\}/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (typeof raw !== "object" || raw === null || Array.isArray(raw))\n    return { kind: "unavailable" };\n  const { limit, used, remaining }',
-        '  if (typeof raw !== "object" || raw === null || Array.isArray(raw))\n    return { kind: "limited", limit: 0, used: 0, remaining: 0 };\n  const { limit, used, remaining }',
-      ),
-  },
-  {
-    id: "MU-1609",
-    title: "WEB-08d: an inconsistent `remaining` is accepted",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /"remaining":3\} is \{"kind":"unavailable"\}/,
-    patch: (t) =>
-      sub(
-        t,
-        "    remaining === Math.max(limit - used, 0)\n",
-        "    remaining >= 0\n",
-      ),
-  },
-  {
-    id: "MU-1610",
-    title:
-      "WEB-08d: the devices line counts the listed devices instead of sync_capacity",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /both lines come from their own answers/,
-    patch: (t) =>
-      sub(
-        t,
-        '<CapacityLine kind="devices" raw={load.value.sync_capacity} />',
-        '<CapacityLine kind="devices" raw={{ limit: (load.value.sync_capacity as { limit: number }).limit, used: load.value.devices.length, remaining: Math.max((load.value.sync_capacity as { limit: number }).limit - load.value.devices.length, 0) }} />',
-      ),
-  },
-  {
-    id: "MU-1611",
-    title: "WEB-08d: the kernel drops sync_capacity from the devices read",
-    file: "src/session/kernel/operations.ts",
-    tests: ["tests/session/public-decode.test.ts"],
-    expect: /BE-Q25 readDevices \+ sync_capacity no transition/,
-    patch: (t) =>
-      sub(
-        t,
-        'return Object.hasOwn(value as object, "sync_capacity")',
-        'return false && Object.hasOwn(value as object, "sync_capacity")',
-      ),
-  },
-  {
-    id: "MU-1612",
-    title:
-      "WEB-08d: the kernel turns an absent session_capacity into null (unavailable can no longer be told from a value)",
-    file: "src/session/kernel/operations.ts",
-    tests: ["tests/session/operations-device-name.test.ts"],
-    expect: /absent stays absent/,
-    patch: (t) =>
-      sub(
-        t,
-        ": { sessions: sessions as SessionSummary[] };",
-        ": { sessions: sessions as SessionSummary[], session_capacity: null };",
-      ),
-  },
-  {
-    id: "MU-1613",
-    title: "WEB-08d: nameDevice trims the name before sending it",
-    file: "src/session/kernel/operations.ts",
-    tests: ["tests/session/operations-device-name.test.ts"],
-    expect: /never trimmed by the client/,
-    patch: (t) =>
-      sub(
-        t,
-        // Review R3 (revision 2) adaptation: the body now sits beside the caller's `withdraw`; same mutation, same intent.
-        ": { body: { name }, withdraw: send.withdraw },",
-        ": { body: { name: name.trim() }, withdraw: send.withdraw },",
-      ),
-  },
-  {
-    id: "MU-1614",
-    title: "WEB-08d: a 404 not_found is reported as `named`",
-    file: "src/session/kernel/operations.ts",
-    tests: ["tests/session/operations-device-name.test.ts"],
-    expect: /404 not_found is `gone`/,
-    patch: (t) =>
-      sub(
-        t,
-        '          return { ok: true, value: "gone" };\n        // Any other answer',
-        '          return { ok: true, value: "named" };\n        // Any other answer',
-      ),
-  },
-  {
-    id: "MU-1615",
-    title:
-      "WEB-08d: a `closed` naming answer (another identity is settled) is treated as a success",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /closed: the session moved on/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (result?.ok) {",
-        '    if (result?.ok || (result && !result.ok && result.error === "closed")) {',
-      ),
-  },
-  {
-    id: "MU-1616",
-    title:
-      "WEB-08d: an unconfirmed outcome (a 5xx or a lost answer) is reported as 'not saved'",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /the outcome is unknown, it says so/,
-    patch: (t) =>
-      sub(t, "          : NAME_UNCONFIRMED;", '          : "Name not saved.";'),
-  },
-  {
-    id: "MU-1617",
-    title:
-      "WEB-08d: naming is offered by a server that does not support it (no sync_capacity)",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: [
-      "tests/features/settings/name-device.test.tsx",
-      "tests/features/settings/sessions-devices.test.tsx",
-    ],
-    expect: /naming is offered only when the server supports it/,
-    patch: (t) =>
-      sub(
-        t,
-        'load.status === "ready" && Object.hasOwn(load.value, "sync_capacity");',
-        'load.status === "ready";',
-      ),
-  },
-  {
-    id: "MU-1618",
-    title: "WEB-08d: the naming control is enabled offline",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /offline: Name and Rename are disabled/,
-    patch: (t) =>
-      sub(
-        t,
-        "                      {canName ? (\n                        online ? (",
-        "                      {canName ? (\n                        online || true ? (",
-      ),
-  },
-  {
-    id: "MU-1619",
-    title:
-      "WEB-08d: a reload keeps the previous answer, so a stale capacity stands while the list is read again",
-    file: "src/features/settings/sessions-devices/useLoad.ts",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /no capacity line while a list reloads or after it fails/,
-    patch: (t) => sub(t, '    setState({ status: "loading" });', "    void 0;"),
-  },
-  {
-    id: "MU-1620",
-    title: "WEB-08d: the retire-other confirmation does not name the device",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /retiring another device: the title names it/,
-    patch: (t) =>
-      sub(
-        t,
-        "title={retireOtherDialogTitle(device)}",
-        'title={"Retire this other device?"}',
-      ),
-  },
-  {
-    id: "MU-1621",
-    title: "WEB-08d: the current-row indicator is on every session row",
-    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /each current row has exactly one indicator/,
-    patch: (t) =>
-      sub(
-        t,
-        '                      {row.current ? (\n                        <span\n                          data-current-tag=""',
-        '                      {true ? (\n                        <span\n                          data-current-tag=""',
-      ),
-  },
-  {
-    id: "MU-1622",
-    title: "WEB-08d: the hint for devices that look the same is missing",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /two devices that look the same get one hint/,
-    patch: (t) =>
-      sub(
-        t,
-        "{canName && hasDuplicateTitles(load.value.devices) ? (",
-        "{canName && false ? (",
-      ),
-  },
-  {
-    id: "MU-1623",
-    title:
-      "WEB-08d: the retirement envelope carries the device's name (persisted in atlas-auth)",
-    file: "src/session/kernel/operations.ts",
-    tests: ["tests/session/operations-retirement.test.ts"],
-    expect: /a device.s name and label are never persisted/,
-    patch: (t) =>
-      sub(
-        t,
-        "summary: input.device.summary,",
-        "summary: { ...input.device.summary, name: input.device.name } as never,",
-      ),
-  },
-  {
-    id: "MU-1624",
-    title:
-      "WEB-08d: a device name is not bidi-isolated where it stands in a composed string (accessible names, titles)",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: [
-      "tests/features/settings/session-labels.test.ts",
-      "tests/features/settings/name-device.test.tsx",
-    ],
-    expect: /an action.s phrase is the title and the row.s own timestamp/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (d.named) return isolate(d.title);",
-        "  if (d.named) return d.title;",
-      ),
-  },
-  {
-    id: "MU-1625",
-    title: "WEB-08d: a name the rules refuse is sent anyway",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /is refused before sending/,
-    patch: (t) => sub(t, "    if (problem) {", "    if (problem && false) {"),
-  },
-  {
-    id: "MU-1626",
-    title:
-      "WEB-08d: the naming handler does not re-check the browser's connectivity",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /the handler re-checks the browser/,
-    patch: (t) =>
-      sub(
-        t,
-        // Review R3 (revision 2) adaptation: the guard now also asks whether the interaction is current; same mutation, same intent.
-        "if (inflight.current || !isOnlineNow() || !interaction.current()) return;",
-        "if (inflight.current || !interaction.current()) return;",
-      ),
-  },
-  {
-    id: "MU-1627",
-    title:
-      "WEB-08d: a naming result that arrives after the dialog was closed is still acted on",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    // Review R1/R3 (revision 2) adaptation: the dialog's `live` flag became its interaction. The mutant removes the presentation guard
-    // that replaced it (the lists are still read again, which is now required); the test still requires that nothing is said.
-    tests: [
-      "tests/features/settings/name-device.test.tsx",
-      "tests/features/settings/interaction-ownership.test.tsx",
-    ],
-    expect: /arrives after the dialog was closed/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!interaction.current()) return;\n    if (result?.ok) {",
-        "    if (result?.ok) {",
-      ),
-  },
-  {
-    id: "MU-1628",
-    title: "WEB-08d: the logout warning does not name this browser",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /logging out: the warning names this browser/,
-    patch: (t) =>
-      sub(
-        t,
-        "return label ? { line: thisBrowserLine(clientLabelText(label)) } : null;",
-        "return label ? null : null;",
-      ),
-  },
-  {
-    id: "MU-1629",
-    title:
-      "WEB-08d: a naming change does not read the sessions list again (its device_name goes stale)",
-    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
-    // Review R1 adaptation (revision 1): naming reported through the section's shared `changed`. Revision 2 adaptation: a change is
-    // reported to every list on the page (`ownership.ts`); the mutant keeps its intent by leaving the sessions list unsubscribed.
-    tests: [
-      "tests/features/settings/name-device.test.tsx",
-      "tests/features/settings/cross-list.test.tsx",
-    ],
-    expect: /BOTH lists are read again/,
-    patch: (t) => sub(t, "  useListChanges(reload);", "  void useListChanges;"),
-  },
-  {
-    id: "MU-1630",
-    title: "WEB-08d: clearing a name sends PUT instead of DELETE",
-    file: "src/session/kernel/operations.ts",
-    tests: ["tests/session/operations-device-name.test.ts"],
-    expect: /null is DELETE with no body/,
-    patch: (t) => sub(t, 'name === null ? "DELETE" : "PUT",', '"PUT",'),
-  },
-  {
-    id: "MU-1631",
-    title:
-      "WEB-08d: the announcement of another session's sign-out does not name it",
-    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
-    tests: ["tests/features/settings/name-device.test.tsx"],
-    expect: /names it in the announcement/,
-    patch: (t) =>
-      sub(
-        t,
-        "named ? signedOut(sessionInSentence(row)) : SIGN_IN_ENDED,",
-        "SIGN_IN_ENDED,",
-      ),
-  },
-  {
-    id: "MU-1632",
-    title: "WEB-08d: the capacity reading accepts a non-integer used count",
-    file: "src/features/settings/sessions-devices/labels.ts",
-    tests: ["tests/features/settings/session-labels.test.ts"],
-    expect: /"limit":4\.5,"used":1,"remaining":3\.5\} is/,
-    patch: (t) =>
-      sub(
-        t,
-        'typeof value === "number" && Number.isSafeInteger(value) && value >= 0;',
-        'typeof value === "number" && value >= 0;',
-      ),
-  },
-  {
-    id: "MU-1633",
-    title:
-      "WEB-08d R1: retiring another device reads only the devices list (its ended sessions and the sign-in capacity stay on screen)",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    // Review R3 (revision 2) adaptation: a retirement reports to every list through `reconcileLists`, not to the devices section; the
-    // mutant reports nothing, so its ended sessions and the sign-in capacity stay on screen as before.
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /retiring another device ends its sessions/,
-    patch: (t) =>
-      sub(
-        t,
-        "      reconcileLists(session, interaction.scope);\n    if (!interaction.current()) return;",
-        "      void reconcileLists;\n    if (!interaction.current()) return;",
-      ),
-  },
-  {
-    id: "MU-1634",
-    title:
-      "WEB-08d R1: signing out another session reads only the sessions list (a removed device keeps its row and controls)",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    // Review R1/R3 (revision 2) adaptation: the devices list is told through its subscription; the mutant leaves it unsubscribed.
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /last session removes the device and its controls/,
-    patch: (t) => sub(t, "  useListChanges(reload);", "  void useListChanges;"),
-  },
-  {
-    id: "MU-1635",
-    title:
-      "WEB-08d R1: the composed screen does not pass the change signal to the devices list",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    // Review R1/R3 (revision 2) adaptation: the composed screen no longer relays the signal; the page's reconciler does. The mutant
-    // tells only the first list subscribed (the sessions list), so the devices list misses the change, as before.
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /last session removes the device and its controls/,
-    patch: (t) =>
-      sub(
-        t,
-        "  for (const reload of [...(readers.get(session) ?? [])]) reload();",
-        "  for (const reload of [...(readers.get(session) ?? [])].slice(0, 1)) reload();",
-      ),
-  },
-  {
-    id: "MU-1636",
-    title:
-      "WEB-08d R1: the composed screen does not pass the change signal to the sessions list",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    // Review R1/R3 (revision 2) adaptation: as MU-1635, telling only the last list subscribed (the devices list).
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /retiring another device ends its sessions/,
-    patch: (t) =>
-      sub(
-        t,
-        "  for (const reload of [...(readers.get(session) ?? [])]) reload();",
-        "  for (const reload of [...(readers.get(session) ?? [])].slice(-1)) reload();",
-      ),
-  },
-  {
-    id: "MU-1637",
-    title:
-      "WEB-08d R1: a sign-out whose outcome is unknown (a lost answer, a 5xx) reads nothing again",
-    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /sign-out, a 503 for a session that is still there/,
-    patch: (t) =>
-      // Review R1/R3 (revision 2) adaptation: the rule is now `mayHaveChanged`; the mutant reads again only after a confirmed answer.
-      sub(
-        t,
-        "    if (mayHaveChanged(result)) reconcileLists(session, interaction.scope);",
-        "    if (result?.ok) reconcileLists(session, interaction.scope);",
-      ),
-  },
-  {
-    id: "MU-1638",
-    title:
-      "WEB-08d R1: a retirement whose outcome is unknown (a lost answer, a 5xx) reads nothing again",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /retirement, a 503/,
-    patch: (t) =>
-      // Review R3 (revision 2) adaptation: the rule now precedes the presentation guard; same intent.
-      sub(
-        t,
-        '"rejected_stale" : outcomeUnknown(result))',
-        '"rejected_stale" : false)',
-      ),
-  },
-  {
-    id: "MU-1639",
-    title:
-      "WEB-08d R1: a definite 4xx refusal is treated as an unknown outcome (the lists are read again for nothing)",
-    file: "src/features/settings/sessions-devices/outcome.ts",
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /sign-out, a 403 refusal/,
-    patch: (t) =>
-      sub(
-        t,
-        "          result.status < 400 ||",
-        "          result.status < 500 ||",
-      ),
-  },
-  {
-    id: "MU-1640",
-    title:
-      "WEB-08d R1: a connection lost after sending is treated as a definite answer (the lists are not read again)",
-    file: "src/features/settings/sessions-devices/outcome.ts",
-    tests: ["tests/features/settings/cross-list.test.tsx"],
-    expect: /offline after sending/,
-    patch: (t) => sub(t, '    (result.error === "offline" ||', "    (false ||"),
-  },
-  {
-    id: "MU-1641",
-    title:
-      "WEB-08d R1 (revision 2): a naming change reaches the lists only while its dialog is open (the dismissed-dialog defect)",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /save, then Cancel\/Keep, then the success/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (mayHaveChanged(result)) reconcileLists(session, interaction.scope);",
-        "    if (mayHaveChanged(result) && interaction.current())\n      reconcileLists(session, interaction.scope);",
-      ),
-  },
-  {
-    id: "MU-1642",
-    title:
-      "WEB-08d R1 (revision 2): an outcome nobody can confirm is not reported to the lists",
-    file: "src/features/settings/sessions-devices/outcome.ts",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /dismissed, then a 503: both lists are read again/,
-    patch: (t) =>
-      sub(
-        t,
-        "  result?.ok === true || outcomeUnknown(result);",
-        "  result?.ok === true;",
-      ),
-  },
-  {
-    id: "MU-1643",
-    title:
-      "WEB-08d R3 (revision 2): a retirement refused before sending is tried again after its dialog was dismissed",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /not_sent held, Cancel\/Keep, then released/,
-    patch: (t) =>
-      sub(t, "      { isCurrent: interaction.current },", "      {},"),
-  },
-  {
-    id: "MU-1644",
-    title:
-      "WEB-08d R3 (revision 2): untilSent makes its first call for an owner that has already gone",
-    file: "src/features/settings/sessions-devices/until-sent.ts",
-    tests: ["tests/features/settings/until-sent.test.ts"],
-    expect: /already superseded makes no call/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!isCurrent()) return last;\n    last = await call();",
-        "    last = await call();",
-      ),
-  },
-  {
-    id: "MU-1645",
-    title:
-      "WEB-08d R3 (revision 2): untilSent waits out a retry delay for an owner that ended during the call",
-    file: "src/features/settings/sessions-devices/until-sent.ts",
-    tests: [
-      "tests/features/settings/until-sent.test.ts",
-      "tests/features/settings/interaction-ownership.test.tsx",
-    ],
-    expect: /no wait and no further call|no retry is even scheduled/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (delay === undefined || !isCurrent()) return last;",
-        "    if (delay === undefined) return last;",
-      ),
-  },
-  {
-    id: "MU-1646",
-    title:
-      "WEB-08d R3 (revision 2): closing a retirement warning closes whichever one is open (a late start of an older one closes the newer)",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /this device's retirement: confirmed, Stay, opened again/,
-    patch: (t) =>
-      sub(
-        t,
-        "    setRetiring((open) => (open?.interaction === interaction ? null : open));",
-        "    setRetiring(null);",
-      ),
-  },
-  {
-    id: "MU-1647",
-    title:
-      "WEB-08d R3 (revision 2): closing the logout warning closes whichever one is open",
-    file: "src/features/settings/sessions-devices/SessionsDevices.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /logging out: confirmed, Stay, opened again/,
-    patch: (t) =>
-      sub(
-        t,
-        "    setLoggingOut((open) => (open?.interaction === interaction ? null : open));",
-        "    setLoggingOut(null);",
-      ),
-  },
-  {
-    id: "MU-1648",
-    title:
-      "WEB-08d A2 (revision 2): one row's confirmed sign-out clears every row's state (another pending row is released)",
-    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /two rows pending/,
-    patch: (t) =>
-      sub(t, "      setRow(id, null);", "      setRows(new Map());"),
-  },
-  {
-    id: "MU-1649",
-    title:
-      "WEB-08d Q7 (revision 2): an interaction stays current after the identity moved on",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect:
-      /settles while a naming answer is held|a retry of the old identity is never made/,
-    patch: (t) =>
-      sub(
-        t,
-        "      scope !== null &&\n      scopeOf(session.identity.get()) === scope,",
-        "      scope !== null,",
-      ),
-  },
-  {
-    id: "MU-1650",
-    title:
-      "WEB-08d Q7 (revision 2): a change of an identity no longer settled makes the new identity's lists read again",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /settles while a naming answer is held/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (scope === null || scopeOf(session.identity.get()) !== scope) return;",
-        "  if (scope === null) return;",
-      ),
-  },
-  {
-    id: "MU-1651",
-    title:
-      "WEB-08d R3 (revision 2): the kernel's ordinary call does not pass the caller's withdraw signal to the send loop",
-    file: "src/session/kernel/operations.ts",
-    tests: ["tests/session/operations-withdraw.test.ts"],
-    expect: /a signal already aborted sends nothing/,
-    patch: (t) => sub(t, "    withdraw: options.withdraw,\n", ""),
-  },
-  {
-    id: "MU-1652",
-    title:
-      "WEB-08d R3 (revision 2): the send loop's guards do not see a withdrawn intent (only its abort event cancels)",
-    file: "src/session/kernel/send.ts",
-    tests: ["tests/session/operations-withdraw.test.ts"],
-    expect: /a signal already aborted sends nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        "    spec.callerSignal?.aborted === true || spec.withdraw?.aborted === true;",
-        "    spec.callerSignal?.aborted === true;",
-      ),
-  },
-  {
-    id: "MU-1653",
-    title:
-      "WEB-08d R3 (revision 2): withdrawing aborts a request already issued (its answer is lost although the server applied it)",
-    file: "src/session/kernel/send.ts",
-    tests: ["tests/session/operations-withdraw.test.ts"],
-    expect: /withdrawn while its answer is held/,
-    patch: (t) =>
-      sub(
-        t,
-        "      k.ports.clock.abortAfter(k.config.stampedRequestTimeoutMs),\n      spec.callerSignal,\n    ),",
-        "      k.ports.clock.abortAfter(k.config.stampedRequestTimeoutMs),\n      combineSignals(\n        spec.withdraw ?? new AbortController().signal,\n        spec.callerSignal,\n      ),\n    ),",
-      ),
-  },
-  {
-    id: "MU-1654",
-    title:
-      "WEB-08d R1/R3 (revision 2): a naming request refused before sending is tried again after its dialog was dismissed",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect:
-      /refused before sending, then dismissed: the name is not tried again/,
-    patch: (t) =>
-      sub(t, "      { isCurrent: interaction.current },", "      {},"),
-  },
-  {
-    id: "MU-1655",
-    title:
-      "WEB-08d R3 (revision 2): the retirement does not carry its interaction's withdraw signal (a dismissal cannot stop one waiting to be issued)",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /not_sent held, Cancel\/Keep, then released/,
-    patch: (t) =>
-      sub(
-        t,
-        "        session.operations.retireOtherDevice(device, {\n          withdraw: interaction.withdraw,\n        }),",
-        "        session.operations.retireOtherDevice(device),",
-      ),
-  },
-  {
-    id: "MU-1656",
-    title:
-      "WEB-08d A3 (revision 2): leaving the screen does not end its interactions (a sign-out refused before sending is tried again) (re-anchored r17: the unmount's end is interactionLifetime's endAll)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /then the screen left: not tried again/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const endAll = () => {\n    for (const interaction of [...open]) interaction.end();",
-        "  const endAll = () => {\n    void open;",
-      ),
-  },
-  {
-    id: "MU-1657",
-    title:
-      "WEB-08d Q9 (revision 2): a password change refused before sending is tried again after its dialog was closed",
-    file: "src/features/settings/signing-in/ChangePasswordForm.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /a password change refused before sending, its dialog closed/,
-    patch: (t) =>
-      sub(t, "      { isCurrent: interaction.current },", "      {},"),
-  },
-  {
-    id: "MU-1658",
-    title:
-      "WEB-08d Q9 (revision 2): an identity removal refused before sending is tried again after the screen was left",
-    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /an identity removal refused before sending, the screen unmounted/,
-    patch: (t) =>
-      sub(t, "      { isCurrent: interaction.current },", "      {},"),
-  },
-  {
-    id: "MU-1659",
-    title:
-      "WEB-08d Q9 (revision 2): the account card's logout warning closes whichever one is open",
-    file: "src/features/settings/account/AccountCard.tsx",
-    tests: ["tests/features/settings/interaction-ownership.test.tsx"],
-    expect: /the account card's logout warning/,
-    patch: (t) =>
-      sub(
-        t,
-        "            setLoggingOut((open) => (open === loggingOut ? null : open));",
-        "            setLoggingOut(null);",
-      ),
-  },
-  {
-    id: "MU-1660",
-    title:
-      "WEB-08d R4 (revision 3): a password form's completion shows its outcome without asking whether it still owns it (a dismissed form announces)",
-    file: "src/features/settings/signing-in/ChangePasswordForm.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect: /Close, then a refusal \(422\): no announcement/,
-    patch: (t) =>
-      sub(t, '    if (!owned) return setPhase({ kind: "idle" });\n', ""),
-  },
-  {
-    id: "MU-1661",
-    title:
-      "WEB-08d R4 (revision 3): the password completion asks for ownership AFTER ending its interaction (a form still open never shows its outcome)",
-    file: "src/features/settings/signing-in/ChangePasswordForm.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect: /control: left open, a refusal is shown and announced at once/,
-    patch: (t) =>
-      sub(
-        t,
-        "    const owned = interaction.current();\n    interaction.end();\n",
-        "    interaction.end();\n    const owned = interaction.current();\n",
-      ),
-  },
-  {
-    id: "MU-1662",
-    title:
-      "WEB-08d R4 (revision 3): an interaction is owned by the account only (a new sign-in of the same account inherits an old answer)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect:
-      /password answer for an identity that moved on is not shown a new sign-in of the same account \(epoch\)/,
-    patch: (t) =>
-      sub(
-        t,
-        /identity \? `\$\{identity\.account_id\}:\$\{identity\.epoch\}` : null;/,
-        "identity ? identity.account_id : null;",
-      ),
-  },
-  {
-    id: "MU-1663",
-    title:
-      "WEB-08d A4 (revision 3): Check now shows its answer without asking whether it still owns it (a dismissed check announces)",
-    file: "src/features/settings/signing-in/Unconfirmed.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect:
-      /dismissed \(Close\) while checking, a working session: nothing is said/,
-    patch: (t) => sub(t, '    if (!owned) return setState("idle");\n', ""),
-  },
-  {
-    id: "MU-1664",
-    title:
-      "WEB-08d R4 (revision 3): dismissing Signing in does not end its forms' interactions until they unmount (an answer in between is shown)",
-    file: "src/features/settings/signing-in/SigningInDialog.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect:
-      /arrives after Close is pressed, before the route has changed, is not shown/,
-    patch: (t) => sub(t, "        scope.dismiss();\n", ""),
-  },
-  {
-    id: "MU-1665",
-    title:
-      "WEB-08d R4 (revision 3): an interaction begun inside a dismissal scope is not tracked by it (the dismissal ends nothing)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect:
-      /arrives after Close is pressed, before the route has changed, is not shown/,
-    patch: (t) => sub(t, "        dismissal?.track(interaction);\n", ""),
-  },
-  {
-    id: "MU-1666",
-    title:
-      "WEB-08d A5 (revision 3): a linked-identity action that ends releases every action's progress",
-    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect:
-      /two removals in progress, X first answered: the other stays in progress/,
-    patch: (t) =>
-      sub(
-        t,
-        "      setPending((now) => without(now, key));",
-        "      setPending(new Set());",
-      ),
-  },
-  {
-    id: "MU-1667",
-    title:
-      "WEB-08d A5 (revision 3): starting a linked-identity action clears every action's failure",
-    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect: /starting a removal clears only its own earlier failure/,
-    patch: (t) =>
-      sub(
-        t,
-        "    setProblems((now) => {\n      const next = new Map(now);\n      next.delete(key);\n      return next;\n    });",
-        "    setProblems(new Map());",
-      ),
-  },
-  {
-    id: "MU-1668",
-    title:
-      "WEB-08d A5 (revision 3): a removal shows its outcome after its identity moved on (no ownership check)",
-    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect: /the identity moved on during a removal: another account/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!finish(key, interaction)) return;",
-        "    finish(key, interaction);",
-      ),
-  },
-  {
-    id: "MU-1669",
-    title:
-      "WEB-08d A5 (revision 3): a link shows its outcome after its identity moved on (no ownership check)",
-    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect: /the identity moved on during a link: another account/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (!finish("link", interaction)) return;',
-        '    finish("link", interaction);',
-      ),
-  },
-  {
-    id: "MU-1670",
-    title:
-      "WEB-08d A5 (revision 3): no synchronous per-action guard (a double press of Remove sends twice)",
-    file: "src/features/settings/signing-in/LinkedIdentities.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect: /a double press of one Remove sends one request/,
-    patch: (t) =>
-      sub(t, "    if (actions.current.has(key)) return null;\n", ""),
-  },
-  {
-    id: "MU-1671",
-    title:
-      "WEB-08d A4 (revision 3): no synchronous guard on Check now (a double press asks twice)",
-    file: "src/features/settings/signing-in/Unconfirmed.tsx",
-    tests: ["tests/features/settings/completion-ownership.test.tsx"],
-    expect: /a double press of Check now, before Checking… renders, asks once/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (checking.current || !online || !isOnlineNow()) return;",
-        "    if (!online || !isOnlineNow()) return;",
-      ),
-  },
-  {
-    id: "MU-1672",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a quiet refresh is not refused while one is outstanding (one return reads twice)",
-    file: "src/features/settings/sessions-devices/useLoad.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect:
-      /overlapping notifications while the read is outstanding make no second read/,
-    patch: (t) =>
-      sub(
-        t,
-        '      shown.current.status !== "ready" ||\n      refreshing.current === generation.current\n',
-        '      shown.current.status !== "ready"\n',
-      ),
-  },
-  {
-    id: "MU-1673",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a quiet refresh runs from an error too (a return reads in place of the error's Retry)",
-    file: "src/features/settings/sessions-devices/useLoad.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /a failed refresh shows the usual error and its Retry/,
-    patch: (t) =>
-      sub(
-        t,
-        '      shown.current.status !== "ready" ||\n      refreshing.current === generation.current\n',
-        "      refreshing.current === generation.current\n",
-      ),
-  },
-  {
-    id: "MU-1674",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the return refresh shows the loading state (rows and the focused control are replaced)",
-    file: "src/features/settings/sessions-devices/useLoad.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect:
-      /nothing is replaced by a loading state|keyboard focus on a row's control stays/,
-    patch: (t) =>
-      sub(
-        t,
-        "    refreshing.current = mine;\n",
-        '    refreshing.current = mine;\n    setState({ status: "loading" });\n',
-      ),
-  },
-  {
-    id: "MU-1675",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a return-triggered answer is shown after the identity moved on",
-    file: "src/features/settings/sessions-devices/useLoad.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /arrives after the identity moved on is dropped/,
-    patch: (t) =>
-      sub(
-        t,
-        "    const current = () => mine === generation.current && isCurrent();\n",
-        "    const current = () => mine === generation.current;\n",
-      ),
-  },
-  {
-    id: "MU-1676",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): an older return-triggered answer replaces a newer read (no generation check)",
-    file: "src/features/settings/sessions-devices/useLoad.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /older return-triggered answer never replaces a newer read/,
-    patch: (t) =>
-      sub(
-        t,
-        "    const current = () => mine === generation.current && isCurrent();\n",
-        "    const current = () => isCurrent();\n",
-      ),
-  },
-  {
-    id: "MU-1677",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): every focus or visible notification reads (no departure is required: one return is several reads)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /a focus with no departure reads nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        '      if (!away || document.visibilityState !== "visible") return;\n',
-        '      if (document.visibilityState !== "visible") return;\n',
-      ),
-  },
-  {
-    id: "MU-1678",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a focus while the tab is hidden reads",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /a focus while the tab is hidden reads nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        '      if (!away || document.visibilityState !== "visible") return;\n',
-        "      if (!away) return;\n",
-      ),
-  },
-  {
-    id: "MU-1679",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): a return reads while the browser says it is offline",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /while the browser says it is offline a return reads nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (scope === null || !navigator.onLine) return;\n",
-        "      if (scope === null) return;\n",
-      ),
-  },
-  {
-    id: "MU-1680",
-    title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the return listeners outlive the screen",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /after the screen is left a return reads nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        '      document.removeEventListener("visibilitychange", visibility);\n      window.removeEventListener("blur", leave);\n      window.removeEventListener("focus", back);\n',
+        '    (occurrence.definition.carry !== "close_incomplete" ||\n      occurrence.closes_at === null ||\n      now < occurrence.closes_at) &&\n',
         "",
       ),
   },
+
   {
-    id: "MU-1681",
+    id: "MU-2006",
     title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the devices list does not refresh on return",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /a change made elsewhere appears after the tab is visible again/,
-    patch: (t) => sub(t, "  useReturnRefresh(refresh);\n", ""),
+      "WEB-10a: an Anyone occurrence I may edit is not eligible without a stream of mine",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /Anyone with occurrence can_edit is eligible/,
+    patch: (t) =>
+      sub(
+        t,
+        '    input.streamPresent ||\n    (occurrence.definition.participation === "anyone" && input.canEdit)\n',
+        "    input.streamPresent\n",
+      ),
   },
+
   {
-    id: "MU-1682",
+    id: "MU-2007",
     title:
-      "WEB-08d Q8 (revision 4, WEB08D-NAVIGATION-FRESHNESS-20261011): the sessions list does not refresh on return",
-    file: "src/features/settings/sessions-devices/SessionsSection.tsx",
-    tests: ["tests/features/settings/return-refresh.test.tsx"],
-    expect: /a change made elsewhere appears after the tab is visible again/,
-    patch: (t) => sub(t, "  useReturnRefresh(refresh);\n", ""),
+      "WEB-10a: offline, the joint line shows the last server answer as if it were current (Q8: never presented as fresh)",
+    file: "src/features/tasks/model/row-state.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect: /the joint line is the server's or nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!input.online)\n",
+        "    if (!input.online && (false as boolean))\n",
+      ),
   },
+
   {
-    id: "MU-1683",
+    id: "MU-2008",
     title:
-      "WEB-08d review R6 (revision 8): a completed naming request closes the dialog whatever was typed since it was submitted",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/name-draft-ownership.test.tsx"],
+      "WEB-10a: day membership uses slot.date for a timed slot (the instant's date in the display zone is ignored)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /a timed slot belongs to the day of its INSTANT/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (slot.instant !== null) return dateIn(slot.instant, zone) === day;",
+        "  if (slot.instant !== null && slot.date === null)\n    return dateIn(slot.instant, zone) === day;",
+      ),
+  },
+
+  {
+    id: "MU-2009",
+    title:
+      "WEB-10a: the occurrence id is a UUIDv5 under NAMESPACE_URL instead of the task's own UUID",
+    file: "src/features/tasks/model/ids.ts",
+    tests: ["tests/features/tasks/ids.test.ts"],
+    expect: /the documented first occurrence/,
+    patch: (t) =>
+      sub(
+        t,
+        "uuidV5(taskId, `atlas-occurrence-v1:${slotKey}`)",
+        'uuidV5("6ba7b811-9dad-11d1-80b4-00c04fd430c8", `atlas-occurrence-v1:${slotKey}`)',
+      ),
+  },
+
+  {
+    id: "MU-2010",
+    title: "WEB-10a: a dated one-off's slot key is its date, not `once`",
+    file: "src/features/tasks/model/ids.ts",
+    tests: ["tests/features/tasks/ids.test.ts"],
+    expect: /slot keys: `once` for every schedule without repeat/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (\n    schedule.repeat === null ||\n    schedule.repeat.frequency === "after_completion" ||',
+        '  if (\n    schedule.repeat?.frequency === "after_completion" ||',
+      ),
+  },
+
+  {
+    id: "MU-2011",
+    title: "WEB-10a: in a fold the LATER instant is taken",
+    file: "src/features/tasks/model/time.ts",
+    tests: ["tests/features/tasks/time.test.ts"],
+    expect: /autumn fold/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (found.length > 0) return found[0] as number;",
+        "  if (found.length > 0) return found[found.length - 1] as number;",
+      ),
+  },
+
+  {
+    id: "MU-2012",
+    title:
+      "WEB-10a: in a gap the wall time moves BACKWARDS by the change of offset",
+    file: "src/features/tasks/model/time.ts",
+    tests: ["tests/features/tasks/time.test.ts"],
+    expect: /spring gap|Lord Howe/,
+    patch: (t) =>
+      sub(
+        t,
+        "instantsOf(zone, wall + gap)[0]",
+        "instantsOf(zone, wall - gap)[0]",
+      ),
+  },
+
+  {
+    id: "MU-2013",
+    title:
+      "WEB-10a: a checkbox record omits expected_version (the server refuses it: required for checkbox and checklist)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /a create seeds task, details, first occurrence/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ? { expected_version: bases[input.progressId] as number }\n",
+        "          ? {}\n",
+      ),
+  },
+
+  {
+    id: "MU-2014",
+    title:
+      "WEB-10a: exclude is checked against the OCCURRENCE's version instead of my progress stream's",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /exclude is checked against MY PROGRESS version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          expected_version: bases[input.progressId] as number,\n",
+        "          expected_version: bases[input.occurrenceId] as number,\n",
+      ),
+  },
+
+  {
+    id: "MU-2015",
+    title:
+      "WEB-10a: revise_task does not raise the task's details (the server raises the execution too)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /revise_task: the task's version and its policy_version/,
+    patch: (t) =>
+      sub(
+        t,
+        '      {\n        resourceId: input.executionId,\n        role: "side_effect",\n        basis: "resource",\n        versionChecked: true,\n        requiresEdit: true,\n      },\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2016",
+    title:
+      "WEB-10a: revise_occurrence raises no progress stream (the server raises every participant's)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
     expect:
-      /completes after a later edit keeps the dialog|an edit away and back is still a later draft|a not_sent retry keeps the submitted payload/,
+      /revise_occurrence: the occurrence's version, and EVERY known progress stream raised/,
     patch: (t) =>
-      sub(t, "      if (revision.current === submitted) {\n", "      {\n"),
+      sub(
+        t,
+        "  const progress = [...new Set(input.progressIds)];",
+        "  const progress: string[] = [];",
+      ),
   },
+
   {
-    id: "MU-1684",
+    id: "MU-2017",
     title:
-      "WEB-08d review R6 (revision 8): an accepted edit does not move the draft's revision on",
-    file: "src/features/settings/sessions-devices/NameDeviceDialog.tsx",
-    tests: ["tests/features/settings/name-draft-ownership.test.tsx"],
+      "WEB-10a: revise_task omits expected_policy_version (Q1: refused with conflict)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /revise_task: the task's version and its policy_version/,
+    patch: (t) =>
+      sub(t, "          expected_policy_version: input.policyVersion,\n", ""),
+  },
+
+  {
+    id: "MU-2018",
+    title:
+      "WEB-10a: a private ('Only me') create does not capture the progress defaults (the creator's enrolment uses them)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /never fetched is held for review|a create seeds task/,
+    patch: (t) =>
+      sub(
+        t,
+        '["task", "progress"] : ["progress"];',
+        '["task", "progress"] : [];',
+      ),
+  },
+
+  {
+    id: "MU-2019",
+    title:
+      "WEB-10a: an Anyone first record does not capture the progress defaults (the stream is created on demand from them)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /an Anyone first stream is seeded at 1 and captures progress/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const captured = input.firstAnyoneStream\n",
+        "  const captured = input.firstAnyoneStream && (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-2020",
+    title:
+      "WEB-10a: a successful save sends hidden numeric bounds after switching to a tick (PRODUCT-DECISIONS item 2)",
+    file: "src/features/tasks/model/form.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect: /switching numeric → checkbox keeps the bounds/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (show.numeric) {",
+        '  if (show.numeric || state.minimum.trim() !== "") {',
+      ),
+  },
+
+  {
+    id: "MU-2021",
+    title:
+      "WEB-10a: switching the goal kind discards the hidden checklist items",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /switching the goal kind away and back keeps the checklist items/,
+    patch: (t) =>
+      sub(
+        t,
+        "onChange={() => set({ goalKind: kind })}",
+        "onChange={() => set({ goalKind: kind, checklist: [] })}",
+      ),
+  },
+
+  {
+    id: "MU-2022",
+    title:
+      "WEB-10a: a refused save clears the form (a failure must keep every value)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /a refused save keeps every value/,
+    // Re-expressed in revision 18 (same intent): the form's values now live in its editing session (`kept-input.ts`, R33).
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!saved.ok) note = saved.message;",
+        "        if (!saved.ok) {\n          note = saved.message;\n          kept.edit(() => ({ initial, state: initial }));\n        }",
+      ),
+  },
+
+  {
+    id: "MU-2023",
+    title:
+      "WEB-10a: a 409 on a /daily continuation is not a restart (TASK-7: the read fails instead of starting again)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-page.test.tsx"],
+    expect: /TASK-7/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (page.kind === "conflict" && revision !== undefined) {',
+        '        if (page.kind === "conflict" && revision !== undefined && (false as boolean)) {',
+      ),
+  },
+
+  {
+    id: "MU-2024",
+    title:
+      "WEB-10a: a refused mount-time read is not remembered (the remount asks again, for ever)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/today-page.test.tsx",
+      "tests/features/tasks/model.test.ts",
+    ],
+    expect: /a 403 is remembered|AFTER the view unmounted/,
+    patch: (t) =>
+      sub(t, "    noteRefusal(identity, read, result.kind);", "    void read;"),
+  },
+
+  {
+    id: "MU-2025",
+    title:
+      "WEB-10a: a late /daily answer of the previous identity is applied (the read's currency, checked per page and on completion, and the answer's key are all ignored)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-page.test.tsx"],
+    expect: /a late answer for a previous identity is never shown/,
+    patch: (t) =>
+      sub(
+        t.replace(
+          "const isCurrent = () => mine === read.current;",
+          "const isCurrent = () => mine === mine;",
+        ),
+        // Re-expressed in revision 1 (R2 moved the answer's key check into `listed`): the same three layers are defeated.
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    env.online && answer !== null ? answer : null;",
+      ),
+  },
+
+  {
+    id: "MU-2026",
+    title:
+      "WEB-10a: mergeResource takes a projection of another resource (a multi-resource create projects the task as its occurrence)",
+    file: "src/data/model/overlay.ts",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/data/outcomes-model.test.ts",
+    ],
+    expect: /mergeResource ignores a projection with another id/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (projected !== null && projected.id === target) {",
+        "      if (projected !== null) {",
+      ),
+  },
+
+  {
+    id: "MU-2027",
+    title:
+      "WEB-10a: commandKindOf ignores a wrapped `{command: {kind}}` (every task draft's kind is the endpoint)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/features/tasks/commands.test.ts",
+    ],
+    expect: /commandKindOf reads a WRAPPED command|a create seeds task/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const kind = (wrapped as Record<string, unknown>).kind;\n    if (typeof kind === "string") return kind;\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2028",
+    title:
+      "WEB-10a: readOutstanding keeps an acknowledged draft whose effect is gone (counted twice once the cache has it)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /queued, in-flight and blocked drafts naming a resource/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-expressed in revision 1 (R4 moved the check into `oldestNaming`): an acknowledged draft is kept whatever its effect.
+        '        (draft.status === "acknowledged" &&\n          (await effectStands(reader, id, draft)))',
+        '        draft.status === "acknowledged"',
+      ),
+  },
+
+  {
+    id: "MU-2029",
+    title:
+      "WEB-10a: 'Exclude from my streak' is offered when the task does not allow exclusions",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /Exclude is hidden entirely when the policy is off/,
+    patch: (t) =>
+      sub(
+        t,
+        "    data.definition.allow_streak_exclusions &&\n    data.covered_by === null &&",
+        "    data.covered_by === null &&",
+      ),
+  },
+
+  {
+    id: "MU-2030",
+    title:
+      "WEB-10a: a pooled task with a tick goal passes validation (pooled needs an amount)",
+    file: "src/features/tasks/model/form.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
     expect:
-      /completes after a later edit keeps the dialog|an edit away and back is still a later draft|a not_sent retry keeps the submitted payload/,
-    patch: (t) => sub(t, "            revision.current += 1;\n", ""),
-  },
-  {
-    id: "MU-1685",
-    title:
-      "WEB-08d revision 17: every cleanup ends the interactions at once again (StrictMode's simulated unmount ends a press made before the effects ran)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
-    expect:
-      /a press before the component's effects ran keeps its interaction|StrictMode's simulated unmount/,
+      /validation matches the contract bounds, and pooled needs an amount/,
     patch: (t) =>
       sub(
         t,
-        "        if (!development || !first || !sameTurn) return endAll();\n",
-        "        return endAll();\n",
+        '  if (state.participation === "pooled" && goal.kind !== "numeric")',
+        '  if (state.participation === "pooled" && goal.kind !== "numeric" && (false as boolean))',
       ),
   },
+  // ---- WEB-10a revision 1 (review of 13 October 2026, R1-R6): MU-2034..MU-2060 ------------------------------------------------------
   {
-    id: "MU-1686",
+    id: "MU-2034",
     title:
-      "WEB-08d revision 17: a genuine unmount in the turn of the first setup never ends its interactions",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
-    expect: /a genuine unmount in the turn of the first setup/,
+      "WEB-10a R1: an occurrence in the address is accepted only when it is on the loaded page of saved days",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /BEYOND the first page/,
+    // Re-expressed in revision 4 (same intent): the selection is made inside the detail's certified read, against its first page.
     patch: (t) =>
       sub(
         t,
-        "          if (detached) endAll();\n",
-        "          if (false) endAll();\n",
+        "    if (belongs(asked.value)) {",
+        "    if (\n      belongs(asked.value) &&\n      firstPage?.rows.some((r) => r.base.id === occurrenceParam) === true\n    ) {",
       ),
   },
+
   {
-    id: "MU-1687",
+    id: "MU-2035",
     title:
-      "WEB-08d revision 17: a detached interaction is still current (an old answer could be shown or retried until the end of the turn)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
-    expect: /a genuine unmount in the turn of the first setup/,
+      "WEB-10a R1: an occurrence in the address that is unavailable falls back to another day (today's or the page's last)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /not on this device|another task's day/,
+    // Re-expressed in revision 4 (same intent): the fallback would be the first page's last day of the certified read.
     patch: (t) =>
       sub(
         t,
-        "        current: () => !detached && inner.current(),\n",
-        "        current: () => inner.current(),\n",
+        '    } else selection = "unavailable";',
+        "    } else {\n      const last = firstPage?.rows[firstPage.rows.length - 1];\n      chosen = last?.base.id ?? null;\n      chosenRow = last?.merged ?? null;\n    }",
       ),
   },
+
   {
-    id: "MU-1688",
+    id: "MU-2036",
     title:
-      "WEB-08d revision 17: production defers the end of a cleanup in its setup's turn as development does",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
-    expect: /production \(no simulated unmount\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (!development || !first || !sameTurn) return endAll();\n",
-        "        if (!first || !sameTurn) return endAll();\n",
-      ),
-  },
-  {
-    id: "MU-1689",
-    title:
-      "WEB-08d revision 17: every cleanup in a setup's turn is taken for StrictMode's simulated one (a genuine same-turn unmount after its pass is deferred)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
-    expect:
-      /after StrictMode's pass, a genuine unmount in the same turn ends them at once|a genuine unmount ends the interaction at once/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (!development || !first || !sameTurn) return endAll();\n",
-        "        if (!development || !sameTurn) return endAll();\n",
-      ),
-  },
-  {
-    id: "MU-1690",
-    title:
-      "WEB-08d revision 17: a genuine unmount in a later turn is deferred too (its interactions are not ended at once)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
-    expect:
-      /a cleanup in a later turn than its setup|a genuine unmount ends the interaction at once/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (!development || !first || !sameTurn) return endAll();\n",
-        "        if (!development || !first) return endAll();\n",
-      ),
-  },
-  {
-    id: "MU-1691",
-    title:
-      "WEB-08d revision 17: a reconnect does not attach the interactions again (StrictMode's pass leaves them detached and they end)",
-    file: "src/features/settings/sessions-devices/ownership.ts",
-    tests: ["tests/features/settings/interaction-lifetime.test.tsx"],
-    expect:
-      /StrictMode's simulated unmount|a press before the component's effects ran keeps its interaction/,
-    patch: (t) =>
-      sub(
-        t,
-        "      detached = false;\n      setups += 1;\n",
-        "      setups += 1;\n",
-      ),
-  },
-  {
-    id: "MU-1695",
-    title:
-      "WEB-08d review r25 R25-N2: the other-device confirmation never hears of connectivity (its subscription is a constant online)",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /other device RC4 /,
-    patch: (t) =>
-      sub(t, "  const online = useOnline();\n", "  const online = true;\n"),
-  },
-  {
-    id: "MU-1696",
-    title:
-      "WEB-08d review r25 R25-N2: the other-device confirmation has no offline disabled state",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /other device RC4 /,
-    patch: (t) =>
-      sub(t, "          ) : !online ? (\n", "          ) : false ? (\n"),
-  },
-  {
-    id: "MU-1697",
-    title:
-      "WEB-08d review r25 R25-N2: the other-device confirmation does not ask the browser at the moment of use",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /other device RC3 /,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (inflight.current || !isOnlineNow() || !interaction.current()) return;\n",
-        "    if (inflight.current || !interaction.current()) return;\n",
-      ),
-  },
-  {
-    id: "MU-1698",
-    title:
-      "WEB-08d review r25 R25-N2: this device's confirmation never hears of connectivity (its subscription is a constant online)",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /current device RC4 |RC9 /,
-    patch: (t) =>
-      sub(t, "  const online = useOnline();\n", "  const online = true;\n"),
-  },
-  {
-    id: "MU-1699",
-    title:
-      "WEB-08d review r25 R25-N2: this device's confirmation has no offline disabled state",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /current device RC4 |RC9 |RC11 /,
-    patch: (t) =>
-      sub(
-        t,
-        "          {known && !busy && !offline ? (\n",
-        "          {known && !busy ? (\n",
-      ),
-  },
-  {
-    id: "MU-1700",
-    title:
-      "WEB-08d review r25 R25-N2: this device's confirmation does not ask the browser at the moment of use",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /current device RC3 /,
-    patch: (t) =>
-      sub(t, "    if (needsConnection && !isOnlineNow()) return;\n", ""),
-  },
-  {
-    id: "MU-1701",
-    title:
-      "WEB-08d review r25 R25-N2: the online rule is not scoped to retirement: logging out is blocked offline too",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /RC12 |RC13 /,
-    patch: (t) =>
-      sub(
-        t,
-        '  const needsConnection = kind === "retire";\n',
-        "  const needsConnection = true;\n",
-      ),
-  },
-  {
-    id: "MU-1702",
-    title:
-      "WEB-08d review r25 R25-N2: the online rule is scoped to the wrong kind: logging out needs a connection and retiring this device does not",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /current device RC[34] |RC12 |RC13 /,
-    patch: (t) =>
-      sub(
-        t,
-        '  const needsConnection = kind === "retire";\n',
-        '  const needsConnection = kind === "logout";\n',
-      ),
-  },
-  {
-    id: "MU-1703",
-    title:
-      "WEB-08d review r25 R25-N2: the Retire opener does not ask the browser at the moment of use",
-    file: "src/features/settings/sessions-devices/DevicesSection.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /RC2 /,
-    patch: (t) =>
-      sub(
-        t,
-        "                            if (navigator.onLine) openRetiring(row);\n",
-        "                            openRetiring(row);\n",
-      ),
-  },
-  {
-    id: "MU-1704",
-    title:
-      "WEB-08d review r25 R25-N2: this device's confirmation can be begun twice while the first is being started",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /current device RC6 /,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!known || inflight.current) return;\n",
-        "    if (!known) return;\n",
-      ),
-  },
-  {
-    id: "MU-1705",
-    title:
-      "WEB-08d review r25 R25-N2: reconnecting confirms the other-device retirement by itself",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /other device RC5 /,
+      "WEB-10a R1: an occurrence in the address is not checked against the task (its parent and task id)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /another task's day/,
     patch: (t) =>
       sub(
         sub(
           t,
-          'import { useRef, useState } from "react";',
-          'import { useEffect, useRef, useState } from "react";',
+          "    if (executionId === null || row.parent_id !== executionId) return false;\n",
+          "",
         ),
-        "  const inflight = useRef(false);\n",
-        "  const inflight = useRef(false);\n  const sawOffline = useRef(false);\n  useEffect(() => {\n    if (!online) sawOffline.current = true;\n    else if (sawOffline.current) void confirm();\n  });\n",
+        "    return parsed === null || parsed.task_id === taskId;",
+        "    return parsed === parsed;",
       ),
   },
+
   {
-    id: "MU-1706",
+    id: "MU-2037",
     title:
-      "WEB-08d review r25 R25-N2: reconnecting confirms this device's retirement by itself",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /current device RC5 /,
+      "WEB-10a R1: without an occurrence in the address, the latest day of the FIRST page is shown (not of every saved day)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /latest day by date over EVERY saved day/,
+    // Re-expressed in revision 4 (same intent): the walk stops after its first window and that window's latest is taken.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "              best = { id: listed.base.id, date, row: listed.merged };\n          }\n          return undefined;",
+          '              best = { id: listed.base.id, date, row: listed.merged };\n          }\n          return "stop";',
+        ),
+        '      if (end !== "complete") return unread();\n      const found',
+        '      if (end === "closed") return unread();\n      const found',
+      ),
+  },
+
+  {
+    id: "MU-2038",
+    title:
+      "WEB-10a R1: the day picker never offers the next page of saved days",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /a page of 100 at a time/,
     patch: (t) =>
       sub(
         t,
-        "  const offline = needsConnection && !online;\n",
-        "  const offline = needsConnection && !online;\n  const sawOffline = useRef(false);\n  useEffect(() => {\n    if (offline) sawOffline.current = true;\n    else if (sawOffline.current && known && !busy) void confirm();\n  });\n",
+        "      more: page?.next !== null && page?.next !== undefined,",
+        "      more: false,",
       ),
   },
+
   {
-    id: "MU-1707",
+    id: "MU-2039",
     title:
-      "WEB-08d review r25 R25-N2: an applied answer of an other-device retirement no longer reads the lists again (the issued effect's reconciliation dropped)",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    tests: ["tests/features/settings/retirement-connectivity.test.tsx"],
-    expect: /other device RC6 |RC7 /,
+      "WEB-10a R2: the last /daily answer still lists the day and gives my result once the device is offline",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /offline WITHOUT a remount/,
     patch: (t) =>
       sub(
         t,
-        "      reconcileLists(session, interaction.scope);\n",
-        "      void 0;\n",
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    answer !== null && answer.key === key ? answer : null;",
       ),
   },
+
+  {
+    id: "MU-2040",
+    title:
+      "WEB-10a R2: my result from /daily still applies after a sync page committed since its read began",
+    // Re-expressed in revision 2 (same intent): the cache generation is now the answer's `current` basis, checked in `composeRow`.
+    // Re-expressed in revision 3 (same intent): the condition now also names the clock generation (`sameClock`), kept by this patch.
+    file: "src/features/tasks/view.ts",
+    tests: [
+      "tests/features/tasks/today-freshness.test.tsx",
+      "tests/features/tasks/freshness-provenance.test.tsx",
+    ],
+    expect:
+      /sync page committed after the read began|cache first|permission the cache committed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    basis?.current === true &&\n    basis.sameClock &&",
+        "    basis !== null &&\n    basis.sameClock &&",
+      ),
+  },
+
+  {
+    id: "MU-2041",
+    title:
+      "WEB-10a R2: my result from /daily still applies after a window boundary passed since it was answered",
+    // Re-expressed in revision 2 (same intent): the boundary is now measured from the read's dispatch (`requestedAt`).
+    // Re-expressed in revision 3 (same intent): the coverage is the last term of the condition.
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /window closes before the re-read answers/,
+    patch: (t) =>
+      sub(
+        t,
+        "    answerCovers(data, basis.requestedAt, nowMs);",
+        "    basis.requestedAt !== null;",
+      ),
+  },
+
+  {
+    id: "MU-2042",
+    title:
+      "WEB-10a R2: an answer is taken as current at the instant of the boundary itself",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /answerCovers/,
+    // Re-expressed in revision 3 (same intent): the interval is now between the dispatch and now in either direction (`from`, `to`).
+    patch: (t) => sub(t, "boundary * 1000 <= to)", "boundary * 1000 < to)"),
+  },
+
+  {
+    id: "MU-2043",
+    title:
+      "WEB-10a R3: a successful record clears an amount typed while it was pending",
+    file: "src/features/tasks/detail/RecordCard.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /typed while the save was pending stays after its success/,
+    // Re-expressed in revision 18 (same intent): the amount and its revision now live in the card's editing session (R33).
+    patch: (t) =>
+      sub(
+        t,
+        "                        completeKept(ticket, ok);",
+        '                        completeKept(ticket, ok);\n                        if (ok) input.edit((v) => ({ ...v, amount: "" }));',
+      ),
+  },
+
+  {
+    id: "MU-2044",
+    title:
+      "WEB-10a R3: a successful correction closes the dialog and forgets the retained draft whatever was edited since",
+    // Re-expressed in revision 2 (same intent): the edit revision now lives in the correction owner, which outlives the dialog's mounts.
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: [
+      "tests/features/tasks/save-acknowledgement.test.tsx",
+      "tests/features/tasks/correction-ownership.test.tsx",
+    ],
+    expect:
+      /edit made while the save was pending|newer edit kept while the person went to the queue|keeps 15|B's own save|edit after the submission/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (saved && held.revision === ticket.revision) {",
+        "  if (saved) {",
+      ),
+  },
+
+  {
+    id: "MU-2045",
+    title:
+      "WEB-10a R3: a successful fix closes the form whatever was typed since it was submitted",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /value typed while the save was pending stays in the open fix/,
+    // Re-expressed in revision 2 (same intent): the completion now names its fix session. Again in revision 4: the open fix is held by
+    // the history (its value and edit count), and its completion compares the edit count there. Again in revision 6 (R16): the
+    // completion compares the DRAFT's revision (edits across every editor of it).
+    patch: (t) =>
+      sub(
+        t,
+        "      if (ok && f.draft.rev === rev)\n        return f.session === session",
+        "      if (ok)\n        return f.session === session",
+      ),
+  },
+
+  {
+    id: "MU-2046",
+    title:
+      "WEB-10a R3: the fix can be saved again while its save is pending (two attempts)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /Save waits for the pending one/,
+    // Re-expressed in revision 4 (same intent): the pending save is the held fix's `busy`, refused both by the form and by the history.
+    // Again in revision 6 (R16): the pending save is the draft's `saving`, refused by the form and by `submit`.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      ) : fix.draft.saving !== null ? (\n        <Button disabled reason={copy.SAVING}>",
+          "      ) : fix.draft.saving !== null && (false as boolean) ? (\n        <Button disabled reason={copy.SAVING}>",
+        ),
+        "    if (open === null || open.draft.saving !== null) return;",
+        "    if (open === null) return;",
+      ),
+  },
+
+  {
+    id: "MU-2047",
+    title:
+      "WEB-10a R4: a resource with more than a window of outstanding entries is cut to its oldest with no continuation",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect:
+      /101 outstanding drafts of one resource|attention headers beyond the window/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (entries.length > room)\n        next = {",
+        "      if (entries.length > room && (false as boolean))\n        next = {",
+      ),
+  },
+
+  {
+    id: "MU-2048",
+    title:
+      "WEB-10a R4: a page that looked at its bound of headers without a match says it is the last (no continuation)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect:
+      /one match after more headers of other kinds|read further than another/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : Number.isFinite(reach)\n          ? reach\n          : null;",
+        "        : null;",
+      ),
+  },
+
+  {
+    id: "MU-2049",
+    title:
+      "WEB-10a R4: an acknowledged draft whose effect is already in the cache is still listed as outstanding",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /whose effects are in the cache, is found|only the asked kinds/,
+    patch: (t) =>
+      sub(
+        t,
+        '        draft.status === "acknowledged" &&\n        !(await effectStands(reader, draft.target_resource_ids[0], draft))',
+        '        draft.status === "acknowledged" &&\n        (false as boolean)',
+      ),
+  },
+
+  {
+    id: "MU-2050",
+    title:
+      "WEB-10a R4: a page answers entries past what every status was read to (the next page answers them again)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /read further than another/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const candidates = found.filter((d) => d.created_seq <= reach).sort(bySeq);",
+        "    const candidates = found.sort(bySeq);",
+      ),
+  },
+
+  {
+    id: "MU-2051",
+    title:
+      "WEB-10a R4: a chained live read is ready with its first page (the continuation is not followed)",
+    file: "src/data/ui/outstanding.tsx",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/features/tasks/today-freshness.test.tsx",
+    ],
+    expect: /ready only when every page|after 120 others|105 amounts/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (next === null) {",
+        "      if (next === null || pages.length > 0) {",
+      ),
+  },
+
+  {
+    id: "MU-2052",
+    title:
+      "WEB-10a R5: a rebuilt task command is based on the local record, not the version the person reviewed",
+    file: "src/features/tasks/register.ts",
+    tests: [
+      "tests/features/tasks/rebuild.test.ts",
+      "tests/features/tasks/model.test.ts",
+    ],
+    expect:
+      /reviewed at 5|raised from the reviewed version|reviewed task version|reviewed version|takes the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ? { ...target, reviewedBase: reviewed.version }",
+        "        ? target",
+      ),
+  },
+
+  {
+    id: "MU-2053",
+    title:
+      "WEB-10a R5: a rebuilt first record of an Anyone task drops the defaults it captured",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /keeps the defaults it captured/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!captured) return built;",
+        "      if (captured || !captured) return built;",
+      ),
+  },
+
+  {
+    id: "MU-2054",
+    title:
+      "WEB-10a R5: a rebuild replaces the draft even when it changed after it was read",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /changed since it was read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    expectDraft: (stored) =>\n      stored.local_id === draft.local_id &&",
+        "    expectDraft: (stored) =>\n      stored.local_id === stored.local_id ||",
+      ),
+  },
+
+  {
+    id: "MU-2055",
+    title:
+      "WEB-10a R5: my stream is looked for among the primary targets only (an amount's stream is a side effect)",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /among its side effects|stream stays a side effect/,
+    patch: (t) =>
+      sub(t, "    ...Object.keys(draft.side_effect_bases ?? {}),\n", ""),
+  },
+
+  {
+    id: "MU-2056",
+    title:
+      "WEB-10a R5: the outbox ignores a target's reviewed base (the record or the cache is the base)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/reviewed-base.test.ts",
+      "tests/features/tasks/rebuild.test.ts",
+    ],
+    expect:
+      /ahead of the record and the cache|reviewed at 5|raised from the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      target.reviewedBase ??\n      tracked ??",
+        "      tracked ??",
+      ),
+  },
+
+  {
+    id: "MU-2057",
+    title: "WEB-10a R5: the request snapshot drops a target's reviewed base",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/reviewed-base.test.ts",
+      "tests/features/tasks/rebuild.test.ts",
+    ],
+    expect:
+      /ahead of the record and the cache|reviewed at 5|raised from the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ...(target.reviewedBase === undefined\n        ? {}\n        : { reviewedBase: target.reviewedBase }),",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2058",
+    title:
+      "WEB-10a R5: a reviewed base that is not a whole version of at least 1 is accepted",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/reviewed-base.test.ts"],
+    expect: /whole version of at least 1/,
+    patch: (t) =>
+      sub(
+        t,
+        '      throw new OutboxRequestError("reviewed_base");',
+        "      void 0;",
+      ),
+  },
+
+  {
+    id: "MU-2059",
+    title:
+      "WEB-10a R6: a wake on the same day does not arm the next wait (the day never rolls over more than six hours ahead)",
+    file: "src/features/tasks/screens.tsx",
+    tests: ["tests/features/tasks/today-day-timer.test.tsx"],
+    expect: /opened at 12:00|opened at 01:00/,
+    patch: (t) =>
+      sub(t, "          if (!check()) arm();", "          check();"),
+  },
+
+  {
+    id: "MU-2060",
+    title:
+      "WEB-10a R6: a page shown again after the device slept past midnight keeps yesterday",
+    file: "src/features/tasks/screens.tsx",
+    tests: ["tests/features/tasks/today-day-timer.test.tsx"],
+    expect: /slept past midnight/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (document.visibilityState === "visible") check();',
+        '      if (document.visibilityState === "visible") void 0;',
+      ),
+  },
+
+  // ---- WEB-10a revision 2 (R2, R3, R7, R8, DA-N1): unit mutants of the corrections ---------------------------------------------------
+  {
+    id: "MU-2064",
+    title:
+      "WEB-10a R2 (rev 2): the daily item is the structure whatever version the committed cache holds",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /older one never is|cache first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : item.version > cached.version ||\n        (item.version === cached.version && basis.current);",
+        "      : true;",
+      ),
+  },
+
+  {
+    id: "MU-2065",
+    title:
+      "WEB-10a R2 (rev 2): at the same version the daily item's permission wins even after a later cache commit",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /same version|permission the cache committed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (item.version === cached.version && basis.current);",
+        "        item.version === cached.version;",
+      ),
+  },
+
+  {
+    id: "MU-2066",
+    title:
+      "WEB-10a R2 (rev 2): an old answer brings back an occurrence the cache once held and removed",
+    file: "src/features/tasks/view.ts",
+    // Re-expressed in revision 3 (same intent, wider): the `neverCached` exception is gone; a row the cache lacks takes the daily structure
+    // only from a CURRENT answer, so the patch accepts any answer (the removed row comes back, and so does one removed before this view
+    // first looked: Q14).
+    tests: [
+      "tests/features/tasks/freshness-provenance.test.tsx",
+      "tests/features/tasks/local-coherence.test.tsx",
+    ],
+    expect: /never brought back|removed by a committed page|Q14/,
+    patch: (t) => sub(t, "      ? basis.current\n", "      ? true\n"),
+  },
+
+  {
+    id: "MU-2067",
+    title:
+      "WEB-10a R2 (rev 2): my result from /daily is used although its item is of another version than the row",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /another version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sources.personal !== null && sources.personal.version === version) {",
+        "    if (sources.personal !== null) {",
+      ),
+  },
+
+  {
+    id: "MU-2068",
+    title:
+      "WEB-10a R2 (rev 2): a /daily answer is dated by its delivery (receipt time as evaluation time)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /delivered (joint|personal) first/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const requestedAt = Math.min(joint.startedAt, personal.startedAt);",
+        "        const requestedAt = env.now();",
+      ),
+  },
+
+  {
+    id: "MU-2069",
+    title:
+      "WEB-10a R2 (rev 2): a scope restarted on 409 keeps the dispatch time of the discarded pages",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /409 restart/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (let restart = 0; restart < RESTARTS; restart += 1) {\n    const startedAt = clock();",
+        "  const startedAt = clock();\n  for (let restart = 0; restart < RESTARTS; restart += 1) {",
+      ),
+  },
+
+  {
+    id: "MU-2070",
+    title:
+      "WEB-10a R2 (rev 2): an answer already stale when it arrives is not asked for again",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /stale when it arrives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (staleOnArrival) setRestale((n) => n + 1);",
+        "        if (staleOnArrival) void 0;",
+      ),
+  },
+
+  {
+    id: "MU-2071",
+    title:
+      "WEB-10a F4 (rev 2): a pending entry the synced stream already lists is counted again",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /not counted again/,
+    patch: (t) => sub(t, " && !landed.has(p.entryId),", ","),
+  },
+
+  {
+    id: "MU-2072",
+    title:
+      "WEB-10a R8 (rev 2): the clock does not arm the next wait after a wake (only the first boundary is followed)",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /opening, then at the closing|thirteen hours/,
+    patch: (t) =>
+      sub(
+        t,
+        "          revalidate();\n          arm();",
+        "          revalidate();",
+      ),
+  },
+
+  {
+    id: "MU-2073",
+    title:
+      "WEB-10a R8 (rev 2): the clock is not read again when the page is shown, focused or restored",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /slept past the close/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (document.visibilityState !== "visible") return;\n      revalidate();',
+        '      if (document.visibilityState !== "visible") return;\n      void 0;',
+      ),
+  },
+
+  {
+    id: "MU-2074",
+    title:
+      "WEB-10a R8 (rev 2): a clock moved backwards is not a reason to ask again",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /BACKWARDS/,
+    patch: (t) =>
+      // Re-expressed in revision 3 (same intent): the backwards test is now named (`back`), which also moves the clock generation.
+      sub(
+        t,
+        "      back || crossedBetween(latest.current.boundaries, prev.now, t);",
+        "      crossedBetween(latest.current.boundaries, prev.now, t);",
+      ),
+  },
+
+  {
+    id: "MU-2075",
+    title:
+      "WEB-10a R8 (rev 2): new data whose boundary already passed waits for the next wake",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /late answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "    // New data may carry a boundary that has already passed: evaluate at once.\n    revalidate();",
+        "    // New data may carry a boundary that has already passed: evaluate at once.",
+      ),
+  },
+
+  {
+    id: "MU-2076",
+    title:
+      "WEB-10a R8 (rev 2): the task detail's clock is not told its day's window",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect:
+      /left open offline across the close|opens while the detail|queued correction gives/,
+    patch: (t) =>
+      sub(t, "    shownWindow === null ? [] : [shownWindow],", "    [],"),
+  },
+
+  {
+    id: "MU-2077",
+    title:
+      "WEB-10a R8 (rev 2): the detail follows the cached window, not the one its queued correction gives",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /queued correction gives/,
+    patch: (t) =>
+      // Re-expressed in revision 3 (same intent): the window is the effective structure of the certified inputs (`effectiveOccurrence`).
+      sub(
+        t,
+        "      : effectiveOccurrence(rowSources, inputs.detail).data;",
+        "      : effectiveOccurrence(rowSources, { drafts: [], attention: [] }).data;",
+      ),
+  },
+
+  {
+    id: "MU-2078",
+    title:
+      "WEB-10a R3 (rev 2): a completion consumes a session other than the one it submitted",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /never reused|NOTHING edited/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (held === undefined || held.session !== ticket.session) return "gone";',
+        '  if (held === undefined) return "gone";',
+      ),
+  },
+
+  {
+    id: "MU-2079",
+    title:
+      "WEB-10a R3 (rev 2): an editing session let go of ends at once (a development remount loses its input)",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /development remount/,
+    patch: (t) =>
+      // Re-anchored in WEB-10a revision 22 (same intent): the release now marks the session releasing with its visit's keeping decided.
+      sub(
+        t,
+        "  entries.set(key, { ...held, retained: false, releasing: true });\n  dropReleasing(key, session);\n",
+        "  entries.delete(key);\n",
+      ),
+  },
+
+  {
+    id: "MU-2080",
+    title: "WEB-10a R3 (rev 2): Cancel does not end the editing session",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /NOTHING edited|opened again and edited|never reused/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (held !== undefined && held.session === session) entries.delete(key);",
+        "  if (held !== undefined && held.session === session) void 0;",
+      ),
+  },
+
+  {
+    id: "MU-2081",
+    title:
+      "WEB-10a R3 (rev 2): another identity's editing sessions are kept when the displayed identity opens one",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /another identity/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const other of [...entries.keys()])",
+        "  for (const other of [] as string[])",
+      ),
+  },
+
+  {
+    id: "MU-2082",
+    title:
+      "WEB-10a R3 (rev 2): the dialog that saved closes itself through its own (possibly obsolete) callback",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /never through the old mount/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeCorrection(ticket, ok);",
+        "      completeCorrection(ticket, ok);\n      if (ok) onClose();",
+      ),
+  },
+
+  {
+    id: "MU-2083",
+    title:
+      "WEB-10a R3 (rev 2): the parent closes any open fix of the entry when an earlier fix's save succeeds",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /SAME entry|reopened with nothing typed/,
+    // Re-expressed in revision 4 (same intent): the completion closes whatever fix is open, not only its own session. Again in
+    // revision 6 (R16): a success closes whatever fix is open, not only an editor of the draft it submitted.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (f === null || f.draft.id !== draftId) return f;",
+        "      if (f === null || f.draft.id !== draftId) return ok ? null : f;",
+      ),
+  },
+
+  {
+    id: "MU-2084",
+    title:
+      "WEB-10a R3 (rev 2): a late task-form success navigates although the person has left the form",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /went to the task list/,
+    // Re-expressed in revision 18 (same intent): only the form mounted when the owner consumes the session closes onto the task (R33).
+    patch: (t) =>
+      sub(
+        t,
+        "        detail: taskId,\n      });\n    }\n  };",
+        '        detail: taskId,\n      });\n      if (ok && taskId !== null)\n        void navigate({ to: "/tasks/$taskId", params: { taskId }, search: {} });\n    }\n  };',
+      ),
+  },
+
+  {
+    id: "MU-2085",
+    title:
+      "WEB-10a S5 (rev 2): a correction save that throws leaves the dialog waiting",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /save that throws/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeCorrection(ticket, ok);",
+        "      if (ok) completeCorrection(ticket, ok);",
+      ),
+  },
+
+  {
+    id: "MU-2086",
+    title:
+      "WEB-10a DA-N1 (rev 2): the conflict choices do not read the submitted correction from the queued operation",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /submitted day is shown|replacement made by/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : submittedCorrection(commandOf(stored), row.id);",
+        "      : null;",
+      ),
+  },
+
+  {
+    id: "MU-2087",
+    title:
+      "WEB-10a DA-N1 (rev 2): 'Save mine' supersedes whatever the queued operation has become since it was read",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /operation changed/,
+    patch: (t) =>
+      sub(t, "        expectDraft: (now) =>", "        _expectDraft: (now) =>"),
+  },
+
+  {
+    id: "MU-2088",
+    title:
+      "WEB-10a DA-N1 (rev 2): 'Save mine' is offered before the version that defeated it is on the device",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /until a newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row !== null && (builtOn === undefined || row.version > builtOn);",
+        "    row !== null;",
+      ),
+  },
+
+  {
+    id: "MU-2089",
+    title:
+      "WEB-10a DA-N1 (rev 2): an unreadable submitted correction is not said to be unreadable",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /unreadable submitted correction/,
+    patch: (t) =>
+      sub(t, "      {mine === null && readable ? (", "      {false ? ("),
+  },
+
+  {
+    id: "MU-2090",
+    title:
+      "WEB-10a R7 (rev 2): the dialog does not reveal a focused control that is partly out of its scrolling body (WebKit)",
+    file: "src/components/ui/dialog.tsx",
+    tests: ["tests/components/dialog-reveal.test.tsx"],
+    expect: /scrolled into view|revealed too/,
+    patch: (t) =>
+      sub(t, "    return revealInBody(body);", "    return undefined;"),
+  },
+
+  {
+    id: "MU-2091",
+    title:
+      "WEB-10a heading regression (rev 2): Today's level-one heading is not the route's (the gated or loading page has none)",
+    file: "src/features/today/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /Today: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "          <PageHeading>{TODAY_TITLE}</PageHeading>\n          <CacheGate>",
+        "          <CacheGate>",
+      ),
+  },
+
+  {
+    id: "MU-2092",
+    title:
+      "WEB-10a heading regression (rev 2): a task's gated page shows no heading",
+    file: "src/features/tasks/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "      <CacheGate heading={child ? heading : null}>",
+        "      <CacheGate>",
+      ),
+  },
+
+  {
+    id: "MU-2093",
+    title:
+      "WEB-10a heading regression (rev 2): the task list's level-one heading is not the route's",
+    file: "src/features/tasks/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) => sub(t, "      {child ? null : heading}", "      {null}"),
+  },
+
+  {
+    id: "MU-2094",
+    title:
+      "WEB-10a heading regression (rev 2): the cache gate's refreshing state drops the heading it was given",
+    file: "src/features/sync/CacheGate.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "    <>\n      {heading}\n      <section",
+        "    <>\n      <section",
+      ),
+  },
+
+  {
+    id: "MU-2102",
+    title:
+      "WEB-10a loop (rev 2): Today asks /daily again on every committed page, an empty one included (page_seq instead of the content revision)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /empty delta page/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
+        "      ? (position.value?.pageSeq ?? -1)",
+      ),
+  },
+
+  // ---- WEB-10a revision 3 (R2, R8, R9; design assessment C1-C3): one isolated mutant per guard ---------------------------------------
+  {
+    id: "MU-2104",
+    title:
+      "WEB-10a R2 (rev 3): the server's fields apply although the clock went back since the read was asked (no clock-generation check)",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q1|Q2/,
+    patch: (t) => sub(t, "    basis.sameClock &&\n", ""),
+  },
+
+  {
+    id: "MU-2106",
+    title:
+      "WEB-10a R2 (rev 3): a clock that went back does not move the clock generation",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q1|Q2/,
+    patch: (t) =>
+      sub(
+        t,
+        "      generation: back ? prev.generation + 1 : prev.generation,",
+        "      generation: prev.generation,",
+      ),
+  },
+
+  {
+    id: "MU-2107",
+    title:
+      "WEB-10a R8 (rev 3): Today schedules the committed windows only, not those its outstanding creates and corrections give",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q4|Q5/,
+    patch: (t) =>
+      sub(
+        t,
+        "        snapshot.outstanding,\n      );\n      if (effective.data) out.push(effective.data);",
+        "        NOTHING,\n      );\n      if (effective.data) out.push(effective.data);",
+      ),
+  },
+
+  {
+    id: "MU-2108",
+    title:
+      "WEB-10a R9 (rev 3): the last of the bounded attempts is certified although it spanned a commit",
+    file: "src/data/ui/scan.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        "    if (sameBasis(before.basis, after.basis) || attempt === 2)",
+      ),
+  },
+
+  {
+    id: "MU-2109",
+    title:
+      "WEB-10a R9 (rev 3): the certificate ignores the local composition generation (compares the other fields only)",
+    file: "src/data/ui/scan.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q7|Q8|Q9|Q12/,
+    patch: (t) => sub(t, "  a.composition === b.composition &&\n", ""),
+  },
+
+  {
+    id: "MU-2110",
+    title:
+      "WEB-10a R9 (rev 3): a day whose saved tasks could not be read says 'nothing due'",
+    file: "src/features/tasks/today/TodayPage.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q10/,
+    patch: (t) =>
+      sub(
+        t,
+        "view.localError === null && (view.error === null || all.length > 0) ? (",
+        "(view.error === null || all.length > 0) ? (",
+      ),
+  },
+
+  {
+    id: "MU-2111",
+    title:
+      "WEB-10a R9 (rev 3): a walk that failed part-way is composed as if it had seen everything",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q10/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (walked !== "complete")',
+        '  if (walked !== "complete" && walked !== "closed")',
+      ),
+  },
+
+  {
+    id: "MU-2112",
+    title:
+      "WEB-10a R9 (rev 3): the store never advances the local composition generation",
+    file: "src/data/model/composition.ts",
+    tests: [
+      "tests/data/composition-generation.test.ts",
+      "tests/features/tasks/local-coherence.test.tsx",
+    ],
+    expect: /Q12|Q15|Q7|Q8|Q9/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (!scope.includes("sync_state")) return false;',
+        "  return false;",
+      ),
+  },
+
+  {
+    id: "MU-2113",
+    title:
+      "WEB-10a R9 (rev 3): the generation is advanced by a transaction that wrote no composition store (any write counts)",
+    file: "src/data/model/composition.ts",
+    tests: ["tests/data/composition-generation.test.ts"],
+    expect: /Q12/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const store of written) if (COMPOSITION_STORES.has(store)) return true;",
+        "  for (const _store of written) return true;",
+      ),
+  },
+
+  {
+    id: "MU-2114",
+    title:
+      "WEB-10a R9 (rev 3): a stale day freezes its rows (composed again only when data changes, not with the time)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9b/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [snapshot, listed, env.accountId, now, day, zone, clock.generation]);",
+        "  }, [snapshot, listed, env.accountId, day, zone, clock.generation]);",
+      ),
+  },
+
+  {
+    id: "MU-2115",
+    title:
+      "WEB-10a R9 (rev 3): a trigger that arrives while a read is in progress is dropped (the last change is not read)",
+    file: "src/features/tasks/local-read.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9/,
+    patch: (t) => sub(t, "      current.again = true;\n", ""),
+  },
+
+  {
+    id: "MU-2116",
+    title:
+      "WEB-10a R9 (rev 3, Q17): the task list says 'No tasks' when its read failed",
+    file: "src/features/tasks/detail/TaskList.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /list: a failed read/,
+    patch: (t) => sub(t, "        known ? (", "        true ? ("),
+  },
+
+  {
+    id: "MU-2117",
+    title:
+      "WEB-10a R9 (rev 3, Q17): an edit saves while the queue (its write target) could not be read",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    // Re-expressed in revision 4 (same intent, same patch): with the queue unreadable AT ENTRY the edit page now shows the detail read's
+    // error (no form); the form's own block is witnessed by the case where the queue becomes unreadable while the form is open.
+    expect: /form: the queue becomes unreadable while the form is open/,
+    patch: (t) => sub(t, "    !queueUnread &&\n", ""),
+  },
+
+  {
+    id: "MU-2118",
+    title:
+      "WEB-10a R9 (rev 3, Q17): the detail says 'no day' when the day's inputs could not be read",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /detail: a failed read/,
+    // Re-expressed in revision 4 (same intent): the detail's whole read is one; its failure with nothing complete is the error state.
+    patch: (t) =>
+      sub(
+        t,
+        '  if (view.status === "error" && view.readError !== null)',
+        "  if (false as boolean)",
+      ),
+  },
+
+  // ---- WEB-10a revision 4 (R9-R12; design assessment C1, C3, C4; D1-D9, J1-J5, E1-E4): one mutant per guard --------------------------
+  {
+    id: "MU-2123",
+    title:
+      "WEB-10a R9 (rev 4, D1): a detail read that failed with nothing complete is shown as an absent task",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task.*(detail|edit)$/,
+    patch: (t) =>
+      sub(
+        t,
+        '          ? "loading"\n          : "error"',
+        '          ? "loading"\n          : "absent"',
+      ),
+  },
+
+  {
+    id: "MU-2124",
+    title:
+      "WEB-10a R9 (rev 4, D2): a walk over the saved days that did not complete is taken as 'no day'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /the walk over every saved day/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (end !== "complete") return unread();\n      const found',
+        "      const found",
+      ),
+  },
+
+  {
+    id: "MU-2125",
+    title:
+      "WEB-10a R9 (rev 4, D2): a failed read of a day by its id is taken as an absent day ('unavailable', or another default)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D2: .*(the day named in the address|today's day)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read === null) return unread();\n    return { ok: true, value: read.get(id)?.merged ?? null };",
+        "    return { ok: true, value: read?.get(id)?.merged ?? null };",
+      ),
+  },
+
+  {
+    id: "MU-2126",
+    title:
+      "WEB-10a R9 (rev 4, D3/D4): a stale detail (a failed refresh of a complete read) offers no Try again",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D3\/D4: .*warm/,
+    patch: (t) =>
+      sub(
+        t,
+        "      <span>\n        <Button onClick={retry}>{copy.TRY_AGAIN}</Button>\n      </span>",
+        "      {stale ? null : (\n        <span>\n          <Button onClick={retry}>{copy.TRY_AGAIN}</Button>\n        </span>\n      )}",
+      ),
+  },
+
+  {
+    id: "MU-2127",
+    title:
+      "WEB-10a R9 (rev 4, D4): Try again does not read the detail again (only a later commit would)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task/,
+    patch: (t) =>
+      sub(
+        t,
+        "    retry: () => setAttempt((n) => n + 1),",
+        "    retry: () => undefined,",
+      ),
+  },
+
+  {
+    id: "MU-2128",
+    title:
+      "WEB-10a R9 (rev 4, D9): a later page of saved days that could not be read is shown as 'no more days'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /a later page that cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const pickerError =\n    cursors.length > 1 &&",
+        "  const pickerError =\n    (false as boolean) &&",
+      ),
+  },
+
+  {
+    id: "MU-2129",
+    title:
+      "WEB-10a R9 (rev 4): the default day is chosen again on every read (it moves under the person to a later synced day)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /chosen once for the visit/,
+    patch: (t) =>
+      sub(
+        t,
+        "              pinned:\n                pinned.current?.scope === scope ? pinned.current.id : null,",
+        "              pinned: null,",
+      ),
+  },
+
+  {
+    id: "MU-2130",
+    title:
+      "WEB-10a R9 (rev 4, D9): a failed page of the day's progress streams is taken as 'nobody else'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /progress streams are read whole/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (end !== "complete") return unread();\n  }\n  return {',
+        "  }\n  return {",
+      ),
+  },
+
+  {
+    id: "MU-2131",
+    title:
+      "WEB-10a R9 (rev 4, D1): the edit page takes a failed read for an absent task",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task.*edit$/,
+    patch: (t) => sub(t, '  if (view.status === "error") return notice;\n', ""),
+  },
+
+  {
+    id: "MU-2132",
+    title:
+      "WEB-10a R12 (rev 4, J3): Load more keeps every page (a fourth is retained)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J3:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const drop = Math.max(0, pages.length - MAX_PAGES);",
+        "    const drop = 0;",
+      ),
+  },
+
+  {
+    id: "MU-2133",
+    title:
+      "WEB-10a R12 (rev 4, J3): Earlier entries keeps every page (a fourth is retained)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J3:/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
+    patch: (t) =>
+      sub(
+        t,
+        "            pages: [page, ...now.pages].slice(0, MAX_PAGES),",
+        "            pages: [page, ...now.pages],",
+      ),
+  },
+
+  {
+    id: "MU-2134",
+    title:
+      "WEB-10a R10 (rev 4, J1): an open full history is not read again when its stream's committed version changes",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect:
+      /J1: .*(correction committed while it is open|offline, a newer version waits)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.version === row.progressVersion ||",
+        "      (true as boolean) ||",
+      ),
+  },
+
+  {
+    id: "MU-2135",
+    title:
+      "WEB-10a R10 (rev 4, J2): an older journal answer that arrives after a newer one is shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /older answer that arrives after a newer one/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14). Neither Back to recent nor a new open begins another authority, so the older answer of the earlier one still publishes.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    forgetRefusal(env.identity, readKey);\n    life.current += 1;\n",
+          "    forgetRefusal(env.identity, readKey);\n",
+        ),
+        "  const close = () => {\n    life.current += 1;\n",
+        "  const close = () => {\n",
+      ),
+  },
+
+  {
+    id: "MU-2136",
+    title:
+      "WEB-10a R10/R12 (rev 4, J2): outside a window that reaches the end, Fix opens without checking the rest of the journal",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /Fix first checks the rest of the journal/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!full || toEnd || j === null) return openFixOf(entry, mine);",
+        "    return openFixOf(entry, mine);",
+      ),
+  },
+
+  {
+    id: "MU-2137",
+    title:
+      "WEB-10a R12 (rev 4, J5): an open fix whose page is let go is no longer shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J5: .*evicted/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {fix !== null && !fixShown ? (",
+        "      {false as boolean ? (",
+      ),
+  },
+
+  {
+    id: "MU-2138",
+    title:
+      "WEB-10a R10 (rev 4, J5): a fix whose entry was corrected since (a saved correction) can still be saved",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /corrected since \(a saved correction\)/,
+    // Re-expressed in revision 6 (same intent): the committed-replacement block is now the first test of the one save decision. Re-anchored
+    // in revision 19 (same intent): the committed facts are now the second operand of that test, after the queued corrections (DA19-N1).
+    patch: (t) =>
+      sub(
+        t,
+        '    (j !== null &&\n      (j.checks[entryId]?.found === "replaced" ||',
+        '    ((false as boolean) &&\n      j !== null &&\n      (j.checks[entryId]?.found === "replaced" ||',
+      ),
+  },
+
+  {
+    id: "MU-2139",
+    title:
+      "WEB-10a R10/R14 (rev 4, J4; rev 5, Q6): a refused journal read (any: a page or a check) keeps showing what can no longer be seen",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: [
+      "tests/features/tasks/journal-window.test.tsx",
+      "tests/features/tasks/journal-ownership.test.tsx",
+    ],
+    expect: /refused refresh drops the pages|Q6: .*refused/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14). Every read meets a refusal in one place, so this one fault is the suffix check's too (R14).
+    patch: (t) =>
+      sub(
+        t,
+        '      if (live(by)) revoke();\n      return { kind: "stop" };',
+        '      return { kind: "failed" };',
+      ),
+  },
+
+  {
+    id: "MU-2140",
+    title:
+      "WEB-10a R10 (rev 4, J4): a failed refresh drops the pages (unknown is shown as the recent entries)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /failed refresh keeps the pages/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
+    patch: (t) =>
+      sub(
+        t,
+        '          update((now) => ({\n            ...now,\n            tried: version,\n            error: "failed",\n          }));',
+        "          put(null);",
+      ),
+  },
+
+  {
+    id: "MU-2141",
+    title:
+      "WEB-10a R10 (rev 4, J4): a failed refresh is asked again on its own, in a loop",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /failed refresh keeps the pages/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.tried === row.progressVersion\n",
+        "      (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-2142",
+    title:
+      "WEB-10a R11 (rev 4, E1): a second activation while an enrolment change is pending takes a new key and is sent",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /E1: /,
+    // Re-anchored in revision 11 (R23): the attempt owner now also refuses a change while the previous one is unconfirmed (its cycle);
+    // the same refusal, removed whole.
+    patch: (t) =>
+      sub(
+        t,
+        '  if (held?.phase === "pending" || cycle.phase !== "done") return null;\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2143",
+    title:
+      "WEB-10a R11 (rev 4, E1): Join/Leave stays enabled (with no reason) while a change is pending",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /E1: .*activated twice/,
+    // Re-anchored in revision 10 (R22): the pending rule now lives in `blocked`, which disables every enrolment control (same mechanism).
+    // Re-anchored in revision 11 (R23): `blocked` names the lock (sending, then confirming); the whole rule removed.
+    patch: (t) =>
+      sub(
+        t,
+        '    : lock?.phase === "sending"\n      ? CONTROLS_COPY.sending\n      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n',
+        "    : null;\n",
+      ),
+  },
+
+  {
+    id: "MU-2144",
+    title:
+      "WEB-10a R11 (rev 4, E2): Try again builds the change again from the enrolment shown (another body and key)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /Try again resends the same body and key/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  onClick={() => void send(uncertain.command)}",
+        "                  onClick={() =>\n                    void send({\n                      ...uncertain.command,\n                      expected_version: enrolment.version,\n                    })\n                  }",
+      ),
+  },
+
+  {
+    id: "MU-2145",
+    title:
+      "WEB-10a R11 (rev 4, E2): an uncertain change keeps its body but not its key (a retry is another attempt)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /Try again resends the same body and key/,
+    patch: (t) =>
+      sub(
+        t,
+        "    key: held !== undefined && held.body === body ? held.key : newKey(),",
+        "    key: newKey(),",
+      ),
+  },
+
+  {
+    id: "MU-2146",
+    title:
+      "WEB-10a R11 (rev 4, E3): an enrolment read answered while a change is pending replaces what is shown",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read answered while a change is pending/,
+    // Re-anchored in revision 11 (R23): a read that is not the current state is shown only when nothing is (the same rule).
+    patch: (t) =>
+      sub(
+        t,
+        "        } else setEnrolment((shown) => shown ?? value);",
+        "        } else setEnrolment(value);",
+      ),
+  },
+
+  {
+    id: "MU-2147",
+    title:
+      "WEB-10a R11 (rev 4, E3): an enrolment read asked before a change and answered just after it is shown",
+    // Re-anchored in revision 11 (R23): a read asked before the latest change was admitted is now judged by the change's generation in
+    // page memory (it was the mount's own count of changes sent); the same rule removed.
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read asked before a change/,
+    patch: (t) => sub(t, "    read.generation !== cycle.generation ||\n", ""),
+  },
+
+  {
+    id: "MU-2148",
+    title:
+      "WEB-10a R11 (rev 4, E1/E3): the end of a pending change is not followed by a read (a remounted screen never learns the result)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /remounted while pending|next change after the answer/,
+    // Re-anchored in revision 11 (R23): the read follows the change's answer as recorded in page memory (`reading`), not a pending edge.
+    patch: (t) =>
+      sub(
+        t,
+        "    if (reading !== 0 && reading !== readFor.current) setReload((n) => n + 1);",
+        "    if (reading !== 0 && reading !== readFor.current) void 0;",
+      ),
+  },
+
+  {
+    id: "MU-2152",
+    title:
+      "WEB-10a R13 (rev 5, Q1): a check of the rest of the journal opens its fix whatever was chosen since",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q1: /,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      live(by) && sel.current === mine && versionRef.current === version;",
+          "      live(by) && versionRef.current === version;",
+        ),
+        "    if (sel.current !== mine || !mounted.current) return;",
+        "    if (!mounted.current) return;",
+      ),
+  },
+
+  {
+    id: "MU-2153",
+    title:
+      "WEB-10a R13 (rev 5, Q1): Fix does not take the selection before its check (an older check still owns it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q1: /,
+    // Re-expressed in revision 6 (same intent): Check again also takes the selection, so the anchor names Fix's own next lines.
+    patch: (t) =>
+      sub(
+        t,
+        "    const mine = ++sel.current;\n    const j = journalNow();\n    // A window",
+        "    const mine = sel.current;\n    const j = journalNow();\n    // A window",
+      ),
+  },
+
+  {
+    id: "MU-2154",
+    title:
+      "WEB-10a R13 (rev 5, Q2): Cancel does not end a lookup asked after the open fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Cancel of the open fix also ends a lookup/,
+    patch: (t) =>
+      sub(
+        t,
+        "        onCancel={() => {\n          sel.current += 1;\n",
+        "        onCancel={() => {\n",
+      ),
+  },
+
+  {
+    id: "MU-2155",
+    title:
+      "WEB-10a R13 (rev 5, Q5): a check of the rest of the journal ignores a newer committed version of the stream",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /committed version moves while the lookup is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "      live(by) && sel.current === mine && versionRef.current === version;",
+        "      live(by) && sel.current === mine;",
+      ),
+  },
+
+  {
+    id: "MU-2157",
+    title:
+      "WEB-10a R14 (rev 5, Q7): a refusal met by a request no longer wanted (a superseded check) is ignored",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /superseded lookup is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (live(by)) revoke();",
+        "      if (live(by) && wanted()) revoke();",
+      ),
+  },
+
+  {
+    id: "MU-2158",
+    title:
+      "WEB-10a R14 (rev 5, Q7): an answer of an ended authority (before a refusal) still counts",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q7: /,
+    patch: (t) =>
+      sub(
+        t,
+        "    ownerRef.current === by.owner &&\n    life.current === by.life;",
+        "    ownerRef.current === by.owner;",
+      ),
+  },
+
+  {
+    id: "MU-2159",
+    title:
+      "WEB-10a R14 (rev 5, Q8): a refusal keeps open a fix known only from the refused history (it can be saved)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q8: .*refused while it is open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setScan(null);\n    dropFullOnlyFix();\n    put({",
+        "    setScan(null);\n    put({",
+      ),
+  },
+
+  {
+    id: "MU-2160",
+    title:
+      "WEB-10a R13 (rev 5, Q8): Back to recent keeps open a fix known only from the full history",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Back to recent closes a full-history fix/,
+    patch: (t) =>
+      sub(t, "    dropFullOnlyFix();\n    put(null);", "    put(null);"),
+  },
+
+  {
+    id: "MU-2161",
+    title:
+      "WEB-10a R14 (rev 5, Q9): a failure that is not a refusal (uncertain, offline) is taken as one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: [
+      "tests/features/tasks/journal-window.test.tsx",
+      "tests/features/tasks/journal-ownership.test.tsx",
+    ],
+    expect: /check fails \(uncertain\)|failed refresh keeps the pages/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return { kind: result.kind === "closed" ? "closed" : "failed" };',
+        '      return result.kind === "closed"\n        ? { kind: "closed" }\n        : (revoke(), { kind: "stop" });',
+      ),
+  },
+
+  {
+    id: "MU-2162",
+    title:
+      "WEB-10a C3 (rev 5, Q14): no bound on the journal requests in flight",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /at most 2 journal requests are in flight/,
+    patch: (t) =>
+      sub(
+        t,
+        "    while (g.busy >= IN_FLIGHT)",
+        "    while (g.busy >= IN_FLIGHT + 100)",
+      ),
+  },
+
+  {
+    id: "MU-2163",
+    title:
+      "WEB-10a C3 (rev 5, Q14): a waiting request is sent although nothing wants it any more",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /waiting check that is no longer wanted/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!wanted()) {\n      g.waiting.shift()?.();\n      return { kind: "stop" };\n    }\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2164",
+    title:
+      "WEB-10a C3 (rev 5, Q9): a page that does not move past its cursor is taken as an answer",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect:
+      /does not move past where it was asked|first page that does not move/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (next !== null && next <= at) return { kind: "failed" };\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2165",
+    title:
+      "WEB-10a C3 (rev 5, Q14): a refresh assembles a second window behind the one shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /replaces its pages in place/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    let at = j.starts[from] ?? 0;",
+          "    let at = j.starts[from] ?? 0;\n    const staged: Page[] = [];",
+        ),
+        "        const pages = [...now.pages];\n        pages[i] = page;",
+        "        staged[i] = page;\n        const pages =\n          page.next === null || i === count - 1 ? [...staged] : [...now.pages];",
+      ),
+  },
+
+  {
+    id: "MU-2166",
+    title:
+      "WEB-10a C1 (rev 5, Q15): offline, an entry known only from the full history can be fixed",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q15: .*offline with the full history open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    journal.version === row.progressVersion &&\n    env.online;",
+        "    journal.version === row.progressVersion;",
+      ),
+  },
+
+  {
+    id: "MU-2167",
+    title:
+      "WEB-10a C1 (rev 5, Q5): an entry known only from a window read at an older version can be fixed",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /while a refresh for a newer version is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "    journal.version === row.progressVersion &&\n    env.online;",
+        "    env.online;",
+      ),
+  },
+
+  {
+    id: "MU-2168",
+    title:
+      "WEB-10a C1 (rev 5, Q13): an unmounted history goes on with its checks",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /unmounted while a lookup is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const live = (by: Asker) =>\n    mounted.current &&\n",
+        "  const live = (by: Asker) =>\n",
+      ),
+  },
+
+  {
+    id: "MU-2171",
+    title:
+      "WEB-10a R16 (rev 6, Q1): a restored draft forgets that its input is unsaved (the next closure loses it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /Q1: .*back, 2 closure/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, unsaved: false }) ?? {",
+      ),
+  },
+
+  {
+    id: "MU-2172",
+    title:
+      "WEB-10a R16 (rev 6, Q1): a closure of the full history keeps nothing of the typed draft",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /Q1: .*back, 1 closure/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = draft;\n    fixRef.current = null;",
+        "      parked.current = null;\n    fixRef.current = null;",
+      ),
+  },
+
+  {
+    id: "MU-2173",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a save's success closes a newer editor of the same draft (reopened while it was pending)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving, reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "        return f.session === session\n          ? null",
+        "        return (true as boolean)\n          ? null",
+      ),
+  },
+
+  {
+    id: "MU-2174",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a parked draft whose save succeeded is not retired (an acknowledged draft comes back)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /the acknowledged draft is retired/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = { ...p, saving: null };",
+      ),
+  },
+
+  {
+    id: "MU-2175",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a save's success retires a parked draft edited after it was submitted",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /then parked before the answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = ok ? null : { ...p, saving: null };",
+      ),
+  },
+
+  {
+    id: "MU-2176",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a reopened draft forgets its pending save (a second save while the first is pending)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving, reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, saving: null }) ?? {",
+      ),
+  },
+
+  {
+    id: "MU-2177",
+    title:
+      "WEB-10a R16 (rev 6, Q2): a failed save closes the open fix (its input is lost)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /a failed save keeps the input/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { ...f, draft: { ...f.draft, saving: null } };\n    });",
+        "      return ok ? { ...f, draft: { ...f.draft, saving: null } } : null;\n    });",
+      ),
+  },
+
+  {
+    id: "MU-2178",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a failed save of a parked draft discards it",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving and the save fails/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = ok && p.rev === rev ? null : ok ? { ...p, saving: null } : null;",
+      ),
+  },
+
+  {
+    id: "MU-2179",
+    title:
+      "WEB-10a R17 (rev 6, Q4/Q5/Q11): Save is admitted without the save decision (only the rendered control refuses)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /direct call queues nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (saveBlock(factsNow(), open.entry.id) !== null) return;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2180",
+    title:
+      "WEB-10a R17 (rev 6, Q4): the open fix's Save is shown without the save decision",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q4: .*target=full-only, offline/,
+    patch: (t) => sub(t, "      : decided;", "      : null;"),
+  },
+
+  {
+    id: "MU-2181",
+    title:
+      "WEB-10a R17 (rev 6, Q4): an entry known only from the full history can be saved offline",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q4: .*target=full-only, offline/,
+    patch: (t) =>
+      sub(
+        sub(t, "  if (!f.online) return HISTORY_COPY.fixOffline;\n", ""),
+        "    f.online &&\n    f.current &&",
+        "    f.current &&",
+      ),
+  },
+
+  {
+    id: "MU-2182",
+    title:
+      "WEB-10a R17 (rev 6, Q5): the open fix is judged at the version its history was read at, not the stream's committed one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /the re-read is held/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  if (j === null || !fullAuthority(f)) return HISTORY_COPY.fixWaits;",
+            "  if (j === null || !fullAuthority({ ...f, version: j.version }))\n    return HISTORY_COPY.fixWaits;",
+          ),
+          '  if (check?.found === "current" && check.version === f.version) return null;',
+          '  if (check?.found === "current" && check.version === j.version) return null;',
+        ),
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if (coversToEnd(j, entryId, j.version)) return null;",
+      ),
+  },
+
+  {
+    id: "MU-2183",
+    title:
+      "WEB-10a R17 (rev 6, Q11): a local change not yet read in still counts as a current detail for a full-only save",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q11: .*target=full-only/,
+    patch: (t) =>
+      sub(t, "    f.online &&\n    f.current &&\n", "    f.online &&\n"),
+  },
+
+  {
+    id: "MU-2184",
+    title:
+      "WEB-10a R17 (rev 6, Q11): the task detail does not tell the history whether its local read is current",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q11: .*target=full-only/,
+    patch: (t) => sub(t, "            current={view.current}\n", ""),
+  },
+
+  {
+    id: "MU-2185",
+    title:
+      "WEB-10a R17 (rev 6, Q6): any current window authorises a detached fix (no evidence about its own entry)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if ((true as boolean)) return null;",
+      ),
+  },
+
+  {
+    id: "MU-2186",
+    title:
+      "WEB-10a R17 (rev 6, Q6): a check made at an older version still answers for the entry",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (check?.found === "current" && check.version === f.version) return null;',
+        '  if (check?.found === "current") return null;',
+      ),
+  },
+
+  {
+    id: "MU-2187",
+    title:
+      "WEB-10a R17 (rev 6, Q4/Q5): a recent entry loses its own authority (offline and during a re-read)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /target=recent/,
+    patch: (t) => sub(t, "  if (f.recent.has(entryId)) return null;\n", ""),
+  },
+
+  {
+    id: "MU-2188",
+    title:
+      "WEB-10a R17 (rev 6, Q6): Check again replaces the open fix (its value is lost)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (open !== null && open.entry.id === entry.id) return;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2189",
+    title:
+      "WEB-10a R17 (rev 6, Q9): a check answered after the connection went opens a full-only fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q9: .*offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (!facts.recent.has(entry.id) && !fullAuthority(facts))",
+        "      (!facts.recent.has(entry.id) && (false as boolean))",
+      ),
+  },
+
+  {
+    id: "MU-2190",
+    title:
+      "WEB-10a R17 (rev 6, Q6): a window that reached the end does not answer for its entry once the window moves",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /window that reached the end answers/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (j !== null && coversToEnd(j, entry.id, row.progressVersion))",
+        "    if (j !== null && (false as boolean))",
+      ),
+  },
+
+  {
+    id: "MU-2195",
+    title:
+      "WEB-10a R19: the current read looks at the first page of the progress collection only (a later page's stream is 'inaccessible')",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /on the (second|third) page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (page.next_after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+        '    if (page.next_after === null || after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+
+  {
+    id: "MU-2196",
+    title:
+      "WEB-10a R19: the walk does not send the page's cursor (it asks for the first page again)",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /on the (second|third) page/,
+    patch: (t) =>
+      sub(
+        t,
+        '        after === null ? "" : `&after=${encodeURIComponent(after)}`',
+        '        after === null ? "" : ""',
+      ),
+  },
+
+  {
+    id: "MU-2197",
+    title:
+      "WEB-10a R19: a FULL page without a cursor is taken as the end of the collection (absence)",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /full page with no cursor/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (out.length === PROGRESS_PAGE ? next !== last : next !== null)",
+        "  if (out.length !== PROGRESS_PAGE && next !== null)",
+      ),
+  },
+
+  {
+    id: "MU-2198",
+    title: "WEB-10a R19: a later page's error is taken as the stream's absence",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /later page answers (401|429|500|503): error/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (status !== 200) return failedFor(status);",
+        '    if (status !== 200)\n      return after === null\n        ? failedFor(status)\n        : { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+
+  {
+    id: "MU-2199",
+    title:
+      "WEB-10a R19: the page's ids are not checked to follow the cursor in the endpoint's order (a repeated or backward cursor is followed)",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect:
+      /repeated cursor|goes back before the cursor|out of the endpoint's order/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (last !== null && !(row.id > last))",
+        "      (false as boolean)",
+      ),
+  },
+
+  {
+    id: "MU-2200",
+    title: "WEB-10a R19: a page is asked for after the read's scope ended",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /aborted before the first page/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (;;) {\n    if (io.signal.aborted) return ended;\n",
+        "  for (;;) {\n",
+      ),
+  },
+
+  {
+    id: "MU-2201",
+    title:
+      "WEB-10a R19: a page that arrived after the read's scope ended is still answered",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /HOLDS mine is held/,
+    patch: (t) =>
+      sub(t, "    );\n    if (io.signal.aborted) return ended;\n", "    );\n"),
+  },
+
+  {
+    id: "MU-2202",
+    title:
+      "WEB-10a R19: a projection of another kind is taken as my progress stream",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /projection of another kind/,
+    patch: (t) => sub(t, '      row.kind !== "progress" ||\n', ""),
+  },
+
+  {
+    id: "MU-2203",
+    title:
+      "WEB-10a R19: a projection of another occurrence is taken as my progress stream",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /projection of another occurrence/,
+    patch: (t) => sub(t, "      row.parent_id !== occurrenceId ||\n", ""),
+  },
+
+  {
+    id: "MU-2204",
+    title: "WEB-10a R19: the walk goes on past the page that holds my stream",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /LAST row of a full page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (row !== undefined) return { kind: "loaded", value: row };',
+        '    if (row !== undefined && page.next_after === null)\n      return { kind: "loaded", value: row };',
+      ),
+  },
+
+  {
+    id: "MU-2206",
+    title:
+      "WEB-10a rev 7 (live region): an earlier announcement's retraction erases a later message",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /never erases the later one|later notice's announcement survives/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (owners.current.get(region) !== announcement) return;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2207",
+    title:
+      "WEB-10a rev 7 (live region): a retraction does not cancel the announcement's pending frame",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /withdrawn before its frame|Dismiss BEFORE the frame/,
+    patch: (t) =>
+      sub(
+        t,
+        "          owners.current.delete(region);\n          cancel(region);\n",
+        "          owners.current.delete(region);\n",
+      ),
+  },
+
+  {
+    id: "MU-2208",
+    title:
+      "WEB-10a rev 7 (live region): a retraction leaves the announcement's written text",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /withdrawn after its frame|the failed order/,
+    patch: (t) =>
+      sub(
+        t,
+        '          cancel(region);\n          region.textContent = "";\n        },',
+        "          cancel(region);\n        },",
+      ),
+  },
+
+  {
+    id: "MU-2209",
+    title:
+      "WEB-10a rev 7 (live region): dismissing a notice does not withdraw its announcement",
+    file: "src/app/SessionNotices.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /the failed order|Dismiss BEFORE the frame/,
+    // Re-anchored in revision 8 (R20): the retraction now stands in the one reconciliation of the lists (the unmount cleanup is separate).
+    patch: (t) =>
+      sub(
+        t,
+        "        seen.delete(id);\n        announcement?.retract();\n",
+        "        seen.delete(id);\n",
+      ),
+  },
+
+  {
+    id: "MU-2210",
+    title:
+      "WEB-10a rev 7 (live region): a retraction owns the region by TEXT, not by announcement (it erases a later announcement of the same words)",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /ownership is the announcement, not its text/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (owners.current.get(region) !== announcement) return;\n",
+        "          if (\n            owners.current.get(region) !== announcement &&\n            region.textContent !== message\n          )\n            return;\n",
+      ),
+  },
+
+  {
+    id: "MU-2211",
+    title:
+      "WEB-10a rev 8 (R20): a change of the list re-announces whatever fact is now LATEST (positional reannouncement: dismissing the newest replays the survivor over a later message)",
+    file: "src/app/SessionNotices.tsx",
+    tests: ["tests/app/notice-announcements.test.tsx"],
+    expect:
+      /N1: dismissing the newest of two notices|N2: dismissing the newest of two notices/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const fact = feedback.filter((item) => !seen.has(item.id)).pop();\n",
+        "    const fact = feedback[feedback.length - 1];\n",
+      ),
+  },
+
+  {
+    id: "MU-2212",
+    title:
+      "WEB-10a rev 8 (R20): only ANNOUNCED notices are remembered, so a survivor that was shown without announcing counts as new when another is removed",
+    file: "src/app/SessionNotices.tsx",
+    tests: ["tests/app/notice-announcements.test.tsx"],
+    expect: /N4: two session notices shown|N5: facts that arrive in one render/,
+    patch: (t) =>
+      sub(
+        t,
+        "    for (const id of shown) if (!seen.has(id)) seen.set(id, null);\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2213",
+    title:
+      "WEB-10a rev 10 (R22): an enrolment change omits initial_policy (the server then resolves the current progress defaults)",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: |Q2: |Q5: /,
+    patch: (t) =>
+      sub(
+        t,
+        "    initial_policy: copyPolicy(change.policy ?? base.policy),\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2214",
+    title:
+      "WEB-10a rev 10 (R22): Leave and the consent send a private policy instead of the audience that was read",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*(Leave keeps|consent alone)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    initial_policy: copyPolicy(change.policy ?? base.policy),\n",
+        "    initial_policy: copyPolicy(change.policy ?? { grants: [], exclude_accounts: [] }),\n",
+      ),
+  },
+
+  {
+    id: "MU-2215",
+    title: "WEB-10a rev 10 (R22): a command's policy loses its exclusions",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "  exclude_accounts: [...policy.exclude_accounts],\n",
+        "  exclude_accounts: [],\n",
+      ),
+  },
+
+  {
+    id: "MU-2216",
+    title:
+      "WEB-10a rev 10 (R22): rejoining sends expected_version 0 instead of the enrolment's current version",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining/,
+    patch: (t) =>
+      sub(
+        t,
+        "    expected_version: base.version,\n",
+        "    expected_version: change.active === true ? 0 : base.version,\n",
+      ),
+  },
+
+  {
+    id: "MU-2217",
+    title:
+      "WEB-10a rev 10 (R22): the primary-household default is offered with edit access whatever the template says",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q2: .*version 0|Q3\/Q8: .*the first Join keeps/,
+    patch: (t) =>
+      sub(t, "        edit: template.edit,\n", "        edit: true,\n"),
+  },
+
+  {
+    id: "MU-2218",
+    title:
+      "WEB-10a rev 10 (R22, C3): the captured attempt keeps the caller's live object, not a frozen copy of its body",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q3\/Q8: .*the sent command/,
+    patch: (t) =>
+      sub(
+        t,
+        "    command: frozen(JSON.parse(body)) as EnrolCommand,\n",
+        "    command,\n",
+      ),
+  },
+
+  {
+    id: "MU-2219",
+    title:
+      "WEB-10a rev 10 (R22, C2): an unreadable default audience is shown as Private and Join can send it",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q2: .*the default can't be read/,
+    patch: (t) =>
+      sub(
+        t,
+        '            : { status: "failed" },\n',
+        '            : { status: "ready", policy: { grants: [], exclude_accounts: [] } },\n',
+      ),
+  },
+
+  {
+    id: "MU-2220",
+    title:
+      "WEB-10a rev 10 (R22, F1): joining implies the consent instead of asking it",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining|X3: /,
+    patch: (t) =>
+      // Re-anchored in revision 11 (R23): the join form's choices live in the settings' draft; no choice made is the consent `null`.
+      sub(
+        t,
+        "  const consent = draft?.consent ?? null;\n",
+        "  const consent = draft?.consent ?? true;\n",
+      ),
+  },
+
+  {
+    id: "MU-2221",
+    title:
+      "WEB-10a rev 10 (R22): rejoining starts from a private audience instead of the one last used",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining/,
+    patch: (t) =>
+      // Re-anchored in revision 11 (R23): the rejoin form's seed is passed by the settings (the draft starts from it).
+      sub(
+        t,
+        "            joinForm(enrolment, enrolment.policy, CONTROLS_COPY.lastAudience)\n",
+        "            joinForm(\n              enrolment,\n              { grants: [], exclude_accounts: [] },\n              CONTROLS_COPY.lastAudience,\n            )\n",
+      ),
+  },
+
+  {
+    id: "MU-2222",
+    title: "WEB-10a rev 10 (R22): Cancel of the audience editor saves the edit",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*control: Cancel/,
+    patch: (t) =>
+      // Re-anchored in revision 11 (R23): Cancel is an Act (frozen while a change is sent or confirmed) that discards the draft.
+      sub(
+        t,
+        '              <Act variant="quiet" blocked={blocked} onClick={cancel}>\n',
+        '              <Act\n                variant="quiet"\n                blocked={blocked}\n                onClick={() => save(draft)}\n              >\n',
+      ),
+  },
+
+  {
+    id: "MU-2223",
+    title:
+      "WEB-10a rev 11 (R23): an open directory lookup's Choose stays enabled while the caller sends its policy",
+    file: "src/features/sharing/DirectoryLookup.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1: /,
+    patch: (t) =>
+      sub(
+        t,
+        "            {...(blocked\n              ? { disabled: true, reason: blocked }\n              : { onClick: () => onChoose(entry) })}\n",
+        "            onClick={() => onChoose(entry)}\n",
+      ),
+  },
+
+  {
+    id: "MU-2224",
+    title:
+      "WEB-10a rev 11 (R23): an enrolment change's answer ends its cycle (the read that follows is not awaited)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S2: /,
+    // Re-anchored in revision 12 (R25): the answer's settlement also records what a success acknowledged; the same move to `reading`.
+    patch: (t) =>
+      sub(t, '    cycle.phase = "reading";\n', '    cycle.phase = "done";\n'),
+  },
+
+  {
+    id: "MU-2225",
+    title:
+      "WEB-10a rev 11 (R23): an audience/consent edit is admitted when it happens without asking whether a change owns the settings",
+    // Re-expressed in revision 12 (R23, C1): the page owner of the draft admits each edit when it happens (the settings only ask it); the
+    // same lock check removed there.
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S5: .*Choose, one turn/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (\n    enrolmentLock(identity, taskId) !== null ||\n    (draft !== undefined && draft.base.version !== base.version)\n  )\n",
+        "  if (draft !== undefined && draft.base.version !== base.version)\n",
+      ),
+  },
+
+  {
+    id: "MU-2226",
+    title:
+      "WEB-10a rev 11 (R23): a read showing another version drops a draft whose later edits were never sent",
+    // Re-expressed in revision 12 (R23/R25): the current read ends drafts in page memory (`answerEnrolment`); the same fault, any draft
+    // of another version dropped by the read.
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S8: a draft not acknowledged/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (draft.revision === 0 && draft.base.version !== value.version))\n",
+        "        draft.base.version !== value.version)\n",
+      ),
+  },
+
+  {
+    id: "MU-2227",
+    title:
+      "WEB-10a rev 11 (R23): a read asked while the change was being sent is taken as the current state",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read answered while a change is pending/,
+    patch: (t) => sub(t, '  if (!read.after) return "early";\n', ""),
+  },
+
+  {
+    id: "MU-2228",
+    title:
+      "WEB-10a rev 11 (R23): a read asked after the answer is not taken as current, so the change's cycle never ends (frozen for ever)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1\/S2 controls: /,
+    patch: (t) =>
+      sub(
+        t,
+        '    after: cycle.phase !== "sending",\n',
+        '    after: cycle.phase === "done",\n',
+      ),
+  },
+
+  {
+    id: "MU-2229",
+    title:
+      "WEB-10a rev 11 (DA-1): an offline retry is taken as a definite answer (the uncertain attempt's body and key are forgotten)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S8\/DA-1: .*Try again finds the page offline/,
+    patch: (t) =>
+      sub(t, '  "invalid",\n]);\n', '  "invalid",\n  "offline",\n]);\n'),
+  },
+
+  {
+    id: "MU-2230",
+    title:
+      "WEB-10a rev 11 (R23, I8): Leave and the consent proceed beside an unsaved audience edit (their answer then drops it)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S4: .*an unsaved edit/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 12 (R25): any draft with an edit holds them (unsent, refused or uncertain); the same rule removed.
+        "    blocked ??\n    (draft !== null && draft.revision > 0 ? CONTROLS_COPY.finishFirst : null);\n",
+        "    blocked;\n",
+      ),
+  },
+
+  {
+    id: "MU-2231",
+    title:
+      "WEB-10a rev 11 (R23): a failed read after the answer ends the change's cycle (the settings are free on no current state)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S9: .*the follow-up read is closed/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 12: the read's value (null: failed) is passed; a failed read passed as a successful one.
+        "answerEnrolment(env.identity, taskId, read, got)",
+        "answerEnrolment(\n        env.identity,\n        taskId,\n        read,\n        got ?? ({ version: -1 } as Enrolment),\n      )",
+      ),
+  },
+
+  {
+    id: "MU-2233",
+    title:
+      "WEB-10a rev 11 (R23): the settings are frozen while a change is sent but not while its read is awaited",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S2: |S3: /,
+    patch: (t) =>
+      sub(
+        t,
+        "      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n",
+        "      : null;\n",
+      ),
+  },
+
+  {
+    id: "MU-2234",
+    title:
+      "WEB-10a rev 11 (R23, S5): the audience editor's Cancel stays enabled while its change is sent or confirmed",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S3: /,
+    patch: (t) =>
+      sub(
+        t,
+        '              <Act variant="quiet" blocked={blocked} onClick={cancel}>\n',
+        '              <Act variant="quiet" blocked={null} onClick={cancel}>\n',
+      ),
+  },
+
+  {
+    id: "MU-2235",
+    title:
+      "WEB-10a rev 11 (R24): the expected unit count is left behind when the catalogue grows (revision 10's 1,269)",
+    file: "scripts/mutation/expected.mjs",
+    tests: ["tests/static/mutation-inventory.test.ts"],
+    expect: /maintained catalogue agrees/,
+    patch: (t) =>
+      sub(
+        t,
+        /export const EXPECTED_UNIT = \d+;/,
+        "export const EXPECTED_UNIT = 1269;",
+      ),
+  },
+
+  {
+    id: "MU-2236",
+    title:
+      "WEB-10a rev 11 (R23): a draft's edits are not marked as sent when its change is admitted (its own answer then leaves it kept as unsaved)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1\/S2 controls: /,
+    // Re-expressed in revision 12 (R25, C2): a Save/Join names the draft revision it submits (its ticket) instead of marking it sent; the
+    // same fault, the change submitted without naming it (its own success then leaves the draft kept as unsaved).
+    patch: (t) =>
+      sub(
+        t,
+        "    send(enrolCommand(taskId, d.base, change), {\n      session: d.session,\n      revision: d.revision,\n    });\n",
+        "    send(enrolCommand(taskId, d.base, change));\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 12 (review 12, R23/R25; design assessment C1-C7, Q2-Q15): MU-2237..MU-2250 --------------------------------------
+  {
+    id: "MU-2237",
+    title:
+      "WEB-10a rev 12 (R23, C1): the settings end the page's draft when they unmount (an ordinary remount loses the later edit)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q2 \(R23\): .*REMOUNT/,
+    patch: (t) =>
+      sub(
+        t,
+        "  useEffect(() => subscribeEnrolment(changed), []);\n",
+        "  // biome-ignore lint/correctness/useExhaustiveDependencies: mutant\n  useEffect(() => {\n    const stop = subscribeEnrolment(changed);\n    return () => {\n      stop();\n      const d = enrolmentDraftOf(env.identity, taskId);\n      if (d !== null) discardEnrolmentDraft(env.identity, taskId, d.session);\n    };\n  }, []);\n",
+      ),
+  },
+
+  {
+    id: "MU-2238",
+    title:
+      "WEB-10a rev 12 (R25, C2): a refusal acknowledges the submitted draft like a success (the read that follows ends it)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q4 \(R25\): .*kept with its grant|refused, the read at version/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (outcome === "saved") cycle.acknowledged = attempt.ticket;\n',
+        '    if (outcome !== "uncertain") cycle.acknowledged = attempt.ticket;\n',
+      ),
+  },
+
+  {
+    id: "MU-2239",
+    title:
+      "WEB-10a rev 12 (R25, I4): an uncertain answer acknowledges the submitted draft (a later read showing another version ends it)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-ownership.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect:
+      /SAME audience at version 8|uncertain, the read at version|S8: a draft not acknowledged/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (outcome === "saved") cycle.acknowledged = attempt.ticket;\n',
+        '    if (outcome !== "refused") cycle.acknowledged = attempt.ticket;\n',
+      ),
+  },
+
+  {
+    id: "MU-2240",
+    title:
+      "WEB-10a rev 12 (R23, Q9): a success ends a LATER revision of the draft it submitted (the edit made after it is lost)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect:
+      /Q9: .*a later edit after the uncertain save|a later revision survives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        saved.session === draft.session &&\n        saved.revision === draft.revision) ||\n",
+        "        saved.session === draft.session) ||\n",
+      ),
+  },
+
+  {
+    id: "MU-2241",
+    title:
+      "WEB-10a rev 12 (C5, Q9): a success ends ANOTHER editor session's draft (one reopened after Cancel, its revision and values equal)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Cancel and reopen|another session with the same revision/,
+    patch: (t) => sub(t, "        saved.session === draft.session &&\n", ""),
+  },
+
+  {
+    id: "MU-2242",
+    title:
+      "WEB-10a rev 12 (C3, Q9): Try again names the LIVE draft's revision as what it submits (its success ends the later edit)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q9: .*a later edit after the uncertain save/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  onClick={() => void send(uncertain.command)}",
+        "                  onClick={() =>\n                    void send(\n                      uncertain.command,\n                      held === null\n                        ? undefined\n                        : { session: held.session, revision: held.revision },\n                    )\n                  }",
+      ),
+  },
+
+  {
+    id: "MU-2243",
+    title:
+      "WEB-10a rev 12 (C4, Q7): a first Join already begun waits for the defaults read again (a failed read hides the choices made)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q7: .*consent No and the default audience chosen/,
+    // Re-anchored in revision 13 (R26, C1/C2): the first Join's form no longer moves once begun; the same fault is its defaults read asked
+    // for again with a draft begun, and the defaults' loading or failure shown in place of the draft.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      {begun === null ? <SeedRead round={round} found={setSeed} /> : null}\n",
+          "      <SeedRead round={round} found={setSeed} />\n",
+        ),
+        '      {begun !== null ? (\n        form(begun.policy)\n      ) : seed.status === "ready" ? (\n',
+        '      {seed.status === "ready" ? (\n',
+      ),
+  },
+
+  {
+    id: "MU-2244",
+    title:
+      "WEB-10a rev 12 (Q6): a refused enrolment read keeps the unsaved draft (shown again when the read is allowed)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /the enrolment read is refused|a 403\/404 of the enrolment read/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (read.startsWith("enrolment:") && memory.drafts.delete(read.slice(10)))\n    enrolmentChanged();\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2245",
+    title:
+      "WEB-10a rev 12 (C6, Q14): a late answer for a replaced identity allocates its page memory (the current identity's is dropped)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q14: |another identity starts with nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const memory = memories.get(identity);\n  if (memory === undefined || memory.enrolment.get(taskId) !== attempt) return;\n",
+        "  const memory = memoryOf(identity);\n  if (memory.enrolment.get(taskId) !== attempt) return;\n",
+      ),
+  },
+
+  {
+    id: "MU-2246",
+    title:
+      "WEB-10a rev 12 (C6, Q15): a full page reclaims the oldest cycle even while it owns the settings (its lock is lost)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an unconfirmed cycle is never reclaimed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (id !== taskId && !owned(memory, id)) {\n",
+        "        if (id !== taskId) {\n",
+      ),
+  },
+
+  {
+    id: "MU-2247",
+    title:
+      "WEB-10a rev 12 (I8, Q15): a full page admits a new draft or change without limit (no refusal with why)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q15: |at capacity a NEW task/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.enrolment.size + memory.drafts.size >= limit\n",
+        "    (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-2248",
+    title:
+      "WEB-10a rev 12 (C5): opening the editor replaces a draft with edits (Change… loses the unsaved change)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an edited draft is never replaced by an opening/,
+    patch: (t) =>
+      sub(t, "    (held !== undefined && held.revision > 0) ||\n", ""),
+  },
+
+  {
+    id: "MU-2249",
+    title:
+      "WEB-10a rev 12 (I5): an edit made to the version shown changes a kept draft of an earlier version (it is moved onto it)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /a draft of another version is never edited/,
+    patch: (t) =>
+      sub(
+        t,
+        " ||\n    (draft !== undefined && draft.base.version !== base.version)\n  )\n",
+        "\n  )\n",
+      ),
+  },
+
+  {
+    id: "MU-2250",
+    title:
+      "WEB-10a rev 12: an editor opened with nothing in it outlives a change of the version (it then blocks the next edit there)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an editor opened with nothing in it ends at another version/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (draft.revision === 0 && draft.base.version !== value.version))\n",
+        "        (false as boolean))\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 13 (review 13, R26; design assessment C1/C2, Q1/Q3): MU-2251..MU-2253 (unit), MU-2254 (REAL ENGINE) -------------
+  {
+    id: "MU-2251",
+    title:
+      "WEB-10a rev 13 (R26): the first Join's form is keyed by whether a draft is begun (the first choice replaces it, and focus falls to the body)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect: /F1 \(R26\): .*first join, consent|F2 \(R26\): .*first join, /,
+    patch: (t) =>
+      sub(
+        t,
+        "            <FirstJoin\n              begun={current}\n",
+        '            <FirstJoin\n              key={current === null ? "seed" : "draft"}\n              begun={current}\n',
+      ),
+  },
+
+  {
+    id: "MU-2252",
+    title:
+      "WEB-10a rev 13 (R26): revision 12's first Join restored: once begun, its form is rendered outside FirstJoin (the focussed control is replaced)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect:
+      /F1 \(R26\): .*first join, consent|F2 \(R26\): .*first join, |F4 \(R26\): .*first join/,
+    patch: (t) => sub(t, FIRST_JOIN_R13, FIRST_JOIN_R12),
+  },
+
+  {
+    id: "MU-2253",
+    title:
+      "WEB-10a rev 13 (R26, C2): a first Join already begun still asks for the defaults snapshot (the draft shown, but a read asked for nothing)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect: /F5 \(R26, C2\): .*a draft begun/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {begun === null ? <SeedRead round={round} found={setSeed} /> : null}\n",
+        "      <SeedRead round={round} found={setSeed} />\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 15 (review 15, R28 today-participant-membership-label, R29 task-edit-permission-admission): MU-2255..MU-2265
+  // (unit), MU-2266/MU-2267 (REAL ENGINE) ------------------------------------------------------------------------------------------------
+  {
+    id: "MU-2255",
+    title:
+      "WEB-10a rev 15 (R28): Today's row restored to review 15's defect: every shared row says You (or You and N others), whoever the roster names",
+    file: "src/features/tasks/today/TodayRow.tsx",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect:
+      /Today never names a viewer who is not taking part \(R28\) (everyone|pooled|anyone): |an empty roster says no one/,
+    patch: (t) => sub(t, TODAY_WHO_R15, TODAY_WHO_R14),
+  },
+
+  {
+    id: "MU-2256",
+    title:
+      "WEB-10a rev 15 (R28): edit permission counted as taking part (an Anyone task I may record on names me before I have)",
+    file: "src/features/tasks/format.ts",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /eligibility is not membership/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row.data.participants.includes(me) || row.streamPresent || row.streamPending\n",
+        "    row.data.participants.includes(me) ||\n    row.streamPresent ||\n    row.streamPending ||\n    row.canEdit\n",
+      ),
+  },
+
+  {
+    id: "MU-2257",
+    title:
+      "WEB-10a rev 15 (R28): my own stream (held, or being created by a queued first record) is not counted as taking part",
+    file: "src/features/tasks/format.ts",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /own stream held|my first record makes me You/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row.data.participants.includes(me) || row.streamPresent || row.streamPending\n",
+        "    row.data.participants.includes(me)\n",
+      ),
+  },
+
+  {
+    id: "MU-2258",
+    title:
+      "WEB-10a rev 15 (R28): the task's Who's on this says You unconditionally (the two screens disagree)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /the task says the same as Today \(R28\) a viewer off the roster/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {whoLabel(row, env.accountId)}\n",
+        `        {others.length === 0\n          ? "You"\n          : \`You and \${others.length} other\${others.length === 1 ? "" : "s"}\`}\n`,
+      ),
+  },
+
+  {
+    id: "MU-2259",
+    title:
+      "WEB-10a rev 15 (R29): a revision needs only the task editable (a read-only execution is ignored)",
+    file: "src/features/tasks/reasons.ts",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /denied execution|both resources must be editable/,
+    patch: (t) => sub(t, EDITABLE_R15, "  return task.can_edit;\n"),
+  },
+
+  {
+    id: "MU-2260",
+    title:
+      "WEB-10a rev 15 (R29): a revision needs only the execution editable (a read-only task is ignored)",
+    file: "src/features/tasks/reasons.ts",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /denied task|both resources must be editable/,
+    patch: (t) =>
+      sub(t, EDITABLE_R15, "  return execution?.can_edit !== false;\n"),
+  },
+
+  {
+    id: "MU-2261",
+    title:
+      "WEB-10a rev 15 (R29): the form's admission ignores a known denial (Save still disabled with its reason, but Enter queues the revision)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    // Revision 16: the writing transaction refuses such a write too (`denied`), so the form's own admission is observed by
+    // task-revision-admission.test.tsx's "attempts no write" cases (no write is even asked for).
+    tests: [
+      "tests/features/tasks/task-edit-permission.test.tsx",
+      "tests/features/tasks/task-revision-admission.test.tsx",
+    ],
+    expect:
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)|attempts no write under a known denial/,
+    patch: (t) =>
+      sub(t, "    !queueUnread &&\n    !denied &&\n", "    !queueUnread &&\n"),
+  },
+
+  {
+    id: "MU-2262",
+    title:
+      "WEB-10a rev 15 (R29): save() admits whatever started it (Enter's implicit submission bypasses the disabled Save)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    // Revision 16: the writing transaction refuses such a write too (`denied`), so the form's own admission is observed by
+    // task-revision-admission.test.tsx's "attempts no write" cases (no write is even asked for).
+    tests: [
+      "tests/features/tasks/task-edit-permission.test.tsx",
+      "tests/features/tasks/task-revision-admission.test.tsx",
+    ],
+    expect:
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)|attempts no write under a known denial/,
+    patch: (t) => sub(t, "    if (!canSave) return;\n", ""),
+  },
+
+  {
+    id: "MU-2263",
+    title:
+      "WEB-10a rev 15 (R29): a denied Save gives the wrong reason (wait for syncing) instead of saying the task can't be edited",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /Save is withheld with the reason|withholds Save; the typed name/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ) : denied ? (\n          <Button disabled reason={FORM_COPY.denied}>\n            {FORM_COPY.save}\n          </Button>\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2264",
+    title:
+      "WEB-10a rev 15 (R29): the task detail offers the Edit task link under a known denial (sync and policy version only)",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /the task's Edit affordance \(R29\) denied /,
+    patch: (t) =>
+      sub(
+        t,
+        "          {!editable(task, view.execution) ? (\n",
+        "          {false ? (\n",
+      ),
+  },
+
+  {
+    id: "MU-2265",
+    title:
+      "WEB-10a rev 15 (R29): the edit route does not carry the permissions it read into the form (a direct route is always editable)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect:
+      /direct route: Save is withheld|permission lost while the form is open|a queued revision is not edited/,
+    patch: (t) =>
+      sub(
+        t,
+        "          editable: editable(view.task, view.execution),\n",
+        "          editable: true,\n",
+      ),
+  },
+  // WEB-10a revision 16 (R30, R31, DA-A1..A3): MU-2268..MU-2298, kept in their own module (this file reached Biome's size limit).
+  ...UNIT_R16,
+  ...UNIT_R17,
+  ...UNIT_R18,
+  ...UNIT_R19,
+  ...UNIT_R20,
+  ...UNIT_R21,
+  ...UNIT_R22,
+  ...UNIT_R23,
+  ...UNIT_R24,
+  ...UNIT_R25,
+  ...UNIT_R26,
+
+  ...UNIT_LABELS,
 ];
 
 /**
@@ -20728,6 +21991,13 @@ export const RETIRED = [
     why: "(revision 35, R55) the second walk is not compared with the first: there is no walk any more. The listing is ONE snapshot of the origin's keys (`Object.keys` of the store, the HTML standard's single \"get the keys\"), which no interleaving can enter, so there are no two walks to compare and the anchor does not exist",
     replacedBy:
       "MU-1062 (the listing walks by index again: the review's churn then hides a standing failure), MU-1064 and MU-1065 (an established key the snapshot left out is read again and contradicts it)",
+  },
+
+  {
+    id: "MU-2232",
+    why: "(WEB-10a revision 11, R23 S13) an unsaved enrolment draft shown under another identity: the draft's own owner check was removed as unreachable. The qualification run (`.agtx/evidence/web10a-revision-11/validation/runs/2026-10-15T20-43-03.594Z-612cc000`) found the mutant SURVIVED S13 with no failure at all, because the task detail's complete read belongs to one identity (`useTaskDetail`'s scope): another identity remounts the settings and drops the draft before it could be shown. A guard no composed schedule can reach is not kept, so there is no anchor (`draft?.owner === owner`) to patch",
+    replacedBy:
+      "enrolment-ownership S13 (asserts the composed behaviour) and the detail's identity-scoped read (its existing coherence mutants)",
   },
 ];
 
@@ -23224,190 +24494,7 @@ export const ENGINE = [
         "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
       ),
   },
-  {
-    id: "MU-1301",
-    title:
-      "WEB-08c revision 3 (R5, T24 A/S4): (REAL ENGINE) the recovery finishes after its FIRST catch-up page, before the final data commit (the fence is cleared early)",
-    file: "src/data/engine/recovery-job.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-1 T24 A",
-    expect: /LR-1 T24 A/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (hasMore) {\n      setState({ kind: "running", mode: issued.mode, path: issued.path });',
-        '    if (hasMore && issued.mode !== "recovery") {\n      setState({ kind: "running", mode: issued.mode, path: issued.path });',
-      ),
-  },
-  {
-    id: "MU-1302",
-    title:
-      "WEB-08c revision 3 (R5, T24 B\u2032): (REAL ENGINE) a recovery snapshot's `409 access_changed` does not restart the snapshot",
-    file: "src/data/engine/recovery-job.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-2 T24 B",
-    expect: /LR-2 T24 B/,
-    patch: (t) =>
-      sub(
-        t,
-        '      if (code === "access_changed" && issued.path === "snapshot")',
-        '      if (code === "access_changed" && issued.path === "snapshot" && (false as boolean))',
-      ),
-  },
-  {
-    id: "MU-1303",
-    title:
-      "WEB-08c revision 3 (R5, T24 C, QR2-a attribution): (REAL ENGINE) a RECOVERY-class request's 401 is not recorded as an observation",
-    file: "src/session/kernel/send.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-3 T24 C",
-    expect: /LR-3 T24 C/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (response.status === 401) {\n    observe("unauthenticated");',
-        '  if (response.status === 401) {\n    if (inflight.klass !== "recovery") observe("unauthenticated");',
-      ),
-  },
-  {
-    id: "MU-1304",
-    title:
-      "WEB-08c revision 3 (R5, T24 C3): (REAL ENGINE) `finish_recovery` does not refuse a current-epoch entry (NOT_ELIGIBLE never answered)",
-    file: "src/session/model/reducers/operation.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-4 T24 C3",
-    expect: /LR-4 T24 C3/,
-    patch: (t) =>
-      sub(
-        t,
-        "        f.epoch >= input.epoch,\n",
-        "        f.epoch > input.epoch,\n",
-      ),
-  },
-  {
-    id: "MU-1305",
-    title:
-      "WEB-08c revision 3 (R5, T24 C3 RERUN): (REAL ENGINE) `finish_recovery` removes older-epoch entries above the captured `s` too (over-clearing)",
-    file: "src/session/model/reducers/operation.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-5 T24 C3",
-    expect: /LR-5 T24 C3/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const kept = list.filter((f) => !(f.epoch < input.epoch && f.seq <= input.s));",
-        "  const kept = list.filter((f) => !(f.epoch < input.epoch));",
-      ),
-  },
-  {
-    id: "MU-1306",
-    title:
-      "WEB-08c revision 3 (R5, T24 D, K-3): (REAL ENGINE) the leading page publishes no recovery report (a follower never shows state 3). Revision 4: a report is announced AND answered to questions, so the mutant silences both (the announcement alone was equivalent: a follower that opens later asks; pool request-18efefc5e2a04a89829c, survived)",
-    file: "src/data/leader/leader.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-6 T24 D",
-    expect: /LR-6 T24 D/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (standing === null) return;\n",
-        "    if (standing === null || (true as boolean)) return;\n",
-      ),
-  },
-  {
-    id: "MU-1308",
-    title:
-      "WEB-08c revision 3 (R5, T24 H(ii)): (REAL ENGINE) the leader binds an account whose operation is unresolved (row 3)",
-    file: "src/data/leader/leader.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-8 T24 H\\(ii\\)",
-    expect: /LR-8 T24 H\(ii\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (deps.operationPending(identity.account_id)) return;\n",
-        "    void deps.operationPending;\n",
-      ),
-  },
-  {
-    id: "MU-1309",
-    title:
-      "WEB-08c revision 3 (R5, T24 H(iv)): (REAL ENGINE) E5 never converts an older-epoch unresolved lease into an entry (the reducer refuses every lease; a call-site mutant of recovery.begin was EQUIVALENT: verifyUnresolved converts first too)",
-    file: "src/session/model/reducers/observation.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-9 T24 H\\(iv\\)",
-    expect: /LR-9 T24 H\(iv\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "        lease.epoch >= settled.epoch\n      )\n        continue;\n      pushFence(",
-        "        lease.epoch >= 0\n      )\n        continue;\n      pushFence(",
-      ),
-  },
-  {
-    id: "MU-1313",
-    title:
-      "WEB-08c revision 3 (R8, HF-13): (REAL ENGINE) both corrections reverted: the level-0 gate does not cancel the mount's heading attempt and a deferred attempt takes focus from the restored control",
-    file: "src/session/adapters/protected-surface.ts",
-    spec: "tests/e2e/fixture.session-gate.spec.ts",
-    grep: "HF-13 \\(revision 3\\)",
-    expect: /HF-13 \(revision 3\)/,
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "      // The gate owns focus until the lift: a heading attempt still waiting from the mount is obsolete (HF-13).\n      focusToken += 1;\n",
-          "",
-        ),
-        "      if (deferred && moved) return;\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1314",
-    title:
-      "WEB-08c revision 4 (R9, S2): (REAL ENGINE) a follower asks for the leader's report ONCE per card (its paced question never re-arms, so neither time nor its own evaluations ask again; the timer-only form was equivalent natively: pool request-18efefc5e2a04a89829c, survived)",
-    file: "src/data/leader/leader.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-12 S2",
-    expect: /LR-12 S2/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (asking?.key !== key) return;\n        asking = null;\n        followStatus(Math.min(delay * 2, STATUS_ASK_MAX_MS));\n",
-        "        void delay;\n",
-      ),
-  },
-  {
-    id: "MU-1315",
-    title:
-      "WEB-08c revision 4 (R9, S3): (REAL ENGINE) the scan reads only a displaying page (a visible follower on a recovery card never learns the completion when every hint is lost)",
-    file: "src/session/session.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-13 S3",
-    expect: /LR-13 S3/,
-    patch: (t) =>
-      sub(
-        t,
-        '(view.kind === "neutral" && /^[23]$/.test(view.state))',
-        '(view.kind === "neutral" && (false as boolean))',
-      ),
-  },
-  {
-    id: "MU-1316",
-    title:
-      "WEB-08c revision 4 (DA-N1, S7): (REAL ENGINE) a recovery quota stop is not recorded in the write-failure marker (a reload retries it)",
-    file: "src/data/engine/recovery-job.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-15 S7",
-    expect: /LR-15 S7/,
-    patch: (t) =>
-      sub(
-        t,
-        '    const recorded = recordStop(\n      deps.markers,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
-        '    const recorded = recordStop(\n      undefined,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
-      ),
-  },
+  ...ENGINE_LIFECYCLE,
   // ---- WEB-13a (REAL ENGINE): the Calendars screen in the production composition --------------------------------------------
   {
     id: "MU-1342",
@@ -23692,84 +24779,524 @@ export const ENGINE = [
         "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
       ),
   },
+  // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
+
   {
-    id: "MU-1692",
+    id: "MU-2031",
     title:
-      "WEB-08d review r18 M1: (REAL ENGINE) the fixture entry marks every page ready as it starts, before an on-demand diagnostic page's code has even arrived",
-    file: "src/fixture/main.tsx",
-    spec: "tests/e2e/fixture.diagnostic-pages.spec.ts",
-    grep: "diagnostic pages load on demand",
-    expect: /not ready while its code is held/,
+      "WEB-10a N-T1: (REAL ENGINE) the offline Today walk keeps the occurrences of an archived task",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T6:",
+    expect: /E-T6:/,
+    patch: (t) => sub(t, "      if (row.archived) continue;\n", ""),
+  },
+
+  {
+    id: "MU-2032",
+    title:
+      "WEB-10a N-T2: (REAL ENGINE) the first occurrence of a repeating schedule is keyed `once` (its deterministic id is not the server's)",
+    file: "src/features/tasks/model/ids.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T3:",
+    expect: /E-T3:/,
     patch: (t) =>
       sub(
         t,
-        "document.documentElement.dataset.atlasFixture = ATLAS_FIXTURE_ONLY;\n",
-        'document.documentElement.dataset.atlasFixture = ATLAS_FIXTURE_ONLY;\ndocument.documentElement.dataset.fixturePage = "ready";\n',
+        "  if (\n    schedule.repeat === null ||\n",
+        "  if (\n    schedule.repeat !== undefined ||\n",
       ),
   },
+
   {
-    id: "MU-1693",
+    id: "MU-2033",
     title:
-      "WEB-08d review r18 M1: (REAL ENGINE) a diagnostic page marks itself ready in a layout effect, before its children's effects (the heading's focus) have run",
-    file: "src/fixture/page-ready.tsx",
-    spec: "tests/e2e/fixture.diagnostic-pages.spec.ts",
-    grep: "diagnostic pages load on demand",
-    expect:
-      /(a neutral state|the sign-in-again form): not ready while its code is held/,
+      "WEB-10a N-T3: (REAL ENGINE) happened_at is not the instant of the person's act (an hour later)",
+    file: "src/features/tasks/actions.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T2:",
+    expect: /E-T2:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            happenedAt: Math.floor(env.now() / 1000),",
+        "            happenedAt: Math.floor(env.now() / 1000) + 3_600,",
+      ),
+  },
+
+  // ---- WEB-10a revision 1 (R2, R3, R7): N-T4..N-T6 -------------------------------------------------------------------------------------
+  {
+    id: "MU-2061",
+    title:
+      "WEB-10a N-T4: (REAL ENGINE) a mounted Today keeps the /daily answer it received online after the device goes offline",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9b:",
+    expect: /E-T9b:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    answer !== null && answer.key === key ? answer : null;",
+      ),
+  },
+
+  {
+    id: "MU-2062",
+    title:
+      "WEB-10a N-T5: (REAL ENGINE) a correction refused on a version conflict offers neither 'Save mine on the current version' nor 'Discard mine'",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7b:",
+    expect: /E-T7b:/,
+    patch: (t) =>
+      sub(
+        t,
+        '    row.attention.status === "version_conflict"',
+        '    row.attention.status === "rejected"',
+      ),
+  },
+
+  {
+    id: "MU-2063",
+    title:
+      "WEB-10a N-T6: (REAL ENGINE) the correction being edited is not kept when the person opens the queue from the dialog",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7c:",
+    expect: /E-T7c:/,
+    // Re-expressed in revision 2 (same intent): retention is now the correction owner's `retainCorrection`. Re-anchored in WEB-10a revision
+    // 22 (same intent): the visit the dialog opens its session on keeps a correction holding input through the sync screens too, so the
+    // explicit retain alone is a redundant layer for an edited correction (Run 6: MU-2063 survived in all three engines). The mutant takes
+    // both of the dialog's keepers away: its session belongs to no visit and its sync control retains nothing. Re-anchored in revision 23
+    // (same intent): the dialog now asks for its visit once (`owner`, also what it attaches to, R35) and opens its session on it.
     patch: (t) =>
       sub(
         sub(
           t,
-          'import { type ReactNode, useEffect } from "react";',
-          'import { type ReactNode, useLayoutEffect } from "react";',
+          "        if (session.current !== null) retainCorrection(key, session.current);",
+          "        if (session.current !== null) void 0;",
         ),
-        "  useEffect(markFixturePageReady, []);",
-        "  useLayoutEffect(markFixturePageReady, []);",
+        "      owner,\n",
+        "      null,\n",
       ),
   },
+
+  // ---- WEB-10a revision 2 (R2, R3, R7, R8, DA-N1): N-T7..N-T13 ------------------------------------------------------------------------
   {
-    id: "MU-1694",
+    id: "MU-2095",
     title:
-      "WEB-08d review r18 M1: (REAL ENGINE) a gallery is marked ready once its code has arrived, before the boot screen is cleared and the gallery is mounted",
-    file: "src/fixture/main.tsx",
-    spec: "tests/e2e/fixture.diagnostic-pages.spec.ts",
-    grep: "diagnostic pages load on demand",
-    expect: /gallery: not ready while its code is held/,
+      "WEB-10a N-T7: (REAL ENGINE) the correction dialog's Save is taken out of the keyboard's tab order",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8d: .*correction dialog",
+    expect: /E-T8d:/,
+    patch: (t) =>
+      sub(
+        t,
+        '              <Button variant="primary" onClick={() => void save()}>',
+        '              <Button\n                variant="primary"\n                tabIndex={-1}\n                onClick={() => void save()}\n              >',
+      ),
+  },
+
+  {
+    id: "MU-2096",
+    title:
+      "WEB-10a N-T8: (REAL ENGINE) the task form's Save is taken out of the keyboard's tab order",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8d: .*task form",
+    expect: /E-T8d:/,
+    patch: (t) =>
+      sub(
+        t,
+        '          <Button variant="primary" type="submit">',
+        '          <Button variant="primary" type="submit" tabIndex={-1}>',
+      ),
+  },
+
+  {
+    id: "MU-2097",
+    title:
+      "WEB-10a N-T9: (REAL ENGINE) an older correction save consumes the session whatever was edited since (keys, held save, queue visit)",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8e:",
+    expect: /E-T8e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (saved && held.revision === ticket.revision) {",
+        "  if (saved) {",
+      ),
+  },
+
+  {
+    id: "MU-2098",
+    title:
+      "WEB-10a N-T10: (REAL ENGINE) the task detail's clock is not told its day's window (no wake at the close)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9c:",
+    expect: /E-T9c:/,
+    patch: (t) =>
+      sub(t, "    shownWindow === null ? [] : [shownWindow],", "    [],"),
+  },
+
+  {
+    id: "MU-2099",
+    title:
+      "WEB-10a N-T11: (REAL ENGINE) a /daily answer is dated by its delivery instead of its dispatch",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9d:",
+    expect: /E-T9d:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const requestedAt = Math.min(joint.startedAt, personal.startedAt);",
+        "        const requestedAt = env.now();",
+      ),
+  },
+
+  {
+    id: "MU-2100",
+    title:
+      "WEB-10a N-T12: (REAL ENGINE) the daily item is taken as the structure even when the committed cache holds a newer version",
+    file: "src/features/tasks/view.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9e:",
+    expect: /E-T9e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : item.version > cached.version ||\n        (item.version === cached.version && basis.current);",
+        "      : true;",
+      ),
+  },
+
+  {
+    id: "MU-2101",
+    title:
+      "WEB-10a N-T13: (REAL ENGINE) the conflict choices do not read what was submitted from the queued operation (after a reload)",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7e:",
+    expect: /E-T7e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : submittedCorrection(commandOf(stored), row.id);",
+        "      : null;",
+      ),
+  },
+
+  {
+    id: "MU-2103",
+    title:
+      "WEB-10a N-T14: (REAL ENGINE) Today asks /daily again on every committed page, an empty one included: with the production leader the read wakes the engine and they loop",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.data-wake.spec.ts",
+    grep: "E-C13: .*a healthy engine beside a second real tab",
+    expect: /E-C13:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
+        "      ? (position.value?.pageSeq ?? -1)",
+      ),
+  },
+
+  // ---- WEB-10a revision 3 (R8, R9; design assessment C2, C3, Q13, Q19): the real engines ----------------------------------------------
+  {
+    id: "MU-2119",
+    title:
+      "WEB-10a N-T14: (REAL ENGINE) a local read is certified at its first attempt whatever was committed between its stages",
+    file: "src/data/ui/scan.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T14:.*between=true",
+    expect: /E-T14:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        '    if (after.kind === "ok")',
+      ),
+  },
+
+  {
+    id: "MU-2120",
+    title:
+      "WEB-10a N-T15: (REAL ENGINE) Today schedules the committed windows only, not the one an outstanding create gives",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9f:.*today:",
+    expect: /E-T9f:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        snapshot.outstanding,\n      );\n      if (effective.data) out.push(effective.data);",
+        "        NOTHING,\n      );\n      if (effective.data) out.push(effective.data);",
+      ),
+  },
+
+  {
+    id: "MU-2121",
+    title:
+      "WEB-10a N-CG1: (REAL ENGINE) the Dexie adapter never advances the local composition generation",
+    file: "src/data/store/dexie-adapter.ts",
+    spec: "tests/e2e/fixture.data-composition.spec.ts",
+    grep: "E-CG1:",
+    expect: /E-CG1:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (advancesComposition(written, plan.scope)) {",
+        "        if (false as boolean) {",
+      ),
+  },
+
+  {
+    id: "MU-2122",
+    title:
+      "WEB-10a N-CG2: (REAL ENGINE) the schema stays at version 2: an older build's connection is never closed and it can still open",
+    file: "src/data/model/schema.ts",
+    spec: "tests/e2e/fixture.data-composition.spec.ts",
+    grep: "E-CG2:",
+    expect: /E-CG2:/,
+    patch: (t) =>
+      sub(
+        t,
+        "export const SCHEMA_VERSION = 3;",
+        "export const SCHEMA_VERSION = 2;",
+      ),
+  },
+
+  // ---- WEB-10a revision 4 (R9, R10, R11; design assessment D7, J1, E1): the real engines -------------------------------------------------
+  {
+    id: "MU-2149",
+    title:
+      "WEB-10a N-T15: (REAL ENGINE) an open full history is not read again when its stream's committed version changes",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T15:.*opened=true",
+    expect: /E-T15:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.version === row.progressVersion ||",
+        "      (true as boolean) ||",
+      ),
+  },
+
+  {
+    id: "MU-2150",
+    title:
+      "WEB-10a N-T16: (REAL ENGINE) an enrolment change has no owner while it is pending (no refusal of a second attempt, the control stays enabled)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T16:",
+    expect: /E-T16:/,
     patch: (t) =>
       sub(
         sub(
           t,
-          'import { FixturePageReady } from "./page-ready";',
-          'import { FixturePageReady, markFixturePageReady } from "./page-ready";',
+          // Re-anchored in revision 12: `startEnrolment` also takes the change's ticket (R25); the same owner bypassed.
+          "    const mine = startEnrolment(\n      env.identity,\n      taskId,\n      command,\n      env.newId,\n      ticket,\n    );\n    if (mine === null) return false;",
+          '    const mine = {\n      key: env.newId(),\n      body: JSON.stringify(command),\n      command,\n      phase: "pending" as const,\n    };',
         ),
-        "  void page.then((gallery) => {\n",
-        "  void page.then((gallery) => {\n    markFixturePageReady();\n",
+        // Re-expressed in revision 10 (R22): the pending rule now lives in `blocked` (every enrolment control), and the body is sent.
+        // Re-anchored in revision 11 (R23): `send` reports whether it sent, and `blocked` names the lock (sending, then confirming).
+        '    : lock?.phase === "sending"\n      ? CONTROLS_COPY.sending\n      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n',
+        "    : null;\n",
       ),
   },
+
   {
-    id: "MU-1708",
+    id: "MU-2151",
     title:
-      "WEB-08d review r25 R25-N2: (REAL ENGINE) the other-device confirmation has no offline disabled state",
-    file: "src/features/settings/sessions-devices/RetireOtherDialog.tsx",
-    spec: "tests/e2e/fixture.session-labels.spec.ts",
-    grep: "L-5b real offline",
-    expect: /L-5b real offline/,
-    patch: (t) =>
-      sub(t, "          ) : !online ? (\n", "          ) : false ? (\n"),
-  },
-  {
-    id: "MU-1709",
-    title:
-      "WEB-08d review r25 R25-N2: (REAL ENGINE) this device's confirmation has no offline disabled state",
-    file: "src/features/settings/sessions-devices/WipeConfirmDialog.tsx",
-    spec: "tests/e2e/fixture.session-labels.spec.ts",
-    grep: "L-5b real offline",
-    expect: /L-5b real offline/,
+      "WEB-10a N-T17: (REAL ENGINE) the task detail's read is certified at its first attempt whatever another tab committed between its stages",
+    file: "src/data/ui/scan.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T17:.*between=true",
+    expect: /E-T17:/,
     patch: (t) =>
       sub(
         t,
-        "          {known && !busy && !offline ? (\n",
-        "          {known && !busy ? (\n",
+        "    if (sameBasis(before.basis, after.basis))",
+        '    if (after.kind === "ok")',
       ),
   },
+
+  {
+    id: "MU-2169",
+    title:
+      "WEB-10a N-T18: (REAL ENGINE) a check of the rest of the journal opens its fix whatever was chosen since",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T18:.*held=true",
+    expect: /E-T18:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      live(by) && sel.current === mine && versionRef.current === version;",
+          "      live(by) && versionRef.current === version;",
+        ),
+        "    if (sel.current !== mine || !mounted.current) return;",
+        "    if (!mounted.current) return;",
+      ),
+  },
+
+  {
+    id: "MU-2170",
+    title:
+      "WEB-10a N-T19: (REAL ENGINE) a refused check of the rest of the journal only marks the entry (the full history stays)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T19:.*refused=true",
+    expect: /E-T19:/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (live(by)) revoke();\n      return { kind: "stop" };',
+        '      return { kind: "failed" };',
+      ),
+  },
+
+  {
+    id: "MU-2191",
+    title:
+      "WEB-10a N-T24: (REAL ENGINE) a restored draft forgets that its input is unsaved (the next closure loses it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T24:.*2 closures",
+    expect: /E-T24:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, unsaved: false }) ?? {",
+      ),
+  },
+
+  {
+    id: "MU-2192",
+    title:
+      "WEB-10a N-T25: (REAL ENGINE) an entry known only from the full history can be saved offline (no save decision shown or taken)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T25:.*offline-full",
+    expect: /E-T25:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (saveBlock(factsNow(), open.entry.id) !== null) return;\n",
+          "",
+        ),
+        "      : decided;",
+        "      : null;",
+      ),
+  },
+
+  {
+    id: "MU-2193",
+    title:
+      "WEB-10a N-T21: (REAL ENGINE) the open fix is judged at the version its history was read at, not the stream's committed one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T21:",
+    expect: /E-T21:/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  if (j === null || !fullAuthority(f)) return HISTORY_COPY.fixWaits;",
+            "  if (j === null || !fullAuthority({ ...f, version: j.version }))\n    return HISTORY_COPY.fixWaits;",
+          ),
+          '  if (check?.found === "current" && check.version === f.version) return null;',
+          '  if (check?.found === "current" && check.version === j.version) return null;',
+        ),
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if (coversToEnd(j, entryId, j.version)) return null;",
+      ),
+  },
+
+  {
+    id: "MU-2194",
+    title:
+      "WEB-10a N-T20: (REAL ENGINE) a check answered after another tab's commit moved the version still opens its fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T20:.*committed=true",
+    expect: /E-T20:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      live(by) && sel.current === mine && versionRef.current === version;",
+        "      live(by) && sel.current === mine;",
+      ),
+  },
+
+  {
+    id: "MU-2205",
+    title:
+      "WEB-10a N-T26: (REAL ENGINE) the conflict dialog's current read looks at the first page of /progress only",
+    file: "src/features/tasks/register.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T26:.*mine on the second page",
+    expect: /E-T26:/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (page.next_after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+        '    if (page.next_after === null || after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+
+  {
+    id: "MU-2254",
+    title:
+      "WEB-10a N-T34: (REAL ENGINE) revision 12's first Join restored: once begun, its form is rendered outside FirstJoin (focus leaves the control chosen)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T34:",
+    expect: /E-T34:/,
+    patch: (t) => sub(t, FIRST_JOIN_R13, FIRST_JOIN_R12),
+  },
+
+  {
+    id: "MU-2266",
+    title:
+      "WEB-10a N-T35: (REAL ENGINE) Today's row restored to review 15's defect: every shared row says You, whoever the roster names",
+    file: "src/features/tasks/today/TodayRow.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T35:",
+    expect: /E-T35:/,
+    patch: (t) => sub(t, TODAY_WHO_R15, TODAY_WHO_R14),
+  },
+
+  {
+    id: "MU-2267",
+    title:
+      "WEB-10a N-T36: (REAL ENGINE) a revision is offered whatever the task's and its details' permissions (review 15's defect)",
+    file: "src/features/tasks/reasons.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T36:",
+    expect: /E-T36:/,
+    patch: (t) => sub(t, EDITABLE_R15, "  return true;\n"),
+  },
+  // WEB-10a revision 16 (R30, R31): MU-2299..MU-2303, in their own module.
+  ...ENGINE_R16,
+  ...ENGINE_R17,
+  ...ENGINE_R18,
+  ...ENGINE_R19,
+  ...ENGINE_R20,
+  ...ENGINE_R21,
+  ...ENGINE_R22,
+  ...ENGINE_R23,
+
+  ...ENGINE_LABELS,
 ];

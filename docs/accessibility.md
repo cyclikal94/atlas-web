@@ -15,7 +15,7 @@ The target is WCAG 2.2 AA, with the accepted Atlas rules on top (`accessibility.
 | Reflow | 320 CSS px, a 320 px viewport at 400% zoom, text-spacing overrides (WCAG 1.4.12): no horizontal scrolling | `fixture.shell.spec.ts` |
 | Long pages | content taller than the viewport at 390, 834 and 1440 px and in short windows (844x390, 1280x480, 667x375): navigation and the sync chip stay inside the viewport, topmost and clickable at the top, middle and bottom; content is not left under a bar; Tab and Shift+Tab never park focus under the mobile bars; the skip link and route focus stay clear of them | `tests/e2e/fixture.scroll.spec.ts` |
 | Live regions | one registry; a lint rule (R6) rejects any other `aria-live`, `status`, `alert` or `log` (`neutral-status.tsx` was added by WEB-08b for the public surfaces; see `docs/lint-rules.md`) | `lint/live-region-registry.grit` |
-| Public surfaces (sign-in, join) and the Settings account card and "Signing in" dialog (WEB-08b) | every state, at 320, 390, 768 and 1280 px, dark and light, in Chromium, Firefox and WebKit: no horizontal scroll, axe **including contrast**, 44 px targets, a visible focus ring, the heading as the focus target where a state has just appeared; forced colours and reduced motion; 400% zoom; keyboard-only completion of sign-in and registration. Screenshots (Chromium) are in `.agtx/evidence/WEB-08b/design/` | `tests/e2e/production.auth-public.spec.ts`, `tests/e2e/fixture.auth-settings.spec.ts` |
+| Public surfaces (sign-in, join) and the Settings account card and "Signing in" dialog (WEB-08b) | every state, at 320, 390, 768 and 1280 px, dark and light, in Chromium, Firefox and WebKit: no horizontal scroll, axe **including contrast**, 44 px targets, a visible focus ring, the heading as the focus target where a state has just appeared; forced colours and reduced motion; 400% zoom; keyboard-only completion of sign-in and registration. Screenshots (Chromium) and painted-contrast records are written per invocation and test: `<evidence run>/<project>/<test id>-repeat<n>-retry<n>/` holds `chromium%2F<surface>-<width>-<scheme>%2Epng.artifact/<surface>-<width>-<scheme>.png` and `painted-contrast-<scheme>.json` (the run is `.agtx/evidence/browser/runs/run-*/`, or under `ATLAS_EVIDENCE_DIR`; Playwright prints it as "Browser evidence:" and the JSON report carries each test's `evidence` annotation and screenshot attachments). `.agtx/evidence/WEB-08b/design/` is historical and no longer written | `tests/e2e/production.auth-public.spec.ts`, `tests/e2e/fixture.auth-settings.spec.ts` |
 
 A green layer 1 does not mean the product is accessible. It means the failures a machine can find are absent.
 
@@ -55,6 +55,39 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Remove and Link stop being offered when the window ends.** The five-minute rule is applied while "Signing in" stays open, not only when it opens: at the deadline both become disabled with the same visible reason ("Needs a sign-in from the last few minutes. Sign out and in again first."), which is their accessible description. Nothing announces the change, and a disabled control is drawn in place of the enabled one, so **keyboard focus on Remove or Link falls to the page when the window ends** (Tab then starts again from the top of the dialog), exactly as it does when either becomes busy or the connection is lost. That is the shared `Button`'s disabled form and was not changed; it is listed in the manual checks below.
 - **Remove is described by its consequence.** The "signs you out everywhere" paragraph has an id and every Remove control (enabled, "Removing…", or disabled with its reason) lists it in `aria-describedby`, on the mobile sheet and the desktop dialog. A disabled control's own reason is read first. axe does not check this association, so `tests/e2e/fixture.auth-settings.spec.ts` asserts the accessible description at 320 and 1280 px.
 - **A refusal that arrives after "Finishing sign-in"** is shown by the sign-in form that mounts next (the heading is focused as for any new state, and the message is a `role="alert"` inserted after the form appears, so it is announced once).
+
+
+## Today and tasks (WEB-10a)
+
+- Every page has one `h1` (Today, Tasks, the task's title, New task / Edit task); sections are labelled by their `h2`.
+- The Today filters are a native radio group (`fieldset`/`legend`: arrow keys move and select); the day and zone are labelled native controls.
+- A disabled action always states why beside it (`Button`'s `reason`): "Not open until …", "This day is closed", "Only participants can record this",
+  "Wait for this task to finish syncing before editing it".
+- A result shown from saved, unsent work is named "provisional" in its text; pending marks are words, never colour alone (the pill tone is decoration).
+- Saves and refusals are announced through the announcer only (lint R6); nothing new is a live region.
+- Radio choices with a consequence line are named by both, separated (found by the component tests: the names ran together).
+- The correction dialog uses the shared `Dialog` (focus trap, Escape discards, focus return, in-dialog sync control keeps the draft).
+- Automated: jest-axe in the component tests; axe with real layout and contrast in Chromium, Firefox and WebKit at 390×844, 834×1112, 1112×834,
+  1180×820 and 1440×900 in light and dark (`fixture.tasks.spec.ts` E-T1; theme set before load), no horizontal overflow, and a keyboard-only journey
+  (E-T8). This is browser emulation: physical devices and manual screen readers are WEB-09d's (collected by WEB-15).
+- Revision 1 (R7): axe with real layout in all three engines for the task detail, the correction dialog and the task form at 390×844 and 1440×900,
+  light and dark (E-T13). E-T8b is **keyboard activation and focus return only**: each control is focused by the test itself and then operated
+  by keys (the correction dialog opens by Enter with focus inside, closes by Escape and saves by Enter, focus returning to "Correct this day"; the
+  task form is filled and saved by keys). It does not show reachability or tab order and is kept as an activation control. A day named in the
+  address that is not available says so in text (no control is offered for it).
+- Revision 2 (R7): **keyboard traversal** (E-T8d), Chromium, Firefox and WebKit at 1280×720. From the start of the page (nothing focused) the
+  person moves by Tab, in WebKit by Option+Tab (Safari's default settings move by Tab between text fields only; the dialog's focus loop honours
+  either). The correction dialog: "Correct this day" is reached and opened by Enter; Tab then visits every control of the dialog (the in-dialog
+  sync control, Close, each field, Cancel, Save correction) and comes back round without leaving it, and Shift+Tab visits the same stops back to
+  the first; at each stop the control is visibly focused, on screen and not covered; a field is edited by keys and Enter on "Save correction"
+  saves and returns focus to "Correct this day"; Escape discards and returns focus there too. The task form: "Start from scratch instead", the
+  name, the sharing choice (arrow keys to "Only me") and Save are reached by Tab, each visibly focused and uncovered, and Enter saves. E-T8e adds
+  the queue visit by keys while a save's acknowledgement is held (the newer edit survives the older save). Date and time fields have several
+  stops of their own whose focus the BROWSER draws (the focused part of the value is highlighted): WebKit never applies `:focus-visible` to these
+  fields and Chromium's picker stop is inside the field, so the app's ring is not what shows there; this is recorded, not claimed as the ring.
+  **Found and fixed:** WebKit revealed a text field's caret rather than the field, so the dialog's lower fields stayed half under its footer
+  (9 of 10 runs); the dialog now reveals a focused control whole (`dialog.tsx`, block "nearest"; 10 of 10 clear afterwards). Browser emulation,
+  not physical devices or a screen reader (WEB-09d, collected by WEB-15).
 
 ## What WEB-08c built in (the account switcher's focus)
 

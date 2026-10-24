@@ -710,11 +710,14 @@ test("H7 Q3: a patch that does not apply stops the run before any control; the r
   const tree = owned(mkdtempSync(join(tmpdir(), "unit-runner-tree-")));
   for (const f of [
     "scripts/run-data-mutants.mjs",
-    "scripts/mutation/data-catalogue.mjs",
-    "scripts/mutation/attributed-errors.mjs",
+    "scripts/lib/mutation-inventory.mjs",
     "scripts/validation/unit-results.mjs",
   ])
     cpSync(join(base, f), join(tree, f));
+  // The merged catalogue uses modules and independent expected counts; the disposable runner needs that same closed input set.
+  cpSync(join(base, "scripts/mutation"), join(tree, "scripts/mutation"), {
+    recursive: true,
+  });
   const { UNIT } = await import("../mutation/data-catalogue.mjs");
   const [a, b] = ["MU-1600", "MU-1625"].map((id) =>
     UNIT.find((m) => m.id === id),

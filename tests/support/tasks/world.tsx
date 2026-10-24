@@ -1,0 +1,586 @@
+import { RouterProvider } from "@tanstack/react-router";
+import { act, render } from "@testing-library/react";
+import * as React from "react";
+import { ProtectedProviders } from "../../../src/app/providers";
+import { createAppRouter } from "../../../src/app/router";
+import { ShellEnvProvider } from "../../../src/app/shell/env";
+import {
+  type CacheRow,
+  createDataEnv,
+  type DataEnv,
+  DataEnvProvider,
+  type DraftRow,
+} from "../../../src/data";
+import type { ReadResult } from "../../../src/data/engine/identity-task";
+import { createQuotaGuard } from "../../../src/data/engine/quota-guard";
+import type { SyncChannel } from "../../../src/data/engine/sync-channel";
+import { accountDatabaseName } from "../../../src/data/model/schema";
+import type { SyncStateRow } from "../../../src/data/model/types";
+import { commitPage } from "../../../src/data/plans/commit-page";
+import { scanSyncPage } from "../../../src/data/scan/scan";
+import {
+  createKeyDerivers,
+  createValueValidators,
+} from "../../../src/data/scan/validate";
+import { SharingEnvProvider } from "../../../src/features/sharing";
+import type { TasksApi, TasksResult } from "../../../src/features/tasks/api";
+import {
+  type TasksEnv,
+  TasksEnvProvider,
+} from "../../../src/features/tasks/env";
+import type {
+  OccurrenceData,
+  OccurrencePage,
+  ProgressState,
+  TaskDefinition,
+} from "../../../src/features/tasks/model/contract";
+import {
+  occurrenceId,
+  progressId,
+} from "../../../src/features/tasks/model/ids";
+import {
+  slotOn,
+  todayIn,
+  windows,
+} from "../../../src/features/tasks/model/time";
+import { observeTaskRoutes } from "../../../src/features/tasks/visit";
+import { createHistoryRouteChanges } from "../../../src/lib/route-changes";
+import type { Identity, Store } from "../../../src/session";
+import { DataTestWorld } from "../data/env";
+import { cacheRow } from "../data/rows";
+import { bytesOf, pageJson } from "../data/sync-pages";
+import {
+  type FakeSharingApi,
+  fakeSharingApi,
+  sharingEnv,
+} from "../sharing/fake-api";
+
+/**
+ * The task screens' world (FIXTURE evidence): the PRODUCTION data controller, plans and outbox over the double of IndexedDB, the app's own
+ * router inside the protected providers, and a scriptable `TasksApi` for the online reads. Nothing here talks to a backend.
+ */
+export const ME = "11111111-1111-4111-8111-111111111111";
+export const OTHER = "22222222-2222-4222-8222-222222222222";
+const NAME = accountDatabaseName(ME);
+
+class Cell<T> implements Store<T> {
+  private listeners = new Set<() => void>();
+  constructor(private value: T) {}
+  get() {
+    return this.value;
+  }
+  set(next: T) {
+    this.value = next;
+    for (const l of [...this.listeners]) l();
+  }
+  subscribe(l: () => void) {
+    this.listeners.add(l);
+    return () => this.listeners.delete(l);
+  }
+}
+
+export const TODAY = todayIn("UTC", Date.now());
+
+export function definition(over: Partial<TaskDefinition> = {}): TaskDefinition {
+  return {
+    schedule: { start_date: TODAY, time: null, timezone: "UTC", repeat: null },
+    goal: { kind: "checkbox" },
+    carry: "close_incomplete",
+    participation: "personal",
+    open_days_before: 0,
+    close_days_after: 1,
+    allow_streak_exclusions: false,
+    ...over,
+  };
+}
+
+export interface SeededTask {
+  taskId: string;
+  executionId: string;
+  occurrenceId: string;
+  progressId: string;
+  data: OccurrenceData;
+  rows: CacheRow[];
+}
+
+let seq = 0;
+const id = () => {
+  seq += 1;
+  return `aaaaaaaa-0000-4000-8000-${String(seq).padStart(12, "0")}`;
+};
+
+/** A task with its details, its one occurrence on `date` and (unless `stream: false`) my progress stream, as synced rows. */
+export async function seededTask(
+  options: {
+    title?: string;
+    definition?: Partial<TaskDefinition>;
+    date?: string | null;
+    stream?: boolean;
+    progress?: Partial<ProgressState>;
+    archived?: boolean;
+    participants?: string[];
+    occurrence?: Partial<OccurrenceData>;
+    canEdit?: boolean;
+  } = {},
+): Promise<SeededTask> {
+  const def = definition({
+    ...options.definition,
+    schedule: {
+      ...definition().schedule,
+      start_date: options.date === undefined ? TODAY : options.date,
+      ...options.definition?.schedule,
+    },
+  });
+  const taskId = id();
+  const executionId = id();
+  const slot = slotOn(def.schedule, def.schedule.start_date);
+  const occ = await occurrenceId(taskId, slot.key);
+  const prog = await progressId(occ, ME);
+  const w = windows(slot, def);
+  const data: OccurrenceData = {
+    task_id: taskId,
+    definition: def,
+    slot,
+    opens_at: w.opens_at,
+    closes_at: w.closes_at,
+    participants: options.participants ?? [ME],
+    covered_by: null,
+    resolved: false,
+    ...options.occurrence,
+  };
+  const empty = { outcome: "unknown" as const, amount: null, checked: [] };
+  const rows: CacheRow[] = [
+    cacheRow({
+      id: taskId,
+      kind: "task",
+      label: options.title ?? "Brush your teeth",
+      version: 1,
+      policy_version: 1,
+      archived: options.archived ?? false,
+    }),
+    cacheRow({
+      id: executionId,
+      kind: "execution",
+      parent_id: taskId,
+      label: "Task details",
+      value: def as never,
+    }),
+    cacheRow({
+      id: occ,
+      kind: "occurrence",
+      parent_id: executionId,
+      label: "Occurrence",
+      value: data as never,
+      can_edit: options.canEdit ?? true,
+    }),
+  ];
+  if (options.stream !== false)
+    rows.push(
+      cacheRow({
+        id: prog,
+        kind: "progress",
+        parent_id: occ,
+        label: "Progress",
+        value: {
+          subject_account_id: ME,
+          recent_entries: [],
+          entry_count: 0,
+          excluded: false,
+          action: empty,
+          period: empty,
+          aggregate_consent: true,
+          ...options.progress,
+        } as never,
+      }),
+    );
+  return {
+    taskId,
+    executionId,
+    occurrenceId: occ,
+    progressId: prog,
+    data,
+    rows,
+  };
+}
+
+export interface FakeApi extends TasksApi {
+  calls: Record<string, number>;
+  /** Scripted `/daily` answers by scope; a function may hold. Default: an empty page. */
+  daily: {
+    joint: Array<
+      TasksResult<OccurrencePage> | (() => Promise<TasksResult<OccurrencePage>>)
+    >;
+    personal: Array<
+      TasksResult<OccurrencePage> | (() => Promise<TasksResult<OccurrencePage>>)
+    >;
+  };
+  queries: Array<{ scope: string; after?: string; revision?: number }>;
+  /** An answer chosen by the query itself (robust to a remount that repeats a read); used before the scripted queue. */
+  respond:
+    | ((q: {
+        scope: string;
+        after?: string;
+        revision?: number;
+      }) => TasksResult<OccurrencePage> | undefined)
+    | null;
+}
+
+export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
+  const calls: Record<string, number> = {};
+  const count = (name: string) => {
+    calls[name] = (calls[name] ?? 0) + 1;
+  };
+  const empty: OccurrencePage = {
+    items: [],
+    next_after: null,
+    revision: 1,
+    pending_tasks: [],
+  };
+  const api: FakeApi = {
+    calls,
+    daily: { joint: [], personal: [] },
+    queries: [],
+    respond: null,
+    readDaily: async (q) => {
+      count("readDaily");
+      const asked = {
+        scope: q.scope,
+        ...(q.after ? { after: q.after } : {}),
+        ...(q.revision !== undefined ? { revision: q.revision } : {}),
+      };
+      api.queries.push(asked);
+      const chosen = api.respond?.(asked);
+      if (chosen !== undefined) return chosen;
+      const next = api.daily[q.scope].shift();
+      if (next === undefined) return { ok: true, value: empty };
+      return typeof next === "function" ? next() : next;
+    },
+    readPresets: async () => {
+      count("readPresets");
+      return { ok: false, kind: "uncertain" };
+    },
+    readTask: async () => {
+      count("readTask");
+      return { ok: false, kind: "uncertain" };
+    },
+    readEnrolment: async () => {
+      count("readEnrolment");
+      return { ok: false, kind: "uncertain" };
+    },
+    readJournal: async () => {
+      count("readJournal");
+      return { ok: true, value: { entries: [], next_after: null } };
+    },
+    enrol: async () => {
+      count("enrol");
+      return { ok: false, kind: "uncertain" };
+    },
+    ...over,
+  };
+  return api;
+}
+
+export function tasksEnv(
+  api: TasksApi,
+  over: Partial<TasksEnv> = {},
+): TasksEnv {
+  return {
+    api,
+    accountId: ME,
+    identity: `${ME}:1`,
+    online: true,
+    writable: true,
+    now: () => Date.now(),
+    newId: () => crypto.randomUUID(),
+    dailyPageSize: 200,
+    ...over,
+  };
+}
+
+export interface Mounted {
+  world: DataTestWorld;
+  data: DataEnv;
+  api: FakeApi;
+  sharing: FakeSharingApi;
+  router: ReturnType<typeof createAppRouter>;
+  settle(): Promise<void>;
+  /** Settles until `ready()` holds (the cache walk and related reads take several turns), at most 20 rounds. */
+  until(ready: () => boolean): Promise<void>;
+  drafts(): DraftRow[];
+  bodies(): Array<{
+    local_id: string;
+    command: { command: Record<string, unknown> };
+  }>;
+  rerender(env: TasksEnv): void;
+  /**
+   * Remounts the protected tree (revision 12, R23): `ProtectedProviders` is keyed afresh, so every component under it (the router's
+   * screens included) mounts again, as the session does when it closes and reopens the display for the SAME identity. The router, data
+   * env, API doubles, location and page memory are kept: not a reload and not a navigation.
+   */
+  remount(): void;
+  unmount(): void;
+  /**
+   * Commits ONE delta sync page carrying `rows` through the PRODUCTION `commitPage` plan, as the leader does: the cache changes and its
+   * position (`page_seq`) moves, which every live read hears (a seeded row is not heard). `removed` ids are removed by the same page.
+   */
+  commitSync(
+    rows: CacheRow[],
+    removed?: string[],
+    options?: { empty?: boolean },
+  ): Promise<void>;
+  /**
+   * The same commit with no `act` and no settling (revision 3): for a test that lands a page BETWEEN two reads of a screen (from inside an
+   * interception of the store). Resolves with whether the page was committed.
+   */
+  commitNow(
+    rows: CacheRow[],
+    removed?: string[],
+    options?: { empty?: boolean },
+  ): Promise<boolean>;
+}
+
+/**
+ * WEB-10a revision 8 (review 8 R21): a test that timed out INSIDE an `act` scope keeps running after Vitest moves on (a test body is
+ * not cancelled), and its scope stays open. React then flushes no later act scope of the file, and once that scope ends during a
+ * following test's act the act depth stays corrupted: every later render waits for ever in React's act queue. The following tests
+ * then fail as if the product were wrong (a missing stale notice, a history that never appears; reproduced in the forced-order
+ * diagnostic `.agtx/evidence/web10a-revision-8/r21`). Between tests the queue is empty in a healthy run, so a mount that finds it
+ * open says so instead. (React's internal act queue; if a later React no longer exposes it, nothing is checked.)
+ */
+export function assertNoOpenActScope(where: string): void {
+  const internals = (
+    React as unknown as Record<string, { actQueue?: unknown[] | null }>
+  ).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const queue = internals?.actQueue;
+  if (queue !== undefined && queue !== null)
+    throw new Error(
+      `${where}: an earlier act() scope is still open (${queue.length} queued) - a previous test timed out inside act or did not await it; this test's results would not be its own`,
+    );
+}
+
+export async function mountTasks(options: {
+  path: string;
+  rows?: CacheRow[];
+  /** Drafts seeded before the screens mount (a draft carrying `command` is split into its header and body, as the enqueue writes them). */
+  drafts?: object[];
+  api?: FakeApi;
+  env?: Partial<TasksEnv>;
+  database?: boolean;
+  /** The cache's state as the sync state records it (revision 2: `invalid` hides cache-sourced content behind the gate). */
+  cacheStatus?: "valid" | "invalid";
+  /** The sharing client the audience chooser reads households and the directory through (revision 10, R22); a default double. */
+  sharing?: FakeSharingApi;
+  /** `GET /defaults/snapshot` (revision 10, R22: the first Join's default audience). Absent: the defaults are never read. */
+  defaultsSnapshot?: () => Promise<ReadResult<unknown>>;
+}): Promise<Mounted> {
+  assertNoOpenActScope("mountTasks");
+  // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
+  await import("../../../src/features/tasks/screens");
+  const world = new DataTestWorld();
+  world.idb.autoDrive = true;
+  const page = world.page("A");
+  page.identity.account = ME;
+  if (options.database !== false) {
+    const created = await page.open(ME, { create: true });
+    if (created.kind !== "opened") throw new Error("setup");
+    if (options.rows?.length) world.idb.seed(NAME, "cache", options.rows);
+    if (options.drafts?.length)
+      world.idb.seed(NAME, "drafts", options.drafts as never);
+    if (options.cacheStatus !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        { ...sync, cache_status: options.cacheStatus },
+      ]);
+    }
+  }
+  const identity = new Cell<Identity | null>({
+    account_id: ME,
+    epoch: 1,
+    session_id: "s",
+  });
+  const runtime = new world.modules.accountService.DataRuntime({
+    identity,
+    persistence: world.modules.accountService.unorderedPersistence,
+    registry: page.registry,
+    open: (a, o) => page.open(a, o),
+  });
+  const channel: SyncChannel = {
+    post: () => undefined,
+    subscribe: () => () => undefined,
+  };
+  const data = createDataEnv({
+    identity,
+    loadRuntime: async () => runtime,
+    online: new Cell(options.env?.online ?? true),
+    quota: createQuotaGuard({ storage: undefined, now: () => 0 }),
+    ids: { uuid: () => crypto.randomUUID() },
+    clock: { iso: () => new Date().toISOString(), now: () => Date.now() },
+    fence: () => ({ hasPendingOperation: false, sessionStarted: true }),
+    readMe: async () => ({ kind: "closed" }),
+    currentDeviceId: async () => ({ kind: "closed" }),
+    onOnline: () => () => undefined,
+    channel,
+    ...(options.defaultsSnapshot
+      ? { readDefaultsSnapshot: options.defaultsSnapshot }
+      : {}),
+  });
+  const api = options.api ?? fakeApi();
+  const sharing = options.sharing ?? fakeSharingApi();
+  const router = createAppRouter({ initialPath: options.path });
+  // Revision 22 (R34): the task screens' logical visits end on a departure the DOCUMENT records (`visit.ts`); this router's memory
+  // history never moves the document, so the visits observe it instead, with the same semantics (`createHistoryRouteChanges`).
+  observeTaskRoutes(createHistoryRouteChanges(router.history));
+  let generation = 0;
+  let shown = tasksEnv(api, options.env);
+  const tree = (env: TasksEnv) => (
+    <ProtectedProviders key={generation}>
+      <ShellEnvProvider
+        value={{
+          syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+          onOpenSync: () => undefined,
+        }}
+      >
+        <DataEnvProvider env={data}>
+          <TasksEnvProvider value={env}>
+            <SharingEnvProvider
+              value={sharingEnv(sharing, {
+                accountId: env.accountId,
+                identity: env.identity,
+                online: env.online,
+                writable: env.writable,
+              })}
+            >
+              <RouterProvider router={router} />
+            </SharingEnvProvider>
+          </TasksEnvProvider>
+        </DataEnvProvider>
+      </ShellEnvProvider>
+    </ProtectedProviders>
+  );
+  const view = render(tree(shown));
+  const settle = async () => {
+    await act(async () => {
+      for (let i = 0; i < 60; i += 1) {
+        await world.settle();
+        await new Promise((r) => setTimeout(r, i % 5 === 4 ? 10 : 0));
+      }
+    });
+  };
+  await settle();
+  return {
+    world,
+    data,
+    api,
+    sharing,
+    router,
+    settle,
+    until: async (ready) => {
+      for (let i = 0; i < 20 && !ready(); i += 1) await settle();
+    },
+    drafts: () =>
+      ((world.idb.snapshot(NAME)?.drafts ?? []) as DraftRow[]).sort(
+        (a, b) => a.created_seq - b.created_seq,
+      ),
+    bodies: () => (world.idb.snapshot(NAME)?.draft_commands ?? []) as never,
+    rerender: (env) => {
+      shown = env;
+      view.rerender(tree(env));
+    },
+    remount: () => {
+      generation += 1;
+      view.rerender(tree(shown));
+    },
+    unmount: () => view.unmount(),
+    commitSync: async (rows, removed = [], options = {}) => {
+      let committed = false;
+      await act(async () => {
+        committed = await commitNow(rows, removed, options);
+      });
+      if (!committed) throw new Error("commitSync: the page was not committed");
+      await settle();
+    },
+    commitNow: (rows, removed = [], options = {}) =>
+      commitNow(rows, removed, options),
+  };
+
+  async function commitNow(
+    rows: CacheRow[],
+    removed: string[],
+    options: { empty?: boolean },
+  ): Promise<boolean> {
+    {
+      const service = data.service();
+      if (service === null) throw new Error("commitSync: no open service");
+      const before = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (before === undefined) throw new Error("commitSync: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        {
+          ...before,
+          phase: "delta",
+          cache_status: "valid",
+          cursor: before.cursor ?? "cursor-0",
+        },
+      ]);
+      const s = world.idb.peek(NAME, "sync_state", "singleton") as SyncStateRow;
+      const bytes = bytesOf(
+        pageJson({
+          // An empty delta page (no batch) moves `page_seq` and the cursor but no row and no revision.
+          batches:
+            options.empty === true
+              ? []
+              : [
+                  {
+                    revision: (s.applied_revision ?? 0) + 1,
+                    changes: [
+                      ...removed.map((id) => ({ kind: "remove" as const, id })),
+                      ...rows.map((row) => ({
+                        kind: "upsert" as const,
+                        resource: {
+                          id: row.id,
+                          kind: row.kind,
+                          parent_id: row.parent_id,
+                          label: row.label,
+                          value: row.value as Record<string, unknown> | null,
+                          version: row.version,
+                          can_edit: row.can_edit,
+                          archived: row.archived,
+                          ...(row.policy_version === undefined
+                            ? {}
+                            : { policy_version: row.policy_version }),
+                        },
+                      })),
+                    ],
+                  },
+                ],
+          nextCursor: `cursor-${s.page_seq + 1}`,
+        }),
+      );
+      const scan = scanSyncPage(bytes);
+      if (!scan.ok) throw new Error(`commitSync: ${scan.reason}`);
+      await service.commit(commitPage, {
+        captured: service.capture(1, {
+          requestSeq: s.request_seq,
+          ownershipToken: s.owner?.ownership_token ?? null,
+          recoveryGeneration: s.recovery_generation,
+          expectedPosition: s.cursor,
+        }),
+        bytes,
+        scan,
+        now: new Date().toISOString(),
+        decode: {
+          validators: createValueValidators(),
+          derivers: createKeyDerivers(),
+        },
+      });
+      const committed = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      return committed !== undefined && committed.page_seq !== s.page_seq;
+    }
+  }
+}

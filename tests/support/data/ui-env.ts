@@ -147,8 +147,15 @@ export function stubEnv(
       const answer = env.currentRead;
       return typeof answer === "function" ? answer(localId) : answer;
     },
-    saveAsNew: async (localId, current) => {
-      calls.push({ action: "saveAsNew", args: [localId, current] });
+    saveAsNew: async (localId, current, related) => {
+      // The rows the read returned beside the reviewed value are recorded only when there are some (WEB-10a revision 16).
+      calls.push({
+        action: "saveAsNew",
+        args:
+          related === undefined || related.length === 0
+            ? [localId, current]
+            : [localId, current, related],
+      });
       return { kind: "refused", reason: "not_rebuildable" };
     },
     showNextQueue: record("showNextQueue"),

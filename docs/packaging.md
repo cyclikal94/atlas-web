@@ -121,3 +121,5 @@ artefacts are internal and short-lived; nothing is published.
 - The image tag defaults, the chart `version` and `appVersion` are `0.0.0` until a release sets them.
 - Rollback: an image tag or digest is immutable, so rolling back means deploying the previous tag; the client stores nothing that a rollback can strand
   except through WEB-09's schema versioning, which owns that.
+
+Integration maintenance, 24 October 2026: accepted WEB-10a at `b9fd602` is also present. Its separate fixture baseline (272,459 B) and ceiling (272,600 B) remain historical provenance. The combined candidate measured 277,211 B against WEB-08d's fixed 273,100 B fixture ceiling. Kieran explicitly approved a one-off 277,300 B ceiling for this candidate (orchestrator `delivery/handoffs/web08d-web10a-integration-fixture-budget-20261024.md`, SHA-256 `5efa96d752b4cc8cca07e357400ddf5e2b29f15e46981bbf474968d284b69b39`). The existing baseline and production/CSS/font limits are unchanged; allowances are not added or automatically reset. WEB-09c still owns a reasoned successor.

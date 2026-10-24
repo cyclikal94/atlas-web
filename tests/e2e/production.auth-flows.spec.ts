@@ -62,39 +62,22 @@ const signInForm = (page: Page, username: string, password: string) =>
       await page.getByRole("button", { name: "Sign in" }).click();
     });
 
-/** The original deadline for "the account card names this account" (unchanged by the adaptation below). */
-const SETTINGS_DEADLINE_MS = 20_000;
-/** At most this many Settings clicks are attempted, and only while no account card is drawn. */
-const SETTINGS_CLICKS = 3;
-
-/** Opens Settings from the shell's navigation (no reload) with ONE click and returns once the account card names the account. */
+/** Accepted WEB-08c journey: one Settings click must land; no setup retry hides a lifecycle regression. */
 async function shownAs(page: Page, username: string | RegExp) {
   const nav = page
     .getByRole("navigation")
     .getByRole("link", { name: "Settings" })
     .first();
-  // WEB-08c revision 2, HF-1: the ORIGINAL single click, unadapted (as at `84a8361`). Revision 1 repeated the click because the other pages'
-  // identity reads right after a settlement surrendered their leases and closed this page's tree for a few milliseconds; the product
-  // correction (HF1-SHARED-CONFIRMATION-20261013: the settlement's token and confirmation are shared) removes those reads, so ONE click must
-  // land. WEB08D-NAVIGATION-FRESHNESS-20261011: WEB-09d verifies it again in the integrated client before beta.
   await nav.click();
   await expect(page.locator("[data-account-card]")).toContainText(username, {
     timeout: 20_000,
   });
 }
 
-/**
- * The bounded-retry helper, kept ONLY for the "R5 / HF-1" controls at the end of this file; every ordinary case uses `shownAs`.
- *
- * LABELLED TEST-SETUP ADAPTATION (WEB-08d R5, WEB08D-NAVIGATION-FRESHNESS-20261011). In review r3 (Firefox, T3) one Settings
- * click was reported complete while the tab stayed on Today behind `1e.interrupted_online`, so WEB-08d's ordinary cases used
- * this helper while that one-click regression was WEB-08c's to correct. Accepted WEB-08c (HF1-SHARED-CONFIRMATION-20261013)
- * restored the original single click to every ordinary case (`shownAs`), and WEB-09d verifies it again before beta. Here a
- * click is attempted only while no account card is drawn, at most `SETTINGS_CLICKS` times, and the account the card names is
- * asserted within the ORIGINAL 20 s deadline (no longer timeout, no sleep, no whole-test retry). The attempts used are returned
- * and annotated as `settings-clicks`.
- */
-async function shownAsRetrying(page: Page, username: string | RegExp) {
+/** Historical D3 bounded setup adaptation, retained only for its labelled controls below. */
+const SETTINGS_DEADLINE_MS = 20_000;
+const SETTINGS_CLICKS = 3;
+async function shownAsWithRetry(page: Page, username: string | RegExp) {
   const nav = page
     .getByRole("navigation")
     .getByRole("link", { name: "Settings" })
@@ -1048,25 +1031,164 @@ test.describe("R5 / HF-1: a Settings click delivered while the protected tree is
   }
 
   /**
-   * Closes tab A with ITS OWN device read held; returns once tab B is closed for ITS OWN held check. Both holds are bound to the
-   * page that must issue the request (review r29 R29-N1): B's own background `/sessions` read, which can arrive at any time after
-   * it is displayed, must neither take A's hold nor satisfy the wait for it, and a check from any other page must not take B's.
+   * READ-ONLY barrier probe from tab B (WEB-10a revision 5, R15; design assessment C4): the Web Locks state (`navigator.locks.query()`,
+   * allowed in a spec, never in `src`) with each lease lock marked as B's own or another page's, and the REQUEST leases of the durable
+   * `atlas-auth` record (a read-only transaction; nothing is written). It is how the forced order below is ESTABLISHED, not assumed.
+   */
+  const sessionProbe = (page: Page) =>
+    page.evaluate(async () => {
+      const mine = `r15-probe-${Math.random()}`;
+      let me: string | undefined;
+      const view = await navigator.locks.request(mine, async () => {
+        const q = await navigator.locks.query();
+        me = q.held?.find((l) => l.name === mine)?.clientId;
+        return q;
+      });
+      const leases = await new Promise<Record<string, string> | null>(
+        (resolve) => {
+          const open = indexedDB.open("atlas-auth", 1);
+          open.onerror = () => resolve(null);
+          open.onsuccess = () => {
+            const db = open.result;
+            try {
+              const get = db
+                .transaction("records", "readonly")
+                .objectStore("records")
+                .get("auth_state");
+              get.onsuccess = () => {
+                const all =
+                  (get.result as { leases?: Record<string, { class: string }> })
+                    ?.leases ?? {};
+                resolve(
+                  Object.fromEntries(
+                    Object.entries(all).map(([id, l]) => [id, l.class]),
+                  ),
+                );
+                db.close();
+              };
+              get.onerror = () => {
+                resolve(null);
+                db.close();
+              };
+            } catch {
+              resolve(null);
+              db.close();
+            }
+          };
+        },
+      );
+      const lease = (list: LockInfo[] | undefined) =>
+        (list ?? [])
+          .filter((l) => l.name?.startsWith("atlas-lease-"))
+          .map((l) => ({
+            id: (l.name as string).slice("atlas-lease-".length),
+            mine: l.clientId === me,
+          }));
+      return { held: lease(view.held), pending: lease(view.pending), leases };
+    });
+
+  /** Holds tab A's OWN `GET /sessions` (a route on page A only; the stub answers it when released, unless A is gone). */
+  async function holdOwnRead(a: Page) {
+    let arrived = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await a.route(
+      (url) => url.pathname === "/api/experimental/v1/sessions",
+      async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        arrived = true;
+        await gate;
+        await route.fallback().catch(() => undefined);
+      },
+    );
+    return { arrived: () => arrived, release };
+  }
+
+  /**
+   * Barrier: a REQUEST lease in the record whose lock another page (A) holds and tab B WAITS for (B watches it), seen in two consecutive
+   * looks (so a short-lived lease, such as the leader's `/sync` in A, is not taken for the held read).
+   */
+  async function watchedLease(b: Page): Promise<string> {
+    let before = new Set<string>();
+    let lease: string | null = null;
+    await expect
+      .poll(
+        async () => {
+          const p = await sessionProbe(b);
+          const now = new Set(
+            p.held
+              .filter(
+                (h) =>
+                  !h.mine &&
+                  p.leases?.[h.id] !== undefined &&
+                  p.leases?.[h.id] !== "exposure" &&
+                  p.pending.some((w) => w.mine && w.id === h.id),
+              )
+              .map((h) => h.id),
+          );
+          lease = [...now].find((id) => before.has(id)) ?? null;
+          before = now;
+          return lease !== null;
+        },
+        {
+          timeout: 10_000,
+          message:
+            "A's held read has a REQUEST lease held by A and waited for by B",
+        },
+      )
+      .toBe(true);
+    return lease as unknown as string;
+  }
+
+  /**
+   * Closes tab A with ITS OWN device read held; returns once tab B is closed for its held check. The order is established by barriers,
+   * each within the original 10 s bound (WEB-10a revision 5, R15): (1) A's `GET /sessions` is held by a route on page A only — a
+   * context-wide hold of "the first `/sessions`" also caught tab B's own device read in 2 of 10 WebKit executions (diagnosed with the
+   * probe above), and then A retired its lease cleanly and B rightly verified nothing; (2) that read's REQUEST lease is in the record, its
+   * lock held by another page and WAITED FOR by B (B watches it); (3) after A's destruction the lease record remains while its lock is
+   * released (orphaned, not cleanly retired); (4) B's check is held and B is closed behind `1e.interrupted_online`. The check hold and
+   * its count begin only after (2): B's second boot check can come ~50 ms after it displays, and a hold set before it caught that one.
    */
   async function closeForHeldCheck(stub: AuthStub, a: Page, b: Page) {
-    const holdRead = stub.hold(
-      (r) => r.page === a && r.method === "GET" && r.path === "/sessions",
-      1,
-    );
-    const holdCheck = stub.hold((r) => r.page === b && isCheck(r), 1);
+    const read = await holdOwnRead(a);
     await settingsLink(a).click();
-    // A's read is in flight (held) before A is closed: the orphaned request lease this order needs.
-    await expect.poll(() => holdRead.caught(), { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => read.arrived(), { timeout: 10_000 }).toBe(true);
+    const lease = await watchedLease(b);
+    // Only now: B's own boot checks are over, so the one check held (and counted) is the verification A's closure causes.
+    const checksBefore = stub.count("GET", "/browser-sessions/current");
+    const holdCheck = stub.hold(isCheck, 1);
     await a.close();
-    holdRead.stop();
-    await expect.poll(() => holdCheck.caught(), { timeout: 10_000 }).toBe(1);
+    read.release();
+    await expect
+      .poll(
+        async () => {
+          const p = await sessionProbe(b);
+          return (
+            p.leases?.[lease] !== undefined &&
+            !p.held.some((h) => h.id === lease && !h.mine)
+          );
+        },
+        {
+          timeout: 10_000,
+          message:
+            "A's destruction released the lease's lock and left its record (orphaned, not cleanly retired)",
+        },
+      )
+      .toBe(true);
+    await expect
+      .poll(() => stub.count("GET", "/browser-sessions/current"), {
+        timeout: 10_000,
+      })
+      .toBeGreaterThan(checksBefore);
     expect(await treeState(b)).toEqual({
       neutral: "1e.interrupted_online",
       open: false,
+    });
+    test.info().annotations.push({
+      type: "r15-forced-order",
+      description: `lease ${lease} held by A, watched by B, orphaned at A's close; B's check held`,
     });
     return holdCheck;
   }
@@ -1075,7 +1197,7 @@ test.describe("R5 / HF-1: a Settings click delivered while the protected tree is
     context,
   }) => {
     const { b } = await displayedInTwoTabs(context);
-    expect(await shownAsRetrying(b, "sam")).toBe(1);
+    expect(await shownAsWithRetry(b, "sam")).toBe(1);
     await expect(b).toHaveURL(/\/settings$/);
   });
 
@@ -1109,7 +1231,7 @@ test.describe("R5 / HF-1: a Settings click delivered while the protected tree is
     const holdCheck = await closeForHeldCheck(stub, a, b);
     if (box) await b.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     holdCheck.release();
-    expect(await shownAsRetrying(b, "sam")).toBeLessThanOrEqual(
+    expect(await shownAsWithRetry(b, "sam")).toBeLessThanOrEqual(
       SETTINGS_CLICKS,
     );
     await expect(b).toHaveURL(/\/settings$/);
@@ -1138,12 +1260,116 @@ test.describe("R5 / HF-1: a Settings click delivered while the protected tree is
         true,
       );
     });
-    expect(await shownAsRetrying(b, "sam")).toBe(2);
+    expect(await shownAsWithRetry(b, "sam")).toBe(2);
     expect(
       await b.evaluate(
         () => (window as unknown as { __swallowed: number }).__swallowed,
       ),
     ).toBe(1);
     await expect(b).toHaveURL(/\/settings$/);
+  });
+
+  test("control (clean retirement, R15): A's held device read is ANSWERED while A stays open: B watched its lease, finds it retired and verifies nothing", async ({
+    context,
+  }) => {
+    // A deterministic negative control of the barriers above. (Closing A after its read was answered is NOT one: A is the data leader,
+    // and a `/sync` of A in flight at its closure is a genuinely orphaned lease that B rightly verifies — observed once in WebKit.)
+    const { stub, a, b } = await displayedInTwoTabs(context);
+    const read = await holdOwnRead(a);
+    await settingsLink(a).click();
+    await expect.poll(() => read.arrived(), { timeout: 10_000 }).toBe(true);
+    const lease = await watchedLease(b);
+    // From here on, every closure of B's protected tree is recorded, and every check counted (B's own boot checks are long over: the
+    // first version of this control took its baseline right after B displayed and counted B's second boot check, observed once in WebKit).
+    await b.evaluate(() => {
+      const w = window as unknown as { __closures: string[] };
+      w.__closures = [];
+      const look = () => {
+        const neutral = document
+          .querySelector("[data-neutral-state]")
+          ?.getAttribute("data-neutral-state");
+        if (neutral) w.__closures.push(neutral);
+        if (document.getElementById("protected-root")?.hasAttribute("inert"))
+          w.__closures.push("inert");
+      };
+      new MutationObserver(look).observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+      });
+      look();
+    });
+    const checksAtWatch = stub.count("GET", "/browser-sessions/current");
+    read.release();
+    // Barrier: the lease was retired (its record gone) and B waits for it no more.
+    await expect
+      .poll(
+        async () => {
+          const p = await sessionProbe(b);
+          return (
+            p.leases !== null &&
+            p.leases[lease] === undefined &&
+            !p.pending.some((w) => w.id === lease)
+          );
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+    await expect(a.locator("[data-account-card]")).toContainText("sam", {
+      timeout: 20_000,
+    });
+    expect(stub.count("GET", "/browser-sessions/current")).toBe(checksAtWatch);
+    expect(
+      await b.evaluate(
+        () => (window as unknown as { __closures: string[] }).__closures,
+      ),
+    ).toEqual([]);
+    expect(await treeState(b)).toEqual({ neutral: null, open: true });
+  });
+
+  /** Counts the clicks that reach the Settings link (`swallow`: and keeps them from the application — a HARNESS stand-in). */
+  const countSettingsClicks = (page: Page, swallow: boolean) =>
+    page.evaluate((swallowing) => {
+      const w = window as unknown as { __settingsClicks: number };
+      w.__settingsClicks = 0;
+      window.addEventListener(
+        "click",
+        (event) => {
+          const target = event.target as Element | null;
+          if (!target?.closest('nav a[href="/settings"]')) return;
+          w.__settingsClicks += 1;
+          if (!swallowing) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        },
+        true,
+      );
+    }, swallow);
+  const settingsClicks = (page: Page) =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __settingsClicks: number }).__settingsClicks,
+    );
+
+  test("adapted helper (qualification, R15): a card naming ANOTHER account fails within the original deadline, after one click only (no click while a card is drawn)", async ({
+    context,
+  }) => {
+    const { b } = await displayedInTwoTabs(context);
+    await countSettingsClicks(b, false);
+    await expect(shownAsWithRetry(b, "kieran")).rejects.toThrow();
+    expect(await settingsClicks(b)).toBe(1);
+    await expect(b.locator("[data-account-card]")).toContainText("sam");
+  });
+
+  test("adapted helper (qualification, R15): clicks that never take effect: at most three, then it fails within the original deadline", async ({
+    context,
+  }) => {
+    const { b } = await displayedInTwoTabs(context);
+    // HARNESS STAND-IN, as above: every click on the Settings link is kept from the application.
+    await countSettingsClicks(b, true);
+    await expect(shownAsWithRetry(b, "sam")).rejects.toThrow();
+    // D3's bound, written out: the helper may never click more than three times.
+    expect(await settingsClicks(b)).toBe(3);
+    await expect(b).toHaveURL(/\/today$/);
   });
 });

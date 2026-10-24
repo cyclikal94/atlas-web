@@ -1,5 +1,11 @@
-import type { EnqueueRequest } from "../model/outbox";
-import type { CacheRow, DraftRow, DraftWithCommand } from "../model/types";
+import type { EnqueueRequest, TargetNeeds } from "../model/outbox";
+import { projectionTarget } from "../model/overlay";
+import type {
+  CacheRow,
+  DraftRow,
+  DraftWithCommand,
+  ResourceId,
+} from "../model/types";
 
 /**
  * The seams through which feature slices teach the generic outbox what its commands mean (plan 5.9). The data layer knows
@@ -16,18 +22,26 @@ export interface CommandSpec {
   describe(draft: DraftRow): string;
   /**
    * A projection of a create that is not in the cache yet, so the merged reads can show it. `null`: nothing to show. It sees the
-   * body, which the merged read of ONE resource joins for the queued creates against that resource.
+   * body, which the merged read of ONE resource joins for the queued creates against that resource, and the id of THAT resource: a
+   * create that introduces several resources (a task, its details, its first occurrence and progress) returns the row of the one
+   * asked for. A row with any other id is never shown in its place (`mergeResource`).
    */
-  projectCreate?(draft: DraftWithCommand): CacheRow | null;
+  projectCreate?(
+    draft: DraftWithCommand,
+    resourceId: ResourceId,
+  ): CacheRow | null;
   /**
    * WEB-09b's seam for the generic item-detail dialog (WF-QUEUE-02): a NEW command built from a failed or conflicting draft and `current`,
    * the value of the authorised current read (`readCurrent`) the person reviewed, or `null` when they continued without it (never the
    * cache), for "Resend as a new operation" / "Review, then save as new". `null`: nothing can be rebuilt.
-   * A kind that registers none is never offered them: the dialog offers only what the store can do (discard).
+   * A kind that registers none is never offered them: the dialog offers only what the store can do (discard). `related`: the other rows
+   * the same authorised read returned (`CurrentRead.related`), for their facts (a task's details and whether I may change them), never a
+   * base.
    */
   rebuild?(
     draft: DraftWithCommand,
     current: CacheRow | null,
+    related?: readonly CacheRow[],
   ): EnqueueRequest | null;
   /**
    * The command needs a connection and is never queued (enrolment, rota consent, a sharing or policy change): the dialog shows the
@@ -47,6 +61,12 @@ export interface CommandSpec {
     draft: DraftWithCommand,
     io: CurrentReadIo,
   ): Promise<CurrentRead>;
+  /**
+   * What the kind's commands need of the person's access, by target (`TargetSpec.requiresEdit`/`joinRequiresEdit`), derived from the
+   * STORED draft and its body (WEB-10a DA17-N2): a request the data layer rebuilds itself from a stored draft (the defaults review's
+   * confirmation) states them again, so a known denial refuses it as it refuses the slice's own save. None: nothing is required.
+   */
+  admission?(draft: DraftWithCommand): TargetNeeds;
 }
 
 /** What the data layer gives a slice's `readCurrent`: one ordinary, stamped, authorised `GET` for the displayed account and epoch. */
@@ -58,7 +78,15 @@ export interface CurrentReadIo {
 
 /** The authorised current-state read of WF-QUEUE-02, as the dialog distinguishes it. */
 export type CurrentRead =
-  | { kind: "loaded"; value: CacheRow }
+  | {
+      kind: "loaded";
+      value: CacheRow;
+      /**
+       * Other rows the SAME authorised response returned (a task's details with the task, WEB-10a DA-A1), for a rebuild to consult their
+       * facts; the reviewed value, and the only base, is `value`. Absent: none.
+       */
+      related?: readonly CacheRow[];
+    }
   /** The read succeeded but the current state cannot be compared to the queued attempt. */
   | { kind: "indeterminate" }
   | {
@@ -81,16 +109,23 @@ export function commandKind(draft: Pick<DraftRow, "kind">): string {
 export interface CommandRegistry {
   register(kind: string, spec: CommandSpec): void;
   describe(draft: DraftRow): string | null;
-  projectCreate(draft: DraftWithCommand): CacheRow | null;
+  /** `resourceId`: the resource asked for (else the draft's only target). A projection of another resource is `null`. */
+  projectCreate(
+    draft: DraftWithCommand,
+    resourceId?: ResourceId,
+  ): CacheRow | null;
   /** Whether the draft's kind registered `rebuild` (the dialog's "save as new" actions are offered only then). */
   canRebuild(draft: Pick<DraftRow, "kind">): boolean;
   rebuild(
     draft: DraftWithCommand,
     current: CacheRow | null,
+    related?: readonly CacheRow[],
   ): EnqueueRequest | null;
   onlineOnly(draft: Pick<DraftRow, "kind">): boolean;
   /** The kind's authorised current-state read (R7); `failed`/`unavailable` when it registered none, `failed`/`error` if it threw. */
   readCurrent(draft: DraftWithCommand, io: CurrentReadIo): Promise<CurrentRead>;
+  /** What the draft's commands need of the person's access (`CommandSpec.admission`); `{}` when its kind registered none. */
+  admission(draft: DraftWithCommand): TargetNeeds;
 }
 
 export function createCommandRegistry(): CommandRegistry {
@@ -102,13 +137,20 @@ export function createCommandRegistry(): CommandRegistry {
       specs.set(kind, spec);
     },
     describe: (draft) => specs.get(commandKind(draft))?.describe(draft) ?? null,
-    projectCreate: (draft) =>
-      specs.get(commandKind(draft))?.projectCreate?.(draft) ?? null,
+    projectCreate(draft, resourceId) {
+      const target = projectionTarget(draft, resourceId);
+      const project = specs.get(commandKind(draft))?.projectCreate;
+      if (target === null || project === undefined) return null;
+      const projected = project(draft, target);
+      return projected !== null && projected.id === target ? projected : null;
+    },
     canRebuild: (draft) =>
       typeof specs.get(commandKind(draft))?.rebuild === "function",
-    rebuild: (draft, current) =>
-      specs.get(commandKind(draft))?.rebuild?.(draft, current) ?? null,
+    rebuild: (draft, current, related) =>
+      specs.get(commandKind(draft))?.rebuild?.(draft, current, related) ?? null,
     onlineOnly: (draft) => specs.get(commandKind(draft))?.onlineOnly === true,
+    admission: (draft) =>
+      specs.get(commandKind(draft))?.admission?.(draft) ?? {},
     async readCurrent(draft, io) {
       const read = specs.get(commandKind(draft))?.readCurrent;
       if (read === undefined) return { kind: "failed", reason: "unavailable" };

@@ -43,10 +43,16 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  catalogueProblems,
+  completionProblems,
+  selectionProblems,
+} from "./lib/mutation-inventory.mjs";
+import {
   ATTRIBUTED,
   checkAttributions,
 } from "./mutation/attributed-errors.mjs";
 import { ENGINE, UNIT } from "./mutation/data-catalogue.mjs";
+import { EXPECTED_ENGINE, EXPECTED_UNIT } from "./mutation/expected.mjs";
 import {
   classifyControl,
   classifyMutant,
@@ -56,9 +62,6 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
-
-const EXPECTED_UNIT = 1392; // Accepted WEB-13a/API 0.29 main (1219) plus WEB-08d MU-1600 to MU-1709 (105) and accepted WEB-08c MU-8C-* (68, merged in revision 30).
-const EXPECTED_ENGINE = 198; // 181 + WEB-08d (5) + accepted WEB-08c (12).
 
 /** The command line, checked before anything is written or started: a selection that cannot run never passes vacuously. */
 function options() {
@@ -115,6 +118,15 @@ try {
   process.exit(2);
 }
 const { outDir, jobs, only, check } = opts;
+const inventory = [
+  ...catalogueProblems(UNIT, EXPECTED_UNIT),
+  ...catalogueProblems(ENGINE, EXPECTED_ENGINE, "engine"),
+  ...selectionProblems(UNIT, only),
+];
+if (inventory.length > 0) {
+  for (const problem of inventory) console.error(`INVENTORY ${problem}`);
+  process.exit(1);
+}
 const work = join(outDir, "work");
 const partial = only.length > 0;
 const selected = UNIT.filter((m) => !partial || only.includes(m.id));
@@ -398,8 +410,18 @@ const notRun = selected
 const by = (status) =>
   results.filter((r) => r.status === status).map((r) => r.id);
 const ok = (r) => r.status === "caught" || r.status === "crash_only_legacy";
+const inventoryProblems = completionProblems({
+  catalogue: UNIT,
+  expected: EXPECTED_UNIT,
+  only,
+  ran: results.map((r) => r.id),
+  unapplied: unapplied.map((p) => p.mutant.id),
+});
 const catalogueOk = UNIT.length === EXPECTED_UNIT;
-const complete = notRun.length === 0 && failedPatch.size === 0;
+const complete =
+  notRun.length === 0 &&
+  failedPatch.size === 0 &&
+  inventoryProblems.length === 0;
 const passed =
   stop.reason === null &&
   complete &&
@@ -445,7 +467,8 @@ const summary = {
   ),
   stopped: stop.reason === null ? null : stop,
   controls,
-  count_ok: partial || (catalogueOk && complete),
+  count_ok: catalogueOk && complete,
+  inventory_problems: inventoryProblems,
   passed,
   engine_catalogue: ENGINE.map((m) => ({
     id: m.id,

@@ -440,10 +440,10 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
-        // WEB-08d revision 30 (the accepted runner merged into WEB-08d): the I-8d cases, on their own stack.
+        tasks: 22,
         labels: 15,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(215);
+      expect(inBrowser(whole, browser)).toHaveLength(237);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -452,7 +452,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       ).toBe(s.name === "sharing" || s.name === "snapshot");
   }, 120_000);
 
-  test("compared with the schedule review 14 ran, only sharing, snapshot, pages and password-path cases move: from base to their own fresh stacks", async () => {
+  test("compared with the schedule review 14 ran, sharing, snapshot, pages, password-path and adopted task cases have their own fresh stacks", async () => {
     // The stacks of candidate b003cff (review 14), verbatim (scripts/integration/run.mjs STACKS).
     const OLD: Array<[string, string[]]> = [
       [
@@ -502,8 +502,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       snapshot: 18,
       pages: 39,
       "password-path": 24,
-      // WEB-08d revision 30: the I-8d spec (absent from the branch review 14 ran) would have fallen into that catch-all base, exactly
-      // as sharing and snapshot did (R17); on the merged branch its 15 cases per engine have a stack of their own.
+      tasks: 66,
       labels: 45,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
@@ -616,9 +615,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        // WEB-08d revision 30: 200 + the 15 I-8d cases.
-        planned_cases: 215,
-        passed: 209,
+        planned_cases: 237,
+        passed: 231,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -1235,7 +1233,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-lifecycle-restart",
     "-sharing",
     "-snapshot",
-    // WEB-08d: appended when the accepted runner was merged into WEB-08d (the earlier stacks keep their order and names).
+    "-tasks",
     "-labels",
   ]);
   expect(DEFAULT_STACKS.filter((s) => s.oidc).map((s) => s.name)).toEqual([

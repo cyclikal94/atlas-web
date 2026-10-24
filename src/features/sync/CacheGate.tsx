@@ -12,32 +12,57 @@ import { FloorRefusal } from "./NoticeBanners";
  *
  * With no data layer mounted it shows its content (there is nothing to gate it on).
  */
-export function CacheGate({ children }: { children: ReactNode }) {
+export function CacheGate({
+  children,
+  heading = null,
+}: {
+  children: ReactNode;
+  /**
+   * The page's heading while the content is hidden (WEB-10a revision 2): a destination whose own heading is part of the hidden content
+   * passes it, so a gated page still has its one level-one heading. Not shown once the content is.
+   */
+  heading?: ReactNode;
+}) {
   const env = useOptionalDataEnv();
   if (env === null) return children;
-  return <Gate>{children}</Gate>;
+  return <Gate heading={heading}>{children}</Gate>;
 }
 
-function Gate({ children }: { children: ReactNode }) {
+function Gate({
+  children,
+  heading,
+}: {
+  children: ReactNode;
+  heading: ReactNode;
+}) {
   const gate = useCacheGate();
   // While this gate is on screen it owns the floor message (see gate-presence.ts): the shell does not draw it a second time.
   useLayoutEffect(() => registerGate(), []);
   if (gate === "open") return children;
-  if (gate === "floor") return <FloorRefusal variant="b" />;
+  if (gate === "floor")
+    return (
+      <>
+        {heading}
+        <FloorRefusal variant="b" />
+      </>
+    );
   return (
-    <section
-      aria-labelledby="cache-gate-heading"
-      aria-busy="true"
-      data-cache-gate="refreshing"
-      className="flex max-w-[620px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
-    >
-      <h2
-        id="cache-gate-heading"
-        className="text-[14px] font-medium text-ink-1"
+    <>
+      {heading}
+      <section
+        aria-labelledby="cache-gate-heading"
+        aria-busy="true"
+        data-cache-gate="refreshing"
+        className="flex max-w-[620px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
       >
-        {GATE_TITLE}
-      </h2>
-      <p className="text-[13px] leading-[1.6] text-ink-2">{GATE_BODY}</p>
-    </section>
+        <h2
+          id="cache-gate-heading"
+          className="text-[14px] font-medium text-ink-1"
+        >
+          {GATE_TITLE}
+        </h2>
+        <p className="text-[13px] leading-[1.6] text-ink-2">{GATE_BODY}</p>
+      </section>
+    </>
   );
 }

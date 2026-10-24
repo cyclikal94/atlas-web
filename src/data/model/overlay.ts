@@ -3,6 +3,7 @@ import type {
   DraftWithCommand,
   PendingEffectRow,
   ProjectionPatch,
+  ResourceId,
 } from "./types";
 
 /**
@@ -65,21 +66,47 @@ export function applyPatch(row: CacheRow, patch: ProjectionPatch): CacheRow {
   };
 }
 
+/**
+ * The resource a projection of `draft` must be for: the one asked about when the caller names it, else the draft's ONLY target. A create
+ * that introduces several resources at once (a task with its details, first occurrence and progress) has no single answer, so without a
+ * named id nothing of it is projected (WEB-10a): a projection of the task must never stand in for its occurrence.
+ */
+export function projectionTarget(
+  draft: Pick<DraftWithCommand, "target_resource_ids">,
+  resourceId?: ResourceId,
+): ResourceId | null {
+  if (resourceId !== undefined) return resourceId;
+  return draft.target_resource_ids.length === 1
+    ? (draft.target_resource_ids[0] as ResourceId)
+    : null;
+}
+
 export function mergeResource(
   base: CacheRow | null,
   effects: readonly PendingEffectRow[],
   creates: readonly DraftWithCommand[] = [],
-  /** A feature slice's projection of a create that is not in the cache yet (CommandRegistry.projectCreate). */
-  projectCreate?: (draft: DraftWithCommand) => CacheRow | null,
-  /** Where `creates` is a window of a larger population: its exact size and the cursor of the next window. */
-  window: { total?: number; next?: number | null } = {},
+  /**
+   * A feature slice's projection of a create that is not in the cache yet (CommandRegistry.projectCreate). It is asked for the resource
+   * this merge is about, and what it returns is taken only when it IS that resource (`projected.id`): any other row is ignored.
+   */
+  projectCreate?: (
+    draft: DraftWithCommand,
+    resourceId: ResourceId,
+  ) => CacheRow | null,
+  /**
+   * Where `creates` is a window of a larger population: its exact size and the cursor of the next window. `id`: the resource this merge
+   * is about (else each create's only target).
+   */
+  window: { total?: number; next?: number | null; id?: ResourceId } = {},
 ): MergedResource {
   const ordered = orderEffects(effects);
   let merged: CacheRow | null = base;
   if (merged === null && projectCreate)
     for (const draft of creates) {
-      const projected = projectCreate(draft);
-      if (projected !== null) {
+      const target = projectionTarget(draft, window.id);
+      if (target === null) continue;
+      const projected = projectCreate(draft, target);
+      if (projected !== null && projected.id === target) {
         merged = projected;
         break;
       }

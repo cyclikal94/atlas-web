@@ -12,12 +12,21 @@ import {
  * The single home of polite and assertive live regions (lint rule R6). Messages are written by changing
  * text content, so a repeated message is cleared first and re-set on the next frame to be read again.
  * clearAll removes any text at the level-0 gate (matrix section 3.7.2 step 1c).
+ *
+ * Each announcement is OWNED by its caller (Kieran's decision of 15 October 2026, WEB-10a revision 7): `retract`
+ * withdraws it, cancelling its frame if it has not been written yet and clearing its text if it is still the region's
+ * latest message. A later announcement owns the region from then on, so retracting an earlier one never erases it.
+ * A notice that is dismissed retracts what it announced (`SessionNotices`).
  */
 export type Politeness = "polite" | "assertive";
+export interface Announcement {
+  retract(): void;
+}
 export interface Announcer {
-  announce(message: string, politeness?: Politeness): void;
+  announce(message: string, politeness?: Politeness): Announcement;
   clearAll(): void;
 }
+const NOTHING: Announcement = { retract: () => undefined };
 
 const AnnouncerContext = createContext<Announcer | null>(null);
 
@@ -28,7 +37,8 @@ const AnnouncerContext = createContext<Announcer | null>(null);
  */
 let active: Announcer | null = null;
 export const liveRegions: Announcer = {
-  announce: (message, politeness) => active?.announce(message, politeness),
+  announce: (message, politeness) =>
+    active?.announce(message, politeness) ?? NOTHING,
   clearAll: () => active?.clearAll(),
 };
 
@@ -36,6 +46,8 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
   const polite = useRef<HTMLDivElement>(null);
   const assertive = useRef<HTMLDivElement>(null);
   const frames = useRef(new Map<HTMLElement, number>());
+  /** The announcement each region's text (or pending frame) belongs to: only that one may retract it. */
+  const owners = useRef(new Map<HTMLElement, Announcement>());
 
   const cancel = useCallback((region: HTMLElement) => {
     const frame = frames.current.get(region);
@@ -46,7 +58,7 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
   const announce = useCallback(
     (message: string, politeness: Politeness = "polite") => {
       const region = (politeness === "assertive" ? assertive : polite).current;
-      if (!region) return;
+      if (!region) return NOTHING;
       cancel(region);
       region.textContent = "";
       const frame = window.requestAnimationFrame(() => {
@@ -54,6 +66,16 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
         region.textContent = message;
       });
       frames.current.set(region, frame);
+      const announcement: Announcement = {
+        retract: () => {
+          if (owners.current.get(region) !== announcement) return;
+          owners.current.delete(region);
+          cancel(region);
+          region.textContent = "";
+        },
+      };
+      owners.current.set(region, announcement);
+      return announcement;
     },
     [cancel],
   );
@@ -62,6 +84,7 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
     for (const region of [polite.current, assertive.current]) {
       if (!region) continue;
       cancel(region);
+      owners.current.delete(region);
       region.textContent = "";
     }
   }, [cancel]);

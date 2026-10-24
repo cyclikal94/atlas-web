@@ -1,6 +1,12 @@
-import { createBrowserHistory } from "@tanstack/react-router";
+import {
+  createBrowserHistory,
+  createMemoryHistory,
+} from "@tanstack/react-router";
 import { afterEach, describe, expect, test } from "vitest";
-import { createRouteChanges } from "../../src/lib/route-changes";
+import {
+  createHistoryRouteChanges,
+  createRouteChanges,
+} from "../../src/lib/route-changes";
 
 /**
  * Revision 6 of WEB-13a (R13; design assessment C2, Q9, Q10): the document's own record of its path. It must see every path change,
@@ -86,6 +92,76 @@ describe("the document's path changes", () => {
     window.history.pushState(null, "", "/a");
     changes.destroy();
     window.history.pushState(null, "", "/b");
+    expect(seen).toEqual([]);
+  });
+});
+
+/**
+ * WEB-10a revision 22 (R34; design assessment DA22-I1..I3, Q3): the same record over a router's own history, for the component tests'
+ * memory histories (which never move the document). It must tell exactly what the document's record tells for the same moves: every path
+ * change once (push, replace, back, forward, go), with the new path, and no change of only the query or the fragment.
+ */
+describe("a router history's path changes (the memory-history equivalent)", () => {
+  /**
+   * The same moves made on the document (a browser history, which writes the address a microtask after each move: moves are made one at a
+   * time) and on a memory history: what each record told.
+   */
+  async function both(
+    moves: Array<(h: ReturnType<typeof createMemoryHistory>) => void>,
+  ) {
+    const { seen: documentSeen } = record();
+    const browser = createBrowserHistory();
+    cleanups.push(() => browser.destroy());
+    for (const move of moves) {
+      move(browser as never);
+      for (let i = 0; i < 3; i += 1) await Promise.resolve();
+    }
+    const memory = createMemoryHistory({ initialEntries: ["/"] });
+    const changes = createHistoryRouteChanges(memory);
+    const memorySeen: string[] = [];
+    cleanups.push(changes.subscribe((path) => memorySeen.push(path)));
+    for (const move of moves) move(memory);
+    return { documentSeen, memorySeen, changes };
+  }
+
+  test("push and replace are told once per path change; the query and the fragment are not a change of path", async () => {
+    const { documentSeen, memorySeen, changes } = await both([
+      (h) => h.push("/tasks/a/edit"),
+      (h) => h.push("/sync?tab=queue"),
+      (h) => h.replace("/sync?tab=conflicts"),
+      (h) => h.push("/tasks/a/edit#title"),
+      (h) => h.replace("/tasks"),
+    ]);
+    expect(memorySeen).toEqual([
+      "/tasks/a/edit",
+      "/sync",
+      "/tasks/a/edit",
+      "/tasks",
+    ]);
+    expect(memorySeen).toEqual(documentSeen);
+    expect(changes.pathname()).toBe("/tasks");
+  });
+
+  test("Back, Forward and go are told with the path moved to", () => {
+    const memory = createMemoryHistory({ initialEntries: ["/tasks/a/edit"] });
+    const changes = createHistoryRouteChanges(memory);
+    const seen: string[] = [];
+    cleanups.push(changes.subscribe((path) => seen.push(path)));
+    memory.push("/sync");
+    memory.back();
+    memory.forward();
+    memory.go(-1);
+    expect(seen).toEqual(["/sync", "/tasks/a/edit", "/sync", "/tasks/a/edit"]);
+    expect(changes.pathname()).toBe("/tasks/a/edit");
+  });
+
+  test("control: an unsubscribed listener is told nothing", () => {
+    const memory = createMemoryHistory({ initialEntries: ["/"] });
+    const changes = createHistoryRouteChanges(memory);
+    const seen: string[] = [];
+    const off = changes.subscribe((path) => seen.push(path));
+    off();
+    memory.push("/tasks");
     expect(seen).toEqual([]);
   });
 });

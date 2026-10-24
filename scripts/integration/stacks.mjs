@@ -169,6 +169,15 @@ export const DEFAULT_STACKS = [
     oidc: false,
     mutates: "account data seeded for the snapshot; paced by its stack ledger",
   },
+  // WEB-10a: task journeys have their own backend, accounts and pacing state.
+  {
+    name: "tasks",
+    suffix: "-tasks",
+    files: [SPEC("tasks")],
+    oidc: false,
+    mutates:
+      "tasks, evidence, sharing and enrolment; paced by its stack ledger",
+  },
   // WEB-08d (BE-Q25): labels, device names and both capacities. They sign in repeatedly (a second activation, raw sessions, two
   // devices), rename and retire devices and change a password, so they have a backend of their own (as on the WEB-08d branch
   // before the accepted WEB-08c runner was adopted, where their stack was `-labels` too).

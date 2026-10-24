@@ -32,6 +32,68 @@ export interface TargetSpec {
   versionChecked: boolean;
   /** The version to assume for a resource nothing tracks yet: `1` for a resource this client creates. */
   seedIfUntracked?: number;
+  /**
+   * The version the person REVIEWED, from the authorised current-state read of WF-QUEUE-02 (a "save as new" built on what the dialog showed,
+   * WEB-10a R5): the base of this target instead of the local record or the cache, so the command is sent on that version and the record
+   * is raised from it (a later save of the same target is based on what this one leaves). Only a supersession built on a reviewed read
+   * passes it; an ordinary save never does.
+   */
+  reviewedBase?: number;
+  /**
+   * The command needs the person's write access to this resource (the server checks it, WEB-10a R30): a CACHED row that says
+   * `can_edit: false` (as this device last read it) refuses the save as `denied`, decided in the transaction that would write it, so a
+   * denial another tab committed after the screen offered the save is honoured too. A resource the cache does not hold (a create this
+   * device has not sent, a row not fetched) is no known denial: the server decides. A grant is never inferred from anything else.
+   */
+  requiresEdit?: boolean;
+  /**
+   * This target is the person's own participation (their progress stream), and CREATING it needs write access to the named resource,
+   * another target of the request (WEB-10a DA17-N2: the server creates the stream of an Anyone occurrence on its first record only for
+   * someone who may edit the occurrence; an existing participant records without that). Decided in the writing transaction from what
+   * this device knows THERE: the participation is known when the cache holds the stream, another unsettled draft writes it (an
+   * admitted first record) or the request is based on an authorised read of it (`reviewedBase`), and then nothing more is needed;
+   * otherwise a cached `can_edit: false` of the named resource refuses the save as `denied`. Unknown is not a grant, and an absent row
+   * of the named resource is no known denial.
+   */
+  joinRequiresEdit?: ResourceId;
+}
+
+/**
+ * What a command needs of the person's access, by target id (`requiresEdit`, `joinRequiresEdit`), as its slice derives it from a STORED
+ * draft (`CommandRegistry.admission`). A request this layer rebuilds from a stored draft (the defaults review's confirmation) states it
+ * again, so a known denial refuses that request exactly as it refuses the slice's own save; the draft header does not store it.
+ */
+export type TargetNeeds = Readonly<
+  Record<ResourceId, Pick<TargetSpec, "requiresEdit" | "joinRequiresEdit">>
+>;
+
+/**
+ * Whether the cache holds a known denial of a resource the request needs to write: a cached row with `can_edit: false` of a target
+ * that `requiresEdit`, or of the resource a `joinRequiresEdit` target names while the participation it creates is not known here
+ * (the cache's row of it, `others`: the other unsettled drafts that share a target with the request, read in the same transaction, a
+ * terminal one being no participation, or the target's own `reviewedBase`). Absence is not a denial; a display patch never changes
+ * `can_edit`.
+ */
+export function knownDenial(
+  targets: readonly TargetSpec[],
+  cache?: ReadonlyMap<ResourceId, CacheRow>,
+  others: readonly DraftRow[] = [],
+): boolean {
+  const denied = (id: ResourceId) => cache?.get(id)?.can_edit === false;
+  const joined = (target: TargetSpec) =>
+    target.reviewedBase !== undefined ||
+    cache?.has(target.resourceId) === true ||
+    others.some(
+      (draft) =>
+        !isTerminal(draft) && draft.index_targets.includes(target.resourceId),
+    );
+  return targets.some(
+    (target) =>
+      (target.requiresEdit && denied(target.resourceId)) ||
+      (target.joinRequiresEdit !== undefined &&
+        !joined(target) &&
+        denied(target.joinRequiresEdit)),
+  );
 }
 
 /** The versions the command is built from, by resource id (only the targets that have one). */
@@ -420,6 +482,13 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
       ...(target.seedIfUntracked === undefined
         ? {}
         : { seedIfUntracked: target.seedIfUntracked }),
+      ...(target.reviewedBase === undefined
+        ? {}
+        : { reviewedBase: target.reviewedBase }),
+      ...(target.requiresEdit ? { requiresEdit: true } : {}),
+      ...(target.joinRequiresEdit === undefined
+        ? {}
+        : { joinRequiresEdit: target.joinRequiresEdit }),
     })),
     build: (bases) => build.call(request, bases),
     ...(request.targetId === undefined ? {} : { targetId: request.targetId }),
@@ -463,7 +532,20 @@ export function validateRequest(request: EnqueueRequest): void {
     if (target.role === "primary" && target.versionChecked) versioned += 1;
     if (target.role === "side_effect" && !target.versionChecked)
       throw new OutboxRequestError("side_effect_unversioned");
+    if (
+      target.reviewedBase !== undefined &&
+      (!Number.isSafeInteger(target.reviewedBase) || target.reviewedBase < 1)
+    )
+      throw new OutboxRequestError("reviewed_base");
   }
+  // A participation's requirement names ANOTHER target of the request, whose cached row the writing transaction reads.
+  for (const target of request.targets)
+    if (
+      target.joinRequiresEdit !== undefined &&
+      (target.joinRequiresEdit === target.resourceId ||
+        !seen.has(target.joinRequiresEdit))
+    )
+      throw new OutboxRequestError("join_requires_edit");
   if (versioned > 1) throw new OutboxRequestError("two_versioned_primaries");
 }
 
@@ -494,7 +576,7 @@ export interface EnqueueFacts {
 }
 
 export type PlannedEnqueue =
-  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" }
+  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" | "denied" }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   /** The same save was already made (a retry after a lost completion): nothing changes. */
   | { kind: "duplicate"; draft: DraftRow }
@@ -540,7 +622,12 @@ function resolveTargets(
     const tracked = facts.versions.get(id)?.locally_assumed_version;
     const cached = facts.cache.get(id)?.version;
     const untracked = tracked === undefined && cached === undefined;
-    const base = tracked ?? cached ?? target.seedIfUntracked ?? null;
+    const base =
+      target.reviewedBase ??
+      tracked ??
+      cached ??
+      target.seedIfUntracked ??
+      null;
     const bumps = target.role === "side_effect" || target.versionChecked;
     if (bumps) {
       if (base === null) return null;
@@ -700,6 +787,8 @@ export function planEnqueue(
   if (facts.existing) return { kind: "duplicate", draft: facts.existing };
   const refusal = fenceRefusal(facts.sync);
   if (refusal !== null) return { kind: "refused", reason: refusal };
+  if (knownDenial(request.targets, facts.cache, facts.related))
+    return { kind: "refused", reason: "denied" };
   const resolved = resolveTargets(request.targets, facts);
   if (resolved === null) return { kind: "refused", reason: "no_base" };
 
@@ -749,7 +838,9 @@ export type PlannedEdit =
         | "not_found"
         | "not_queued"
         | "retargeted"
-        | "draft_changed";
+        | "draft_changed"
+        /** A target the request needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`): nothing is written. */
+        | "denied";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | { kind: "edited"; draft: DraftRow; command: JsonObject };
@@ -776,12 +867,17 @@ function sameTargets(request: EnqueueRequest, draft: DraftRow): boolean {
 /**
  * The body of a `queued` draft, edited in place. The command is frozen the instant the status leaves `queued` (it may have been
  * transmitted), so an edit of any other status is refused and the change is a NEW draft (F-O3). The edit rebuilds from the
- * bases the draft already holds and cannot change what it targets.
+ * bases the draft already holds and cannot change what it targets. A known denial of a resource it needs to write (`cache`: the cached
+ * rows of the request's targets, and `others`: the unsettled drafts OLDER than the edited one that write a participation it would create
+ * (never the draft itself, nor a later one that depends on it), both read in the editing transaction, `knownDenial`) refuses it, as it
+ * refuses a new draft.
  */
 export function planEdit(
   request: EnqueueRequest,
   draft: DraftRow | undefined,
   sync: SyncStateRow,
+  cache?: ReadonlyMap<ResourceId, CacheRow>,
+  others: readonly DraftRow[] = [],
 ): PlannedEdit {
   if (draft === undefined) return { kind: "refused", reason: "not_found" };
   const refusal = fenceRefusal(sync);
@@ -790,6 +886,8 @@ export function planEdit(
     return { kind: "refused", reason: "not_queued" };
   if (!sameTargets(request, draft))
     return { kind: "refused", reason: "retargeted" };
+  if (knownDenial(request.targets, cache, others))
+    return { kind: "refused", reason: "denied" };
   if (request.expectDraft !== undefined && !request.expectDraft(draft))
     return { kind: "refused", reason: "draft_changed" };
   let built: BuildResult;
@@ -1100,6 +1198,8 @@ export type SupersedeDecision =
         | "not_supersedable"
         | "key_in_use"
         | "no_base"
+        /** A target the replacement needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`): nothing is written. */
+        | "denied"
         /** The request's `expectDraft` refused the old draft as it is stored now: nothing is written. */
         | "draft_changed"
         /**

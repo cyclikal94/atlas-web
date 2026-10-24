@@ -382,6 +382,87 @@ describe("Announcer", () => {
     expect(screen.getByRole("status")).toHaveTextContent("");
   });
 
+  /**
+   * Kieran's decision of 15 October 2026 (WEB-10a revision 7; review 7's superseded-notice live-region race): an announcement is
+   * owned by its caller, and `retract` withdraws it, before or after its frame, but never a later announcement of the same region.
+   */
+  describe("an announcement withdrawn by its owner", () => {
+    let api: ReturnType<typeof useAnnouncer>;
+    function Grab() {
+      api = useAnnouncer();
+      return null;
+    }
+    const mount = () =>
+      render(
+        <AnnouncerProvider>
+          <Grab />
+        </AnnouncerProvider>,
+      );
+
+    test("withdrawn before its frame: nothing is ever written", async () => {
+      mount();
+      const status = screen.getByRole("status");
+      const mine = api.announce("Notice A");
+      mine.retract();
+      await act(frame);
+      await act(frame);
+      expect(status).toHaveTextContent("");
+    });
+
+    test("withdrawn after its frame: its text is cleared", async () => {
+      mount();
+      const alert = screen.getByRole("alert");
+      const mine = api.announce("Notice A", "assertive");
+      await act(frame);
+      expect(alert).toHaveTextContent("Notice A");
+      mine.retract();
+      expect(alert).toHaveTextContent("");
+    });
+
+    for (const when of ["before", "after"] as const)
+      test(`an earlier announcement withdrawn ${when} the later one's frame never erases the later one`, async () => {
+        mount();
+        const status = screen.getByRole("status");
+        const earlier = api.announce("Notice A");
+        await act(frame);
+        api.announce("Notice B");
+        if (when === "before") earlier.retract();
+        await act(frame);
+        if (when === "after") earlier.retract();
+        await act(frame);
+        expect(status).toHaveTextContent("Notice B");
+      });
+
+    test("ownership is the announcement, not its text: withdrawing an earlier announcement of the SAME words keeps the later one", async () => {
+      mount();
+      const status = screen.getByRole("status");
+      const earlier = api.announce("Same words");
+      await act(frame);
+      api.announce("Same words");
+      await act(frame);
+      expect(status).toHaveTextContent("Same words");
+      earlier.retract();
+      await act(frame);
+      expect(status).toHaveTextContent("Same words");
+    });
+
+    test("control: an announcement that is not withdrawn stays; a withdrawal after clearAll changes nothing", async () => {
+      mount();
+      const status = screen.getByRole("status");
+      const kept = api.announce("Notice A");
+      await act(frame);
+      expect(status).toHaveTextContent("Notice A");
+      act(() => api.clearAll());
+      kept.retract();
+      const next = api.announce("Notice B");
+      await act(frame);
+      kept.retract();
+      expect(status).toHaveTextContent("Notice B");
+      next.retract();
+      expect(status).toHaveTextContent("");
+    });
+  });
+
   test("useAnnouncer throws without a provider", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(() => render(<Speak message="x" />)).toThrow(/AnnouncerProvider/);

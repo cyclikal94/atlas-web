@@ -6,9 +6,9 @@ import { checkSurface, expectPaintedContrast, WIDTHS } from "./surface-checks";
  * WEB-08b, A2 / A3 / A4 (Layer A, rendered): the account card (WF-SETTINGS-01), "Signing in" (WF-SETTINGS-03) and the
  * reauthenticate sign-in form, at 320, 390, 768 and 1280 px in dark and light, in each engine, from the fixture shell and its
  * canned session (query-string driven). Design and accessibility evidence only: not Kieran's visual or copy sign-off, not
- * assistive-technology evidence and not integration evidence. Screenshots (Chromium) go to .agtx/evidence/WEB-08b/design/.
+ * assistive-technology evidence and not integration evidence. Screenshots (Chromium) belong to this invocation and test
+ * (`checkSurface` → `surfaceScreenshot`, review 14's R27/DA-H1); the historical `.agtx/evidence/WEB-08b/design/` is no longer written.
  */
-const EVIDENCE = ".agtx/evidence/WEB-08b/design";
 
 interface Surface {
   name: string;
@@ -218,7 +218,7 @@ for (const scheme of ["dark", "light"] as const) {
             label: `${surface.name} at ${width}px, ${scheme}, ${engine}`,
             region: surface.region,
             engine,
-            evidence: EVIDENCE,
+            info: testInfo,
             name: surface.name,
             width,
             scheme,

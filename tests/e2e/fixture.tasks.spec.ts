@@ -1,0 +1,6522 @@
+import {
+  type BrowserContext,
+  expect,
+  type Page,
+  type Route,
+  test,
+} from "@playwright/test";
+import { recordEvidence } from "./data-evidence";
+import {
+  deltaPage,
+  fresh,
+  leaderPage,
+  rowsOf,
+  settleElsewhere,
+  snapshotPage,
+  untilSync,
+} from "./data-leader-helpers";
+import { serveIdentityReads } from "./data-local-faults";
+import {
+  ACCOUNT,
+  pageText,
+  type SyncStub,
+  seedSettled,
+  startLeader,
+  startOutbox,
+  stubNetwork,
+  untilTreeSettled,
+  waitForState,
+} from "./data-sync-helpers";
+import { runAxe } from "./helpers";
+import {
+  API,
+  type BuiltTask,
+  bodiesOf,
+  buildTask,
+  cacheTasks,
+  dailyPage,
+  draftsOf,
+  goOfflineAtBoundary,
+  goOnlineAtBoundary,
+  OTHER,
+  occurrenceIdOf,
+  progressIdOf,
+  serveTaskReads,
+  type TaskReads,
+  todayUtc,
+  view,
+} from "./tasks-helpers";
+
+/**
+ * WEB-10a in Chromium, Firefox and WebKit: the PRODUCTION session and protected tree (`/__session`), the production data controller and REAL
+ * IndexedDB; the cache is filled by one `/sync` delta page through the fixture leader and drafts are sent by the fixture outbox. The task
+ * reads (`/daily`, `/task-presets`) are answered by `page.route`. FIXTURE evidence: an answer the stub gives is the stub's (the I-T cases run
+ * against the released backend).
+ *
+ * E-T1 Today from /daily and from the cache, axe at five viewports; E-T2 Mark done offline, then sent; E-T3 create offline and an immediate
+ * Mark done; E-T4 presets; E-T5 closure and exclusion; E-T6 archive offline leaves the day; E-T7 correction; E-T8 keyboard; E-T9 a real
+ * window boundary; E-T11 a 403 read once across remounts; E-T12 display-zone change and the gap explainer. Revision 1 adds E-T9b (online,
+ * then offline in place), E-T7b/E-T7c (the correction conflict choices; the edit kept across the queue), E-T8b (forms and dialogs by
+ * keyboard, focus return), E-T13 (axe of the forms and dialogs), E-T2b (the PRODUCTION leader sends a save made in the tree) and E-T10 (a
+ * held `/daily` answer across a real account switch). Revision 2 adds E-T8d (the form and the correction dialog by real Tab traversal from
+ * the page's start; E-T8b's programmatic-focus cases remain as activation controls), E-T8e (keys + a held local save + the queue visit: the
+ * newer edit survives), E-T9c (the detail follows its window's close), E-T9d (an answer dispatched before the close and delivered after it),
+ * E-T9e (a committed correction defeats the older answer) and E-T7e (the conflict choices after a reload, from the durable operation).
+ */
+const TODAY = todayUtc();
+const todayRoute = (zone = "UTC", day = TODAY) =>
+  `/today?day=${day}&tz=${encodeURIComponent(zone)}`;
+const rowOf = (page: Page, id: string) =>
+  page.locator(`[data-today-row="${id}"]`);
+
+async function bootAt(
+  context: BrowserContext,
+  route: string,
+  look: {
+    viewport?: { width: number; height: number };
+    colorScheme?: "light" | "dark";
+  } = {},
+): Promise<Page> {
+  const page = await context.newPage();
+  // Set before the page loads, so nothing is measured mid-way through a theme transition.
+  if (look.viewport) await page.setViewportSize(look.viewport);
+  if (look.colorScheme)
+    await page.emulateMedia({ colorScheme: look.colorScheme });
+  await page.goto(`/__session?route=${encodeURIComponent(route)}`);
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await page.waitForFunction(() => window.__atlasData !== undefined);
+  return page;
+}
+
+async function navigateInApp(page: Page, path: string): Promise<void> {
+  await page.evaluate((to) => {
+    history.pushState(null, "", to);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, path);
+}
+
+async function setup(
+  context: BrowserContext,
+  route: string,
+  tasks: BuiltTask[],
+  arrange: (reads: TaskReads) => void = () => undefined,
+  look: Parameters<typeof bootAt>[2] = {},
+): Promise<{ page: Page; net: SyncStub; reads: TaskReads }> {
+  const net = await stubNetwork(context);
+  await serveIdentityReads(context);
+  const reads = await serveTaskReads(context);
+  arrange(reads);
+  await seedSettled(context);
+  const page = await bootAt(context, route, look);
+  // Always one sync page through the fixture leader: it creates the account's database as a first sync does (there is no production
+  // leader here), so a save has somewhere to go even when no task is cached.
+  await cacheTasks(page, net, tasks);
+  return { page, net, reads };
+}
+
+/** The send of the queued drafts by the fixture outbox (a save in the tree only posts a hint; the fixture leader is woken explicitly). */
+async function send(page: Page): Promise<void> {
+  await startOutbox(page);
+  await page.evaluate(() => window.__atlasData?.retryOutbox());
+}
+
+test.describe("E-T1: Today from /daily and from the cache (A1, A2, A19)", () => {
+  test("online: both scopes, the server's results; offline: the same day from the cache, provisional", async ({
+    context,
+  }, info) => {
+    const a = buildTask({ n: 1, title: "Brush your teeth" });
+    const b = buildTask({ n: 2, title: "Water the plants" });
+    const { page, reads } = await setup(context, todayRoute(), [a, b], (r) => {
+      r.respond = (q) =>
+        dailyPage(
+          [
+            view(a, {
+              outcome: "complete",
+              period_outcome: "complete",
+              actionable: false,
+            }),
+            view(b),
+          ],
+          q.scope === "joint" ? { pending_tasks: [a.taskId] } : {},
+        );
+    });
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "server",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+    );
+    await expect(rowOf(page, b.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "to_do",
+    );
+    await expect(page.locator("[data-today-summary]")).toHaveText(
+      "1 of 2 done · 1 still to do",
+    );
+    await expect(page.locator("[data-pending-tasks]")).toBeVisible();
+    expect(new Set(reads.daily.map((q) => q.scope))).toEqual(
+      new Set(["joint", "personal"]),
+    );
+    // Offline, a remounted Today has no server answer: the same day is derived from the cache.
+    await goOfflineAtBoundary(page);
+    await navigateInApp(page, "/tasks");
+    await navigateInApp(page, todayRoute());
+    await expect(rowOf(page, b.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+    );
+    await expect(rowOf(page, b.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "to_do",
+    );
+    recordEvidence(info, "e-t1", { daily: reads.daily });
+  });
+
+  for (const [width, height] of [
+    [390, 844],
+    [834, 1112],
+    [1112, 834],
+    [1180, 820],
+    [1440, 900],
+  ] as const)
+    for (const scheme of ["light", "dark"] as const)
+      test(`axe and layout at ${width}×${height}, ${scheme} (browser emulation, not a device)`, async ({
+        context,
+      }) => {
+        const a = buildTask({ n: 3, title: "Brush your teeth" });
+        const { page } = await setup(
+          context,
+          todayRoute(),
+          [a],
+          (r) => {
+            r.respond = () => dailyPage([view(a)]);
+          },
+          { viewport: { width, height }, colorScheme: scheme },
+        );
+        await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+        expect(await runAxe(page)).toEqual([]);
+        const overflow = await page.evaluate(
+          () =>
+            document.documentElement.scrollWidth -
+            document.documentElement.clientWidth,
+        );
+        expect(overflow).toBeLessThanOrEqual(0);
+      });
+});
+
+test.describe("E-T2: Mark done offline, then sent (A7, A8)", () => {
+  test("a queued draft with the wrapped kind, 'Not sent yet'; online the body carries expected_version and happened_at ≤ the act; the sync page makes it Done", async ({
+    context,
+  }, info) => {
+    const a = buildTask({ n: 4, title: "Brush your teeth" });
+    const { page, net } = await setup(context, todayRoute(), [a]);
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+    const before = Math.floor(Date.now() / 1000);
+    await rowOf(page, a.occurrenceId)
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    await expect(
+      rowOf(page, a.occurrenceId).locator("[data-pending-mark]"),
+    ).toHaveText("Not sent yet");
+    const after = Math.floor(Date.now() / 1000);
+    const drafts = await draftsOf(page);
+    expect(drafts.map((d) => [d.kind, d.status])).toEqual([
+      ["record", "queued"],
+    ]);
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect.poll(() => net.commands.length).toBe(1);
+    const sent = net.commands[0];
+    expect(sent?.path).toBe("/task-commands");
+    expect(sent?.key).toBe(drafts[0]?.local_id);
+    const body = JSON.parse(sent?.body ?? "{}") as {
+      command: Record<string, unknown>;
+    };
+    expect(body.command).toMatchObject({
+      kind: "record",
+      occurrence_id: a.occurrenceId,
+      subject_account_id: ACCOUNT,
+      expected_version: 1,
+      evidence: { kind: "checkbox", complete: true },
+    });
+    expect(body.command.happened_at as number).toBeGreaterThanOrEqual(before);
+    expect(body.command.happened_at as number).toBeLessThanOrEqual(after);
+    const done = { outcome: "complete", amount: null, checked: [] };
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              kind: "upsert",
+              resource: {
+                id: a.progressId,
+                kind: "progress",
+                parent_id: a.occurrenceId,
+                label: "Progress",
+                value: {
+                  subject_account_id: ACCOUNT,
+                  recent_entries: [],
+                  entry_count: 1,
+                  excluded: false,
+                  action: done,
+                  period: done,
+                  aggregate_consent: true,
+                },
+                version: 2,
+                can_edit: true,
+                archived: false,
+                policy_version: 1,
+              },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+    );
+    await expect(
+      rowOf(page, a.occurrenceId).locator("[data-pending-mark]"),
+    ).toHaveCount(0);
+    recordEvidence(info, "e-t2", { sent: net.commands });
+  });
+});
+
+test.describe("E-T3: create offline and an immediate Mark done (A9, A10, A16; TASK-26)", () => {
+  test("a create with deterministic ids, then a record that names the same progress id and depends on it; sent in order", async ({
+    context,
+  }, info) => {
+    const { page, net } = await setup(context, "/tasks/new", []);
+    await page
+      .getByRole("button", { name: "Start from scratch instead" })
+      .click();
+    // The defaults snapshot is read online (the form uses it), so the offline create captures it rather than waiting for review.
+    await expect(
+      page.getByRole("radio", { name: "Use my defaults (only you)" }),
+    ).toBeVisible();
+    await goOfflineAtBoundary(page);
+    await page.getByLabel("Name", { exact: true }).fill("Take the bins out");
+    await page.getByRole("radio", { name: "Only me" }).check();
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await page
+      .locator("[data-record-card]")
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    await expect.poll(async () => (await draftsOf(page)).length).toBe(2);
+    const [create, record] = await draftsOf(page);
+    const bodies = await bodiesOf(page);
+    const createBody = bodies.find((b) => b.local_id === create?.local_id)
+      ?.command.command as Record<string, unknown>;
+    const recordBody = bodies.find((b) => b.local_id === record?.local_id)
+      ?.command.command as Record<string, unknown>;
+    // The first slot's key follows the saved schedule: `once` without a repeat, else `<start date>T<time or "date">`.
+    const schedule = (
+      createBody.definition as {
+        schedule: {
+          start_date: string;
+          time: string | null;
+          repeat: { frequency: string } | null;
+        };
+      }
+    ).schedule;
+    const key =
+      schedule.repeat === null ||
+      schedule.repeat.frequency === "after_completion"
+        ? "once"
+        : `${schedule.start_date}T${schedule.time ?? "date"}`;
+    const occurrence = occurrenceIdOf(createBody.id as string, key);
+    expect(create?.target_resource_ids).toEqual([
+      createBody.id,
+      createBody.execution_id,
+      occurrence,
+      progressIdOf(occurrence),
+    ]);
+    expect(recordBody).toMatchObject({
+      occurrence_id: occurrence,
+      expected_version: 1,
+    });
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect.poll(() => net.commands.length).toBe(2);
+    expect(
+      net.commands.map(
+        (c) =>
+          (JSON.parse(c.body) as { command: { kind: string } }).command.kind,
+      ),
+    ).toEqual(["create_task", "record"]);
+    recordEvidence(info, "e-t3", { sent: net.commands });
+  });
+});
+
+test.describe("E-T3b: a create captured from defaults never fetched waits for review (A16)", () => {
+  test("held for the defaults review in real IndexedDB; the record behind it waits; nothing is sent", async ({
+    context,
+  }) => {
+    const { page, net } = await setup(context, "/tasks/new", [], (r) => {
+      r.snapshot = {
+        status: 503,
+        body: {
+          code: "temporarily_unavailable",
+          message: "m",
+          request_id: "11111111-1111-4111-8111-111111111111",
+          details: [],
+        },
+      };
+    });
+    await page
+      .getByRole("button", { name: "Start from scratch instead" })
+      .click();
+    await page.getByLabel("Name", { exact: true }).fill("Review me");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await page
+      .locator("[data-record-card]")
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    await expect.poll(async () => (await draftsOf(page)).length).toBe(2);
+    const rows = (await page.evaluate(
+      (acct) => window.__atlasData?.rows(acct, "drafts"),
+      ACCOUNT,
+    )) as Array<{
+      kind: string;
+      review_block: { kinds: string[] } | null;
+      created_seq: number;
+    }>;
+    const create = rows.find((d) => d.kind === "create_task");
+    expect(create?.review_block?.kinds.sort()).toEqual(["progress", "task"]);
+    await send(page);
+    await page.waitForTimeout(1_500);
+    expect(net.commands).toHaveLength(0);
+  });
+});
+
+test.describe("E-T4: the preset picker (A11)", () => {
+  test("six presets from the API, chosen by keyboard, fill the form; a failure and offline keep 'Start from scratch'", async ({
+    context,
+  }) => {
+    const definition = (participation: string) => ({
+      schedule: {
+        start_date: TODAY,
+        time: null,
+        timezone: "UTC",
+        repeat: { frequency: "daily", interval: 1 },
+      },
+      goal: { kind: "checkbox" },
+      carry: "close_incomplete",
+      participation,
+      open_days_before: 0,
+      close_days_after: 1,
+      allow_streak_exclusions: false,
+    });
+    const titles = [
+      "Daily routine",
+      "Shared persistent chore",
+      "Three times a week",
+      "Joint daily routine",
+      "25 minutes of focus",
+      "Seven days after completion",
+    ];
+    const { page, reads } = await setup(context, "/tasks/new", [], (r) => {
+      r.presetsAnswer = {
+        status: 200,
+        body: {
+          items: titles.map((title, i) => ({
+            id: `p${i}`,
+            title,
+            definition: definition(i === 1 ? "everyone" : "personal"),
+          })),
+        },
+      };
+    });
+    await expect(
+      page.locator("[data-preset-list] input[type=radio]"),
+    ).toHaveCount(6);
+    await page.getByRole("radio", { name: /Daily routine/ }).focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(
+      page.getByRole("radio", { name: /Shared persistent chore/ }),
+    ).toBeChecked();
+    await page.getByRole("button", { name: "Use preset" }).click();
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue(
+      "Shared persistent chore",
+    );
+    expect(reads.presets).toBeGreaterThanOrEqual(1);
+    await navigateInApp(page, "/tasks");
+    reads.presetsAnswer = {
+      status: 503,
+      body: {
+        code: "temporarily_unavailable",
+        message: "m",
+        request_id: "11111111-1111-4111-8111-111111111111",
+        details: [],
+      },
+    };
+    await navigateInApp(page, "/tasks/new");
+    await expect(page.locator('[data-preset-picker="failed"]')).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start from scratch instead" }),
+    ).toBeVisible();
+    await goOfflineAtBoundary(page);
+    await navigateInApp(page, "/tasks");
+    await navigateInApp(page, "/tasks/new");
+    await expect(page.getByText("Presets need a connection")).toBeVisible();
+  });
+});
+
+test.describe("E-T5: closure and streak exclusion (A12)", () => {
+  test("Exclude is absent when the policy is off; with it on, Close and Exclude queue offline", async ({
+    context,
+  }) => {
+    const off = buildTask({ n: 5, title: "Off" });
+    const on = buildTask({ n: 6, title: "On", allowExclusions: true });
+    const { page } = await setup(
+      context,
+      `/tasks/${off.taskId}?occurrence=${off.occurrenceId}`,
+      [off, on],
+    );
+    await goOfflineAtBoundary(page);
+    await expect(page.locator("[data-closure]")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Exclude from my streak" }),
+    ).toHaveCount(0);
+    await navigateInApp(
+      page,
+      `/tasks/${on.taskId}?occurrence=${on.occurrenceId}`,
+    );
+    await page
+      .getByRole("button", { name: "Close without completing" })
+      .click();
+    await page.getByRole("button", { name: "Exclude from my streak" }).click();
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Undo streak exclusion" }),
+    ).toBeVisible();
+    expect((await draftsOf(page)).map((d) => d.kind)).toEqual([
+      "resolve",
+      "exclude",
+    ]);
+  });
+});
+
+test.describe("E-T6: archive offline leaves the day (A13)", () => {
+  test("the occurrence leaves the offline Today walk; the task is listed under Archived; Restore brings it back", async ({
+    context,
+  }) => {
+    const a = buildTask({ n: 7, title: "Archive me" });
+    // Strengthened in revision 1 (the assertions are unchanged): a task that STAYS on the day is the control that Today has composed its
+    // rows before the archived one's absence is asserted. Since R4, Today shows no row until the whole outstanding overlay is read, so an
+    // absence checked at once could pass before any row was composed (the real-engine mutant MU-2031 survived that way).
+    const stays = buildTask({ n: 22, title: "Stays" });
+    const { page } = await setup(context, todayRoute(), [a, stays]);
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+    await expect(rowOf(page, stays.occurrenceId)).toBeVisible();
+    await navigateInApp(
+      page,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+    );
+    await page.getByRole("button", { name: "Archive" }).click();
+    await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
+    await navigateInApp(page, todayRoute());
+    await expect(page.locator("[data-today-page]")).toBeVisible();
+    await expect(rowOf(page, stays.occurrenceId)).toBeVisible();
+    await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
+    await navigateInApp(page, "/tasks");
+    await page.getByRole("checkbox", { name: "Archived" }).check();
+    await expect(page.locator(`[data-task-link="${a.taskId}"]`)).toBeVisible();
+    await navigateInApp(
+      page,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+    );
+    await page.getByRole("button", { name: "Restore" }).click();
+    await navigateInApp(page, todayRoute());
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+  });
+});
+
+test.describe("E-T7: the correction dialog (A14)", () => {
+  test("Escape discards; Save correction queues a full-definition revise_occurrence", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 8,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const { page } = await setup(
+      context,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+      [a],
+    );
+    await goOfflineAtBoundary(page);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    let dialog = page.getByRole("dialog");
+    await dialog.getByLabel("At most").fill("3");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    dialog = page.getByRole("dialog");
+    await expect(dialog.getByLabel("At most")).toHaveValue("8");
+    await dialog.getByLabel("At most").fill("2");
+    await dialog.getByRole("button", { name: "Save correction" }).click();
+    await expect(dialog).toHaveCount(0);
+    const bodies = await bodiesOf(page);
+    const c = bodies
+      .map((b) => b.command.command)
+      .find((x) => x.kind === "revise_occurrence");
+    expect(c).toMatchObject({
+      id: a.occurrenceId,
+      expected_version: 1,
+      definition: {
+        participation: "personal",
+        goal: { kind: "numeric", minimum: null, maximum: "2", unit: "cups" },
+      },
+    });
+  });
+});
+
+test.describe("E-T8: keyboard only (A19)", () => {
+  test("filters by arrow keys and Mark done by Enter", async ({ context }) => {
+    const a = buildTask({ n: 9, title: "Brush your teeth" });
+    const { page } = await setup(context, todayRoute(), [a]);
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+    await page.getByRole("radio", { name: "All" }).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(page.getByRole("radio", { name: "To do" })).toBeChecked();
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+    await rowOf(page, a.occurrenceId)
+      .getByRole("button", { name: "Mark done" })
+      .focus();
+    await page.keyboard.press("Enter");
+    await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
+    await page.getByRole("radio", { name: "To do" }).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(page.getByRole("radio", { name: "Done" })).toBeChecked();
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+    );
+  });
+});
+
+test.describe("E-T9: a real window boundary (A4; TASK-31 late finalisation)", () => {
+  test("a provisional row becomes Done when the real clock passes its closes_at (no sync, no timer shortened)", async ({
+    context,
+  }) => {
+    const closesAt = Math.floor(Date.now() / 1000) + 6;
+    const a = buildTask({
+      n: 10,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt,
+    });
+    const { page } = await setup(context, todayRoute(), [a]);
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "on_track",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+      { timeout: 20_000 },
+    );
+    expect(Math.floor(Date.now() / 1000)).toBeGreaterThanOrEqual(closesAt);
+  });
+});
+
+test.describe("E-T11: a refused read is asked once across remounts (A2)", () => {
+  test("a 403 on /daily is remembered for the identity: navigating away and back asks nothing more", async ({
+    context,
+  }) => {
+    const { page, reads } = await setup(context, "/tasks", []);
+    // Refused only once the cache is filled: a 403 makes the session re-check and remount the tree, which would interrupt the fixture leader.
+    reads.respond = () => ({
+      status: 403,
+      body: {
+        code: "forbidden",
+        message: "m",
+        request_id: "11111111-1111-4111-8111-111111111111",
+        details: [],
+      },
+    });
+    await navigateInApp(page, todayRoute());
+    // A 403 closes and reopens the protected display while the session classifies it (it remounts the tree).
+    await expect(page.locator("[data-today-error]")).toBeVisible({
+      timeout: 20_000,
+    });
+    // Harness correction (revision 2, labelled): the two scopes of ONE read can reach the stub tens of milliseconds apart (WebKit, measured
+    // 3 of 10 runs, about 70 ms), so the error can show before the second has arrived. Count once this first read is quiet; the assertion
+    // that navigating away and back asks nothing more is unchanged.
+    let settled = -1;
+    await expect
+      .poll(async () => {
+        const before = reads.daily.length;
+        await page.waitForTimeout(300);
+        const quiet = reads.daily.length === before;
+        if (quiet) settled = before;
+        return quiet;
+      })
+      .toBe(true);
+    const asked = settled;
+    expect(asked).toBeGreaterThanOrEqual(1);
+    await navigateInApp(page, "/tasks");
+    await navigateInApp(page, todayRoute());
+    await expect(page.locator("[data-today-error]")).toBeVisible();
+    await page.waitForTimeout(1_000);
+    expect(reads.daily.length).toBe(asked);
+  });
+});
+
+test.describe("E-T12: display zone and the gap explainer (A6)", () => {
+  test("a timed Vienna slot shows in the display zone; changing the zone regroups it; the spring-gap slot explains itself", async ({
+    context,
+  }) => {
+    // 2026-03-29 02:30 Europe/Vienna never happens: the server's instant is 03:30 local (01:30Z).
+    const instant = Date.UTC(2026, 2, 29, 1, 30) / 1000;
+    const a = buildTask({
+      n: 11,
+      title: "Gap",
+      date: "2026-03-29",
+      time: "02:30:00",
+      zone: "Europe/Vienna",
+      instant,
+      slotKey: "once",
+      opensAt: Date.UTC(2026, 2, 28, 23) / 1000,
+      closesAt: Date.UTC(2026, 2, 29, 22) / 1000,
+    });
+    // Strengthened in revision 1 (the assertions are unchanged): an undated task, on every day in every zone, is the control that the
+    // regrouped day has been composed before the timed row's absence is asserted.
+    const anyDay = buildTask({ n: 24, title: "Any day", date: null });
+    const { page } = await setup(
+      context,
+      todayRoute("Europe/Vienna", "2026-03-29"),
+      [a, anyDay],
+    );
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible();
+    await expect(rowOf(page, a.occurrenceId)).toContainText("03:30");
+    await expect(page.locator('[data-today-group="morning"]')).toContainText(
+      "Gap",
+    );
+    await rowOf(page, a.occurrenceId)
+      .getByText("Why is this at 03:30?")
+      .click();
+    await expect(rowOf(page, a.occurrenceId)).toContainText(
+      "This task is scheduled in Europe/Vienna.",
+    );
+    await page.getByLabel("Time zone").selectOption("America/New_York");
+    await expect(page).toHaveURL(/tz=America%2FNew_York/);
+    await expect(rowOf(page, anyDay.occurrenceId)).toBeVisible();
+    // 01:30Z is 21:30 on the 28th in New York: not on the 29th there.
+    await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
+  });
+});
+
+// ---- revision 1 (review of 13 October 2026, R2/R3/R7) -------------------------------------------------------------------------------
+
+const VIEWED = "22222222-2222-4222-8222-222222222222";
+/** A settled record of `account` at `epoch` (a sign-in in another tab), as the production store writes it. */
+const settledAt = (account: string, epoch: number, session: string) => ({
+  schema: 1,
+  latest_epoch: epoch,
+  fence_seq: 0,
+  attempt: null,
+  settled: {
+    account_id: account,
+    epoch,
+    settled_at: new Date().toISOString(),
+    session_id: session,
+  },
+  fences: {},
+  leases: {},
+});
+const conflict = (code: string) => ({
+  status: 409,
+  body: JSON.stringify({
+    code,
+    message: "m",
+    request_id: "11111111-1111-4111-8111-111111111111",
+    details: [],
+  }),
+});
+/**
+ * Serves `/daily` (call AFTER the network stub: a later route wins). `who` is the account the stub's session answers for WHEN THE REQUEST
+ * ARRIVES: the answer is that account's, and `hold` (asked with it) keeps the request unanswered until `release`.
+ */
+async function serveDaily(
+  context: BrowserContext,
+  answer: (account: string) => { status: number; body: unknown },
+  hold: (account: string) => boolean = () => false,
+  who: () => string = () => ACCOUNT,
+) {
+  const held: Array<() => Promise<void>> = [];
+  const asked: Array<{ account: string; url: string }> = [];
+  await context.route("**/api/experimental/v1/daily**", async (route) => {
+    const account = who();
+    asked.push({ account, url: route.request().url() });
+    const fulfil = async () => {
+      const a = answer(account);
+      await route
+        .fulfill({
+          status: a.status,
+          contentType: "application/json",
+          body: JSON.stringify(a.body),
+        })
+        .catch(() => undefined);
+    };
+    if (hold(account)) held.push(fulfil);
+    else await fulfil();
+  });
+  return {
+    asked,
+    held,
+    release: async () => {
+      for (const fulfil of held.splice(0)) await fulfil();
+    },
+  };
+}
+
+test.describe("E-T9b: online, then offline without a remount (A4; R2 of revision 1)", () => {
+  test("a row the server answered provisional is finalised from the saved summary when the real window closes after the device went offline", async ({
+    context,
+  }) => {
+    const closesAt = Math.floor(Date.now() / 1000) + 8;
+    const a = buildTask({
+      n: 15,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt,
+    });
+    const { page } = await setup(context, todayRoute(), [a], (r) => {
+      r.respond = () =>
+        dailyPage([
+          view(a, { outcome: "provisional", period_outcome: "provisional" }),
+        ]);
+    });
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "server",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "on_track",
+    );
+    // Offline in place: the same mounted Today stops using the answer received online.
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+      { timeout: 20_000 },
+    );
+    expect(Math.floor(Date.now() / 1000)).toBeGreaterThanOrEqual(closesAt);
+  });
+});
+
+test.describe("E-T7b: a correction that met another correction (A14; R7 of revision 1)", () => {
+  for (const choice of ["Save mine on the current version", "Discard mine"])
+    test(`'${choice}'`, async ({ context }) => {
+      const a = buildTask({
+        n: 16,
+        title: "Cups",
+        goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      });
+      const { page, net } = await setup(
+        context,
+        `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+        [a],
+      );
+      await goOfflineAtBoundary(page);
+      await page.getByRole("button", { name: "Correct this day" }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByLabel("At most").fill("2");
+      await dialog.getByRole("button", { name: "Save correction" }).click();
+      await expect(dialog).toHaveCount(0);
+      // Someone else corrected the day first: the server refuses ours on version 1.
+      net.commandScript.push(() => conflict("conflict"));
+      await goOnlineAtBoundary(page);
+      await send(page);
+      await expect
+        .poll(async () => (await draftsOf(page)).map((d) => d.status))
+        .toEqual(["version_conflict"]);
+      // Their correction arrives with the next sync page: the occurrence at version 2, at most 6.
+      const theirs = (
+        a.upserts as Array<{
+          kind: string;
+          resource: { kind: string; value: Record<string, unknown> };
+        }>
+      ).find((u) => u.resource.kind === "occurrence");
+      if (theirs === undefined) throw new Error("setup: no occurrence upsert");
+      const definition = (theirs.resource.value as { definition: object })
+        .definition as Record<string, unknown>;
+      net.script.push(() => ({
+        status: 200,
+        body: pageText(
+          [
+            [
+              {
+                ...theirs,
+                resource: {
+                  ...theirs.resource,
+                  version: 2,
+                  value: {
+                    ...theirs.resource.value,
+                    definition: {
+                      ...definition,
+                      goal: {
+                        kind: "numeric",
+                        minimum: null,
+                        maximum: "6",
+                        unit: "cups",
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          ],
+          "cursor-2",
+        ),
+      }));
+      await page.evaluate(() => window.__atlasData?.nudgeSync());
+      const block = page.locator("[data-correction-conflict]");
+      await expect(block).toContainText(
+        "Someone else corrected this day first",
+      );
+      await block.getByRole("button", { name: choice }).click();
+      if (choice === "Discard mine") {
+        await expect(block).toHaveCount(0);
+        await expect.poll(async () => (await draftsOf(page)).length).toBe(0);
+        return;
+      }
+      await expect(block).toHaveCount(0);
+      await send(page);
+      await expect.poll(() => net.commands.length).toBe(2);
+      const resent = JSON.parse(net.commands[1]?.body ?? "{}") as {
+        command: Record<string, unknown>;
+      };
+      // Mine again, on the version now saved, by the person's act.
+      expect(resent.command).toMatchObject({
+        kind: "revise_occurrence",
+        id: a.occurrenceId,
+        expected_version: 2,
+        definition: { goal: { maximum: "2" } },
+      });
+      expect(net.commands[1]?.key).not.toBe(net.commands[0]?.key);
+    });
+});
+
+test.describe("E-T7c: a correction kept while the person visits the queue (A14; R3/R7 of revision 1)", () => {
+  test("the in-dialog sync control keeps the edit for this day; back on the day, the dialog opens on it", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 17,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const detail = `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`;
+    const { page } = await setup(context, detail, [a]);
+    await goOfflineAtBoundary(page);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    let dialog = page.getByRole("dialog");
+    await dialog.getByLabel("At most").fill("4");
+    await dialog.locator("[data-sync-tone]").click();
+    await expect(page).toHaveURL(/\/sync/);
+    await expect(dialog).toHaveCount(0);
+    await navigateInApp(page, detail);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    dialog = page.getByRole("dialog");
+    await expect(dialog.getByLabel("At most")).toHaveValue("4");
+    expect(await draftsOf(page)).toEqual([]);
+  });
+});
+
+test.describe("E-T8b: keyboard only, forms and dialogs (A10, A14, A19; R7 of revision 1)", () => {
+  test("the correction dialog opens, closes by Escape and saves by Enter, focus returning to its control each time (activation control: programmatic focus, revision 2)", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 18,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const { page } = await setup(
+      context,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+      [a],
+    );
+    // Revision 22 (harness readiness, the revision-17 E-T39 remedy): the session's late boot reads (/sessions, /defaults/snapshot) remount the
+    // protected tree after setup returns, replacing a programmatically focused control (Run 5, WebKit: Enter met no button). Act once quiet.
+    await untilTreeSettled(page);
+    await goOfflineAtBoundary(page);
+    const opener = page.getByRole("button", { name: "Correct this day" });
+    await opener.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            document.activeElement?.closest('[role="dialog"]') !== null &&
+            document.activeElement !== null,
+        ),
+      )
+      .toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel("At most").focus();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("3");
+    await dialog.getByRole("button", { name: "Save correction" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    expect((await draftsOf(page)).map((d) => d.kind)).toEqual([
+      "revise_occurrence",
+    ]);
+  });
+
+  test("the task form is filled and saved by keyboard; the new task's detail follows (activation control: programmatic focus, revision 2)", async ({
+    context,
+  }) => {
+    const { page } = await setup(context, "/tasks/new", []);
+    // Revision 22 (harness readiness, the revision-17 E-T39 remedy): the session's late boot reads (/sessions, /defaults/snapshot) remount the
+    // protected tree after setup returns, replacing a programmatically focused control (Run 5, WebKit: Enter met no button). Act once quiet.
+    await untilTreeSettled(page);
+    await goOfflineAtBoundary(page);
+    await page
+      .getByRole("button", { name: "Start from scratch instead" })
+      .focus();
+    await page.keyboard.press("Enter");
+    const name = page.getByLabel("Name", { exact: true });
+    await name.focus();
+    await page.keyboard.type("Water the plants");
+    await page.getByRole("radio", { name: "Only me" }).focus();
+    await page.keyboard.press("Space");
+    await expect(page.getByRole("radio", { name: "Only me" })).toBeChecked();
+    await page.getByRole("button", { name: "Save" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    expect((await draftsOf(page)).map((d) => d.kind)).toEqual(["create_task"]);
+  });
+});
+
+test.describe("E-T13: axe and layout of the forms and dialogs (A19; R7 of revision 1)", () => {
+  for (const [width, height] of [
+    [390, 844],
+    [1440, 900],
+  ] as const)
+    for (const scheme of ["light", "dark"] as const)
+      test(`the task form, the task detail and the correction dialog at ${width}×${height}, ${scheme} (browser emulation, not a device)`, async ({
+        context,
+      }) => {
+        const a = buildTask({
+          n: 19,
+          title: "Cups",
+          goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+        });
+        const { page } = await setup(
+          context,
+          `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+          [a],
+          () => undefined,
+          { viewport: { width, height }, colorScheme: scheme },
+        );
+        await goOfflineAtBoundary(page);
+        const overflow = () =>
+          page.evaluate(
+            () =>
+              document.documentElement.scrollWidth -
+              document.documentElement.clientWidth,
+          );
+        await expect(page.locator("[data-record-card]")).toBeVisible();
+        expect(await runAxe(page), "the task detail").toEqual([]);
+        expect(await overflow()).toBeLessThanOrEqual(0);
+        await page.getByRole("button", { name: "Correct this day" }).click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+        expect(await runAxe(page), "the correction dialog").toEqual([]);
+        expect(await overflow()).toBeLessThanOrEqual(0);
+        await page.keyboard.press("Escape");
+        await navigateInApp(page, "/tasks/new");
+        await page
+          .getByRole("button", { name: "Start from scratch instead" })
+          .click();
+        await expect(page.getByLabel("Name", { exact: true })).toBeVisible();
+        expect(await runAxe(page), "the task form").toEqual([]);
+        expect(await overflow()).toBeLessThanOrEqual(0);
+      });
+});
+
+test.describe("E-T2b: the PRODUCTION leader sends a save made in the tree (A7, A18; R7 of revision 1)", () => {
+  test("Mark done online with ?leader=production: the record is sent with its own key, with no harness call to wake anything", async ({
+    context,
+  }) => {
+    const a = buildTask({ n: 20, title: "Brush your teeth" });
+    const net = await fresh(context);
+    net.answer = (call) =>
+      call.cursor === null
+        ? snapshotPage(a.upserts, "delta-0", false)
+        : deltaPage([], call.cursor);
+    await serveDaily(context, () => dailyPage([view(a)]));
+    const page = await leaderPage(context, net, "one", undefined, {
+      route: todayRoute(),
+    });
+    await expect(rowOf(page, a.occurrenceId)).toBeVisible({ timeout: 20_000 });
+    await rowOf(page, a.occurrenceId)
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    // Nothing but the tree's own save: the production dispatcher hears it and sends.
+    await expect
+      .poll(() => net.commands.map((c) => c.path), { timeout: 20_000 })
+      .toEqual(["/task-commands"]);
+    const records = (
+      (await rowsOf(page, "drafts")) as Array<{
+        kind: string;
+        local_id: string;
+      }>
+    ).filter((d) => d.kind === "record");
+    expect(records).toHaveLength(1);
+    expect(net.commands[0]?.key).toBe(records[0]?.local_id);
+    expect(net.commands[0]?.page).toBe("one");
+  });
+});
+
+test.describe("E-T10: a /daily answer held across an account switch (A20; R7 of revision 1)", () => {
+  test("the answer for the previous account arrives after another account is displayed and is never shown", async ({
+    context,
+  }) => {
+    const a = buildTask({ n: 21, title: "Theirs" });
+    const net = await fresh(context);
+    net.answer = (call) =>
+      call.cursor === null
+        ? snapshotPage(
+            net.identity.account === ACCOUNT ? a.upserts : [],
+            "delta-0",
+            false,
+          )
+        : deltaPage([], call.cursor);
+    // The previous account's reads are held; the next account's are answered at once, with its own (empty) day.
+    const daily = await serveDaily(
+      context,
+      (account) =>
+        account === ACCOUNT
+          ? dailyPage([
+              view(a, {
+                outcome: "complete",
+                period_outcome: "complete",
+                actionable: false,
+              }),
+            ])
+          : dailyPage([]),
+      (account) => account === ACCOUNT,
+      () => net.identity.account,
+    );
+    const page = await leaderPage(context, net, "one", undefined, {
+      route: todayRoute(),
+    });
+    // The account's day from its cache, while both of its /daily reads are held.
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+      { timeout: 20_000 },
+    );
+    await expect.poll(() => daily.held.length).toBeGreaterThanOrEqual(2);
+    // Another tab signs in as someone else: this page now displays that account.
+    net.identity = { account: VIEWED, session: "s2" };
+    await settleElsewhere(context, settledAt(VIEWED, 2, "s2"));
+    // The leading page follows the new settlement: its binding moves to that account, whose cache it brings up to date.
+    const synced = await untilSync(
+      page,
+      (state) => state?.cache_status === "valid",
+      VIEWED,
+    );
+    expect(synced?.cache_status).toBe("valid");
+    await expect(page.locator("[data-today-page]")).toBeVisible({
+      timeout: 20_000,
+    });
+    // The next account's day is composed (empty, not loading) before the late answers are delivered: the absence below is then a
+    // statement about a live view, not about one that has not been drawn yet.
+    await expect(page.locator("[data-today-empty]")).toBeVisible({
+      timeout: 20_000,
+    });
+    const heldBefore = daily.held.length;
+    expect(heldBefore).toBeGreaterThanOrEqual(2);
+    await daily.release();
+    // Long enough for a late answer to be composed and shown, were it applied.
+    await page.waitForTimeout(1_500);
+    await expect(page.locator("[data-today-empty]")).toBeVisible();
+    await expect(rowOf(page, a.occurrenceId)).toHaveCount(0);
+    // The next account's own day was asked for and answered (so the screen is live, not stuck), and the held answers were delivered.
+    expect(daily.asked.some((q) => q.account === VIEWED)).toBe(true);
+    expect(daily.held).toHaveLength(0);
+  });
+});
+
+// ---- revision 2 --------------------------------------------------------------------------------------------------------------------------
+
+/** What has keyboard focus, as a person sees it (K1): its name, whether it is in a dialog, on screen, not covered and visibly focused. */
+interface Focus {
+  tag: string;
+  type: string | null;
+  name: string;
+  chip: boolean;
+  inDialog: boolean;
+  inView: boolean;
+  unobscured: boolean;
+  /** What is at the control's centre when something else is (for the failure message). */
+  coveredBy: string;
+  /** The control's box and the viewport, for the failure message. */
+  box: string;
+  focusVisible: boolean;
+}
+const focusOf = (page: Page): Promise<Focus> =>
+  page.evaluate(() => {
+    const el = document.activeElement as HTMLElement | null;
+    if (el === null || el === document.body)
+      return {
+        tag: "body",
+        type: null,
+        name: "",
+        chip: false,
+        inDialog: false,
+        inView: false,
+        unobscured: false,
+        coveredBy: "",
+        box: "",
+        focusVisible: false,
+      };
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const inView =
+      r.width > 0 &&
+      r.height > 0 &&
+      cx >= 0 &&
+      cy >= 0 &&
+      cx <= innerWidth &&
+      cy <= innerHeight;
+    const top = inView ? document.elementFromPoint(cx, cy) : null;
+    const labelled = (el as HTMLInputElement).labels?.[0]?.textContent;
+    const name = (
+      el.getAttribute("aria-label") ??
+      labelled ??
+      el.textContent ??
+      ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return {
+      tag: el.tagName.toLowerCase(),
+      type: el.getAttribute("type"),
+      name,
+      chip: el.hasAttribute("data-sync-tone"),
+      inDialog: el.closest('[role="dialog"]') !== null,
+      inView,
+      unobscured:
+        top !== null && (top === el || el.contains(top) || top.contains(el)),
+      coveredBy:
+        top === null
+          ? "nothing"
+          : `${top.tagName.toLowerCase()}${top.id ? `#${top.id}` : ""}.${String(top.className).slice(0, 60)}`,
+      box: `${Math.round(r.top)}..${Math.round(r.bottom)} of ${innerHeight}`,
+      // A date or time field has several stops of its own (each part of the value, and Chromium's picker button), whose focus the
+      // BROWSER draws (the focused part is highlighted): WebKit never matches `:focus-visible` on these fields and Chromium's picker stop
+      // is inside the field, so the app's ring rule does not apply there. Measured per engine in revision 2; recorded as the browser's own
+      // indicator, not the app's ring.
+      focusVisible:
+        el.matches(":focus-visible") ||
+        (["date", "time"].includes(el.getAttribute("type") ?? "") &&
+          el.matches(":focus-within")),
+    };
+  });
+/**
+ * The key that moves to the next control. Safari (WebKit) with its default settings moves by Tab between text fields only and by
+ * Option+Tab (Alt+Tab) through every control: that is the keyboard path of a person using Safari, so the WebKit project uses it (the dialog's
+ * focus loop honours either: `focus-loop.ts`). Chromium and Firefox use Tab.
+ */
+const nextKey = (shift = false): string =>
+  `${test.info().project.name === "fixture-webkit" ? "Alt+" : ""}${shift ? "Shift+" : ""}Tab`;
+/** Presses Tab (or Shift+Tab) until `want` holds, at most `max` times; throws with the path taken otherwise. */
+async function tabTo(
+  page: Page,
+  want: (f: Focus) => boolean,
+  label: string,
+  options: { shift?: boolean; max?: number } = {},
+): Promise<Focus> {
+  const trail: string[] = [];
+  for (let i = 0; i < (options.max ?? 60); i += 1) {
+    await page.keyboard.press(nextKey(options.shift));
+    const f = await focusOf(page);
+    trail.push(f.name || f.tag);
+    if (want(f)) return f;
+  }
+  // An assertion, not a thrown error: a control missing from the tab order is the defect this traversal exists to show.
+  expect(
+    false,
+    `${label} was not reached by ${options.shift ? "Shift+Tab" : "Tab"}: ${trail.join(" → ")}`,
+  ).toBe(true);
+  throw new Error("unreachable");
+}
+/** A meaningful stop: visibly focused, on screen and not covered by anything. */
+function seen(f: Focus, what: string): void {
+  expect(f.focusVisible, `${what}: visible focus`).toBe(true);
+  expect(f.inView, `${what}: on screen`).toBe(true);
+  expect(
+    f.unobscured,
+    `${what}: not covered (at its centre: ${f.coveredBy}; box ${f.box})`,
+  ).toBe(true);
+}
+/** The person starts at the top of the page: nothing has focus (as after the page loaded). */
+const fromPageStart = (page: Page) =>
+  page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+const DIALOG_CONTROLS = [
+  "Close",
+  "At least",
+  "At most",
+  "Unit",
+  "The date it counts for",
+  "Time of day",
+  "You can start it (days before)",
+  "How long it stays open (days)",
+  "Cancel",
+  "Save correction",
+];
+
+test.describe("E-T8d: keyboard traversal, forms and dialogs (A10, A14, A19; R7 of revision 2)", () => {
+  test("the correction dialog by Tab from the page's start: reached, contained both ways, edited and saved by keys, focus returned", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 22,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const { page } = await setup(
+      context,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+      [a],
+    );
+    await goOfflineAtBoundary(page);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    seen(
+      await tabTo(page, (f) => f.name === "Correct this day", "the opener"),
+      "the opener",
+    );
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect.poll(async () => (await focusOf(page)).inDialog).toBe(true);
+    // Forward: every stop is in the dialog, visible and uncovered, until Tab comes back round to the first.
+    const first = await focusOf(page);
+    const forward: Focus[] = [first];
+    for (let i = 0; i < 40; i += 1) {
+      await page.keyboard.press(nextKey());
+      const f = await focusOf(page);
+      if (f.name === first.name && f.tag === first.tag && i > 0) break;
+      forward.push(f);
+    }
+    for (const f of forward) {
+      expect(f.inDialog, `${f.name}: inside the dialog`).toBe(true);
+      seen(f, `dialog stop '${f.name}'`);
+    }
+    const names = forward.map((f) => f.name);
+    for (const control of DIALOG_CONTROLS)
+      expect(
+        names.some((n) => n === control || n.startsWith(control)),
+        `'${control}' is reached by Tab (${names.join(" → ")})`,
+      ).toBe(true);
+    expect(forward.some((f) => f.chip)).toBe(true);
+    // Backward: the same stops, in the dialog, back to where it began.
+    let back = 0;
+    for (; back < 40; back += 1) {
+      await page.keyboard.press(nextKey(true));
+      const f = await focusOf(page);
+      expect(f.inDialog, `${f.name}: inside the dialog (Shift+Tab)`).toBe(true);
+      if (f.name === first.name && f.tag === first.tag) break;
+    }
+    expect(back + 1).toBe(forward.length);
+    // Edit by keys and save with Enter on the Save button.
+    seen(
+      await tabTo(
+        page,
+        (f) => f.inDialog && f.name.startsWith("At most"),
+        "At most",
+      ),
+      "At most",
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("3");
+    seen(
+      await tabTo(page, (f) => f.name === "Save correction", "Save correction"),
+      "Save correction",
+    );
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeFocused();
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.kind))
+      .toEqual(["revise_occurrence"]);
+    const body = (await bodiesOf(page))[0]?.command.command as {
+      definition: { goal: { maximum: string } };
+    };
+    expect(body.definition.goal.maximum).toBe("3");
+    // Escape discards and returns focus to the opener too.
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeFocused();
+    expect(await draftsOf(page)).toHaveLength(1);
+  });
+
+  test("the task form by Tab from the page's start: preset choice, name, sharing by arrow keys, saved by Enter", async ({
+    context,
+  }) => {
+    const { page } = await setup(context, "/tasks/new", []);
+    await goOfflineAtBoundary(page);
+    await expect(
+      page.getByRole("button", { name: "Start from scratch instead" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    seen(
+      await tabTo(
+        page,
+        (f) => f.name === "Start from scratch instead",
+        "Start from scratch instead",
+      ),
+      "Start from scratch instead",
+    );
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-task-form]")).toBeVisible();
+    seen(
+      await tabTo(
+        page,
+        (f) => f.tag === "input" && f.name.startsWith("Name"),
+        "Name",
+      ),
+      "Name",
+    );
+    await page.keyboard.type("Water the plants");
+    const sharing = await tabTo(
+      page,
+      (f) =>
+        f.type === "radio" &&
+        (f.name === "Only me" || f.name.startsWith("Use my defaults")),
+      "the sharing choice",
+    );
+    seen(sharing, "the sharing choice");
+    const onlyMe = page.getByRole("radio", { name: "Only me" });
+    for (let i = 0; i < 6 && !(await onlyMe.isChecked()); i += 1)
+      await page.keyboard.press("ArrowDown");
+    await expect(onlyMe).toBeChecked();
+    await expect(onlyMe).toBeFocused();
+    seen(await tabTo(page, (f) => f.name === "Save", "Save"), "Save");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    expect((await draftsOf(page)).map((d) => d.kind)).toEqual(["create_task"]);
+  });
+});
+
+/** Holds the COMPLETION of local writes of drafts (`draft_commands`, read-write) while `__holdDraftWrites` is set: the write is durable, the save's
+ * acknowledgement waits. Installed before the page loads (Dexie assigns `oncomplete` per transaction). */
+const holdDraftWritesInit = (): void => {
+  const desc = Object.getOwnPropertyDescriptor(
+    IDBTransaction.prototype,
+    "oncomplete",
+  );
+  const get = desc?.get;
+  const set = desc?.set;
+  if (get === undefined || set === undefined) return;
+  const w = window as unknown as {
+    __holdDraftWrites?: boolean;
+    __heldDraftWrites?: Array<() => void>;
+  };
+  w.__heldDraftWrites = [];
+  Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
+    configurable: true,
+    enumerable: desc?.enumerable ?? true,
+    get() {
+      return get.call(this);
+    },
+    set(fn: unknown) {
+      const tx = this as IDBTransaction;
+      if (
+        typeof fn !== "function" ||
+        tx.mode !== "readwrite" ||
+        !Array.from(tx.objectStoreNames).includes("draft_commands")
+      ) {
+        set.call(this, fn);
+        return;
+      }
+      set.call(this, function (this: IDBTransaction, event: Event) {
+        if (w.__holdDraftWrites === true) {
+          w.__heldDraftWrites?.push(() => fn.call(tx, event));
+          return;
+        }
+        return fn.call(tx, event);
+      });
+    },
+  });
+};
+
+test.describe("E-T8e: keys, a held local save and the queue visit (A14, A19; R3/R7 of revision 2)", () => {
+  test("a correction saved by keys while its acknowledgement is held, kept through the in-dialog sync control, edited again: the older save keeps the newer edit", async ({
+    context,
+  }) => {
+    await context.addInitScript(holdDraftWritesInit);
+    const a = buildTask({
+      n: 23,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const detail = `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`;
+    const { page } = await setup(context, detail, [a]);
+    await goOfflineAtBoundary(page);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    await tabTo(page, (f) => f.name === "Correct this day", "the opener");
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await tabTo(
+      page,
+      (f) => f.inDialog && f.name.startsWith("At most"),
+      "At most",
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("12");
+    await tabTo(page, (f) => f.name === "Save correction", "Save correction");
+    await page.evaluate(() => {
+      (window as unknown as { __holdDraftWrites?: boolean }).__holdDraftWrites =
+        true;
+    });
+    await page.keyboard.press("Enter");
+    // The save is written but not acknowledged: the dialog waits.
+    await expect(
+      dialog.getByRole("button", { name: "Save correction" }),
+    ).toBeDisabled();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __heldDraftWrites?: unknown[] })
+              .__heldDraftWrites?.length ?? 0,
+        ),
+      )
+      .toBeGreaterThanOrEqual(1);
+    // To the queue by the in-dialog sync control, by keys.
+    await tabTo(
+      page,
+      (f) => f.inDialog && f.chip,
+      "the in-dialog sync control",
+    );
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/sync/);
+    await expect(dialog).toHaveCount(0);
+    // Back on the day: the dialog opens on the kept edit; the person changes it.
+    await navigateInApp(page, detail);
+    await expect(
+      page.getByRole("button", { name: "Correct this day" }),
+    ).toBeVisible();
+    await fromPageStart(page);
+    await tabTo(page, (f) => f.name === "Correct this day", "the opener");
+    await page.keyboard.press("Enter");
+    await expect(dialog.getByLabel("At most")).toHaveValue("12");
+    await tabTo(
+      page,
+      (f) => f.inDialog && f.name.startsWith("At most"),
+      "At most",
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("15");
+    // The older save is acknowledged now.
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __holdDraftWrites?: boolean;
+        __heldDraftWrites?: Array<() => void>;
+      };
+      w.__holdDraftWrites = false;
+      for (const release of w.__heldDraftWrites?.splice(0) ?? []) release();
+    });
+    await expect(
+      dialog.getByRole("button", { name: "Save correction" }),
+    ).toBeEnabled();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("At most")).toHaveValue("15");
+    const saved = (await bodiesOf(page)).map(
+      (b) =>
+        (b.command.command as { definition: { goal: { maximum: string } } })
+          .definition.goal.maximum,
+    );
+    expect(saved).toEqual(["12"]);
+    // The newer edit is saved by its own act, and only then does the dialog close.
+    await tabTo(page, (f) => f.name === "Save correction", "Save correction");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect
+      .poll(async () =>
+        (await bodiesOf(page))
+          .map(
+            (b) =>
+              (
+                b.command.command as {
+                  definition: { goal: { maximum: string } };
+                }
+              ).definition.goal.maximum,
+          )
+          .sort(),
+      )
+      .toEqual(["12", "15"]);
+  });
+});
+
+test.describe("E-T9c: the task detail follows its day's window (A4, A15; R8 of revision 2)", () => {
+  test("left open offline across the real close, the detail becomes Done with no data change or user action (no timer shortened)", async ({
+    context,
+  }) => {
+    const closesAt = Math.floor(Date.now() / 1000) + 8;
+    const a = buildTask({
+      n: 24,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt,
+    });
+    const { page } = await setup(
+      context,
+      `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
+      [a],
+    );
+    await goOfflineAtBoundary(page);
+    const pill = page.locator("[data-detail-pill]");
+    await expect(pill).toHaveAttribute("data-detail-pill", "on_track");
+    await expect(pill).toHaveAttribute("data-detail-pill", "done", {
+      timeout: 20_000,
+    });
+    expect(Math.floor(Date.now() / 1000)).toBeGreaterThanOrEqual(closesAt);
+  });
+});
+
+test.describe("E-T9d: an answer dispatched before the close and delivered after it (A2, A4; R2 of revision 2)", () => {
+  test("the day read ahead of the occurrence's delta, both scopes delivered after the real close: finalised from my saved summary, not the provisional answer", async ({
+    context,
+  }) => {
+    const closesAt = Math.floor(Date.now() / 1000) + 8;
+    const a = buildTask({
+      n: 25,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt,
+    });
+    // The cache holds the task and my progress; the occurrence's delta has not arrived (the daily read is ahead of it).
+    const withoutOccurrence: BuiltTask = {
+      ...a,
+      upserts: (a.upserts as Array<{ resource: { kind: string } }>).filter(
+        (u) => u.resource.kind !== "occurrence",
+      ),
+    };
+    let release: () => void = () => undefined;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { page, reads } = await setup(
+      context,
+      todayRoute(),
+      [withoutOccurrence],
+      (r) => {
+        r.respond = () =>
+          Date.now() < closesAt * 1000
+            ? dailyPage([
+                view(a, {
+                  outcome: "provisional",
+                  period_outcome: "provisional",
+                }),
+              ])
+            : dailyPage([
+                view(a, {
+                  outcome: "complete",
+                  period_outcome: "complete",
+                  actionable: false,
+                }),
+              ]);
+        r.gate = first;
+      },
+    );
+    await expect.poll(() => reads.daily.length).toBeGreaterThanOrEqual(2);
+    expect(reads.dispatched.every((t) => t < closesAt * 1000)).toBe(true);
+    await expect
+      .poll(() => Date.now(), { timeout: 20_000 })
+      .toBeGreaterThan(closesAt * 1000 + 500);
+    // Every later read is held (never delivered): what shows is decided by the late answer alone.
+    reads.gate = new Promise<void>(() => undefined);
+    release();
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+      { timeout: 10_000 },
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-structure",
+      "daily",
+    );
+  });
+});
+
+test.describe("E-T9e: a committed correction defeats an older answer (A2, A14; R2 of revision 2)", () => {
+  test("a sync page commits version 2 with a closed window while the re-read is held: the committed day is shown and finalised", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 26,
+      title: "Cups",
+      carry: "retain_one",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+      action: { outcome: "provisional", amount: "1", checked: [] },
+      closesAt: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const { page, net, reads } = await setup(
+      context,
+      todayRoute(),
+      [a],
+      (r) => {
+        r.respond = () =>
+          dailyPage([
+            view(a, { outcome: "provisional", period_outcome: "provisional" }),
+          ]);
+      },
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "server",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "on_track",
+    );
+    reads.gate = new Promise<void>(() => undefined);
+    const occurrence = (
+      a.upserts as Array<{
+        kind: string;
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "occurrence");
+    if (occurrence === undefined)
+      throw new Error("setup: no occurrence upsert");
+    // The correction arrives in a batch at revision 2, after the first page's revision 1, as a server's always-increasing sync clock sends
+    // it (`pageText` numbers the batches of each page from 1, which would repeat revision 1).
+    net.script.push(() => ({
+      status: 200,
+      body: JSON.stringify({
+        phase: "delta",
+        batches: [
+          {
+            revision: 2,
+            changes: [
+              {
+                ...occurrence,
+                resource: {
+                  ...occurrence.resource,
+                  version: 2,
+                  value: {
+                    ...occurrence.resource.value,
+                    closes_at: Math.floor(Date.now() / 1000) - 1,
+                  },
+                },
+              },
+            ],
+          },
+        ],
+        next_cursor: "cursor-2",
+        has_more: false,
+      }),
+    }));
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-version",
+      "2",
+      { timeout: 10_000 },
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-structure",
+      "cache",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-source",
+      "local",
+    );
+    await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+      "data-pill",
+      "done",
+    );
+  });
+});
+
+test.describe("E-T7e: the conflict choices after a reload (A14; DA-N1 of revision 2)", () => {
+  test("a correction refused on a version conflict, the page reloaded: 'Save mine' resends what was SUBMITTED, read from the queued operation", async ({
+    context,
+  }) => {
+    const a = buildTask({
+      n: 27,
+      title: "Cups",
+      goal: { kind: "numeric", minimum: null, maximum: "8", unit: "cups" },
+    });
+    const detail = `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`;
+    const { page, net } = await setup(context, detail, [a]);
+    await goOfflineAtBoundary(page);
+    await page.getByRole("button", { name: "Correct this day" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("At most").fill("2");
+    await dialog.getByRole("button", { name: "Save correction" }).click();
+    await expect(dialog).toHaveCount(0);
+    net.commandScript.push(() => conflict("conflict"));
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.status))
+      .toEqual(["version_conflict"]);
+    const theirs = (
+      a.upserts as Array<{
+        kind: string;
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "occurrence");
+    if (theirs === undefined) throw new Error("setup: no occurrence upsert");
+    const definition = (theirs.resource.value as { definition: object })
+      .definition as Record<string, unknown>;
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              ...theirs,
+              resource: {
+                ...theirs.resource,
+                version: 2,
+                value: {
+                  ...theirs.resource.value,
+                  definition: {
+                    ...definition,
+                    goal: {
+                      kind: "numeric",
+                      minimum: null,
+                      maximum: "6",
+                      unit: "cups",
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect(page.locator("[data-correction-conflict]")).toBeVisible();
+    // Their correction is committed (version 2) before the reload: the version the person is then shown.
+    await expect
+      .poll(async () => {
+        const rows = (await page.evaluate(
+          (acct) => window.__atlasData?.rows(acct, "cache"),
+          ACCOUNT,
+        )) as Array<{ id: string; version: number }>;
+        return rows.find((r) => r.id === a.occurrenceId)?.version;
+      })
+      .toBe(2);
+    // A reload: nothing of this page's memory survives; the queued operation does.
+    await page.goto(`/__session?route=${encodeURIComponent(detail)}`);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await page.waitForFunction(() => window.__atlasData !== undefined);
+    const block = page.locator("[data-correction-conflict]");
+    await expect(block).toContainText("Someone else corrected this day first");
+    // Asserted before it is pressed: a choice missing after the reload is the defect, reported as such (not as a click that times out).
+    const saveMine = block.getByRole("button", {
+      name: "Save mine on the current version",
+    });
+    await expect(saveMine).toBeVisible({ timeout: 10_000 });
+    await saveMine.click();
+    await expect(block).toHaveCount(0);
+    await send(page);
+    await expect.poll(() => net.commands.length).toBe(2);
+    const resent = JSON.parse(net.commands[1]?.body ?? "{}") as {
+      command: Record<string, unknown>;
+    };
+    expect(resent.command).toMatchObject({
+      kind: "revise_occurrence",
+      id: a.occurrenceId,
+      expected_version: 2,
+      definition: { goal: { maximum: "2" } },
+    });
+    expect(net.commands[1]?.key).not.toBe(net.commands[0]?.key);
+  });
+});
+
+test.describe("E-T9f: an occurrence created offline is followed to its close on Today (A4, A9, A15; R8 of revision 3)", () => {
+  // The review's native diagnostic of 14 October 2026 (`.agtx/evidence/web10a-review-3/native-corrected.spec.ts`), kept as a case: a
+  // one-off maximum-5 task created and recorded on OFFLINE (both saves stay queued), shown on an explicit day; ONLY the wall clock is set
+  // to five seconds before the day's canonical close, and native timers and the five seconds run for real. The time zone is Africa/Abidjan
+  // (UTC+0, offered by every engine's zone list). Today must reach Done with nothing but time; the detail is the control.
+  for (const surface of ["today", "detail"] as const)
+    test(`${surface}: On track five seconds before the close, Done after it, with no event`, async ({
+      context,
+      page,
+    }) => {
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      await page.goto(`/__session?route=${encodeURIComponent("/tasks/new")}`);
+      await page.waitForFunction(
+        () => window.__atlasFixture?.session?.booted !== undefined,
+      );
+      await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      await page.waitForFunction(() => window.__atlasData !== undefined);
+      await cacheTasks(page, net, []);
+      await page
+        .getByRole("button", { name: "Start from scratch instead" })
+        .click();
+      await expect(
+        page.getByRole("radio", { name: "Use my defaults (only you)" }),
+      ).toBeVisible();
+      await goOfflineAtBoundary(page);
+      const today = todayUtc();
+      await page.getByLabel("Name", { exact: true }).fill("Projected close");
+      await page.getByRole("radio", { name: "Only me", exact: true }).check();
+      await page.getByRole("radio", { name: "An amount", exact: true }).check();
+      await page.getByLabel("At most", { exact: true }).fill("5");
+      await page.getByLabel("Unit", { exact: true }).fill("cups");
+      await page
+        .getByLabel("Time zone", { exact: true })
+        .selectOption("Africa/Abidjan");
+      await page.getByLabel("Starting", { exact: true }).fill(today);
+      await page.getByLabel("Repeats", { exact: true }).selectOption("none");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await page.getByLabel("Amount (cups)", { exact: true }).fill("2");
+      await page
+        .locator("[data-record-card]")
+        .getByRole("button", { name: "Record", exact: true })
+        .click();
+      // Both saves stay queued: the day exists on this device only as their projection.
+      await expect.poll(async () => (await draftsOf(page)).length).toBe(2);
+      const detail = new URL(page.url()).pathname + new URL(page.url()).search;
+      const close = Date.parse(`${today}T00:00:00Z`) + 86_400_000;
+      await page.clock.setSystemTime(close - 5_000);
+      await page.evaluate(() => {
+        history.pushState(null, "", "/tasks");
+        dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await page.evaluate(
+        (to) => {
+          history.pushState(null, "", to);
+          dispatchEvent(new PopStateEvent("popstate"));
+        },
+        surface === "today" ? `/today?day=${today}&tz=UTC` : detail,
+      );
+      const pill = page.locator(
+        surface === "today" ? "[data-today-row]" : "[data-detail-pill]",
+      );
+      const attribute = surface === "today" ? "data-pill" : "data-detail-pill";
+      await expect(pill).toHaveAttribute(attribute, "on_track");
+      expect(await page.evaluate(() => Date.now())).toBeLessThan(close);
+      // Nothing happens on the page but time.
+      await page.waitForFunction((end) => Date.now() >= end, close + 500);
+      await expect(pill).toHaveAttribute(attribute, "done", { timeout: 1_000 });
+      expect((await draftsOf(page)).map((d) => d.status)).toEqual([
+        "queued",
+        "queued",
+      ]);
+    });
+});
+
+/**
+ * Holds the COMPLETION of the first read-only transaction that reads cached rows BY ID (`get` on `cache`: the related read of Today's local
+ * snapshot, never its walk, which reads by index) once `__holdRelated` is set: its rows were read, its result waits. Installed before the
+ * page loads (Dexie assigns `oncomplete` per transaction). Another tab can commit while it is held: the engine has finished the read.
+ */
+const holdRelatedReadInit = (): void => {
+  const desc = Object.getOwnPropertyDescriptor(
+    IDBTransaction.prototype,
+    "oncomplete",
+  );
+  const get = desc?.get;
+  const set = desc?.set;
+  if (get === undefined || set === undefined) return;
+  const w = window as unknown as {
+    __holdRelated?: boolean;
+    __heldRelated?: Array<() => void>;
+    __states?: string[];
+  };
+  w.__heldRelated = [];
+  w.__states = [];
+  const byId = new WeakSet<IDBTransaction>();
+  const storeGet = IDBObjectStore.prototype.get;
+  IDBObjectStore.prototype.get = function (
+    this: IDBObjectStore,
+    ...args: Parameters<IDBObjectStore["get"]>
+  ) {
+    if (this.name === "cache" && this.transaction.mode === "readonly")
+      byId.add(this.transaction);
+    return storeGet.apply(this, args);
+  };
+  Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
+    configurable: true,
+    enumerable: desc?.enumerable ?? true,
+    get() {
+      return get.call(this);
+    },
+    set(fn: unknown) {
+      const tx = this as IDBTransaction;
+      if (typeof fn !== "function" || tx.mode !== "readonly") {
+        set.call(this, fn);
+        return;
+      }
+      set.call(this, function (this: IDBTransaction, event: Event) {
+        if (w.__holdRelated === true && byId.has(tx)) {
+          w.__holdRelated = false;
+          w.__heldRelated?.push(() => fn.call(tx, event));
+          return;
+        }
+        return fn.call(tx, event);
+      });
+    },
+  });
+};
+
+test.describe("E-T14: another tab commits while Today's local read is between its stages (A1, A18; R9 of revision 3, Q13)", () => {
+  for (const between of [true, false])
+    test(`between=${between}: tab A never shows the old occurrence with the new title (or the reverse); it ends on what B committed`, async ({
+      context,
+    }) => {
+      const a = buildTask({ n: 30, title: "Cups" });
+      const b = buildTask({ n: 31, title: "Plants" });
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      // Tab B: the fixture leader that commits every page of this account.
+      const writer = await bootAt(context, "/tasks");
+      await cacheTasks(writer, net, [a]);
+      // Tab A: Today, a follower over the same database, its related read held on request.
+      const page = await context.newPage();
+      await page.addInitScript(holdRelatedReadInit);
+      await page.goto(`/__session?route=${encodeURIComponent(todayRoute())}`);
+      await page.waitForFunction(
+        () => window.__atlasFixture?.session?.booted !== undefined,
+      );
+      await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+        "data-version",
+        "1",
+      );
+      // Tab A's boot remounts tab B's protected tree, which closes B's registry (and the harness leader's store with it, WEB-09a): once
+      // both trees are settled B's leader is started again over the same database.
+      await untilTreeSettled(page);
+      await untilTreeSettled(writer);
+      await startLeader(writer);
+      await waitForState(writer, "idle");
+      // Every state tab A shows of the row, from now on (no act here: the engine renders every publication).
+      await page.evaluate((id) => {
+        const w = window as unknown as { __states: string[] };
+        const note = () => {
+          const el = document.querySelector<HTMLElement>(
+            `[data-today-row="${id}"]`,
+          );
+          const next =
+            el === null
+              ? "none"
+              : `${el.dataset.version}|${el.textContent?.includes("Renamed") ? "new" : "old"}`;
+          if (w.__states[w.__states.length - 1] !== next) w.__states.push(next);
+        };
+        note();
+        new MutationObserver(note).observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          characterData: true,
+        });
+      }, a.occurrenceId);
+      const commit = async (revision: number, changes: unknown[]) => {
+        net.script.push(() => ({
+          status: 200,
+          body: JSON.stringify({
+            phase: "delta",
+            batches: [{ revision, changes }],
+            next_cursor: `cursor-${revision}`,
+            has_more: false,
+          }),
+        }));
+        await writer.evaluate(() => window.__atlasData?.nudgeSync());
+      };
+      const renamed = (
+        a.upserts as Array<{ resource: Record<string, unknown> }>
+      )
+        .filter(
+          (u) => u.resource.kind === "task" || u.resource.kind === "occurrence",
+        )
+        .map((u) => ({
+          kind: "upsert",
+          resource: {
+            ...u.resource,
+            version: 2,
+            ...(u.resource.kind === "task" ? { label: "Renamed" } : {}),
+          },
+        }));
+      await page.evaluate(() => {
+        (window as unknown as { __holdRelated: boolean }).__holdRelated = true;
+      });
+      // An unrelated commit makes tab A read its day again; its related read is held.
+      await commit(2, b.upserts);
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __heldRelated: unknown[] }).__heldRelated
+                .length,
+          ),
+        )
+        .toBe(1);
+      if (between) {
+        // While A's related read is held: B commits the occurrence's version 2 and the task's new title in ONE page.
+        await commit(3, renamed);
+        await expect
+          .poll(() =>
+            writer.evaluate(
+              async (acct) =>
+                (
+                  (await window.__atlasData?.syncState(acct)) as {
+                    applied_revision?: number;
+                  } | null
+                )?.applied_revision,
+              ACCOUNT,
+            ),
+          )
+          .toBe(3);
+      }
+      await page.evaluate(() => {
+        const w = window as unknown as { __heldRelated: Array<() => void> };
+        for (const release of w.__heldRelated.splice(0)) release();
+      });
+      if (!between) await commit(3, renamed);
+      await expect(rowOf(page, a.occurrenceId)).toHaveAttribute(
+        "data-version",
+        "2",
+        { timeout: 10_000 },
+      );
+      await expect(rowOf(page, a.occurrenceId)).toContainText("Renamed");
+      const states = await page.evaluate(
+        () => (window as unknown as { __states: string[] }).__states,
+      );
+      expect(states).not.toContain("1|new");
+      expect(states).not.toContain("2|old");
+      expect(states[states.length - 1]).toBe("2|new");
+    });
+});
+
+// ---- WEB-10a revision 4 (R9, R10, R11; design assessment C1, C3, C4: J1, E1, D7) ------------------------------------------------------
+
+/** Commits one delta page through the fixture leader of `writer` (the page that holds it). */
+async function commitDelta(
+  writer: Page,
+  net: SyncStub,
+  revision: number,
+  changes: unknown[],
+): Promise<void> {
+  net.script.push(() => ({
+    status: 200,
+    body: JSON.stringify({
+      phase: "delta",
+      batches: [{ revision, changes }],
+      next_cursor: `cursor-r4-${revision}`,
+      has_more: false,
+    }),
+  }));
+  await writer.evaluate(() => window.__atlasData?.nudgeSync());
+}
+
+/**
+ * Commits one delta page through `writer`'s fixture leader and waits until the account's cache satisfies `landed`, waking the writer again
+ * while it does not (a wake that arrives while a poll is in flight is absorbed by it, WEB-09a). Revision 24 (harness, labelled): the stub
+ * hands its scripted pages out in order, whatever cursor a poll asks from, so when two polls leave one cursor together and the leader keeps
+ * one answer, the page could go to the poll whose answer was discarded and never land (WebKit E-T43 in revision 24's run 1: polls 6 and 7
+ * both asked from `cursor-r4-2`, 7 took revision 3, and the leader went on from 6's `cursor-6`). A server answers from the client's
+ * cursor, so the same page is offered again once the leader has asked from a cursor that is neither the page's own nor the one the poll
+ * that took it asked from: never while that poll may still be committing it. `landed` is asserted exactly as before.
+ */
+async function commitDeltaLanded(
+  writer: Page,
+  net: SyncStub,
+  revision: number,
+  changes: unknown[],
+  landed: (ids: string[]) => boolean,
+): Promise<void> {
+  const own = `cursor-r4-${revision}`;
+  const body = JSON.stringify({
+    phase: "delta",
+    batches: [{ revision, changes }],
+    next_cursor: own,
+    has_more: false,
+  });
+  const taken: { by: { index: number; cursor: string | null } | null } = {
+    by: null,
+  };
+  const offer = () =>
+    net.script.push((url) => {
+      taken.by = {
+        index: net.requests.length,
+        cursor: url.searchParams.get("cursor"),
+      };
+      return { status: 200, body };
+    });
+  offer();
+  await writer.evaluate(() => window.__atlasData?.nudgeSync());
+  await expect
+    .poll(async () => {
+      const ids = (
+        (await rowsOf(writer, "cache")) as Array<{ id: string }>
+      ).map((row) => row.id);
+      if (landed(ids)) return true;
+      const by = taken.by;
+      if (by !== null) {
+        const later = net.requests
+          .slice(by.index)
+          .map((url) => url.searchParams.get("cursor"));
+        if (!later.includes(own) && later.some((c) => c !== by.cursor)) {
+          taken.by = null;
+          offer();
+        }
+      }
+      await writer.evaluate(() => window.__atlasData?.nudgeSync());
+      return false;
+    })
+    .toBe(true);
+}
+
+test.describe("E-T15: the open full history follows its stream's committed version (A8; R10 of revision 4, J1)", () => {
+  for (const opened of [true, false])
+    test(`opened=${opened}: a correction committed through sync is shown as the journal says (opened) or in the recent entries (control)`, async ({
+      context,
+    }) => {
+      const at = Math.floor(Date.now() / 1000);
+      const entry = (n: number) => ({
+        id: `bbbbbbbb-0000-4000-8000-00000000000${n}`,
+        evidence: { kind: "quantity", amount: String(n) },
+        happened_at: at,
+        recorded_by: ACCOUNT,
+      });
+      const first = entry(1);
+      const correction = entry(2);
+      const task = buildTask({
+        n: 40,
+        title: "History",
+        goal: { kind: "numeric", minimum: "10", maximum: null, unit: "cups" },
+      });
+      const progress = (
+        task.upserts as Array<{ resource: Record<string, unknown> }>
+      ).find((u) => u.resource.kind === "progress")?.resource as Record<
+        string,
+        unknown
+      >;
+      Object.assign(progress.value as object, {
+        recent_entries: [first],
+        entry_count: 1,
+      });
+      let journal: unknown[] = [
+        { ...first, sequence: 1, logical_order: 1, replaces: null },
+      ];
+      const asked: string[] = [];
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await context.route(
+        `**/api/experimental/v1/progress/${task.progressId}/entries?*`,
+        (route) => {
+          asked.push(
+            new URL(route.request().url()).searchParams.get("after") ?? "",
+          );
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ entries: journal, next_after: null }),
+          });
+        },
+      );
+      await seedSettled(context);
+      const page = await bootAt(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      );
+      await cacheTasks(page, net, [task]);
+      const shown = (id: string) => page.locator(`[data-entry="${id}"]`);
+      await expect(shown(first.id)).toBeVisible();
+      if (opened) {
+        await page
+          .getByRole("button", { name: "Full history", exact: true })
+          .click();
+        await expect(
+          page.getByRole("heading", { name: "Full history", exact: true }),
+        ).toBeVisible();
+        expect(asked).toEqual(["0"]);
+      }
+      journal = [
+        { ...first, sequence: 1, logical_order: 1, replaces: null },
+        { ...correction, sequence: 2, logical_order: 1, replaces: first.id },
+      ];
+      await commitDelta(page, net, 2, [
+        {
+          kind: "upsert",
+          resource: {
+            ...progress,
+            version: 2,
+            value: {
+              ...(progress.value as object),
+              recent_entries: [first, correction],
+              entry_count: 2,
+            },
+          },
+        },
+      ]);
+      await expect(shown(correction.id)).toBeVisible({ timeout: 10_000 });
+      if (opened) {
+        // From the journal read again after the commit: the correction says what it is and the first entry is marked corrected.
+        await expect(shown(correction.id)).toContainText("Correction");
+        await expect(shown(first.id)).toContainText("Corrected");
+        expect(asked).toEqual(["0", "0"]);
+      } else expect(asked).toEqual([]);
+    });
+});
+
+test.describe("E-T16: an enrolment change pressed again while it is pending sends nothing more (A15; R11 of revision 4, E1)", () => {
+  test("Join twice (a double press, then once more): one request with one key, the control disabled with the reason; the answer settles it", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 41,
+      title: "Shared",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    let enrolment = { version: 1, active: false, aggregate_consent: true };
+    await context.route(
+      `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...enrolment,
+            policy: { grants: [], exclude_accounts: [] },
+          }),
+        }),
+    );
+    const calls: Array<{ key: string | null; body: string | null }> = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await context.route(
+      "**/api/experimental/v1/task-access-commands",
+      async (route) => {
+        calls.push({
+          key: route.request().headers()["idempotency-key"] ?? null,
+          body: route.request().postData(),
+        });
+        await held;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ revision: 2 }),
+        });
+      },
+    );
+    await seedSettled(context);
+    const page = await bootAt(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+    );
+    await cacheTasks(page, net, [task]);
+    const settings = page.locator("[data-enrolment]");
+    const join = settings.getByRole("button", {
+      name: "Join this task",
+      exact: true,
+    });
+    try {
+      // Adapted in revision 10 (R22; states.md R2/F1): joining asks the consent explicitly first; "Yes" is the consent this enrolment held.
+      await settings
+        .getByRole("radio", { name: "Yes, include my contribution" })
+        .check();
+      await expect(join).toBeEnabled();
+      await join.dblclick();
+      await expect.poll(() => calls.length).toBe(1);
+      await expect(join).toBeDisabled();
+      await expect(settings).toContainText("Sending your change…");
+      // Adapted in revision 10 (R22): not enrolled, the consent is the join form's choice (the checkbox is an enrolled person's).
+      await expect(
+        settings.getByRole("radio", { name: "Yes, include my contribution" }),
+      ).toBeDisabled();
+      // Once more, through the page itself: a disabled control dispatches nothing, and the owner refuses a second attempt anyway. Adapted
+      // in revision 10: Join is named by its own attribute (the audience chooser's buttons now come before it in the section).
+      await page.evaluate(() =>
+        document
+          .querySelector<HTMLButtonElement>('[data-enrol-act="join"]')
+          ?.click(),
+      );
+      await page.waitForTimeout(0);
+      expect(calls).toHaveLength(1);
+    } finally {
+      enrolment = { version: 2, active: true, aggregate_consent: true };
+      release();
+    }
+    await expect(
+      settings.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]?.body ?? "{}").command).toMatchObject({
+      kind: "enrol",
+      expected_version: 1,
+      active: true,
+    });
+    // Revision 10 (R22): the audience read is sent explicitly (here the private one), never left for the server's defaults.
+    expect(JSON.parse(calls[0]?.body ?? "{}").command.initial_policy).toEqual({
+      grants: [],
+      exclude_accounts: [],
+    });
+  });
+});
+
+test.describe("E-T28: two tabs read the same enrolment; the stale one is refused and its next change keeps the other's audience (A15, A16; R22 of revision 10, Q6)", () => {
+  test("tab A saves Only me; tab B's change at the old version is refused with nothing substituted; B's fresh change carries A's private audience", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 45,
+      title: "Two tabs",
+      participation: "everyone",
+    });
+    const shared = {
+      grants: [
+        {
+          kind: "account",
+          id: "22222222-2222-4222-8222-222222222222",
+          edit: false,
+        },
+      ],
+      exclude_accounts: [] as string[],
+    };
+    const PRIVATE = { grants: [], exclude_accounts: [] };
+    // A server that keeps one enrolment: a stale expected_version is refused (409); an OMITTED policy would take these defaults.
+    const defaults = {
+      grants: [
+        {
+          kind: "account",
+          id: "33333333-3333-4333-8333-333333333333",
+          edit: true,
+        },
+      ],
+      exclude_accounts: [] as string[],
+    };
+    let state = {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: shared as unknown,
+    };
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await context.route(
+      `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(state),
+        }),
+    );
+    const bodies: Array<Record<string, unknown>> = [];
+    await context.route(
+      "**/api/experimental/v1/task-access-commands",
+      async (route) => {
+        const command = JSON.parse(route.request().postData() ?? "{}")
+          .command as Record<string, unknown>;
+        bodies.push(command);
+        if (command.expected_version !== state.version)
+          return route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({
+              code: "conflict",
+              message: "m",
+              request_id: "11111111-1111-4111-8111-111111111111",
+              details: [],
+            }),
+          });
+        state = {
+          version: state.version + 1,
+          active: command.active as boolean,
+          aggregate_consent: command.aggregate_consent as boolean,
+          policy: command.initial_policy ?? defaults,
+        };
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ revision: 10 + bodies.length }),
+        });
+      },
+    );
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const b = await bootAt(context, path);
+    const inA = a.locator("[data-enrolment]");
+    const inB = b.locator("[data-enrolment]");
+    const consentB = inB.getByRole("checkbox", {
+      name: "Count me in the shared total",
+    });
+    // Both tabs have read version 2 (shared with one account).
+    await expect(consentB).toBeEnabled();
+    await expect(
+      inA.getByRole("button", { name: "Change…", exact: true }),
+    ).toBeEnabled();
+    // Tab A: the audience alone, made private.
+    await inA.getByRole("button", { name: "Change…", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    await inA
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect.poll(() => state.version).toBe(3);
+    expect(state).toEqual({
+      version: 3,
+      active: true,
+      aggregate_consent: true,
+      policy: PRIVATE,
+    });
+    // Tab B still shows version 2: its consent change is refused, and the refusal changes nothing.
+    await consentB.click();
+    await expect(inB).toContainText(
+      "This change wasn't accepted. The latest settings are shown.",
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 2,
+      active: true,
+      aggregate_consent: false,
+      initial_policy: shared,
+    });
+    expect(state.policy).toEqual(PRIVATE);
+    // B read again: its next change is at version 3 and keeps A's private audience.
+    await expect(inB).toContainText(
+      "Who sees your progress from now on: only you",
+    );
+    await expect(consentB).toBeEnabled();
+    await consentB.click();
+    await expect.poll(() => bodies.length).toBe(3);
+    expect(bodies[2]).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 3,
+      active: true,
+      aggregate_consent: false,
+      initial_policy: PRIVATE,
+    });
+    await expect.poll(() => state.policy).toEqual(PRIVATE);
+  });
+});
+
+test.describe("E-T27: Leave and the consent resend the audience that was read (A15, A16; R22 of revision 10)", () => {
+  for (const act of ["consent", "leave"] as const)
+    test(`${act}: the wire body carries the complete enrolment, its shared audience and exclusion unchanged`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 44,
+        title: "Shared audience",
+        participation: "everyone",
+      });
+      const policy = {
+        grants: [
+          {
+            kind: "household",
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            edit: false,
+          },
+          {
+            kind: "account",
+            id: "22222222-2222-4222-8222-222222222222",
+            edit: true,
+          },
+        ],
+        exclude_accounts: ["33333333-3333-4333-8333-333333333333"],
+      };
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await context.route(
+        `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+        (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              version: 3,
+              active: true,
+              aggregate_consent: true,
+              policy,
+            }),
+          }),
+      );
+      const bodies: string[] = [];
+      await context.route(
+        "**/api/experimental/v1/task-access-commands",
+        async (route) => {
+          bodies.push(route.request().postData() ?? "");
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ revision: 4 }),
+          });
+        },
+      );
+      await seedSettled(context);
+      const page = await bootAt(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      );
+      await cacheTasks(page, net, [task]);
+      const settings = page.locator("[data-enrolment]");
+      await expect(
+        settings.getByRole("button", { name: "Leave this task", exact: true }),
+      ).toBeEnabled();
+      if (act === "consent")
+        await settings
+          .getByRole("checkbox", { name: "Count me in the shared total" })
+          .click();
+      else
+        await settings
+          .getByRole("button", { name: "Leave this task", exact: true })
+          .click();
+      await expect.poll(() => bodies.length).toBe(1);
+      expect(JSON.parse(bodies[0] ?? "{}").command).toEqual({
+        kind: "enrol",
+        task_id: task.taskId,
+        expected_version: 3,
+        active: act === "consent",
+        aggregate_consent: act !== "consent",
+        initial_policy: policy,
+      });
+    });
+});
+
+/**
+ * A server that keeps one enrolment for E-T29..E-T31 (revision 11, R23): a stale `expected_version` is refused (409); a key seen before
+ * replays its first receipt without applying anything (the backend's same-key receipt rule); `hold` keeps the next command or the next
+ * enrolment read until released; `lose` commits the next command and then drops its answer (a network error); `drop` (revision 12) fails
+ * the next command before anything is applied (a network error, nothing committed).
+ */
+async function enrolmentServer(
+  context: import("@playwright/test").BrowserContext,
+  taskId: string,
+  initial: Record<string, unknown>,
+) {
+  const s = {
+    state: { ...initial } as Record<string, unknown> & { version: number },
+    bodies: [] as Array<{ key: string; command: Record<string, unknown> }>,
+    receipts: new Map<string, number>(),
+    holdCommand: null as null | Promise<void>,
+    holdRead: null as null | Promise<void>,
+    lose: false,
+    drop: false,
+    reads: 0,
+  };
+  await context.route(
+    `**/api/experimental/v1/tasks/${taskId}/enrolment`,
+    async (route) => {
+      s.reads += 1;
+      const asked = JSON.stringify(s.state);
+      if (s.holdRead !== null) await s.holdRead;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: asked,
+      });
+    },
+  );
+  await context.route(
+    "**/api/experimental/v1/task-access-commands",
+    async (route) => {
+      const key = route.request().headers()["idempotency-key"] ?? "";
+      const command = JSON.parse(route.request().postData() ?? "{}")
+        .command as Record<string, unknown>;
+      s.bodies.push({ key, command });
+      if (s.holdCommand !== null) await s.holdCommand;
+      if (s.drop) {
+        s.drop = false;
+        return route.abort("failed");
+      }
+      const replay = s.receipts.get(key);
+      if (replay !== undefined)
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ revision: replay }),
+        });
+      if (command.expected_version !== s.state.version)
+        return route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "conflict",
+            message: "m",
+            request_id: "11111111-1111-4111-8111-111111111111",
+            details: [],
+          }),
+        });
+      s.state = {
+        version: s.state.version + 1,
+        active: command.active,
+        aggregate_consent: command.aggregate_consent,
+        policy: command.initial_policy,
+      };
+      const revision = 20 + s.bodies.length;
+      s.receipts.set(key, revision);
+      if (s.lose) {
+        s.lose = false;
+        return route.abort("failed");
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ revision }),
+      });
+    },
+  );
+  return s;
+}
+
+/** A promise and the function that ends it (a held answer). */
+function gate(): { held: Promise<void>; release(): void } {
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { held, release };
+}
+
+const SHARED_AUDIENCE = {
+  grants: [
+    {
+      kind: "account",
+      id: "22222222-2222-4222-8222-222222222222",
+      edit: false,
+    },
+  ],
+  exclude_accounts: [] as string[],
+};
+const PRIVATE_AUDIENCE = { grants: [], exclude_accounts: [] };
+
+test.describe("E-T29: while an audience change is sent and confirmed, an open directory lookup cannot choose (A15, A16; R23 of revision 11, S1/S2)", () => {
+  test("Save sharing with the lookup open: Choose is disabled with why (pointer and keyboard), through the answer and the read that follows; the read ends it", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 46,
+      title: "Frozen lookup",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await context.route("**/api/experimental/v1/households", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      }),
+    );
+    await context.route("**/api/experimental/v1/directory**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { id: "33333333-3333-4333-8333-333333333333", username: "reader" },
+        ]),
+      }),
+    );
+    await seedSettled(context);
+    const page = await bootAt(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+    );
+    await cacheTasks(page, net, [task]);
+    const settings = page.locator("[data-enrolment]");
+    await settings
+      .getByRole("button", { name: "Change…", exact: true })
+      .click();
+    await settings
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    await settings
+      .getByRole("button", { name: "+ Add account grant", exact: true })
+      .click();
+    await settings.getByLabel("Name", { exact: true }).fill("rea");
+    await settings.getByRole("button", { name: "Search", exact: true }).click();
+    const choose = settings.getByRole("button", {
+      name: "Choose: reader",
+      exact: true,
+    });
+    await expect(choose).toBeEnabled();
+    const command = gate();
+    const read = gate();
+    s.holdCommand = command.held;
+    try {
+      // Save sharing is outside the lookup view: the lookup stays open while the change is sent.
+      await settings
+        .getByRole("button", { name: "Save sharing", exact: true })
+        .click();
+      await expect.poll(() => s.bodies.length).toBe(1);
+      await expect(choose).toBeDisabled();
+      await expect(settings).toContainText("Sending your change…");
+      // Keyboard: the focused (disabled) control does nothing.
+      await choose.focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Space");
+      // The answer arrives; the read that follows is held: still frozen, with the reason.
+      s.holdRead = read.held;
+      const readsBefore = s.reads;
+      command.release();
+      await expect.poll(() => s.reads).toBeGreaterThan(readsBefore);
+      await expect(choose).toBeDisabled();
+      await expect(settings).toContainText("Checking your settings…");
+      await choose.click({ force: true });
+    } finally {
+      command.release();
+      read.release();
+    }
+    await expect(
+      settings.getByRole("button", { name: "Change…", exact: true }),
+    ).toBeEnabled();
+    await expect(settings).toContainText(
+      "Who sees your progress from now on: only you",
+    );
+    expect(s.bodies).toHaveLength(1);
+    expect(s.bodies[0]?.command.initial_policy).toEqual(PRIVATE_AUDIENCE);
+    expect(s.state.policy).toEqual(PRIVATE_AUDIENCE);
+    await expect(
+      settings.locator(
+        '[data-grant="account"][data-principal="33333333-3333-4333-8333-333333333333"]',
+      ),
+    ).toHaveCount(0);
+  });
+});
+
+// ADAPTATION, revision 12 (R25; design assessment C7, Q11): E-T30 asserted that A's refused audience change was NOT kept ("nothing kept").
+// A refusal is not an acknowledgement: the refused values are now kept, unsaved, beside B's state until A discards them explicitly; every
+// body, version and winner assertion is unchanged. The pre-adaptation spec is kept in `.agtx/evidence/web10a-revision-12/pre-adaptation/`.
+test.describe("E-T30: two tabs read the same enrolment, the other winner order: B commits first, A's audience change is refused (A15, A16; R23 of revision 11, S10; R25 of revision 12)", () => {
+  test("B's consent wins at version 2; A's Save sharing at version 2 is refused, nothing overwritten; A's refused audience is kept until discarded; A's next change keeps B's consent", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 47,
+      title: "Other order",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const b = await bootAt(context, path);
+    const inA = a.locator("[data-enrolment]");
+    const inB = b.locator("[data-enrolment]");
+    const consentB = inB.getByRole("checkbox", {
+      name: "Count me in the shared total",
+    });
+    await expect(consentB).toBeEnabled();
+    // A opens its editor and makes the audience private (not saved yet).
+    await inA.getByRole("button", { name: "Change…", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    // B wins: its consent change commits version 3, keeping the shared audience.
+    await consentB.click();
+    await expect.poll(() => s.state.version).toBe(3);
+    // A saves at version 2: refused; the server keeps B's state.
+    await inA
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(inA).toContainText(
+      "This change wasn't accepted. The latest settings are shown.",
+    );
+    expect(s.bodies).toHaveLength(2);
+    expect(s.bodies[1]?.command).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 2,
+      active: true,
+      aggregate_consent: true,
+      initial_policy: PRIVATE_AUDIENCE,
+    });
+    expect(s.state).toEqual({
+      version: 3,
+      active: true,
+      aggregate_consent: false,
+      policy: SHARED_AUDIENCE,
+    });
+    // A read again: B's state is shown; the refused draft is KEPT as it was (private), never rebased or resent.
+    const consentA = inA.getByRole("checkbox", {
+      name: "Count me in the shared total",
+    });
+    await expect(consentA).not.toBeChecked();
+    const kept = inA.locator("[data-enrol-kept]");
+    await expect(kept).toHaveCount(1);
+    await expect(kept).toContainText("Not saved:");
+    await expect(kept.locator("[data-audience-chooser]")).toHaveCount(1);
+    await expect(inA.locator("[data-audience-chooser]")).toHaveCount(1);
+    await expect(
+      kept.locator(
+        '[data-grant="account"][data-principal="22222222-2222-4222-8222-222222222222"]',
+      ),
+    ).toHaveCount(0);
+    await expect(inA).toContainText(
+      "Who sees your progress from now on: you and 1 person",
+    );
+    // Nothing else changes while it is kept; it is discarded explicitly.
+    const leaveA = inA.getByRole("button", {
+      name: "Leave this task",
+      exact: true,
+    });
+    await expect(leaveA).toBeDisabled();
+    await expect(consentA).toBeDisabled();
+    expect(s.bodies).toHaveLength(2);
+    await kept
+      .getByRole("button", { name: "Discard this change", exact: true })
+      .click();
+    await expect(inA.locator("[data-enrol-kept]")).toHaveCount(0);
+    await expect(inA.locator("[data-audience-chooser]")).toHaveCount(0);
+    await leaveA.click();
+    await expect.poll(() => s.bodies.length).toBe(3);
+    expect(s.bodies[2]?.command).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 3,
+      active: false,
+      aggregate_consent: false,
+      initial_policy: SHARED_AUDIENCE,
+    });
+  });
+});
+
+test.describe("E-T31: A's change commits but its answer is lost; B changes after it; A's exact retry is replayed, overwrites nothing, and a reload resends nothing (A15, A16; R23 of revision 11, S11/S12)", () => {
+  test("A Leave (answer lost) -> B Join -> A Try again (same key, receipt replayed) shows B's state; a reload of A sends nothing", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 48,
+      title: "Lost answer",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const inA = a.locator("[data-enrolment]");
+    await expect(
+      inA.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    s.lose = true;
+    await inA
+      .getByRole("button", { name: "Leave this task", exact: true })
+      .click();
+    await expect(inA).toContainText("Couldn't confirm the change. Try again.");
+    expect(s.state).toMatchObject({ version: 3, active: false });
+    // B reads version 3 (not enrolled) and joins with the private audience: version 4.
+    const b = await bootAt(context, path);
+    const inB = b.locator("[data-enrolment]");
+    await inB
+      .getByRole("radio", { name: "Yes, include my contribution" })
+      .check();
+    await inB
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    await inB
+      .getByRole("button", { name: "Join this task", exact: true })
+      .click();
+    await expect.poll(() => s.state.version).toBe(4);
+    // A's Try again is the exact attempt: same key and body; the server replays its receipt and applies nothing.
+    // (The uncertain change's Try again; the chooser's household list has its own.)
+    await inA
+      .locator("[data-enrolment-uncertain]")
+      .getByRole("button", { name: "Try again", exact: true })
+      .click();
+    await expect.poll(() => s.bodies.length).toBe(3);
+    expect(s.bodies[2]).toEqual(s.bodies[0]);
+    await expect(inA).toContainText("Saved.");
+    expect(s.state).toEqual({
+      version: 4,
+      active: true,
+      aggregate_consent: true,
+      policy: PRIVATE_AUDIENCE,
+    });
+    // A's read after the replayed answer shows B's state, not its own submitted body.
+    await expect(
+      inA.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    await expect(inA).toContainText(
+      "Who sees your progress from now on: only you",
+    );
+    // A reload of A resends nothing.
+    const before = s.bodies.length;
+    // (As E-T7e reloads: through the fixture's session entry; the cache in IndexedDB survives, page memory does not.)
+    await a.goto(`/__session?route=${encodeURIComponent(path)}`);
+    await a.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await a.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(
+      a
+        .locator("[data-enrolment]")
+        .getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeEnabled();
+    expect(s.bodies).toHaveLength(before);
+  });
+});
+
+test.describe("E-T32: a later audience edit survives a same-identity remount of the protected tree (A15, A16; R23 of revision 12, Q2/Q3)", () => {
+  test("A's Save is not confirmed (nothing committed); A adds a grant; a 403 elsewhere remounts the tree: the grant and the unconfirmed change are still there, nothing resent; A's Save of it is acknowledged", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 49,
+      title: "Kept through a remount",
+      participation: "everyone",
+      goal: JOURNAL_GOAL,
+    });
+    const journal = liveJournal(20);
+    progressOf(task, journal);
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await context.route("**/api/experimental/v1/households", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      }),
+    );
+    await context.route("**/api/experimental/v1/directory**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { id: "33333333-3333-4333-8333-333333333333", username: "reader" },
+        ]),
+      }),
+    );
+    await seedSettled(context);
+    const page = await bootAt(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+    );
+    await cacheTasks(page, net, [task]);
+    const route = journalRoute(journal);
+    await page.route(
+      `**${API}/progress/${task.progressId}/entries?*`,
+      route.handler,
+    );
+    const settings = page.locator("[data-enrolment]");
+    const third = settings.locator(
+      '[data-grant="account"][data-principal="33333333-3333-4333-8333-333333333333"]',
+    );
+    await settings
+      .getByRole("button", { name: "Change…", exact: true })
+      .click();
+    await settings
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    // The Save fails in the network before the server applies anything: uncertain, then read (version 2, unchanged).
+    s.drop = true;
+    await settings
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(settings).toContainText(
+      "Couldn't confirm the change. Try again.",
+    );
+    expect(s.bodies).toHaveLength(1);
+    expect(s.state.version).toBe(2);
+    // Editable again after the read: a grant is added and accepted.
+    await settings
+      .getByRole("button", { name: "+ Add account grant", exact: true })
+      .click();
+    await settings.getByLabel("Name", { exact: true }).fill("rea");
+    await settings.getByRole("button", { name: "Search", exact: true }).click();
+    await settings
+      .getByRole("button", { name: "Choose: reader", exact: true })
+      .click();
+    await expect(third).toHaveCount(1);
+    await page.evaluate(() => {
+      const e = document.querySelector("[data-enrolment]") as
+        | (Element & { __mark?: boolean })
+        | null;
+      if (e !== null) e.__mark = true;
+    });
+    // A 403 on the full history's Refresh closes and reopens the protected display for the SAME identity (the tree remounts).
+    await page
+      .getByRole("button", { name: "Full history", exact: true })
+      .click();
+    await expect(page.locator("[data-entry-history]")).toHaveAttribute(
+      "data-journal-version",
+      "1",
+    );
+
+    route.refuseNext(403, "forbidden");
+    await page
+      .locator("[data-entry-history]")
+      .getByRole("button", { name: "Refresh", exact: true })
+      .click();
+    // Barrier: NEW settings (the tree remounted), shown after their own read.
+    await page.waitForFunction(
+      () => {
+        const e = document.querySelector("[data-enrolment]") as
+          | (Element & { __mark?: boolean })
+          | null;
+        return e !== null && e.__mark !== true;
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    await expect(
+      settings.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeVisible();
+    // The accepted grant and the private audience it was made to; the unconfirmed change and its Try again; nothing resent.
+    await expect(third).toHaveCount(1);
+    await expect(
+      settings.locator(
+        '[data-grant="account"][data-principal="22222222-2222-4222-8222-222222222222"]',
+      ),
+    ).toHaveCount(0);
+    await expect(settings).toContainText(
+      "Couldn't confirm the change. Try again.",
+    );
+    expect(s.bodies).toHaveLength(1);
+    // Its Save is a new change of version 2 (its own key), acknowledged; the read that follows ends the draft.
+    await settings
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(settings).toContainText("Saved.");
+    expect(s.bodies).toHaveLength(2);
+    expect(s.bodies[1]?.key).not.toBe(s.bodies[0]?.key);
+    expect(s.bodies[1]?.command).toEqual({
+      kind: "enrol",
+      task_id: task.taskId,
+      expected_version: 2,
+      active: true,
+      aggregate_consent: true,
+      initial_policy: {
+        grants: [
+          {
+            kind: "account",
+            id: "33333333-3333-4333-8333-333333333333",
+            edit: false,
+          },
+        ],
+        exclude_accounts: [],
+      },
+    });
+    await expect(
+      settings.getByRole("button", { name: "Change…", exact: true }),
+    ).toBeEnabled();
+    await expect(settings.locator("[data-audience-chooser]")).toHaveCount(0);
+    await expect(settings).toContainText(
+      "Who sees your progress from now on: you and 1 person",
+    );
+  });
+});
+
+test.describe("E-T33: A's change is not committed, A edits again, B wins; A's exact retry is refused and A's later edit is kept, never sent (A15, A16; R23/R25 of revision 12, Q12)", () => {
+  test("A Save (network failure, nothing applied) -> A adds a grant -> B's consent wins -> A Try again resends the old body and key, refused; A's later draft is kept beside B's state", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 50,
+      title: "Retry is not the draft",
+      participation: "everyone",
+    });
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    const s = await enrolmentServer(context, task.taskId, {
+      version: 2,
+      active: true,
+      aggregate_consent: true,
+      policy: SHARED_AUDIENCE,
+    });
+    await context.route("**/api/experimental/v1/households", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      }),
+    );
+    await context.route("**/api/experimental/v1/directory**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { id: "33333333-3333-4333-8333-333333333333", username: "reader" },
+        ]),
+      }),
+    );
+    await seedSettled(context);
+    const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+    const a = await bootAt(context, path);
+    await cacheTasks(a, net, [task]);
+    const inA = a.locator("[data-enrolment]");
+    await inA.getByRole("button", { name: "Change…", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Only me (private)", exact: true })
+      .click();
+    s.drop = true;
+    await inA
+      .getByRole("button", { name: "Save sharing", exact: true })
+      .click();
+    await expect(inA).toContainText("Couldn't confirm the change. Try again.");
+    expect(s.state.version).toBe(2);
+    // A's later edit, accepted.
+    await inA
+      .getByRole("button", { name: "+ Add account grant", exact: true })
+      .click();
+    await inA.getByLabel("Name", { exact: true }).fill("rea");
+    await inA.getByRole("button", { name: "Search", exact: true }).click();
+    await inA
+      .getByRole("button", { name: "Choose: reader", exact: true })
+      .click();
+    const third =
+      '[data-grant="account"][data-principal="33333333-3333-4333-8333-333333333333"]';
+    await expect(inA.locator(third)).toHaveCount(1);
+    // B changes the consent: version 3.
+    const b = await bootAt(context, path);
+    const consentB = b
+      .locator("[data-enrolment]")
+      .getByRole("checkbox", { name: "Count me in the shared total" });
+    await consentB.click();
+    await expect.poll(() => s.state.version).toBe(3);
+    // A's Try again is the EXACT unconfirmed change (old body and key; not the later draft): refused at version 2.
+    await inA
+      .locator("[data-enrolment-uncertain]")
+      .getByRole("button", { name: "Try again", exact: true })
+      .click();
+    await expect(inA).toContainText(
+      "This change wasn't accepted. The latest settings are shown.",
+    );
+    expect(s.bodies).toHaveLength(3);
+    expect(s.bodies[2]).toEqual(s.bodies[0]);
+    expect(s.bodies[0]?.command.initial_policy).toEqual(PRIVATE_AUDIENCE);
+    expect(s.state).toEqual({
+      version: 3,
+      active: true,
+      aggregate_consent: false,
+      policy: SHARED_AUDIENCE,
+    });
+    // B's state shown; A's later draft kept as it was (private + the grant), never sent; nothing more sent.
+    await expect(
+      inA.getByRole("checkbox", { name: "Count me in the shared total" }),
+    ).not.toBeChecked();
+    await expect(inA).toContainText(
+      "Who sees your progress from now on: you and 1 person",
+    );
+    const kept = inA.locator("[data-enrol-kept]");
+    await expect(kept).toHaveCount(1);
+    await expect(kept.locator(third)).toHaveCount(1);
+    await expect(
+      kept.locator(
+        '[data-grant="account"][data-principal="22222222-2222-4222-8222-222222222222"]',
+      ),
+    ).toHaveCount(0);
+    await expect(
+      inA.getByRole("button", { name: "Leave this task", exact: true }),
+    ).toBeDisabled();
+    expect(s.bodies).toHaveLength(3);
+  });
+});
+
+test.describe("E-T34: the first choice of a first Join keeps keyboard focus at its control (A15, A19; R26 of revision 13, Q1)", () => {
+  // Review 13's witness, maintained: the first choice begins the page's draft, and the form it was made in must stay mounted. Reached by
+  // real keyboard traversal (Option+Tab in WebKit, `nextKey`) and chosen by Space; never focus() or check(). Rejoining (version 7, whose
+  // form never moved) is the structural control. The control is marked before the key press: the same node, still in the page, keeps focus,
+  // and the next key continues from it. Nothing is sent (the command route records and refuses).
+  for (const version of [0, 7])
+    for (const choice of ["consent", "private"] as const)
+      test(`${version === 0 ? "first join" : "control: rejoin"}, ${choice === "consent" ? "consent Yes" : "Only me (private)"} by Tab and Space: the same control keeps visible focus, nothing sent, the next Tab goes on from it`, async ({
+        context,
+      }) => {
+        const task = buildTask({
+          n: 58,
+          title: "Focus boundary",
+          participation: "everyone",
+        });
+        const net = await stubNetwork(context);
+        await serveIdentityReads(context);
+        await serveTaskReads(context);
+        await context.route(
+          `**/api/experimental/v1/tasks/${task.taskId}/enrolment`,
+          (route) =>
+            route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                version,
+                active: false,
+                aggregate_consent: false,
+                policy: { grants: [], exclude_accounts: [] },
+              }),
+            }),
+        );
+        const posts: string[] = [];
+        await context.route(
+          "**/api/experimental/v1/task-access-commands",
+          (route) => {
+            posts.push(route.request().postData() ?? "");
+            return route.abort();
+          },
+        );
+        await seedSettled(context);
+        const page = await bootAt(
+          context,
+          `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        );
+        await cacheTasks(page, net, [task]);
+        await untilTreeSettled(page);
+        const settings = page.locator("[data-enrolment]");
+        await expect(settings.locator("[data-audience-chooser]")).toBeVisible();
+        const name =
+          choice === "consent"
+            ? "Yes, include my contribution"
+            : "Only me (private)";
+        const target =
+          choice === "consent"
+            ? settings.getByRole("radio", { name })
+            : settings.getByRole("button", { name, exact: true });
+        await expect(target).toBeEnabled();
+        await fromPageStart(page);
+        const reached = await tabTo(page, (f) => f.name === name, name, {
+          max: 120,
+        });
+        seen(reached, `${name} reached`);
+        await expect(target).toBeFocused();
+        await target.evaluate((el) => el.setAttribute("data-e-t34", ""));
+        await page.keyboard.press("Space");
+        if (choice === "consent") await expect(target).toBeChecked();
+        await untilTreeSettled(page);
+        const after = await page.evaluate(() => {
+          const marked = document.querySelector("[data-e-t34]");
+          return {
+            marked: marked !== null,
+            focussed: marked !== null && document.activeElement === marked,
+            active: document.activeElement?.tagName ?? "none",
+          };
+        });
+        expect(
+          after,
+          "the control chosen is still in the page, and keeps focus",
+        ).toEqual({
+          marked: true,
+          focussed: true,
+          active: choice === "consent" ? "INPUT" : "BUTTON",
+        });
+        seen(await focusOf(page), `${name} after Space`);
+        expect(posts).toHaveLength(0);
+        // One key more goes on from the choice: to a control of the settings, not from the page's start.
+        await page.keyboard.press(nextKey());
+        expect(
+          await page.evaluate(
+            () =>
+              document.activeElement !== document.body &&
+              document
+                .querySelector("[data-enrolment]")
+                ?.contains(document.activeElement) === true,
+          ),
+          "the next key continues inside the settings",
+        ).toBe(true);
+        expect(posts).toHaveLength(0);
+      });
+});
+
+test.describe("E-T17: another tab commits while the task detail's read is between its stages (A1, A18; R9 of revision 4, D7)", () => {
+  for (const between of [true, false])
+    test(`between=${between}: tab A never shows the new title with the old day (or the reverse); it ends on what B committed`, async ({
+      context,
+    }) => {
+      const a = buildTask({ n: 42, title: "Cups" });
+      const b = buildTask({ n: 43, title: "Plants" });
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      const writer = await bootAt(context, "/tasks");
+      await cacheTasks(writer, net, [a]);
+      const page = await context.newPage();
+      await page.addInitScript(holdRelatedReadInit);
+      await page.goto(
+        `/__session?route=${encodeURIComponent(`/tasks/${a.taskId}?occurrence=${a.occurrenceId}`)}`,
+      );
+      await page.waitForFunction(
+        () => window.__atlasFixture?.session?.booted !== undefined,
+      );
+      await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      const oldDay = String((a.data.slot as { date: string }).date);
+      await expect(page.locator("[data-detail-day]")).toHaveAttribute(
+        "data-detail-day",
+        oldDay,
+      );
+      await untilTreeSettled(page);
+      await untilTreeSettled(writer);
+      await startLeader(writer);
+      await waitForState(writer, "idle");
+      await page.evaluate(() => {
+        const w = window as unknown as { __states: string[] };
+        const note = () => {
+          const day = document
+            .querySelector<HTMLElement>("[data-detail-day]")
+            ?.getAttribute("data-detail-day");
+          const title = document.querySelector("h1")?.textContent ?? "";
+          const next =
+            day === undefined || day === null
+              ? "none"
+              : `${day}|${title.includes("Renamed") ? "new" : "old"}`;
+          if (w.__states[w.__states.length - 1] !== next) w.__states.push(next);
+        };
+        note();
+        new MutationObserver(note).observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          characterData: true,
+        });
+      });
+      const newDay = "2001-02-03";
+      const renamed = (
+        a.upserts as Array<{ resource: Record<string, unknown> }>
+      )
+        .filter(
+          (u) => u.resource.kind === "task" || u.resource.kind === "occurrence",
+        )
+        .map((u) => ({
+          kind: "upsert",
+          resource: {
+            ...u.resource,
+            version: 2,
+            ...(u.resource.kind === "task" ? { label: "Renamed" } : {}),
+            ...(u.resource.kind === "occurrence"
+              ? {
+                  value: {
+                    ...(u.resource.value as Record<string, unknown>),
+                    slot: {
+                      ...(u.resource.value as { slot: object }).slot,
+                      date: newDay,
+                    },
+                  },
+                }
+              : {}),
+          },
+        }));
+      await page.evaluate(() => {
+        (window as unknown as { __holdRelated: boolean }).__holdRelated = true;
+      });
+      // An unrelated commit makes tab A read its detail again; one of its reads by id is held.
+      await commitDelta(writer, net, 2, b.upserts);
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __heldRelated: unknown[] }).__heldRelated
+                .length,
+          ),
+        )
+        .toBe(1);
+      if (between) {
+        await commitDelta(writer, net, 3, renamed);
+        await expect
+          .poll(() =>
+            writer.evaluate(
+              async (acct) =>
+                (
+                  (await window.__atlasData?.syncState(acct)) as {
+                    applied_revision?: number;
+                  } | null
+                )?.applied_revision,
+              ACCOUNT,
+            ),
+          )
+          .toBe(3);
+      }
+      await page.evaluate(() => {
+        const w = window as unknown as { __heldRelated: Array<() => void> };
+        for (const release of w.__heldRelated.splice(0)) release();
+      });
+      if (!between) await commitDelta(writer, net, 3, renamed);
+      await expect(page.locator("[data-detail-day]")).toHaveAttribute(
+        "data-detail-day",
+        newDay,
+        { timeout: 10_000 },
+      );
+      await expect(page.locator("h1")).toContainText("Renamed");
+      const states = await page.evaluate(
+        () => (window as unknown as { __states: string[] }).__states,
+      );
+      expect(states).not.toContain(`${oldDay}|new`);
+      expect(states).not.toContain(`${newDay}|old`);
+      expect(states[states.length - 1]).toBe(`${newDay}|new`);
+    });
+});
+
+/** A journal of `count` of my quantity entries, paged by `sequence` 200 at a time as the contract's. */
+function journalOf(count: number) {
+  const at = Math.floor(Date.now() / 1000);
+  const id = (n: number) =>
+    `bbbbbbbb-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const entries = Array.from({ length: count }, (_, i) => ({
+    id: id(i + 1),
+    sequence: i + 1,
+    logical_order: i + 1,
+    replaces: null,
+    evidence: { kind: "quantity", amount: String(i + 1) },
+    happened_at: at,
+    recorded_by: ACCOUNT,
+  }));
+  const pageAfter = (after: number) => {
+    const rest = entries.filter((e) => e.sequence > after);
+    const items = rest.slice(0, 200);
+    return JSON.stringify({
+      entries: items,
+      next_after:
+        rest.length > 200 ? (items[items.length - 1]?.sequence ?? null) : null,
+    });
+  };
+  return { id, pageAfter };
+}
+
+test.describe("E-T18: an older correction lookup never replaces a newer editor or its input (A8, A14; R13 of revision 5, Q1)", () => {
+  for (const held of [false, true])
+    test(`held=${held}: entry 1's check of the rest of the journal ${held ? "is held while" : "completes before"} entry 2's fix opens and 987 is typed; once every answer is taken in, entry 2's fix still holds 987`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 42,
+        title: "Journal ownership",
+        goal: {
+          kind: "numeric",
+          minimum: "100000",
+          maximum: null,
+          unit: "cups",
+        },
+      });
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      const journal = journalOf(210);
+      const asked: number[] = [];
+      let heldOnce = false;
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await context.route(
+        `**/api/experimental/v1/progress/${task.progressId}/entries?*`,
+        async (route) => {
+          const after = Number(
+            new URL(route.request().url()).searchParams.get("after"),
+          );
+          asked.push(after);
+          if (held && after === 200 && !heldOnce) {
+            heldOnce = true;
+            await gate;
+          }
+          await route
+            .fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: journal.pageAfter(after),
+            })
+            .catch(() => undefined);
+        },
+      );
+      const history = page.locator("[data-entry-history]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      const input = page.getByLabel("New value (cups)", { exact: true });
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(li(1)).toBeVisible();
+      try {
+        await li(1)
+          .getByRole("button", { name: "Fix this entry", exact: true })
+          .click();
+        if (held) await expect.poll(() => heldOnce).toBe(true);
+        else await expect(li(1).locator("[data-fix-form]")).toBeVisible();
+        await li(2)
+          .getByRole("button", { name: "Fix this entry", exact: true })
+          .click();
+        await expect(li(2).locator("[data-fix-form]")).toBeVisible();
+        await expect(input).toHaveValue("2");
+        await input.fill("987");
+      } finally {
+        release();
+      }
+      // Completion barrier: every journal answer, the held one included, has been taken in by the history (nothing in flight).
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      expect(asked).toEqual([0, 200, 200]);
+      await expect(page.locator("[data-fix-form]")).toHaveCount(1);
+      await expect(li(2).locator("[data-fix-form]")).toHaveCount(1);
+      await expect(input).toHaveValue("987");
+    });
+});
+
+test.describe("E-T19: a refused check of the rest of the journal drops the full history (A8, A13; R14 of revision 5, Q6)", () => {
+  for (const refused of [false, true])
+    test(`refused=${refused}: Fix of an entry outside a window that reaches the end ${refused ? "is refused (a valid Atlas 404): the full history is gone, the refusal is said and Full history is offered again" : "is answered: the fix opens over the full history (control)"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 43,
+        title: "Journal refusal",
+        goal: {
+          kind: "numeric",
+          minimum: "100000",
+          maximum: null,
+          unit: "cups",
+        },
+      });
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      const journal = journalOf(210);
+      const asked: number[] = [];
+      await context.route(
+        `**/api/experimental/v1/progress/${task.progressId}/entries?*`,
+        (route) => {
+          const after = Number(
+            new URL(route.request().url()).searchParams.get("after"),
+          );
+          asked.push(after);
+          return refused && after === 200
+            ? route.fulfill({
+                status: 404,
+                contentType: "application/json",
+                body: JSON.stringify({
+                  code: "not_found",
+                  message: "not found",
+                  request_id: "e-t19",
+                  details: [],
+                }),
+              })
+            : route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: journal.pageAfter(after),
+              });
+        },
+      );
+      const history = page.locator("[data-entry-history]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(li(2)).toBeVisible();
+      await li(5)
+        .getByRole("button", { name: "Fix this entry", exact: true })
+        .click();
+      await expect.poll(() => asked.length).toBe(2);
+      // Completion barrier: the check's answer has been taken in.
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      if (!refused) {
+        await expect(
+          page.getByLabel("New value (cups)", { exact: true }),
+        ).toHaveValue("5");
+        await expect(li(2)).toHaveCount(1);
+        return;
+      }
+      await expect(li(2)).toHaveCount(0);
+      await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+      await expect(
+        history.getByText("This history isn't available to you.", {
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        history.getByRole("button", { name: "Full history", exact: true }),
+      ).toBeVisible();
+      expect(asked).toEqual([0, 200]);
+    });
+});
+
+// ---- WEB-10a revision 6 (R16, R17, R18; design assessment Q1, Q4, Q12–Q14) -------------------------------------------------------------
+
+const JOURNAL_GOAL = {
+  kind: "numeric",
+  minimum: "100000",
+  maximum: null,
+  unit: "cups",
+} as const;
+
+/**
+ * A journal of my quantity entries that can grow (a correction or a new entry appended, as the backend appends), paged 200 at a time by
+ * `sequence` as the contract's. Every answer is the journal AS DISPATCHED: the page is taken when the request arrives, so a request held
+ * while another tab commits answers with what was true when it was asked.
+ */
+function liveJournal(count: number) {
+  const at = Math.floor(Date.now() / 1000);
+  const id = (n: number) =>
+    `bbbbbbbb-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const make = (n: number, replaces: number | null) => ({
+    id: id(n),
+    sequence: n,
+    logical_order: replaces ?? n,
+    replaces: replaces === null ? null : id(replaces),
+    evidence: { kind: "quantity", amount: String(n) },
+    happened_at: at,
+    recorded_by: ACCOUNT,
+  });
+  let entries = Array.from({ length: count }, (_, i) => make(i + 1, null));
+  return {
+    id,
+    /** Appends one entry (a correction of `replaces`, or a new one); returns its number. */
+    append(replaces: number | null): number {
+      const n = entries.length + 1;
+      entries = [...entries, make(n, replaces)];
+      return n;
+    },
+    /** The stream's recent tail as the progress row carries it (the last eight). */
+    tail: () =>
+      entries.slice(-8).map((e) => ({
+        id: e.id,
+        evidence: e.evidence,
+        happened_at: e.happened_at,
+        recorded_by: e.recorded_by,
+      })),
+    count: () => entries.length,
+    pageAfter(after: number): string {
+      const rest = entries.filter((e) => e.sequence > after);
+      const items = rest.slice(0, 200);
+      return JSON.stringify({
+        entries: items,
+        next_after:
+          rest.length > 200
+            ? (items[items.length - 1]?.sequence ?? null)
+            : null,
+      });
+    },
+  };
+}
+type LiveJournal = ReturnType<typeof liveJournal>;
+
+/** The task's progress row (version 1) carrying the journal's recent tail. */
+function progressOf(task: BuiltTask, journal: LiveJournal) {
+  const progress = (
+    task.upserts as Array<{ resource: Record<string, unknown> }>
+  ).find((u) => u.resource.kind === "progress")?.resource as Record<
+    string,
+    unknown
+  >;
+  Object.assign(progress.value as object, {
+    recent_entries: journal.tail(),
+    entry_count: journal.count(),
+  });
+  return progress;
+}
+
+/**
+ * The journal endpoint for ONE page (`page.route`): records every `after` asked; `holdNext(match)` holds the next request it matches until
+ * `release()`; `refuseNext(status, code)` answers the next request with a valid Atlas error. The body is taken at dispatch.
+ */
+function journalRoute(journal: LiveJournal) {
+  const asked: number[] = [];
+  let holdIf: ((after: number) => boolean) | null = null;
+  const gates: Array<() => void> = [];
+  let refusal: { status: number; code: string } | null = null;
+  const handler = async (route: Route) => {
+    const after = Number(
+      new URL(route.request().url()).searchParams.get("after"),
+    );
+    asked.push(after);
+    const refused = refusal;
+    refusal = null;
+    const body =
+      refused === null
+        ? journal.pageAfter(after)
+        : JSON.stringify({
+            code: refused.code,
+            message: refused.code,
+            request_id: "e-t-rev6",
+            details: [],
+          });
+    if (holdIf?.(after) === true) {
+      holdIf = null;
+      await new Promise<void>((resolve) => gates.push(resolve));
+    }
+    await route
+      .fulfill({
+        status: refused?.status ?? 200,
+        contentType: "application/json",
+        body,
+      })
+      .catch(() => undefined);
+  };
+  return {
+    handler,
+    asked,
+    holdNext: (match: (after: number) => boolean) => {
+      holdIf = match;
+    },
+    held: () => gates.length,
+    release: () => {
+      for (const gate of gates.splice(0)) gate();
+    },
+    refuseNext: (status: number, code: string) => {
+      refusal = { status, code };
+    },
+  };
+}
+type JournalRoute = ReturnType<typeof journalRoute>;
+
+/** Commits version `version` of my progress stream (the journal's current tail) through the fixture leader of `writer`. */
+async function commitProgress(
+  writer: Page,
+  net: SyncStub,
+  progress: Record<string, unknown>,
+  journal: LiveJournal,
+  version: number,
+): Promise<void> {
+  await commitDelta(writer, net, version, [
+    {
+      kind: "upsert",
+      resource: {
+        ...progress,
+        version,
+        value: {
+          ...(progress.value as object),
+          recent_entries: journal.tail(),
+          entry_count: journal.count(),
+        },
+      },
+    },
+  ]);
+}
+
+/**
+ * Two real tabs over one database: B (`writer`, on the task list) holds the fixture leader that commits every sync page; A shows the task
+ * detail with the journal served by `route` on A alone. Both trees are settled before anything starts (a page that boots remounts the
+ * other's tree), then B's leader is started again (WEB-09a), so B's later commit is the only change A sees.
+ */
+async function twoTabs(
+  context: BrowserContext,
+  task: BuiltTask,
+  route: JournalRoute,
+  init?: () => void,
+): Promise<{ net: SyncStub; writer: Page; page: Page }> {
+  const net = await stubNetwork(context);
+  await serveIdentityReads(context);
+  await serveTaskReads(context);
+  await seedSettled(context);
+  const writer = await bootAt(context, "/tasks");
+  await cacheTasks(writer, net, [task]);
+  const page = await context.newPage();
+  if (init !== undefined) await page.addInitScript(init);
+  await page.route(
+    `**${API}/progress/${task.progressId}/entries?*`,
+    route.handler,
+  );
+  await page.goto(
+    `/__session?route=${encodeURIComponent(`/tasks/${task.taskId}?occurrence=${task.occurrenceId}`)}`,
+  );
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await expect(page.locator("[data-entry-history]")).toHaveAttribute(
+    "data-stream-version",
+    "1",
+  );
+  await untilTreeSettled(page);
+  await untilTreeSettled(writer);
+  await startLeader(writer);
+  await waitForState(writer, "idle");
+  return { net, writer, page };
+}
+
+/** My queued corrections (records) in this page's database, oldest first, with their bodies. */
+async function recordsOf(page: Page) {
+  const drafts = (await rowsOf(page, "drafts")) as Array<{
+    local_id: string;
+    kind: string;
+    created_seq: number;
+  }>;
+  const bodies = (await rowsOf(page, "draft_commands")) as Array<{
+    local_id: string;
+    command: { command: Record<string, unknown> };
+  }>;
+  return drafts
+    .filter((d) => d.kind === "record")
+    .sort((a, b) => a.created_seq - b.created_seq)
+    .map((d) => ({
+      localId: d.local_id,
+      command: bodies.find((b) => b.local_id === d.local_id)?.command.command,
+    }));
+}
+
+/** Keeps the React click handler of the open fix's Save (taken while it is enabled) as `window.__save`: a stale callback or programmatic activation. */
+async function takeSaveHandler(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const save = document.querySelector<HTMLButtonElement>(
+      "[data-fix-form] button",
+    );
+    if (save === null || save.disabled)
+      throw new Error("Save is not enabled when its handler is taken");
+    const key = Object.keys(save).find((k) => k.startsWith("__reactProps$"));
+    const props = (save as unknown as Record<string, { onClick?: unknown }>)[
+      key ?? ""
+    ];
+    if (typeof props?.onClick !== "function")
+      throw new Error("no Save handler");
+    (window as unknown as { __save: unknown }).__save = props.onClick;
+  });
+}
+const callSaveHandler = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __save: () => void }).__save());
+
+const FIX = { name: "Fix this entry", exact: true } as const;
+const SAVE = { name: "Save the fix", exact: true } as const;
+const VALUE = "New value (cups)";
+
+/**
+ * Holds the CONSUMPTION of one journal answer in this page (`__holdBody` = a URL fragment): the request is answered at once (its lease
+ * ends, so another tab's stamped calls go on), the answer is taken as received, and its body reaches the page only when `__heldBodies` are
+ * released. A request held in flight instead keeps a stamped request of this origin unresolved, and another tab's sync waits for it.
+ */
+const holdJournalBodyInit = (): void => {
+  const w = window as unknown as {
+    __holdBody?: string | null;
+    __heldBodies?: Array<() => void>;
+  };
+  w.__holdBody = null;
+  w.__heldBodies = [];
+  const real = window.fetch.bind(window);
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : String(input);
+    const response = await real(input, init);
+    const match = w.__holdBody;
+    if (typeof match !== "string" || !url.includes(match)) return response;
+    w.__holdBody = null;
+    const text = await response.text();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    w.__heldBodies?.push(release);
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        await gate;
+        controller.enqueue(new TextEncoder().encode(text));
+        controller.close();
+      },
+    });
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+};
+const heldBodies = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { __heldBodies: unknown[] }).__heldBodies.length,
+  );
+
+test.describe("E-T20: another tab commits a correction while this tab's check of the rest of the journal is held (A8, A14, A18; R18 of revision 6, Q12)", () => {
+  for (const committed of [false, true])
+    test(`committed=${committed}: ${committed ? "B commits a correction of entry 5 and A takes in version 2 before the old answer ('not corrected', taken at dispatch) is released: nothing opens, and a fresh Fix finds the correction" : "no commit (control): the released answer opens the fix and Save queues one"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 44,
+        title: "Journal two tabs",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(210);
+      const progress = progressOf(task, journal);
+      const route = journalRoute(journal);
+      const { net, writer, page } = await twoTabs(
+        context,
+        task,
+        route,
+        holdJournalBodyInit,
+      );
+      const history = page.locator("[data-entry-history]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      // The check's answer is taken at dispatch (version 1: "not corrected") and its consumption held in A.
+      await page.evaluate(() => {
+        (window as unknown as { __holdBody: string }).__holdBody =
+          "/entries?after=200";
+      });
+      await li(5).getByRole("button", FIX).click();
+      await expect.poll(() => heldBodies(page)).toBe(1);
+      expect(route.asked).toEqual([0, 200]);
+      if (committed) {
+        journal.append(5);
+        await commitProgress(writer, net, progress, journal, 2);
+        // Barriers: A's detail took in version 2, and A's window was read again at it, while the old check is still held.
+        await expect(history).toHaveAttribute("data-stream-version", "2", {
+          timeout: 10_000,
+        });
+        await expect(history).toHaveAttribute("data-journal-version", "2", {
+          timeout: 10_000,
+        });
+        await expect(history).toHaveAttribute("data-journal-requests", "1");
+      }
+      await page.evaluate(() => {
+        for (const release of (
+          window as unknown as { __heldBodies: Array<() => void> }
+        ).__heldBodies.splice(0))
+          release();
+      });
+      // Completion barrier: the held answer has been taken in.
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      if (!committed) {
+        await expect(page.getByLabel(VALUE, { exact: true })).toHaveValue("5");
+        await page.getByRole("button", SAVE).click();
+        await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+        expect(await recordsOf(page)).toHaveLength(1);
+        expect(route.asked).toEqual([0, 200]);
+        return;
+      }
+      await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+      expect(route.asked).toEqual([0, 200, 0]);
+      await li(5).getByRole("button", FIX).click();
+      await expect.poll(() => route.asked.length).toBe(4);
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      await expect(li(5)).toContainText("Corrected");
+      await expect(page.locator("[data-fix-form]")).toHaveCount(0);
+      expect(await recordsOf(page)).toHaveLength(0);
+    });
+});
+
+test.describe("E-T21: another tab commits while this tab's fix is open and its history is read again (A8, A14, A18; R17/R18 of revision 6, Q5, Q12)", () => {
+  for (const change of ["correction", "unrelated"] as const)
+    test(`${change}: while A's re-read at version 2 is held, Save waits and a stale Save handler queues nothing; answered, ${change === "correction" ? "the fix is blocked for good with 987 kept" : "Save queues 987 once"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 45,
+        title: "Journal open fix",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(20);
+      const progress = progressOf(task, journal);
+      const route = journalRoute(journal);
+      const { net, writer, page } = await twoTabs(context, task, route);
+      const history = page.locator("[data-entry-history]");
+      const form = page.locator("[data-fix-form]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      const input = page.getByLabel(VALUE, { exact: true });
+      const save = page.getByRole("button", SAVE);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      await li(5).getByRole("button", FIX).click();
+      await input.fill("987");
+      await expect(save).toBeEnabled();
+      await takeSaveHandler(page);
+      route.holdNext((after) => after === 0);
+      journal.append(change === "correction" ? 5 : null);
+      await commitProgress(writer, net, progress, journal, 2);
+      await expect(history).toHaveAttribute("data-stream-version", "2", {
+        timeout: 10_000,
+      });
+      await expect.poll(() => route.held()).toBe(1);
+      await expect(save).toBeDisabled();
+      await expect(form).toContainText(
+        "This fix can be saved once the full history is up to date.",
+      );
+      await callSaveHandler(page);
+      route.release();
+      await expect(history).toHaveAttribute("data-journal-version", "2");
+      await expect(history).toHaveAttribute("data-journal-requests", "0");
+      await expect(input).toHaveValue("987");
+      expect(route.asked).toEqual([0, 0]);
+      if (change === "correction") {
+        await expect(li(5)).toContainText("Corrected");
+        await expect(save).toBeDisabled();
+        await expect(form).toContainText(
+          "This entry has been corrected since. Fix its correction instead.",
+        );
+        expect(await recordsOf(page)).toHaveLength(0);
+        return;
+      }
+      await expect(save).toBeEnabled();
+      expect(await recordsOf(page)).toHaveLength(0);
+      await save.click();
+      await expect(form).toHaveCount(0);
+      const records = await recordsOf(page);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.command).toMatchObject({
+        replaces: journal.id(5),
+        evidence: { kind: "quantity", amount: "987" },
+      });
+    });
+});
+
+/**
+ * Holds every `data_changed` hint that reaches this page on `atlas-sync` while `__holdHints` is set (the channel's `onmessage`, which the
+ * data layer assigns per channel), counting them; `__hintsHeld` delivers each later. Dexie's own cross-tab notification is NOT held.
+ */
+const holdSyncHintsInit = (): void => {
+  const desc = Object.getOwnPropertyDescriptor(
+    BroadcastChannel.prototype,
+    "onmessage",
+  );
+  const get = desc?.get;
+  const set = desc?.set;
+  if (get === undefined || set === undefined) return;
+  const w = window as unknown as {
+    __holdHints?: boolean;
+    __hintsHeld?: Array<() => void>;
+  };
+  w.__hintsHeld = [];
+  Object.defineProperty(BroadcastChannel.prototype, "onmessage", {
+    configurable: true,
+    enumerable: desc?.enumerable ?? true,
+    get() {
+      return get.call(this);
+    },
+    set(fn: unknown) {
+      const channel = this as BroadcastChannel;
+      if (typeof fn !== "function" || channel.name !== "atlas-sync") {
+        set.call(this, fn);
+        return;
+      }
+      set.call(this, (event: MessageEvent) => {
+        if (
+          w.__holdHints === true &&
+          (event.data as { type?: string } | null)?.type === "data_changed"
+        ) {
+          w.__hintsHeld?.push(() => fn.call(channel, event));
+          return;
+        }
+        return fn.call(channel, event);
+      });
+    },
+  });
+};
+
+test.describe("E-T22: the other tab's hint arrives late and twice (A8, A18; R18 of revision 6, Q13)", () => {
+  test("B commits a correction of entry 5 while A holds its hints; A takes in version 2 from the store (whether before the hint is recorded); the late, duplicated hints bring no old facts back; an explicit Refresh ends on version 2's facts", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 46,
+      title: "Journal late hint",
+      goal: JOURNAL_GOAL,
+    });
+    const journal = liveJournal(20);
+    const progress = progressOf(task, journal);
+    const route = journalRoute(journal);
+    const { net, writer, page } = await twoTabs(
+      context,
+      task,
+      route,
+      holdSyncHintsInit,
+    );
+    const history = page.locator("[data-entry-history]");
+    const form = page.locator("[data-fix-form]");
+    const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+    const input = page.getByLabel(VALUE, { exact: true });
+    const save = page.getByRole("button", SAVE);
+    await page
+      .getByRole("button", { name: "Full history", exact: true })
+      .click();
+    await expect(history).toHaveAttribute("data-journal-version", "1");
+    await li(5).getByRole("button", FIX).click();
+    await input.fill("987");
+    await page.evaluate(() => {
+      (window as unknown as { __holdHints: boolean }).__holdHints = true;
+    });
+    journal.append(5);
+    await commitProgress(writer, net, progress, journal, 2);
+    // B's engine posts a content-free hint after its commit: A holds it (precondition).
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __hintsHeld: unknown[] }).__hintsHeld
+                .length,
+          ),
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThanOrEqual(1);
+    // Observed, not assumed: did A take in version 2 through the store's own notification while the hint was held? (bounded look)
+    const beforeHint = await page
+      .waitForFunction(
+        () =>
+          document
+            .querySelector("[data-entry-history]")
+            ?.getAttribute("data-stream-version") === "2",
+        undefined,
+        { timeout: 5_000 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+    test.info().annotations.push({
+      type: "version 2 taken in while the hint was held",
+      description: String(beforeHint),
+    });
+    // The held hints, delivered late and each twice.
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __holdHints: boolean;
+        __hintsHeld: Array<() => void>;
+      };
+      w.__holdHints = false;
+      for (const deliver of w.__hintsHeld.splice(0)) {
+        deliver();
+        deliver();
+      }
+    });
+    await expect(history).toHaveAttribute("data-stream-version", "2", {
+      timeout: 10_000,
+    });
+    await expect(history).toHaveAttribute("data-journal-version", "2", {
+      timeout: 10_000,
+    });
+    await expect(history).toHaveAttribute("data-journal-requests", "0");
+    // The authoritative re-read.
+    await history.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(() => route.asked.length).toBe(3);
+    await expect(history).toHaveAttribute("data-journal-requests", "0");
+    await expect(history).toHaveAttribute("data-journal-version", "2");
+    expect(route.asked).toEqual([0, 0, 0]);
+    await expect(li(5)).toContainText("Corrected");
+    await expect(save).toBeDisabled();
+    await expect(form).toContainText(
+      "This entry has been corrected since. Fix its correction instead.",
+    );
+    await expect(input).toHaveValue("987");
+    expect(await recordsOf(page)).toHaveLength(0);
+  });
+});
+
+test.describe("E-T23: a refusal that remounts the protected tree, and a hard reload, end the journal's transient state; the queued correction stays (A8, A13, A14; R18 of revision 6, Q14)", () => {
+  for (const how of ["not_found", "forbidden", "reload"] as const)
+    test(`${how === "not_found" ? "a 404 on Refresh (mounted retention control): the same history; Fix 5 reopens on the parked 987" : how === "forbidden" ? "a 403 on Refresh remounts the protected tree: a new history, no editor; Fix 5 reopens on the parked 987 (the same visit)" : "a hard reload: a new history, no editor; Fix 5 opens on its own value"}; the queued fix of entry 6 keeps its id and body and nothing more is queued`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 47,
+        title: "Journal lifetimes",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(20);
+      progressOf(task, journal);
+      const route = journalRoute(journal);
+      const url = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+      const { page } = await setup(context, url, [task]);
+      await page.route(
+        `**${API}/progress/${task.progressId}/entries?*`,
+        route.handler,
+      );
+      const history = page.locator("[data-entry-history]");
+      const form = page.locator("[data-fix-form]");
+      const li = (n: number) => page.locator(`[data-entry="${journal.id(n)}"]`);
+      const input = page.getByLabel(VALUE, { exact: true });
+      const full = page.getByRole("button", {
+        name: "Full history",
+        exact: true,
+      });
+      await full.click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      // A durable queued correction of entry 6.
+      await li(6).getByRole("button", FIX).click();
+      await input.fill("66");
+      await page.getByRole("button", SAVE).click();
+      await expect(form).toHaveCount(0);
+      const queued = await recordsOf(page);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]?.command).toMatchObject({
+        replaces: journal.id(6),
+        evidence: { kind: "quantity", amount: "66" },
+      });
+      // An open fix of entry 5 with unsaved input.
+      await li(5).getByRole("button", FIX).click();
+      await input.fill("987");
+      await page.evaluate(() => {
+        const h = document.querySelector("[data-entry-history]") as
+          | (Element & { __mark?: boolean })
+          | null;
+        if (h !== null) h.__mark = true;
+      });
+      if (how === "reload") {
+        await page.goto(`/__session?route=${encodeURIComponent(url)}`);
+        await page.waitForFunction(
+          () => window.__atlasFixture?.session?.booted !== undefined,
+        );
+        await page.evaluate(() => window.__atlasFixture?.session?.ready);
+      } else {
+        route.refuseNext(how === "forbidden" ? 403 : 404, how);
+        await history
+          .getByRole("button", { name: "Refresh", exact: true })
+          .click();
+      }
+      if (how === "not_found") {
+        await expect(
+          history.getByText("This history isn't available to you.", {
+            exact: true,
+          }),
+        ).toBeVisible();
+        expect(
+          await page.evaluate(
+            () =>
+              (
+                document.querySelector("[data-entry-history]") as
+                  | (Element & { __mark?: boolean })
+                  | null
+              )?.__mark === true,
+          ),
+        ).toBe(true);
+      } else {
+        // Barrier: a NEW history node (the protected tree remounted, or the document was replaced).
+        await page.waitForFunction(
+          () => {
+            const h = document.querySelector("[data-entry-history]") as
+              | (Element & { __mark?: boolean })
+              | null;
+            return h !== null && h.__mark !== true;
+          },
+          undefined,
+          { timeout: 15_000 },
+        );
+      }
+      await expect(form).toHaveCount(0);
+      await expect(
+        page.getByRole("heading", { name: "Recent entries", exact: true }),
+      ).toBeVisible();
+      expect(await recordsOf(page)).toEqual(queued);
+      // An explicit Full history begins afresh.
+      await full.click();
+      await expect(history).toHaveAttribute("data-journal-version", "1");
+      await li(5).getByRole("button", FIX).click();
+      // REVISION 22 ADAPTATION (Review 22 R34 / design assessment DA22-I2, invariant 5: a remount at the same address continues the
+      // logical visit, which owns the person's unsaved input). Until revision 21 the 403 case asserted "5": the protected tree's remount
+      // dropped the parked draft. Its intent (R18 / Q12-Q13: the remount discards transient journal AUTHORITY, keeps durable queued work
+      // and submits nothing) is asserted above: a new history node, no editor open, Recent entries, the walk begun afresh by an explicit
+      // Full history, the queued fix of entry 6 unchanged. The raw 987 is now kept as the mounted 404 control keeps it; a reload (a new
+      // document, no page memory) still opens on "5". Original: .agtx/evidence/web10a-revision-22/adaptations/E-T23-before-revision-22.
+      await expect(input).toHaveValue(how === "reload" ? "5" : "987");
+      expect(await recordsOf(page)).toEqual(queued);
+    });
+});
+
+test.describe("E-T24: what was typed for a fix survives every closure of the full history (A8, A14; R16 of revision 6, Q1; review 6's witness)", () => {
+  for (const how of ["back", "refusal"] as const)
+    for (const cycles of [1, 2])
+      test(`${how}, ${cycles} ${cycles === 1 ? "closure" : "closures"}: 987 typed once is there after reopening each time`, async ({
+        context,
+      }) => {
+        const task = buildTask({
+          n: 48,
+          title: "Journal restored input",
+          goal: JOURNAL_GOAL,
+        });
+        const journal = liveJournal(20);
+        progressOf(task, journal);
+        const route = journalRoute(journal);
+        const { page } = await setup(
+          context,
+          `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+          [task],
+        );
+        await page.route(
+          `**${API}/progress/${task.progressId}/entries?*`,
+          route.handler,
+        );
+        const history = page.locator("[data-entry-history]");
+        const input = page.getByLabel(VALUE, { exact: true });
+        const reopen = async () => {
+          await page
+            .getByRole("button", { name: "Full history", exact: true })
+            .click();
+          await page
+            .locator(`[data-entry="${journal.id(5)}"]`)
+            .getByRole("button", FIX)
+            .click();
+          await expect(history).toHaveAttribute("data-journal-requests", "0");
+        };
+        await reopen();
+        await expect(input).toHaveValue("5");
+        await input.fill("987");
+        for (let i = 0; i < cycles; i += 1) {
+          if (how === "back")
+            await page
+              .getByRole("button", {
+                name: "Back to recent entries",
+                exact: true,
+              })
+              .click();
+          else {
+            route.refuseNext(404, "not_found");
+            await history
+              .getByRole("button", { name: "Refresh", exact: true })
+              .click();
+            await expect(
+              history.getByText("This history isn't available to you.", {
+                exact: true,
+              }),
+            ).toBeVisible();
+          }
+          await expect(history.locator("[data-fix-form]")).toHaveCount(0);
+          await reopen();
+          await expect(input).toHaveValue("987");
+        }
+        expect(await recordsOf(page)).toHaveLength(0);
+      });
+});
+
+test.describe("E-T25: offline, a fix known only from the full history waits; a recent entry's fix is saved (A8, A14; R17 of revision 6, Q4; review 6's witness)", () => {
+  for (const mode of ["online-full", "offline-full", "offline-recent"] as const)
+    test(`${mode}: ${mode === "offline-full" ? "Save waits with its reason, a stale Save handler queues nothing, 987 kept" : "Save queues one record"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 49,
+        title: "Journal save authority",
+        goal: JOURNAL_GOAL,
+      });
+      const journal = liveJournal(20);
+      progressOf(task, journal);
+      const route = journalRoute(journal);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await page.route(
+        `**${API}/progress/${task.progressId}/entries?*`,
+        route.handler,
+      );
+      const form = page.locator("[data-fix-form]");
+      const input = page.getByLabel(VALUE, { exact: true });
+      const save = page.getByRole("button", SAVE);
+      await page
+        .getByRole("button", { name: "Full history", exact: true })
+        .click();
+      await page
+        .locator(
+          `[data-entry="${journal.id(mode === "offline-recent" ? 20 : 5)}"]`,
+        )
+        .getByRole("button", FIX)
+        .click();
+      await input.fill("987");
+      await expect(save).toBeEnabled();
+      await takeSaveHandler(page);
+      if (mode !== "online-full") {
+        await goOfflineAtBoundary(page);
+        await expect(
+          page.getByText("The full history needs a connection.", {
+            exact: true,
+          }),
+        ).toBeVisible();
+      }
+      if (mode === "offline-full") {
+        await expect(save).toBeDisabled();
+        await expect(form).toContainText(
+          "This fix can be saved once you're online again.",
+        );
+        await callSaveHandler(page);
+        await expect(input).toHaveValue("987");
+        await expect(form).toHaveCount(1);
+        expect(await recordsOf(page)).toHaveLength(0);
+        return;
+      }
+      await save.click();
+      await expect(form).toHaveCount(0);
+      const records = await recordsOf(page);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.command).toMatchObject({
+        replaces: journal.id(mode === "offline-recent" ? 20 : 5),
+        evidence: { kind: "quantity", amount: "987" },
+      });
+    });
+});
+
+// ---- revision 7 (review 7 of 15 October 2026, R19) ----------------------------------------------------------------------------------
+
+/**
+ * E-T26 (R19, design assessment P10): the queue's conflict dialog for a version-checked "Mark done", through the PRODUCTION tree, data
+ * env and task registration. `GET /progress?parent_id=<occurrence>` is served as the released endpoint pages it (ids in order, 200 a page,
+ * the last id of a full page as `next_after`), with 200 other streams before mine: mine is on the SECOND page. The dialog's "Currently
+ * saved" is my stream at version 7, and "Resend as a new operation" queues ONE replacement on 7 (sent with a new key). Control: a
+ * collection that ends without mine is a failed read, and nothing is queued. A reload keeps the durable operation, sends nothing by
+ * itself, and the reopened dialog walks again from the first page.
+ */
+test.describe("E-T26: the conflict dialog finds my stream on a later page of /progress (A10, A14, A17; R19 of revision 7)", () => {
+  const others = Array.from(
+    { length: 200 },
+    (_, i) =>
+      `00000000-0000-4000-8000-${(i + 1).toString(16).padStart(12, "0")}`,
+  );
+  async function conflictOnSync(
+    context: BrowserContext,
+    n: number,
+    mine: "second-page" | "absent",
+  ) {
+    const a = buildTask({ n, title: "Brush your teeth" });
+    // A precondition of the arrangement: every other stream comes BEFORE mine in the endpoint's order.
+    expect(others.every((id) => id < a.progressId)).toBe(true);
+    const { page, net } = await setup(context, todayRoute(), [a]);
+    // Served AFTER the stub and the task reads (a later route wins), before the dialog that asks for it.
+    const asked: Array<string | null> = [];
+    await context.route(
+      (url) => url.pathname === `${API}/progress`,
+      async (route) => {
+        const url = new URL(route.request().url());
+        const after = url.searchParams.get("after");
+        asked.push(after);
+        expect(url.searchParams.get("parent_id")).toBe(a.occurrenceId);
+        expect(url.searchParams.get("limit")).toBe("200");
+        const all = [...others, ...(mine === "absent" ? [] : [a.progressId])];
+        const items = all
+          .filter((id) => after === null || id > after)
+          .slice(0, 200);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: items.map((id) => ({
+              id,
+              kind: "progress",
+              parent_id: a.occurrenceId,
+              label: id === a.progressId ? "My progress, as saved" : "Other",
+              value: {},
+              version: 7,
+              can_edit: id === a.progressId,
+            })),
+            next_after: items.length === 200 ? items.at(-1) : null,
+          }),
+        });
+      },
+    );
+    await goOfflineAtBoundary(page);
+    await rowOf(page, a.occurrenceId)
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    // Meanwhile my stream moved on the server: the record is refused on its version.
+    net.commandScript.push(() => conflict("conflict"));
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => [d.kind, d.status]))
+      .toEqual([["record", "version_conflict"]]);
+    await navigateInApp(page, "/sync?tab=conflicts");
+    return { a, page, net, asked };
+  }
+  const openDetails = async (page: Page) => {
+    await page
+      .getByRole("button", { name: /^Details: Progress entry/ })
+      .click({ timeout: 30_000 });
+    return page.getByRole("dialog");
+  };
+
+  test("mine on the second page: version 7 is shown, and the replacement is queued and sent on 7", async ({
+    context,
+  }) => {
+    const { a, page, net, asked } = await conflictOnSync(
+      context,
+      60,
+      "second-page",
+    );
+    const dialog = await openDetails(page);
+    const current = dialog.locator('[data-compare="current"]');
+    await expect(current).toContainText("My progress, as saved");
+    await expect(current).toContainText("version 7");
+    expect(asked).toEqual([null, others[199]]);
+    await dialog
+      .getByRole("button", { name: "Resend as a new operation" })
+      .click();
+    await expect(dialog).toHaveCount(0);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => [d.kind, d.status]))
+      .toEqual([["record", "queued"]]);
+    await send(page);
+    await expect.poll(() => net.commands.length).toBe(2);
+    const [first, resent] = net.commands.map(
+      (c) =>
+        (JSON.parse(c.body) as { command: Record<string, unknown> }).command,
+    );
+    expect(resent).toMatchObject({
+      kind: "record",
+      occurrence_id: a.occurrenceId,
+      expected_version: 7,
+      evidence: { kind: "checkbox", complete: true },
+    });
+    expect(resent?.entry_id).not.toBe(first?.entry_id);
+    expect(net.commands[1]?.key).not.toBe(net.commands[0]?.key);
+  });
+
+  test("control: a collection that ends without mine is a failed read; nothing is queued", async ({
+    context,
+  }) => {
+    const { page, net, asked } = await conflictOnSync(context, 61, "absent");
+    const dialog = await openDetails(page);
+    await expect(dialog.locator('[data-compare="current"]')).toContainText(
+      "Couldn't load the current state of this item to compare.",
+    );
+    // The first page was full, so the end was established by the second (empty) page.
+    expect(asked).toEqual([null, others[199]]);
+    await expect(
+      dialog.getByRole("button", { name: "Resend as a new operation" }),
+    ).toBeDisabled();
+    expect((await draftsOf(page)).map((d) => d.status)).toEqual([
+      "version_conflict",
+    ]);
+    expect(net.commands).toHaveLength(1);
+  });
+
+  test("closed, the page reloaded: the operation is kept and nothing is sent by itself; reopened, the dialog walks again from the first page", async ({
+    context,
+  }) => {
+    const { page, net, asked } = await conflictOnSync(
+      context,
+      62,
+      "second-page",
+    );
+    const [queued] = await draftsOf(page);
+    if (queued === undefined) throw new Error("setup: no queued operation");
+    // The dialog names the durable operation by its reference (the first eight hex digits of its local id, as `xxxx-xxxx`).
+    const hex = queued.local_id.replace(/-/g, "").slice(0, 8);
+    const reference = `ref ${hex.slice(0, 4)}-${hex.slice(4)}`;
+    let dialog = await openDetails(page);
+    await expect(dialog.locator('[data-compare="current"]')).toContainText(
+      "version 7",
+    );
+    await expect(dialog).toContainText(reference);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    // A reload: nothing of this page's memory survives; the queued operation does.
+    await page.goto(
+      `/__session?route=${encodeURIComponent("/sync?tab=conflicts")}`,
+    );
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await page.waitForFunction(() => window.__atlasData !== undefined);
+    await expect(page.getByRole("tab", { selected: true })).toHaveText(
+      /Needs a decision · 1/,
+      { timeout: 30_000 },
+    );
+    asked.length = 0;
+    dialog = await openDetails(page);
+    await expect(dialog.locator('[data-compare="current"]')).toContainText(
+      "version 7",
+    );
+    await expect(dialog).toContainText(reference);
+    expect(asked).toEqual([null, others[199]]);
+    // Nothing was sent or queued by itself: the one refused send, still the one operation needing a decision.
+    expect(net.commands).toHaveLength(1);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("tab", { selected: true })).toHaveText(
+      /Needs a decision · 1/,
+    );
+  });
+});
+
+/** Every upsert of `kinds` made read-only for me (`can_edit: false`), as a viewer's sync page carries it. */
+function readOnly(task: BuiltTask, kinds: readonly string[]): BuiltTask {
+  for (const u of task.upserts as Array<{
+    resource: { kind: string; can_edit: boolean };
+  }>)
+    if (kinds.includes(u.resource.kind)) u.resource.can_edit = false;
+  return task;
+}
+
+test.describe("E-T35: Today names the viewer only when they take part (A1; R28 of revision 15)", () => {
+  // Review 15's witness, maintained: a shared occurrence I can see but whose roster does not name me (no stream of mine, no edit) says how
+  // many take part, never "You and 1 other". The enrolled viewer is the control. Real IndexedDB through the production data controller.
+  for (const participation of ["everyone", "pooled", "anyone"] as const)
+    test(`${participation}: a viewer off the roster is not named as You`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 59,
+        title: "Shared view only",
+        participation,
+        stream: false,
+        ...(participation === "pooled"
+          ? {
+              goal: {
+                kind: "numeric",
+                minimum: "1",
+                maximum: null,
+                unit: "items",
+              },
+            }
+          : {}),
+      });
+      task.data.participants = [OTHER];
+      readOnly(task, ["task", "execution", "occurrence"]);
+      const { page } = await setup(context, todayRoute(), [task]);
+      await goOfflineAtBoundary(page);
+      const row = rowOf(page, task.occurrenceId);
+      await expect(row).toBeVisible();
+      await expect(row).toContainText("1 person");
+      expect(await row.textContent()).not.toContain("You");
+    });
+
+  test("control: an enrolled viewer is You and the others", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 60,
+      title: "Shared and joined",
+      participation: "everyone",
+    });
+    task.data.participants = [ACCOUNT, OTHER];
+    const { page } = await setup(context, todayRoute(), [task]);
+    await goOfflineAtBoundary(page);
+    await expect(rowOf(page, task.occurrenceId)).toContainText(
+      "You and 1 other",
+    );
+  });
+});
+
+test.describe("E-T36: a known denial of the task or its details admits no revision (A11; R29 of revision 15)", () => {
+  // Review 15's witnesses, maintained: offline, with the task, its details or both read-only for me, the detail offers no Edit link and
+  // the direct edit route withholds Save (the button, and Enter in the Name field); nothing is queued and the typed name stays. The
+  // permitted editor is the control: exactly one revise_task.
+  for (const denied of [["task"], ["execution"], ["task", "execution"]])
+    test(`denied ${denied.join(" and ")}: no Edit link, the direct route queues nothing, the typed name stays`, async ({
+      context,
+    }) => {
+      const task = readOnly(
+        buildTask({
+          n: 61,
+          title: "Partial permission",
+          participation: "everyone",
+          stream: false,
+        }),
+        denied,
+      );
+      task.data.participants = [OTHER];
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await goOfflineAtBoundary(page);
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      await expect(
+        page.getByRole("link", { name: "Edit task", exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: "Edit task", exact: true }),
+      ).toBeDisabled();
+      await navigateInApp(page, `/tasks/${task.taskId}/edit`);
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      const name = page.getByLabel("Name", { exact: true });
+      await name.fill("Not authorised to revise");
+      const save = page.getByRole("button", { name: "Save", exact: true });
+      await expect(save).toBeDisabled();
+      await name.press("Enter");
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      await expect(name).toHaveValue("Not authorised to revise");
+      expect(
+        (await draftsOf(page)).filter((d) => d.kind === "revise_task"),
+      ).toHaveLength(0);
+    });
+
+  test("control: an editor of both queues exactly one revision offline", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 62,
+      title: "Permission test",
+      participation: "everyone",
+    });
+    const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [task]);
+    await goOfflineAtBoundary(page);
+    await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+    await page.getByLabel("Name", { exact: true }).fill("Renamed by editor");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    expect(
+      (await draftsOf(page)).filter((d) => d.kind === "revise_task"),
+    ).toHaveLength(1);
+  });
+});
+
+/**
+ * A denial of `id` committed by ANOTHER TAB of the same origin through its own connection to the account's real IndexedDB (revision 16, S4,
+ * S8): the cache row as stored, with `can_edit: false`. The page under test is not told (no sync page, no channel hint), so its screens
+ * still offer the save; only the writing transaction can see the denial. The other tab is a static asset of the origin (no app boots).
+ */
+async function denyFromAnotherTab(
+  context: BrowserContext,
+  id: string,
+): Promise<void> {
+  const other = await context.newPage();
+  await other.goto("/favicon.svg");
+  const done = await other.evaluate(
+    ({ name, id }) =>
+      new Promise<string>((resolve) => {
+        const open = indexedDB.open(name);
+        open.onerror = () => resolve(`open: ${String(open.error)}`);
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("cache", "readwrite");
+          const store = tx.objectStore("cache");
+          const read = store.get(id);
+          read.onsuccess = () => {
+            if (read.result === undefined) resolve("absent");
+            else store.put({ ...read.result, can_edit: false });
+          };
+          tx.oncomplete = () => {
+            db.close();
+            resolve("committed");
+          };
+          tx.onerror = () => resolve(`tx: ${String(tx.error)}`);
+        };
+      }),
+    { name: `atlas-${ACCOUNT}`, id },
+  );
+  await other.close();
+  expect(done).toBe("committed");
+}
+
+test.describe("E-T37: a known denial of the occurrence admits no correction (A9; R30 of revision 16)", () => {
+  // Review 16's witnesses, maintained, with the retention they did not reach: read-only occurrence, a denial arriving while the dialog is
+  // open, a denial that arrives with the newer version a conflicted correction waits for, and a denial another tab committed after the
+  // screen offered the save (refused by the writing transaction). The permitted editor is the control of each.
+  const correctable = (n: number, canEdit: boolean) => {
+    const task = buildTask({
+      n,
+      title: "Occurrence permission",
+      participation: "everyone",
+    });
+    return canEdit ? task : readOnly(task, ["occurrence"]);
+  };
+  const correctThisDay = (page: Page) =>
+    page.getByRole("button", { name: "Correct this day", exact: true });
+  const closeDays = (page: Page) =>
+    page.getByLabel("How long it stays open (days)", { exact: true });
+  const saveCorrection = (page: Page) =>
+    page.getByRole("button", { name: "Save correction", exact: true });
+  const corrections = async (page: Page) =>
+    (await draftsOf(page)).filter((d) => d.kind === "revise_occurrence");
+
+  test("read-only occurrence: Correct this day is withheld; nothing is queued", async ({
+    context,
+  }) => {
+    const task = correctable(70, false);
+    const { page } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await goOfflineAtBoundary(page);
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    await expect(correctThisDay(page)).toBeDisabled();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await corrections(page)).toHaveLength(0);
+  });
+
+  test("control: an editor queues exactly one correction offline", async ({
+    context,
+  }) => {
+    const task = correctable(71, true);
+    const { page } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await goOfflineAtBoundary(page);
+    await correctThisDay(page).click();
+    await closeDays(page).fill("3");
+    await saveCorrection(page).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await corrections(page)).toHaveLength(1);
+  });
+
+  test("the permission lost while the dialog is open: Save is withheld, the dialog and the typed value stay, nothing is queued", async ({
+    context,
+  }) => {
+    const task = correctable(72, true);
+    const { page, net } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await correctThisDay(page).click();
+    await closeDays(page).fill("3");
+    const occ = (
+      task.upserts as Array<{ resource: { kind: string; version: number } }>
+    ).find((u) => u.resource.kind === "occurrence") as {
+      resource: Record<string, unknown>;
+    };
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              ...occ,
+              resource: { ...occ.resource, version: 2, can_edit: false },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await startLeader(page);
+    await waitForState(page, "idle");
+    await expect(saveCorrection(page)).toBeDisabled();
+    await goOfflineAtBoundary(page);
+    await expect(page.getByRole("dialog")).toHaveCount(1);
+    await expect(closeDays(page)).toHaveValue("3");
+    expect(await corrections(page)).toHaveLength(0);
+  });
+
+  for (const denied of [false, true])
+    test(`${denied ? "another tab committed a denial" : "control: nothing committed in between"} after the dialog offered Save: ${denied ? "the transaction refuses it, the dialog keeps the input" : "the correction is queued once"}`, async ({
+      context,
+    }) => {
+      const task = correctable(denied ? 73 : 74, true);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await goOfflineAtBoundary(page);
+      await correctThisDay(page).click();
+      await closeDays(page).fill("4");
+      if (denied) await denyFromAnotherTab(context, task.occurrenceId);
+      await expect(saveCorrection(page)).toBeEnabled();
+      await saveCorrection(page).click();
+      if (denied) {
+        await expect(
+          page.getByText("You can't change this. Nothing was saved.", {
+            exact: true,
+          }),
+        ).toHaveCount(1);
+        await expect(page.getByRole("dialog")).toHaveCount(1);
+        await expect(closeDays(page)).toHaveValue("4");
+        expect(await corrections(page)).toHaveLength(0);
+      } else {
+        await expect(page.getByRole("dialog")).toHaveCount(0);
+        expect(await corrections(page)).toHaveLength(1);
+      }
+    });
+
+  const conflict = () => ({
+    status: 409,
+    body: JSON.stringify({
+      code: "conflict",
+      message: "The item changed",
+      details: [],
+      request_id: "11111111-1111-4111-8111-111111111111",
+    }),
+  });
+  /** A correction refused `409 conflict`, then version 2 (with `canEdit`) delivered: the conflict block waits for "Save mine". */
+  async function conflicted(
+    context: BrowserContext,
+    n: number,
+    canEdit: boolean,
+  ) {
+    const task = correctable(n, true);
+    const { page, net } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await goOfflineAtBoundary(page);
+    await correctThisDay(page).click();
+    await closeDays(page).fill("3");
+    await saveCorrection(page).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    net.commandScript.push(conflict);
+    await goOnlineAtBoundary(page);
+    await send(page);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.status))
+      .toEqual(["version_conflict"]);
+    const occ = (task.upserts as Array<{ resource: { kind: string } }>).find(
+      (u) => u.resource.kind === "occurrence",
+    ) as {
+      resource: Record<string, unknown>;
+    };
+    net.script.push(() => ({
+      status: 200,
+      body: pageText(
+        [
+          [
+            {
+              ...occ,
+              resource: { ...occ.resource, version: 2, can_edit: canEdit },
+            },
+          ],
+        ],
+        "cursor-2",
+      ),
+    }));
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect
+      .poll(
+        async () =>
+          (
+            (await page.evaluate(
+              (acct) => window.__atlasData?.rows(acct, "cache"),
+              ACCOUNT,
+            )) as Array<{ id: string; version: number }>
+          ).find((r) => r.id === task.occurrenceId)?.version,
+      )
+      .toBe(2);
+    await goOfflineAtBoundary(page);
+    const block = page.locator("[data-correction-conflict]");
+    await expect(block).toBeVisible();
+    const before = JSON.stringify({
+      drafts: await draftsOf(page),
+      bodies: await bodiesOf(page),
+    });
+    return { page, task, block, before };
+  }
+  const saveMine = (block: ReturnType<Page["locator"]>) =>
+    block.getByRole("button", {
+      name: "Save mine on the current version",
+      exact: true,
+    });
+
+  test("a denial delivered with the newer version: Save mine is withheld; the conflicted correction stays as it was", async ({
+    context,
+  }) => {
+    const { page, block, before } = await conflicted(context, 75, false);
+    await expect(saveMine(block)).toBeDisabled();
+    expect(
+      JSON.stringify({
+        drafts: await draftsOf(page),
+        bodies: await bodiesOf(page),
+      }),
+    ).toBe(before);
+  });
+
+  test("control: an editor's Save mine replaces it with one queued correction on version 2", async ({
+    context,
+  }) => {
+    const { page, block } = await conflicted(context, 76, true);
+    await saveMine(block).click();
+    await expect(block).toHaveCount(0);
+    const queued = (await corrections(page)).filter(
+      (d) => d.status === "queued",
+    );
+    expect(queued).toHaveLength(1);
+    const body = (await bodiesOf(page)).find(
+      (b) => b.local_id === queued[0]?.local_id,
+    )?.command.command;
+    expect(body?.expected_version).toBe(2);
+  });
+
+  test("another tab committed a denial after Save mine was offered: the replacement is refused, the conflicted correction and the block stay, with the reason", async ({
+    context,
+  }) => {
+    const { page, task, block, before } = await conflicted(context, 77, true);
+    await denyFromAnotherTab(context, task.occurrenceId);
+    await expect(saveMine(block)).toBeEnabled();
+    await saveMine(block).click();
+    await expect(block.locator("[data-correction-replace-failed]")).toHaveText(
+      "You can't correct this day any more. Your saved correction stays until you discard it.",
+    );
+    expect(
+      JSON.stringify({
+        drafts: await draftsOf(page),
+        bodies: await bodiesOf(page),
+      }),
+    ).toBe(before);
+  });
+});
+
+test.describe("E-T38: an untouched time keeps its seconds (A7, A9; R31 of revision 16)", () => {
+  // Review 16's witnesses, maintained: a task and an occurrence at 07:30:45 whose name, or open window, alone is changed queue the whole
+  // time; 07:30:00 is the control; an explicit time edit queues the chosen minute.
+  const timed = (n: number, seconds: string) =>
+    buildTask({
+      n,
+      title: "Keep my time",
+      time: `07:30:${seconds}`,
+      instant: Math.floor(Date.parse(`${TODAY}T07:30:${seconds}Z`) / 1000),
+    });
+  for (const seconds of ["45", "00"])
+    test(`task at 07:30:${seconds}: a change of the name alone queues 07:30:${seconds}`, async ({
+      context,
+    }) => {
+      const task = timed(seconds === "45" ? 80 : 81, seconds);
+      const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [
+        task,
+      ]);
+      await goOfflineAtBoundary(page);
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      await page.getByLabel("Name", { exact: true }).fill("Only the title");
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      const body = (await bodiesOf(page))[0]?.command.command as {
+        definition: { schedule: { time: string } };
+      };
+      expect(body.definition.schedule.time).toBe(`07:30:${seconds}`);
+    });
+
+  test("task at 07:30:45: the person's own time edit queues the chosen minute", async ({
+    context,
+  }) => {
+    const task = timed(82, "45");
+    const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [task]);
+    await goOfflineAtBoundary(page);
+    await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+    await page.getByLabel("Time of day", { exact: true }).fill("08:15");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("[data-task-detail]")).toBeVisible();
+    const body = (await bodiesOf(page))[0]?.command.command as {
+      definition: { schedule: { time: string } };
+    };
+    expect(body.definition.schedule.time).toBe("08:15:00");
+  });
+
+  for (const seconds of ["45", "00"])
+    test(`occurrence at 07:30:${seconds}: a change of the window alone queues 07:30:${seconds}, its key kept`, async ({
+      context,
+    }) => {
+      const task = timed(seconds === "45" ? 83 : 84, seconds);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await goOfflineAtBoundary(page);
+      await page
+        .getByRole("button", { name: "Correct this day", exact: true })
+        .click();
+      await page
+        .getByLabel("How long it stays open (days)", { exact: true })
+        .fill("3");
+      await page
+        .getByRole("button", { name: "Save correction", exact: true })
+        .click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      const body = (await bodiesOf(page))[0]?.command.command as {
+        time: string;
+      };
+      expect(body.time).toBe(`07:30:${seconds}`);
+      const draft = (
+        (await page.evaluate(
+          (acct) => window.__atlasData?.rows(acct, "drafts"),
+          ACCOUNT,
+        )) as Array<{
+          display_patch: Record<
+            string,
+            { value: { slot: { key: string; intended_time: string } } }
+          > | null;
+        }>
+      )[0];
+      const slot = draft?.display_patch?.[task.occurrenceId]?.value.slot;
+      expect(slot?.key).toBe("once");
+      expect(slot?.intended_time).toBe(`07:30:${seconds}`);
+    });
+});
+
+test.describe("E-T39: a known denial of the occurrence admits no closure and no first Anyone record (A8, A10; DA17-N1/N2 of revision 17)", () => {
+  // The design assessment's S8/S9/S10 schedules in each engine: the detail page offers Close/Reopen or an Anyone occurrence's first
+  // record; another tab then commits the occurrence's denial through its own connection (this page is not told); only the writing
+  // transaction can refuse it. The editor is the control of each; an existing participant records without the occurrence's edit access.
+  // Each case acts only once the page's session and protected tree are quiet (`untilTreeSettled`, R34): the tree remounts when the session's
+  // own boot steps finish, and a Firefox control that typed before that lost its amount (revision 17, run 2's MU-2329 control; trace in
+  // the run's evidence). A readiness boundary of the harness, not a wait on the behaviour under test.
+  const refusal = (page: Page) =>
+    page.getByText("You can't change this. Nothing was saved.", {
+      exact: true,
+    });
+  const ofKind = async (page: Page, kind: string) =>
+    (await draftsOf(page)).filter((d) => d.kind === kind);
+
+  for (const resolved of [false, true])
+    for (const denied of [false, true]) {
+      const label = resolved ? "Reopen" : "Close without completing";
+      test(`${label}: ${denied ? "another tab committed a denial after it was offered: nothing is queued, the refusal is said" : "control: an editor queues one resolve"}`, async ({
+        context,
+      }) => {
+        const task = buildTask({
+          n: 90 + (resolved ? 2 : 0) + (denied ? 1 : 0),
+          title: "Closure permission",
+          participation: "everyone",
+        });
+        task.data.resolved = resolved;
+        const { page } = await setup(
+          context,
+          `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+          [task],
+        );
+        await untilTreeSettled(page);
+        await goOfflineAtBoundary(page);
+        const button = page.getByRole("button", { name: label, exact: true });
+        await expect(button).toBeEnabled();
+        if (denied) await denyFromAnotherTab(context, task.occurrenceId);
+        await button.click();
+        if (denied) {
+          await expect(refusal(page)).toHaveCount(1);
+          expect(await ofKind(page, "resolve")).toHaveLength(0);
+        } else {
+          await expect
+            .poll(async () => (await ofKind(page, "resolve")).length)
+            .toBe(1);
+          expect((await bodiesOf(page))[0]?.command.command).toMatchObject({
+            kind: "resolve",
+            resolved: !resolved,
+          });
+        }
+      });
+    }
+
+  const anyone = (n: number, stream: boolean) => {
+    const task = buildTask({
+      n,
+      title: "Anyone may record",
+      participation: "anyone",
+      stream,
+      goal: { kind: "numeric", minimum: "8", maximum: null, unit: "glasses" },
+    });
+    if (!stream) task.data.participants = [OTHER];
+    return task;
+  };
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (glasses)", { exact: true });
+  const record = (page: Page) =>
+    page
+      .locator("[data-record-card]")
+      .getByRole("button", { name: "Record", exact: true });
+
+  for (const denied of [false, true])
+    test(`the first record of an Anyone occurrence: ${denied ? "another tab committed a denial after it was offered: no record, the amount stays, the refusal is said" : "control: an editor's first amount is queued once"}`, async ({
+      context,
+    }) => {
+      const task = anyone(denied ? 95 : 94, false);
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await amount(page).fill("2");
+      await expect(amount(page)).toHaveValue("2");
+      await expect(record(page)).toBeEnabled();
+      if (denied) await denyFromAnotherTab(context, task.occurrenceId);
+      await record(page).click();
+      if (denied) {
+        await expect(refusal(page)).toHaveCount(1);
+        await expect(amount(page)).toHaveValue("2");
+        expect(await ofKind(page, "record")).toHaveLength(0);
+      } else {
+        await expect
+          .poll(async () => (await ofKind(page, "record")).length)
+          .toBe(1);
+        await expect(amount(page)).toHaveValue("");
+      }
+    });
+
+  test("an existing participant whose occurrence is read-only still records (S10)", async ({
+    context,
+  }) => {
+    const task = readOnly(anyone(96, true), ["occurrence"]);
+    const { page } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+    );
+    await untilTreeSettled(page);
+    await goOfflineAtBoundary(page);
+    await amount(page).fill("2");
+    await expect(amount(page)).toHaveValue("2");
+    await record(page).click();
+    await expect
+      .poll(async () => (await ofKind(page, "record")).length)
+      .toBe(1);
+  });
+});
+
+test.describe("E-T40: checking sync state keeps unfinished task input (ia.md §1.3.3, task states I1; R33 of revision 18)", () => {
+  // Review 18's witnesses, maintained: an unfinished new task (its stage too), a changed task name, a progress amount and an open entry
+  // fix, each left through the VISIBLE sync control for the queue and brought back with the browser's Back, in the same document. The
+  // input is shown again, raw, and nothing was queued by the visit or by coming back. The control of each saves the same input without
+  // navigating. Each case acts once the session and protected tree are quiet (`untilTreeSettled`, R34): a readiness boundary of the
+  // harness, not a wait on the behaviour under test.
+  const ENTRY = "80000000-0000-4000-8000-000000000001";
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  async function visitSync(page: Page, back: RegExp) {
+    await page.evaluate(() => {
+      (window as unknown as { __r33Document?: string }).__r33Document =
+        "same document";
+    });
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(back);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __r33Document?: string }).__r33Document,
+      ),
+    ).toBe("same document");
+  }
+  const name = (page: Page) => page.getByLabel("Name", { exact: true });
+  const progressTask = (n: number) => {
+    const task = buildTask({
+      n,
+      title: "Keep my progress input",
+      goal: { kind: "numeric", minimum: "10", maximum: null, unit: "cups" },
+      action: { outcome: "incomplete", amount: "1", checked: [] },
+    });
+    const progress = (
+      task.upserts as Array<{
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "progress")?.resource.value;
+    if (progress === undefined) throw new Error("setup: no progress");
+    progress.recent_entries = [
+      {
+        id: ENTRY,
+        evidence: { kind: "quantity", amount: "1" },
+        happened_at: Math.floor(Date.now() / 1000),
+        recorded_by: ACCOUNT,
+      },
+    ];
+    progress.entry_count = 1;
+    return task;
+  };
+
+  for (const visit of [true, false])
+    test(`new task: ${visit ? "the form, its title and a hidden interval come back after the queue; nothing queued" : "control: saved without navigating, it is queued"}`, async ({
+      context,
+    }) => {
+      const { page } = await setup(context, "/tasks/new", []);
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await page
+        .getByRole("button", {
+          name: "Start from scratch instead",
+          exact: true,
+        })
+        .click();
+      await name(page).fill("Keep this unfinished title");
+      await expect(name(page)).toHaveValue("Keep this unfinished title");
+      const repeats = page.getByLabel("Repeats", { exact: true });
+      await repeats.selectOption("daily");
+      await page.getByLabel("Every how many", { exact: true }).fill("3x");
+      await repeats.selectOption("none");
+      await expect(
+        page.getByLabel("Every how many", { exact: true }),
+      ).toHaveCount(0);
+      if (visit) {
+        await visitSync(page, /\/tasks\/new$/);
+        await expect(name(page)).toHaveValue("Keep this unfinished title");
+        await expect(
+          page.getByRole("button", { name: "Start from scratch instead" }),
+        ).toHaveCount(0);
+        await repeats.selectOption("daily");
+        await expect(
+          page.getByLabel("Every how many", { exact: true }),
+        ).toHaveValue("3x");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page.getByRole("radio", { name: "Only me" }).check();
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map((b) => b.command.command.title),
+          )
+          .toContain("Keep this unfinished title");
+      }
+    });
+
+  for (const visit of [true, false])
+    test(`edit task: ${visit ? "the changed name comes back after the queue, not the saved one; nothing queued" : "control: saved without navigating, the change is queued"}`, async ({
+      context,
+    }) => {
+      const task = buildTask({
+        n: 101 + (visit ? 0 : 1),
+        title: "Original title",
+      });
+      const { page } = await setup(context, `/tasks/${task.taskId}/edit`, [
+        task,
+      ]);
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+      await name(page).fill("Keep this unfinished title");
+      await expect(name(page)).toHaveValue("Keep this unfinished title");
+      if (visit) {
+        await visitSync(page, new RegExp(`/tasks/${task.taskId}/edit$`));
+        await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
+        await expect(name(page)).toHaveValue("Keep this unfinished title");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map((b) => b.command.command.title),
+          )
+          .toContain("Keep this unfinished title");
+      }
+    });
+
+  for (const visit of [true, false])
+    test(`progress amount: ${visit ? "the amount typed comes back after the queue; nothing recorded" : "control: recorded without navigating, it is queued"}`, async ({
+      context,
+    }) => {
+      const task = progressTask(103 + (visit ? 0 : 1));
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      const amount = page.getByLabel("Amount (cups)", { exact: true });
+      await amount.fill("7");
+      await expect(amount).toHaveValue("7");
+      if (visit) {
+        await visitSync(page, new RegExp(`/tasks/${task.taskId}\\?`));
+        await expect(page.locator("[data-task-detail]")).toBeVisible();
+        await expect(amount).toHaveValue("7");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page
+          .locator("[data-record-card]")
+          .getByRole("button", { name: "Record", exact: true })
+          .click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map(
+              (b) =>
+                (b.command.command.evidence as { amount?: string })?.amount,
+            ),
+          )
+          .toContain("7");
+      }
+    });
+
+  for (const visit of [true, false])
+    test(`entry fix: ${visit ? "the open fix and its value come back after the queue; nothing queued" : "control: saved without navigating, the fix is queued"}`, async ({
+      context,
+    }) => {
+      const task = progressTask(105 + (visit ? 0 : 1));
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+      );
+      await untilTreeSettled(page);
+      await goOfflineAtBoundary(page);
+      await page
+        .getByRole("button", { name: "Fix this entry", exact: true })
+        .click();
+      const value = page.getByLabel("New value (cups)", { exact: true });
+      await value.fill("7");
+      await expect(value).toHaveValue("7");
+      if (visit) {
+        await visitSync(page, new RegExp(`/tasks/${task.taskId}\\?`));
+        await expect(page.locator("[data-task-detail]")).toBeVisible();
+        await expect(value).toHaveValue("7");
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await page
+          .getByRole("button", { name: "Save the fix", exact: true })
+          .click();
+        await expect
+          .poll(async () =>
+            (await bodiesOf(page)).map(
+              (b) =>
+                (b.command.command.evidence as { amount?: string })?.amount,
+            ),
+          )
+          .toContain("7");
+      }
+    });
+});
+
+test.describe("E-T41: coming back from the sync screens finds the day and the entry the input was typed for (A8, A14; DA19-I1/N1 of revision 19)", () => {
+  // The design assessment of Review 19's witnesses in real engines over the real IndexedDB: the VISIBLE sync control, the browser's Back
+  // in the same document, and (Q6) a second real tab of the same account. Q3: the detail without an occurrence in its address shows its
+  // default day; the person types for it and checks the queue, and a later day is synced meanwhile. Back shows the SAME day and input,
+  // and the save names that day (control: with nothing typed, the visit chooses the later day). Q6: the person's open fix of entry E is
+  // kept through the visit while the other tab queues its own fix of E; back, the value is shown and Save is withheld with the reason,
+  // nothing added (control: without the other tab's fix, Save queues exactly one). Each case acts once the trees are quiet
+  // (`untilTreeSettled`): a readiness boundary of the harness, not a wait on the behaviour under test.
+  const ENTRY = "80000000-0000-4000-8000-000000000041";
+  const LATER = "eeeeeeee-0000-4000-8000-000000000041";
+  const DAY = 24 * 60 * 60;
+  const dayBefore = (days: number) =>
+    new Date(Date.parse(`${TODAY}T00:00:00Z`) - days * DAY * 1000)
+      .toISOString()
+      .slice(0, 10);
+  const CUPS = { kind: "numeric", minimum: "10", maximum: null, unit: "cups" };
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  async function visitSync(page: Page, whileAway: () => Promise<void>) {
+    const back = page.url();
+    await page.evaluate(() => {
+      (window as unknown as { __da19Document?: string }).__da19Document =
+        "same document";
+    });
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await whileAway();
+    await page.goBack();
+    await expect(page).toHaveURL(back);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __da19Document?: string }).__da19Document,
+      ),
+    ).toBe("same document");
+  }
+  const withEntry = (task: BuiltTask) => {
+    const progress = (
+      task.upserts as Array<{
+        resource: { kind: string; value: Record<string, unknown> };
+      }>
+    ).find((u) => u.resource.kind === "progress")?.resource.value;
+    if (progress === undefined) throw new Error("setup: no progress");
+    progress.recent_entries = [
+      {
+        id: ENTRY,
+        evidence: { kind: "quantity", amount: "1" },
+        happened_at: Math.floor(Date.now() / 1000),
+        recorded_by: ACCOUNT,
+      },
+    ];
+    progress.entry_count = 1;
+    return task;
+  };
+  /** A daily task whose only saved day (A, two days ago, open for recording) is not today's slot: the default is the latest saved day. */
+  const dailyTask = (n: number) => {
+    const date = dayBefore(2);
+    const task = withEntry(
+      buildTask({
+        n,
+        title: "Keep my day",
+        date,
+        goal: CUPS,
+        action: { outcome: "incomplete", amount: "1", checked: [] },
+        slotKey: "day-a",
+        closesAt: Math.floor(Date.now() / 1000) + 5 * DAY,
+      }),
+    );
+    const definition = (
+      task.data as { definition: { schedule: Record<string, unknown> } }
+    ).definition;
+    definition.schedule.repeat = { frequency: "daily", interval: 1 };
+    return task;
+  };
+  /** Day B (yesterday) of the same task, as the next sync page carries it. */
+  const laterDay = (task: BuiltTask) => {
+    const occurrence = (
+      task.upserts as Array<{ resource: Record<string, unknown> }>
+    ).find((u) => u.resource.kind === "occurrence")?.resource;
+    if (occurrence === undefined) throw new Error("setup: no occurrence");
+    const data = occurrence.value as Record<string, unknown>;
+    const date = dayBefore(1);
+    return {
+      kind: "upsert",
+      resource: {
+        ...occurrence,
+        id: LATER,
+        value: {
+          ...data,
+          slot: { ...(data.slot as object), key: "day-b", date },
+        },
+      },
+    };
+  };
+  const daySelect = (page: Page) => page.locator("[data-day-picker] select");
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (cups)", { exact: true });
+
+  for (const typed of [true, false])
+    test(`Q3: ${typed ? "the amount typed for day A is shown on day A after a later day was synced; its record names day A" : "control: with nothing typed, the visit chooses the later day"}`, async ({
+      context,
+    }) => {
+      const task = dailyTask(141 + (typed ? 0 : 1));
+      const { page, net } = await setup(context, `/tasks/${task.taskId}`, [
+        task,
+      ]);
+      await untilTreeSettled(page);
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await expect(daySelect(page)).toHaveCount(0);
+      if (typed) {
+        await amount(page).fill("7");
+        await expect(amount(page)).toHaveValue("7");
+      }
+      // Adapted (revision 20, labelled; readiness only, no assertion changed): Back waits until the later day's page is COMMITTED in the
+      // queue. The nudge alone let WebKit send the page's request after Back (trace: `/sync?cursor=cursor-1` 19 ms after `goBack`), so the
+      // returned visit had already chosen day A: the control then failed, and the typed witness could have passed with no day synced away.
+      await visitSync(page, async () => {
+        await commitDelta(page, net, 2, [laterDay(task)]);
+        await expect
+          .poll(async () =>
+            ((await rowsOf(page, "cache")) as Array<{ id: string }>).some(
+              (row) => row.id === LATER,
+            ),
+          )
+          .toBe(true);
+      });
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      await expect(daySelect(page)).toHaveCount(1);
+      if (!typed) {
+        await expect(daySelect(page)).toHaveValue(LATER);
+        await expect(amount(page)).toHaveValue("");
+        expect(await draftsOf(page)).toEqual([]);
+        return;
+      }
+      await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+      await expect(amount(page)).toHaveValue("7");
+      expect(await draftsOf(page)).toEqual([]);
+      await page
+        .locator("[data-record-card]")
+        .getByRole("button", { name: "Record", exact: true })
+        .click();
+      await expect.poll(async () => (await recordsOf(page)).length).toBe(1);
+      expect((await recordsOf(page))[0]?.command).toMatchObject({
+        occurrence_id: task.occurrenceId,
+        evidence: { kind: "quantity", amount: "7" },
+      });
+    });
+
+  for (const other of [true, false])
+    test(`Q6: ${other ? "the other tab queued its fix of E while the person was away: the kept fix shows 7, Save is withheld, nothing added" : "control: no other fix of E: the kept fix of 7 is queued once"}`, async ({
+      context,
+    }) => {
+      const task = withEntry(
+        buildTask({
+          n: 143 + (other ? 0 : 1),
+          title: "Keep my fix",
+          goal: CUPS,
+          action: { outcome: "incomplete", amount: "1", checked: [] },
+        }),
+      );
+      const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+      const net = await stubNetwork(context);
+      await serveIdentityReads(context);
+      await serveTaskReads(context);
+      await seedSettled(context);
+      // B holds the fixture leader that caches the task; A boots after it, then both trees are let settle (a booting page remounts the
+      // other's tree) before anything is typed.
+      const writer = await bootAt(context, path);
+      await cacheTasks(writer, net, [task]);
+      const page = await bootAt(context, path);
+      await expect(page.locator(`[data-entry="${ENTRY}"]`)).toBeVisible();
+      await untilTreeSettled(page);
+      await untilTreeSettled(writer);
+      await goOfflineAtBoundary(page);
+      await goOfflineAtBoundary(writer);
+      await page
+        .getByRole("button", { name: "Fix this entry", exact: true })
+        .click();
+      const value = page.getByLabel("New value (cups)", { exact: true });
+      await value.fill("7");
+      await expect(value).toHaveValue("7");
+      await visitSync(page, async () => {
+        if (!other) return;
+        await writer
+          .getByRole("button", { name: "Fix this entry", exact: true })
+          .click();
+        await writer.getByLabel("New value (cups)", { exact: true }).fill("5");
+        await writer
+          .getByRole("button", { name: "Save the fix", exact: true })
+          .click();
+        await expect.poll(async () => (await recordsOf(writer)).length).toBe(1);
+      });
+      await expect(page.locator("[data-task-detail]")).toBeVisible();
+      await expect(value).toHaveValue("7");
+      const save = page.getByRole("button", {
+        name: "Save the fix",
+        exact: true,
+      });
+      if (!other) {
+        await expect(save).toBeEnabled();
+        expect(await recordsOf(page)).toEqual([]);
+        await save.click();
+        await expect.poll(async () => (await recordsOf(page)).length).toBe(1);
+        expect((await recordsOf(page))[0]?.command).toMatchObject({
+          replaces: ENTRY,
+          evidence: { kind: "quantity", amount: "7" },
+        });
+        return;
+      }
+      // A's own read knows B's queued fix before anything is pressed: shown as not sent yet, E as corrected.
+      await expect(page.locator("[data-entry-pending]")).toHaveCount(1);
+      await expect(save).toBeDisabled();
+      await expect(page.locator("[data-fix-form]")).toContainText(
+        "This entry has been corrected since. Fix its correction instead.",
+      );
+      await save.click({ force: true });
+      const records = await recordsOf(page);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.command).toMatchObject({
+        replaces: ENTRY,
+        evidence: { kind: "quantity", amount: "5" },
+      });
+    });
+});
+
+test.describe("E-T42: the visit's day leaving after the person came back keeps it and its input (A8, A14; DA20-I1 of revision 20)", () => {
+  // The design assessment of Review 20 (QT5) in real engines over the real IndexedDB, with a second real tab of the same account holding
+  // the fixture leader. The person types an amount for the detail's default day A, checks the queue with the VISIBLE sync control and
+  // comes back (Back, same document): the amount is on day A. Then the other tab commits a sync page that removes day A (day B, an
+  // earlier saved day, stays): the person's tab says the day is unavailable, shows no other day and writes nothing; the next page brings
+  // day A back and the same raw amount is there; only the explicit Record writes, naming day A (control: the other tab's page brings
+  // another day instead, and day A stays shown with the amount). A reload while day A is gone forgets the unsaved amount (page memory)
+  // and sends nothing. The account database is read through the writer's harness (the person's tab opens none). Each case acts once
+  // the trees are quiet (`untilTreeSettled`), a readiness boundary of the harness.
+  const DAY = 24 * 60 * 60;
+  const EARLIER = "eeeeeeee-0000-4000-8000-000000000042";
+  const LATER = "eeeeeeee-0000-4000-8000-000000000043";
+  const dayBefore = (days: number) =>
+    new Date(Date.parse(`${TODAY}T00:00:00Z`) - days * DAY * 1000)
+      .toISOString()
+      .slice(0, 10);
+  const CUPS = { kind: "numeric", minimum: "10", maximum: null, unit: "cups" };
+  type Upsert = { kind: string; resource: Record<string, unknown> };
+  /** A daily task whose default day (A, two days ago, open for recording) is the latest saved one; day B (three days ago) is saved too. */
+  function twoDays(n: number) {
+    const task = buildTask({
+      n,
+      title: "Keep my day when it leaves",
+      date: dayBefore(2),
+      goal: CUPS,
+      action: { outcome: "incomplete", amount: "1", checked: [] },
+      slotKey: "day-a",
+      closesAt: Math.floor(Date.now() / 1000) + 5 * DAY,
+    });
+    const definition = (
+      task.data as { definition: { schedule: Record<string, unknown> } }
+    ).definition;
+    definition.schedule.repeat = { frequency: "daily", interval: 1 };
+    const occurrence = (task.upserts as Upsert[]).find(
+      (u) => u.resource.kind === "occurrence",
+    );
+    if (occurrence === undefined) throw new Error("setup: no occurrence");
+    const dayOf = (id: string, key: string, date: string): Upsert => {
+      const data = occurrence.resource.value as Record<string, unknown>;
+      return {
+        kind: "upsert",
+        resource: {
+          ...occurrence.resource,
+          id,
+          value: { ...data, slot: { ...(data.slot as object), key, date } },
+        },
+      };
+    };
+    (task.upserts as Upsert[]).push(dayOf(EARLIER, "day-b", dayBefore(3)));
+    return {
+      task,
+      dayA: structuredClone(occurrence),
+      later: dayOf(LATER, "day-c", dayBefore(1)),
+    };
+  }
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  const daySelect = (page: Page) => page.locator("[data-day-picker] select");
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (cups)", { exact: true });
+  /**
+   * The writer (another tab, on the task list) caches the task and holds the fixture leader; the person's tab boots after it; both trees
+   * settle (a page that boots remounts the other's tree) and the writer's leader is started again (WEB-09a), as in E-T15's `twoTabs`.
+   */
+  async function detailBesideWriter(
+    context: BrowserContext,
+    path: string,
+    task: BuiltTask,
+  ) {
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await seedSettled(context);
+    const writer = await bootAt(context, "/tasks");
+    await cacheTasks(writer, net, [task]);
+    const page = await bootAt(context, path);
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    return { net, writer, page };
+  }
+  /**
+   * The writer's leader commits the page, and the test waits until the account's cache holds it (the precondition, read through the
+   * writer's harness): a wake that arrives while a poll is in flight is absorbed by it (WEB-09a), so the writer is woken again until the
+   * scripted page has been taken. Nothing here waits on the person's tab.
+   */
+  async function commitOnWriter(
+    writer: Page,
+    net: SyncStub,
+    revision: number,
+    changes: unknown[],
+    landed: (ids: string[]) => boolean,
+  ) {
+    await commitDeltaLanded(writer, net, revision, changes, landed);
+  }
+  /** Types the amount for day A, visits the queue by the visible sync control and comes back in the same document. */
+  async function typeAndVisit(page: Page, task: BuiltTask) {
+    await amount(page).fill("7.125");
+    await expect(amount(page)).toHaveValue("7.125");
+    const back = page.url();
+    await page.evaluate(() => {
+      (window as unknown as { __da20Document?: string }).__da20Document =
+        "same document";
+    });
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(back);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __da20Document?: string }).__da20Document,
+      ),
+    ).toBe("same document");
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(amount(page)).toHaveValue("7.125");
+  }
+
+  for (const removed of [true, false])
+    test(`${removed ? "another tab's sync page removes day A: unavailable, nothing written; day A back, the same 7.125, and Record names day A once" : "control: another tab's sync page brings another day: day A stays shown with 7.125"}`, async ({
+      context,
+    }) => {
+      const { task, dayA, later } = twoDays(145 + (removed ? 0 : 1));
+      const path = `/tasks/${task.taskId}`;
+      const { net, writer, page } = await detailBesideWriter(
+        context,
+        path,
+        task,
+      );
+      await typeAndVisit(page, task);
+      if (!removed) {
+        await commitOnWriter(writer, net, 2, [later], (ids) =>
+          ids.includes(LATER),
+        );
+        await expect(
+          daySelect(page).locator(`option[value="${LATER}"]`),
+        ).toHaveCount(1);
+        await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+        await expect(amount(page)).toHaveValue("7.125");
+        await expect(page.locator("[data-day-unavailable]")).toHaveCount(0);
+        expect(await draftsOf(writer)).toEqual([]);
+        return;
+      }
+      await commitOnWriter(
+        writer,
+        net,
+        2,
+        [{ kind: "remove", id: task.occurrenceId }],
+        (ids) => !ids.includes(task.occurrenceId),
+      );
+      await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+      await expect(page.locator("[data-record-card]")).toHaveCount(0);
+      await expect(page.locator("[data-detail-day]")).toHaveCount(0);
+      expect(await draftsOf(writer)).toEqual([]);
+      await commitOnWriter(writer, net, 3, [dayA], (ids) =>
+        ids.includes(task.occurrenceId),
+      );
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await expect(page.locator("[data-day-unavailable]")).toHaveCount(0);
+      await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+      await expect(amount(page)).toHaveValue("7.125");
+      expect(await draftsOf(writer)).toEqual([]);
+      await page
+        .locator("[data-record-card]")
+        .getByRole("button", { name: "Record", exact: true })
+        .click();
+      await expect.poll(async () => (await recordsOf(writer)).length).toBe(1);
+      expect((await recordsOf(writer))[0]?.command).toMatchObject({
+        occurrence_id: task.occurrenceId,
+        evidence: { kind: "quantity", amount: "7.125" },
+      });
+    });
+
+  test("a reload while day A is gone forgets the unsaved amount and sends nothing; day A back is shown blank", async ({
+    context,
+  }) => {
+    const { task, dayA } = twoDays(147);
+    const path = `/tasks/${task.taskId}`;
+    const { net, writer, page } = await detailBesideWriter(context, path, task);
+    await typeAndVisit(page, task);
+    await commitOnWriter(
+      writer,
+      net,
+      2,
+      [{ kind: "remove", id: task.occurrenceId }],
+      (ids) => !ids.includes(task.occurrenceId),
+    );
+    await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+    // A reload of the fixture's session page (the app route itself boots no harness).
+    await page.goto(`/__session?route=${encodeURIComponent(path)}`);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    // The reloaded page is a new visit: its day is B (the only saved day when it read). Day A back, the person picks it: nothing of the
+    // forgotten input, nothing written.
+    await expect(daySelect(page)).toHaveCount(0);
+    await commitOnWriter(writer, net, 3, [dayA], (ids) =>
+      ids.includes(task.occurrenceId),
+    );
+    await expect(daySelect(page)).toHaveCount(1);
+    await expect(daySelect(page)).toHaveValue(EARLIER);
+    await daySelect(page).selectOption(task.occurrenceId);
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await expect(amount(page)).toHaveValue("");
+    expect(await draftsOf(writer)).toEqual([]);
+  });
+});
+
+test.describe("E-T43: the logical visit owns its day and the input typed for it (A8, A14; DA21-I1/I2 of revision 21)", () => {
+  // The design assessment of Review 21 (Q11) in real engines over the real IndexedDB, with a second real tab of the same account holding
+  // the fixture leader, as E-T42. DA21-I1: the other tab commits a page removing the task's DETAILS (its execution row; the task and its
+  // days stay): the person's tab says day A is unavailable and writes nothing; the details back, the same raw amount is on day A and
+  // only the explicit Record writes, naming it. DA21-I2: the person checks the queue with the visible sync control, the other tab removes
+  // day A meanwhile, browser Back shows it unavailable; leaving that visit by "‹ Tasks" ends it, so day A back and opened again (browser
+  // Back to the detail, a new visit) is blank with nothing written (control: staying in the visit, day A back shows 7.125). The account
+  // database is read through the writer's harness. Each case acts once the trees are quiet (`untilTreeSettled`).
+  const DAY = 24 * 60 * 60;
+  const EARLIER = "eeeeeeee-0000-4000-8000-000000000044";
+  const dayBefore = (days: number) =>
+    new Date(Date.parse(`${TODAY}T00:00:00Z`) - days * DAY * 1000)
+      .toISOString()
+      .slice(0, 10);
+  type Upsert = { kind: string; resource: Record<string, unknown> };
+  /** A daily task whose default day (A, two days ago, open for recording) is the latest saved one; day B (three days ago) is saved too. */
+  function twoDays(n: number) {
+    const task = buildTask({
+      n,
+      title: "The visit keeps my day",
+      date: dayBefore(2),
+      goal: { kind: "numeric", minimum: "10", maximum: null, unit: "cups" },
+      action: { outcome: "incomplete", amount: "1", checked: [] },
+      slotKey: "day-a",
+      closesAt: Math.floor(Date.now() / 1000) + 5 * DAY,
+    });
+    const definition = (
+      task.data as { definition: { schedule: Record<string, unknown> } }
+    ).definition;
+    definition.schedule.repeat = { frequency: "daily", interval: 1 };
+    const of = (kind: string) => {
+      const found = (task.upserts as Upsert[]).find(
+        (u) => u.resource.kind === kind,
+      );
+      if (found === undefined) throw new Error(`setup: no ${kind}`);
+      return found;
+    };
+    const occurrence = of("occurrence");
+    const data = occurrence.resource.value as Record<string, unknown>;
+    (task.upserts as Upsert[]).push({
+      kind: "upsert",
+      resource: {
+        ...occurrence.resource,
+        id: EARLIER,
+        value: {
+          ...data,
+          slot: { ...(data.slot as object), key: "day-b", date: dayBefore(3) },
+        },
+      },
+    });
+    return {
+      task,
+      dayA: structuredClone(occurrence),
+      details: structuredClone(of("execution")),
+    };
+  }
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  const daySelect = (page: Page) => page.locator("[data-day-picker] select");
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (cups)", { exact: true });
+  async function detailBesideWriter(
+    context: BrowserContext,
+    path: string,
+    task: BuiltTask,
+  ) {
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await seedSettled(context);
+    const writer = await bootAt(context, "/tasks");
+    await cacheTasks(writer, net, [task]);
+    const page = await bootAt(context, path);
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(daySelect(page).locator("option")).toHaveCount(2);
+    return { net, writer, page };
+  }
+  /** The writer's leader commits the page and the test waits until the account's cache holds it (E-T42's `commitOnWriter`). */
+  async function commitOnWriter(
+    writer: Page,
+    net: SyncStub,
+    revision: number,
+    changes: unknown[],
+    landed: (ids: string[]) => boolean,
+  ) {
+    await commitDeltaLanded(writer, net, revision, changes, landed);
+  }
+
+  test("another tab's sync page removes the task's details: day A unavailable, nothing written; details back, the same 7.125 on A, and Record names A once", async ({
+    context,
+  }) => {
+    const { task, details } = twoDays(148);
+    const path = `/tasks/${task.taskId}`;
+    const { net, writer, page } = await detailBesideWriter(context, path, task);
+    await amount(page).fill("7.125");
+    await expect(amount(page)).toHaveValue("7.125");
+    await commitOnWriter(
+      writer,
+      net,
+      2,
+      [{ kind: "remove", id: task.executionId }],
+      (ids) => !ids.includes(task.executionId),
+    );
+    await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+    await expect(page.locator("[data-record-card]")).toHaveCount(0);
+    expect(await draftsOf(writer)).toEqual([]);
+    await commitOnWriter(writer, net, 3, [details], (ids) =>
+      ids.includes(task.executionId),
+    );
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await expect(page.locator("[data-day-unavailable]")).toHaveCount(0);
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(amount(page)).toHaveValue("7.125");
+    expect(await draftsOf(writer)).toEqual([]);
+    await page
+      .locator("[data-record-card]")
+      .getByRole("button", { name: "Record", exact: true })
+      .click();
+    await expect.poll(async () => (await recordsOf(writer)).length).toBe(1);
+    expect((await recordsOf(writer))[0]?.command).toMatchObject({
+      occurrence_id: task.occurrenceId,
+      evidence: { kind: "quantity", amount: "7.125" },
+    });
+  });
+
+  for (const leave of [true, false])
+    test(`${leave ? "day A removed while the person is in the sync screens, Back shows it unavailable; leaving that visit ends its amount: opened again once A is back, blank, nothing written" : "control: the same, staying in the visit: day A back shows 7.125, nothing written"}`, async ({
+      context,
+    }) => {
+      const { task, dayA } = twoDays(149 + (leave ? 0 : 1));
+      const path = `/tasks/${task.taskId}`;
+      const { net, writer, page } = await detailBesideWriter(
+        context,
+        path,
+        task,
+      );
+      await amount(page).fill("7.125");
+      await expect(amount(page)).toHaveValue("7.125");
+      await syncControl(page).click();
+      await expect(page).toHaveURL(/\/sync(\?|$)/);
+      await commitOnWriter(
+        writer,
+        net,
+        2,
+        [{ kind: "remove", id: task.occurrenceId }],
+        (ids) => !ids.includes(task.occurrenceId),
+      );
+      await page.goBack();
+      await expect(page).toHaveURL(new RegExp(`${path}$`));
+      await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+      await expect(page.locator("[data-record-card]")).toHaveCount(0);
+      if (leave) {
+        await page.getByRole("link", { name: "‹ Tasks" }).click();
+        await expect(page).toHaveURL(/\/tasks$/);
+      }
+      await commitOnWriter(writer, net, 3, [dayA], (ids) =>
+        ids.includes(task.occurrenceId),
+      );
+      if (leave) {
+        // Browser Back to the detail: a new visit of the task, its default day A again.
+        await page.goBack();
+        await expect(page).toHaveURL(new RegExp(`${path}$`));
+      }
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+      await expect(amount(page)).toHaveValue(leave ? "" : "7.125");
+      expect(await draftsOf(writer)).toEqual([]);
+    });
+});
+
+test.describe("E-T44: the edit visit owns the input typed on it (A10; R34 / DA22-I1, DA22-I3 of revision 22)", () => {
+  // Review 22's R34 and the design assessment's DA22-I1/I3 in real engines over the real IndexedDB, with a second real tab of the same
+  // account holding the fixture leader (E-T42's arrangement). The visit is observed from the DOCUMENT's own history here (production's
+  // route record), not a memory history. The other tab commits a page removing the task's DETAILS (its execution row) and later restoring
+  // them; the person's edit form is unavailable meanwhile, at the same address and in the same document (a marker set before typing must
+  // survive: no reload). Staying in the edit visit keeps the raw title through that absence, before or after a sync visit; an ordinary
+  // departure (the Tasks link, from the form or from the sync screens) ends it, so browser Back to the edit form is a new visit with the
+  // task's own title. Every case reads the account's drafts through the writer: retention never writes; only the explicit Save does.
+  const ORIGINAL = "Original title";
+  const TYPED = "Unfinished personal title";
+  type Upsert = { kind: string; resource: Record<string, unknown> };
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  const name = (page: Page) => page.getByLabel("Name", { exact: true });
+  async function editBesideWriter(context: BrowserContext, n: number) {
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await seedSettled(context);
+    const task = buildTask({ n, title: ORIGINAL });
+    const details = (task.upserts as Upsert[]).filter(
+      (u) => u.resource.kind === "execution",
+    );
+    expect(details, "exactly one execution").toHaveLength(1);
+    const writer = await bootAt(context, "/tasks");
+    await cacheTasks(writer, net, [task]);
+    const path = `/tasks/${task.taskId}/edit`;
+    const page = await bootAt(context, path);
+    await expect(name(page)).toHaveValue(ORIGINAL);
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await page.evaluate(() => {
+      (
+        window as unknown as { __editVisitDocument?: string }
+      ).__editVisitDocument = "same-document";
+    });
+    await name(page).fill(TYPED);
+    await expect(name(page)).toHaveValue(TYPED);
+    expect(await draftsOf(writer)).toEqual([]);
+    /** The writer's leader commits the page; the test waits until the account's cache holds it (E-T42's `commitOnWriter`). */
+    const commit = async (
+      revision: number,
+      changes: unknown[],
+      present: boolean,
+    ) => {
+      await commitDeltaLanded(
+        writer,
+        net,
+        revision,
+        changes,
+        (ids) => ids.includes(task.executionId) === present,
+      );
+    };
+    return {
+      task,
+      path,
+      writer,
+      page,
+      remove: () =>
+        commit(2, [{ kind: "remove", id: task.executionId }], false),
+      restore: () => commit(3, details, true),
+      sameDocument: async () =>
+        expect(
+          await page.evaluate(
+            () =>
+              (window as unknown as { __editVisitDocument?: string })
+                .__editVisitDocument,
+          ),
+        ).toBe("same-document"),
+    };
+  }
+
+  test("control: details removed while the person is in the sync screens, Back to the unavailable form and staying: details back, the typed title, nothing written", async ({
+    context,
+  }) => {
+    const { path, writer, page, remove, restore, sameDocument } =
+      await editBesideWriter(context, 151);
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await remove();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(page.locator("[data-task-form]")).toHaveCount(0);
+    expect(await draftsOf(writer)).toEqual([]);
+    await restore();
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(TYPED);
+    expect(await draftsOf(writer)).toEqual([]);
+  });
+
+  test("R34: sync and Back keep the typed title; the details then leave and come back in the same visit: the typed title, and Save writes one revise of it", async ({
+    context,
+  }) => {
+    const { task, path, writer, page, remove, restore, sameDocument } =
+      await editBesideWriter(context, 152);
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(name(page)).toHaveValue(TYPED);
+    await remove();
+    await expect(page.locator("[data-task-form]")).toHaveCount(0);
+    expect(await draftsOf(writer)).toEqual([]);
+    await restore();
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(TYPED);
+    expect(await draftsOf(writer)).toEqual([]);
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect
+      .poll(async () =>
+        (await draftsOf(writer)).filter((d) => d.kind === "revise_task"),
+      )
+      .toHaveLength(1);
+    const bodies = (await bodiesOf(writer)).map((b) => b.command.command);
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        kind: "revise_task",
+        id: task.taskId,
+        title: TYPED,
+      }),
+    ]);
+  });
+
+  test("R34: details removed while in the sync screens, Back (unavailable), then the Tasks link: details back, Back to the edit is a new visit with the task's own title", async ({
+    context,
+  }) => {
+    const { path, writer, page, remove, restore, sameDocument } =
+      await editBesideWriter(context, 153);
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await remove();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(page.locator("[data-task-form]")).toHaveCount(0);
+    await page.getByRole("link", { name: "Tasks", exact: true }).click();
+    await expect(page).toHaveURL(/\/tasks$/);
+    await restore();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(ORIGINAL);
+    expect(await draftsOf(writer)).toEqual([]);
+  });
+
+  test("DA22-I3: the sync control, then the Tasks link from the sync screens; browser Back twice to the edit: a new visit with the task's own title", async ({
+    context,
+  }) => {
+    const { path, writer, page, sameDocument } = await editBesideWriter(
+      context,
+      154,
+    );
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.getByRole("link", { name: "Tasks", exact: true }).click();
+    await expect(page).toHaveURL(/\/tasks$/);
+    await page.goBack();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(ORIGINAL);
+    expect(await draftsOf(writer)).toEqual([]);
+  });
+});
+
+test.describe("E-T45: a save acknowledged after the person left never moves them (A10; R35 / DA23 of revision 23)", () => {
+  // Review 23's R35 in real engines over the real IndexedDB and the document's own history. The save's write COMMITS (the account's
+  // drafts hold it) and only its acknowledgement is held: the first transaction that put a command body (`draft_commands`) and completes
+  // after the test arms the hold keeps Dexie's `complete` handler until the test releases it (the transaction has completed; the app is
+  // not told yet). Then,
+  // in ONE task of the page: an in-app navigation (the Tasks link, or the visible sync control), a check that the old form is still
+  // mounted and where the document is, and the release. A late success then consumes the save (one command, never offered again) and
+  // never moves the person; the staying controls still close onto the task. The settlement is known to have reached the form when the
+  // save's own announcement is shown (announced, then the form completes, then the frame shows it): only then is the address judged.
+  type Hold = {
+    armed: boolean;
+    held: boolean;
+    delivered: boolean;
+    release?: () => void;
+    announced: string[];
+  };
+  const name = (page: Page) => page.getByLabel("Name", { exact: true });
+  async function holdAcknowledgements(context: BrowserContext) {
+    await context.addInitScript(() => {
+      const hold: Hold = {
+        armed: false,
+        held: false,
+        delivered: false,
+        announced: [],
+      };
+      (window as unknown as { __ackHold: Hold }).__ackHold = hold;
+      // The transactions that put a command body (`draft_commands`): only the first of them completing after the test arms is held.
+      const writing = new WeakSet<IDBTransaction>();
+      for (const method of ["put", "add"] as const) {
+        const original = IDBObjectStore.prototype[method];
+        IDBObjectStore.prototype[method] = function (
+          this: IDBObjectStore,
+          ...args: Parameters<IDBObjectStore["put"]>
+        ) {
+          if (this.name === "draft_commands") writing.add(this.transaction);
+          return original.apply(this, args);
+        };
+      }
+      const described = Object.getOwnPropertyDescriptor(
+        IDBTransaction.prototype,
+        "oncomplete",
+      );
+      if (described?.set === undefined || described.get === undefined) return;
+      const { get, set } = described;
+      Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
+        configurable: true,
+        enumerable: described.enumerable ?? true,
+        get,
+        set(this: IDBTransaction, handler: unknown) {
+          if (typeof handler !== "function") return set.call(this, handler);
+          set.call(this, (event: Event) => {
+            const call = () =>
+              (handler as (e: Event) => void).call(this, event);
+            if (!hold.armed || !writing.has(this)) return call();
+            hold.armed = false;
+            hold.held = true;
+            hold.release = () => {
+              hold.held = false;
+              hold.delivered = true;
+              call();
+            };
+          });
+        },
+      });
+    });
+  }
+
+  for (const mode of ["edit", "new"] as const)
+    for (const where of ["tasks", "sync", "stay"] as const)
+      test(`${mode} form, ${where === "stay" ? "control: staying, the acknowledged save closes the form onto its task" : `${where === "sync" ? "the sync control" : "the Tasks link"} before the acknowledgement: the person stays; one command`}`, async ({
+        context,
+      }) => {
+        await holdAcknowledgements(context);
+        const task = buildTask({
+          n:
+            161 +
+            (mode === "new" ? 3 : 0) +
+            ["tasks", "sync", "stay"].indexOf(where),
+          title: "Original title",
+        });
+        const path =
+          mode === "edit" ? `/tasks/${task.taskId}/edit` : "/tasks/new";
+        const { page } = await setup(context, path, [task]);
+        await untilTreeSettled(page);
+        if (mode === "new") {
+          await page
+            .getByRole("button", {
+              name: "Start from scratch instead",
+              exact: true,
+            })
+            .click();
+          await page.getByRole("radio", { name: "Only me" }).check();
+        } else await expect(name(page)).toHaveValue("Original title");
+        await name(page).fill("Typed title");
+        await expect(name(page)).toHaveValue("Typed title");
+        expect(await draftsOf(page)).toEqual([]);
+        await page.evaluate(() => {
+          (window as unknown as { __ackHold: Hold }).__ackHold.armed = true;
+        });
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await page.waitForFunction(
+          () => (window as unknown as { __ackHold: Hold }).__ackHold.held,
+        );
+        // The write committed before its acknowledgement: exactly one command, with the typed title.
+        const saved = (await bodiesOf(page)).map((b) => b.command.command);
+        expect(saved).toEqual([
+          expect.objectContaining({
+            kind: mode === "edit" ? "revise_task" : "create_task",
+            title: "Typed title",
+            ...(mode === "edit" ? { id: task.taskId } : {}),
+          }),
+        ]);
+        const savedId = String(saved[0]?.id);
+        // The pending save disables the form's fields (its outer fieldset).
+        await expect(name(page), "the save is pending").toBeDisabled();
+        const barrier = await page.evaluate((to) => {
+          const hold = (window as unknown as { __ackHold: Hold }).__ackHold;
+          const polite = document.querySelector(
+            '[role="status"][aria-live="polite"]',
+          );
+          if (polite !== null)
+            new MutationObserver(() => {
+              if (polite.textContent) hold.announced.push(polite.textContent);
+            }).observe(polite, {
+              childList: true,
+              characterData: true,
+              subtree: true,
+            });
+          const shown = (e: Element) => e.getClientRects().length > 0;
+          const control =
+            to === "tasks"
+              ? Array.from(document.querySelectorAll("a")).find(
+                  (a) => a.textContent?.trim() === "Tasks" && shown(a),
+                )
+              : to === "sync"
+                ? Array.from(
+                    document.querySelectorAll("[data-sync-tone]"),
+                  ).find(shown)
+                : null;
+          if (to !== "stay" && control == null) return null;
+          (control as HTMLElement | null)?.click();
+          const result = {
+            formMounted: document.querySelector("[data-task-form]") !== null,
+            documentPath: location.pathname,
+          };
+          hold.release?.();
+          return result;
+        }, where);
+        expect(barrier, "the navigation control was found").not.toBeNull();
+        expect(
+          barrier?.formMounted,
+          "the old form is still mounted at the release",
+        ).toBe(true);
+        await page.waitForFunction(
+          () => (window as unknown as { __ackHold: Hold }).__ackHold.delivered,
+        );
+        // The save's own announcement: the form has completed the save by the time the frame shows it.
+        await page.waitForFunction(() =>
+          (window as unknown as { __ackHold: Hold }).__ackHold.announced.some(
+            (text) => text.startsWith("Saved"),
+          ),
+        );
+        await page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+        if (where === "stay")
+          await expect(page).toHaveURL(new RegExp(`/tasks/${savedId}$`));
+        else if (where === "sync") await expect(page).toHaveURL(/\/sync(\?|$)/);
+        else await expect(page).toHaveURL(/\/tasks$/);
+        await untilTreeSettled(page);
+        expect(new URL(page.url()).pathname).toBe(
+          where === "stay"
+            ? `/tasks/${savedId}`
+            : where === "sync"
+              ? "/sync"
+              : "/tasks",
+        );
+        expect((await bodiesOf(page)).map((b) => b.command.command)).toEqual(
+          saved,
+        );
+      });
+});

@@ -86,11 +86,13 @@ export interface DataActions {
    * WEB-09b (WF-QUEUE-02): "Resend as a new operation" / "Review and save as a new attempt". Only for a draft whose kind registered
    * `rebuild`: the new command is built from the draft and `current`, the value the authorised read returned and the dialog showed (`null`
    * when the person explicitly continued without it), and SUPERSEDES the draft (a new operation id). Never rebuilt on the cache.
+   * `related`: the other rows that read returned (`CurrentRead.related`), for the rebuild's checks only.
    * `not_rebuildable`: nothing is registered, or the rebuild declined; nothing was changed.
    */
   saveAsNew(
     localId: LocalId,
     current: CacheRow | null,
+    related?: readonly CacheRow[],
   ): Promise<SaveAsNewOutcome>;
   /** The next window of the queue replaces the one shown. */
   showNextQueue(): void;
@@ -1042,7 +1044,10 @@ export function createDataEnv(
       const facade = leader.outbox ?? outbox;
       if (facade === null)
         return { kind: "refused", reason: "closed" } as ConfirmReviewOutcome;
-      return facade.confirmDefaultsReview(localId, confirmation);
+      // What the draft's commands need of the person's access, from the slices' registry (WEB-10a DA17-N2).
+      return facade.confirmDefaultsReview(localId, confirmation, (draft) =>
+        commands.admission(draft),
+      );
     },
     discard: async (localId) => {
       const facade = outbox;
@@ -1128,7 +1133,7 @@ export function createDataEnv(
         currentReads.delete(read);
       }
     },
-    saveAsNew: async (localId, base) => {
+    saveAsNew: async (localId, base, related) => {
       const bound = current;
       const facade = leader.outbox ?? outbox;
       if (bound === null || facade === null || !bound.service.live)
@@ -1141,7 +1146,7 @@ export function createDataEnv(
       if (draft === null || !commands.canRebuild(draft))
         return { kind: "refused", reason: "not_rebuildable" };
       // R7: rebuilt on the value of the authorised current read the person reviewed, never on the cache.
-      const next = commands.rebuild(draft, base);
+      const next = commands.rebuild(draft, base, related);
       if (next === null) return { kind: "refused", reason: "not_rebuildable" };
       return facade.supersede(localId, next);
     },

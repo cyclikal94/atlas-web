@@ -239,6 +239,12 @@ export interface SyncStateRow {
    * Absent on a database that never needed it: 0. Not a non-negative safe integer: no generation is issued (`no_generation`).
    */
   form_writer_gen?: number;
+  /**
+   * The local composition generation (WEB-10a revision 3, `model/composition.ts`): advanced in the same transaction as every write to
+   * `cache`, `pending_effects`, `drafts` or `draft_commands`, so a view that composes from several reads can prove that none committed
+   * between them. Absent on a database that never had such a write since it existed: 0.
+   */
+  composition_seq?: number;
   draft_fence: DraftFence | null;
   defaults: unknown | null;
   device_id: string | null;

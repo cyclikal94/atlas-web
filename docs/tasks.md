@@ -1,0 +1,788 @@
+# Today and tasks (WEB-10a)
+
+*Written by WEB-10a, 12 October 2026, against the pinned contract `v0.28.0-rc.1`. Consumers: WEB-10b (lists), WEB-10c (materialisation,
+dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people names). Fixture-stage work: `integration_passed` is false.*
+
+## What this slice does
+
+- **Today (`/today?day=YYYY-MM-DD&tz=Area/City`, WF-TODAY-01).** The day's occurrences in a display zone: filters All / To do / Done /
+  Missed, the summary "{done} of {total} done · {to do} still to do" (with "· {n} not known" when a state is not known: unknown is never
+  counted as zero), time-of-day groups, one row per occurrence with my state, a pending mark, the carry consequence, who takes part and the
+  quick action ("Mark done" for a tick goal; "Record" opens the task). States: loading, empty, error (banner with request ID and Try again;
+  cached rows stay under it), offline, and the `pending_tasks` notice.
+- **Tasks (`/tasks`, `/tasks/new`, `/tasks/<id>?occurrence=<id>`, `/tasks/<id>/edit`, WF-TASK-01/02/03).** The list (100 a page, an
+  Archived filter), the detail (record card for every goal kind, history with corrections, participation and the joint line, enrolment,
+  closure and streak exclusion, archive/restore, sharing through WEB-12a's editor), the form with presets, and the one-day correction.
+- **Commands.** `create_task`, `revise_task`, `record`, `exclude`, `resolve`, `revise_occurrence` and `archive` are queued through the
+  outbox (`model/commands.ts`); `enrol` is online-only (`/task-access-commands`, one attempt per body).
+
+## Public interface (`src/features/tasks/index.ts`)
+
+Import only from the index.
+
+| Export | What it is |
+| --- | --- |
+| `model/contract.ts` types and parsers | `TaskDefinition`, `OccurrenceData`, `ProgressState`, `OccurrenceView`, … and `parseDefinition`, `parseOccurrenceData`, `parseProgressState`, `parseOccurrencePage`, `parsePresets`, `parseJournalPage`, `parseEnrolment`, `parseTaskDetail`, `parseProjection`. Strict: exact keys, every bound; `null` on any mismatch. |
+| `evaluate`, `aggregate`, `finalise`, `layer`, `personalResult`, `eligible`, `actionable`, `scheduledOn`, `inDayView` | The server's evaluation mirrored (`crates/core/src/tasks/mod.rs`, `service/reads.rs`). `aggregate` is for tests and documentation only: **the client never shows a joint result it computed (Q8).** |
+| `uuidV5`, `occurrenceId`, `progressId`, `slotKey` | The deterministic ids (async, SHA-1 through `crypto.subtle`): compute them BEFORE enqueueing. |
+| `model/time.ts` | `resolveWallTime` (fold → earlier; gap → forward by the change of offset), `windows`, `firstSlot`, `slotOn`, `dateIn`, `todayIn`, `dayEnd`, `gapShifted`. |
+| `model/commands.ts` | The request builders (`createTask`, `reviseTask`, `record`, `exclude`, `resolve`, `reviseOccurrence`, `archive`), `QUEUED_KINDS`, `commandOf`, `pendingEvidenceOf`, `canonicalDefinition`. |
+| `registerTaskCommands(registry)` | Describe / project / current read / rebuild for every queued kind; idempotent per registry. The protected tree registers into the page's registry. |
+| `TasksBoundary`, `TasksEnvProvider`, `useTasksEnv` | The environment (the `SharingEnv` pattern): the stamped client for the displayed `(account, epoch)`, `identity`, `online`, `writable`, clock and ids. |
+| `useTaskActions`, `RecordCard`, `TodayRow`, `composeRow`, `RowModel` | The acts and the shared components. |
+| `taskPath(id, occurrence?)`, `todayPath(day?, zone?)` | Route helpers. |
+
+### Obligations of a consumer
+
+- A command for a task resource goes through the builders here, or follows the same targets and version bases (table in the plan §3.3):
+  `record` is checked against **my progress stream** only for checkbox and checklist evidence without `replaces`; quantity, observe and
+  corrections raise the stream as a side effect and send no `expected_version`. `exclude` is checked against my stream, `resolve`,
+  `revise_occurrence` and `archive` against their own resource, `revise_task` against the task with `expected_policy_version`.
+- Never record for another person (TASK-18): `subject_account_id` is the signed-in account.
+- `happened_at` is the instant of the person's act (Unix seconds), taken when it happens, never at send.
+- A value from the cache or the server is parsed with the strict parsers at READ time. No page-level value validator is registered for a
+  task kind (D-10a-3): one bad value would fail a whole sync page.
+- A screen that reads on mount records a `403`/`404` with `noteIfRefused` **when the answer arrives**, not after checking it is still
+  mounted: a `403` remounts the protected tree before the screen's continuation runs (measured: dozens of `/daily` reads a second).
+- **Read every page of the outstanding work** (revision 1, R4): `useAllOutstandingByKind` / `useAllOutstanding` follow the reads' cursors and
+  are `loading` until the whole overlay is read; a view never composes my result from the first window alone. The single-page hooks remain
+  for a caller that pages explicitly (`next` is `{id, after}` for `readOutstanding`, a `created_seq` for `readOutstandingByKind`; a page may be
+  empty and still continue).
+- **A deep link names its write target** (revision 1, R1): an `occurrence` in the address is shown only if it is this task's; otherwise the
+  detail says it is unavailable and offers nothing to record. A consumer linking to a day passes the id it means; it is never replaced.
+- **A save acknowledges what it submitted** (revision 1, R3): an input editable while its save is pending is cleared, closed or forgotten
+  only if it was not edited after it was submitted (the task form, the record amount, the correction dialog and the entry fix all do this).
+- **"Save as new" of a task command** (revision 1, R5) rebuilds the request with its own builder on the REVIEWED version (`reviewedBase`), keeps
+  every target and the captured defaults, and is conditional on the draft not having changed. `resolve` offers no rebuild (no authorised
+  single-occurrence read exists for its draft).
+
+## Decisions taken in this slice (D-10a-1 … D-10a-15)
+
+1. **Sources.** Resources from the cache; derived fields (`outcome`, `period_outcome`, `actionable`, membership, `pending_tasks`) from `GET /daily`
+   while online, in page memory for the displayed identity only. Two reads per view (`scope=joint`, `scope=personal`), both `state=all`. Offline the
+   day is derived from the cache (§ offline below).
+2. **No `kind_date` deriver, no schema change.** The offline day is a bounded walk of every cached occurrence (`scanResources`, 100 rows a
+   window, a macrotask between windows). A recorded departure from WEB-04 D's `by_kind_date`. The cost at large caches is a diagnostic for
+   WEB-09c/09d (trigger: a desktop full walk of 10,000 occurrences over 2 s in Chromium).
+3. **Strict parsing at read time**, never a page-level validator. An unparseable row says "This item can't be shown on this device".
+4. **Create sharing**: "Use my defaults" (the task audience from the B5 record) or "Only me" (an explicit empty policy, still queueable).
+   Choosing people is done after save through Sharing on the task (WEB-12a's editor); there is no second policy editor.
+5. **Online reads are this slice's own loader**, bound to `(account, epoch)`; refusals are remembered per identity (`memory.ts`).
+6. **`pending_tasks` disclosure without catch-up.** A non-blocking notice; `materialise` and "Catch up" are WEB-10c's (escalation E-1 below).
+7. **Enrolment** is online-only, one attempt per body (`model/attempt.ts`).
+8. **Status vocabulary** (first rule wins): Conflict, Excluded, Done (Done late), Waiting on an earlier day, Closed not completed, Missed, On
+   track, To do, Not open yet, Not available offline, Not known.
+9. **Pending marks**: "Not sent yet" (queued, or held for a review), "Sending…" (in flight), "Waiting for the server" (acknowledged, effect not in
+   the cache). The locally layered result is labelled "provisional".
+10. **Display zone and day in the address**; the default zone is the device's, shown on the chip and changeable; the default day rolls over at
+    local midnight.
+11. **Time-of-day groups** by the slot instant in the display zone: Morning before 12:00, Afternoon to 17:59, Evening; date-only, undated and
+    overdue rows in "Any time today" (an overdue row shows "From {day}"). Within a group: by instant, title, id.
+12. **"Record" opens the task** for that day and focuses the record card; "Mark done" records in place (tick goals only).
+13. **Queued-edit coalescing.** Saving the form of a task whose `create_task` is still `queued` edits that draft in place; a second
+    `revise_task` that is still queued and never sent is edited. The defaults review block is kept or widened, never cleared by an edit.
+14. **No `happened_at` editor.**
+15. **WF-QUEUE-02 current reads**: task-level kinds read `GET /tasks/{id}`; `record`/`exclude` read `GET /progress?parent_id=<occurrence>`
+    (my stream is found among the primary targets AND the side effects: an amount names it as a side effect). `resolve` and
+    `revise_occurrence` register none (no single-occurrence read in the contract), so neither is rebuilt.
+
+Revision 1 (review of 13 October 2026) adds:
+
+16. **Freshness of my result from `/daily` (R2).** It applies only while the device is online, for the cache generation its read began under
+    (a committed sync page makes it stale until the re-read answers), and, row by row, until a window boundary of the row passes after it was
+    answered (`answerCovers`). Otherwise the row shows the personal reapplication with its finalisation. Offline, the day is the device's (the
+    last answer does not list it); the joint result stays the server's alone (Q8), shown with its time by the detail.
+17. **The displayed day of the detail (R1).** The address's occurrence by its own id (parent = the task's details, task id = the task);
+    unavailable otherwise. Without one: today's slot read by id, else the latest by date of every saved day (a bounded walk). The picker lists
+    a page of 100 saved days at a time ("More saved days" / "Previous saved days"), plus the selected day.
+18. **The default day's midnight timer (R6)** re-arms itself on every six-hourly wake and re-reads the day when the page is shown or focused; a
+    day in the address never moves.
+
+Revision 2 (review of 13 October 2026 and its design assessment) adds:
+
+19. **Whole-input freshness (R2; supersedes the time and generation rules of 16).** A `/daily` answer carries its provenance: when each scope's
+    accepted page chain was DISPATCHED (a `409` restart counts from the restart), each scope's `revision`, and the durable cache position read
+    when the read was dispatched (`readCacheRevisionNow`, the content revision: an empty delta page changes nothing and asks for no re-read). A row's STRUCTURE (definition, window, participants, `can_edit`, version) and its DERIVED
+    fields are chosen separately (`structureOf`, `composeRow`): the committed cache row wins unless the daily item is ahead of it (a newer
+    version; the same version read after the cache's last commit; or a row the cache does not hold that this view never held, so an old answer
+    cannot bring back a removed one). My result is the server's only when no cache page was committed since dispatch, no window boundary of the
+    row passed since dispatch (delivery never renews an answer), and the server's item is of the structure's version; otherwise it is the
+    personal reapplication with its finalisation. The server's membership of the day applies only while its answer for the row is current. An
+    answer already stale when it arrives is asked for again once (its re-read is dispatched after the boundary). Joint results stay the server's.
+    (Revision 3: the "never held" exception is withdrawn, decision 29; the clock's generation and symmetric coverage are added, decision 28.)
+20. **Coherent composition (C2; superseded by decisions 26 and 27 in revision 3).** Today composes from the occurrence, task and progress rows of ONE related read (the durable position is read
+    before and after; a read that spans a commit is read again, at most three times), for the current candidate ids; otherwise it keeps the last
+    coherent composition and marks the list `data-today-refreshing`. The walk only discovers candidates. The queue key includes each draft's
+    `command_digest`, so a queued edit under the same id and status re-walks. A pending entry the synced stream already lists is not counted
+    again.
+21. **One boundary clock for Today and the detail (R8).** `useBoundaryClock` holds the time a screen evaluates against and wakes at the next
+    opening or closing of the windows shown (Today: every candidate row; the detail: the displayed day, its queued correction applied), capped
+    at six hours with waits that arm themselves, re-reads the clock on `visibilitychange`, `focus` and `pageshow`, evaluates at once when new
+    data brings a boundary that has already passed, and moves its epoch (Today asks `/daily` again) when a boundary is crossed or the clock went
+    back. The detail's `now` feeds its result, pill and record card. The detail's default day is chosen once per visit: moving it at midnight
+    would retarget an open record card or correction; the record card, entry history and correction dialog are keyed by the day shown.
+22. **Correction editing has an owner that outlives the dialog (R3).** `detail/correction-owner.ts`: per identity and day, a session (numbers
+    never reused) with a revision every edit advances, wherever it is made. A save captures `{session, revision}`; its completion consumes the
+    entry only if it is still that session at that revision, and the session's CURRENT editor (if one is mounted) closes itself on that
+    notification: no mount ever closes through an earlier mount's callback. Cancel, Escape and the close icon end the session (a save already
+    made stays queued); the in-dialog sync control retains it; another identity's sessions are dropped. The entry fix carries a session number
+    from its parent (a reopened fix of the same entry is never closed by an earlier one's save), and the task form navigates only while it is
+    still mounted.
+23. **The conflict choices read the queued operation (DA-N1).** "Someone else corrected this day first" reads the conflicted draft WITH its
+    command (`useDraftWithCommand`, the existing `readDraftWithCommand` plan) and shows and resends what was SUBMITTED (`submittedCorrection`):
+    the full definition, date and time, rebuilt in full on the version shown (`reviewedBase`) and only if the stored operation is still the one
+    read (`expectDraft`: id, status, digest). A reload, another tab, or a second conflict of the replacement all work from the durable
+    operation; page memory is not used. "Save mine" is offered only once a version newer than the one the operation was built on is on the
+    device; an unreadable command says so. "Discard mine" is always offered.
+25. **Today asks `/daily` again only when committed CONTENT changed (a regression of revisions 0–1, found in revision 2).** It followed
+    `page_seq`, which an empty delta page also moves. With the production leader every stamped read changes the session's view, which wakes
+    the idle engine; its empty page moved `page_seq`; Today read again 750 ms later: two reads per tab and one sync every ~0.8 s, for ever
+    (E-C13's healthy engine never went quiet; E-C8's follower kept seeing its gate re-read). Two generations now: every committed page
+    (`page_seq`) re-reads the LOCAL rows (cheap, whatever the page carried); only committed content (the applied revision,
+    `readCacheRevisionNow`) asks the SERVER again and decides whether an answer is still current. Tests: `freshness-provenance.test.tsx` (an empty page asks nothing; content asks again; MU-2102), E-C13 and E-C8
+    unchanged (MU-2103 natively).
+24. **The destinations' heading is the route's (a regression of revisions 0–1, found in revision 2).** Today and the task list replaced
+    placeholders whose level-one heading was always there; the screens then put it inside the cache gate and the lazy chunk, so a gated or
+    still-loading page had no h1 (the sync-screen specs' axe "page-has-heading-one") and a route change found no heading to focus (the shell's
+    route-focus case). Both routes now render their heading outside the gate and the lazy screen; `CacheGate` takes an optional `heading` that a
+    gated task page shows (its own heading is part of the hidden content). Tests: `route-headings.test.tsx` (MU-2091…MU-2094); the shell and
+    sync-screen specs.
+
+Revision 3 (review of 14 October 2026, findings R2, R8 and R9, and its recurring-finding design assessment C1–C3) adds:
+
+26. **A durable local composition generation (R9, C3).** `sync_state.composition_seq` (`data/model/composition.ts`) is advanced by the STORE (the
+    Dexie adapter and the test double, one shared rule) in the same transaction as every write to `cache`, `pending_effects`, `drafts` or
+    `draft_commands`, after the plan's writes, so every writer is covered by construction and a refused or aborted transaction advances
+    nothing. Schema version 3 (no store change) is the barrier against an older build that would write without advancing it: opening it closes
+    an older build's connections (`upgrade_pending`), and an older build cannot open it. The certificate a screen reads (`readLocalBasis`: the
+    incarnation, the generation, the cache status and recovery generation, the content revision) before and after its reads proves that nothing
+    it read was written in between, in this tab or another (`readCoherently`, three attempts). It supersedes decision 20's single related read
+    bracketed by the content revision, which a queue write, a receipt or reconciliation after recovery did not move.
+27. **Honest publication (R9).** Today reads everything the day needs as one certified snapshot: every page of the outstanding task work, the
+    walk that discovers the candidates, then their related rows (the occurrence, its task and my progress). Only a complete snapshot is shown. A
+    read that failed (`failed`) or kept changing on every attempt (`unstable`) is never an empty day: the last complete snapshot of the same
+    identity, day and zone stays, marked stale (`data-today-stale`), with a notice and "Try again"; without one the notice shows alone. Rows
+    are composed from the retained snapshot with the CURRENT time, so a stale day still finalises at its close. A new snapshot is read when the
+    generation moves (any local commit, an empty sync page included: only a local re-read); the server is asked again only for committed
+    content, the clock or a retry (decision 25 stands). The detail composes its day's row from a certified read of its own inputs (`rowError`
+    says why when it cannot); the task list says when its read failed instead of "No tasks here yet."; the task form saves no edit while the
+    queue (its write target) is unread.
+28. **The clock's own generation (R2, C1).** `useBoundaryClock` moves a synchronous generation when the device clock goes BACKWARDS. A `/daily`
+    answer records the generation it was asked in; its derived fields apply only while it is still the clock's (a clock that went back and
+    returned to the same time is caught), and an answer asked before a backward step is not taken as the joint result's "as of". Coverage is
+    symmetric: a boundary between the dispatch and now, in either direction, makes the server's fields stale. Structure is chosen separately.
+29. **No structure from an answer that is not current (R2, C1).** A daily item supplies the structure of a row the cache lacks only while its
+    answer is current against the snapshot (no content committed since its dispatch). The revision 2 exception for a row "this view never
+    held" is gone: not having seen a row is no evidence that it was never removed. The row is withheld until a current answer (asked once).
+30. **One effective structure for composition and the clock (R8, C2).** `effectiveOccurrence` (view.ts) resolves the committed or daily row and
+    then the outstanding drafts' projection and display patches; `composeRow` and Today's clock windows both use it, for every candidate: walked,
+    listed, projected by an outstanding create, or named by an outstanding draft (a queued correction can bring an occurrence into the day). A day
+    created offline is therefore woken at its opening and closing with no other event.
+
+Tests: `tests/data/composition-generation.test.ts` (the writers), `tests/features/tasks/local-coherence.test.tsx` (the composed screens with real
+commits and failures placed between their reads), native E-T9f, E-T14 (another tab commits between Today's reads) and E-CG1/E-CG2; unit
+MU-2104, MU-2106…MU-2118 and real-engine MU-2119…MU-2122. Considered and rejected: one read transaction for the whole walk (it would hold every
+writer for the length of a full walk, and the 10,000-occurrence walk already exceeds the diagnostic trigger, F-1), and a generation advanced by
+the plan builders (it cost initial-bundle bytes the fixture budget does not have, and advanced on decisions that wrote nothing).
+
+Revision 4 (review of 14 October 2026, findings R9, R10, R11 and R12, and its recurring-finding design assessment C1–C4) adds:
+
+31. **The task detail is one certified read (R9, C1).** The task, its details, the displayed day's selection (the address's day, the visit's
+    default, today's slot or the walk over every saved day), the queue and the outstanding work naming them, the day and my progress rows, the
+    picker's first page and every progress stream of the day are read as ONE composition (`readCoherently`). "This task isn't on this device",
+    "no day" and "This day isn't saved on this device…" are said only by a complete read; a read that failed or kept changing with nothing
+    complete is an error with "Try again" (`data-task-detail="error"`), never absence; with a complete read it stays, marked stale, with "Try
+    again" (`data-detail-row-stale`), which reads everything again. The edit page uses the same read (an error with "Try again"; a stale
+    refresh keeps the open form and what was typed) and reads its write target (the queue) before the form shows. A later page of the day
+    picker is a read of its own, whose failure says so with "Try again" (`data-day-picker-error`) and never "no more days". The default day is
+    chosen once for the visit and kept while it is still this task's day.
+32. **The open full history is a bounded, owned window (R10, R12, C3).** At most three pages (`MAX_PAGES`, Q9) are retained; the page-start
+    cursors visited are kept (numbers), so an earlier page is read again from its own start ("Earlier entries") and a later one by "Load
+    more", each letting go of the page at the other end. Every request belongs to the history's current authority (decision 36): an answer of
+    an ended one never replaces anything. The window
+    follows its stream's committed version (`RowModel.progressVersion`): a new version reads the window's pages again, once per version and
+    online; offline it waits for the connection. A refresh replaces each page in place as its answer arrives (revision 5: never a second window
+    behind the first). A failed refresh keeps the pages, marked stale, with "Try again"; a refusal of any read drops them (decision 36);
+    another identity starts over. "Refresh" and "Back to recent entries" are always offered while it is open. Saved entries newer than the
+    pages (the stream's recent tail) show until the journal is read again, never fixable.
+33. **Corrections across pages (R10, C3).** A window that reaches the journal's end knows every correction of its entries (a correction is
+    appended after what it corrects). Outside it, "Fix this entry" first walks the rest of the journal for a correction of THAT entry, keeping
+    only the answer: corrected since, the entry is marked "Corrected" and no fix opens; otherwise the fix opens. There is no automatic walk.
+    An entry known only from the full history is fixable only while the window is current: online, not failed, read at the stream's committed
+    version (revision 5; offline only the recent entries can be fixed, as before).
+34. **The open fix is the history's, not its page's (C3, J5).** The entry, the session, the typed value and its edit count live in the history:
+    letting a page go or refreshing it never erases a fix (shown apart while its entry's page is not shown). A fix whose entry has a saved
+    correction since cannot be saved, and says why. Revision 2's session and edit-count rules are kept. A fix known only from the full history
+    has that history's authority (revision 5): "Back to recent entries" or a refusal closes it (nothing is saved); what was typed is kept in
+    memory for the same identity and entry and restored when that entry's fix is opened again under a new authority — never persisted or sent.
+35. **One enrolment attempt per change, owned before it is sent (R11, C4).** The attempt (`{key, body, command, phase}`) is taken
+    synchronously in page memory per identity and task (`startEnrolment`) before the request: while it is pending, Join/Leave and the consent
+    are disabled with "Sending your change…" and a second activation sends nothing; it outlives a same-identity remount and is dropped with the
+    identity. An uncertain answer keeps the exact command and key, and "Try again" resends them unchanged; a definite answer ends it and the
+    next change is a new attempt. Every answer is followed by a read of the enrolment; a read asked before a change was sent is not shown, and
+    one answered while a change is pending never replaces what is shown. A reload starts with no attempt and resends nothing (decided:
+    RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, below).
+
+36. **One owner of the journal's state; only the latest Fix opens an editor; a refusal of any read ends the authority (R13, R14; revision 5,
+    design assessment C1–C3).** The history's continuations read its CURRENT journal, never one captured before an await, and check what they
+    were started under: the authority (begun by opening the full history; ended by "Back to recent entries" and by a refusal), the correction
+    selection (taken synchronously by every "Fix this entry" and by Cancel), for a check the stream's committed version, and the mounted
+    lifetime. So an older check of the rest of the journal never opens or retargets an editor over a newer one or its typed value, and stops at
+    its next answer once anything it depends on moved. A valid refusal (403/404/410) of ANY read of the current authority — the first page,
+    Refresh, Load more, Earlier entries or a check, current or superseded — drops the full history, its cursors and check facts at once, and no
+    earlier success restores them; "Full history" is offered again, so only a new explicit read begins another authority. Uncertain, offline
+    and not-sent answers certify nothing (stale pages kept, or "Couldn't check…"); a closed request is abandoned; a page whose cursor does not
+    move is a failed read. At most two journal requests are in flight per view (a further one waits holding numbers only, and is never sent if
+    no longer wanted), so the retained payload is at most the three window pages plus two answers in flight. The number of requests in flight is
+    shown as `data-journal-requests` (for tests: 0 once every answer has been taken in).
+37. **What was typed belongs to its draft; one save decision for the Save shown and the save admitted (R16, R17; revision 6, design
+    assessment items 1–7).** A fix's input is held by a DRAFT (raw value, a revision counting edits across every editor of it, whether it is
+    unsaved, and the revision a pending save submitted), not by the editor showing it. Closing the full history ("Back to recent entries" or a
+    refusal) parks a draft that holds unsaved input — typed or restored — and opening that entry's fix again moves it back, however many times,
+    until Cancel discards it, a save of exactly that revision acknowledges it, or the view ends (route change, protected-tree remount, reload,
+    another identity). Memory only: never persisted, never sent, never an authority. A save's answer settles only the draft and revision it
+    submitted wherever the draft is now (the submitting editor closes; a newer editor of the same draft stays, marked saved; a parked draft is
+    retired; anything edited since is kept); one save at a time per draft. `saveBlock` decides for the Save shown and, synchronously, when Save
+    is pressed: not writable; a COMMITTED correction of the entry (for good); a recent entry is saved on its own authority (offline and while
+    the history is read again); otherwise the full history must be current (online, read without failure at the stream's committed version,
+    the detail's local read current — `useTaskDetail().current`) and there must be evidence about THIS entry: a check at the current version,
+    or a window that reaches the end and holds it (kept as the entry's check when Fix is chosen there). Without it Save says why — "This fix
+    can be saved once you're online again.", "This fix can be saved once the full history is up to date.", "Check whether this entry was
+    corrected since, then save the fix." with "Check again" (a check from the entry's own place in the journal, keeping the open fix) — and
+    the input is kept. A pending correction of the entry by me does not block a newer value (R3). A check answered after the connection went
+    opens nothing. The history shows `data-stream-version` and `data-journal-version` for native barriers.
+38. **Every enrolment change sends the complete enrolment, its audience explicit (R22; revision 10, design assessment C1–C5; task
+    `states.md` R2/F1).** `enrol` replaces the whole enrolment, and an omitted `initial_policy` is read by the server as "resolve my CURRENT
+    progress defaults", which would silently replace a private or custom audience (and the progress generated from then on would follow it).
+    So `EnrolCommand.initial_policy` is required and every command is built by `enrolCommand` from the enrolment as read with only the
+    person's change applied: Leave and the consent keep the audience; "Change…" edits the audience (WEB-12a's `AudienceChooser`, Save and
+    Cancel; Cancel sends nothing) and keeps active and the consent. Aggregate consent and who can read progress are independent: neither
+    sets the other, and Private is an explicit empty policy. Joining asks the consent explicitly (no choice implied; Join waits for it) and
+    shows the audience first: rejoining starts from the audience last used, the first Join (version 0, whose read policy is only a
+    placeholder) from the CURRENT default for progress, from a defaults snapshot asked for when the form opened (`progressDefaultPolicy`,
+    resolved as the server resolves it); a default that cannot be read is said so with "Try again", never shown as Private, and Join cannot
+    send. A choice belongs to the enrolment version it was made on and is never rebased; a stale version is refused by `expected_version`
+    (revision 11, decision 39: a choice whose edits were not all sent is kept, unsaved, rather than dropped). The attempt (decision 35) captures a frozen copy of the
+    canonical body, nested policy included, and that body is what is sent, now and on "Try again", whatever changed since (the read, the
+    defaults, the object the request was built from). The audience applies to days from now on; "Who sees my progress" still edits a day's
+    own progress. The chooser is imported from `sharing/AudienceChooser` (not the barrel, whose editors are in the shell's first load).
+39. **An enrolment change owns the settings until the read after its answer (R23; revision 11, design assessment C1–C3, DA-1).** A save's
+    answer, and the read that follows it, may end only the edits that were sent. So from the moment a change is admitted (`startEnrolment`)
+    until a read asked AFTER its answer is accepted, nothing in "Your settings" is edited, chosen or sent: the change's cycle (`sending`, then
+    `reading`) is page memory beside the attempt, so a same-identity remount is still bound by it and a reload or another identity starts
+    without it. Every control says why ("Sending your change…", then "Checking your settings…"), an already open directory lookup included:
+    its Choose buttons are disabled with the reason (`DirectoryLookup`'s optional `blocked`; the resource and defaults editors pass none), and
+    every edit is also refused when it HAPPENS (`admitted()`), since a control rendered before the change was sent can still be pressed in
+    the same turn. A read is numbered and judged by the change it was asked under (`askEnrolment`/`answerEnrolment`): one asked before the
+    answer is never the current state (shown only when nothing is, disabled) and never ends the cycle; a failed read leaves it open, with its
+    "Try again" (a read, never a send). The draft lives in the settings (the enrolment it began on, an edit count and the count last sent; the
+    detail's identity- and task-scoped read remounts it with the settings), not in a child keyed by version, so a hidden form (offline, a failed read) keeps it. When the current state shows
+    another version, a draft whose edits were all sent ends (saved, or refused); one with an edit not yet sent is KEPT, unsaved, as "Not
+    saved: your settings changed after you started this change, so it can't be sent. Discard it to change the settings shown." with
+    "Discard this change", and the rest waits ("Discard the unsaved change first"): never dropped, never moved onto the new version. Leave
+    and the consent wait while an audience edit is unsaved ("Save or cancel the sharing change first"). A retry that finds the page offline
+    is not a definite answer (DA-1): only `conflict`, `operation_conflict`, `forbidden`, `not_found` and `invalid` end an attempt, so an
+    uncertain change keeps its body and key whatever a later retry finds. No cross-tab lock, rebase or persistence across a reload is added.
+
+    Revision 12 (review 12: R23 `task-save-acknowledgement-consumes-newer-edits`, R25 `task-enrolment-refusal-discards-input`; design
+    assessment I3/I4, C1-C7): the draft is no longer the settings' React state but the PAGE's (`EnrolmentDraft` in `memory.ts`, per identity
+    and task: a never-reused editor `session`, its `revision` (edits accepted), the enrolment it was made to, a frozen copy of the policy and
+    the consent), so an ordinary same-identity remount of the protected tree shows it again, after the remounted settings' own authorised
+    read. Being sent is not being saved: Save/Join captures the draft's session and revision with the change (`EnrolmentTicket`, kept on the
+    attempt; a Try again keeps the ticket of what it resends), only a SUCCESS records it as acknowledged, and only the current read that
+    follows ends that exact draft revision (`answerEnrolment`). A refused (`conflict`, `operation_conflict`, `invalid`, ...) or uncertain
+    change keeps the submitted values, unsaved, beside the settings read: editable on the same version (Save again), kept with "Discard this
+    change" on another; never resent, rebased or merged, and Leave and the consent wait for it. A version that moved, or a server state that
+    looks equal, is not an acknowledgement. Every edit, opening and Cancel/Discard is admitted by the owner when it happens (not while a
+    change is sent or confirmed); Discard ends only its own session and never forgets an uncertain change. A refused enrolment read
+    (`403`/`404`) removes the draft; another identity never sees it (page memory is per identity); a reload starts without it and resends
+    nothing. A first Join already begun keeps its own audience and consent whatever a later defaults read says. The page holds at most 2,000
+    changes and drafts: a NEW one beyond that is refused with "Too many unsaved changes on this page: save or discard one first", and
+    nothing held is evicted to make room (only cycles with nothing in progress are reclaimed).
+
+    Revision 13 (review 13: R26 `task-enrolment-first-choice-focus`; design assessment C1/C2, I7): the first choice of a first Join (consent
+    or audience) begins the draft without replacing its form. `FirstJoin` renders the same join form in the same place before and after
+    (from the draft once begun, from the defaults seed before), so the control chosen stays in the page and keeps keyboard focus. The
+    defaults snapshot is read only while nothing is begun (`SeedRead`), so a begun first Join neither waits for nor asks for one, as before.
+
+Tests: `tests/features/tasks/detail-read-coherence.test.tsx` (D1–D4, D9, the visit's default), `journal-window.test.tsx` (J1–J5),
+`enrolment-attempt.test.tsx` (E1–E4), local-coherence Q17's form case (adapted, labelled) and its open-form case; native E-T15 (the open journal
+follows a committed correction), E-T16 (an enrolment change pressed again while pending) and E-T17 (another tab commits between the detail's
+reads); unit MU-2123…MU-2148 and real-engine MU-2149…MU-2151; MU-2034/2035/2037/2045/2046/2083/2118 re-expressed (same intent). Revision 5:
+`journal-ownership.test.tsx` (Q1–Q9, Q13–Q15), native E-T18 (an older check never replaces a newer editor) and E-T19 (a refused check drops the
+full history); unit MU-2152…MU-2155, MU-2157…MU-2168 and real-engine MU-2169/MU-2170; MU-2133/2135/2136/2139/2140 re-expressed (same intent). Revision 6:
+`journal-drafts.test.tsx` (Q1–Q3, Q15), `journal-save-authority.test.tsx` (Q4–Q6, Q9–Q11), native E-T20 (another tab commits while a check's
+answer is held), E-T21 (another tab commits while the fix is open and its re-read is held), E-T22 (the other tab's hint late and twice),
+E-T23 (a 404, a remounting 403 and a reload end the transient state; the queued correction stays), E-T24/E-T25 (review 6's witnesses);
+unit MU-2171…MU-2190 and real-engine MU-2191…MU-2194; MU-2045/2046/2083/2138/2153 re-expressed (same intent).
+Revision 10 (R22): `enrolment-policy.test.tsx` (Q1–Q5, Q8, X3), `enrolment-attempt.test.tsx` adapted (labelled: Join first chooses the
+consent), native E-T16 adapted, E-T27 (the wire body keeps a shared audience and exclusion) and E-T28 (two tabs: the stale change is refused and the next one keeps the other tab's audience), released-backend I-T23 (a consent change in
+the UI keeps a private audience, so another reader of the task cannot read progress generated afterwards; with an explicitly shared control);
+unit MU-2213…MU-2222; MU-2143 re-anchored (same mechanism).
+Revision 11 (R23, R24, DA-1): `enrolment-ownership.test.tsx` (S1–S9, S13, X4: all three callers × grant/exclusion while sent and while
+confirmed, every writer frozen, same-turn choice refused, Leave/consent beside an unsaved edit, early reads, remounts, offline retry, kept
+draft, failed follow-up reads, another identity), `tests/static/mutation-inventory.test.ts` (the catalogue's expected count and the
+membership check, R24), native E-T29 (an open lookup frozen while sent and confirmed, pointer and keyboard), E-T30 (two tabs, the other
+winner order) and E-T31 (a lost answer replayed after another tab's change; a reload sends nothing); unit MU-2223…MU-2236 (MU-2232 retired: its guard was unreachable and removed); MU-2142,
+MU-2143, MU-2146…MU-2148 and MU-2220…MU-2222 re-anchored and real-engine MU-2150 re-expressed (same intent).
+Revision 13 (R26): `enrolment-focus.test.tsx` (F1–F6: the first consent Yes/No, Private from a shared and an already-private default, a
+grant's permission and a consent choice with the directory lookup open, each keeping the same connected control focussed with nothing sent;
+rejoining, enrolled and rerender controls; no defaults snapshot asked for once begun), native E-T34 (real Tab, Option+Tab in WebKit, and Space
+in three engines, with rejoin controls); unit MU-2251…MU-2253 and real-engine MU-2254; MU-2243 re-anchored (same intent).
+Revision 14 (review 14's R27 `production-browser-evidence-overwrite`, design assessment DA-H1; harness only, no product change): the
+production public surfaces' Chromium screenshots and painted-contrast records, and the Settings fixture's screenshots through
+`checkSurface`, are claimed per invocation and test (`surfaceScreenshot`/`recordPaintedContrast` in `tests/e2e/surface-checks.ts`, on
+`evidence-run.ts`'s exclusive claims) instead of the fixed `.agtx/evidence/WEB-08b/design/`, now historical; every assertion unchanged.
+`tests/static/browser-evidence-writers.test.ts` (no fixed evidence destination, append or literal screenshot path in `tests/e2e`,
+profiling producers exempt) and `scripts/validation/design-evidence.test.mjs` (two and concurrent invocations, projects, repeats, a
+failed attempt, report discovery and a sentinel historical folder, through Playwright).
+Revision 15 (review 15's R28 `today-participant-membership-label` and R29 `task-edit-permission-admission`; decision 41):
+`today-participants.test.tsx` (the roster's label for non-members, members and an empty roster, own-stream evidence, Everyone/Pooled/Anyone
+off the roster on Today, Just me unchanged, an Anyone task still recordable without a stream, the task saying the same as Today) and
+`task-edit-permission.test.tsx` (the rule; Edit task withheld for a denied task, details or both; the direct route's Save and Enter queue
+nothing and keep the typed name; a permission lost while the form is open; a queued revision not coalesced after the loss; the editor and
+queued-create controls), native E-T35 (Today off the roster, three modes, enrolled control) and E-T36 (denied task, details, both: no Edit
+link, the direct route queues nothing; the editor control) in three engines; unit MU-2255…MU-2265 and real-engine MU-2266/MU-2267.
+Revision 16 (review 16's R30 `occurrence-correction-permission-admission` and R31 `task-time-precision-loss`, design assessment DA-A1–A3;
+decision 42): `write-admission.test.ts` (the rule; W2, W3 and W4 under a denial committed before their transaction and after a write, with
+editor controls; the generic rebuilds of a revision and an archive, and the task's read keeping its details), `correction-permission.test.tsx`
+(Correct this day withheld; a permission lost while the dialog is open, then restored; a denial committed before Save; Save mine withheld,
+refused with its reason, and its editor control), `task-revision-admission.test.tsx` (a denial committed before a revision and before an edit
+of the queued one; another tab's edit of the queued revision not overwritten, with its control) and `time-precision.test.tsx` (00/01/45/59
+seconds through the form and the correction, explicit and cleared times, a hidden time, the slot's time rather than the definition's, the
+corrected instant and key, DST folds and gaps, recovery round trips and legacy values; the real form and dialog at 07:30:45 and 07:30:00),
+with `current-read.test.ts` and `recovery-screens.test.tsx` U-6b for the read's details reaching the rebuild; native E-T37 (read-only
+occurrence, the editor control, a permission lost while the dialog is open, a denial committed by another tab's own connection before Save
+and before Save mine, a denial delivered with the newer version) and E-T38 (07:30:45 and 07:30:00 task and occurrence, an explicit time
+edit) in three engines; unit MU-2268…MU-2298 and real-engine MU-2299…MU-2303 (`scripts/mutation/catalogue-web10a-r16.mjs`).
+Revision 17 (the design assessment's DA17-N1 `occurrence-closure-permission-admission` and DA17-N2 `anyone-first-record-permission-admission`;
+decision 43): `closure-record-admission.test.ts` (the rule; W2 Close/Reopen and an Anyone occurrence's first record under a denial committed
+before their transaction, with editor controls and a denial after the write; an existing participant, an admitted first record and a
+reviewed read as known participation, a settled or rejected first record as none; my stream's own denial for a record and an exclusion; the
+defaults review's confirmation of a held first record (W3) and the replacement of a conflicted one (W4); the registry stating what each
+builder states) and `closure-record-screens.test.tsx` (the same over the production data controller and screens: Close, Reopen and a first
+amount offered, then denied by another tab; an existing participant still recording; the confirmation through the controller; a denial
+already on screen refused before the outbox is asked); native E-T39 (Close, Reopen and a first Anyone record denied by another tab's own
+connection after they were offered, their editor controls, and an existing participant of a read-only occurrence) in three engines; unit
+MU-2304…MU-2326 and real-engine MU-2327…MU-2329 (`scripts/mutation/catalogue-web10a-r17.mjs`; MU-2268, MU-2270–MU-2272 and MU-2299
+re-anchored, same intent).
+Revision 18 (Review 18's R33 `task-sync-navigation-draft-loss`; decision 44): `sync-visit-retention.test.tsx` (through the app's router:
+the new form, its stage and a hidden interval, the edit form's raw invalid name, the record amount and mode, and an open fix, each kept
+through a visit to `/sync` and Back, nothing queued; a save pending when the person left consumed only at its revision, a refusal kept with
+its note; the controls: any other departure, Cancel, an unedited form, another identity, another task; the preset picker's in-dialog sync
+control); native E-T40 (Review 18's witnesses through the visible sync control and browser Back, with save-without-navigation controls) in
+three engines; unit MU-2330…MU-2349 and real-engine MU-2350…MU-2352 (`scripts/mutation/catalogue-web10a-r18.mjs`; MU-2022, MU-2043 and
+MU-2084 re-expressed, same intent).
+Revision 19 (the design assessment of Review 19: DA19-I1 and DA19-N1; decision 45): `sync-return-context.test.tsx` (through the app's
+router: an amount, a fix and a correction typed for the default day are found on that day after a later day was synced or the task's
+midnight passed during the visit, and the save names it; a gone day is shown as unavailable; a fix kept through the visit while another
+writer queued a correction of its entry is shown with Save withheld, a stale Save handler queues nothing, the queued correction's entry
+already in the recent tail still hides Fix; the controls: nothing typed chooses afresh, an explicit address, no correction queued, a
+correction of another entry, the queued correction discarded); native E-T41 (Q3 and Q6 through the visible sync control, browser Back and
+a second real tab) in three engines; unit MU-2353…MU-2363 and real-engine MU-2364…MU-2365 (`scripts/mutation/catalogue-web10a-r19.mjs`;
+MU-2138 re-anchored, same intent).
+Revision 20 (the design assessment of Review 20: DA20-I1; decision 46): `sync-return-context.test.tsx` "DA20-I1" (the visit's day
+removed by a committed page AFTER the restored editors mounted, or with no visit, or named by the address: unavailable, no other day, no
+write; restored: the same raw amount, open fix, reopened or retained correction; a record or fix save pending across the removal settles
+only what it submitted; leaving for the sync screens or choosing again keeps the input with its own day; another identity drops it; a
+failed read stays stale, not absent; controls: the day still present, nothing typed, choosing again shows the other day blank); native
+E-T42 (another real tab's leader removes and restores the day; a reload forgets the unsaved input; E-T41 Q3 gained a commit-readiness wait,
+labelled) in three engines; unit MU-2367…MU-2376 and real-engine MU-2377…MU-2378 (`scripts/mutation/catalogue-web10a-r20.mjs`; MU-2345,
+MU-2351 and MU-2355 re-anchored, same intent).
+Revision 21 (the design assessment of Review 21: DA21-I1 and DA21-I2; decision 47): `sync-return-context.test.tsx` "DA21" (the task's
+details removed or unreadable by a committed page: the day unavailable, the amount, open fix and open correction held and back with the
+details, one explicit record naming the day; input taken back from the sync screens, a correction retained and never reopened, and days
+parked by choosing again, each ended by an ordinary departure, by another identity too; a fix save answered between that end and its
+drop; controls: only the label changing, a failed details read, an explicit address, staying in the visit, reopening the correction, the
+fix's own drop, picking the parked day again within the visit or after a sync visit); native E-T43 (another real tab removes and restores
+the details; a sync visit with day A removed meanwhile, Back, then "‹ Tasks" ends it, with the staying control) in three engines; unit
+MU-2379…MU-2387 and real-engine MU-2388…MU-2389 (`scripts/mutation/catalogue-web10a-r21.mjs`; MU-2340, MU-2352, MU-2368…MU-2370 and
+MU-2374…MU-2376 re-anchored, same intent).
+Revision 22 (Review 22 R34 and its design assessment: DA22-I1, DA22-I2, DA22-I3; decision 48): `task-visit-ownership.test.tsx` (the
+edit form the data hides, before and after a sync visit, with a save pending and refused while hidden, after leaving, and another identity;
+the cache gate hiding and showing the edit form, the new form and the detail's amount, fix and correction, and a departure while hidden;
+leaving the sync screens for the task list ends the edit, the new form, the amount, the fix and a retained correction; the picker's sync
+control goes straight to the sync screens; the protected tree remounted in place; controls: staying, Back, the queue's way back, a readable
+refresh, an explicit Save writing one revise), `task-visit.test.ts` (the visit's lifecycle) and `route-changes.test.ts` (the memory-history
+route record told as the document's); native E-T44 (another real tab removes and restores the task's details around the edit form; the
+Tasks link from the form or from the sync screens, then browser Back, starts afresh) in three engines; unit MU-2390…MU-2399 and real-engine
+MU-2400…MU-2401 (`scripts/mutation/catalogue-web10a-r22.mjs`); MU-2063, MU-2079, MU-2330…MU-2334, MU-2338, MU-2340, MU-2342,
+MU-2345, MU-2347, MU-2350…MU-2352, MU-2368…MU-2376, MU-2378 and MU-2381…MU-2387 re-anchored to the visit (same intent; MU-2389 through
+its shared helper).
+`sync-visit-retention.test.tsx` "kept for its own task only" is adapted, labelled: another task's form from the sync screens is a
+departure, so the first task starts afresh.
+Revision 23 (Review 23 R35 and its design assessment DA23; decision 49): `save-presentation.test.tsx` (a new and an edit form whose
+save the outbox has committed, acknowledged after the Tasks link or the sync screens but before React removed the old form, and after it
+was removed; the queued create and the queued revision edited in place under the same schedules; a refused and a thrown save at the sync
+screens; the pending form returned to before the acknowledgement; a new visit of the form typed again before the old acknowledgement; a
+correction acknowledged after leaving for the sync screens; the same form instance after away-and-back before React removed it, which
+starts afresh and saves the next input; controls: staying closes the form onto its task) and `task-attachment.test.tsx`
+(a real router over a browser history in jsdom: not presenting from the moment the router moves, before the document's address is
+written; revoked for good by a departure to the sync screens; a change of only the query); native E-T45 (the save's write committed and
+only its IndexedDB `complete` handler held by the test; the Tasks link or the visible sync control, the old form still mounted, and the
+release in one task of the page; the staying controls) in three engines; unit MU-2402…MU-2407, MU-2409 and real-engine MU-2408
+(`scripts/mutation/catalogue-web10a-r23.mjs`); MU-2063 re-anchored (same intent).
+Revision 24 (Review 24 R36 and the design assessment after it; decision 50): `correction-return.test.tsx` (the same correction dialog
+instance, away to the task list or the sync screens and back before React removed it: acknowledged after the return, or while away
+before the return; three explicit saves across two returns; a refused and a thrown save, and 15 typed while 12 was pending, kept and
+saved again, closing the dialog; input typed after a return through the task list kept by the in-dialog sync control; Cancel and a
+departure after a fresh start; controls: staying, and the dialog removed at the sync screens and reopened), `save-presentation.test.tsx`
+(the same for the new and edit forms: acknowledged while away then back; refused or thrown then saved again; input typed after a return
+through the task list kept at the sync screens), `task-route-moved.test.tsx` (a real router over a browser history in jsdom: the editor
+is told at a moment its router, history and document are all at its address, after a push and after Back) and
+`session-adoption.test.ts` (exact held session only); unit MU-2410…MU-2423 (`scripts/mutation/catalogue-web10a-r24.mjs`); MU-2402,
+MU-2407, MU-2409 and real-engine MU-2408 re-anchored (same intent). Same-instance away-and-back is component evidence only: no real-engine
+schedule reliably keeps the old instance across two navigations without a product hook, so native evidence is E-T45 and the correction
+controls, not this ordering.
+Revision 25 (Review 25 R37 and the design assessment after it; decision 51): `surviving-return.test.tsx` (the same task detail instance
+returned to from the task list, its visit asserted ended: a fix opened and typed after the return kept through Sync and Back and saved
+once, against controls staying, a full unmount and a same-instance sync return; two sync visits; a second return; Cancel; an ordinary
+departure after the return; another identity; a fix typed before the departure and still shown; a save pending, acknowledged at the sync
+screens, with newer input, refused, or acknowledged on the surviving history; a full-history fix parked by Back to recent after the return,
+or before the departure, and its Cancel and ordinary-departure controls; the detail's shown day let go after the return, and a day parked
+after it, each with its full-unmount control); unit MU-2430, MU-2432…MU-2435 (`scripts/mutation/catalogue-web10a-r25.mjs`; MU-2431
+withdrawn as equivalent); MU-2392 re-anchored (same intent). Component evidence only, as for revision 24.
+Revision 26 (Review 26 R38, a maintained-test ordering defect; no product change): the calendar S13 test in
+`tests/features/calendars/manage-revision-2.test.tsx` counted a retry the production loop may make 50 ms after a `not_sent`, before its
+asynchronous setup had queued the waiting change, as an admission after that change. The attempt being answered is now held until the
+change is committed and Manage shows Remove waiting for it; only then is `not_sent` released, with the real delays and the full 500 ms
+observation. A second case allows one retry before the change and requires no further one after it; the no-waiting-change control still
+requires more than two attempts; all attempts are the same Remove body under one key. Unit MU-1378 (Manage's admission ignored, existing)
+and new MU-2436 (`not_sent` never retried; the control fails) in `scripts/mutation/catalogue-web10a-r26.mjs`. The whole unit suite then
+showed a second inherited maintained-test defect, from the merged pool tooling: `tests/static/playwright-servers.test.ts` read each
+physical line, so `smoke-image.sh`'s Playwright runs continued over several lines (their `ATLAS_PRODUCTION_URL` on the line before)
+looked as if they supplied no server. It now reads a `\`-continued command as one; the script is unchanged.
+Revision 27 (Review 27 R39, a maintained-test oracle defect; no product change): I-T12 judged every `/daily` response of the page as one
+list and required a first page after the first continuation's 409, although a newer read (started by the sync engine delivering the
+publication) may already have finished before that 409 arrives, and an unrelated scope's first page could satisfy it. The test now
+records every `/daily` request of the page in one route (scope, day, zone, `revision`, `after`, and the server's answer before the page
+receives it) and judges named chains. Its first case stops the test leader's sync once the cache holds the account's tasks, holds both
+scopes' first continuations, publishes through the backend (one first-page task marked done, the other archived, one task created),
+then releases joint and personal in turn: each 409 is followed by a cursorless restart of THAT scope only (the other is still held, so no
+new read began), complete and wholly of the newer revision; the screen shows the done row from the server and the archived row as the
+device's own; sync then resumes. Its second case keeps sync running: the publication starts a newer read that completes while the old one
+is held; the old continuations' 409s, released afterwards, start nothing. The static stack inventory counts the 22nd task case.
+
+**Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
+require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
+Join/Leave/consent command is never resent, never said to have failed, and a newly keyed change is never labelled a retry of it. A failed or
+unavailable read offers no change and resends nothing ("Try again" reads again); once the read succeeds the person may make a fresh, explicit
+change under the normal identity and `expected_version` checks. Within the page's lifetime, including same-identity remounts of the protected
+tree, the exact body and key are kept for an uncertain retry (decision 35). Covered by `enrolment-attempt.test.tsx` E4 and E4b.
+
+**HF-1 setup adaptation (RECOVERY-NAVIGATION-ENROLMENT-20261014 D3).** `tests/e2e/production.auth-flows.spec.ts` uses WEB-08d's bounded
+Settings-navigation helper (`shownAs`: a click only while no account card is drawn, at most three, within the original 20 s deadline,
+annotated `settings-clicks`) and its "R5 / HF-1" cases, byte-identical to WEB-08d `e88085b` (its capacity-message wording, a WEB-08d product
+change, is not adopted). This is labelled test setup: the single-click regression is WEB-08c's to correct, WEB-09d verifies the original
+single click before beta and WEB-15 enforces that gate; the adaptation fixes nothing.
+
+**R15 (revision 5): the forced order is established, not assumed.** Diagnosed with read-only probes from tab B (`navigator.locks.query()` and a
+read-only `atlas-auth` transaction): in the WebKit executions that failed the setup, the context-wide hold of "the first `GET /sessions`"
+had caught tab B's OWN device read, so A's read was answered, A retired its lease cleanly and B rightly verified nothing. The cases now hold A's
+own read (a route on page A) and pass three barriers within the original 10 s bounds before the real click: A's held read has a REQUEST lease
+whose lock A holds and B waits for (seen in two consecutive looks); after A's destruction that lease's record remains while its lock is
+released (orphaned); B's check — held and counted only from then on, past B's own boot checks — closes B behind `1e.interrupted_online`. A
+clean-retirement control (A's held read answered while A stays open: B watched the lease, finds it retired, never closes) and two helper
+qualification cases (a card naming another account fails after one click; clicks that never take effect stop at three) are added. The helper,
+its three-click bound, its identity assertion, the 20 s deadline and zero retries are unchanged.
+
+38. **The current read of a progress-level kind walks the whole collection (R19; revision 7, design assessment C1–C4).** `GET /progress?parent_id=`
+    is paged by the released endpoint (ids in order, 200 a page, `next_after` the last id of a FULL page, null otherwise), so my stream can be on
+    any page. `readProgressCurrent` (`record`, `exclude`) asks page after page, following each page's own cursor, stops at my stream, and says
+    `inaccessible` only when a valid page ends the collection without it. A page that is not one of this collection (`parseProgressPage`: a
+    missing or extra member, ids out of order or not after the cursor, a full page without a cursor or a short page with one, another kind or
+    occurrence) is `indeterminate`: never absence, never another request. A later page's refusal or error is that page's answer. Only the page in
+    hand is kept; there is no page cap; the data layer seals the whole walk, and a scope that ended sends nothing more. The unused
+    `TasksApi.listProgress`, which dropped the cursor, is removed.
+39. **Kieran's decisions WEB10A-ANNOUNCEMENT-NAVIGATION-R43-20261015 (revision 7).** D1: dismissing a notice withdraws its own announcement
+    (the shared announcer's `announce` returns an `Announcement` whose `retract` cancels its pending frame and clears its text only while it
+    still owns the region, so a later message, even with the same words, is kept; speech already delivered cannot be undone). D2: the public
+    production spec leaves a page before going online (a labelled readiness correction) and keeps a deliberate case in which the online
+    re-check of the sign-in record — a read — is interrupted by navigation without any write. D3: the historical R43 double closure is an
+    accepted diagnostic risk owned by WEB-17 (its exact-one assertion unchanged); HF-1's own pre-beta verification is separate and unchanged.
+40. **A notice is announced when it arrives, never because the list moved (R20; revision 8).** `SessionNotices` records every notice it has
+    shown in this presentation by id (with the announcement it made, if any) and reconciles the whole lists on each change: a removed notice
+    withdraws its own announcement (D1) and announces nothing; only an id not seen before is announced (the first new session notice, the latest
+    new sign-in fact). Dismissing one of two notices therefore never replays the other over a later message or cancels that message's frame. A
+    new session notice arriving while another is shown is now announced (it was not before). The record ends with the presentation; nothing is
+    persisted or shared between tabs.
+41. **"You" only for someone known to take part; no revision under a known denial (R28, R29; revision 15).** Today's row and the task's
+    "Who's on this" say the same thing, from one rule (`whoLabel` in `format.ts`): "You" (or "You and N others") only when the roster names
+    me or my own stream is held or being created on this device (a queued first record or join); otherwise the roster's count ("1 person",
+    "0 people"). Seeing or sharing a task is not taking part, and for Anyone a stream this device does not hold proves nothing either way.
+    It is display only: who may record keeps its own rule (`recordBlock`), so an Anyone task I may edit stays recordable without a stream.
+    `revise_task` writes the task and its details and the server checks write access to both, so a known denial of either (`can_edit:
+    false` as this device last read it, `editable` in `reasons.ts`) disables "Edit task" on the task ("You can't edit this task") and every
+    save of the edit form, the direct route and Enter's implicit submission included, with "You can't edit this task. What you typed is
+    kept here."; a permission lost while the form is open does the same, nothing is queued or coalesced into a queued revision, and the
+    typed values stay. A policy version is not edit authority. A task created on this device and not sent yet is its creator's (its
+    projected rows are editable), so its queued create is still edited in place. No fresh online check is added: the server still decides
+    when a change is sent.
+42. **A known denial admits no write in the transaction that would make it; an untouched time is sent whole (R30, R31, DA-A1–A3; revision
+    16).** A request's target may say it needs the person's write access (`TargetSpec.requiresEdit`): a correction's occurrence, a revision's
+    task AND details, an archive's task. The enqueue (W2), the edit of a queued command (W3, which now reads those cached rows in its own
+    transaction) and the replacement (W4) refuse it as `denied`, writing nothing, when they find that resource cached with `can_edit: false`,
+    so a denial another tab committed after a screen offered the save is honoured too; a denial committed after the write does not erase
+    it. A resource the cache does not hold (a create not sent yet) is no known denial, and a progress stream a correction raises is a side
+    effect, not mine to need. The screens check the same fact first: "Correct this day" is disabled with "You can't correct this day"; an open
+    dialog that loses the permission stays open with Save disabled ("You can't correct this day any more. What you entered is kept here.");
+    "Save mine on the current version" is disabled under a denial of the newer occurrence, waits for the replacement's answer ("Saving your
+    correction…") and, when it is refused, keeps the conflicted correction and says why ("You can't correct this day any more. Your saved
+    correction stays until you discard it.", "Your correction changed somewhere else. Check it, then try again."). A refused ordinary save
+    says "You can't change this. Nothing was saved." and keeps the input. An edit of a queued revision is made only to the queued change the
+    form was shown (`expectDraft` on its id, status and digest): another tab's edit committed in between is not overwritten ("This task's
+    unsent change was edited somewhere else. What you typed is kept here: check it, then save again."). The generic "save as new" of a
+    revision or an archive declines under a denial its authorised read returned: the task's read keeps the details it returned beside the
+    reviewed task (`CurrentRead.related`), for that check only, never as a base. No online check is added; offline saves under a permission
+    last read as granted are unchanged, and the server still decides.
+    Time: the task form and the correction keep the time they loaded (`keptTime`, `HH:MM:SS`; the correction's from the occurrence's slot,
+    never the task definition) while the person has not edited the time field, and send it unchanged: a change of the name, the window, the
+    goal, the zone or the date keeps the seconds, and the corrected occurrence keeps its key and intended instant. The person's own edit of
+    the minute input (even back to the same minute) sends that minute with `:00`; clearing it sends none; a time hidden by a removed date is
+    sent again whole with the date. The minute input itself is unchanged (no seconds editor). Recovery values carry the kept time; one saved
+    before it existed keeps its visible time and waits for the person to confirm it ("Check the time of day, then save."), never a guess.
+    Durable queued bodies are not repaired: one already truncated stays as it was sent.
+43. **Closing a day and joining an Anyone occurrence need the occurrence; recording writes my own stream (DA17-N1, DA17-N2; revision
+    17).** Close and Reopen (`resolve`) need write access to the occurrence, as the server checks: the occurrence is `requiresEdit`. A
+    record and an exclusion write my progress stream, so a known denial of my stream refuses them, never the occurrence's. The record that
+    CREATES my stream (an Anyone occurrence's first) also needs the occurrence (`TargetSpec.joinRequiresEdit`, the server's
+    `ensure_own_participation`), decided in the writing transaction from what it reads there, not from what the screen thought: my
+    participation is known when the cache holds my stream, an unsettled OLDER draft writes it (an admitted first record; a later one stands
+    on the one being edited and is no evidence) or the replacement is based on an authorised read of it; then the occurrence's permission is
+    not needed and an existing participant records as before. Otherwise a cached `can_edit: false` of the occurrence refuses it as `denied`:
+    nothing is queued, no stream is seeded, no "You" appears, the amount typed stays and "You can't change this. Nothing was saved." is
+    said. A settled draft (a rejected first record) is no participation; an absent occurrence row is no denial. The defaults review's
+    confirmation rebuilds a stored draft without its builder, so the slice's registry states the needs again from the stored draft
+    (`CommandSpec.admission`, applied by the data controller), with no new stored field: drafts stored before this revision are covered
+    the same way. A denial already on screen is refused by the act itself before the outbox is asked. Exclusion has no occurrence
+    requirement; closure still has no generic rebuild. No online check is added.
+44. **Checking sync state keeps unfinished task input (R33, Review 18; ia.md §1.3.3, task states I1; revision 18).** The new-task and
+    edit forms, the Record progress amount (with the chosen "Log an amount" / "Just checked on it") and an open entry fix are no longer
+    their mounts' state but an editing SESSION in page memory (`kept-input.ts`; the fix's in `EntryHistory`), keyed by the displayed
+    identity and the editor (`task-form:new`, `task-form:<task>`, `record:<progress>`, the history's `(identity, progress)` owner). When
+    the editor unmounts because the router went to the sync screens (`/sync`, whichever control took the person there), a session that
+    holds something of the person's (an edit, a pending save, the new form's chosen stage) is KEPT and the next editor of the same key
+    resumes it: Back (or the queue's own close control) shows the same raw values, invalid and conditionally hidden ones included, at the
+    same stage, the open fix open again (for a recent entry this device may fix; otherwise parked for its next Fix, as Back to recent
+    parks it). Nothing is submitted by coming back. Leaving for anywhere else drops it as before (Cancel, Escape and the close icon
+    leave, so they discard it); an unedited session is not kept, so a definition synced meanwhile is what the person comes back to.
+    A save takes a ticket of the session and revision it submitted; its answer, whichever mount made it and whether or not any editor is
+    mounted then, consumes the session only at that revision (the form then closes onto its task only if the person is on it; the
+    amount clears), and otherwise keeps the newer input with what the save had to say (a refusal, "Saved. Your newer changes are still
+    here."). A fix's answer reaches its draft wherever it is (session and draft numbers are the page's, never reused). Opening an editor
+    forgets every other identity's kept input; a reload forgets all of it (page memory only; Q4 recovery is WEB-14a's). The preset
+    picker's choice is kept through its own in-dialog sync control the same way. The occurrence correction keeps its own reviewed owner.
+45. **Coming back from the sync screens finds the day and the entry the input was typed for (DA19-I1/N1, revision 19).** The day the
+    detail shows without an occurrence in its address is part of the draft: it is kept with the screen through a sync visit (a
+    `kept-input.ts` session `detail-day:<task>`) and, coming back, read BEFORE any default is chosen while an amount, a fix or a
+    correction typed for that day is kept, so neither a later synced day nor the task's midnight moves the person off their input. With
+    nothing kept the visit chooses afresh; an address naming a day is the address's. If the kept day is no longer this task's here, the
+    view says so ("This day isn't saved on this device…", with "Show this task's days", which chooses the default day again in place and moves focus to that day's Record progress card) and
+    never shows or records against another day in its place; the input stays with its own day. A fix taken back is not leave to save it:
+    the editor reopens readable and its Save is the one save decision, which now also counts the corrections QUEUED on this device (in
+    any tab, this draft's own save included) like committed ones: "This entry has been corrected since. Fix its correction instead.", and
+    no Fix is offered for such an entry. Discarding the queued correction gives a fresh decision. Another tab queuing a correction after
+    this tab's decision is not refused locally (no entry-specific transaction precondition); the backend's ordering and conflict
+    handling decide, as before.
+46. **The visit's day and the input typed for it leave and come back together (DA20-I1, revision 20).** Once the detail has shown a day
+    (its own default, the address's, or the one kept with input through a sync visit) every later read resolves THAT day by its id: when
+    a committed sync page (in this tab or another) removes it, the view says the day is unavailable, never chooses another day in its
+    place and writes nothing; only the person chooses again ("Show this task's days") or a new visit does. The visit holds the input
+    typed for its day (the record amount and mode, an open or parked fix, an open or retained correction, and a save still pending) while
+    the data hides its editors, so the day coming back shows the same raw input, and only an explicit save writes, naming that day.
+    Leaving for the sync screens keeps it as before; any other departure drops it; choosing another day in place keeps it with its own
+    day; another identity or a reload never sees it (page memory only). A failed read is not absence: the last complete read stays,
+    marked stale. Before this, a day removed after the restored editor had mounted fell back to another day and its input was dropped.
+47. **The logical visit owns its day and the input typed for it (DA21-I1/I2, revision 21).** The visit's own day (the one it showed, or
+    the one kept with input through a sync visit) is its target BEFORE anything says whether the task's details (its execution) can be
+    read: a committed page that removes the details, or leaves them unreadable, shows the day as unavailable (nothing to record against)
+    and the amount, the open or parked fix and the open correction typed for it stay held; the details back, the same raw input is on
+    that day, and only an explicit save writes. An address naming a day keeps its own rule. The detail's LOGICAL visit (the time on the
+    task's detail, its sync visits included) owns every day it holds: its shown day, the days it parked with "Show this task's days",
+    and the sessions it took back from the sync screens (a mount coming back from `/sync` adopts them, whether or not their editors
+    ever mount again, including a correction kept by its in-dialog sync control and not reopened). How a mount ends decides for all of
+    them: at the sync screens everything it holds is kept for the next mount; at the task's own detail again (the day picker's address,
+    or a remount in place) the shown day is let go as before and the parked days stay the visit's; anywhere else, or another identity,
+    ends the visit and drops everything it holds, the parked days included, so no later visit resumes it. A save's answer arriving after
+    that end cannot keep a dropped fix (the drop no longer compares the kept entry's object). Before this, the details leaving dropped
+    the input, and input taken back from the sync screens or parked outlived an ordinary departure until some later editor resumed it.
+48. **Unsaved input belongs to the logical visit of its screen, observed from the route (R34, DA22-I1..I3, revision 22).** Decisions 44,
+    46 and 47 still let the component that could render decide: the edit form the data hid lost its title (its session had no visit to
+    hold it), input kept through the sync screens outlived a departure made while its editor could not mount, the cache gate hiding the
+    whole screen let the shown day go, and leaving the sync screens for anywhere else kept everything. Now `visit.ts` owns it: a visit
+    is one screen address (`location.pathname`; the query and the fragment are not a change) for one displayed identity. It begins when a
+    task screen first asks for it there, goes on at the sync screens and back at its own address (Back, the queue's way back, a push),
+    and ends on any other address, from the screen or from the sync screens, observed by the document's own record of its address
+    (`route-changes.ts`, installed before any router), so a departure while the cache gate shows, while the protected tree is closed or
+    while the person is still at the sync screens ends it too; another identity asking ends it as well. Every editor's session (task
+    forms, the picker's choice, the amount, the entry fix, the occurrence correction) is owned by the visit it was opened on: while the
+    visit goes on, a session holding the person's input survives its editor unmounting for any reason (the data hiding it, the gate, a
+    remount, the sync screens) and the next editor resumes it raw; when the visit ends, every session it owns is dropped, mounted again or
+    not, and an ended visit's session is never resumed by another (both checked). A session holding nothing of the person's is still
+    dropped once no editor holds it, so a definition synced meanwhile is shown. The detail lets go of a day it stops showing in place,
+    unless parked by "Show this task's days"; what it shows is the visit's, so a remount in place keeps the shown day's input. The preset
+    picker's in-dialog sync control now goes to the sync screens straight from the picker (no longer through the task list, which is a
+    departure), so Back finds the picker. Retention never writes, enqueues, edits or supersedes a queued operation and never navigates; a
+    save's answer still settles only its own session and revision. Page memory only: a reload, another tab or another identity sees
+    nothing. The component tests' routers use a memory history, which never moves the document: their harness gives the visits that
+    history's changes (`createHistoryRouteChanges`), with the document record's semantics.
+49. **Settling a save is not permission to act on the screen (R35, DA23, revision 23).** Decision 48 made the visit own the input, but
+    a save's answer still told the form mounted for its session to close onto its task, and that form outlives the person's choice to
+    leave: a navigation moves the router at once, the document's address a microtask later and React removes the old form later still,
+    and at the sync screens the visit rightly goes on. So a save the outbox had committed, answered in between, took the person from the
+    task list or the sync screens to the task (new and edit forms, and both queued edits). Now an editor mounted on a visit is an
+    ATTACHMENT to it (`useTaskAttachment` in `visit.ts`), revoked for good by the first change of path away from the visit's address that
+    its router's history or the document makes (the sync screens included), by its visit ending, and as React removes the editor (its
+    layout cleanup, before passive cleanups). It PRESENTS only while not revoked, its visit is the one going on and both its router and
+    the document are at its address, asked immediately before acting. The save still settles exactly as before (its own session and
+    revision; consumed, never offered again, or kept with its note), whichever editor is mounted; only the side effects of a consumed
+    save are withheld from an editor that does not present: the form's close onto its task, the amount's fresh session, the correction
+    dialog's close. A form the person comes back to (the same visit, Back from the sync screens) is a new attachment and acts on its
+    pending save; a save answered while the person is away never redirects them later. An editor React never removed (the person went
+    away and came back before it re-rendered) and whose save settled while it did not present starts afresh once the person is at its
+    address again, as a new mount would: a new session and attachment from what the screen shows now, so its next Save writes the next
+    input (the edit coalescing into the queued revision) and the new form never re-offers the consumed input. Nothing about writes, the
+    queue or retention changes.
+50. **An editor React never removed is the person's again once they are back (R36, revision 24).** Decision 49's fresh start was the
+    generic editors' only (the correction dialog kept its consumed session and offered a Save that wrote nothing), it was asked only
+    when the observed address changed (before the router had caught up, so a save answered while the person was away never started
+    afresh), and an editor whose input outlived the departure (a refused save, newer input) kept its revoked attachment and its ended
+    visit. Now the session editors (`useKeptInput` and `CorrectionDialog`) are told whenever their router's history or the observed address moves
+    (`useTaskRouteMoved`: a browser push tells the router before it writes the document's address, Back is recorded by the document
+    before the router hears it) and, once its router, history and document are all at its address and it was not removed, is attached
+    anew on the visit going on there, which takes over the exact session it holds (`adoptKept`, `adoptCorrection`; only that session,
+    and only while an editor holds it). That attachment is for later work: a save taken before the departure acts, if at all, by the
+    attachment it was taken with (a save's side effect is asked of the attachment it was submitted from, or the one that resumed it). A
+    consumed session's editor then starts afresh from what the screen shows (a correction from the day as now read, its queued correction
+    included), and while it holds no session its Save is unavailable ("Correction saved on this device"). Refused or newer input stays
+    as typed and is saved by the next explicit Save, which closes the form or dialog. Nothing is written, retried or resubmitted by a
+    return; settlement is unchanged. Decision 50 named those two owners only; the entry history's fixes and the detail's shown-day
+    record had their own captured visit (decision 51).
+51. **Every owner of a screen's input follows the same surviving return (R37, design assessment P1-P3, revision 25).** Three owners hold
+    input a visit owns: the session editors (decision 50), the entry history's open and parked fixes (`EntryHistory`, kept in
+    `keptFixes` by the visit) and the detail's record of the day it shows (`useTaskDetail`, `shownDays` per visit, which lets go of a
+    day's input when another day is shown in its place). The last two still captured the visit they were mounted on, so after an
+    ordinary departure and a return before React removed them, input made there (a fix opened after the return; an amount on the day
+    shown) was governed by the ENDED visit: the history's next unmount kept nothing for the sync screens, and the detail recorded its day
+    on the ended visit, so a later mount let go of nothing when it showed another day (that day's input came back when it was picked
+    again). Both are now told whenever the router's history or the observed address moves (`useTaskRouteMoved`) and, once their
+    router, history and document are at their address (`useTaskScreenAt`) after their visit ended, belong to the visit going on there:
+    the history keeps what it still holds (an open or parked fix, typed before the departure or after) for that visit; the detail
+    records on it the day it shows now (only that: what the ended visit parked or kept unheld is not carried). An ended visit is never
+    resumed, a full unmount after an ordinary departure still starts afresh, and settlement, admission (`saveBlock`) and writes are
+    unchanged.
+## Personal results offline (ARCH §3.3c, TASK-31)
+
+In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
+by its DETERMINISTIC id (never `participants`): absent with nothing pending → "Not available offline" (listed, or Anyone) or no result (not
+listed); present → the stored outcome finalised when the window has closed (provisional → complete, incomplete → missed, unknown → missed only
+for checkbox, checklist and minimum-only goals), never re-derived from `recent_entries` (at most eight) or `entry_count`; my pending evidence
+layered on (exact for appended evidence; a correction only when the whole stream is known, otherwise "waiting for the server to check the full
+history").
+
+## Deviations and additions, for the connected-app checkpoint (STAGED-ACCEPTANCE-20261011)
+
+Provisional copy and these choices do not block; they are collected for the human review after WEB-10a/10b/11a and Settings are integrated.
+Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.ts` (the case named).
+
+| Item | Route and fixture state |
+| --- | --- |
+| Pill words beyond the drawings, "· n not known" | `/today` (E-T1, E-T9; jsdom `today-page.test.tsx`) |
+| `pending_tasks` notice without "Catch up" | `/today` with `pending_tasks` (E-T1) |
+| Error banner keeps cached rows under it ("Showing what's on this device") | `/today` with a failing `/daily` |
+| Joint-line wording ("Withheld — …", "No one has finished it yet that you can see", "Shared result not known yet", "last checked …") | `/tasks/<id>` of a shared task |
+| Pending marks | `/today` after "Mark done" offline (E-T2) |
+| Time-of-day boundaries; overdue rows "From {day}" | `/today` (E-T12) |
+| "Record" navigates to the task | `/today` numeric row |
+| Create sharing as "Use my defaults / Only me" | `/tasks/new` (E-T3) |
+| No search in the list; an "Archived" filter instead of the Settings ledger | `/tasks` (E-T6) |
+| Time of day added to the correction dialog | `/tasks/<id>` → Correct this day (E-T7) |
+| No `happened_at` editor | — |
+| "Let people skip a day without breaking their streak" toggle (required by Q21, absent from the drawings) | `/tasks/new` |
+| Time zone and participation fields from the baseline | `/tasks/new` |
+| Participants as counts ("You and 2 others" only when I take part, else "3 people"), the same on Today and the task (revision 15); names are WEB-11a's | `/today`, `/tasks/<id>` (jsdom `today-participants.test.tsx`, native E-T35) |
+| Revision 15: a task I can't edit (task or details read-only for me): "Edit task" disabled with "You can't edit this task"; the edit page's Save disabled with "You can't edit this task. What you typed is kept here." | `/tasks/<id>`, `/tasks/<id>/edit` of a read-only task (jsdom `task-edit-permission.test.tsx`, native E-T36) |
+| Revision 16: a day I can't correct: "Correct this day" disabled with "You can't correct this day"; a dialog open when the permission is lost: Save disabled with "You can't correct this day any more. What you entered is kept here."; "Save mine on the current version" disabled under a denial, "Saving your correction…" while it is saved, and "You can't correct this day any more. Your saved correction stays until you discard it." / "Your correction changed somewhere else. Check it, then try again." when refused; "You can't change this. Nothing was saved." for a save refused on this device | `/tasks/<id>` of a read-only occurrence, or a correction in conflict (jsdom `correction-permission.test.tsx`, native E-T37) |
+| Revision 16: an edit of a queued revision that another tab changed: "This task's unsent change was edited somewhere else. What you typed is kept here: check it, then save again."; a restored time whose seconds are unknown: "Check the time of day, then save." | `/tasks/<id>/edit` (jsdom `task-revision-admission.test.tsx`, `time-precision.test.tsx`) |
+| The header says "Who can see this is set in Sharing." instead of naming the audience (the policy is readable by its owner only, online) | `/tasks/<id>` |
+| The "‹ Tasks" link shows at every width (the CSS budget had no room for a desktop-only rule); the mobile tab bar stays on the detail | `/tasks/<id>` |
+| Status colour only for Missed and Conflict (Done uses the neutral pill: the CSS budget); the words always say the state | `/today` |
+| Preset subtexts are built by the client from the definition | `/tasks/new` (E-T4) |
+| Tablet landscape at 1180×820 and 1112×834 both tested | E-T1 |
+| Revision 1: "This day isn't saved on this device, or isn't one of this task's days. Nothing can be recorded for it here." with "Show this task's days" | `/tasks/<id>?occurrence=<another id>` (jsdom `detail-selection.test.tsx`) |
+| Revision 1: "Loading this day"; the picker's "More saved days" / "Previous saved days" (saved days are listed by id a page at a time, each page shown by date) | `/tasks/<id>` with over 100 saved days (jsdom) |
+| Revision 1: a correction or fix saved while the person kept editing stays open with the newer value (the announcement says the earlier one was saved) | `/tasks/<id>` → Correct this day (jsdom `save-acknowledgement.test.tsx`) |
+| Revision 2: "The other correction hasn't reached this device yet." (no "Save mine" until the newer version is synced) and "Your saved correction can't be read on this device." | `/tasks/<id>` with a correction in conflict (jsdom `conflict-context.test.tsx`) |
+| Revision 2: while a newer composition is read, Today keeps the last one on screen (marked `data-today-refreshing`, no visible text) | `/today` after a sync page (jsdom `freshness-provenance.test.tsx`) |
+| Revision 3: "Couldn't read this device's tasks" with "Atlas couldn't read the tasks saved on this device." or "The tasks saved on this device kept changing while they were read.", "Showing what was last read on this device." and "Try again" (Today, as a section; the detail and the list as a line; the task form as the disabled Save's reason) | `/today` with a failing local read (jsdom `local-coherence.test.tsx`, Q9/Q10/Q17) |
+| Revision 4: the detail and the edit page with a failed local read: "Atlas couldn't read the tasks saved on this device." (or "kept changing") with "Try again"; stale: the same with "Showing what was last read on this device."; the picker's "Couldn't read this task's saved days." with "Try again" | `/tasks/<id>` with a failing local read (jsdom `detail-read-coherence.test.tsx`) |
+| Revision 4: the full history's "Earlier entries", "Load more", "Refresh", "Back to recent entries", "Couldn't refresh the full history. Showing what was last loaded.", "Checking whether this entry was corrected", "Couldn't check whether this entry was corrected since.", "This entry has been corrected since. Fix its correction instead."; a fix whose page is not shown appears above the list as "Fix this entry: {value}" | `/tasks/<id>` → Full history (jsdom `journal-window.test.tsx`, native E-T15) |
+| Revision 5: after "This history isn't available to you." the "Full history" button is offered again; "Back to recent entries" (or a refusal) closes a fix of an entry known only from the full history, and opening that entry's fix again restores what was typed; offline, or while the full history is being read again for a newer version, such an entry offers no "Fix this entry" | `/tasks/<id>` → Full history (jsdom `journal-ownership.test.tsx`, native E-T18/E-T19) |
+| Revision 6: an open fix whose Save waits says why: "This fix can be saved once you're online again.", "This fix can be saved once the full history is up to date.", "Check whether this entry was corrected since, then save the fix." with "Check again" (and "Checking whether this entry was corrected" while it runs); what was typed survives every "Back to recent entries" or refusal until Cancel or a save | `/tasks/<id>` → Full history → Fix this entry (jsdom `journal-save-authority.test.tsx`, `journal-drafts.test.tsx`, native E-T21/E-T24/E-T25) |
+| Revision 20: no new copy; "This day isn't saved on this device…" with the "Show this task's days" button now also when the day this visit showed is removed while the person is on it (instead of another day) | `/tasks/<id>` → the shown day removed by a sync page (jsdom `sync-return-context.test.tsx` DA20-I1, native E-T42) |
+| Revision 19: "Show this task's days" as a button when the day kept with the person's input is gone; a kept fix of an entry corrected meanwhile (queued in another tab) reopens with "This entry has been corrected since. Fix its correction instead." | `/tasks/<id>` → type → sync → Back (jsdom `sync-return-context.test.tsx`, native E-T41) |
+| Revision 4: enrolment "Sending your change…" (the disabled reason while a change is pending) and "Try again" beside "Couldn't confirm the change. Try again." | `/tasks/<id>` of a shared task (jsdom `enrolment-attempt.test.tsx`, native E-T16) |
+| Revision 10: joining asks "Count your contribution in the shared total?" ("Yes, include my contribution" / "No, leave my contribution out of the shared total"; Join waits with "Choose whether to count your contribution first"), then "Who sees your progress from now on" with "This starts from your default sharing." (first Join) or "This starts from the sharing you had before." (rejoining) and "This applies to days from now on. A day already started keeps its own sharing (Who sees my progress)."; the default loading/unreadable lines "Loading your default sharing" / "Your default sharing couldn't be loaded." with "Try again" (Join's reason: "Who would see your progress isn't known yet"); enrolled: "Who sees your progress from now on: only you" (or "you and 1 household and 2 people, 1 excluded"), "Change…", the chooser's "Only me (private)", "Cancel" and "Save sharing" ("Nothing has changed" while unchanged) | `/tasks/<id>` of a shared task (jsdom `enrolment-policy.test.tsx`, native E-T16/E-T27/E-T28) |
+| Revision 11: while a change is answered and its read is awaited every control says "Checking your settings…" (after "Sending your change…"), an open lookup's Choose included; Leave and the consent beside an unsaved audience edit: "Save or cancel the sharing change first"; a kept draft: "Not saved: your settings changed after you started this change, so it can't be sent. Discard it to change the settings shown." with "Discard this change", and elsewhere "Discard the unsaved change first" | `/tasks/<id>` of a shared task (jsdom `enrolment-ownership.test.tsx`, native E-T29–E-T31) |
+| Revision 12: after a refused change the submitted audience (and a join's consent) stays: on another version as the kept draft above beside "This change wasn't accepted. The latest settings are shown.", on the same version in the editor; a page holding 2,000 unsaved changes refuses a new one with "Too many unsaved changes on this page: save or discard one first" | `/tasks/<id>` of a shared task (jsdom `enrolment-retention.test.tsx`, native E-T30/E-T32/E-T33) |
+| Revision 1: "Who sees my progress" offers any account, and the server refuses one who cannot see the day with its generic "Check the request fields and values." (it reports `IdentityGrantRequired` as `invalid_value`); a clearer message is WEB-12a's editor and the contract's | `/tasks/<id>` of a personal task → Who sees my progress (I-T20 notes) |
+
+## Escalation E-1 (material, not blocking WEB-10a)
+
+No fixed-recurrence task gets a second occurrence until WEB-10c's `materialise` exists: the server makes only the start-date slot at
+`create_task`. At the connected-app checkpoint recurring tasks would show only on their first day, with the `pending_tasks` notice. The options
+are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal catch-up here by a scope change). Nothing here adds
+`materialise`.
+
+## Limits
+
+- **The journal endpoint has no snapshot or reverse cursor (revision 4).** Pages are read by `sequence` from remembered starts, so an earlier page
+  is read again when the person goes back, and a fix outside a window that reaches the end walks the rest of the journal (one request per
+  later page, keeping only the answer). Neither is a remote snapshot: a correction committed after the walk is seen at the next committed
+  version (the window is read again). A reverse or snapshot endpoint would be a backend scope decision; none is assumed.
+- **A refusal reaches only the tab that met it (revision 5).** Each tab owns its own open history; a refusal in one tab is not broadcast. Another
+  tab learns of it at its own next read (a newer committed version reads its window again) — no cross-tab access cache is introduced.
+- **Transient journal payload (revision 5).** Retained: at most the three window pages; in flight: at most two answers (pages or checks); a
+  waiting request holds numbers only. Not measured here (WEB-09c owns measurements).
+- **The detail reads more per local commit (revision 4).** Its one certified read includes the picker's first page and every progress stream
+  of the day, read again when the composition generation moves (as Today's is); the walk over every saved day runs only until the visit's
+  default day is chosen. Not profiled here (WEB-09c owns measurements; F-1's cost of the walk applies).
+
+- **Paging the saved days by id.** No day index exists (D-10a-2), so the picker's pages are in id order, each shown by date; the latest day
+  is found by a walk of every saved day of the task (F-1's cost applies to it).
+- **The native E-T10 cannot see the hook's own layers.** On a real account switch the protected tree remounts, which discards the old view
+  before a late answer could be applied (an A/B with the three-layer mutant passed). The hook's layers are mutation-tested in jsdom (MU-2025),
+  where the identity changes without a remount.
+- **The first answer on a device without a database.** An answer dispatched before the database existed is not current for my result; Today
+  asks again once its rows are read at a cache position (the `behind` re-read). That path has no separate test (the jsdom world cannot create
+  the database after mount); its effect is limited to one extra `/daily` read.
+- **Other cards' specs that used Today as a neutral page.** E-SH15 (WEB-12a's sharing spec) held every `GET /defaults/snapshot` on a page
+  showing Today, whose own defaults read (now needed by its quick actions) was then released in place of the gate's: it boots on the task list
+  instead (labelled adaptation, assertions unchanged). The shell and sync-screen specs needed no change once the heading regression was fixed.
+- **The dialog reveals a focused control whole** (`src/components/ui/dialog.tsx`, revision 2): a shared component changed for R7's keyboard
+  evidence; every dialog benefits. Covered by `tests/components/dialog-reveal.test.tsx` (MU-2090) and E-T8d in WebKit.
+- **Shared files with WEB-11a.** `plans/outstanding-reads.ts` and `ui/outstanding.tsx` also carry WEB-11a's `readOutstandingCreates`; the
+  integration of the two branches is an add/add merge (recorded in WEB-11a's `docs/people.md`).
+
+- **Client "today" vs server "today".** A create's first occurrence is projected from the device's day in the task's zone; after a long offline
+  period the server may make another slot. The next sync replaces the projection; a record queued against the projected id meets a real
+  `404`/`409` and shows in the queue. It is never silently retargeted.
+- **Device time-zone data** can differ from the server's bundled data; server values win wherever they exist.
+- **Two `/daily` reads per view**, not profiled here (WEB-09c owns measurements).
+- **A `403` re-check of the session** closes and reopens the display: a screen remounts, by design of the session.
+- **Unfinished input lasts for its screen's logical visit only (decisions 44 and 48, revisions 18 and 22).** ia.md §1.3.3 requires it
+  for checking sync state; the same visit also keeps it through the data hiding an editor, the cache gate and a `403` re-check's remount
+  at the same address. A reload, a crash, another tab or another identity keep nothing (the enrolment draft keeps its own owner; Q4
+  update recovery is WEB-14a's). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
+  other than to the sync screens, including leaving the sync screens for anywhere but that address (revision 22 reverses decision 44 on
+  this point, per Review 22 and DA22-I3).
+- **A save answered while the person is away closes nothing (decisions 49 and 50, revisions 23 and 24).** Coming back to the form after
+  it settled shows what the settlement left (the new task's picker, or the edit form afresh; the same correction dialog afresh); the saved
+  task is in the list and the queue.
+
+## Not claimed
+
+No PostgreSQL, HTTPS deployment, physical device, installed PWA or manual screen-reader evidence (WEB-09d, collected by WEB-15). The
+production leader is exercised by one fixture case (E-T2b: a save in the tree is sent by the production dispatcher); the composed
+production-leader journey against a backend is WEB-09d's. Browser viewport and colour-scheme emulation is not device evidence. Fixture evidence (stubbed `/daily`,
+`/task-presets`, the fixture leader) is never integration evidence. Backend gates BE-Q1 and BE-CH1 have no completion record.

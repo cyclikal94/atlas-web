@@ -85,3 +85,31 @@ export function documentRouteChanges(): RouteChanges {
   installed ??= createRouteChanges(window);
   return installed;
 }
+
+/**
+ * The same record over a router's own history (WEB-10a revision 22): a memory history (the component tests' routers) never moves the
+ * document, so a screen observing the document there would never see a departure. Told once per change of path, with the new path, after
+ * the history moved (push, replace, back, forward, go); a change of only the query or the fragment is not told.
+ */
+export function createHistoryRouteChanges(history: {
+  readonly location: { readonly pathname: string };
+  subscribe(listener: () => void): () => void;
+}): RouteChanges {
+  const listeners = new Set<(pathname: string) => void>();
+  let last = history.location.pathname;
+  history.subscribe(() => {
+    const now = history.location.pathname;
+    if (now === last) return;
+    last = now;
+    for (const listener of [...listeners]) listener(now);
+  });
+  return {
+    pathname: () => history.location.pathname,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}

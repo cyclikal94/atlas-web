@@ -1,7 +1,12 @@
-import { mkdirSync } from "node:fs";
-import type { Locator, Page } from "@playwright/test";
+import type { Locator, Page, TestInfo } from "@playwright/test";
 import { contrastRatio } from "../../src/design/contrast";
 import { tokens } from "../../src/design/tokens";
+import {
+  claimEvidencePath,
+  evidenceRun,
+  testEvidenceDirectory,
+  writeEvidence,
+} from "./evidence-run";
 import { expect, pressTab, runAxe } from "./helpers";
 
 /** The widths of the design pass (WEB-08a and WEB-08b): 320, 390, 768 and 1280 px. */
@@ -15,7 +20,8 @@ export const WIDTHS: Array<[number, number]> = [
 /**
  * The rendered checks every surface gets in a real engine, at one width: no horizontal scroll, axe clean INCLUDING colour
  * contrast in real layout, 44 px targets in `region`, the heading as the focus target where asked, a visible focus ring on the
- * first control reached by keyboard, and (Chromium) a screenshot for the evidence folder. Design and accessibility evidence only.
+ * first control reached by keyboard, and (Chromium) a screenshot in this test's own evidence directory (`surfaceScreenshot`).
+ * Design and accessibility evidence only.
  */
 export async function checkSurface(
   page: Page,
@@ -23,7 +29,8 @@ export async function checkSurface(
     label: string;
     region: string;
     engine: string;
-    evidence: string;
+    /** The test that owns the screenshot: it is claimed in that test's run/project/repeat/retry directory. */
+    info: TestInfo;
     name: string;
     width: number;
     scheme: string;
@@ -94,13 +101,67 @@ export async function checkSurface(
     ).toBeTruthy();
   }
 
-  if (engine === "chromium") {
-    mkdirSync(`${options.evidence}/chromium`, { recursive: true });
-    await page.screenshot({
-      path: `${options.evidence}/chromium/${options.name}-${options.width}-${options.scheme}.png`,
-      fullPage: true,
-    });
-  }
+  if (engine === "chromium")
+    await surfaceScreenshot(page, options.info, options);
+}
+
+/** Names the test's evidence directory once in its report (JSON reporter `annotations`), so its files are found from the run. */
+function annotateEvidence(info: TestInfo): string {
+  const directory = testEvidenceDirectory(info);
+  if (
+    !info.annotations.some(
+      (a) => a.type === "evidence" && a.description === directory,
+    )
+  )
+    info.annotations.push({ type: "evidence", description: directory });
+  return directory;
+}
+
+/**
+ * WEB-10a revision 14 (review 14's R27, design assessment DA-H1): a design-pass screenshot (WEB-08a/WEB-08b) belongs to the
+ * invocation and the test that took it. The path is claimed exclusively in `testEvidenceDirectory` (run, project, test, repeat,
+ * retry), so another invocation, repeat or retry writes elsewhere and a second capture of the same surface, width and scheme in one
+ * test is refused (EEXIST) before any byte is written. Never a fixed folder shared between runs: `.agtx/evidence/WEB-08b/design/`
+ * is historical and is no longer written. The screenshot is also attached by path to the test's report entry.
+ */
+export async function surfaceScreenshot(
+  page: Page,
+  info: TestInfo,
+  sample: { name: string; width: number; scheme: string },
+): Promise<string> {
+  annotateEvidence(info);
+  const name = `chromium/${sample.name}-${sample.width}-${sample.scheme}.png`;
+  const path = claimEvidencePath(info, name);
+  await page.screenshot({ path, fullPage: true });
+  info.attachments.push({ name, path, contentType: "image/png" });
+  return path;
+}
+
+/**
+ * The painted-contrast observations of one test, as one exclusive JSON file in that test's evidence directory (R27: never appended
+ * to a shared file). The record names its own run, project, test, repeat and retry, so it stays attributable once copied out of
+ * its directory.
+ */
+export function recordPaintedContrast(
+  info: TestInfo,
+  scheme: "dark" | "light",
+  observations: Record<string, unknown>,
+): void {
+  annotateEvidence(info);
+  writeEvidence(info, `painted-contrast-${scheme}`, {
+    schema: 1,
+    kind: "painted-contrast",
+    run: evidenceRun(),
+    project: info.project.name,
+    testId: info.testId,
+    title: info.titlePath.join(" › "),
+    file: info.file,
+    repeat: info.repeatEachIndex,
+    retry: info.retry,
+    scheme,
+    at: new Date().toISOString(),
+    ...observations,
+  });
 }
 
 const toHex = (rgb: string): string => {
