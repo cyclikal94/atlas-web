@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
@@ -14,7 +14,7 @@ import {
 } from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import type { RowModel } from "../view";
-import { useTaskVisit } from "../visit";
+import { type TaskAttachment, useTaskAttachment, useTaskVisit } from "../visit";
 import {
   completeCorrection,
   correctionKey,
@@ -114,13 +114,21 @@ export function CorrectionDialog({
   latest.current = { onClose, row };
   // The session is the visit's (revision 22, `visit.ts`): asked for when the dialog opens, not when it renders.
   const visitOf = useTaskVisit();
+  // Closing on a consumed save acts on the screen: only a dialog the person is still at does (revision 23, R35; `visit.ts`).
+  const attachTo = useTaskAttachment();
+  const attachment = useRef<TaskAttachment | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the editor opened for this key and identity leaves the screen
+  useLayoutEffect(() => () => attachment.current?.detach(), [key, identity]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: the key and identity are the reason; the visit is asked for as the dialog opens
   useEffect(() => {
+    const owner = visitOf(identity);
+    const here = attachTo(owner);
+    attachment.current = here;
     const opened = openCorrection(
       key,
       identity,
       () => correctionFrom(latest.current.row.data),
-      visitOf(identity),
+      owner,
     );
     session.current = opened.session;
     setState(opened.state);
@@ -128,9 +136,11 @@ export function CorrectionDialog({
     const stop = subscribeCorrection(key, (event) => {
       if (event.session !== opened.session) return;
       setBusy(false);
-      if (event.kind === "consumed") latest.current.onClose();
+      if (event.kind === "consumed" && (here === null || here.presents()))
+        latest.current.onClose();
     });
     return () => {
+      here?.detach();
       stop();
       releaseCorrection(key, opened.session);
       session.current = null;

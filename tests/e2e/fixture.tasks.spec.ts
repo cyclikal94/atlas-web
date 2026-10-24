@@ -6305,3 +6305,184 @@ test.describe("E-T44: the edit visit owns the input typed on it (A10; R34 / DA22
     expect(await draftsOf(writer)).toEqual([]);
   });
 });
+
+test.describe("E-T45: a save acknowledged after the person left never moves them (A10; R35 / DA23 of revision 23)", () => {
+  // Review 23's R35 in real engines over the real IndexedDB and the document's own history. The save's write COMMITS (the account's
+  // drafts hold it) and only its acknowledgement is held: the first transaction that put a command body (`draft_commands`) and completes
+  // after the test arms the hold keeps Dexie's `complete` handler until the test releases it (the transaction has completed; the app is
+  // not told yet). Then,
+  // in ONE task of the page: an in-app navigation (the Tasks link, or the visible sync control), a check that the old form is still
+  // mounted and where the document is, and the release. A late success then consumes the save (one command, never offered again) and
+  // never moves the person; the staying controls still close onto the task. The settlement is known to have reached the form when the
+  // save's own announcement is shown (announced, then the form completes, then the frame shows it): only then is the address judged.
+  type Hold = {
+    armed: boolean;
+    held: boolean;
+    delivered: boolean;
+    release?: () => void;
+    announced: string[];
+  };
+  const name = (page: Page) => page.getByLabel("Name", { exact: true });
+  async function holdAcknowledgements(context: BrowserContext) {
+    await context.addInitScript(() => {
+      const hold: Hold = {
+        armed: false,
+        held: false,
+        delivered: false,
+        announced: [],
+      };
+      (window as unknown as { __ackHold: Hold }).__ackHold = hold;
+      // The transactions that put a command body (`draft_commands`): only the first of them completing after the test arms is held.
+      const writing = new WeakSet<IDBTransaction>();
+      for (const method of ["put", "add"] as const) {
+        const original = IDBObjectStore.prototype[method];
+        IDBObjectStore.prototype[method] = function (
+          this: IDBObjectStore,
+          ...args: Parameters<IDBObjectStore["put"]>
+        ) {
+          if (this.name === "draft_commands") writing.add(this.transaction);
+          return original.apply(this, args);
+        };
+      }
+      const described = Object.getOwnPropertyDescriptor(
+        IDBTransaction.prototype,
+        "oncomplete",
+      );
+      if (described?.set === undefined || described.get === undefined) return;
+      const { get, set } = described;
+      Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
+        configurable: true,
+        enumerable: described.enumerable ?? true,
+        get,
+        set(this: IDBTransaction, handler: unknown) {
+          if (typeof handler !== "function") return set.call(this, handler);
+          set.call(this, (event: Event) => {
+            const call = () =>
+              (handler as (e: Event) => void).call(this, event);
+            if (!hold.armed || !writing.has(this)) return call();
+            hold.armed = false;
+            hold.held = true;
+            hold.release = () => {
+              hold.held = false;
+              hold.delivered = true;
+              call();
+            };
+          });
+        },
+      });
+    });
+  }
+
+  for (const mode of ["edit", "new"] as const)
+    for (const where of ["tasks", "sync", "stay"] as const)
+      test(`${mode} form, ${where === "stay" ? "control: staying, the acknowledged save closes the form onto its task" : `${where === "sync" ? "the sync control" : "the Tasks link"} before the acknowledgement: the person stays; one command`}`, async ({
+        context,
+      }) => {
+        await holdAcknowledgements(context);
+        const task = buildTask({
+          n:
+            161 +
+            (mode === "new" ? 3 : 0) +
+            ["tasks", "sync", "stay"].indexOf(where),
+          title: "Original title",
+        });
+        const path =
+          mode === "edit" ? `/tasks/${task.taskId}/edit` : "/tasks/new";
+        const { page } = await setup(context, path, [task]);
+        await untilTreeSettled(page);
+        if (mode === "new") {
+          await page
+            .getByRole("button", {
+              name: "Start from scratch instead",
+              exact: true,
+            })
+            .click();
+          await page.getByRole("radio", { name: "Only me" }).check();
+        } else await expect(name(page)).toHaveValue("Original title");
+        await name(page).fill("Typed title");
+        await expect(name(page)).toHaveValue("Typed title");
+        expect(await draftsOf(page)).toEqual([]);
+        await page.evaluate(() => {
+          (window as unknown as { __ackHold: Hold }).__ackHold.armed = true;
+        });
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await page.waitForFunction(
+          () => (window as unknown as { __ackHold: Hold }).__ackHold.held,
+        );
+        // The write committed before its acknowledgement: exactly one command, with the typed title.
+        const saved = (await bodiesOf(page)).map((b) => b.command.command);
+        expect(saved).toEqual([
+          expect.objectContaining({
+            kind: mode === "edit" ? "revise_task" : "create_task",
+            title: "Typed title",
+            ...(mode === "edit" ? { id: task.taskId } : {}),
+          }),
+        ]);
+        const savedId = String(saved[0]?.id);
+        // The pending save disables the form's fields (its outer fieldset).
+        await expect(name(page), "the save is pending").toBeDisabled();
+        const barrier = await page.evaluate((to) => {
+          const hold = (window as unknown as { __ackHold: Hold }).__ackHold;
+          const polite = document.querySelector(
+            '[role="status"][aria-live="polite"]',
+          );
+          if (polite !== null)
+            new MutationObserver(() => {
+              if (polite.textContent) hold.announced.push(polite.textContent);
+            }).observe(polite, {
+              childList: true,
+              characterData: true,
+              subtree: true,
+            });
+          const shown = (e: Element) => e.getClientRects().length > 0;
+          const control =
+            to === "tasks"
+              ? Array.from(document.querySelectorAll("a")).find(
+                  (a) => a.textContent?.trim() === "Tasks" && shown(a),
+                )
+              : to === "sync"
+                ? Array.from(
+                    document.querySelectorAll("[data-sync-tone]"),
+                  ).find(shown)
+                : null;
+          if (to !== "stay" && control == null) return null;
+          (control as HTMLElement | null)?.click();
+          const result = {
+            formMounted: document.querySelector("[data-task-form]") !== null,
+            documentPath: location.pathname,
+          };
+          hold.release?.();
+          return result;
+        }, where);
+        expect(barrier, "the navigation control was found").not.toBeNull();
+        expect(
+          barrier?.formMounted,
+          "the old form is still mounted at the release",
+        ).toBe(true);
+        await page.waitForFunction(
+          () => (window as unknown as { __ackHold: Hold }).__ackHold.delivered,
+        );
+        // The save's own announcement: the form has completed the save by the time the frame shows it.
+        await page.waitForFunction(() =>
+          (window as unknown as { __ackHold: Hold }).__ackHold.announced.some(
+            (text) => text.startsWith("Saved"),
+          ),
+        );
+        await page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+        if (where === "stay")
+          await expect(page).toHaveURL(new RegExp(`/tasks/${savedId}$`));
+        else if (where === "sync") await expect(page).toHaveURL(/\/sync(\?|$)/);
+        else await expect(page).toHaveURL(/\/tasks$/);
+        await untilTreeSettled(page);
+        expect(new URL(page.url()).pathname).toBe(
+          where === "stay"
+            ? `/tasks/${savedId}`
+            : where === "sync"
+              ? "/sync"
+              : "/tasks",
+        );
+        expect((await bodiesOf(page)).map((b) => b.command.command)).toEqual(
+          saved,
+        );
+      });
+});

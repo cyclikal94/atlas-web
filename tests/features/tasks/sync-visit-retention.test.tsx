@@ -46,6 +46,11 @@ type Mounted = Awaited<ReturnType<typeof mountTasks>>;
 const formShown = () => document.querySelector("[data-task-form]") !== null;
 const pickerShown = () =>
   screen.queryByRole("button", { name: PRESET_COPY.scratch }) !== null;
+/**
+ * New task's screen in either of its stages (revision 23, labelled harness adaptation): a readiness condition both outcomes meet, so a
+ * mutant showing the other stage fails the assertion that follows instead of spending the test's time in the wait.
+ */
+const newTaskShown = () => formShown() || pickerShown();
 const detailShown = () => document.querySelector("[data-task-detail]") !== null;
 /** A field by its label, asserted present first (an absent field is a failed expectation, never a thrown query). */
 function field(label: string): HTMLInputElement {
@@ -114,9 +119,11 @@ function refuseWrites(t: Mounted) {
 describe("the new-task form (R33)", () => {
   async function scratchForm() {
     const t = await mountTasks({ path: "/tasks/new", env: { online: false } });
-    await t.until(pickerShown);
+    await t.until(newTaskShown);
+    expect(pickerShown(), "the picker, not the form").toBe(true);
     press(PRESET_COPY.scratch);
-    await t.until(formShown);
+    await t.until(newTaskShown);
+    expect(formShown(), "the form, not the picker").toBe(true);
     return t;
   }
   /** A title, plus an interval typed and then hidden by choosing a one-off (a conditionally hidden value). */
@@ -134,7 +141,8 @@ describe("the new-task form (R33)", () => {
     await toSync(t);
     expect(formShown()).toBe(false);
     await back(t, "/tasks/new");
-    await t.until(formShown);
+    await t.until(newTaskShown);
+    expect(formShown(), "the form, not the picker").toBe(true);
     expect(pickerShown()).toBe(false);
     expect(field(FORM_COPY.name).value).toBe("Keep this unfinished title");
     fireEvent.change(field(FORM_COPY.repeats), { target: { value: "daily" } });
@@ -146,7 +154,8 @@ describe("the new-task form (R33)", () => {
     const t = await scratchForm();
     await toSync(t);
     await back(t, "/tasks/new");
-    await t.until(formShown);
+    await t.until(newTaskShown);
+    expect(formShown(), "the form, not the picker").toBe(true);
     expect(pickerShown()).toBe(false);
     expect(field(FORM_COPY.name).value).toBe("");
   });
@@ -156,7 +165,8 @@ describe("the new-task form (R33)", () => {
     typeUnfinished();
     await to(t, "/tasks");
     await back(t, "/tasks/new");
-    await t.until(pickerShown);
+    await t.until(newTaskShown);
+    expect(pickerShown(), "the picker, not the form").toBe(true);
     expect(formShown()).toBe(false);
   });
 
@@ -165,11 +175,13 @@ describe("the new-task form (R33)", () => {
     typeUnfinished();
     await toSync(t);
     await back(t, "/tasks/new");
-    await t.until(formShown);
+    await t.until(newTaskShown);
+    expect(formShown(), "the form, not the picker").toBe(true);
     expect(field(FORM_COPY.name).value).toBe("Keep this unfinished title");
     await to(t, "/tasks");
     await back(t, "/tasks/new");
-    await t.until(pickerShown);
+    await t.until(newTaskShown);
+    expect(pickerShown(), "the picker, not the form").toBe(true);
     expect(formShown()).toBe(false);
   });
 
@@ -181,7 +193,8 @@ describe("the new-task form (R33)", () => {
     expect(t.router.state.location.pathname).toBe("/tasks");
     await toSync(t);
     await to(t, "/tasks/new");
-    await t.until(pickerShown);
+    await t.until(newTaskShown);
+    expect(pickerShown(), "the picker, not the form").toBe(true);
     expect(formShown()).toBe(false);
   });
 
@@ -193,7 +206,8 @@ describe("the new-task form (R33)", () => {
     );
     await toSync(t);
     await back(t, "/tasks/new");
-    await t.until(formShown);
+    await t.until(newTaskShown);
+    expect(formShown(), "the form, not the picker").toBe(true);
     press(FORM_COPY.save);
     await t.until(detailShown);
     const creates = t
@@ -220,7 +234,8 @@ describe("the new-task form (R33)", () => {
     // The person is not moved away from the queue by the late success.
     expect(t.router.state.location.pathname).toBe("/sync");
     await back(t, "/tasks/new");
-    await t.until(pickerShown);
+    await t.until(newTaskShown);
+    expect(pickerShown(), "the picker, not the form").toBe(true);
     expect(t.drafts().map((d) => d.kind)).toEqual(["create_task"]);
   });
 
@@ -239,7 +254,8 @@ describe("the new-task form (R33)", () => {
     await act(async () => gate.resolve());
     await t.settle();
     await back(t, "/tasks/new");
-    await t.until(formShown);
+    await t.until(newTaskShown);
+    expect(formShown(), "the form, not the picker").toBe(true);
     expect(field(FORM_COPY.name).value).toBe("Newer title");
     expect(document.querySelector("[data-form-notice]")?.textContent).toBe(
       FORM_COPY.newerEdits,
@@ -260,7 +276,8 @@ describe("the new-task form (R33)", () => {
     expect(notice).toBeTruthy();
     await toSync(t);
     await back(t, "/tasks/new");
-    await t.until(formShown);
+    await t.until(newTaskShown);
+    expect(formShown(), "the form, not the picker").toBe(true);
     expect(field(FORM_COPY.name).value).toBe("Refused title");
     expect(document.querySelector("[data-form-notice]")?.textContent).toBe(
       notice,

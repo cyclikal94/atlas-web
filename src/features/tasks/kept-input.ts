@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   forgetTaskVisits,
   onTaskVisitEnded,
+  type TaskAttachment,
   type TaskVisit,
+  useTaskAttachment,
   useTaskVisit,
 } from "./visit";
 
@@ -28,6 +30,12 @@ import {
  * A save takes a ticket naming the session and the revision it submitted. Its completion, whichever mount made it and whether or not any
  * editor is mounted then, consumes the session only if it is still that session at that revision; newer input stays (with the note the
  * save left), and the session's CURRENT editor, if one is mounted, is told either way. Session numbers are never reused.
+ *
+ * Settling a save is not permission to act on the screen (revision 23, R35 / DA23): the editor told of a consumed session moves on (its
+ * form closing onto the task, a fresh amount) only if it still PRESENTS (`visit.ts`, `TaskAttachment`), that is, the person has not
+ * gone elsewhere, the sync screens included, since it opened. An editor the person left, still mounted while React removes it, just lets
+ * go of the settled session: no navigation, no new session. A later return finds what the settlement left (a consumed save is not offered
+ * again, newer input is still there).
  */
 export interface KeptEntry<T> {
   readonly session: number;
@@ -239,8 +247,8 @@ export interface KeptInput<T> {
 /**
  * The editor side of a session: mounting opens (or resumes) the session of `key` on the visit of the screen it is on, unmounting releases
  * it (kept while that visit goes on and it holds input). `consumed` is told when a save consumed this session: it returns the value of a
- * fresh session to continue with, or null to hold none (the editor is leaving). `unedited`: the visit keeps the session even before it is
- * edited.
+ * fresh session to continue with, or null to hold none (the editor is leaving); it is told only while the editor presents (the person is
+ * at its screen now), else the editor holds none. `unedited`: the visit keeps the session even before it is edited.
  */
 export function useKeptInput<T>(
   key: string,
@@ -252,6 +260,11 @@ export function useKeptInput<T>(
   },
 ): KeptInput<T> {
   const visitOf = useTaskVisit();
+  const attachTo = useTaskAttachment();
+  const attachment = useRef<TaskAttachment | null>(null);
+  // Leaving the screen revokes the attachment as React removes the editor, before any passive cleanup (R35).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the editor opened for this key and identity leaves the screen
+  useLayoutEffect(() => () => attachment.current?.detach(), [key, identity]);
   const peek = (): {
     key: string;
     value: T;
@@ -273,6 +286,8 @@ export function useKeptInput<T>(
   // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for when the editor opens (the key and identity are the reason)
   useEffect(() => {
     const owner = visitOf(identity);
+    const here = attachTo(owner);
+    attachment.current = here;
     const open = (make: () => T) => {
       const entry = openKept(
         key,
@@ -298,14 +313,16 @@ export function useKeptInput<T>(
         return;
       }
       session.current = null;
-      const next = latest.current.options.consumed(
-        event.value as T,
-        event.detail,
-      );
+      // Asked now, immediately before acting: an editor the person has left is told nothing to act on (R35).
+      const next =
+        here === null || here.presents()
+          ? latest.current.options.consumed(event.value as T, event.detail)
+          : null;
       if (next !== null) open(() => next);
       else setShown((s) => ({ ...s, busy: false }));
     });
     return () => {
+      here?.detach();
       stop();
       if (session.current !== null) releaseKept(key, session.current);
       session.current = null;

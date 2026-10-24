@@ -305,7 +305,9 @@ function TaskForm({
   // What was typed is the editing session's (revision 18, R33; `kept-input.ts`), not this mount's: a visit to the sync screens keeps it,
   // whole and raw, and coming back shows it again, as is the new form's stage. Every edit moves the session's revision; a save consumes the
   // session, and closes the form onto its task, only if nothing was typed after what it submitted, and only the form mounted then (if
-  // any) moves: a save that completes after the person left never navigates them away from where they are now (revision 2).
+  // any) moves: a save that completes after the person left never navigates them away from where they are now (revision 2), even while
+  // the form they left is still being removed, and at the sync screens too (revision 23, R35: `consumed` is told only to a form the
+  // person is still at; the save is consumed either way).
   const kept = useKeptInput<FormInput>(
     keptKey(
       env.identity,

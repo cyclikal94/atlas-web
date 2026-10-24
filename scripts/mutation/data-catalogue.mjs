@@ -12,6 +12,7 @@ import { ENGINE_R19, UNIT_R19 } from "./catalogue-web10a-r19.mjs";
 import { ENGINE_R20, UNIT_R20 } from "./catalogue-web10a-r20.mjs";
 import { ENGINE_R21, UNIT_R21 } from "./catalogue-web10a-r21.mjs";
 import { ENGINE_R22, UNIT_R22 } from "./catalogue-web10a-r22.mjs";
+import { ENGINE_R23, UNIT_R23 } from "./catalogue-web10a-r23.mjs";
 
 export class PatchError extends Error {}
 
@@ -21811,6 +21812,7 @@ export const UNIT = [
   ...UNIT_R20,
   ...UNIT_R21,
   ...UNIT_R22,
+  ...UNIT_R23,
 ];
 
 /**
@@ -24844,7 +24846,8 @@ export const ENGINE = [
     // Re-expressed in revision 2 (same intent): retention is now the correction owner's `retainCorrection`. Re-anchored in WEB-10a revision
     // 22 (same intent): the visit the dialog opens its session on keeps a correction holding input through the sync screens too, so the
     // explicit retain alone is a redundant layer for an edited correction (Run 6: MU-2063 survived in all three engines). The mutant takes
-    // both of the dialog's keepers away: its session belongs to no visit and its sync control retains nothing.
+    // both of the dialog's keepers away: its session belongs to no visit and its sync control retains nothing. Re-anchored in revision 23
+    // (same intent): the dialog now asks for its visit once (`owner`, also what it attaches to, R35) and opens its session on it.
     patch: (t) =>
       sub(
         sub(
@@ -24852,7 +24855,7 @@ export const ENGINE = [
           "        if (session.current !== null) retainCorrection(key, session.current);",
           "        if (session.current !== null) void 0;",
         ),
-        "      visitOf(identity),\n",
+        "      owner,\n",
         "      null,\n",
       ),
   },
@@ -25271,4 +25274,5 @@ export const ENGINE = [
   ...ENGINE_R20,
   ...ENGINE_R21,
   ...ENGINE_R22,
+  ...ENGINE_R23,
 ];

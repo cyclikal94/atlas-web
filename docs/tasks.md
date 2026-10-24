@@ -411,6 +411,16 @@ MU-2345, MU-2347, MU-2350…MU-2352, MU-2368…MU-2376, MU-2378 and MU-2381…MU
 its shared helper).
 `sync-visit-retention.test.tsx` "kept for its own task only" is adapted, labelled: another task's form from the sync screens is a
 departure, so the first task starts afresh.
+Revision 23 (Review 23 R35 and its design assessment DA23; decision 49): `save-presentation.test.tsx` (a new and an edit form whose
+save the outbox has committed, acknowledged after the Tasks link or the sync screens but before React removed the old form, and after it
+was removed; the queued create and the queued revision edited in place under the same schedules; a refused and a thrown save at the sync
+screens; the pending form returned to before the acknowledgement; a new visit of the form typed again before the old acknowledgement; a
+correction acknowledged after leaving for the sync screens; controls: staying closes the form onto its task) and `task-attachment.test.tsx`
+(a real router over a browser history in jsdom: not presenting from the moment the router moves, before the document's address is
+written; revoked for good by a departure to the sync screens; a change of only the query); native E-T45 (the save's write committed and
+only its IndexedDB `complete` handler held by the test; the Tasks link or the visible sync control, the old form still mounted, and the
+release in one task of the page; the staying controls) in three engines; unit MU-2402…MU-2407 and real-engine MU-2408
+(`scripts/mutation/catalogue-web10a-r23.mjs`); MU-2063 re-anchored (same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -575,6 +585,20 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     save's answer still settles only its own session and revision. Page memory only: a reload, another tab or another identity sees
     nothing. The component tests' routers use a memory history, which never moves the document: their harness gives the visits that
     history's changes (`createHistoryRouteChanges`), with the document record's semantics.
+49. **Settling a save is not permission to act on the screen (R35, DA23, revision 23).** Decision 48 made the visit own the input, but
+    a save's answer still told the form mounted for its session to close onto its task, and that form outlives the person's choice to
+    leave: a navigation moves the router at once, the document's address a microtask later and React removes the old form later still,
+    and at the sync screens the visit rightly goes on. So a save the outbox had committed, answered in between, took the person from the
+    task list or the sync screens to the task (new and edit forms, and both queued edits). Now an editor mounted on a visit is an
+    ATTACHMENT to it (`useTaskAttachment` in `visit.ts`), revoked for good by the first change of path away from the visit's address that
+    its router's history or the document makes (the sync screens included), by its visit ending, and as React removes the editor (its
+    layout cleanup, before passive cleanups). It PRESENTS only while not revoked, its visit is the one going on and both its router and
+    the document are at its address, asked immediately before acting. The save still settles exactly as before (its own session and
+    revision; consumed, never offered again, or kept with its note), whichever editor is mounted; only the side effects of a consumed
+    save are withheld from an editor that does not present: the form's close onto its task, the amount's fresh session, the correction
+    dialog's close. A form the person comes back to (the same visit, Back from the sync screens) is a new attachment and acts on its
+    pending save; a save answered while the person is away never redirects them later. Nothing about writes, the queue or retention
+    changes.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -680,6 +704,10 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
   update recovery is WEB-14a's). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
   other than to the sync screens, including leaving the sync screens for anywhere but that address (revision 22 reverses decision 44 on
   this point, per Review 22 and DA22-I3).
+- **A save answered while the person is away closes nothing (decision 49, revision 23).** Coming back to the form after it settled shows
+  what the settlement left (the new task's picker, or the edit form afresh); the saved task is in the list and the queue. An editor kept
+  mounted across an away-and-back too fast for React to remove it (no person's navigation is that fast) holds no session after its save
+  settles there: its Save does nothing until the screen is opened again.
 
 ## Not claimed
 

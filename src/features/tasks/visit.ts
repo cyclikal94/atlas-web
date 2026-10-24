@@ -25,6 +25,9 @@ import {
  *    protected tree closed, the person still at the sync screens) ends it too. After its end the address starts a new visit: fresh input.
  *  - Ending a visit lets go of every input it owns (`onTaskVisitEnded`; each owner drops what is its): kept-input sessions, entry fixes and
  *    occurrence corrections, shown, parked or never mounted again. It never writes, sends, discards a queued operation or navigates.
+ *  - Owning input is not being on the screen (revision 23, R35 / design assessment DA23): an editor mounted on a visit is an ATTACHMENT
+ *    to it (`useTaskAttachment`), and only an attachment that still PRESENTS (the person is at its address now) may act on the screen,
+ *    such as closing a saved form onto its task. A save settles whether or not it does (`kept-input.ts`).
  *
  * Page memory only: a reload or another tab has no visit. One visit at a time (the document has one address); visit numbers are never
  * reused. The component tests' routers use a memory history, which is not the document's: their harness gives the visits that history's
@@ -49,6 +52,8 @@ let unsubscribe: (() => void) | null = null;
 let current: Visit | null = null;
 let generations = 0;
 const ends = new Set<(visit: TaskVisit) => void>();
+/** Every attachment that may still present, with its visit (revoked by the first change of path away from that visit's address). */
+const attached = new Map<() => void, TaskVisit>();
 
 /** A path as compared here: without a trailing slash, and decoded (a router's path and the document's may differ in escaping only). */
 function trimmed(pathname: string): string {
@@ -76,9 +81,10 @@ const routes = (): RouteChanges => source ?? observe(documentRouteChanges());
 
 /** The address changed: the visit goes on at its own address and at the sync screens, and ends anywhere else. */
 function heard(pathname: string): void {
+  const at = trimmed(pathname);
+  for (const [revoke, on] of [...attached]) if (at !== on.address) revoke();
   const visit = current;
   if (visit === null) return;
-  const at = trimmed(pathname);
   if (at !== visit.address && !atSync(at)) end(visit);
 }
 
@@ -86,6 +92,7 @@ function end(visit: Visit): void {
   if (visit.over) return;
   visit.over = true;
   if (current === visit) current = null;
+  for (const [revoke, on] of [...attached]) if (on === visit) revoke();
   for (const listener of [...ends]) listener(visit);
 }
 
@@ -130,18 +137,86 @@ export function onTaskVisitEnded(
   };
 }
 
+/** What of a router is read here: where it is (`latestLocation`) and its history, which moves before the document's address does. */
+interface ScreenRouter {
+  latestLocation: { pathname: string };
+  history?: {
+    location: { pathname: string };
+    subscribe(listener: () => void): () => void;
+  };
+}
+
+const useScreenRouter = (): ScreenRouter | null =>
+  (useRouter({ warn: false }) as ScreenRouter | null | undefined) ?? null;
+
 /**
  * The visit an editor opening now belongs to, for `identity` (asked when it opens, not when it renders). An editor shown outside any router
  * (a component test) belongs to none: it keeps its input only while it is mounted.
  */
 export function useTaskVisit(): (identity: string) => TaskVisit | null {
-  const router = useRouter({ warn: false }) as {
-    latestLocation: { pathname: string };
-  } | null;
+  const router = useScreenRouter();
   return (identity) =>
-    router === null || router === undefined
+    router === null
       ? null
       : visitHere(identity, router.latestLocation.pathname);
+}
+
+/**
+ * An editor shown on a visit's screen (revision 23, R35 / DA23): what may act ON the screen, as against owning the input typed on it.
+ * A save's acknowledgement can arrive after the person chose to go elsewhere but before React removed the old editor (a navigation moves the
+ * router at once, the document's address a microtask later, and the editor's cleanup later still), and at the sync screens the visit,
+ * rightly, goes on. Neither the visit's end nor the editor's cleanup is therefore the authority to close a form onto its task.
+ */
+export interface TaskAttachment {
+  /**
+   * Whether the editor is on the screen the person is at NOW: never revoked, its visit still the one going on, and both its router and the
+   * document at its address. Asked immediately before acting, with nothing awaited in between.
+   */
+  presents(): boolean;
+  /** The editor leaves the screen (its layout cleanup, before passive cleanups run): it never presents again. */
+  detach(): void;
+}
+
+/**
+ * Attaches an editor opening on `visit` (null: an editor outside any router, which presents while it is mounted). Revoked for good by the
+ * first change of path away from the visit's address that its router's history or the document makes (the sync screens included: coming
+ * back mounts a new attachment), by its visit ending, or by `detach`; a return to the same address never restores an old attachment.
+ */
+export function useTaskAttachment(): (
+  visit: TaskVisit | null,
+) => TaskAttachment | null {
+  const router = useScreenRouter();
+  return (visit) => {
+    if (visit === null) return null;
+    const { address } = visit;
+    const away = (pathname: string) => trimmed(pathname) !== address;
+    let revoked = false;
+    let stop: (() => void) | undefined;
+    const revoke = () => {
+      if (revoked) return;
+      revoked = true;
+      attached.delete(revoke);
+      stop?.();
+    };
+    attached.set(revoke, visit);
+    const history = router?.history;
+    if (history !== undefined)
+      stop = history.subscribe(() => {
+        if (away(history.location.pathname)) revoke();
+      });
+    if (visit.ended()) revoke();
+    return {
+      presents: () =>
+        !revoked &&
+        !visit.ended() &&
+        current === visit &&
+        !away(routes().pathname()) &&
+        (router === null ||
+          (!away(router.latestLocation.pathname) &&
+            (history === undefined || !away(history.location.pathname)))),
+      detach: revoke,
+    };
+  };
 }
 
 /**
