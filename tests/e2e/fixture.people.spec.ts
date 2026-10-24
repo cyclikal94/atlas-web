@@ -1829,8 +1829,11 @@ test.describe("E-P25: leaving the page never discards a held change (review 3, f
       expect(after).toHaveLength(1);
       // Adapted (review 4, finding 1): `queued: false` (no content admission) is not part of the v 4 copy any more; its content is handed
       // off in one commit with its draft, so a copy that is still live was not handed off (and no draft exists, asserted above).
+      // Adapted again (review 12, R12.1): the copy is now v 5 and records the save its value was typed over; nothing was outstanding
+      // here, so that binding is null (never omitted, never "unknown").
       expect(after[0]).toMatchObject({
-        v: 4,
+        v: 5,
+        predecessor: null,
         value: { kind: "text", text: "Retain this unsent input" },
         to: PRIVATE,
         retired: false,
