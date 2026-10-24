@@ -18,6 +18,7 @@ import { ResourcePolicyEditor } from "../../sharing";
 import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
+import { admit, isPending, settle } from "../lifetime";
 import { useMemoryRevision } from "../memory";
 import {
   audienceLabel,
@@ -714,11 +715,20 @@ function ArchiveFieldButton({
   const env = usePeopleEnv();
   const announcer = useAnnouncer();
   const save = useOutboxSave();
+  useMemoryRevision(env.memory);
   const [message, setMessage] = useState<string | null>(null);
   const label = archived ? copy.RESTORE : copy.ARCHIVE;
+  // One archive or restore of the field at a time, whichever button asks (review 7, finding 1).
+  const target = `archive:${id}`;
   if (!env.writable)
     return (
       <Button variant="quiet" disabled reason={copy.READ_ONLY_COMPAT}>
+        {label}
+      </Button>
+    );
+  if (isPending(env.memory, target))
+    return (
+      <Button variant="quiet" disabled reason={copy.SAVING}>
         {label}
       </Button>
     );
@@ -729,9 +739,16 @@ function ArchiveFieldButton({
         aria-describedby={nameId}
         data-people-action={archived ? "restore-field" : "archive-field"}
         onClick={async () => {
-          const outcome = await save((outbox) =>
-            outbox.enqueue(archiveRequest({ id, archived: !archived })),
-          );
+          const admission = admit(env.memory, [target], env.newId);
+          if (admission === null) return;
+          let outcome: Awaited<ReturnType<typeof save>>;
+          try {
+            outcome = await save((outbox) =>
+              outbox.enqueue(archiveRequest({ id, archived: !archived })),
+            );
+          } finally {
+            settle(admission);
+          }
           if (outcome.ok) {
             setMessage(null);
             announcer.announce(copy.SAVED_NOT_SENT, "polite");

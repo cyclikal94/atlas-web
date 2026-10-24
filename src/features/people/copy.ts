@@ -134,6 +134,11 @@ export const NOT_ON_DEVICE =
 export const PERSON_READ_FAILED = "Couldn't read this person on this device."; // PROVISIONAL
 export const PERSON_UNCONFIRMED =
   "Couldn't read every unsent change on this device, so this person can't be shown."; // PROVISIONAL
+export const EDITOR_CHANGES_UNREAD =
+  "Couldn't read every unsent change on this device, so this field can't be edited yet."; // PROVISIONAL (review 7)
+export const EDITOR_CHANGES_CAPPED =
+  "More unsent changes are waiting than this page reads, so this field can't be edited yet. Sync them first."; // PROVISIONAL (review 7)
+export const FIELD_FALLBACK_NAME = "field"; // PROVISIONAL (an editor title when the field can't be read)
 export const CHANGES_READ_FAILED =
   "Couldn't read every unsent change on this device. What's shown may not include them."; // PROVISIONAL
 export const FIELDS_READ_FAILED =

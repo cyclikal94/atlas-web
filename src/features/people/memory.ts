@@ -17,6 +17,7 @@ import type { LinkageState } from "./model/linkage";
  *  - `heldAuthority`: the holds this page may run by itself (D1 of 22 October 2026); every other hold waits for "Send now";
  *  - `drafts`: editor input kept by the in-dialog sync control or across a remount (field editor, rename, new person), each with its
  *    editing session; `sessions`: the mounted form of each session, the only one a save's completion may close (`lifetime.ts`);
+ *    `pending`, `reports` and `prepared`: each session's running save, what its last one said, and the request it was prepared as;
  *  - `attempts`: the uncertain attempt of an online-only command, per target (same key and body on "Try again");
  *  - `summaries`: the viewer-safe summaries read for this identity (finding 8, `summaries.tsx`), per query, for the CURRENT invalidation
  *    `summaryGeneration` only, with the highest `preferences_version` applied and each row's highest versions (the contract's
@@ -85,6 +86,16 @@ export class PeopleMemory {
   readonly drafts = new Map<string, unknown>();
   /** The mounted form of each editing session (`lifetime.ts`): what a save's completion may close (review 6, finding 1). */
   readonly sessions = new Map<string, EditingSession>();
+  /**
+   * The saves still running, by what they were admitted for (an editing session's id, or an action's target such as `archive:<id>`),
+   * each with its claim's token (`lifetime.ts` `admit`, review 7, finding 1): while one runs, no other is admitted for the same thing,
+   * whichever mount asks.
+   */
+  readonly pending = new Map<string, string>();
+  /** What a session's last save said, kept for its next mount while none is mounted (`lifetime.ts` `reportSession`). */
+  readonly reports = new Map<string, unknown>();
+  /** The request a session's save was prepared as, with the input it was prepared from (`lifetime.ts` `prepared`). */
+  readonly prepared = new Map<string, { basis: string; value: unknown }>();
   /**
    * Field policies this page read or confirmed (owner-only `GET /policies/{id}`), with their versions and when they were read: the only
    * audiences the table names besides the summaries, and only while no later policy version of the field is known (`policyShownFor`).

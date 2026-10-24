@@ -24,6 +24,7 @@ import { type LinkageState, linkageOf, unknownLinkage } from "./model/linkage";
  * subscribed reader per page, following `next` until the end or a cap, and reports the union. Every page stays live, nothing is read
  * past the cap, and the data layer is not changed. The same for the outstanding drafts (`useOutstandingCreates`, 100 per window).
  */
+/** `absent`: the database does not exist (nothing is in it); `failed`: a read failed, or the database is closed. */
 export type ChainStatus = "loading" | "ready" | "absent" | "failed";
 
 export interface ChainResult<Row> {
@@ -45,10 +46,15 @@ export interface Report<Row, Cursor> {
   next: Cursor | null;
 }
 
-function statusOf(loadable: Loadable<unknown>): ChainStatus {
+/**
+ * A page's read as the chains count it. `absent` is ONLY a database known not to exist (it holds nothing); a CLOSED one (latched,
+ * ended, being wiped) is not evidence of anything, and counts as a read that failed (review 7's design assessment: closed was taken as
+ * absent, and the detail then took every unsent change as read).
+ */
+export function statusOf(loadable: Loadable<unknown>): ChainStatus {
   if (loadable.status === "ready") return "ready";
   if (loadable.status === "loading") return "loading";
-  return loadable.reason === "error" ? "failed" : "absent";
+  return loadable.reason === "absent" ? "absent" : "failed";
 }
 
 /** The reports of the pages of a walk, by index, each with the cursor it was read after. */

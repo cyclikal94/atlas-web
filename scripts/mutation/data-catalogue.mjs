@@ -16500,8 +16500,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      setSaving(false);\n      if (!outcome.ok) return fail(outcome.message);\n      return succeeded(\n        reviewing",
-        '      setSaving(false);\n      if (!outcome.ok) {\n        dispatch({ type: "replace", state: newFieldForm() });\n        return fail(outcome.message);\n      }\n      return succeeded(\n        reviewing',
+        // Re-anchored in revision 7 (the save's `saving` state moved into page memory; the defect is unchanged).
+        "      const outcome = await save((outbox) => outbox.enqueue(request));\n      if (!outcome.ok) return fail(outcome.message);\n      return succeeded(\n        reviewing",
+        '      const outcome = await save((outbox) => outbox.enqueue(request));\n      if (!outcome.ok) {\n        dispatch({ type: "replace", state: newFieldForm() });\n        return fail(outcome.message);\n      }\n      return succeeded(\n        reviewing',
       ),
   },
   {
@@ -20660,8 +20661,397 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '    document.addEventListener("pointercancel", release, true);\n',
+        // Re-anchored in revision 7 (a cancel now ends only its own pointer's press; the defect is unchanged).
+        '    document.addEventListener("pointercancel", cancel, true);\n',
         "",
+      ),
+  },
+  {
+    id: "MU-2307",
+    title:
+      "WEB-11a R7 F1: admission ignores a save already running for the key (the reviewer's defect: a reopened New person admits a second create)",
+    file: "src/features/people/lifetime.ts",
+    tests: [
+      "tests/features/people/lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /one save per key at a time|kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (keys.some((key) => memory.pending.has(key))) return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2308",
+    title:
+      "WEB-11a R7 F1: an old save's settlement frees whatever claim holds the key (a later save's included)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/lifetime.test.tsx"],
+    expect: /an old save's settlement never frees a later save's claim/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (memory.pending.get(key) === token) {\n",
+        "    if (memory.pending.has(key)) {\n",
+      ),
+  },
+  {
+    id: "MU-2309",
+    title:
+      "WEB-11a R7 F1: New person admits every press (no session claim): a reopened form saves the same person again",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(memory, [session], env.newId);\n    if (admission === null) return;\n",
+        '    const admission = { memory, keys: [] as string[], token: "" };\n',
+      ),
+  },
+  {
+    id: "MU-2310",
+    title:
+      "WEB-11a R7 F1: New person shows saving only in the mount that pressed Save (a reopened form looks ready)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const saving = isPending(env.memory, session);\n",
+        "  const [saving] = useState(false);\n",
+      ),
+  },
+  {
+    id: "MU-2311",
+    title:
+      "WEB-11a R7 F1: a retry of the same input is prepared anew (new person and local ids: a write whose answer was lost is made twice)",
+    file: "src/features/people/lifetime.ts",
+    tests: [
+      "tests/features/people/lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /the retry of the same input is the same request|the same basis is the same request/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known !== undefined && known.basis === basis) return known.value as T;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2312",
+    title:
+      "WEB-11a R7 F1: a changed input reuses the earlier request (its local id would report the earlier save as this one)",
+    file: "src/features/people/lifetime.ts",
+    tests: [
+      "tests/features/people/lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /a retry after the input changed is a NEW request|the same basis is the same request/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known !== undefined && known.basis === basis) return known.value as T;\n",
+        "  if (known !== undefined) return known.value as T;\n",
+      ),
+  },
+  {
+    id: "MU-2313",
+    title:
+      "WEB-11a R7 F1: New person's refusal is told only to the mount that pressed Save (a reopened form is never told)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /while the form is kept and reopened: told to the reopened form/,
+    patch: (t) =>
+      sub(
+        t,
+        "        reportSession(memory, RETAINED, session, { refusal: outcome.message });\n",
+        "        setRefusal(outcome.message);\n",
+      ),
+  },
+  {
+    id: "MU-2314",
+    title:
+      "WEB-11a R7 F1: New person's request carries no local id of its own (the outbox allocates one per attempt)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /the retry of the same input is the same request/,
+    patch: (t) => sub(t, "            localId: env.newId(),\n", ""),
+  },
+  {
+    id: "MU-2315",
+    title:
+      "WEB-11a R7 F1: the field editor admits every press (no session claim): a remounted editor saves the same input again",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect:
+      /remounted \(a 403 elsewhere\) while its save runs: the restored editor shows it saving|remounted while its request is unanswered: no second request/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(env.memory, [session], env.newId);\n    if (admission === null) return;\n    try {\n      await run(choice);\n",
+        '    const admission = { memory: env.memory, keys: [] as string[], token: "" };\n    try {\n      await run(choice);\n',
+      ),
+  },
+  {
+    id: "MU-2316",
+    title:
+      "WEB-11a R7 F1: the editor's Archive is admitted apart from the session (it runs beside the session's save, and Save beside it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect:
+      /its Archive is not admitted beside it|the editor's Archive pressed twice while it is saved admits one archive, and Save waits for it/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "                  saving || isPending(env.memory, `archive:$" +
+            "{existing.id}`)\n",
+          "                  isPending(env.memory, `archive:$" +
+            "{existing.id}`)\n",
+        ),
+        "                        [session, `archive:$" + "{existing.id}`],\n",
+        "                        [`archive:$" + "{existing.id}`],\n",
+      ),
+  },
+  {
+    id: "MU-2317",
+    title:
+      "WEB-11a R7 F1: a rename admits every press (no session claim): a remounted rename form renames again",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect:
+      /a queued rename remounted while saved|a linked profile's rename remounted while unanswered/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(env.memory, [session], env.newId);\n    if (admission === null) return;\n    try {\n      await run();\n",
+        '    const admission = { memory: env.memory, keys: [] as string[], token: "" };\n    try {\n      await run();\n',
+      ),
+  },
+  {
+    id: "MU-2318",
+    title:
+      "WEB-11a R7 F1: unlink admits every confirmation (a confirmation asked again while one is sent sends again)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /unlink asked again while the first is unanswered/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(env.memory, [target], env.newId);\n    if (admission === null) return;\n    setMessage(null);\n",
+        '    const admission = { memory: env.memory, keys: [] as string[], token: "" };\n    setMessage(null);\n',
+      ),
+  },
+  {
+    id: "MU-2319",
+    title:
+      "WEB-11a R7 F1: the person's Archive admits every press (pressed twice, it archives twice)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /the person's Archive pressed twice while the first is saved/,
+    patch: (t) =>
+      sub(
+        t,
+        "          const admission = admit(env.memory, [target], env.newId);\n          if (admission === null) return;\n",
+        '          const admission = { memory: env.memory, keys: [] as string[], token: "" };\n',
+      ),
+  },
+  {
+    id: "MU-2320",
+    title:
+      "WEB-11a R7 F1: a field's Archive admits every press (pressed twice, it archives twice)",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /the field's Archive pressed twice while the first is saved/,
+    patch: (t) =>
+      sub(
+        t,
+        "          const admission = admit(env.memory, [target], env.newId);\n          if (admission === null) return;\n",
+        '          const admission = { memory: env.memory, keys: [] as string[], token: "" };\n',
+      ),
+  },
+  {
+    id: "MU-2321",
+    title:
+      "WEB-11a R7 F1: every mount of a session counts as its owner (an older form's handler may keep input for, or save, a later one)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/lifetime.test.tsx"],
+    expect: /the latest mount owns it/,
+    patch: (t) =>
+      sub(
+        t,
+        "      mine.current !== null &&\n      memory.sessions.get(session) === mine.current,\n",
+        "      mine.current !== null,\n",
+      ),
+  },
+  {
+    id: "MU-2322",
+    title:
+      "WEB-11a R7 F2: the list takes its absence claims from the cache alone (the reviewer's defect: an unreadable queue shows 'No one here yet')",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /the unsent changes unreadable: no Empty|a queued archive may exist but the unsent changes are unreadable|the unsent changes unreadable: no 'No one matches'|the cap/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const known = changesKnown(outstanding);\n",
+        "  const known = true;\n",
+      ),
+  },
+  {
+    id: "MU-2323",
+    title:
+      "WEB-11a R7 F2: the list is not loading while its unsent changes are still read (it claims nobody meanwhile)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the unsent changes still read: loading, never Empty/,
+    patch: (t) =>
+      sub(
+        t,
+        '      (!step.settled && status !== "failed") ||\n      outstanding.status === "loading") &&\n',
+        '      (!step.settled && status !== "failed")) &&\n',
+      ),
+  },
+  {
+    id: "MU-2324",
+    title:
+      "WEB-11a R7 F2: the list's Try again keeps its failed watches (only the data layer's retry: a repaired store is never read again)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /Try again shows the person|a LATER window of the unsent changes fails|the cache read fails on a later page of a search/,
+    patch: (t) =>
+      sub(
+        t,
+        "        <OutstandingChain key={reading}>\n",
+        "        <OutstandingChain>\n",
+      ),
+  },
+  {
+    id: "MU-2325",
+    title:
+      "WEB-11a R7 F2: a scope's search matches the server's names, not the names shown (a queued rename is not found by its new name)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /control, every unsent change read: found by the name shown/,
+    patch: (t) =>
+      sub(
+        t,
+        '          keep: (item) => wanted === "" || shownName(item).includes(wanted),\n',
+        '          keep: (item) =>\n            wanted === "" || normalise(item.label).includes(wanted),\n',
+      ),
+  },
+  {
+    id: "MU-2326",
+    title:
+      "WEB-11a R7 F2: a scope claims 'No one matches' with its unsent renames unread",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /the unsent changes unreadable: the failure is said, and 'No one matches' is not claimed/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const claimable = wanted === "" || changesKnown(outstanding);\n',
+        "  const claimable = true;\n",
+      ),
+  },
+  {
+    id: "MU-2327",
+    title:
+      "WEB-11a R7 assessment: a CLOSED database is taken as an absent one (every unsent change counted as read)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /absent only for a database known not to exist/,
+    patch: (t) =>
+      sub(
+        t,
+        '  return loadable.reason === "absent" ? "absent" : "failed";\n',
+        '  return loadable.reason === "error" ? "failed" : "absent";\n',
+      ),
+  },
+  {
+    id: "MU-2328",
+    title:
+      "WEB-11a R7 assessment: the field editor opens on an unreadable (or capped) chain of unsent changes",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the editor does not open on a guessed base/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (outstanding.status === "failed" || outstanding.capped)\n',
+        "        if (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2329",
+    title:
+      "WEB-11a R7 F3: the pressed action is never translated back (only the boxes' heights are held, as in revision 6)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /it is translated back while pressed/,
+    patch: (t) =>
+      sub(
+        t,
+        "      element.style.transform =\n        dx === 0 && dy === 0\n          ? held.style.transform\n          : `translate($" +
+          "{dx}px, $" +
+          "{dy}px)`;\n",
+        "      void element;\n",
+      ),
+  },
+  {
+    id: "MU-2330",
+    title:
+      "WEB-11a R7 F3: the pressed action's size is not held (a shorter label shrinks it from under the pointer)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect:
+      /it is translated back while pressed|is let go at once|a second pointer/,
+    patch: (t) =>
+      sub(
+        t,
+        "        action.style.width = `$" +
+          "{rect.width}px`;\n        action.style.height = `$" +
+          "{rect.height}px`;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2331",
+    title:
+      "WEB-11a R7 F3: an action disabled while pressed is still held for the click",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /an action disabled while pressed is let go at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !element.isConnected ||\n        element.matches(\":disabled, [aria-disabled='true']\")\n",
+        "        !element.isConnected\n",
+      ),
+  },
+  {
+    id: "MU-2332",
+    title:
+      "WEB-11a R7 F3: any pointer's release ends the press (a second pointer lets the first one's action go)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /a second pointer does not start another press/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (pointer === null || idOf(event) !== pointer) return;\n",
+        "      if (pointer === null) return;\n",
       ),
   },
 ];
@@ -20674,6 +21064,12 @@ export const UNIT = [
  * of a fallback that no longer exists has nothing to patch; what each of them stood for is covered by the mutant named beside it.
  */
 export const RETIRED = [
+  {
+    id: "MU-2306",
+    why: "(REAL ENGINE; WEB-11a revision 7, review 7 finding 3) a press fixes no box: since D-11a-29 the PRESSED ACTION itself is held in place and size, so whether the boxes above it keep their height no longer decides whether the press activates; E-P33 passes with this mutant in three engines (revision 7, `author-diagnostics/engine-mutants-1`, controls passing). The boxes' heights stay as defence in depth (what is below them does not jump); the mutant is equivalent for the activation the spec asserts",
+    replacedBy:
+      "MU-2335 (real engine, E-P33: the press fixes nothing, boxes and action), MU-2333/MU-2334 (real engine, E-P34/E-P35: the action not translated / not held) and MU-2329/MU-2330 (unit)",
+  },
   {
     id: "MU-2232",
     why: "(WEB-11a revision 4, review 4 finding 1) a stop inside the content step leaves its admission (queued) standing: there is no separate content admission any more. The content is handed off in ONE transaction with the end of the hold's copy (`transferDraft`), so nothing is admitted before the draft is written and nothing is left to withdraw; the anchor (`write({ ...copy.change, queued: false })`) does not exist",
@@ -24006,19 +24402,55 @@ export const ENGINE = [
       ),
   },
   {
-    id: "MU-2306",
+    id: "MU-2333",
     title:
-      "WEB-11a R6 F3: (REAL ENGINE) a press fixes no box: the linkage answer moves 'Add a field' from under the pointer and the press opens nothing",
+      "WEB-11a R7 F3: (REAL ENGINE) the pressed action is never translated back: a field's audience and reach move Edit/Archive from under the pointer",
+    file: "src/features/people/detail/steady.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P34:",
+    expect: /E-P34: .*pressed before and released after the answer is shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "      element.style.transform =\n        dx === 0 && dy === 0\n          ? held.style.transform\n          : `translate($" +
+          "{dx}px, $" +
+          "{dy}px)`;\n",
+        "      void element;\n",
+      ),
+  },
+  {
+    id: "MU-2334",
+    title:
+      "WEB-11a R7 F3: (REAL ENGINE) the pressed action is not held at all (only the boxes, as in revision 6): a header action and a list row move",
+    file: "src/features/people/detail/steady.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P35:",
+    expect: /E-P35: .*pressed before and released after the/,
+    patch: (t) =>
+      sub(
+        t,
+        "        rect.width > 0 &&\n        rect.height > 0\n      ) {\n",
+        "        rect.width > 0 &&\n        (false as boolean)\n      ) {\n",
+      ),
+  },
+  {
+    id: "MU-2335",
+    title:
+      "WEB-11a R7 F3: (REAL ENGINE) a press fixes nothing (neither the boxes nor the pressed action): the linkage answer moves 'Add a field' from under the pointer",
     file: "src/features/people/detail/steady.ts",
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P33:",
     expect: /E-P33: .*pressed before and released after the answer/,
     patch: (t) =>
       sub(
-        t,
-        // The anchor holds a template literal; it is spelt in two parts (no `$`+`{` inside a plain string).
-        "        box.style.height = `$" + "{heights[index]}px`;\n",
-        "        void heights[index];\n",
+        sub(
+          t,
+          // The anchor holds a template literal; it is spelt in two parts (no `$`+`{` inside a plain string).
+          "        box.style.height = `$" + "{heights[index]}px`;\n",
+          "        void heights[index];\n",
+        ),
+        "        rect.width > 0 &&\n        rect.height > 0\n      ) {\n",
+        "        rect.width > 0 &&\n        (false as boolean)\n      ) {\n",
       ),
   },
 ];

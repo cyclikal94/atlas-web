@@ -7,7 +7,16 @@ import { Input } from "../../../components/ui/input";
 import { useSharingDefaults } from "../../../data";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
-import { completeSession, sessionOf, useEditingSession } from "../lifetime";
+import {
+  admit,
+  completeSession,
+  isPending,
+  preparedFor,
+  reportSession,
+  sessionOf,
+  settle,
+  useEditingSession,
+} from "../lifetime";
 import { useMemoryRevision } from "../memory";
 import { personDefaultsLabel } from "../model/audience";
 import { createPersonRequest } from "../model/commands";
@@ -26,6 +35,9 @@ import { Choices, FieldError, useOutboxSave } from "../parts";
  * queued `/commands` batch, `create_person` then `create_field` (SHARE-10), offline-capable. A hidden note keeps its text and is not sent
  * (PRODUCT-DECISIONS item 2). The in-dialog sync control keeps the draft for this identity; Cancel, Escape and the close icon discard it.
  * A save ends only the editing session it was made in (`lifetime.ts`, review 6, finding 1): a form opened after Cancel is another one.
+ * And a session saves once at a time (review 7, finding 1): a form reopened while its save runs shows it saving, and admits no second
+ * create; a retry of the same input is the same request (the same person, note and local ids), so a save that was written but whose
+ * answer was lost is recognised, never made twice.
  */
 const RETAINED = "new-person";
 
@@ -61,7 +73,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
     retained?.form ?? newPersonForm(),
   );
   const restored = useRef(retained !== undefined);
-  const [saving, setSaving] = useState(false);
+  const saving = isPending(env.memory, session);
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [refusal, setRefusal] = useState<string | null>(null);
   const stateRef = useRef(state);
@@ -75,7 +87,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       env.memory.drafts.delete(RETAINED);
   };
   // The person saved by this session is shown when the save completes, through whichever mount shows the session now.
-  useEditingSession(env.memory, session, {
+  const owns = useEditingSession<{ refusal: string }>(env.memory, session, {
     revision: () => stateRef.current.revision,
     close: (personId) => {
       onClose();
@@ -83,6 +95,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
         void navigate({ to: "/people/$personId", params: { personId } });
     },
     keep: () => setRefusal(copy.LATER_EDITS_KEPT),
+    report: (update) => setRefusal(update.refusal),
   });
 
   const resolved = personDefaultsLabel(defaults.record);
@@ -90,7 +103,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
     state.sharing === "defaults" && defaults.status === "loading";
 
   const submit = async () => {
-    if (saving) return;
+    if (!owns()) return;
     const result = applicablePerson(state);
     if (!result.ok) {
       setProblems(
@@ -103,30 +116,55 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       );
       return;
     }
+    const memory = env.memory;
+    // Admitted once per session, before anything is awaited: a remounted or reopened form of the same session admits nothing more.
+    const admission = admit(memory, [session], env.newId);
+    if (admission === null) return;
     setProblems({});
     setRefusal(null);
-    setSaving(true);
-    const memory = env.memory;
     const ticket = state.revision;
-    const personId = env.newId();
-    const request = createPersonRequest({
-      personId,
-      name: result.name,
-      sharing: result.sharing,
-      note:
-        result.note === null
-          ? null
-          : { fieldId: env.newId(), label: NOTE_LABEL, text: result.note },
-      record: defaults.record,
-    });
-    const outcome = await save((outbox) => outbox.enqueue(request));
-    setSaving(false);
+    const record = defaults.record;
+    const { personId, request } = preparedFor(
+      memory,
+      session,
+      JSON.stringify([result.name, result.sharing, result.note, record]),
+      () => {
+        const id = env.newId();
+        return {
+          personId: id,
+          request: {
+            ...createPersonRequest({
+              personId: id,
+              name: result.name,
+              sharing: result.sharing,
+              note:
+                result.note === null
+                  ? null
+                  : {
+                      fieldId: env.newId(),
+                      label: NOTE_LABEL,
+                      text: result.note,
+                    },
+              record,
+            }),
+            localId: env.newId(),
+          },
+        };
+      },
+    );
+    let outcome: Awaited<ReturnType<typeof save>>;
+    try {
+      outcome = await save((outbox) => outbox.enqueue(request));
+    } finally {
+      settle(admission);
+    }
     if (!outcome.ok) {
-      // Everything typed stays (a refused save is not saved).
-      if (outcome.message !== null) setRefusal(outcome.message);
+      // Everything typed stays (a refused save is not saved), told to the form showing this session now.
+      if (outcome.message !== null)
+        reportSession(memory, RETAINED, session, { refusal: outcome.message });
       return;
     }
-    const reviewing = result.sharing === "defaults" && defaults.record === null;
+    const reviewing = result.sharing === "defaults" && record === null;
     announcer.announce(
       reviewing ? copy.SAVED_REVIEW : copy.SAVED_NOT_SENT,
       "polite",
@@ -157,12 +195,14 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       title={copy.NEW_PERSON_TITLE}
       onClose={onClose}
       onDiscard={forget}
-      onRetainDraft={() =>
-        env.memory.drafts.set(RETAINED, {
-          session,
-          form: stateRef.current,
-        } satisfies RetainedPerson)
-      }
+      onRetainDraft={() => {
+        // Only the session's form now keeps input for it (an older form's handler never overwrites a later session's).
+        if (owns())
+          env.memory.drafts.set(RETAINED, {
+            session,
+            form: stateRef.current,
+          } satisfies RetainedPerson);
+      }}
       initialFocusSelector="input"
       footer={
         <>

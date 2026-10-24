@@ -1,16 +1,25 @@
 import { Link } from "@tanstack/react-router";
-import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
 import {
   type CacheRow,
+  type DraftWithCommand,
   useDataActions,
   useResourceList,
   useStatusInputs,
 } from "../../../data";
 import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
+import { useSteadyWhilePressed } from "../detail/steady";
 import { type PeopleEnv, usePeopleEnv } from "../env";
 import {
   byName,
@@ -29,7 +38,12 @@ import {
   summaryCurrentFor,
 } from "../model/summary";
 import { Avatar, Banner, PendingBadge } from "../parts";
-import { OutstandingChain, ResourceScan, type ScanResult } from "../reads";
+import {
+  type ChainResult,
+  OutstandingChain,
+  ResourceScan,
+  type ScanResult,
+} from "../reads";
 import {
   type SummaryView,
   shownOf,
@@ -57,6 +71,11 @@ import { NewPersonDialog } from "./NewPersonDialog";
  *
  * States: Loading (five skeleton rows; header and controls paint at once), Empty (a completed sync with nobody), Offline-first-visit (no
  * sync yet: never shown as Empty), Error (the store failed: a banner with Try again), each with "New person" still offered.
+ *
+ * What the list shows is the cache AND this device's unsent changes (a queued new person exists only in the queue), so "No one here yet",
+ * "Nobody is archived" and a final "No one matches" are said only when BOTH inventories were read to their end (review 7, finding 2):
+ * while the unsent changes are still read, the list is loading; when they could not be read, it says so with Try again (a fresh read of
+ * both), beside whatever could be read; when there are more than it reads, it says that, and claims no absence.
  */
 const PEOPLE_STEP = 100;
 const PEOPLE_STEP_PAGES = 20;
@@ -79,11 +98,23 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<PeopleView>("all");
   const [creating, setCreating] = useState(false);
+  const actions = useDataActions();
+  // "Try again" reads afresh: new watches of the cache and the unsent changes (a live query ends at its first error), and the data
+  // layer's own retry of an unavailable database.
+  const [reading, setReading] = useState(0);
+  const retry = useCallback(() => {
+    actions.retryLoad();
+    setReading((value) => value + 1);
+  }, [actions]);
   // The start of each step walked so far (null: the first); a new search or view begins again from the first.
   const [starts, setStarts] = useState<(string | null)[]>([null]);
   const searchId = useId();
+  // A press on a row or a control is not lost to a summary that answers during it (review 7, finding 3): the pressed action keeps its
+  // place while the rows above it grow.
+  const root = useRef<HTMLDivElement>(null);
+  useSteadyWhilePressed(root);
   return (
-    <div className="flex min-w-0 flex-col gap-4" data-people-list="">
+    <div ref={root} className="flex min-w-0 flex-col gap-4" data-people-list="">
       <div className="flex flex-wrap items-center gap-2">
         <Button
           variant="primary"
@@ -126,13 +157,14 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
         </fieldset>
       </div>
       <CacheGate>
-        <OutstandingChain>
+        <OutstandingChain key={reading}>
           {(outstanding) =>
             view === "all" || view === "archived" ? (
               <PeopleSteps
                 env={env}
                 changes={changesOfAll(outstanding.rows)}
-                outstandingCapped={outstanding.capped}
+                outstanding={outstanding}
+                onRetry={retry}
                 query={query}
                 view={view}
                 starts={starts}
@@ -145,6 +177,8 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
                 env={env}
                 scope={view}
                 changes={changesOfAll(outstanding.rows)}
+                outstanding={outstanding}
+                onRetry={retry}
                 query={query}
                 starts={starts}
                 onStarts={setStarts}
@@ -163,7 +197,8 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
 function PeopleSteps({
   env,
   changes,
-  outstandingCapped,
+  outstanding,
+  onRetry,
   query,
   view,
   starts,
@@ -173,7 +208,8 @@ function PeopleSteps({
 }: {
   env: PeopleEnv;
   changes: Change[];
-  outstandingCapped: boolean;
+  outstanding: ChainResult<DraftWithCommand>;
+  onRetry(): void;
   query: string;
   view: "all" | "archived";
   starts: (string | null)[];
@@ -219,7 +255,8 @@ function PeopleSteps({
                 ).filter((row) => shows(row.row))
               : []),
           ].sort(byName)}
-          outstandingCapped={outstandingCapped}
+          outstanding={outstanding}
+          onRetry={onRetry}
           query={query}
           view={view}
           selectedId={selectedId}
@@ -273,13 +310,42 @@ function useStepSummaries(
   });
 }
 
+/**
+ * Every unsent change of this device was read (an absent database holds none): only then is a person's absence from what is shown
+ * evidence that nobody (or nobody matching) is there (review 7, finding 2). Loading, failed and capped reads are not.
+ */
+export const changesKnown = (outstanding: ChainResult<unknown>): boolean =>
+  outstanding.status === "absent" ||
+  (outstanding.status === "ready" && outstanding.complete);
+
+/** What the list says about the unsent changes it could not read in full, beside whatever it shows. */
+function ChangesNotice({
+  outstanding,
+  onRetry,
+}: {
+  outstanding: ChainResult<unknown>;
+  onRetry(): void;
+}) {
+  if (outstanding.status === "failed")
+    return (
+      <div data-people-state="changes-failed">
+        <Banner
+          message={copy.CHANGES_READ_FAILED}
+          action={<Button onClick={onRetry}>{copy.TRY_AGAIN}</Button>}
+        />
+      </div>
+    );
+  return null;
+}
+
 function CachedRows({
   env,
   step,
   start,
   archived,
   shown,
-  outstandingCapped,
+  outstanding,
+  onRetry,
   query,
   view,
   selectedId,
@@ -292,7 +358,8 @@ function CachedRows({
   start: string | null;
   archived: boolean;
   shown: ShownRow[];
-  outstandingCapped: boolean;
+  outstanding: ChainResult<DraftWithCommand>;
+  onRetry(): void;
   query: string;
   view: "all" | "archived";
   selectedId: string | null;
@@ -301,45 +368,67 @@ function CachedRows({
   onNext: (() => void) | null;
 }) {
   const inputs = useStatusInputs();
-  const actions = useDataActions();
   const summaries = useStepSummaries(env, step, start, archived);
   const read = shownOf(summaries)?.value.read ?? null;
   const wanted = normalise(query);
   const status = step.status;
   const first = start === null;
+  // Both inventories the list shows were read to their end: only then is an absence a claim it can make.
+  const known = changesKnown(outstanding);
 
-  if (status === "failed")
-    return (
+  // The cache could not be read: said, with a fresh read, above whatever of it (and of the unsent changes) could be.
+  const cacheFailed =
+    status === "failed" ? (
       <Banner
         message={copy.LOAD_FAILED}
-        action={
-          <Button onClick={() => actions.retryLoad()}>{copy.TRY_AGAIN}</Button>
-        }
+        action={<Button onClick={onRetry}>{copy.TRY_AGAIN}</Button>}
       />
-    );
-  if ((status === "loading" || !step.settled) && shown.length === 0)
+    ) : null;
+  const notice = <ChangesNotice outstanding={outstanding} onRetry={onRetry} />;
+  if (
+    (status === "loading" ||
+      (!step.settled && status !== "failed") ||
+      outstanding.status === "loading") &&
+    shown.length === 0
+  )
     return <Skeleton />;
+  if (status === "failed" && shown.length === 0)
+    return (
+      <div className="flex flex-col gap-2">
+        {cacheFailed}
+        {notice}
+      </div>
+    );
   const neverSynced =
     status === "absent" ||
     inputs.cache === "empty" ||
     inputs.cache === "unknown";
-  // Nobody at all: the whole walk from the first person found none to show in "All", and nothing is searched for.
+  // Nobody at all: the whole walk from the first person found none to show in "All", nothing is searched for, and every unsent change
+  // was read (a queued new person is in the queue only).
   const nobody =
-    first && step.end && shown.length === 0 && wanted === "" && view === "all";
+    first &&
+    step.end &&
+    shown.length === 0 &&
+    wanted === "" &&
+    view === "all" &&
+    known;
   if (nobody || (neverSynced && shown.length === 0))
     return (
-      <div
-        data-people-state={neverSynced ? "offline-first-visit" : "empty"}
-        className="flex flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
-      >
-        <p className="text-[13.5px] leading-[1.55] text-ink-1">
-          {neverSynced
-            ? inputs.online
-              ? copy.NOT_SYNCED_YET
-              : copy.OFFLINE_FIRST_VISIT
-            : copy.EMPTY}
-        </p>
-        <Button onClick={onNew}>{copy.NEW_PERSON}</Button>
+      <div className="flex flex-col gap-2">
+        {notice}
+        <div
+          data-people-state={neverSynced ? "offline-first-visit" : "empty"}
+          className="flex flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+        >
+          <p className="text-[13.5px] leading-[1.55] text-ink-1">
+            {neverSynced
+              ? inputs.online
+                ? copy.NOT_SYNCED_YET
+                : copy.OFFLINE_FIRST_VISIT
+              : copy.EMPTY}
+          </p>
+          <Button onClick={onNew}>{copy.NEW_PERSON}</Button>
+        </div>
       </div>
     );
   // The step stopped at its page bound before it found a full step: more people may match further on.
@@ -354,21 +443,26 @@ function CachedRows({
   };
   return (
     <div className="flex flex-col gap-2">
+      {cacheFailed}
+      {notice}
       {neverSynced ? (
         <p className="text-[12.5px] text-ink-2">
           {inputs.online ? copy.NOT_SYNCED_YET : copy.OFFLINE_FIRST_VISIT}
         </p>
       ) : null}
       {shown.length === 0 ? (
-        <p data-people-state="no-match" className="text-[13px] text-ink-2">
-          {wanted !== ""
-            ? step.end
-              ? copy.NO_MATCH(query.trim())
-              : copy.NO_MATCH_YET(query.trim())
-            : view === "archived"
-              ? copy.EMPTY_ARCHIVED
-              : copy.EMPTY}
-        </p>
+        // Nobody (matching) is claimed only from complete inventories; otherwise the notices above say what could not be read.
+        known && status !== "failed" ? (
+          <p data-people-state="no-match" className="text-[13px] text-ink-2">
+            {wanted !== ""
+              ? step.end
+                ? copy.NO_MATCH(query.trim())
+                : copy.NO_MATCH_YET(query.trim())
+              : view === "archived"
+                ? copy.EMPTY_ARCHIVED
+                : copy.EMPTY}
+          </p>
+        ) : null
       ) : (
         <List className="flex flex-col gap-1">
           {shown.map((row) => (
@@ -390,7 +484,7 @@ function CachedRows({
         </p>
       ) : null}
       <Steps onPrevious={onPrevious} onNext={onNext} partial={partial} />
-      {outstandingCapped ? (
+      {outstanding.capped ? (
         <p
           className="text-[12.5px] text-ink-2"
           data-people-state="outstanding-capped"
@@ -429,6 +523,8 @@ function ScopeSteps({
   env,
   scope,
   changes,
+  outstanding,
+  onRetry,
   query,
   starts,
   onStarts,
@@ -437,6 +533,8 @@ function ScopeSteps({
   env: PeopleEnv;
   scope: Exclude<SummaryScope, "all">;
   changes: Change[];
+  outstanding: ChainResult<DraftWithCommand>;
+  onRetry(): void;
   query: string;
   starts: (string | null)[];
   onStarts(starts: (string | null)[]): void;
@@ -445,8 +543,21 @@ function ScopeSteps({
   const wanted = normalise(query);
   const start = starts.at(-1) ?? null;
   const byId = useMemo(() => changesById(changes), [changes]);
+  // A search is over the names SHOWN (this device's unsent renames over the server's): the walk is asked again when they change.
+  const shownName = (summary: PersonSummary) =>
+    normalise(foldOne(rowOf(summary), byId).row.label);
+  const renamed =
+    wanted === ""
+      ? ""
+      : changes
+          .filter(
+            (change) => change.kind === "edit" && change.label !== undefined,
+          )
+          .map((change) => `${change.id}=${change.label}`)
+          .sort()
+          .join("\u0000");
   const view = useSummary<WalkedPages<PersonSummary>>(
-    `people:${scope}:${start ?? ""}:${wanted}`,
+    `people:${scope}:${start ?? ""}:${wanted}:${renamed}`,
     (current) =>
       walkPages(
         (after) =>
@@ -457,8 +568,7 @@ function ScopeSteps({
           }),
         {
           start,
-          keep: (item) =>
-            wanted === "" || normalise(item.label).includes(wanted),
+          keep: (item) => wanted === "" || shownName(item).includes(wanted),
           limit: PEOPLE_STEP,
           pages: PEOPLE_STEP_PAGES,
         },
@@ -483,9 +593,12 @@ function ScopeSteps({
     .map((summary) => ({ summary, row: foldOne(rowOf(summary), byId) }))
     .sort((a, b) => byName(a.row, b.row));
   const partial = !end && kept.length < PEOPLE_STEP;
+  // Who is in a scope is the server's; whether nobody MATCHES a search also rests on this device's unsent renames being read.
+  const claimable = wanted === "" || changesKnown(outstanding);
   return (
     <div className="flex flex-col gap-2" data-people-scope={scope}>
-      {rows.length === 0 ? (
+      <ChangesNotice outstanding={outstanding} onRetry={onRetry} />
+      {rows.length === 0 && !claimable ? null : rows.length === 0 ? (
         <p data-people-state="no-match" className="text-[13px] text-ink-2">
           {wanted !== ""
             ? end

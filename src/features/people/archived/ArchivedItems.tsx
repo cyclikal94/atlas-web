@@ -19,6 +19,7 @@ import {
 } from "../../../data";
 import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
+import { useSteadyWhilePressed } from "../detail/steady";
 import { archiveRequest } from "../model/commands";
 import {
   type Change,
@@ -45,8 +46,15 @@ const LEDGER_STEP_PAGES = 50;
 export function ArchivedItems() {
   const env = useOptionalDataEnv();
   const heading = useId();
+  // A press on Restore (or a link) is not lost to a report that answers during it (review 7, finding 3): the pressed action keeps its place.
+  const root = useRef<HTMLDivElement>(null);
+  useSteadyWhilePressed(root);
   return (
-    <div className="flex max-w-[700px] flex-col gap-5" data-archived-items="">
+    <div
+      ref={root}
+      className="flex max-w-[700px] flex-col gap-5"
+      data-archived-items=""
+    >
       <div className="flex flex-col gap-2">
         <Link
           to="/settings"
@@ -194,6 +202,10 @@ function LedgerRow({
   const save = useOutboxSave();
   const announcer = useAnnouncer();
   const [message, setMessage] = useState<string | null>(null);
+  // One restore of the row at a time (review 7, finding 1): taken before anything is awaited, so a second press adds nothing. The
+  // ledger is outside the people screens' page memory; the row is the action's owner here.
+  const restoring = useRef(false);
+  const [pending, setPending] = useState(false);
   const nameId = useId();
   return (
     <li
@@ -211,17 +223,30 @@ function LedgerRow({
           <span className="text-[12px] text-conflict-text">{message}</span>
         ) : null}
       </span>
-      {shown.row.can_edit && !shown.projected ? (
+      {shown.row.can_edit && !shown.projected && pending ? (
+        <Button variant="quiet" disabled reason={copy.SAVING}>
+          {copy.RESTORE}
+        </Button>
+      ) : shown.row.can_edit && !shown.projected ? (
         <Button
           variant="quiet"
           aria-describedby={nameId}
           data-people-action="ledger-restore"
           onClick={async () => {
-            const outcome = await save((outbox) =>
-              outbox.enqueue(
-                archiveRequest({ id: shown.row.id, archived: false }),
-              ),
-            );
+            if (restoring.current) return;
+            restoring.current = true;
+            setPending(true);
+            let outcome: Awaited<ReturnType<typeof save>>;
+            try {
+              outcome = await save((outbox) =>
+                outbox.enqueue(
+                  archiveRequest({ id: shown.row.id, archived: false }),
+                ),
+              );
+            } finally {
+              restoring.current = false;
+              setPending(false);
+            }
             if (outcome.ok) {
               setMessage(null);
               announcer.announce(copy.SAVED_NOT_SENT, "polite");

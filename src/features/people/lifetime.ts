@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 import { isCurrentMemory, type PeopleMemory } from "./memory";
 
 /**
@@ -10,7 +10,7 @@ import { isCurrentMemory, type PeopleMemory } from "./memory";
  * so). A completion whose session ended or was replaced touches nothing: another session's kept input, dialog and route are never its
  * to close. What the save did is still told (the caller announces it before asking); an admitted save is never undone here.
  */
-export interface EditingSession {
+export interface EditingSession<Update = unknown> {
   /** The input's revision now. */
   revision(): number;
   /**
@@ -20,28 +20,53 @@ export interface EditingSession {
   close(saved: string | null): void;
   /** The session's save completed for an earlier revision: the later input stays, and the form says so. */
   keep(): void;
+  /**
+   * What the session's save says to the form showing the session now (a refusal, a re-binding it confirmed): the form that submitted
+   * may have been remounted since (review 7, finding 1), so the save never tells only the instance that started it.
+   */
+  report(update: Update): void;
 }
 
-/** Registers the mounted form of `session` while it is mounted (the latest mount of the session wins; a mount withdraws only itself). */
-export function useEditingSession(
+/**
+ * Registers the mounted form of `session` while it is mounted (the latest mount of the session wins; a mount withdraws only itself), and
+ * gives it what the session's save said while no form of it was mounted. Answers whether this mount is the session's form now: a handler
+ * of a form that is not (an old one's, still reachable) has no say over the session (it neither keeps input for it nor saves it).
+ */
+export function useEditingSession<Update>(
   memory: PeopleMemory,
   session: string,
-  view: EditingSession,
-): void {
+  view: EditingSession<Update>,
+): () => boolean {
   const current = useRef(view);
   current.current = view;
+  const mine = useRef<EditingSession | null>(null);
   useLayoutEffect(() => {
     const owner: EditingSession = {
       revision: () => current.current.revision(),
       close: (saved) => current.current.close(saved),
       keep: () => current.current.keep(),
+      report: (update) => current.current.report(update as Update),
     };
     memory.sessions.set(session, owner);
+    mine.current = owner;
+    const waiting = memory.reports.get(session);
+    if (waiting !== undefined) {
+      memory.reports.delete(session);
+      owner.report(waiting);
+    }
     return () => {
+      if (mine.current === owner) mine.current = null;
       if (memory.sessions.get(session) === owner)
         memory.sessions.delete(session);
     };
   }, [memory, session]);
+  return useCallback(
+    () =>
+      isCurrentMemory(memory) &&
+      mine.current !== null &&
+      memory.sessions.get(session) === mine.current,
+    [memory, session],
+  );
 }
 
 /** The session a kept draft belongs to (undefined: none, or not a session's). */
@@ -66,6 +91,8 @@ export function completeSession(
   saved: string | null = null,
 ): "closed" | "kept" | "gone" {
   if (!isCurrentMemory(memory)) return "gone";
+  // The request this save was prepared as is spent: a later save of the session is prepared from its own input.
+  memory.prepared.delete(session);
   const owner = memory.sessions.get(session);
   const kept = memory.drafts.get(key);
   const keptHere = kept !== undefined && sessionOf(kept) === session;
@@ -77,6 +104,94 @@ export function completeSession(
     return "kept";
   }
   if (keptHere) memory.drafts.delete(key);
+  memory.reports.delete(session);
   owner?.close(saved);
   return "closed";
+}
+
+/**
+ * What a save of `session` (input kept under `key`) says, told to the form showing the session now, or kept for its next mount while
+ * none is mounted (a remount, or the in-dialog sync control). A session that ended or was replaced (Cancel and a new form) is told
+ * nothing: the new form's message is its own. Updates kept while no form is mounted are merged, later over earlier.
+ */
+export function reportSession<Update extends object>(
+  memory: PeopleMemory,
+  key: string,
+  session: string,
+  update: Update,
+): void {
+  if (!isCurrentMemory(memory)) return;
+  const owner = memory.sessions.get(session);
+  if (owner !== undefined) {
+    owner.report(update);
+    return;
+  }
+  if (sessionOf(memory.drafts.get(key)) !== session) return;
+  const waiting = memory.reports.get(session) as Update | undefined;
+  memory.reports.set(session, { ...waiting, ...update });
+  memory.touch();
+}
+
+/**
+ * ADMISSION (review 7, finding 1). A save is admitted for what it saves: an editing session's id (whichever mount of the session asks),
+ * or an action's target (`archive:<id>`, `unlink:<id>`). While it runs, no other save is admitted for any of its keys, so a form that
+ * was remounted, kept by the sync control and reopened, or pressed twice, cannot start a second save of the same input. The claim is
+ * taken synchronously, before anything is awaited (a component's `saving` state is what it shows, not what excludes), and every mount
+ * shows the session as saving while it runs (`isPending`, re-rendered by `useMemoryRevision`). It ends with `settle`, however the save
+ * ends; an old save's settlement never ends a later save's claim. Page memory only: another page's saves are excluded by the outbox's
+ * own guards (base versions, draft digests, field locks), never by this.
+ */
+export interface Admission {
+  readonly memory: PeopleMemory;
+  readonly keys: readonly string[];
+  readonly token: string;
+}
+
+/** Admits one save for every key at once, or nothing (null): another save of one of them runs, or the identity changed. */
+export function admit(
+  memory: PeopleMemory,
+  keys: readonly string[],
+  newId: () => string,
+): Admission | null {
+  if (!isCurrentMemory(memory)) return null;
+  if (keys.some((key) => memory.pending.has(key))) return null;
+  const token = newId();
+  for (const key of keys) memory.pending.set(key, token);
+  memory.touch();
+  return { memory, keys, token };
+}
+
+/** The admitted save ended: its keys are free again (only those it still holds). */
+export function settle(admission: Admission): void {
+  const { memory, keys, token } = admission;
+  let freed = false;
+  for (const key of keys)
+    if (memory.pending.get(key) === token) {
+      memory.pending.delete(key);
+      freed = true;
+    }
+  if (freed) memory.touch();
+}
+
+/** Whether a save admitted for `key` runs now. */
+export const isPending = (memory: PeopleMemory, key: string): boolean =>
+  memory.pending.has(key);
+
+/**
+ * The request a save of `session` is made as, prepared from `basis` (what was typed and chosen, and anything captured with it): the
+ * SAME request again while the basis is unchanged, so a retry of a save that may have been written (its completion was lost) carries the
+ * same ids and the outbox recognises it (`localId`); a new one, with new ids, for any other input. Spent when the session's save
+ * completes (`completeSession`).
+ */
+export function preparedFor<T>(
+  memory: PeopleMemory,
+  session: string,
+  basis: string,
+  prepare: () => T,
+): T {
+  const known = memory.prepared.get(session);
+  if (known !== undefined && known.basis === basis) return known.value as T;
+  const value = prepare();
+  memory.prepared.set(session, { basis, value });
+  return value;
 }

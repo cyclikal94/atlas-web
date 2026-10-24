@@ -20,7 +20,17 @@ import {
 } from "../../sharing/apply-policy-change";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
-import { completeSession, sessionOf, useEditingSession } from "../lifetime";
+import {
+  type Admission,
+  admit,
+  completeSession,
+  isPending,
+  preparedFor,
+  reportSession,
+  sessionOf,
+  settle,
+  useEditingSession,
+} from "../lifetime";
 import { isCurrentMemory, notePolicy, useMemoryRevision } from "../memory";
 import {
   type AudienceClass,
@@ -105,8 +115,10 @@ export function FieldEditorDialog({
   const env = usePeopleEnv();
   const person = useCachedResource(personId);
   const field = useCachedResource(fieldId ?? "");
+  // "Try again" reads this device's unsent changes afresh (new watches: a live query ends at its first error).
+  const [reading, setReading] = useState(0);
   return (
-    <OutstandingChain>
+    <OutstandingChain key={reading}>
       {(outstanding) => {
         // The edit's snapshot needs this device's whole chain of saves (finding 5): a later window still loading is not "none".
         if (
@@ -118,6 +130,29 @@ export function FieldEditorDialog({
             !outstanding.capped)
         )
           return null;
+        // A chain that failed (or is more than this page reads) is not an empty one: nothing is edited on a guessed base (review 7's
+        // design assessment, C15). Input kept for the editor stays kept for when the read succeeds.
+        if (outstanding.status === "failed" || outstanding.capped)
+          return (
+            <EditorUnread
+              title={
+                fieldId === null
+                  ? copy.ADD_FIELD_TITLE
+                  : copy.EDIT_FIELD_TITLE(
+                      field.status === "ready" && field.value.merged !== null
+                        ? field.value.merged.label
+                        : copy.FIELD_FALLBACK_NAME,
+                    )
+              }
+              message={
+                outstanding.capped
+                  ? copy.EDITOR_CHANGES_CAPPED
+                  : copy.EDITOR_CHANGES_UNREAD
+              }
+              onRetry={() => setReading((value) => value + 1)}
+              onClose={onClose}
+            />
+          );
         const changes = changesOfAll(outstanding.rows);
         const personRow = foldRows(
           person.status === "ready" && person.value.merged?.kind === "person"
@@ -157,6 +192,42 @@ export function FieldEditorDialog({
   );
 }
 
+function EditorUnread({
+  title,
+  message,
+  onRetry,
+  onClose,
+}: {
+  title: string;
+  message: string;
+  onRetry(): void;
+  onClose(): void;
+}) {
+  return (
+    <Dialog
+      open
+      title={title}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="quiet" onClick={onClose}>
+            {copy.CANCEL}
+          </Button>
+          <span className="ml-auto">
+            <Button variant="primary" onClick={onRetry}>
+              {copy.TRY_AGAIN}
+            </Button>
+          </span>
+        </>
+      }
+    >
+      <p data-people-state="editor-unread" className="text-[13.5px] text-ink-1">
+        {message}
+      </p>
+    </Dialog>
+  );
+}
+
 interface Retained {
   /** The editing session this input belongs to (`lifetime.ts`): kept across a remount, new after Cancel (review 6, finding 1). */
   session: string;
@@ -180,6 +251,13 @@ type Outcome =
   | { kind: "offline_choice" }
   /** The field changed since the edit began (finding 1): nothing was saved; the person reviews the current value and audience. */
   | { kind: "stale" };
+
+/** What a save tells the form showing its session now (`reportSession`): its outcome, and a re-binding it confirmed. */
+interface EditorReport {
+  outcome?: Outcome;
+  snapshot?: EditSnapshot;
+  touched?: boolean;
+}
 
 function Editor({
   env,
@@ -244,7 +322,6 @@ function Editor({
   const [problems, setProblems] = useState<
     Partial<Record<ProblemSlot, FieldInputProblem>>
   >({});
-  const [saving, setSaving] = useState(false);
   const [outcome, setOutcome] = useState<Outcome>(null);
   const [offlineChoice, setOfflineChoice] = useState<"save_now" | "hold">(
     "hold",
@@ -255,6 +332,8 @@ function Editor({
   const nameError = useId();
   const typeId = useId();
   const session = initial.retained.session;
+  // Whether this session's save runs, whichever mount of it started the save (review 7, finding 1).
+  const saving = isPending(env.memory, session);
 
   // The draft is kept for this identity while the editor is open (a remount reopens it); dismissing the editor forgets it.
   useEffect(() => {
@@ -286,11 +365,19 @@ function Editor({
     onClose();
   };
   // A save's completion ends the session it was made in, through whichever mount shows it now (review 6, finding 1).
-  useEditingSession(env.memory, session, {
+  const owns = useEditingSession<EditorReport>(env.memory, session, {
     revision: () => stateRef.current.revision,
     close,
     keep: () => setOutcome({ kind: "message", text: copy.LATER_EDITS_KEPT }),
+    report: (update) => {
+      if (update.snapshot !== undefined) setSnapshot(update.snapshot);
+      if (update.touched !== undefined) setTouched(update.touched);
+      if (update.outcome !== undefined) setOutcome(update.outcome);
+    },
   });
+  /** What this session's save says, to the form showing the session now (the one that submitted may have been remounted since). */
+  const tell = (update: EditorReport) =>
+    reportSession(env.memory, draftKey, session, update);
   const ended = (ticket: number | null) =>
     completeSession(
       env.memory,
@@ -435,10 +522,12 @@ function Editor({
 
   const fail = (text: string | null, requestId?: string) => {
     if (text !== null)
-      setOutcome({
-        kind: "message",
-        text,
-        ...(requestId ? { requestId } : {}),
+      tell({
+        outcome: {
+          kind: "message",
+          text,
+          ...(requestId ? { requestId } : {}),
+        },
       });
   };
   const succeeded = (message: string, ticket: number) => {
@@ -502,15 +591,15 @@ function Editor({
     return { outcome, moved: guard.moved || reviewAgain };
   };
 
-  const submit = async (choice?: "save_now" | "hold") => {
-    if (saving) return;
+  /** One save of this session, admitted by `submit` (never on its own). */
+  const run = async (choice?: "save_now" | "hold") => {
     const ready = applicable(state);
     if (!ready.ok) {
       setProblems(ready.problems);
       return;
     }
     setProblems({});
-    setOutcome(null);
+    tell({ outcome: null });
     const ticket = state.revision;
     // ---- create ----
     if (isNew) {
@@ -519,7 +608,6 @@ function Editor({
       if (choiceNew === "home") {
         const policy = quickPolicy("home", null, home?.id ?? null);
         if (policy === null) return fail(copy.NO_PRIMARY_HOUSEHOLD);
-        setSaving(true);
         const result = await sendOnline(
           env,
           `create:${fieldId}`,
@@ -532,7 +620,6 @@ function Editor({
           }),
           (attempt) => env.api.putFieldShared(attempt),
         );
-        setSaving(false);
         if (result.ok) return succeeded(copy.SAVED_AFTER_SYNC, ticket);
         return fail(
           result.kind === "identity_grant_required"
@@ -547,24 +634,38 @@ function Editor({
           "requestId" in result ? result.requestId : undefined,
         );
       }
-      setSaving(true);
-      const reviewing = choiceNew === "defaults" && defaults.record === null;
-      const outcome = await save((outbox) =>
-        outbox.enqueue(
-          putFieldCreateRequest({
+      const record = defaults.record;
+      const reviewing = choiceNew === "defaults" && record === null;
+      const dependsOn =
+        person.projected && person.createDraft !== null
+          ? [person.createDraft]
+          : [];
+      // The same input is the same request (its local id): a retry of a create that was written but not answered is recognised.
+      const request = preparedFor(
+        env.memory,
+        session,
+        JSON.stringify([
+          fieldId,
+          ready.label,
+          ready.value,
+          choiceNew,
+          record,
+          dependsOn,
+        ]),
+        () => ({
+          ...putFieldCreateRequest({
             fieldId,
             personId: person.row.id,
             label: ready.label,
             value: ready.value,
             audience: choiceNew,
-            record: defaults.record,
-            ...(person.projected && person.createDraft !== null
-              ? { dependsOn: [person.createDraft] }
-              : {}),
+            record,
+            ...(dependsOn.length > 0 ? { dependsOn } : {}),
           }),
-        ),
+          localId: env.newId(),
+        }),
       );
-      setSaving(false);
+      const outcome = await save((outbox) => outbox.enqueue(request));
       if (!outcome.ok) return fail(outcome.message);
       return succeeded(
         reviewing ? copy.SAVED_FIELD_REVIEW : copy.SAVED_NOT_SENT,
@@ -582,7 +683,6 @@ function Editor({
       const reviewed = initial.retained.createDigest;
       if (reviewed === null || draft.command_digest !== reviewed)
         return fail(copy.CREATE_CHANGED);
-      setSaving(true);
       let changed = false;
       const outcome = await save(async (outbox) => {
         const edited = await outbox.editQueued(draft.local_id, {
@@ -596,7 +696,6 @@ function Editor({
           edited.kind === "refused" && edited.reason === "draft_changed";
         return edited;
       });
-      setSaving(false);
       if (changed) return fail(copy.CREATE_CHANGED);
       if (!outcome.ok) return fail(outcome.message ?? null);
       return succeeded(copy.SAVED_NOT_SENT, ticket);
@@ -609,7 +708,7 @@ function Editor({
       !stillBound(bound, existing) ||
       (known !== undefined && known.version !== bound.policyVersion)
     ) {
-      setOutcome({ kind: "stale" });
+      tell({ outcome: { kind: "stale" } });
       return;
     }
     const contentChanged =
@@ -618,15 +717,13 @@ function Editor({
     const sameKind = parsed !== null && parsed.kind === ready.value.kind;
     const content = { label: ready.label, value: ready.value };
     const queued = async (policyVersion: number) => {
-      setSaving(true);
       const { outcome, moved } = await queueUpdate(
         bound,
         content,
         policyVersion,
       );
-      setSaving(false);
       if (moved) {
-        setOutcome({ kind: "stale" });
+        tell({ outcome: { kind: "stale" } });
         return;
       }
       if (!outcome.ok) return fail(outcome.message);
@@ -649,7 +746,7 @@ function Editor({
       return fail(copy.SHARING_CHANGED);
     if (!env.online) {
       if (choice === undefined) {
-        setOutcome({ kind: "offline_choice" });
+        tell({ outcome: { kind: "offline_choice" } });
         return;
       }
       if (choice === "save_now") {
@@ -659,7 +756,6 @@ function Editor({
       // "Hold as draft": ONE operation of the field under its lock (`holdChange`, review 3 of 22 October 2026, finding 2): kept DURABLY
       // in the account's database as the field's current hold (finding 6), its earlier holds retired; only then may this page run it by
       // itself (D1). A taken lock, a failure or a hold changed elsewhere keeps the edit open here, as typed.
-      setSaving(true);
       const memory = env.memory;
       let kept: HoldOutcome;
       try {
@@ -681,8 +777,6 @@ function Editor({
         });
       } catch {
         kept = { kind: "failed", refused: false };
-      } finally {
-        setSaving(false);
       }
       if (kept.kind === "busy") return fail(copy.HELD_BUSY);
       if (kept.kind === "changed") return fail(copy.HELD_CHANGED_ELSEWHERE);
@@ -697,7 +791,6 @@ function Editor({
         announcer.announce(copy.HELD_KEPT_EARLIER(ready.label), "polite");
       return succeeded(copy.HELD_WAITING(ready.label), ticket);
     }
-    setSaving(true);
     const memory = env.memory;
     // The same change's unresolved attempt, kept by this page or by a hold (a reconciliation record) on this device: its key and body. A
     // page attempt counts only for EXACTLY this body (review 4; the assessment's C9: one of another change never hides a held one), and a
@@ -716,7 +809,6 @@ function Editor({
         target,
       );
       if (kept.kind === "unknown") {
-        setSaving(false);
         return fail(copy.HELD_ATTEMPT_UNKNOWN);
       }
       attempt = kept.kind === "found" ? kept.attempt : remembered;
@@ -739,7 +831,6 @@ function Editor({
     if (isCurrentMemory(memory) && sentSomething(result))
       memory.invalidateSummaries();
     if (!result.ok) {
-      setSaving(false);
       if (result.kind === "changed" || result.kind === "conflict") {
         // Re-read and re-classify; the draft stays.
         memory.policies.delete(existing.id);
@@ -765,10 +856,8 @@ function Editor({
     memory.touch();
     // The edit is now bound to the audience the person just confirmed (its new policy version); the content base is unchanged.
     const confirmed = { ...bound, policyVersion: result.policyVersion };
-    setSnapshot(confirmed);
-    setTouched(false);
+    tell({ snapshot: confirmed, touched: false });
     if (!contentChanged) {
-      setSaving(false);
       return succeeded(copy.SAVED_NOT_SENT, ticket);
     }
     const { outcome, moved } = await queueUpdate(
@@ -776,13 +865,29 @@ function Editor({
       content,
       result.policyVersion,
     );
-    setSaving(false);
     if (moved) {
-      setOutcome({ kind: "stale" });
+      tell({ outcome: { kind: "stale" } });
       return;
     }
     if (!outcome.ok) return fail(outcome.message);
     return succeeded(copy.SAVED_NOT_SENT, ticket);
+  };
+
+  /**
+   * Saves this session's input: admitted once per SESSION, synchronously, before anything is awaited (review 7, finding 1). While it
+   * runs, every mount of the session shows it saving and admits nothing: a remounted editor cannot start a second create, update,
+   * audience change or hold of the same input. The audience step, the policy read, its confirmation and the content update are ONE
+   * admission (nothing re-enters between them with the older binding). Held changes keep their own field lock (`holdChange`).
+   */
+  const submit = async (choice?: "save_now" | "hold") => {
+    if (!owns()) return;
+    const admission = admit(env.memory, [session], env.newId);
+    if (admission === null) return;
+    try {
+      await run(choice);
+    } finally {
+      settle(admission);
+    }
   };
 
   const policyChangedSince =
@@ -814,6 +919,16 @@ function Editor({
 
   /** "Save mine on the current version" of a CONFLICTED save (finding 3): ITS content, on the version and audience the person sees now. */
   const saveConflicted = async (draft: DraftWithCommand) => {
+    if (!owns()) return;
+    const admission = admit(env.memory, [session], env.newId);
+    if (admission === null) return;
+    try {
+      await saveConflictedAdmitted(draft);
+    } finally {
+      settle(admission);
+    }
+  };
+  const saveConflictedAdmitted = async (draft: DraftWithCommand) => {
     const content = draftFieldContent(draft);
     if (existing === null || content === null || livePolicyVersion === null)
       return fail(copy.WAIT_FOR_SYNC_FIELD);
@@ -904,7 +1019,23 @@ function Editor({
               {copy.CANCEL}
             </Button>
             {!isNew && !projected && canEdit ? (
-              <ArchiveInEditor id={existing.id} onDone={() => ended(null)} />
+              <ArchiveInEditor
+                id={existing.id}
+                pending={
+                  saving || isPending(env.memory, `archive:${existing.id}`)
+                }
+                admission={() =>
+                  owns()
+                    ? admit(
+                        env.memory,
+                        [session, `archive:${existing.id}`],
+                        env.newId,
+                      )
+                    : null
+                }
+                onRefused={(text) => fail(text)}
+                onDone={() => ended(null)}
+              />
             ) : null}
             <span className="ml-auto">
               {saveReason === null ? (
@@ -1336,30 +1467,53 @@ function ReviewPanel({
   );
 }
 
-function ArchiveInEditor({ id, onDone }: { id: string; onDone(): void }) {
+/**
+ * Archive from the editor: admitted with the editing session AND the field's archive (review 7, finding 1), so it never runs beside
+ * the session's save or another archive of the field; a refusal is told to the session's form now.
+ */
+function ArchiveInEditor({
+  id,
+  pending,
+  admission,
+  onRefused,
+  onDone,
+}: {
+  id: string;
+  pending: boolean;
+  admission(): Admission | null;
+  onRefused(text: string): void;
+  onDone(): void;
+}) {
   const save = useOutboxSave();
   const announcer = useAnnouncer();
-  const [message, setMessage] = useState<string | null>(null);
-  return (
-    <span className="inline-flex flex-col items-start gap-1">
-      <Button
-        variant="quiet"
-        data-people-action="archive-field-editor"
-        onClick={async () => {
-          const outcome = await save((outbox) =>
-            outbox.enqueue(archiveRequest({ id, archived: true })),
-          );
-          if (outcome.ok) {
-            announcer.announce(copy.SAVED_NOT_SENT, "polite");
-            onDone();
-          } else if (outcome.message !== null) setMessage(outcome.message);
-        }}
-      >
+  if (pending)
+    return (
+      <Button variant="quiet" disabled reason={copy.SAVING}>
         {copy.ARCHIVE}
       </Button>
-      {message ? (
-        <span className="text-[12px] text-conflict-text">{message}</span>
-      ) : null}
-    </span>
+    );
+  return (
+    <Button
+      variant="quiet"
+      data-people-action="archive-field-editor"
+      onClick={async () => {
+        const admitted = admission();
+        if (admitted === null) return;
+        let outcome: Awaited<ReturnType<typeof save>>;
+        try {
+          outcome = await save((outbox) =>
+            outbox.enqueue(archiveRequest({ id, archived: true })),
+          );
+        } finally {
+          settle(admitted);
+        }
+        if (outcome.ok) {
+          announcer.announce(copy.SAVED_NOT_SENT, "polite");
+          onDone();
+        } else if (outcome.message !== null) onRefused(outcome.message);
+      }}
+    >
+      {copy.ARCHIVE}
+    </Button>
   );
 }

@@ -280,8 +280,38 @@ reopens it with its draft), and `/settings/archived`.
   the detail's read-dependent boxes above its actions (the header with the outstanding-change notice and conflicts, the field list and
   each field row, `[data-steady]`) keep the height they had when the press began; what they show changes at once (a taller answer
   overflows for that moment). They are released after the click has been delivered, at once when the press is cancelled, or 500 ms after
-  a pointer released elsewhere. Keyboard activation is unaffected. The People list, the archive ledger and the duplicates view were not
-  changed (no lost press there is established).
+  a pointer released elsewhere. Keyboard activation is unaffected. Revision 7 extends this to the pressed action itself (D-11a-29).
+- **D-11a-27** (review 7 of 23 October 2026, finding 1) An editing session saves ONCE at a time (`lifetime.ts` `admit`). The claim is taken
+  synchronously, before anything is awaited, in the identity's page memory (`memory.pending`), keyed by the session id (or, for an
+  action without input, by its target: `archive:<id>`, `unlink:<id>`); every mount of the session shows it saving and admits nothing
+  until the save settles, however it ends, and an old save's settlement never frees a later claim. So a New person kept by the sync
+  control and reopened, a remounted field editor or rename form, an unlink asked again, or a second press of Archive starts no second
+  operation. The editor's Archive is admitted with its session (neither runs beside the other); the audience step, its confirmation and
+  the content update of a field are one admission. What a save says (a refusal, a confirmed re-binding) is told to the form showing the
+  session NOW (`reportSession`), or kept for its next mount; a session that ended (Cancel) is told nothing. A retry of the SAME input is
+  the same request: New person's person, note and local ids, and a queued field create's local id, are prepared once per input
+  (`preparedFor`), so a save that was written but whose answer was lost is recognised by the outbox (`localId`), never made twice; a
+  changed input is a new request. This is page memory only: a reload forgets a running save's claim (the queue keeps what was written),
+  and another page is excluded by the outbox's own guards (base versions, draft digests, the field lock), never by this. Restore in the
+  Settings ledger (outside the people screens' memory) is latched by its row.
+- **D-11a-28** (review 7, finding 2) The People list claims nobody only from complete inventories. What it shows is the cache AND this
+  device's unsent changes (a queued new person exists only in the queue), so "No one here yet", "Nobody is archived." and a final "No one
+  matches" need both read to their end: while the unsent changes are read the list is loading; when they could not be read (a failed or
+  CLOSED database: `reads.tsx` `statusOf` counts only a database known not to exist as absent) the list says "Couldn't read every unsent
+  change on this device. What's shown may not include them." with "Try again", beside whatever could be read; more unsent changes than it
+  reads says so and claims no absence. A failed cache read keeps any readable rows under its banner. "Try again" mounts the list's reads
+  afresh (new watches) and asks the data layer to retry an unavailable database. In In Home / Shared with me / Not linked, who is listed
+  is the server's; a search there matches the names SHOWN (this device's unsent renames over the server's), and its "No one matches" also
+  needs the unsent changes read. The field editor opens only on a complete read of the unsent changes: a failed or capped one says the
+  field can't be edited yet, with "Try again", and any kept input stays kept.
+- **D-11a-29** (review 7, finding 3) The pressed ACTION keeps its place and size (`detail/steady.ts`). A fixed outer box is not enough: in
+  the narrow layout a field row stacks its audience and reach above Edit and Archive, which then move inside the row (22 px in the
+  review), and on wider layouts the row recentres. So while a pointer is down on an enabled action inside the detail, the People list or
+  the archive ledger, the action is measured when the press begins, its width and height are held, and after every change inside the
+  root it is translated back to where it was, before the next input is hit-tested (a translated element is painted, and hit, above what
+  moved under it). What is shown still changes at once. Everything is restored after the click is delivered, at once on cancel of that
+  pointer, when the page is hidden, or when the action is removed or disabled (a withdrawn action is never kept for a click), and 500 ms
+  after its pointer was released elsewhere; a second pointer starts nothing.
 
 What is shown of unsent changes: a queued draft has no overlay until it is claimed, so the screens fold the bodies of the outstanding drafts
 (`useOutstandingCreates`) over the cache (`model/project.ts`): a create is projected and marked "Not sent yet"; a later rename, field update or
@@ -291,8 +321,8 @@ archive is folded over its row. A projected row is never a base for a version-ch
 
 - The summaries are as fresh as their snapshot: up to the 60-second refresh behind a household or primary household change made elsewhere
   (the contract's own bound). Each invalidation re-reads every summary shown (a list step's join, the person's summary, the fields' step).
-- Search in In Home / Shared with me / Not linked matches the names the server returned: a rename not sent yet is shown folded over the
-  row but is not searched there until it is sent.
+- Search in In Home / Shared with me / Not linked matches the names shown, this device's unsent renames folded over the server's (revision
+  7); who is in each view is still the server's, so a new person not sent yet is in none of them.
 - "Recent changes" (the drawn rail's second panel) is still not built: no history endpoint exists.
 
 - Hidden form values (PRODUCT-DECISIONS-20261011 item 2): the field type switch keeps each type's value; the new person's hidden note keeps

@@ -17,7 +17,15 @@ import { ResourcePolicyEditor } from "../../sharing";
 import type { PeopleFailure } from "../api";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
-import { completeSession, sessionOf, useEditingSession } from "../lifetime";
+import {
+  admit,
+  completeSession,
+  isPending,
+  reportSession,
+  sessionOf,
+  settle,
+  useEditingSession,
+} from "../lifetime";
 import { isCurrentMemory, useMemoryRevision } from "../memory";
 import {
   archiveRequest,
@@ -326,6 +334,18 @@ function failureMessage(failure: PeopleFailure): string | null {
  * locked (no resubmission). Success closes it. A conflict keeps the typed text ("Someone else already changed this — reload and try
  * again."). `rename_profile` needs a connection (Save is disabled with the reason); the unlinked person's content edit queues.
  */
+interface RenameMessage {
+  text: string;
+  requestId?: string;
+  reload?: boolean;
+}
+
+/** What a rename tells the form showing its session now (`reportSession`): its message, and the re-binding after a stale save. */
+interface RenameReport {
+  message?: RenameMessage | null;
+  snapshot?: EditSnapshot;
+}
+
 interface RetainedRename {
   /** The editing session (`lifetime.ts`): a completed rename ends only the session it was typed in (review 6, finding 1). */
   session: string;
@@ -375,12 +395,10 @@ function RenameForm({
   const revisionRef = useRef(revision);
   revisionRef.current = revision;
   const [snapshot, setSnapshot] = useState(initial.snapshot);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<{
-    text: string;
-    requestId?: string;
-    reload?: boolean;
-  } | null>(null);
+  useMemoryRevision(env.memory);
+  // Whether this session's rename runs, whichever mount of it started it (review 7, finding 1).
+  const saving = isPending(env.memory, session);
+  const [message, setMessage] = useState<RenameMessage | null>(null);
   const errorId = useId();
   const max = route.kind === "rename_profile" ? 200 : 300;
   // The typed name is kept across a remount of the tree (a 403 elsewhere), for this identity and this person only.
@@ -393,20 +411,28 @@ function RenameForm({
     } satisfies RetainedRename);
   }, [env, retainedKey, session, name, revision, snapshot]);
   /** The person changed since the form opened: nothing is sent; the form is re-bound to the person as shown now, for a deliberate re-save. */
-  const stale = () => {
-    setSnapshot(snapshotOf(person, drafts, shown.latest?.localId ?? null));
-    setMessage({ text: copy.STALE_RENAME });
-  };
+  const stale = () =>
+    tell({
+      snapshot: snapshotOf(person, drafts, shown.latest?.localId ?? null),
+      message: { text: copy.STALE_RENAME },
+    });
   const close = () => {
     if (sessionOf(env.memory.drafts.get(retainedKey)) === session)
       env.memory.drafts.delete(retainedKey);
     onDone();
   };
-  useEditingSession(env.memory, session, {
+  const owns = useEditingSession<RenameReport>(env.memory, session, {
     revision: () => revisionRef.current,
     close,
     keep: () => setMessage({ text: copy.LATER_EDITS_KEPT }),
+    report: (update) => {
+      if (update.snapshot !== undefined) setSnapshot(update.snapshot);
+      if (update.message !== undefined) setMessage(update.message);
+    },
   });
+  /** What this session's rename says, to the form showing the session now (the one that submitted may have been remounted since). */
+  const tell = (update: RenameReport) =>
+    reportSession(env.memory, retainedKey, session, update);
   /** A save of this session at `ticket` completed: only this session ends (a later rename form is never closed by it). */
   const ended = (ticket: number) =>
     completeSession(
@@ -417,8 +443,18 @@ function RenameForm({
       (kept) => (kept as RetainedRename).revision,
     );
 
+  /** Renames once per SESSION at a time: admitted synchronously, before anything is awaited (review 7, finding 1). */
   const submit = async () => {
-    if (saving) return;
+    if (!owns()) return;
+    const admission = admit(env.memory, [session], env.newId);
+    if (admission === null) return;
+    try {
+      await run();
+    } finally {
+      settle(admission);
+    }
+  };
+  const run = async () => {
     const trimmed = name.trim();
     if (trimmed === "") {
       setMessage({ text: copy.PROBLEM.name_missing as string });
@@ -434,7 +470,6 @@ function RenameForm({
     }
     setMessage(null);
     if (!stillBound(snapshot, person)) return stale();
-    setSaving(true);
     const ticket = revision;
     if (route.kind === "rename_profile") {
       const version = snapshot.version;
@@ -449,7 +484,6 @@ function RenameForm({
         body,
         (attempt) => env.api.peopleCommand(attempt),
       );
-      setSaving(false);
       if (result.ok) {
         env.memory.drafts.set(`renaming:${person.id}`, version);
         readLinkage(env, person.id, { force: true });
@@ -461,18 +495,19 @@ function RenameForm({
         readLinkage(env, person.id, { force: true });
       const text = failureMessage(result);
       if (text !== null)
-        setMessage({
-          text,
-          ...("requestId" in result && result.requestId
-            ? { requestId: result.requestId }
-            : {}),
-          reload: result.kind === "conflict",
+        tell({
+          message: {
+            text,
+            ...("requestId" in result && result.requestId
+              ? { requestId: result.requestId }
+              : {}),
+            reload: result.kind === "conflict",
+          },
         });
       return;
     }
     if (route.kind !== "edit" || snapshot.policyVersion === null) {
-      setSaving(false);
-      setMessage({ text: copy.WAIT_FOR_SYNC_PERSON });
+      tell({ message: { text: copy.WAIT_FOR_SYNC_PERSON } });
       return;
     }
     const input = {
@@ -512,10 +547,10 @@ function RenameForm({
       }
       return outbox.enqueue(renameEditRequest({ ...input, guard }));
     });
-    setSaving(false);
     if (guard.moved || reviewAgain) return stale();
     if (!outcome.ok) {
-      if (outcome.message !== null) setMessage({ text: outcome.message });
+      if (outcome.message !== null)
+        tell({ message: { text: outcome.message } });
       return;
     }
     announcer.announce(copy.SAVED_NOT_SENT, "polite");
@@ -634,7 +669,11 @@ function UnlinkDialog({
 }) {
   const env = usePeopleEnv();
   const announcer = useAnnouncer();
-  const [sending, setSending] = useState(false);
+  useMemoryRevision(env.memory);
+  // One unlink of the person at a time, whichever confirmation asks (review 7, finding 1): a confirmation opened again while one is
+  // sent shows it sending, and sends nothing more.
+  const target = `unlink:${personId}`;
+  const sending = isPending(env.memory, target);
   // A confirmation that completes after this dialog was closed never closes a later one (review 6, finding 1).
   const mounted = useRef(false);
   useLayoutEffect(() => {
@@ -648,16 +687,20 @@ function UnlinkDialog({
     requestId?: string;
   } | null>(null);
   const confirm = async () => {
-    if (sending) return;
-    setSending(true);
+    const admission = admit(env.memory, [target], env.newId);
+    if (admission === null) return;
     setMessage(null);
-    const result = await sendOnline(
-      env,
-      `unlink:${personId}`,
-      unlinkBody({ personId, version }),
-      (attempt) => env.api.peopleCommand(attempt),
-    );
-    setSending(false);
+    let result: Awaited<ReturnType<typeof env.api.peopleCommand>>;
+    try {
+      result = await sendOnline(
+        env,
+        `unlink:${personId}`,
+        unlinkBody({ personId, version }),
+        (attempt) => env.api.peopleCommand(attempt),
+      );
+    } finally {
+      settle(admission);
+    }
     readLinkage(env, personId, { force: true });
     if (result.ok) {
       announcer.announce(copy.UNLINKED, "polite");
@@ -665,7 +708,7 @@ function UnlinkDialog({
       return;
     }
     const text = failureMessage(result);
-    if (text !== null)
+    if (text !== null && mounted.current)
       setMessage({
         text,
         ...("requestId" in result && result.requestId
@@ -725,9 +768,12 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
   const env = usePeopleEnv();
   const announcer = useAnnouncer();
   const save = useOutboxSave();
+  useMemoryRevision(env.memory);
   const [message, setMessage] = useState<string | null>(null);
   const person = shown.row;
   const label = person.archived ? copy.RESTORE : copy.ARCHIVE;
+  // One archive or restore of the person at a time (review 7, finding 1): a second press while one is saved adds nothing.
+  const target = `archive:${person.id}`;
   if (shown.projected)
     return (
       <Button variant="quiet" disabled reason={copy.WAIT_FOR_SYNC_PERSON}>
@@ -746,6 +792,12 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
         {label}
       </Button>
     );
+  if (isPending(env.memory, target))
+    return (
+      <Button variant="quiet" disabled reason={copy.SAVING}>
+        {label}
+      </Button>
+    );
   return (
     <span className="inline-flex flex-col items-start gap-1">
       <Button
@@ -754,11 +806,18 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
           person.archived ? "restore-person" : "archive-person"
         }
         onClick={async () => {
-          const outcome = await save((outbox) =>
-            outbox.enqueue(
-              archiveRequest({ id: person.id, archived: !person.archived }),
-            ),
-          );
+          const admission = admit(env.memory, [target], env.newId);
+          if (admission === null) return;
+          let outcome: Awaited<ReturnType<typeof save>>;
+          try {
+            outcome = await save((outbox) =>
+              outbox.enqueue(
+                archiveRequest({ id: person.id, archived: !person.archived }),
+              ),
+            );
+          } finally {
+            settle(admission);
+          }
           if (outcome.ok) {
             setMessage(null);
             announcer.announce(copy.SAVED_NOT_SENT, "polite");

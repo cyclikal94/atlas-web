@@ -43,13 +43,25 @@ const F = "77777777-7777-4777-8777-777777777777";
 const fieldId = (n: number) =>
   `77777777-7777-4777-8777-${String(n).padStart(12, "0")}`;
 const detail = () => document.querySelector(`[data-person-detail="${P}"]`);
-/** Text shown on the page itself (the announcer's live region repeats a banner's words; it is not counted). */
+/**
+ * Text shown by the DETAIL (the announcer's live region repeats a banner's words, and since review 7 the list beside the detail says
+ * for itself that the unsent changes could not be read: neither is counted).
+ */
 const text = (value: string) =>
   screen
     .queryAllByText(value)
-    .find((node) => node.closest("[aria-live], .sr-only") === null) ?? null;
-const tryAgain = () =>
-  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    .find(
+      (node) =>
+        node.closest("[aria-live], .sr-only, [data-people-list]") === null,
+    ) ?? null;
+/** The DETAIL's Try again (the list beside it says, with its own Try again, that the same unsent changes could not be read: review 7). */
+const tryAgain = () => {
+  const buttons = screen
+    .getAllByRole("button", { name: "Try again" })
+    .filter((button) => button.closest("[data-people-list]") === null);
+  expect(buttons).toHaveLength(1);
+  fireEvent.click(buttons[0] as HTMLElement);
+};
 /** A queued `create_person` of this device. */
 const createOf = (seq: number) =>
   draftRow({

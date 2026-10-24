@@ -19,6 +19,7 @@ import {
   MO,
   navigateInApp,
   notSummary,
+  OWNER_ONLY,
   personP,
   publish,
   servePeople,
@@ -42,6 +43,8 @@ import {
  * superseded is never shown. Review 2 (22 October 2026): E-P22 an old editor never overwrites a newer edit of the same queued draft
  * (finding 3); E-P23 the generic Sync dialog never resends a People change under an audience the person did not review (finding 1);
  * E-P24 held changes past a thousand ended copies stay reachable in real IndexedDB (finding 4). E-P15 asserts D1's "Send now".
+ * Review 7 (23 October 2026): E-P34 a field's actions and E-P35 a header action and a list row keep their place through an answer during
+ * a press (finding 3).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -51,6 +54,10 @@ const HOME_VIEW = {
   grants: [{ kind: "household", id: HOME, edit: false }],
   exclude_accounts: [],
 };
+
+type Box = { x: number; y: number; width: number; height: number };
+/** A field audience of the owner alone (the summaries' `OWNER_ONLY`). */
+const OWNER_ONLY_AUDIENCE = OWNER_ONLY;
 
 const send = (page: Page) =>
   page.evaluate(() => window.__atlasData?.retryOutbox());
@@ -2542,6 +2549,325 @@ test.describe("E-P33: a press is not lost when the linkage answers during it (re
           ).toBeVisible();
           // While pressed, with the answer shown, the action stayed where the press began.
           if (answer !== "control") expect(pressed?.y).toBe(before.y);
+        });
+    });
+});
+
+/**
+ * E-P34 (review 7, finding 3): a press on a FIELD's action is not lost when the field's audience and reach answer during it. In the
+ * narrow layout the audience and reach are stacked ABOVE Edit and Archive inside the same row, so a fixed row height alone does not keep
+ * them under the pointer (the reviewer's 22 px move, `review-7/field-pointer-upper.probe.spec.ts`). Each case holds the field-audiences
+ * read, observes it and the unknown audience, presses a point INSIDE the action (centre, upper and lower quarter, just inside the top,
+ * bottom and right edges), releases the answer, observes the audience and reach SHOWN, then releases the pointer where it went down. The
+ * action must stay where it was (x, y, width, height), be the element under the pointer, and act exactly once. Each point's control
+ * presses the same point after the answer is shown. Phone, tablet and desktop.
+ */
+test.describe("E-P34: a field action keeps its place while the field's audience answers during a press (review 7, finding 3)", () => {
+  // Points INSIDE the action's hit area. Edge points are taken at the middle of an edge, 2 px in: a point 2 px from a corner is outside
+  // the control's 8 px rounded corner and is not on the action at all (revision 7's first campaign: its point-matched control missed too).
+  const points = {
+    centre: (b: Box) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 }),
+    "upper quarter": (b: Box) => ({
+      x: b.x + b.width / 2,
+      y: b.y + b.height / 4,
+    }),
+    "lower quarter": (b: Box) => ({
+      x: b.x + b.width / 2,
+      y: b.y + (3 * b.height) / 4,
+    }),
+    "top edge": (b: Box) => ({ x: b.x + b.width / 2, y: b.y + 2 }),
+    "bottom edge": (b: Box) => ({
+      x: b.x + b.width / 2,
+      y: b.y + b.height - 2,
+    }),
+    "right edge": (b: Box) => ({ x: b.x + b.width - 2, y: b.y + b.height / 2 }),
+  } as const;
+  for (const viewport of [
+    { name: "phone", width: 390, height: 844 },
+    { name: "tablet", width: 820, height: 1180 },
+    { name: "desktop", width: 1280, height: 900 },
+  ])
+    test.describe(`${viewport.name} (${viewport.width} px)`, () => {
+      test.use({
+        viewport: { width: viewport.width, height: viewport.height },
+      });
+      for (const action of ["edit", "archive", "audience"] as const)
+        for (const point of Object.keys(points) as (keyof typeof points)[])
+          for (const control of [false, true])
+            test(`${action} at the ${point}: ${control ? "control, the answer shown before the press" : "pressed before and released after the answer is shown"}`, async ({
+              context,
+            }, info) => {
+              let release!: () => void;
+              const gate = new Promise<void>((resolve) => {
+                release = resolve;
+              });
+              let held = 0;
+              context.on("page", (page) => {
+                void page.route(
+                  `**/api/experimental/v1/people/${P}/field-audiences*`,
+                  async (route) => {
+                    held += 1;
+                    await gate;
+                    await route.fallback();
+                  },
+                );
+              });
+              const { page } = await setup(
+                context,
+                `/people/${P}`,
+                [
+                  personP(P, "Ada"),
+                  fieldP(F, P, "Note", { kind: "text", text: "Kept value" }),
+                ],
+                {
+                  arrange: (served) => {
+                    served.policies.set(F, { version: 1, policy: PRIVATE });
+                    served.fieldAudiences.set(P, [
+                      {
+                        id: F,
+                        version: 1,
+                        policy_version: 1,
+                        archived: false,
+                        owner_is_you: true,
+                        your_access: "owner",
+                        audience: OWNER_ONLY_AUDIENCE,
+                        effective: {
+                          disclosure: "complete",
+                          account_count: 0,
+                          limited_count: 0,
+                        },
+                      },
+                    ]);
+                  },
+                },
+              );
+              const row = page.locator(`[data-field-row="${F}"]`);
+              await expect.poll(() => held).toBeGreaterThan(0);
+              // Harness precondition: the header's own read has answered (E-P33 is that schedule; this one is the field's).
+              await linkageAnswered(page);
+              await expect(
+                row.locator('[data-field-audience="unknown"]'),
+              ).toBeVisible();
+              const target =
+                action === "edit"
+                  ? row.getByRole("link", { name: "Edit", exact: true })
+                  : action === "archive"
+                    ? row.locator('[data-people-action="archive-field"]')
+                    : row.locator('[data-people-action="field-audience"]');
+              await target.scrollIntoViewIfNeeded();
+              const before = await target.boundingBox();
+              if (before === null) throw new Error("no target");
+              let pressed: Box | null = null;
+              let hit: boolean | null = null;
+              // The control presses the same point of the action as laid out AFTER the answer.
+              if (control) {
+                release();
+                await expect(row.locator("[data-field-reach]")).toBeVisible();
+              }
+              const from = control ? await target.boundingBox() : before;
+              if (from === null) throw new Error("no target");
+              const at = points[point](from);
+              await page.mouse.move(at.x, at.y);
+              await page.mouse.down();
+              if (!control) release();
+              await expect(
+                row.locator('[data-field-audience="complete"]'),
+              ).toBeVisible();
+              await expect(row.locator("[data-field-reach]")).toBeVisible();
+              pressed = await target.boundingBox();
+              hit = await target.evaluate((element, { x, y }) => {
+                const under = document.elementFromPoint(x, y);
+                return under !== null && element.contains(under);
+              }, at);
+              await page.mouse.up();
+              recordEvidence(info, "e-p34", {
+                viewport,
+                action,
+                point,
+                control,
+                held,
+                before,
+                from,
+                pressed,
+                hit,
+              });
+              if (action === "edit")
+                await expect(
+                  page.getByRole("dialog", { name: "Edit Note" }),
+                ).toBeVisible();
+              else if (action === "audience")
+                await expect(
+                  page.getByRole("dialog", { name: "Sharing — Note" }),
+                ).toBeVisible();
+              else
+                await expect
+                  .poll(
+                    async () =>
+                      (await draftsOf(page)).filter(
+                        (draft) =>
+                          draft.kind === "archive" &&
+                          (draft.target_resource_ids as string[]).includes(F),
+                      ).length,
+                  )
+                  .toBe(1);
+              // While pressed, with the answer shown, the action stayed where the press began and was what the pointer was over.
+              expect(pressed).toEqual(from);
+              expect(hit).toBe(true);
+            });
+    });
+});
+
+/**
+ * E-P35 (review 7, finding 3; the assessment's representative controls): the same for an action INSIDE the fixed header (the person's
+ * Archive, while the linkage answers) and for a People list row below rows that grow when the list's summaries answer.
+ */
+test.describe("E-P35: a header action and a list row keep their place through an answer during a press (review 7, finding 3)", () => {
+  for (const viewport of [
+    { name: "phone", width: 390, height: 844 },
+    { name: "desktop", width: 1280, height: 900 },
+  ])
+    test.describe(`${viewport.name} (${viewport.width} px)`, () => {
+      test.use({
+        viewport: { width: viewport.width, height: viewport.height },
+      });
+      for (const answer of ["other", "control"] as const)
+        test(`the person's Archive: ${answer === "control" ? "control, the linkage shown before the click" : "pressed before and released after the linkage (other) is shown"}`, async ({
+          context,
+        }, info) => {
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          let held = 0;
+          context.on("page", (page) => {
+            void page.route(
+              `**/api/experimental/v1/people/${P}`,
+              async (route) => {
+                if (route.request().method() === "GET") {
+                  held += 1;
+                  await gate;
+                }
+                await route.fallback();
+              },
+            );
+          });
+          const { page } = await setup(
+            context,
+            `/people/${P}`,
+            [personP(P, "Ada")],
+            { linked: { [P]: MO } },
+          );
+          await expect.poll(() => held).toBeGreaterThan(0);
+          await expect(
+            detail(page).locator('[data-linkage="unknown"]'),
+          ).toBeVisible();
+          const target = detail(page).locator(
+            '[data-people-action="archive-person"]',
+          );
+          await target.scrollIntoViewIfNeeded();
+          const before = await target.boundingBox();
+          if (before === null) throw new Error("no target");
+          let pressed: Box | null = null;
+          if (answer === "control") {
+            release();
+            await linkageAnswered(page);
+            await target.click();
+          } else {
+            await page.mouse.move(
+              before.x + before.width / 2,
+              before.y + before.height / 4,
+            );
+            await page.mouse.down();
+            release();
+            await expect(
+              detail(page).locator('[data-linkage="other"]'),
+            ).toBeVisible();
+            pressed = await target.boundingBox();
+            await page.mouse.up();
+          }
+          recordEvidence(info, "e-p35-header", {
+            viewport,
+            answer,
+            held,
+            before,
+            pressed,
+          });
+          await expect
+            .poll(
+              async () =>
+                (await draftsOf(page)).filter(
+                  (draft) =>
+                    draft.kind === "archive" &&
+                    (draft.target_resource_ids as string[]).includes(P),
+                ).length,
+            )
+            .toBe(1);
+          if (answer !== "control") expect(pressed).toEqual(before);
+        });
+
+      for (const answer of ["summaries", "control"] as const)
+        test(`a People row: ${answer === "control" ? "control, the summaries shown before the click" : "pressed before and released after the summaries are shown"}`, async ({
+          context,
+        }, info) => {
+          const people = ["Ada", "Ben", "Cleo", "Dan"].map((name, i) =>
+            personP(`55555555-5555-4555-8555-00000000000${i + 1}`, name),
+          );
+          const pressedOn = people[2] as (typeof people)[number];
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const { page, served } = await setup(context, "/people", people, {
+            arrange: (s) => {
+              // Every summary read waits for the gate (a read made twice, or again on an invalidation, never answers early).
+              for (let n = 0; n < 20; n += 1)
+                s.summaryScript.push(async () => {
+                  await gate;
+                });
+            },
+          });
+          const row = page.locator(`[data-person-row="${pressedOn.id}"]`);
+          await expect(row).toBeVisible();
+          await expect
+            .poll(() =>
+              served.log.some((line) =>
+                line.startsWith("GET /people/summaries"),
+              ),
+            )
+            .toBe(true);
+          await expect(page.locator("[data-person-linkage]")).toHaveCount(0);
+          const before = await row.boundingBox();
+          if (before === null) throw new Error("no row");
+          let pressed: Box | null = null;
+          if (answer === "control") {
+            release();
+            await expect(row.locator("[data-person-linkage]")).toBeVisible();
+            await row.click();
+          } else {
+            await page.mouse.move(
+              before.x + before.width / 2,
+              before.y + before.height / 4,
+            );
+            await page.mouse.down();
+            release();
+            await expect(
+              page
+                .locator(`[data-person-row="${people[0]?.id}"]`)
+                .locator("[data-person-linkage]"),
+            ).toBeVisible();
+            pressed = await row.boundingBox();
+            await page.mouse.up();
+          }
+          recordEvidence(info, "e-p35-row", {
+            viewport,
+            answer,
+            before,
+            pressed,
+          });
+          await expect(
+            page.locator(`[data-person-detail="${pressedOn.id}"]`),
+          ).toBeVisible();
+          if (answer !== "control") expect(pressed).toEqual(before);
         });
     });
 });
