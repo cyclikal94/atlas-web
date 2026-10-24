@@ -1,6 +1,5 @@
 import { mkdirSync } from "node:fs";
 import type { BrowserContext, Page } from "@playwright/test";
-import { test } from "./auth-helpers";
 import {
   observeAuthWork,
   recordAuthTransactions,
@@ -9,6 +8,7 @@ import {
 } from "./auth-settlement";
 import { AuthStub } from "./auth-stub";
 import { expect, pressTab, runAxe } from "./helpers";
+import { test } from "./intercepted-auth";
 import { expectPaintedContrast } from "./surface-checks";
 
 /**
@@ -16,8 +16,9 @@ import { expectPaintedContrast } from "./surface-checks";
  * (WEB-14a), and Playwright WebKit does not apply `context.route` to requests a worker passes on, so the AuthStub never answered there
  * and most WebKit cases failed (also on the unmodified revision-18 candidate). These specs test the authentication surfaces, not the
  * worker: they run without it. The worker in the production build is covered by production.pwa.spec.ts and production.offline.spec.ts.
+ * Revision 34 (R37): the `test` of ./intercepted-auth now blocks worker registration for every AuthStub suite and refuses another
+ * setting, in place of this file's own `test.use`.
  */
-test.use({ serviceWorkers: "block" });
 
 /**
  * WEB-08b, A2 / A3 / A4 (Layer A, rendered): the PUBLIC surfaces (sign-in, join) in the production build, in a real engine, with

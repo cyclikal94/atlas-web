@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { prepareCampaign } from "./validation/campaign.mjs";
 import { EvidenceCache, ordered, qualify } from "./validation/reliability.mjs";
 import { fingerprint, json, newRun, processes } from "./validation/runtime.mjs";
+import { scheduleStage } from "./validation/scheduler.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -56,6 +57,13 @@ for (const step of plan.steps) {
     throw new Error("env must map names to string values");
   ids.add(step.id);
 }
+const poolParallelism = plan.execution?.pool_parallelism ?? 1;
+if (
+  !Number.isInteger(poolParallelism) ||
+  poolParallelism < 1 ||
+  poolParallelism > 8
+)
+  throw new Error("pool_parallelism must be an integer from 1 to 8");
 qualify(plan);
 ordered(plan); // Validate dependencies before creating output directories.
 const outAt = args.indexOf("--out");
@@ -112,17 +120,6 @@ try {
     path: temporary,
     owner_pid: process.pid,
   });
-  let stepTemporary = temporary;
-  const executing = {
-    ...proc,
-    run: (command, args, env) =>
-      proc.run(command, args, {
-        ...env,
-        TMPDIR: stepTemporary,
-        TMP: stepTemporary,
-        TEMP: stepTemporary,
-      }),
-  };
   // AR-20261006: managed Atlas campaigns route eligible batches automatically.
   // Outside agtx the normal standalone/local validation path is unchanged.
   let router = null;
@@ -139,7 +136,7 @@ try {
         ),
       ).href
     );
-    router = createRouter({ root, runDir, proc: executing, throughput: true });
+    router = createRouter({ root, runDir, proc, throughput: true });
   }
   json(join(runDir, "inputs.json"), before);
   json(join(runDir, "requested-plan.json"), requestedPlan);
@@ -149,107 +146,138 @@ try {
   console.log(
     "One campaign: qualification passes directly into focused checks; final/profiling remain deferred unless --final is supplied.",
   );
-  for (const stage of stages) {
-    for (const step of sequence.filter((s) => s.stage === stage)) {
-      if (!full && ["final", "profiling"].includes(stage)) {
-        records.push({
-          id: step.id,
-          status: "deferred",
-          requirement: step.requirement,
-        });
-        continue;
-      }
-      if (failed || proc.cancelled) {
-        if (proc.cancelled) failed = true;
-        records.push({
-          id: step.id,
-          status: "not_run",
-          reason: failureReason,
-          requirement: step.requirement,
-        });
-        continue;
-      }
-      // An edit during an earlier check invalidates the run before more expensive work.
-      if (fingerprint(root).sha256 !== before.sha256) {
-        failed = true;
-        records.push({
-          id: step.id,
-          status: "not_run",
-          reason: "source_changed",
-        });
-        continue;
-      }
-      if (
-        (step.after ?? []).some(
-          (id) =>
-            !records.some(
-              (r) => r.id === id && ["passed", "reused"].includes(r.status),
-            ),
-        )
+  async function executeStep(step, { requirePool }) {
+    const stage = step.stage;
+    if (!full && ["final", "profiling"].includes(stage)) {
+      records.push({
+        id: step.id,
+        status: "deferred",
+        requirement: step.requirement,
+      });
+      return;
+    }
+    if (failed || proc.cancelled) {
+      if (proc.cancelled) failed = true;
+      records.push({
+        id: step.id,
+        status: "not_run",
+        reason: failureReason,
+        requirement: step.requirement,
+      });
+      return;
+    }
+    // An edit during an earlier check invalidates the run before more expensive work.
+    if (fingerprint(root).sha256 !== before.sha256) {
+      failed = true;
+      records.push({
+        id: step.id,
+        status: "not_run",
+        reason: "source_changed",
+      });
+      return;
+    }
+    if (
+      (step.after ?? []).some(
+        (id) =>
+          !records.some(
+            (r) => r.id === id && ["passed", "reused"].includes(r.status),
+          ),
       )
-        throw new Error(`Unmet prerequisite for ${step.id}`);
-      let key = null;
-      let cacheReason = null;
-      try {
-        key = cache.identity(step);
-      } catch (error) {
-        cacheReason = String(error.message);
-      }
-      const reused = cache.load(key);
-      if (reused) {
-        records.push({
-          id: step.id,
-          stage,
-          requirement: step.requirement,
-          status: "reused",
-          origin: reused.origin,
-          evidence: reused.files,
-          elapsed_ms: 0,
-        });
-        json(join(runDir, "progress.json"), records);
-        continue;
-      }
-      console.log(`${step.id}: start (${stage})`);
-      const started = Date.now();
-      stepTemporary = join(temporary, String(records.length));
-      mkdirSync(stepTemporary);
-      const result = router
-        ? await router.run(step)
-        : await executing.run(step.argv[0], step.argv.slice(1), step.env);
-      writeFileSync(join(runDir, `${step.id}.log`), result.output);
+    )
+      throw new Error(`Unmet prerequisite for ${step.id}`);
+    let key = null;
+    let cacheReason = null;
+    try {
+      key = cache.identity(step);
+    } catch (error) {
+      cacheReason = String(error.message);
+    }
+    const reused = cache.load(key);
+    if (reused) {
       records.push({
         id: step.id,
         stage,
         requirement: step.requirement,
-        status: result.code === 0 ? "passed" : "failed",
-        exit: result.code,
-        signal: result.signal,
-        routing: result.routing ?? {
-          mode: "local",
-          reason: "standalone validation outside agtx",
-        },
-        elapsed_ms: Date.now() - started,
-        cache_reason: cacheReason,
+        status: "reused",
+        origin: reused.origin,
+        evidence: reused.files,
+        elapsed_ms: 0,
       });
-      console.log(
-        `${step.id}: exit ${result.code}, ${((Date.now() - started) / 1000).toFixed(1)}s`,
-      );
-      if (fingerprint(root).sha256 !== before.sha256) {
-        records.at(-1).status = "invalidated";
-        failureReason = "source_changed";
+      json(join(runDir, "progress.json"), records);
+      return;
+    }
+    console.log(`${step.id}: start (${stage})`);
+    const started = Date.now();
+    const stepTemporary = join(temporary, step.id);
+    mkdirSync(stepTemporary);
+    const executing = {
+      run: (command, args, env) =>
+        proc.run(command, args, {
+          ...env,
+          TMPDIR: stepTemporary,
+          TMP: stepTemporary,
+          TEMP: stepTemporary,
+        }),
+    };
+    const result = router
+      ? await router.run(step, { proc: executing, requirePool })
+      : await executing.run(step.argv[0], step.argv.slice(1), step.env);
+    writeFileSync(join(runDir, `${step.id}.log`), result.output);
+    const record = {
+      id: step.id,
+      stage,
+      requirement: step.requirement,
+      status: result.code === 0 ? "passed" : "failed",
+      exit: result.code,
+      signal: result.signal,
+      routing: result.routing ?? {
+        mode: "local",
+        reason: "standalone validation outside agtx",
+      },
+      elapsed_ms: Date.now() - started,
+      cache_reason: cacheReason,
+    };
+    records.push(record);
+    console.log(
+      `${step.id}: exit ${result.code}, ${((Date.now() - started) / 1000).toFixed(1)}s`,
+    );
+    if (fingerprint(root).sha256 !== before.sha256) {
+      record.status = "invalidated";
+      failureReason = "source_changed";
+      failed = true;
+    }
+    if (!failed && !proc.cancelled && key) {
+      if (cache.identity(step) !== key) {
+        record.status = "invalidated";
+        failureReason = "runtime_changed";
         failed = true;
       }
-      if (!failed && !proc.cancelled && key) {
-        if (cache.identity(step) !== key) {
-          records.at(-1).status = "invalidated";
-          failureReason = "runtime_changed";
-          failed = true;
-        }
-        cache.save(key, step, records.at(-1), join(runDir, `${step.id}.log`));
-      }
-      if (result.code !== 0) failed = true;
-      json(join(runDir, "progress.json"), records);
+      cache.save(key, step, record, join(runDir, `${step.id}.log`));
     }
+    if (result.code !== 0) failed = true;
+    json(join(runDir, "progress.json"), records);
+  }
+  for (const stage of stages) {
+    if (!full && ["final", "profiling"].includes(stage)) {
+      for (const step of sequence.filter((s) => s.stage === stage))
+        await executeStep(step, { requirePool: false });
+      continue;
+    }
+    await scheduleStage(
+      sequence.filter((step) => step.stage === stage),
+      {
+        limit: poolParallelism,
+        mayOverlap: (step) =>
+          step.routing?.independent === true &&
+          router?.canOverlap(step) === true,
+        succeeded: (id) =>
+          records.some(
+            (r) => r.id === id && ["passed", "reused"].includes(r.status),
+          ),
+        stopped: () => failed || proc.cancelled,
+        execute: executeStep,
+      },
+    );
   }
 } catch (error) {
   failed = true;

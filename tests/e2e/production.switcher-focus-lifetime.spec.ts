@@ -1,6 +1,6 @@
 import type { ElementHandle, Locator, Page } from "@playwright/test";
-import { expect, test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
+import { expect, test } from "./intercepted-auth";
 import {
   displayedAs,
   newMarker,
@@ -21,6 +21,10 @@ import {
  *
  * Each case first establishes its precondition (the original entry element is or is not disconnected) before it asserts focus, so a case
  * that did not reach its schedule fails at the precondition, never as a focus verdict.
+ *
+ * Intercepted authentication (R37, WEB-14a revision 34): the stubbed API is a `context.route`, which a worker-controlled WebKit page's
+ * requests bypass, so `test` from ./intercepted-auth blocks service worker registration for this file's contexts. Its peer pages,
+ * navigations and reloads are therefore never worker-controlled; the shipped worker is covered by the PWA and offline suites.
  */
 const API = "/api/experimental/v1/browser-sessions";
 
