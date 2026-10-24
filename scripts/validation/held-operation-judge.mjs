@@ -33,6 +33,14 @@
 // snapshot bound to the bundle's record: its run directory's snapshot.json (snapshotProblems). A part published while its run was still
 // going, or by a run whose snapshot changed, is not admission-eligible. Historical replays are unchanged.
 //
+// Revision 28 (review r27 R27-N1; design assessment 3f7047c0 C5, I6, H10, H12, H13): the snapshot record alone is not completion (a
+// run whose final collection failed, or that was interrupted after publishing a healthy part, left an unchanged, removed snapshot). Both
+// admission modes (`--target current` and a named target) now require the producing run's TERMINAL completion record, verified with its
+// bound files by the same verifier the split-stage prerequisite uses (held-operation-qualification.mjs completionProblems): of the
+// bundle's invocation, passed, binding this part's manifest and record. `--target current` is collected through the runner's own
+// lifecycle (a linked installation root refused before anything is written; the private runtime sealed and guarded). A named target is
+// a claim about that target only. Historical replays still need no completion and still never admit.
+//
 // Usage: node scripts/validation/held-operation-judge.mjs
 //          --negative <NC id> --evidence <manifest.json> (--target current|<applicability.json> | --historical)
 //                             [--report <report.json>] [--spec <spec>] [--exit <n>]
@@ -45,18 +53,21 @@
 //        [--out <judgement.json>]
 // Defaults: a mutant is expected `caught`, a control `healthy`; a negative control must be `qualified` (a diagnostic, `diagnostic-holds`).
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectSnapshotTarget } from "./held-operation-applicability.mjs";
 import {
   judgeControlEvidence,
   qualifyNegative,
   readBundle,
+  readRunCompletion,
   sha256,
   verifyBundle,
 } from "./held-operation-evidence.mjs";
+import { installationRootProblems } from "./held-operation-installation.mjs";
 import {
   CONTRACT_VERSION,
+  completionProblems,
   judgeControl,
   judgeMutant,
   judgeNegative,
@@ -65,7 +76,6 @@ import {
   NO_EVIDENCE,
   normalise,
   PROBE_IDS,
-  snapshotProblems,
 } from "./held-operation-qualification.mjs";
 import { fingerprint } from "./runtime.mjs";
 
@@ -213,6 +223,12 @@ if (bound) {
   if (!historical) {
     const given = options.get("--target");
     if (given === "current") {
+      // Revision 28 (R27-N2): a linked installation root is refused before anything is read or written (even the fingerprint).
+      const rootProblems = installationRootProblems(root);
+      if (rootProblems.length)
+        throw new Error(
+          `the current target cannot be collected (nothing is copied or written): ${rootProblems.join("; ")}`,
+        );
       // This machine's own record, collected as the runner collects it, for the engines the bundle's own run selected.
       const selection = verifyBundle(bundle, {
         kind: nc ? "negative" : "control",
@@ -225,23 +241,27 @@ if (bound) {
         browsers: selection?.length ? selection : browsers,
       });
     } else expect.target = JSON.parse(readFileSync(given, "utf8"));
-    // The producing run's completion witness: its execution snapshot record, beside the part's directory.
+    // The producing run's terminal completion record (revision 28), beside the part's directory, with the files it binds.
     const runDir = dirname(dirname(resolve(options.get("--evidence"))));
-    let snapshot = null;
+    // The invocation the bundle's own manifest names (its digest, bound by the completion record, covers it).
+    let invocation = null;
     try {
-      snapshot = JSON.parse(
-        readFileSync(join(runDir, "snapshot.json"), "utf8"),
-      );
+      invocation = JSON.parse(
+        bundle.manifest_bytes.toString("utf8"),
+      ).invocation;
     } catch {
-      snapshot = null;
+      invocation = null;
     }
-    let record = null;
-    try {
-      record = JSON.parse(bundle.files?.applicability?.toString("utf8"));
-    } catch {
-      record = null;
-    }
-    producing = snapshotProblems(snapshot, record);
+    producing = completionProblems(readRunCompletion(runDir), {
+      invocation,
+      part: nc ? nc.id : options.get("--part"),
+      manifest_sha256: bundle.manifest_bytes
+        ? sha256(bundle.manifest_bytes)
+        : null,
+      record_sha256: bundle.files?.applicability
+        ? sha256(bundle.files.applicability)
+        : null,
+    });
   }
   label = historical
     ? "a HISTORICAL replay of a published evidence bundle: what its own recorded run shows, with no applicability to this host assessed; never an admission, not a fresh browser run"
@@ -310,7 +330,8 @@ const result = {
   outcome,
   expected,
   passed: outcome === expected && !producing?.length,
-  // Revision 27: an admission's producing run must have completed from a sealed, unchanged snapshot of its record.
+  // Revision 27: an admission's producing run must have completed from a sealed, unchanged snapshot of its record; revision 28: shown
+  // by its terminal completion record.
   producing_run: producing ? { problems: producing } : null,
   // Admission needs a target the bundle's runtime applies to (revision 26): a historical replay never admits.
   admission_eligible:

@@ -35,13 +35,22 @@
 // where the children really run; `source` names the live worktree whose installation no installed file may name. A /1 record is of an
 // unsupported schema here: `unknown`, never admitted, while its bundle still verifies as history (I7). The report's runtime witness of a
 // /2 record must also name the snapshot's own @playwright/test (the installation the run really loaded).
-import { spawnSync } from "node:child_process";
+//
+// Revision 28 (review r27 R27-N1; design assessment 3f7047c0 RC1, I3, I4, I6, steps C3-C5): the launcher, Node, Corepack, the package
+// manager, its configuration and the browsers were measured where they stood OUTSIDE the run, at its two ends only, while every child
+// resolved them again at its own launch; an external launcher replaced, executed and restored in between left both records equal. The
+// run now executes only from its PRIVATE RUNTIME (held-operation-execution.mjs: a sealed copy of exactly that chain, guarded before every
+// launch), and this record measures THAT copy: `launcher` is the runtime's own launcher, `child` reports what the probe (launched through
+// the guard, from the snapshot's VERIFIED copy of the probe script, never the live checkout's) really ran under, and every one of its
+// executables must lie inside the runtime (the actual-execution witness: Node, the pnpm that launched it, Corepack, each browser). Schema
+// /3 adds `runtime` (its schema, the launcher form, the digest and entry count of its whole content outside the browsers, which are
+// digested separately); the behavioural environment is recorded with the run's own private roots replaced by tokens. /2 and /1 records
+// are of unsupported schemas here: `unknown`, never admitted, still replayable as history. There is no collection without the guard.
 import { createHash } from "node:crypto";
 import {
   accessSync,
   constants,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -60,27 +69,29 @@ import {
   resolve,
   sep,
 } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
-  allocateSnapshot,
-  createSnapshot,
+  finishExecution,
+  newExecution,
+  prepareExecution,
+  RUNTIME_SCHEMA,
+  runtimeManifest,
+  snapshotJournal,
+} from "./held-operation-execution.mjs";
+import {
   globalConfig,
   INSTALLATION_SCHEMA,
   installationManifest,
   inventoryDigest,
   isInside,
-  preparePnpm,
-  relocate,
-  removeSnapshot,
+  ROOT_TOKEN,
   resolutionProblems,
-  seal,
-  snapshotParent,
-  verifySealed,
 } from "./held-operation-installation.mjs";
 
-export const APPLICABILITY_SCHEMA = "web08d-held-operation-applicability/2";
+export const APPLICABILITY_SCHEMA = "web08d-held-operation-applicability/3";
 export const COMPARISON_VERSION =
-  "web08d-held-operation-applicability-comparison/2";
+  "web08d-held-operation-applicability-comparison/3";
+/** The token the private runtime's own path becomes in a recorded environment value. */
+export const RUNTIME_TOKEN = "<runtime-root>";
 export const PACKAGES = [
   "@playwright/test",
   "playwright",
@@ -126,10 +137,8 @@ const ENGINES = ["chromium", "firefox", "webkit"];
 const DIGEST = /^[0-9a-f]{64}$/;
 const VERSION = /^v\d+\.\d+\.\d+$/;
 const BROWSER_DIR = /^[a-z][a-z_]*-\d+$/;
-const PROBE = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "held-operation-runtime-probe.cjs",
-);
+/** The runtime probe, by its path in the project: always run from the execution snapshot's verified copy (revision 28). */
+export const PROBE = "scripts/validation/held-operation-runtime-probe.cjs";
 
 /** The package-manager configuration files outside the worktree (held-operation-installation.mjs globalConfig), by name. */
 export const CONFIG_FILES = [
@@ -149,6 +158,10 @@ export const FIELDS = [
   ["controller.os_release", "word"],
   ["controller.os_version", "word"],
   ["launcher.pnpm_sha256", "digest"],
+  ["runtime.schema", "word"],
+  ["runtime.form", "word"],
+  ["runtime.sha256", "digest"],
+  ["runtime.entries", "count"],
   ["child.node", "version"],
   ["child.exec_sha256", "digest"],
   ["child.platform", "word"],
@@ -174,6 +187,8 @@ export const LOCATIONS = [
   "controller.exec_path",
   "launcher.pnpm_path",
   "launcher.pnpm_realpath",
+  "launcher.source_path",
+  "runtime.root",
   "child.exec_path",
   "child.pnpm_path",
   "child.corepack_root",
@@ -258,8 +273,18 @@ export function resolveOnPath(name, env) {
   throw new Error(`no executable ${name} on PATH`);
 }
 
-/** The behavioural environment, by name; locations and the runner's selections are left out. */
-export function behaviouralEnv(env) {
+/**
+ * The behavioural environment, by name; locations and the runner's selections are left out. Revision 28: `roots` ([path, token] pairs,
+ * the run's private runtime and snapshot) are replaced by their tokens in each value, so the same environment at another private path
+ * is the same behaviour while any other path still counts.
+ */
+export function behaviouralEnv(env, roots = []) {
+  const tokenised = (v) => {
+    let out = String(v);
+    for (const [path, token] of roots)
+      if (path) out = out.split(path).join(token);
+    return out;
+  };
   return Object.fromEntries(
     Object.keys(env)
       .filter(
@@ -268,7 +293,7 @@ export function behaviouralEnv(env) {
           (ENV_NAMES.includes(k) || ENV_PREFIXES.some((p) => k.startsWith(p))),
       )
       .sort()
-      .map((k) => [k, String(env[k])]),
+      .map((k) => [k, tokenised(env[k])]),
   );
 }
 
@@ -289,16 +314,32 @@ function packageRoot(file) {
   return dirname(file);
 }
 
-/** Runs the child probe exactly as the runner runs its children (`pnpm exec`, this environment, the execution root as cwd). */
-export function runChildProbe({ root, browsers, env, origins = [] }) {
-  const dir = mkdtempSync(join(env.TMPDIR ?? os.tmpdir(), "held-op-runtime-"));
+/**
+ * Runs the child probe exactly as the runner runs its children (`pnpm exec`, the execution root as cwd). Revision 28: only through
+ * `execution.spawnSync` (the guard, the private launcher, the frozen environment: there is no `pnpm` resolved on PATH), and the probe
+ * script is the execution root's own copy (the snapshot's fingerprint-checked file), never the live checkout's.
+ */
+export function runChildProbe({ root, browsers, execution, origins = [] }) {
+  if (typeof execution?.spawnSync !== "function")
+    throw new Error("the runtime probe needs the execution's guarded launcher");
+  const dir = mkdtempSync(
+    join(execution.env?.TMPDIR ?? os.tmpdir(), "held-op-probe-"),
+  );
   const out = join(dir, "child.json");
   try {
-    const r = spawnSync(
-      "pnpm",
-      ["exec", "node", PROBE, out, root, browsers.join(","), ...origins],
+    const r = execution.spawnSync(
+      "the runtime probe",
+      [
+        "exec",
+        "node",
+        join(root, PROBE),
+        out,
+        root,
+        browsers.join(","),
+        ...origins,
+      ],
       // A hang guard, not a duration requirement (revision 27: 120 s timed out on a heavily loaded controller); a timeout refuses.
-      { cwd: root, env, encoding: "utf8", timeout: 900_000 },
+      { cwd: root, timeout: 900_000 },
     );
     if (r.error) throw r.error;
     if (r.status !== 0)
@@ -365,7 +406,7 @@ export function collectApplicability({
   source = null,
   origins = [],
   browsers,
-  env = process.env,
+  execution,
   probe = runChildProbe,
   controller = process,
   keep = null,
@@ -376,9 +417,20 @@ export function collectApplicability({
     browsers.some((b) => !ENGINES.includes(b))
   )
     throw new Error(`unknown engines ${JSON.stringify(browsers)}`);
+  // Revision 28: the record is of the execution's private runtime; there is no collection outside one.
+  if (!execution?.runtime || !execution.env || !execution.launcher)
+    throw new Error(
+      "no execution: the record is collected only from a private runtime (held-operation-execution.mjs)",
+    );
+  const env = execution.env;
+  const rt = realpathSync(execution.runtime);
   const exec = realpathSync(controller.execPath);
-  const launcher = resolveOnPath("pnpm", env);
-  const child = probe({ root: resolve(root), browsers, env, origins });
+  const launcherReal = realpathSync(execution.launcher);
+  if (!isInside(rt, launcherReal))
+    throw new Error(
+      `the launcher ${execution.launcher} is not the private runtime's`,
+    );
+  const child = probe({ root: resolve(root), browsers, execution, origins });
   if (!child?.parent_exec_path)
     throw new Error(
       "the runtime probe could not name the pnpm that launched it",
@@ -388,6 +440,21 @@ export function collectApplicability({
   const corepack = child.corepack_root
     ? realpathSync(child.corepack_root)
     : null;
+  // The actual-execution witness (revision 28, C3): what the probe really ran under must be the private runtime's own executables.
+  const outside = [
+    ["the children's Node", childExec],
+    ["the pnpm that launched them", pnpm],
+    ...(corepack ? [["Corepack", corepack]] : []),
+    ...Object.entries(child.browsers ?? {}).map(([engine, p]) => [
+      `${engine}'s executable`,
+      typeof p === "string" && existsSync(p) ? realpathSync(p) : String(p),
+    ]),
+  ].filter(([, p]) => !isInside(rt, p));
+  if (outside.length)
+    throw new Error(
+      `the children did not run from the private runtime ${rt}: ${outside.map(([what, p]) => `${what} is ${p}`).join("; ")}`,
+    );
+  const runtime = runtimeManifest(rt);
   // The complete installed content and the ways resolution could leave it (revision 27).
   const reach = resolutionProblems(root, [root, ...origins], {
     home: env.HOME,
@@ -466,9 +533,17 @@ export function collectApplicability({
       os_version: os.version(),
     },
     launcher: {
-      pnpm_path: launcher.path,
-      pnpm_realpath: launcher.realpath,
-      pnpm_sha256: launcher.sha256,
+      pnpm_path: execution.launcher,
+      pnpm_realpath: launcherReal,
+      pnpm_sha256: sha256(readFileSync(launcherReal)),
+      source_path: execution.chain?.pnpm?.path ?? "none",
+    },
+    runtime: {
+      schema: RUNTIME_SCHEMA,
+      form: execution.chain?.form ?? "unknown",
+      sha256: runtime.sha256,
+      entries: runtime.entries,
+      root: rt,
     },
     child: {
       node: child.node,
@@ -505,7 +580,12 @@ export function collectApplicability({
     },
     config: globalConfig(env.HOME, env),
     browsers: installed,
-    env: behaviouralEnv(env),
+    env: behaviouralEnv(env, [
+      [rt, RUNTIME_TOKEN],
+      [execution.runtime, RUNTIME_TOKEN],
+      [realpathSync(root), ROOT_TOKEN],
+      [resolve(root), ROOT_TOKEN],
+    ]),
   };
 }
 
@@ -513,6 +593,11 @@ export function collectApplicability({
  * The record a FRESH run here would execute under (revision 27; the judge CLI's `--target current`): a private snapshot of `source`
  * (its fingerprinted `files`), relocated, prepared, sealed and measured exactly as the runner measures its own, then removed. A failure
  * anywhere, the snapshot changing while it is measured, or a failed removal is a refusal, never a record.
+ *
+ * Revision 28 (R27-N2, C2, I5): through the SAME lifecycle as the runner (held-operation-execution.mjs prepareExecution: a linked
+ * installation root refused before any write, the copy proved independent, the private runtime sealed, the source installation's state
+ * unchanged, every launch guarded), finished by finishExecution (only owned directories removed, both errors kept). `journal` receives
+ * the snapshot record.
  */
 export function collectSnapshotTarget({
   source,
@@ -520,33 +605,40 @@ export function collectSnapshotTarget({
   browsers,
   env = process.env,
   keep = null,
+  journal = snapshotJournal(source, true),
 }) {
-  const dir = allocateSnapshot(snapshotParent(env));
+  const ex = newExecution({ journal });
   let record = null;
   let failure = null;
   try {
-    createSnapshot({ root: source, files, dir });
-    relocate(dir, source);
-    const trees = join(dir, ".agtx/held-operation-probe-trees/target");
-    mkdirSync(trees, { recursive: true });
-    preparePnpm(dir, env);
-    const baseline = seal(dir);
+    prepareExecution(ex, {
+      source,
+      files,
+      browsers,
+      env,
+      trees: ".agtx/held-operation-probe-trees/target",
+    });
+    const trees = join(ex.root, ".agtx/held-operation-probe-trees/target");
     record = collectApplicability({
-      root: dir,
+      root: ex.root,
       source,
       origins: [trees],
       browsers,
-      env,
+      execution: ex,
       keep,
     });
-    verifySealed(dir, baseline, "while the target was collected");
+    ex.check("after the target was collected");
   } catch (error) {
     failure = error;
   }
-  const removal = removeSnapshot(dir);
+  finishExecution(ex, { check: !failure });
   if (failure) throw failure;
-  if (removal)
-    throw new Error(`the target's snapshot was not removed: ${removal}`);
+  if (journal.end_error)
+    throw new Error(`the target's execution changed: ${journal.end_error}`);
+  if (!journal.removed || !journal.runtime_removed)
+    throw new Error(
+      `the target's snapshot was not removed: ${journal.removal_error ?? journal.runtime_removal_error}`,
+    );
   return record;
 }
 

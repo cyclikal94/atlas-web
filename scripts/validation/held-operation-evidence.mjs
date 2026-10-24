@@ -694,6 +694,34 @@ function unjudged(nc, evidence, why) {
 }
 
 /**
+ * Revision 28 (design assessment 3f7047c0 C5): what a completed-run reader reads from a producing run's directory, each file once: its
+ * completion record, applicability before and after, snapshot record and summary, each by its bytes' digest and parsed record (null when
+ * absent or unreadable: unknown, never assumed). Judged by held-operation-qualification.mjs completionProblems.
+ */
+export function readRunCompletion(dir) {
+  const at = (name) => {
+    try {
+      const bytes = readFileSync(join(dir, name));
+      return {
+        sha256: sha256(bytes),
+        record: JSON.parse(bytes.toString("utf8")),
+      };
+    } catch {
+      return null;
+    }
+  };
+  return {
+    completion: at("completion.json"),
+    applicability: {
+      before: at("applicability.json"),
+      after: at("applicability-after.json"),
+    },
+    snapshot: at("snapshot.json"),
+    summary: at("probe-results.json"),
+  };
+}
+
+/**
  * A negative control judged from its bundle (design assessment C1, C3): verified, then the verified bytes normalised with the recorded
  * exit and signal and judged by judgeNegative, which compares them with the evidence again. The live runner and the replay CLI both call
  * this; nothing else qualifies a negative control. Revision 26: `expect.target` is the consumer's own applicability record; without it the

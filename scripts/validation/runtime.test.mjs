@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -225,6 +226,53 @@ test("missing executables fail and owned long-running children are cleaned up", 
   assert.throws(() => process.kill(live.child.pid, 0), { code: "ESRCH" });
 });
 
+// WEB-08d revision 28: the held-operation runner gives its children a frozen environment and its execution snapshot's directory (both
+// read at each start); without the option every child still gets this process's environment and the fixed root.
+test("processes() keeps the inherited environment by default and uses a given base environment and root instead", async (t) => {
+  const root = fixture(t);
+  const other = mkdtempSync(join(tmpdir(), "atlas-processes-root-"));
+  t.after(() => rmSync(other, { recursive: true, force: true }));
+  const print =
+    "process.stdout.write(JSON.stringify({cwd:process.cwd(),inherited:process.env.ATLAS_PROCESSES_INHERITED??null,base:process.env.ATLAS_PROCESSES_BASE??null,call:process.env.ATLAS_PROCESSES_CALL??null}))";
+  process.env.ATLAS_PROCESSES_INHERITED = "inherited";
+  t.after(() => {
+    delete process.env.ATLAS_PROCESSES_INHERITED;
+  });
+  const plain = processes(root);
+  t.after(() => plain.close());
+  const a = JSON.parse(
+    (
+      await plain.run(process.execPath, ["-e", print], {
+        ATLAS_PROCESSES_CALL: "call",
+      })
+    ).output,
+  );
+  assert.deepEqual(a, {
+    cwd: realpathSync(root),
+    inherited: "inherited",
+    base: null,
+    call: "call",
+  });
+  let dir = root;
+  const frozen = processes(() => dir, {
+    env: () => ({ PATH: process.env.PATH, ATLAS_PROCESSES_BASE: "base" }),
+  });
+  t.after(() => frozen.close());
+  dir = other;
+  const b = JSON.parse(
+    (
+      await frozen.run(process.execPath, ["-e", print], {
+        ATLAS_PROCESSES_CALL: "call",
+      })
+    ).output,
+  );
+  assert.deepEqual(b, {
+    cwd: realpathSync(other),
+    inherited: null,
+    base: "base",
+    call: "call",
+  });
+});
 test("a valid assertion cannot conceal an unrelated runtime timeout", () => {
   const mixed = report("failed", "Error: expect(x)");
   mixed.suites[0].specs.push({

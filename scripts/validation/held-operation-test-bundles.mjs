@@ -17,6 +17,12 @@
 // Revision 27 (review r26 R26-N1; design assessment eff76566 Q4): the synthetic record is of schema /2 (the complete installation's
 // digest and entry count, the resolution digest, the snapshot root, the package-manager configuration), its witness names the snapshot's
 // @playwright/test, and `legacyRecord(change)` builds the revision 26 /1 record a genuine r26 bundle carries.
+//
+// Revision 28 (review r27 R27-N1; design assessment 3f7047c0 Q4): the synthetic record is of schema /3 (it names the private runtime: its
+// schema, launcher form, digest, entry count and root, and the external launcher it was cloned from), the snapshot record of schema /2
+// (the runtime's seal and checks, the guarded trees, the source installation's state), `r27Record(change)` builds the revision 27 /2
+// record, and `completedRun` / `writeCompletedRun` build a producing run's terminal completion record CONSISTENT with the records it
+// binds (in memory as held-operation-evidence.mjs readRunCompletion returns it, or on disk as the runner writes it).
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -24,11 +30,13 @@ import {
   canonical,
 } from "./held-operation-applicability.mjs";
 import { MANIFEST, probeArgv, sha256 } from "./held-operation-evidence.mjs";
+import { RUNTIME_SCHEMA } from "./held-operation-execution.mjs";
 import {
   INSTALLATION_SCHEMA,
   SNAPSHOT_SCHEMA,
 } from "./held-operation-installation.mjs";
 import {
+  COMPLETION_SCHEMA,
   CONTRACT_VERSION,
   ENGINES,
   EVIDENCE_SCHEMA,
@@ -67,9 +75,17 @@ export function applicabilityRecord(change) {
       os_version: "Darwin Kernel Version 25.6.0",
     },
     launcher: {
-      pnpm_path: "/w/.agtx/evidence/revision-9/pnpm-shim/pnpm",
-      pnpm_realpath: "/w/.agtx/evidence/revision-9/pnpm-shim/pnpm",
+      pnpm_path: "/t/held-op-runtime-aaaaaa/bin/pnpm",
+      pnpm_realpath: "/t/held-op-runtime-aaaaaa/bin/pnpm",
       pnpm_sha256: digest("pnpm shim"),
+      source_path: "/w/.agtx/evidence/revision-9/pnpm-shim/pnpm",
+    },
+    runtime: {
+      schema: RUNTIME_SCHEMA,
+      form: "task-shim",
+      sha256: digest("private runtime"),
+      entries: 620,
+      root: "/t/held-op-runtime-aaaaaa",
     },
     child: {
       node: "v22.23.2",
@@ -157,27 +173,73 @@ export const TARGET = applicabilityRecord();
  */
 export function snapshotRecord(record = TARGET, change) {
   const sealed = digest("sealed snapshot");
+  const rt = digest("sealed runtime");
+  const build = digest("sealed build");
+  const state = digest("source installation state");
   const s = {
     schema: SNAPSHOT_SCHEMA,
     root: record.installation?.root,
     source: "/w",
     used: true,
+    runtime_root: record.runtime?.root,
+    runtime_form: "task-shim",
+    launcher_source: "/w/.agtx/evidence/revision-9/pnpm-shim/pnpm",
+    runtime_sealed_sha256: rt,
+    runtime_entries: 8031,
+    runtime_checks: [
+      { when: "before pnpm's preparation in the snapshot", runtime_sha256: rt },
+    ],
+    source_state_before_sha256: state,
+    source_state_after_sha256: state,
+    source_state_entries: 28460,
     relocated: [".bin/vite"],
     prepared: true,
     sealed_sha256: sealed,
     sealed_entries: 29545,
     installation_sha256: record.installation?.sha256,
+    runtime_sha256: record.runtime?.sha256,
+    trees: {
+      "build control-build": {
+        root: "/w/run/control-build",
+        sealed_sha256: build,
+        entries: 40,
+      },
+    },
     checks: [
-      { when: "after the applicability was collected", sha256: sealed },
-      { when: "before the build", sha256: sealed },
+      {
+        when: "after the applicability was collected",
+        sha256: sealed,
+        runtime_sha256: rt,
+        trees: {},
+      },
+      {
+        when: "before the preview",
+        sha256: sealed,
+        runtime_sha256: rt,
+        trees: { "build control-build": build },
+      },
     ],
     end_sha256: sealed,
+    runtime_end_sha256: rt,
+    trees_end: { "build control-build": build },
     unchanged: true,
     removed: true,
     removal_error: null,
+    runtime_removed: true,
+    runtime_removal_error: null,
   };
   change?.(s);
   return s;
+}
+/** The revision 27 record (schema /2): the complete installation, but no private runtime (its launcher chain measured outside the run). */
+export function r27Record(change) {
+  const r = applicabilityRecord((x) => {
+    x.schema = "web08d-held-operation-applicability/2";
+    delete x.runtime;
+    delete x.launcher.source_path;
+  });
+  change?.(r);
+  return r;
 }
 /** The revision 26 record (schema /1): four package trees and pnpm's two metadata files, no installation content. */
 export function legacyRecord(change) {
@@ -191,6 +253,69 @@ export function legacyRecord(change) {
   });
   change?.(r);
   return r;
+}
+const recordBytes = (v) => Buffer.from(`${JSON.stringify(v, null, 2)}\n`);
+/**
+ * A producing run's terminal completion record and the files it binds, as held-operation-evidence.mjs readRunCompletion returns them:
+ * applicability before and after (`before`/`after`: records, written canonically), the snapshot record, the summary and `parts` (part
+ * name -> manifest digest). Consistent unless `change(completion)` edits the completion record.
+ */
+export function completedRun({
+  invocation = INVOCATION,
+  before = TARGET,
+  after = before,
+  snapshot = snapshotRecord(before),
+  summary = { passed: true, stage: "controls" },
+  parts = {},
+  change,
+} = {}) {
+  const b = Buffer.from(canonical(before));
+  const a = Buffer.from(canonical(after));
+  const record = {
+    schema: COMPLETION_SCHEMA,
+    invocation,
+    stage: summary.stage ?? "controls",
+    check_only: false,
+    browsers: [...ENGINES],
+    passed: true,
+    reasons: [],
+    processes_closed: true,
+    source_sha256: digest("source"),
+    source_after_sha256: digest("source"),
+    applicability_sha256: sha256(b),
+    applicability_after_sha256: sha256(a),
+    applicability_after: "applicable",
+    snapshot_sha256: sha256(recordBytes(snapshot)),
+    summary_sha256: sha256(recordBytes({ summary })),
+    parts,
+    at: "2026-10-24T09:00:00.000Z",
+  };
+  change?.(record);
+  return {
+    files: {
+      "applicability.json": b,
+      "applicability-after.json": a,
+      "snapshot.json": recordBytes(snapshot),
+      "probe-results.json": recordBytes({ summary }),
+      "completion.json": Buffer.from(canonical(record)),
+    },
+    completion: {
+      sha256: sha256(Buffer.from(canonical(record))),
+      record,
+    },
+    applicability: {
+      before: { sha256: sha256(b), record: before },
+      after: { sha256: sha256(a), record: after },
+    },
+    snapshot: { sha256: sha256(recordBytes(snapshot)), record: snapshot },
+    summary: { sha256: sha256(recordBytes({ summary })), record: { summary } },
+  };
+}
+/** Writes a completedRun's files into the run directory `dir` (beside its part directories), as the runner leaves them. */
+export function writeCompletedRun(dir, run, { omit = [] } = {}) {
+  mkdirSync(dir, { recursive: true });
+  for (const [name, bytes] of Object.entries(run.files))
+    if (!omit.includes(name)) writeFileSync(join(dir, name), bytes);
 }
 /** The runtime witness a Playwright run under `record` writes into its report (tests/e2e/evidence-run.ts runtimeWitness). */
 export const witnessOf = (record) => ({

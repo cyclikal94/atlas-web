@@ -30,6 +30,15 @@
 // (held-operation-evidence.mjs: every claim compared with the bytes and the execution record it names, and the judged report, spec, exit
 // and signal being exactly the bundle's). Without it a judgement is a labelled diagnostic and never qualified; the campaign admits only
 // verified parts of its own invocation, and a --stage negatives prerequisite is the predecessor's raw controls, re-verified and re-judged.
+//
+// Revision 28 (review r27 R27-N1/R27-N2; design assessment 3f7047c0 I4-I6, I10, step C5): a part's own integrity is not its run's
+// completion. Parts are published while their run is still going; a later change, a failed final collection or an interruption could
+// leave a healthy part on disk that the standalone judge (which read only snapshot.json) still admitted. Every completed-run admission
+// now consumes the producing run's TERMINAL completion record (completion.json, published exclusively after every process closed, the
+// final applicability and seals were checked, the source was compared and the owned directories were removed) through ONE verifier,
+// completionProblems: the campaign's split-stage prerequisite and both judge target modes. A missing, partial, failed, foreign or
+// legacy completion record is never admission. snapshotProblems (schema /2) also requires the private runtime's seal unchanged at every
+// check and the end and removed, every guarded tree unchanged, and the source installation's state unchanged by the preparation.
 import { createHash } from "node:crypto";
 import { classifyMutant, inspectReport } from "./engine-results.mjs";
 import {
@@ -38,6 +47,9 @@ import {
   compareApplicability,
 } from "./held-operation-applicability.mjs";
 import { SNAPSHOT_SCHEMA } from "./held-operation-installation.mjs";
+
+/** The terminal completion record of a held-operation run (revision 28): the only evidence of a COMPLETED run. */
+export const COMPLETION_SCHEMA = "web08d-held-operation-completion/1";
 
 export const CONTRACT_VERSION = "web08d-held-operation-qualification/1";
 export const NEGATIVE_CONTRACT_VERSION = "web08d-held-operation-negative/3";
@@ -2403,6 +2415,12 @@ function identityProblems(kind, planned, got) {
  * of the current schema; sealed with a stat inventory that every check before a child started and the check at the end found unchanged;
  * removed; and bound to the record (`record`: the installation digest and root the run measured and judged under). A missing snapshot
  * (a revision 26 or earlier run) is unknown, never "unchanged".
+ *
+ * Revision 28 (review r27 R27-N1/N2; design assessment 3f7047c0 I2-I4, I7): schema /2 also records the PRIVATE RUNTIME every child ran
+ * from (held-operation-execution.mjs): sealed before the first launch, unchanged at every check (the ones before the snapshot was sealed
+ * included) and at the end, removed, and bound to the record's `runtime` digest and root; every guarded tree (a copied test tree once its
+ * patches were installed, a completed build, a mutant's build input) unchanged at every later check and at the end; and the source
+ * installation's state the same after preparation as before it. One failed check stays a failure: nothing later clears it.
  */
 export function snapshotProblems(snapshot, record) {
   if (!snapshot || typeof snapshot !== "object")
@@ -2433,6 +2451,49 @@ export function snapshotProblems(snapshot, record) {
     problems.push(
       `its execution snapshot was not removed: ${snapshot.removal_error ?? "no removal recorded"}`,
     );
+  // Revision 28: the private runtime.
+  if (!DIGEST.test(String(snapshot.runtime_sealed_sha256)))
+    problems.push("its private runtime was never sealed");
+  const early = Array.isArray(snapshot.runtime_checks)
+    ? snapshot.runtime_checks
+    : null;
+  if (!early)
+    problems.push("its private runtime records no checks before sealing");
+  for (const c of [...(early ?? []), ...(checks ?? [])])
+    if (c?.runtime_sha256 !== snapshot.runtime_sealed_sha256)
+      problems.push(`its private runtime changed (${c?.when ?? "at a check"})`);
+  if (snapshot.runtime_end_sha256 !== snapshot.runtime_sealed_sha256)
+    problems.push(
+      "its private runtime changed by the end of the run (or was not checked at the end)",
+    );
+  if (snapshot.runtime_removed !== true)
+    problems.push(
+      `its private runtime was not removed: ${snapshot.runtime_removal_error ?? "no removal recorded"}`,
+    );
+  const trees =
+    snapshot.trees && typeof snapshot.trees === "object"
+      ? snapshot.trees
+      : null;
+  if (!trees) problems.push("its guarded trees are not recorded");
+  for (const [name, t] of Object.entries(trees ?? {})) {
+    if (!DIGEST.test(String(t?.sealed_sha256)))
+      problems.push(`its guarded tree ${name} was never sealed`);
+    if (snapshot.trees_end?.[name] !== t?.sealed_sha256)
+      problems.push(
+        `its guarded tree ${name} changed by the end of the run (or was not checked at the end)`,
+      );
+  }
+  for (const c of checks ?? [])
+    for (const [name, digest] of Object.entries(c?.trees ?? {}))
+      if (digest !== trees?.[name]?.sealed_sha256)
+        problems.push(`its guarded tree ${name} changed (${c.when})`);
+  if (
+    !DIGEST.test(String(snapshot.source_state_before_sha256)) ||
+    snapshot.source_state_after_sha256 !== snapshot.source_state_before_sha256
+  )
+    problems.push(
+      "the source installation is not recorded unchanged by the snapshot's preparation",
+    );
   if (!record || typeof record !== "object")
     problems.push(
       "its execution snapshot cannot be bound: there is no applicability record of what it measured",
@@ -2445,6 +2506,99 @@ export function snapshotProblems(snapshot, record) {
     if (!snapshot.root || snapshot.root !== record.installation?.root)
       problems.push(
         `its execution snapshot is ${snapshot.root}, but its applicability record was collected at ${record.installation?.root}`,
+      );
+    if (
+      !DIGEST.test(String(snapshot.runtime_sha256)) ||
+      snapshot.runtime_sha256 !== record.runtime?.sha256
+    )
+      problems.push(
+        `its private runtime measured ${snapshot.runtime_sha256}, but its applicability record names ${record.runtime?.sha256}`,
+      );
+    if (
+      !snapshot.runtime_root ||
+      snapshot.runtime_root !== record.runtime?.root
+    )
+      problems.push(
+        `its private runtime is ${snapshot.runtime_root}, but its applicability record was collected from ${record.runtime?.root}`,
+      );
+  }
+  return problems;
+}
+
+/**
+ * Revision 28 (review r27 R27-N1; design assessment 3f7047c0 I6, H10, H12, H13, step C5): why a producing run is not COMPLETED evidence.
+ * `run` is what a reader read from the run directory, each file once (held-operation-evidence.mjs readRunCompletion): the completion
+ * record, the applicability records before and after, the snapshot record and the summary, each with its bytes' digest. `expect` names
+ * the invocation (the run directory's name) and, for a part, its name and its manifest's digest (and the digest of the record the part
+ * carries). The completion record must be of the current schema, of that invocation, terminal and passed; every digest it binds must
+ * be the bytes read now; the runtime must have stayed applicable to itself from start to end; the snapshot record must show sealed,
+ * unchanged, removed execution of that record; and the part must be one the run completed with. Returns the problems.
+ */
+export function completionProblems(run, expect = {}) {
+  const c = run?.completion?.record;
+  if (!c || typeof c !== "object")
+    return [
+      "no completion record: the producing run never completed (it was interrupted, is still running, or is of revision 27 or earlier), so none of its parts is admitted",
+    ];
+  const problems = [];
+  if (c.schema !== COMPLETION_SCHEMA)
+    problems.push(
+      `its completion record is of schema ${JSON.stringify(c.schema)}, not ${COMPLETION_SCHEMA}`,
+    );
+  if (!expect.invocation || c.invocation !== expect.invocation)
+    problems.push(
+      `its completion record is of invocation ${c.invocation}, not ${expect.invocation}`,
+    );
+  if (c.passed !== true)
+    problems.push(
+      `the producing run did not pass: ${(Array.isArray(c.reasons) ? c.reasons : []).slice(0, 3).join("; ") || "no reason recorded"}`,
+    );
+  if (c.processes_closed !== true)
+    problems.push("its completion record does not show every process closed");
+  if (
+    !DIGEST.test(String(c.source_sha256)) ||
+    c.source_after_sha256 !== c.source_sha256
+  )
+    problems.push("its source is not recorded unchanged from start to end");
+  const before = run.applicability?.before;
+  const after = run.applicability?.after;
+  if (!before?.sha256 || c.applicability_sha256 !== before.sha256)
+    problems.push(
+      `its completion record binds applicability ${c.applicability_sha256}, not the run's recorded ${before?.sha256}`,
+    );
+  if (expect.record_sha256 && c.applicability_sha256 !== expect.record_sha256)
+    problems.push(
+      `its completion record binds applicability ${c.applicability_sha256}, but the part carries ${expect.record_sha256}`,
+    );
+  if (!after?.sha256 || c.applicability_after_sha256 !== after.sha256)
+    problems.push(
+      `its completion record binds the final applicability ${c.applicability_after_sha256}, not the run's recorded ${after?.sha256}`,
+    );
+  if (after?.record && before?.record) {
+    const cmp = compareApplicability(before.record, after.record);
+    if (cmp.decision !== "applicable")
+      problems.push(
+        ...applicabilityReasons(cmp).map(
+          (r) =>
+            `its completed run's records differ from start to end (${cmp.decision}): ${r}`,
+        ),
+      );
+  } else
+    problems.push("its applicability before or after the run is unreadable");
+  if (!run.snapshot?.sha256 || c.snapshot_sha256 !== run.snapshot.sha256)
+    problems.push(
+      `its completion record binds snapshot record ${c.snapshot_sha256}, not the run's ${run.snapshot?.sha256}`,
+    );
+  problems.push(...snapshotProblems(run.snapshot?.record, before?.record));
+  if (!run.summary?.sha256 || c.summary_sha256 !== run.summary.sha256)
+    problems.push(
+      `its completion record binds summary ${c.summary_sha256}, not the run's ${run.summary?.sha256}`,
+    );
+  if (expect.part) {
+    const bound = c.parts?.[expect.part];
+    if (!DIGEST.test(String(bound)) || bound !== expect.manifest_sha256)
+      problems.push(
+        `its completion record binds part ${expect.part} to manifest ${bound}, not ${expect.manifest_sha256}`,
       );
   }
   return problems;
@@ -2527,6 +2681,18 @@ export function prerequisiteProblems(
       (p) => `the controls run: ${p}`,
     ),
   );
+  // Revision 28: the producing run's terminal completion record, binding exactly these two raw controls.
+  for (const name of ["control", "copy-control"]) {
+    const raw = (evidence.controls ?? []).find((x) => x.name === name);
+    problems.push(
+      ...completionProblems(evidence.completion, {
+        invocation: evidence.invocation,
+        part: name,
+        manifest_sha256: raw?.evidence?.manifest_sha256,
+        record_sha256: raw?.evidence?.applicability_sha256,
+      }).map((p) => `the controls run (${name}): ${p}`),
+    );
+  }
   if (summary.passed !== true) problems.push("the controls run did not pass");
   if (summary.stage !== "controls")
     problems.push(`the evidence is a ${summary.stage} run, not a controls run`);

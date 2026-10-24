@@ -37,21 +37,25 @@ import {
   compareApplicability,
 } from "./held-operation-applicability.mjs";
 import * as evidenceModule from "./held-operation-evidence.mjs";
+import * as executionModule from "./held-operation-execution.mjs";
 import * as installationModule from "./held-operation-installation.mjs";
 import { installationAssessments } from "./held-operation-installation-checks.mjs";
 import * as evaluator from "./held-operation-qualification.mjs";
 import {
   applicabilityRecord,
+  completedRun,
   controlBundle,
   INVOCATION,
   legacyRecord,
   negativeBundle,
   OTHER_INVOCATION,
+  r27Record,
   snapshotRecord,
   sourceOf,
   TARGET,
   withManifest,
   writeBundle,
+  writeCompletedRun,
 } from "./held-operation-test-bundles.mjs";
 
 const B = ["chromium", "firefox", "webkit"];
@@ -926,7 +930,7 @@ const prerequisite = (
   controls,
 ) =>
   q.prerequisiteProblems(
-    {
+    withCompletion({
       summary: { ...CONTROLS_SUMMARY, ...summary },
       source,
       invocation: INVOCATION,
@@ -957,7 +961,7 @@ const prerequisite = (
       },
       snapshot: snapshotRecord(),
       inputs_runtime: { node: "v22.23.2", platform: "darwin", arch: "arm64" },
-    },
+    }),
     {
       source: CONTROL_SOURCE.sha256,
       browsers: B,
@@ -965,6 +969,32 @@ const prerequisite = (
       target: TARGET,
     },
   );
+/**
+ * Revision 28: the producing run's terminal completion record, consistent with the evidence's own records and binding both raw
+ * controls' manifests (held-operation-test-bundles.mjs completedRun); `change(completion)` edits it.
+ */
+function withCompletion(evidence, change) {
+  evidence.completion = completedRun({
+    invocation: evidence.invocation,
+    before: evidence.applicability.before.record,
+    after: evidence.applicability.after.record,
+    snapshot: evidence.snapshot,
+    summary: evidence.summary,
+    parts: Object.fromEntries(
+      (evidence.controls ?? []).map((c) => [
+        c.name,
+        c.evidence?.manifest_sha256,
+      ]),
+    ),
+    change,
+  });
+  // The consistent records are the ones the reader read (their digests are the completion's).
+  evidence.applicability.before.sha256 =
+    evidence.completion.applicability.before.sha256;
+  evidence.applicability.after.sha256 =
+    evidence.completion.applicability.after.sha256;
+  return evidence;
+}
 
 // --- revision 25: the evidence boundary (design assessment 91d0404c Q2-Q5) ------------------------------------------------------------
 const ENTRY = (id) => NEG[`author-negatives/${id}`];
@@ -1736,6 +1766,17 @@ function applicabilityAssessments(q, e, a, check) {
       c.unknown.some((u) => u.field === "schema" && u.side === "record")
     );
   });
+  // Revision 28: a revision 27 record (schema /2: no private runtime) is unknown on its side, even against itself.
+  check(
+    "applicability: a revision 27 /2 record is unknown, never applicable",
+    () => {
+      const old = r27Record();
+      return (
+        decided(a, T, old).decision === "unknown" &&
+        decided(a, old, structuredClone(old)).decision === "unknown"
+      );
+    },
+  );
   check("applicability: no target is unknown", () => {
     const c = decided(a, undefined, T);
     return (
@@ -2094,6 +2135,7 @@ function applicabilityAssessments(q, e, a, check) {
       snapshot: snapshotRecord(T),
       inputs_runtime: { node: "v22.23.2", platform: "darwin", arch: "arm64" },
     };
+    withCompletion(evidence);
     change(evidence);
     return q.prerequisiteProblems(evidence, {
       source: CONTROL_SOURCE.sha256,
@@ -2119,9 +2161,17 @@ function applicabilityAssessments(q, e, a, check) {
     () =>
       prereq((ev) => {
         ev.snapshot = snapshotRecord(T, (x) => {
-          x.checks.push({ when: "before Playwright", sha256: sha("other") });
+          // Revision 28: only the snapshot's digest differs (the runtime and trees unchanged).
+          x.checks.push({
+            when: "before Playwright",
+            sha256: sha("other"),
+            runtime_sha256: x.runtime_sealed_sha256,
+            trees: {},
+          });
         });
-      }).some((p) => p.includes("changed (before Playwright)")),
+      }).some((p) =>
+        p.includes("execution snapshot changed (before Playwright)"),
+      ),
   );
   check(
     "prerequisite: a controls run whose snapshot measured another installation is not met",
@@ -2131,6 +2181,131 @@ function applicabilityAssessments(q, e, a, check) {
           x.installation_sha256 = sha("another installation");
         });
       }).some((p) => p.includes("measured installation")),
+  );
+  // Revision 28 (design assessment 3f7047c0 H10, H12, H13): the producing run's terminal completion record.
+  const completionCase = (name, change, why) =>
+    check(`prerequisite (completion): ${name} is not met`, () =>
+      prereq(change).some((p) => p.includes(why)),
+    );
+  completionCase(
+    "a controls run that never completed (no completion record)",
+    (ev) => {
+      ev.completion = { ...ev.completion, completion: null };
+    },
+    "no completion record",
+  );
+  completionCase(
+    "a controls run whose completion record failed (a late mismatch after its parts were published)",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.passed = false;
+        c.reasons = ["the runtime changed during the run: runtime.sha256"];
+      }),
+    "did not pass",
+  );
+  completionCase(
+    "a completion record of another invocation",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.invocation = OTHER_INVOCATION;
+      }),
+    "not 2026-10-23T09-00-00.000Z-aaaaaaaa",
+  );
+  completionCase(
+    "a completion record of another schema (a legacy or future record)",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.schema = "web08d-held-operation-completion/0";
+      }),
+    "not web08d-held-operation-completion/1",
+  );
+  completionCase(
+    "a completion record that binds another copy-control manifest",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.parts["copy-control"] = sha("another manifest");
+      }),
+    "binds part copy-control",
+  );
+  completionCase(
+    "a completion record binding another snapshot record (swapped)",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.snapshot_sha256 = sha("another snapshot record");
+      }),
+    "binds snapshot record",
+  );
+  completionCase(
+    "a completion record binding another final applicability",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.applicability_after_sha256 = sha("another record");
+      }),
+    "binds the final applicability",
+  );
+  completionCase(
+    "a completion record binding another summary",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.summary_sha256 = sha("another summary");
+      }),
+    "binds summary",
+  );
+  completionCase(
+    "a completion record without every process closed",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.processes_closed = false;
+      }),
+    "every process closed",
+  );
+  completionCase(
+    "a completed run whose source changed",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.source_after_sha256 = sha("other source");
+      }),
+    "source is not recorded unchanged",
+  );
+  completionCase(
+    "a completed run whose runtime changed between its records (an inconsistent pair)",
+    (ev) => {
+      const after = structuredClone(ev.applicability.after.record);
+      after.runtime.sha256 = sha("another runtime");
+      ev.applicability.after = { ...ev.applicability.after, record: after };
+      withCompletion(ev);
+    },
+    "its completed run's records differ from start to end",
+  );
+  completionCase(
+    "a completed run whose private runtime changed at a check",
+    (ev) => {
+      ev.snapshot = snapshotRecord(T, (x) => {
+        x.checks[1].runtime_sha256 = sha("changed runtime");
+      });
+      withCompletion(ev);
+    },
+    "private runtime changed (before the preview)",
+  );
+  completionCase(
+    "a completed run whose guarded build changed at the end",
+    (ev) => {
+      ev.snapshot = snapshotRecord(T, (x) => {
+        x.trees_end["build control-build"] = sha("changed build");
+      });
+      withCompletion(ev);
+    },
+    "guarded tree build control-build changed by the end",
+  );
+  completionCase(
+    "a completed run whose source installation changed during preparation",
+    (ev) => {
+      ev.snapshot = snapshotRecord(T, (x) => {
+        x.source_state_after_sha256 = sha("written source");
+      });
+      withCompletion(ev);
+    },
+    "source installation is not recorded unchanged",
   );
   check("prerequisite: no consumer target is not met", () =>
     prereq(undefined, null).some((p) => p.includes("no consuming target")),
@@ -2404,7 +2579,13 @@ function applicabilityAssessments(q, e, a, check) {
 }
 
 /** Every check the evaluator must pass, by name: the evaluator's own mutants must fail at least one (design assessment Q3). */
-function assessments(q, e, a = applicabilityModule, i = installationModule) {
+function assessments(
+  q,
+  e,
+  a = applicabilityModule,
+  i = installationModule,
+  x = executionModule,
+) {
   const failed = [];
   const check = (name, ok) => {
     try {
@@ -2791,7 +2972,7 @@ function assessments(q, e, a = applicabilityModule, i = installationModule) {
     );
   applicabilityAssessments(q, e, a, check);
   // Revision 27: the installation boundary on disk, with this mutant's own modules (held-operation-installation-checks.mjs).
-  installationAssessments(i, a, q, check);
+  installationAssessments(i, a, q, check, x);
   return failed;
 }
 
@@ -3483,8 +3664,9 @@ const EVALUATOR_MUTANTS = [
   ],
   [
     "EM82 a link out of the installation is admitted",
-    "        if (!inside(base, real))\n",
-    "        if (false)\n",
+    // Revision 28: the anchor names refuse( (the copy check has the same condition).
+    "        if (!inside(base, real))\n          refuse(",
+    "        if (false)\n          refuse(",
     "I",
   ],
   [
@@ -3568,8 +3750,9 @@ const EVALUATOR_MUTANTS = [
   ],
   [
     "EM97 sealing leaves the installation writable",
-    "      } else chmodSync(full, lstatSync(full).mode & 0o555);",
-    "      } else void full;",
+    // Revision 28: sealing removes files' write permission through readOnly (an entry already read-only keeps its change time).
+    "      if (e.isDirectory()) walk(full, r);\n      else readOnly(full);",
+    "      if (e.isDirectory()) walk(full, r);\n      else void full;",
     "I",
   ],
   [
@@ -3703,6 +3886,344 @@ const EVALUATOR_MUTANTS = [
     "      tree_sha256: treeDigest(dir) || inventoryDigest(",
     "A",
   ],
+  // Revision 28 (review r27 R27-N1/N2; design assessment 3f7047c0 Q5): the preparation isolation, the private runtime and its guard, the
+  // completion record and every reader of it. Each names the check it must be caught by (its fifth element).
+  [
+    "EM121 a linked installation root is copied (no root check before copying)",
+    'if (rootProblems.length) throw new Error(rootProblems.join("; "));\n  assertOwnedRoot(dir, "before the snapshot was copied");',
+    'assertOwnedRoot(dir, "before the snapshot was copied");',
+    "I",
+    "installation-root link is refused before anything is copied",
+  ],
+  [
+    "EM122 relocation writes through a linked snapshot root (R27-N2's writer)",
+    `    throw new Error(\`relocation refused: \${rootProblems.join("; ")}\`);`,
+    "    void rootProblems;",
+    "I",
+    "relocation through a linked snapshot root",
+  ],
+  [
+    "EM123 sealing chmods through a linked snapshot root",
+    `    throw new Error(\`sealing refused: \${rootProblems.join("; ")}\`);`,
+    "    void rootProblems;",
+    "I",
+    "sealing through a linked snapshot root",
+  ],
+  [
+    "EM124 a replaced snapshot root is treated as owned",
+    "  if (owned && (owned.dev !== st.dev || owned.ino !== st.ino))",
+    "  if (false)",
+    "I",
+    "replaced by another directory",
+  ],
+  [
+    "EM125 a snapshot root replaced by a link is treated as a directory",
+    "  if (st.isSymbolicLink() || !st.isDirectory())",
+    "  if (!st.isDirectory() && !st.isSymbolicLink())",
+    "I",
+    "replaced by a link before relocation",
+  ],
+  [
+    "EM126 the copy check accepts a link out of the copy",
+    "        if (!inside(base, real))\n          problems.push(",
+    "        if (false)\n          problems.push(",
+    "I",
+    "nested absolute link back into the source",
+  ],
+  [
+    "EM127 the copy check accepts the source's own installation root (a shared directory)",
+    '  if (same(lstatSync(to), sourceStat("")))',
+    "  if (false)",
+    "I",
+    "the source's own installation as the copy",
+  ],
+  [
+    "EM128 the copy check accepts a hard link",
+    "      else if (st.isFile() && st.nlink !== 1)",
+    "      else if (false)",
+    "I",
+    "a hard link inside a copy",
+  ],
+  [
+    "EM129 relocation treats a link inside the copy as a file",
+    "      else if (e.isFile()) {\n        const bytes = readFileSync(full);",
+    "      else if (e.isFile() || e.isSymbolicLink()) {\n        const bytes = readFileSync(full);",
+    "I",
+    "relocation never writes through a link",
+  ],
+  [
+    "EM130 the source installation's state ignores modes",
+    `        lines.push(\`F \${r} \${mode} \${sha256(readFileSync(full))}\`);`,
+    `        lines.push(\`F \${r} \${sha256(readFileSync(full))}\`);`,
+    "I",
+    "sees a mode change",
+  ],
+  [
+    "EM131 the source installation's state ignores link targets",
+    `      if (st.isSymbolicLink()) lines.push(\`L \${r} \${readlinkSync(full)}\`);`,
+    `      if (st.isSymbolicLink()) lines.push(\`L \${r}\`);`,
+    "I",
+    "sees a link retarget",
+  ],
+  [
+    "EM132 removal follows a snapshot root replaced by a link",
+    '      assertOwnedRoot(root, "before removal");',
+    "",
+    "I",
+    "removing a snapshot whose root was replaced by a link",
+  ],
+  [
+    "EM133 any launcher on PATH is taken for the task's launcher",
+    "  if (bytes.equals(Buffer.from(TASK_SHIM))) {",
+    "  if (true) {",
+    "X",
+    "opaque wrapper first on PATH",
+  ],
+  [
+    "EM134 the frozen environment keeps the external PATH",
+    '    PATH: [join(rt, "bin"), ...SYSTEM_PATH].join(delimiter),',
+    '    PATH: [join(rt, "bin"), ...SYSTEM_PATH, base.PATH].join(delimiter),',
+    "X",
+    "frozen environment names only",
+  ],
+  [
+    "EM135 the frozen environment accepts injected code (DYLD_*, NODE_OPTIONS, ...)",
+    "    if (REFUSED_ENV.some((r) => r.test(k)))",
+    "    if (false)",
+    "X",
+    "DYLD_INSERT_LIBRARIES is refused",
+  ],
+  [
+    "EM136 the frozen environment accepts a package-manager setting naming a path",
+    "      SETTING.test(k) &&",
+    "      false &&",
+    "X",
+    "npm_config_globalconfig is refused",
+  ],
+  [
+    "EM137 a synchronous launch skips the guard",
+    "      return spawnSync(ex.guarded(what), args, {",
+    "      return spawnSync(ex.launcher, args, {",
+    "X",
+    "after a runtime change the guard refuses the launch",
+  ],
+  [
+    "EM138 the guard accepts any change (a seal always verifies)",
+    "  if (now.sha256 === baseline.sha256) return now.sha256;",
+    "  return now.sha256;",
+    "X",
+    "launcher changed and restored after sealing",
+  ],
+  [
+    "EM139 the guard ignores the guarded trees",
+    "          entry.trees[name] = verifyTree(",
+    "          entry.trees[name] = t.baseline.sha256 || verifyTree(",
+    "X",
+    "guarded tree changed and restored",
+  ],
+  [
+    "EM140 a guarded tree is not sealed",
+    "      const baseline = withRoot(sealTree(root), root);",
+    "      const baseline = withRoot(statInventory(root), root);",
+    "X",
+    "a guarded tree is read-only once guarded",
+  ],
+  [
+    "EM141 the private runtime is not checked for independence",
+    "  runtimeIndependence(rt, sources);\n  return withRoot(sealTree(rt), rt);",
+    "  return withRoot(sealTree(rt), rt);",
+    "X",
+    "Corepack package links outside itself",
+  ],
+  [
+    "EM142 the private runtime is not sealed",
+    "  return withRoot(sealTree(rt), rt);",
+    "  return withRoot(statInventory(rt), rt);",
+    "X",
+    "sealed and independent of its sources",
+  ],
+  [
+    "EM143 the source installation's state is not compared after preparation",
+    "  if (after.sha256 !== before.sha256) {",
+    "  if (false) {",
+    "X",
+    "a write into the source installation during preparation",
+  ],
+  [
+    "EM144 the shared lifecycle allocates before refusing a linked root",
+    'const rootProblems = installationRootProblems(source);\n  if (rootProblems.length) throw new Error(rootProblems.join("; "));',
+    "const rootProblems = installationRootProblems(source);",
+    "X",
+    "a linked installation root is refused before anything is allocated",
+  ],
+  [
+    "EM145 the qualification seam is never reached",
+    "      afterGuard?.(what, launches);",
+    "",
+    "X",
+    "the qualification seam runs after the guard",
+  ],
+  [
+    "EM146 children outside the private runtime are accepted (no actual-execution witness)",
+    "  ].filter(([, p]) => !isInside(rt, p));",
+    "  ].filter(() => false);",
+    "A",
+    "children whose Node is outside the private runtime",
+  ],
+  [
+    "EM147 the runtime's content digest is not recorded",
+    "      sha256: runtime.sha256,",
+    '      sha256: "0".repeat(64),',
+    "A",
+    "a changed launcher byte is not",
+  ],
+  [
+    "EM148 a launcher outside the private runtime is accepted",
+    "  if (!isInside(rt, launcherReal))",
+    "  if (false)",
+    "A",
+    "a launcher outside the private runtime",
+  ],
+  [
+    "EM149 the environment's private roots are not tokenised",
+    "      if (path) out = out.split(path).join(token);",
+    "      if (false) out = out.split(path).join(token);",
+    "A",
+    "private roots are tokenised",
+  ],
+  [
+    "EM150 a runtime change at a check is ignored",
+    "    if (c?.runtime_sha256 !== snapshot.runtime_sealed_sha256)",
+    "    if (false)",
+    "Q",
+    "runtime change at a later check",
+  ],
+  [
+    "EM151 a runtime changed by the end is accepted",
+    "  if (snapshot.runtime_end_sha256 !== snapshot.runtime_sealed_sha256)",
+    "  if (false)",
+    "Q",
+    "runtime changed by the end",
+  ],
+  [
+    "EM152 a runtime not removed is accepted",
+    "  if (snapshot.runtime_removed !== true)",
+    "  if (false)",
+    "Q",
+    "runtime not removed",
+  ],
+  [
+    "EM153 a guarded tree changed by the end is accepted",
+    "    if (snapshot.trees_end?.[name] !== t?.sealed_sha256)",
+    "    if (false)",
+    "Q",
+    "a guarded tree changed by the end is refused",
+  ],
+  [
+    "EM154 a guarded tree changed at a check is accepted",
+    "      if (digest !== trees?.[name]?.sealed_sha256)",
+    "      if (false)",
+    "Q",
+    "guarded tree changed at a check",
+  ],
+  [
+    "EM155 a source installation written during preparation is accepted",
+    "    snapshot.source_state_after_sha256 !== snapshot.source_state_before_sha256",
+    "    false",
+    "Q",
+    "source installation written during preparation",
+  ],
+  [
+    "EM156 a snapshot record of another runtime is accepted",
+    "      snapshot.runtime_sha256 !== record.runtime?.sha256",
+    "      false",
+    "Q",
+    "runtime of another digest",
+  ],
+  [
+    "EM157 a missing completion record is no problem",
+    '  if (!c || typeof c !== "object")\n    return [',
+    '  if (!c || typeof c !== "object") return [];\n  if (false)\n    return [',
+    "Q",
+    "never completed (no completion record)",
+  ],
+  [
+    "EM158 a failed completion record is accepted",
+    "  if (c.passed !== true)",
+    "  if (false)",
+    "Q",
+    "completion record failed",
+  ],
+  [
+    "EM159 a completion record of another invocation is accepted",
+    "  if (!expect.invocation || c.invocation !== expect.invocation)",
+    "  if (false)",
+    "Q",
+    "a completion record of another invocation",
+  ],
+  [
+    "EM160 a completion record that does not bind the part is accepted",
+    "    if (!DIGEST.test(String(bound)) || bound !== expect.manifest_sha256)",
+    "    if (false)",
+    "Q",
+    "binds another copy-control manifest",
+  ],
+  [
+    "EM161 a completion record binding another snapshot record is accepted",
+    "  if (!run.snapshot?.sha256 || c.snapshot_sha256 !== run.snapshot.sha256)",
+    "  if (false)",
+    "Q",
+    "another snapshot record (swapped)",
+  ],
+  [
+    "EM162 a completion record binding another final applicability is accepted",
+    "  if (!after?.sha256 || c.applicability_after_sha256 !== after.sha256)",
+    "  if (false)",
+    "Q",
+    "another final applicability",
+  ],
+  [
+    "EM163 a completion record binding another summary is accepted",
+    "  if (!run.summary?.sha256 || c.summary_sha256 !== run.summary.sha256)",
+    "  if (false)",
+    "Q",
+    "another summary",
+  ],
+  [
+    "EM164 a completion record without every process closed is accepted",
+    "  if (c.processes_closed !== true)",
+    "  if (false)",
+    "Q",
+    "every process closed",
+  ],
+  [
+    "EM165 a completion record of another schema is accepted",
+    "  if (c.schema !== COMPLETION_SCHEMA)",
+    "  if (false)",
+    "Q",
+    "another schema (a legacy",
+  ],
+  [
+    "EM166 a completed run whose source changed is accepted",
+    "    c.source_after_sha256 !== c.source_sha256",
+    "    false",
+    "Q",
+    "source changed",
+  ],
+  [
+    "EM168 the guard ignores its roots' identity (a root replaced by a link to the same entries passes)",
+    "    st.isSymbolicLink() ||\n    !st.isDirectory() ||\n    st.dev !== baseline.root?.dev ||\n    st.ino !== baseline.root?.ino",
+    "    false",
+    "X",
+    "runtime root replaced by a link to its own moved content",
+  ],
+  [
+    "EM167 the split-stage prerequisite ignores the producing run's completion",
+    "      ...completionProblems(evidence.completion, {",
+    "      ...((..._) => [])(evidence.completion, {",
+    "Q",
+    "never completed (no completion record)",
+  ],
 ];
 
 test("Q3: every evaluator mutant fails at least one of these checks; the evaluator itself passes all", async (t) => {
@@ -3728,6 +4249,10 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
       join(import.meta.dirname, "held-operation-installation.mjs"),
       "utf8",
     ),
+    X: readFileSync(
+      join(import.meta.dirname, "held-operation-execution.mjs"),
+      "utf8",
+    ),
   };
   // Revision 26: "A" names held-operation-applicability.mjs, which both of the others import (one mutated instance for all three).
   const names = {
@@ -3735,9 +4260,11 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
     E: "held-operation-evidence.mjs",
     A: "held-operation-applicability.mjs",
     I: "held-operation-installation.mjs",
+    // Revision 28: "X" names held-operation-execution.mjs (the shared lifecycle, private runtime and guard), imported by "A".
+    X: "held-operation-execution.mjs",
   };
   const caughtBy = {};
-  for (const [name, from, to, which = "Q"] of EVALUATOR_MUTANTS) {
+  for (const [name, from, to, which = "Q", intended] of EVALUATOR_MUTANTS) {
     assert.equal(sources[which].split(from).length - 1, 1, `${name}: anchor`);
     const sub = join(dir, name.split(" ")[0]);
     mkdirSync(sub);
@@ -3745,7 +4272,7 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
       join(import.meta.dirname, "engine-results.mjs"),
       join(sub, "engine-results.mjs"),
     );
-    for (const k of ["Q", "E", "A", "I"])
+    for (const k of ["Q", "E", "A", "I", "X"])
       writeFileSync(
         join(sub, names[k]),
         k === which ? sources[k].replace(from, to) : sources[k],
@@ -3754,8 +4281,15 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
     const e = await import(pathToFileURL(join(sub, names.E)).href);
     const a = await import(pathToFileURL(join(sub, names.A)).href);
     const i = await import(pathToFileURL(join(sub, names.I)).href);
-    caughtBy[name] = assessments(q, e, a, i);
+    const x = await import(pathToFileURL(join(sub, names.X)).href);
+    caughtBy[name] = assessments(q, e, a, i, x);
     assert.ok(caughtBy[name].length > 0, `${name} survived`);
+    // Revision 28 (design assessment Q5): a mutant naming its intended check must be caught BY that check (not only by a crash elsewhere).
+    if (intended)
+      assert.ok(
+        caughtBy[name].some((c) => c.includes(intended)),
+        `${name} was not caught by its intended check "${intended}": ${caughtBy[name].slice(0, 5).join(" | ")}`,
+      );
   }
   // Evidence for the reviewer: the checks each evaluator mutant fails (opt-in; the test writes nothing otherwise).
   if (process.env.ATLAS_EVALUATOR_MUTANTS_OUT)
@@ -4469,27 +5003,85 @@ function driverFixture(t) {
   });
   for (const [name, b] of Object.entries(bundles))
     writeBundle(join(dir, ".agtx", name), b);
+  const nc1Manifest = sha(bundles.nc1.manifest_bytes);
   // Revision 27: the same NC1 bundle published by a run that left no snapshot record (one still going, or a revision 26 run), and by a
-  // run whose snapshot changed before a child started.
+  // run whose snapshot changed before a child started. Revision 28: `norun` left no completion record either; `changedrun` completed
+  // and recorded its own failure.
   writeBundle(join(dir, ".agtx/norun/nc1"), bundles.nc1);
   writeBundle(join(dir, ".agtx/changedrun/nc1"), bundles.nc1);
-  writeFileSync(
-    join(dir, ".agtx/changedrun/snapshot.json"),
-    `${JSON.stringify(
-      snapshotRecord(TARGET, (x) => {
-        x.checks.push({ when: "before Playwright", sha256: sha("changed") });
+  writeCompletedRun(
+    join(dir, ".agtx/changedrun"),
+    completedRun({
+      snapshot: snapshotRecord(TARGET, (x) => {
+        x.checks.push({
+          when: "before Playwright",
+          sha256: sha("changed"),
+          runtime_sha256: x.runtime_sealed_sha256,
+        });
         x.unchanged = false;
       }),
-      null,
-      2,
-    )}\n`,
+      parts: { NC1: nc1Manifest },
+    }),
   );
-  // Revision 27: the producing run's completion witness beside the parts (their run directory is .agtx): a sealed, unchanged,
-  // removed snapshot of TARGET.
-  writeFileSync(
-    join(dir, ".agtx/snapshot.json"),
-    `${JSON.stringify(snapshotRecord(), null, 2)}\n`,
+  // Revision 28: the terminal completion record of each producing run, beside its parts: `.agtx` (every bundle above; it binds the
+  // genuine nc1 bundle) completed and passed; the others are each wrong in one way (H10, H12, H13).
+  writeCompletedRun(
+    join(dir, ".agtx"),
+    completedRun({ parts: { NC1: nc1Manifest } }),
   );
+  const variants = {
+    // A run that published its part, then failed at its final collection (a late mismatch).
+    failedrun: {
+      change: (c) =>
+        Object.assign(c, {
+          passed: false,
+          reasons: [
+            "the runtime changed during the run: runtime.sha256 differs",
+          ],
+        }),
+    },
+    // A run interrupted before its completion record (its other records present).
+    interruptedrun: { omit: ["completion.json"] },
+    // A completion record truncated mid-write (never published whole).
+    truncatedrun: { truncate: true },
+    // A completion record of another run copied beside these parts.
+    foreignrun: {
+      change: (c) => Object.assign(c, { invocation: OTHER_INVOCATION }),
+    },
+    // A completion record that does not bind this part.
+    unboundrun: { parts: { NC1: sha("another manifest") } },
+    // A completion record whose snapshot record was swapped afterwards.
+    swappedrun: { swap: true },
+    // A completion record of the revision 27 era's (non-existent) or another schema.
+    legacyrun: {
+      change: (c) =>
+        Object.assign(c, { schema: "web08d-held-operation-completion/0" }),
+    },
+  };
+  for (const [name, v] of Object.entries(variants)) {
+    writeBundle(join(dir, `.agtx/${name}/nc1`), bundles.nc1);
+    const run = completedRun({
+      parts: v.parts ?? { NC1: nc1Manifest },
+      change: v.change,
+    });
+    writeCompletedRun(join(dir, `.agtx/${name}`), run, { omit: v.omit });
+    if (v.truncate)
+      writeFileSync(
+        join(dir, `.agtx/${name}/completion.json`),
+        run.files["completion.json"].subarray(0, 80),
+      );
+    if (v.swap)
+      writeFileSync(
+        join(dir, `.agtx/${name}/snapshot.json`),
+        `${JSON.stringify(
+          snapshotRecord(TARGET, (x) => {
+            x.root = "/t/held-op-exec-other";
+          }),
+          null,
+          2,
+        )}\n`,
+      );
+  }
   // The consumer's own record (TARGET), as `--target <applicability.json>` reads it.
   writeFileSync(join(dir, ".agtx/target.json"), canonical(TARGET));
   writeFileSync(
@@ -4693,9 +5285,9 @@ test("H8 (revision 26): an admission to the bundle's own runtime record is admis
 
 for (const [label, bundle, why] of [
   [
-    "a run that left no snapshot record",
+    "a run that left no snapshot record (nor a completion record)",
     "norun/nc1",
-    "no execution snapshot record",
+    "no completion record",
   ],
   [
     "a run whose snapshot changed before a child",
@@ -4703,8 +5295,40 @@ for (const [label, bundle, why] of [
     "changed (before Playwright)",
   ],
   ["a revision 26 run (a /1 record)", "nc1-r26", "applicability"],
+  // Revision 28 (H10, H12, H13): the producing run's terminal completion record.
+  [
+    "a run that failed after publishing the part (a late mismatch)",
+    "failedrun/nc1",
+    "did not pass",
+  ],
+  [
+    "a run interrupted before its completion record",
+    "interruptedrun/nc1",
+    "no completion record",
+  ],
+  [
+    "a run whose completion record is truncated",
+    "truncatedrun/nc1",
+    "no completion record",
+  ],
+  ["a completion record of another run", "foreignrun/nc1", "is of invocation"],
+  [
+    "a completion record not binding the part",
+    "unboundrun/nc1",
+    "binds part NC1",
+  ],
+  [
+    "a run whose snapshot record was swapped after completion",
+    "swappedrun/nc1",
+    "binds snapshot record",
+  ],
+  [
+    "a completion record of another schema",
+    "legacyrun/nc1",
+    "not web08d-held-operation-completion/1",
+  ],
 ])
-  test(`H11 (revision 27): an admission of a bundle published by ${label} exits 1, never admission-eligible`, (t) => {
+  test(`H11/H13 (revisions 27-28): an admission of a bundle published by ${label} exits 1, never admission-eligible`, (t) => {
     const dir = driverFixture(t);
     const step = evidenceStep(bundle, "--negative", "NC1");
     const result = driver(dir, [

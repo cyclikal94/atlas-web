@@ -26,29 +26,48 @@
 // undone between two collections (A -> B -> A) still fails the run. Limit, stated rather than claimed away: a process of the same user
 // that deliberately unseals and edits the private snapshot between two checks could only be detected by those checks, and a clock set
 // backwards by an administrator could forge a change time; no exclusion of such writers is claimed.
-import { spawnSync } from "node:child_process";
+//
+// Revision 28 (review r27 R27-N2; design assessment 3f7047c0 RC2, I2, I5, I8, steps C1-C2): a snapshot's installation was copied with
+// its root link kept verbatim, and relocation then wrote THROUGH that link into the installation it named (the live one), before
+// anything had proved the copy was physically separate. Nothing is written now until independence is established:
+//  - installationRootProblems refuses a `node_modules` root that is a link (absolute, relative or dangling) or that resolves anywhere but
+//    `<root>/node_modules`, before any copy (the reviewed conservative option: linked layouts are refused, not materialised);
+//  - createSnapshot writes only into an empty, owned 0700 destination that is neither inside nor around the source, and then proves the
+//    copy independent (independenceProblems): its root a different directory from the source's, every file with one link (a file
+//    sharing an inode is a hard link), every link resolving inside the copy itself. A copied absolute link back to the source is refused;
+//  - relocate, seal and removeSnapshot re-check the root (an owned allocation keeps its device and inode: a replaced root is refused,
+//    never chmodded or traversed), write files only through no-follow descriptors, and never follow a link;
+//  - sourceState is the source installation's complete content, mode and link state, compared before and after preparation by the
+//    shared lifecycle (held-operation-execution.mjs), so a write into the source is a refusal that names it.
+// Snapshot records are of schema /2 (they also record the private runtime's seal and the guarded trees, held-operation-execution.mjs).
+// Sealing now makes FILES read-only and leaves directories owner-writable (a SIGKILLed run's residue under the shared driver's TMPDIR
+// otherwise made the driver's own cleanup fail before it wrote its results); detection never relied on the modes: every write,
+// addition, removal or replacement changes the stat inventory.
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   constants,
   copyFileSync,
   cpSync,
   existsSync,
+  fchmodSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
   realpathSync,
   rmSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import os from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const INSTALLATION_SCHEMA = "web08d-held-operation-installation/1";
-export const SNAPSHOT_SCHEMA = "web08d-held-operation-snapshot/1";
+export const SNAPSHOT_SCHEMA = "web08d-held-operation-snapshot/2";
 /** Tool cache/output directories directly under node_modules: outputs, never measured, never copied. */
 export const CACHE_DIRS = [".vite", ".vite-temp"];
 /** pnpm's workspace state: the one file normalised (its last validation time is not installed content). */
@@ -278,23 +297,162 @@ export function globalConfig(home, env = {}) {
   );
 }
 
-/** A new, empty, private (0700) snapshot directory under `parent`, by its real path. */
-export function allocateSnapshot(parent) {
-  const dir = realpathSync(mkdtempSync(join(parent, "held-op-exec-")));
+/** The allocations this process made (allocateSnapshot): real path -> device and inode, so a replaced root is never treated as owned. */
+const ALLOCATIONS = new Map();
+/** A new, empty, private (0700) snapshot directory under `parent`, by its real path; its identity is kept for every later writer. */
+export function allocateSnapshot(parent, prefix = "held-op-exec-") {
+  const dir = realpathSync(mkdtempSync(join(parent, prefix)));
   chmodSync(dir, 0o700);
+  const st = lstatSync(dir);
+  ALLOCATIONS.set(dir, { dev: st.dev, ino: st.ino });
   return dir;
+}
+/**
+ * Throws unless `dir` is still the real directory it was (revision 28, I2): not a link, not replaced since this process allocated it
+ * (same device and inode), private to its owner. A directory this process did not allocate must at least be a real directory.
+ */
+export function assertOwnedRoot(dir, when) {
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (error) {
+    throw new Error(
+      `the execution directory ${dir} is gone ${when}: ${error.code ?? error.message}`,
+    );
+  }
+  if (st.isSymbolicLink() || !st.isDirectory())
+    throw new Error(
+      `the execution directory ${dir} is not a real directory ${when} (nothing is written through it)`,
+    );
+  const owned = ALLOCATIONS.get(dir);
+  if (owned && (owned.dev !== st.dev || owned.ino !== st.ino))
+    throw new Error(
+      `the execution directory ${dir} was replaced ${when} (it is not the directory allocated; nothing is written through it)`,
+    );
+  if (owned && (st.mode & 0o077) !== 0)
+    throw new Error(
+      `the execution directory ${dir} is no longer private ${when}`,
+    );
+  if (realpathSync(dir) !== resolve(dir) && owned)
+    throw new Error(
+      `the execution directory ${dir} no longer resolves to itself ${when}`,
+    );
+}
+/**
+ * Why `root`'s installation cannot be snapshotted (revision 28, R27-N2, H2): its `node_modules` must be a real directory at exactly
+ * `<root>/node_modules`, never a link of any kind. Returns the problems (empty when it can be copied); nothing is written.
+ */
+export function installationRootProblems(root) {
+  const nm = join(root, "node_modules");
+  let st;
+  try {
+    st = lstatSync(nm);
+  } catch (error) {
+    return [
+      `the installation root ${nm} cannot be read: ${error.code ?? error.message}`,
+    ];
+  }
+  if (st.isSymbolicLink()) {
+    let real = null;
+    try {
+      real = realpathSync(nm);
+    } catch {
+      real = null;
+    }
+    return [
+      `the installation root ${nm} is a link (${readlinkSync(nm)}${real ? ` -> ${real}` : ", dangling"}): a linked installation is not supported and is never copied or written through`,
+    ];
+  }
+  if (!st.isDirectory())
+    return [`the installation root ${nm} is not a directory`];
+  if (realpathSync(nm) !== join(realpathSync(root), "node_modules"))
+    return [
+      `the installation root ${nm} resolves to ${realpathSync(nm)}, not inside ${realpathSync(root)}`,
+    ];
+  return [];
+}
+/** True when one of two real paths contains the other (or they are the same). */
+const overlapping = (a, b) => inside(a, b) || inside(b, a);
+/**
+ * Why the copy `dir/node_modules` of `source/node_modules` is not physically independent (revision 28, C1): the copy's root must be a
+ * different directory from the source's (device and inode), every file must have one link (a file sharing an inode with any other path,
+ * the source's included, is a hard link; a directory can only be shared through a link), and every link must resolve inside the copy
+ * itself. Returns the problems (empty when independent).
+ */
+export function independenceProblems(source, dir) {
+  const from = join(source, "node_modules");
+  const to = join(dir, "node_modules");
+  const problems = [];
+  const rootProblems = installationRootProblems(dir);
+  if (rootProblems.length) return rootProblems.map((p) => `the copy: ${p}`);
+  const base = realpathSync(to);
+  const same = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
+  const sourceStat = (rel) => {
+    try {
+      return lstatSync(rel ? join(from, rel) : from);
+    } catch {
+      return null;
+    }
+  };
+  if (same(lstatSync(to), sourceStat("")))
+    problems.push(`the copy's installation root is the source's own directory`);
+  const walk = (d, rel) => {
+    for (const e of readdirSync(d, { withFileTypes: true }).sort(byName)) {
+      if (problems.length > 20) return;
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      const full = join(d, e.name);
+      const st = lstatSync(full);
+      if (st.isSymbolicLink()) {
+        let real = null;
+        try {
+          real = realpathSync(full);
+        } catch {
+          problems.push(`${r} is a dangling link in the copy`);
+          continue;
+        }
+        if (!inside(base, real))
+          problems.push(
+            `${r} resolves to ${real}, outside the copy (the copy would share what it names)`,
+          );
+        continue;
+      }
+      // A file sharing the source's inode is a hard link (refused below); a directory cannot be shared but through a link (above).
+      if (st.isDirectory()) walk(full, r);
+      else if (st.isFile() && st.nlink !== 1)
+        problems.push(
+          `${r} shares its bytes with ${st.nlink - 1} other path(s) (a hard link)`,
+        );
+    }
+  };
+  walk(to, "");
+  return problems;
 }
 /**
  * Fills a private execution snapshot `dir` of `root` (design assessment step 3): a clone of each fingerprinted source file (`files`:
  * name -> SHA-256, as runtime.mjs fingerprint() records them; each clone is checked against it) and of the whole installation except
  * its caches, symlinks copied verbatim. Returns `dir`.
+ *
+ * Revision 28 (R27-N2, C1): refuses a linked installation root BEFORE anything is copied, writes only into an empty real directory that
+ * neither contains nor is contained by the source, and refuses a copy that is not physically independent (independenceProblems)
+ * before any later writer (relocation, pnpm, sealing) can reach it.
  */
 export function createSnapshot({ root, files, dir }) {
+  const rootProblems = installationRootProblems(root);
+  if (rootProblems.length) throw new Error(rootProblems.join("; "));
+  assertOwnedRoot(dir, "before the snapshot was copied");
+  if (overlapping(realpathSync(root), realpathSync(dir)))
+    throw new Error(`the snapshot ${dir} and its source ${root} overlap`);
   if (readdirSync(dir).length) throw new Error(`${dir} is not empty`);
   for (const [name, digest] of Object.entries(files)) {
     if (digest === "deleted") continue;
-    if (name.split("/").includes("node_modules"))
-      throw new Error(`a source file inside a node_modules directory: ${name}`);
+    if (
+      name.split("/").includes("node_modules") ||
+      isAbsolute(name) ||
+      name.split("/").some((c) => c === ".." || c === "." || c === "")
+    )
+      throw new Error(
+        `a source file name that cannot be copied safely: ${name}`,
+      );
     const from = join(root, name);
     if (!lstatSync(from).isFile())
       throw new Error(`a source entry that is not a regular file: ${name}`);
@@ -306,13 +464,37 @@ export function createSnapshot({ root, files, dir }) {
       );
   }
   const modules = join(root, "node_modules");
+  if (existsSync(join(dir, "node_modules")))
+    throw new Error(
+      `a source file created ${join(dir, "node_modules")} before the installation was copied`,
+    );
   cpSync(modules, join(dir, "node_modules"), {
     recursive: true,
     verbatimSymlinks: true,
     mode: constants.COPYFILE_FICLONE,
     filter: (from) => !CACHE_DIRS.some((c) => from === join(modules, c)),
   });
+  const shared = independenceProblems(root, dir);
+  if (shared.length)
+    throw new Error(
+      `the snapshot's installation is not independent of its source (nothing is relocated, prepared or sealed): ${shared.slice(0, 5).join("; ")}`,
+    );
   return dir;
+}
+
+/** Writes `bytes` to the existing regular file `path` without following a link, keeping its mode (revision 28: no write through a link). */
+function writeNoFollow(path, bytes, mode) {
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
+  );
+  try {
+    let at = 0;
+    while (at < bytes.length) at += writeSync(fd, bytes, at, bytes.length - at);
+    fchmodSync(fd, mode & 0o7777);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
@@ -322,6 +504,12 @@ export function createSnapshot({ root, files, dir }) {
  * either spelling) is rewritten to name the snapshot instead, as pnpm would have generated it there. Returns the relocated entries.
  */
 export function relocate(root, from) {
+  assertOwnedRoot(root, "before relocation");
+  const rootProblems = installationRootProblems(root);
+  if (rootProblems.length)
+    throw new Error(`relocation refused: ${rootProblems.join("; ")}`);
+  if (overlapping(realpathSync(root), realpathSync(from)))
+    throw new Error(`relocation refused: ${root} and ${from} overlap`);
   const pairs = [
     [realpathSync(from), root],
     [resolve(from), root],
@@ -353,9 +541,7 @@ export function relocate(root, from) {
           out = Buffer.concat(parts);
         }
         if (out !== bytes) {
-          const mode = lstatSync(full).mode;
-          writeFileSync(full, out);
-          chmodSync(full, mode & 0o7777);
+          writeNoFollow(full, out, lstatSync(full).mode);
           relocated.push(r);
         }
       }
@@ -388,6 +574,11 @@ export function statInventory(root) {
 
 /** Makes the snapshot's installation and source files read-only and creates the (writable, unmeasured) caches; returns the baseline. */
 export function seal(root) {
+  // Revision 28: the root must still be the owned real directory and its installation a real directory (never chmod through a link).
+  assertOwnedRoot(root, "before sealing");
+  const rootProblems = installationRootProblems(root);
+  if (rootProblems.length)
+    throw new Error(`sealing refused: ${rootProblems.join("; ")}`);
   const modules = join(root, "node_modules");
   for (const c of CACHE_DIRS) mkdirSync(join(modules, c), { recursive: true });
   mkdirSync(join(root, ".agtx"), { recursive: true });
@@ -398,17 +589,49 @@ export function seal(root) {
         continue;
       const full = join(dir, e.name);
       if (e.isSymbolicLink()) continue;
-      if (e.isDirectory()) {
-        walk(full, r);
-        // Installation directories are sealed too (nothing can be added to them); source directories stay writable, but anything
-        // added to them still changes the stat inventory.
-        if (r === "node_modules" || r.startsWith("node_modules/"))
-          chmodSync(full, lstatSync(full).mode & 0o555);
-      } else chmodSync(full, lstatSync(full).mode & 0o555);
+      // Revision 28: files lose write permission; directories keep their owner's (an interrupted run's residue, e.g. a SIGKILLed run
+      // under the shared driver, must stay removable by an ordinary recursive removal of its TMPDIR). Anything added to, removed from
+      // or renamed in a directory still changes the stat inventory (the directory's own change time and its entries).
+      if (e.isDirectory()) walk(full, r);
+      else readOnly(full);
     }
   };
   walk(root, "");
   return statInventory(root);
+}
+/** Removes write permission from one real entry, only when it has any (an entry already read-only keeps its change time). */
+function readOnly(full) {
+  const st = lstatSync(full);
+  if (st.isSymbolicLink()) return;
+  if ((st.mode & 0o222) !== 0) chmodSync(full, st.mode & 0o7555);
+}
+/**
+ * Seals a whole tree (revision 28: the private runtime, a copied test tree once its patches are installed, a completed build) and
+ * returns its stat inventory: every real file loses write permission; links are never followed. `root` must be a real directory.
+ */
+export function sealTree(root) {
+  assertOwnedRoot(root, "before sealing a tree");
+  // Files only, as in seal(): directories stay owner-writable so residue stays removable; every change is still in the inventory.
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name);
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) walk(full);
+      else readOnly(full);
+    }
+  };
+  walk(root);
+  return statInventory(root);
+}
+/** Gives a sealed tree's real directories back their owner write permission (so it can be kept or removed); links are never followed. */
+export function unsealTree(root) {
+  assertOwnedRoot(root, "before unsealing a tree");
+  const walk = (dir) => {
+    chmodSync(dir, lstatSync(dir).mode | 0o700);
+    for (const e of readdirSync(dir, { withFileTypes: true }))
+      if (e.isDirectory() && !e.isSymbolicLink()) walk(join(dir, e.name));
+  };
+  walk(root);
 }
 
 /** Throws when the sealed snapshot differs from its baseline (any write, replacement, addition or removal since sealing). */
@@ -428,28 +651,87 @@ export function verifySealed(root, baseline, when) {
 /** Removes a snapshot (unsealing it first); returns null or the reason it could not be removed. */
 export function removeSnapshot(root) {
   try {
-    const walk = (dir) => {
-      chmodSync(dir, 0o700);
-      for (const e of readdirSync(dir, { withFileTypes: true }))
-        if (e.isDirectory() && !e.isSymbolicLink()) walk(join(dir, e.name));
-    };
-    if (existsSync(root)) walk(root);
-    rmSync(root, { recursive: true, force: true });
-    return existsSync(root) ? `${root} still exists` : null;
+    // Revision 28 (I2, I5): only the owned real directory is unsealed and removed; a root replaced by a link or another directory is
+    // left alone (and reported), never chmodded or traversed. Links inside are removed as links, never followed.
+    let present = true;
+    try {
+      lstatSync(root);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      present = false;
+    }
+    if (present) {
+      assertOwnedRoot(root, "before removal");
+      const walk = (dir) => {
+        chmodSync(dir, 0o700);
+        for (const e of readdirSync(dir, { withFileTypes: true }))
+          if (e.isDirectory() && !e.isSymbolicLink()) walk(join(dir, e.name));
+      };
+      walk(root);
+      rmSync(root, { recursive: true, force: true });
+    }
+    if (existsSync(root)) return `${root} still exists`;
+    ALLOCATIONS.delete(root);
+    return null;
   } catch (error) {
     return String(error.message ?? error);
   }
 }
 
-/** Runs `pnpm exec node -e 0` in the snapshot: pnpm's own preparation (relinking its shims there) before anything is measured. */
-export function preparePnpm(root, env) {
-  const r = spawnSync("pnpm", ["exec", "node", "-e", "0"], {
-    cwd: root,
-    env,
-    encoding: "utf8",
-    // A hang guard, not a duration requirement: a timeout refuses the run.
-    timeout: 900_000,
-  });
+/**
+ * The complete state of `root`'s installation as it stands (revision 28, I2): every entry under `<root>/node_modules` except the tool
+ * caches, a directory by its mode, a file by its mode and bytes, a link by its text (never followed). Its digest is compared before and
+ * after a snapshot is prepared, so any write into the source installation (a shim, a nested shim, the virtual store, pnpm's metadata, a
+ * mode) is seen and named.
+ */
+export function sourceState(root) {
+  const lines = [];
+  const walk = (dir, rel) => {
+    for (const e of readdirSync(dir, { withFileTypes: true }).sort(byName)) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (rel === "" && CACHE_DIRS.includes(e.name)) continue;
+      const full = join(dir, e.name);
+      const st = lstatSync(full);
+      const mode = (st.mode & 0o7777).toString(8);
+      if (st.isSymbolicLink()) lines.push(`L ${r} ${readlinkSync(full)}`);
+      else if (st.isDirectory()) {
+        lines.push(`D ${r} ${mode}`);
+        walk(full, r);
+      } else if (st.isFile())
+        lines.push(`F ${r} ${mode} ${sha256(readFileSync(full))}`);
+      else lines.push(`O ${r} ${mode}`);
+    }
+  };
+  const nm = join(root, "node_modules");
+  const st = lstatSync(nm);
+  lines.push(
+    st.isSymbolicLink()
+      ? `L . ${readlinkSync(nm)}`
+      : `D . ${(st.mode & 0o7777).toString(8)}`,
+  );
+  if (!st.isSymbolicLink()) walk(nm, "");
+  return { sha256: sha256(lines.join("\n")), entries: lines.length, lines };
+}
+
+/**
+ * Runs `pnpm exec node -e 0` in the snapshot: pnpm's own preparation (relinking its shims there) before anything is measured.
+ * Revision 28 (R27-N1, C3): only through `launch`, the execution's guarded launcher (held-operation-execution.mjs): its private, sealed
+ * copy of the launcher chain, its frozen environment, the guard before the child starts. There is no fallback to a `pnpm` on PATH.
+ */
+export function preparePnpm(root, launch) {
+  if (typeof launch !== "function")
+    throw new Error(
+      "pnpm's preparation needs the execution's guarded launcher (no pnpm is resolved on PATH)",
+    );
+  const r = launch(
+    "pnpm's preparation in the snapshot",
+    ["exec", "node", "-e", "0"],
+    {
+      cwd: root,
+      // A hang guard, not a duration requirement: a timeout refuses the run.
+      timeout: 900_000,
+    },
+  );
   if (r.error) throw r.error;
   if (r.status !== 0)
     throw new Error(
