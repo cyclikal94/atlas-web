@@ -20524,35 +20524,6 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2294",
-    title:
-      "WEB-11a R6 F2: a FAILED field step counts as settled: 'No fields yet.' (the reviewer's defect)",
-    file: "src/features/people/detail/PersonDetail.tsx",
-    tests: ["tests/features/people/detail-reads.test.tsx"],
-    expect:
-      /the field read FAILS: never 'No fields yet\.'|a later step's read FAILS/,
-    patch: (t) =>
-      sub(
-        t,
-        "              settled={step.settled && changesKnown}\n",
-        '              settled={step.settled || step.status !== "ready"}\n',
-      ),
-  },
-  {
-    id: "MU-2295",
-    title:
-      "WEB-11a R6 F2: 'No fields yet.' without every unsent change read (a field only a queued create shows may be missing)",
-    file: "src/features/people/detail/PersonDetail.tsx",
-    tests: ["tests/features/people/detail-reads.test.tsx"],
-    expect: /this device's unsent changes cannot be read/,
-    patch: (t) =>
-      sub(
-        t,
-        "              settled={step.settled && changesKnown}\n",
-        "              settled={step.settled}\n",
-      ),
-  },
-  {
     id: "MU-2296",
     title:
       "WEB-11a R6 F2: unreadable unsent changes and no cached person: 'not on this device'",
@@ -20566,16 +20537,6 @@ export const UNIT = [
         '          if (outstanding.status === "failed")\n            return (\n              <ReadFailed message={copy.PERSON_READ_FAILED} onRetry={retry} />\n            );\n',
         "",
       ),
-  },
-  {
-    id: "MU-2297",
-    title:
-      "WEB-11a R6 F2: a later window of unsent changes still on its way is taken as read: 'not on this device'",
-    file: "src/features/people/detail/PersonDetail.tsx",
-    tests: ["tests/features/people/detail-reads.test.tsx"],
-    expect: /LATER window still on its way: nothing is claimed/,
-    patch: (t) =>
-      sub(t, "          if (!changesKnown) return <DetailSkeleton />;\n", ""),
   },
   {
     id: "MU-2298",
@@ -21141,6 +21102,24 @@ export const UNIT = [
  * of a fallback that no longer exists has nothing to patch; what each of them stood for is covered by the mutant named beside it.
  */
 export const RETIRED = [
+  {
+    id: "MU-2294",
+    why: "(WEB-11a revision 7, the design assessment's DA7-12) a FAILED field step counts as settled: 'No fields yet.' is now said only when ONE read of the person's fields and the unsent changes together (`ConfirmedAbsence`, `data.readInventory`) agrees, and that read sees the fields, so the claim is not made; the failure is still said (its banner reads the step's own status). Survived campaign 23 (`validation/runs/2026-10-24T03-06-29.382Z-9f0f614d`, 0 failing tests, controls passing): equivalent for what the tests assert, the step's guard being defence in depth",
+    replacedBy:
+      "MU-2336 (an absence confirmed without the composed read), MU-2337/MU-2338 (the composed read truncated), MU-2340/MU-2341 (the detail's confirmations made unconditional)",
+  },
+  {
+    id: "MU-2295",
+    why: "(WEB-11a revision 7, DA7-12) 'No fields yet.' without every unsent change read: the confirming read requires its own complete chain of unsent changes (`ConfirmedAbsence` returns `unknown` for an incomplete one) and finds the queued field, so the claim is not made. Survived campaign 23 (0 failing tests, controls passing): equivalent, the separate guard being defence in depth",
+    replacedBy:
+      "MU-2336 (an absence confirmed without the composed read), MU-2337/MU-2338 (the composed read truncated), MU-2340/MU-2341 (the detail's confirmations made unconditional)",
+  },
+  {
+    id: "MU-2297",
+    why: '(WEB-11a revision 7, DA7-12) a later window of unsent changes still on its way is taken as read: "isn\'t on this device" is now said only when the confirming read, complete by itself, finds neither the cached person nor a queued create, so the claim is not made. Survived campaign 23 (0 failing tests, controls passing): equivalent, the separate guard being defence in depth',
+    replacedBy:
+      "MU-2336 (an absence confirmed without the composed read), MU-2337/MU-2338 (the composed read truncated), MU-2340/MU-2341 (the detail's confirmations made unconditional)",
+  },
   {
     id: "MU-2306",
     why: "(REAL ENGINE; WEB-11a revision 7, review 7 finding 3) a press fixes no box: since D-11a-29 the PRESSED ACTION itself is held in place and size, so whether the boxes above it keep their height no longer decides whether the press activates; E-P33 passes with this mutant in three engines (revision 7, `author-diagnostics/engine-mutants-1`, controls passing). The boxes' heights stay as defence in depth (what is below them does not jump); the mutant is equivalent for the activation the spec asserts",
