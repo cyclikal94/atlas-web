@@ -66,11 +66,16 @@ export const UNIT_R22 = [
     tests: [OWN],
     expect:
       /the gate hides and shows the detail again: day A's typed amount|the protected tree remounted at the detail's address|Correct resumes the person's 12/,
+    // Re-anchored in revision 25 (same intent: the effect now also renews the screen's visit, R37 / P3, and returns its route listener).
     patch: (t) =>
       sub(
-        t,
-        "    visit.current = visitOf(env.identity);\n    alone.current = { target: null, progress: null };\n  }, [env.identity, taskId]);\n",
-        "    visit.current = visitOf(env.identity);\n    alone.current = { target: null, progress: null };\n    return () => {\n      const mine = visit.current;\n      if (mine !== null) show(shownBy(mine, taskId), env.identity, null, null);\n    };\n  }, [env.identity, taskId]);\n",
+        sub(
+          t,
+          "    return onRouteMoved(() => {\n",
+          "    const stop = onRouteMoved(() => {\n",
+        ),
+        "      visit.current = next;\n    });\n  }, [env.identity, taskId]);\n",
+        "      visit.current = next;\n    });\n    return () => {\n      stop();\n      const mine = visit.current;\n      if (mine !== null) show(shownBy(mine, taskId), env.identity, null, null);\n    };\n  }, [env.identity, taskId]);\n",
       ),
   },
 

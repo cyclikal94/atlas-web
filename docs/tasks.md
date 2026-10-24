@@ -434,6 +434,14 @@ is told at a moment its router, history and document are all at its address, aft
 MU-2407, MU-2409 and real-engine MU-2408 re-anchored (same intent). Same-instance away-and-back is component evidence only: no real-engine
 schedule reliably keeps the old instance across two navigations without a product hook, so native evidence is E-T45 and the correction
 controls, not this ordering.
+Revision 25 (Review 25 R37 and the design assessment after it; decision 51): `surviving-return.test.tsx` (the same task detail instance
+returned to from the task list, its visit asserted ended: a fix opened and typed after the return kept through Sync and Back and saved
+once, against controls staying, a full unmount and a same-instance sync return; two sync visits; a second return; Cancel; an ordinary
+departure after the return; another identity; a fix typed before the departure and still shown; a save pending, acknowledged at the sync
+screens, with newer input, refused, or acknowledged on the surviving history; a full-history fix parked by Back to recent after the return,
+or before the departure, and its Cancel and ordinary-departure controls; the detail's shown day let go after the return, and a day parked
+after it, each with its full-unmount control); unit MU-2430, MU-2432…MU-2435 (`scripts/mutation/catalogue-web10a-r25.mjs`; MU-2431
+withdrawn as equivalent); MU-2392 re-anchored (same intent). Component evidence only, as for revision 24.
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -619,7 +627,7 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     generic editors' only (the correction dialog kept its consumed session and offered a Save that wrote nothing), it was asked only
     when the observed address changed (before the router had caught up, so a save answered while the person was away never started
     afresh), and an editor whose input outlived the departure (a refused save, newer input) kept its revoked attachment and its ended
-    visit. Now every editor (`useKeptInput` and `CorrectionDialog`) is told whenever its router's history or the observed address moves
+    visit. Now the session editors (`useKeptInput` and `CorrectionDialog`) are told whenever their router's history or the observed address moves
     (`useTaskRouteMoved`: a browser push tells the router before it writes the document's address, Back is recorded by the document
     before the router hears it) and, once its router, history and document are all at its address and it was not removed, is attached
     anew on the visit going on there, which takes over the exact session it holds (`adoptKept`, `adoptCorrection`; only that session,
@@ -628,7 +636,21 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     consumed session's editor then starts afresh from what the screen shows (a correction from the day as now read, its queued correction
     included), and while it holds no session its Save is unavailable ("Correction saved on this device"). Refused or newer input stays
     as typed and is saved by the next explicit Save, which closes the form or dialog. Nothing is written, retried or resubmitted by a
-    return; settlement is unchanged.
+    return; settlement is unchanged. Decision 50 named those two owners only; the entry history's fixes and the detail's shown-day
+    record had their own captured visit (decision 51).
+51. **Every owner of a screen's input follows the same surviving return (R37, design assessment P1-P3, revision 25).** Three owners hold
+    input a visit owns: the session editors (decision 50), the entry history's open and parked fixes (`EntryHistory`, kept in
+    `keptFixes` by the visit) and the detail's record of the day it shows (`useTaskDetail`, `shownDays` per visit, which lets go of a
+    day's input when another day is shown in its place). The last two still captured the visit they were mounted on, so after an
+    ordinary departure and a return before React removed them, input made there (a fix opened after the return; an amount on the day
+    shown) was governed by the ENDED visit: the history's next unmount kept nothing for the sync screens, and the detail recorded its day
+    on the ended visit, so a later mount let go of nothing when it showed another day (that day's input came back when it was picked
+    again). Both are now told whenever the router's history or the observed address moves (`useTaskRouteMoved`) and, once their
+    router, history and document are at their address (`useTaskScreenAt`) after their visit ended, belong to the visit going on there:
+    the history keeps what it still holds (an open or parked fix, typed before the departure or after) for that visit; the detail
+    records on it the day it shows now (only that: what the ended visit parked or kept unheld is not carried). An ended visit is never
+    resumed, a full unmount after an ordinary departure still starts afresh, and settlement, admission (`saveBlock`) and writes are
+    unchanged.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream

@@ -17,7 +17,13 @@ import type {
 import { parseDecimalInput } from "../model/decimal";
 import { MESSAGES } from "../model/form";
 import type { RowModel } from "../view";
-import { onTaskVisitEnded, type TaskVisit, useTaskVisit } from "../visit";
+import {
+  onTaskVisitEnded,
+  type TaskVisit,
+  useTaskRouteMoved,
+  useTaskScreenAt,
+  useTaskVisit,
+} from "../visit";
 
 export const HISTORY_COPY = {
   heading: "Recent entries",
@@ -359,6 +365,8 @@ export function EntryHistory({
 }) {
   const env = useTasksEnv();
   const visitOf = useTaskVisit();
+  const shownAt = useTaskScreenAt();
+  const onRouteMoved = useTaskRouteMoved();
   const heading = useId();
   const goal = row.data.definition.goal;
   const owner = `${env.identity}\u0000${row.progressId}`;
@@ -994,10 +1002,26 @@ export function EntryHistory({
    * blocks it as it would a mounted editor; the input is never moved to the correction. Every unmount while the screen's visit goes on keeps
    * it the same way (revision 22, `visit.ts`): the data hiding the day (DA20-I1), the cache gate hiding the screen (DA22-I2); the visit's
    * end drops it (DA22-I3), so no history of a later visit is given it.
+   *
+   * A history React never removed (the person went away and came back before it re-rendered) is the history the person is at again
+   * (revision 25, R37): once its router, its history and the document are at its address it belongs to the visit going on there, so the
+   * fix it holds, open or parked (typed before the departure and still shown, or opened after the return), is that visit's from now on and
+   * a later visit to the sync screens keeps it. Only what this history still holds: a visit that ended is never resumed, and a fix it kept
+   * without a history holding it was dropped with it.
    */
   // biome-ignore lint/correctness/useExhaustiveDependencies: the owner (which names the identity) is the reason; the rest is read through refs, the visit is asked for as the history opens
   useEffect(() => {
-    const visit = visitOf(env.identity);
+    const identity = env.identity;
+    let visit = visitOf(identity);
+    // The person is at this history's address again after its visit ended (R37): the visit going on there owns what it holds.
+    const renew = () => {
+      if (visit === null || !visit.ended() || ownerRef.current !== owner)
+        return;
+      // Asked only once its router is at its address, so the visit going on there is the one asked for.
+      if (!shownAt(visit.address)) return;
+      visit = visitOf(identity) ?? visit;
+    };
+    const unheard = onRouteMoved(renew);
     for (const other of [...keptFixes.keys()])
       if (!other.startsWith(`${env.identity}\u0000`)) keptFixes.delete(other);
     // Only this visit's own kept fix is taken (a fix kept for a visit that has ended is never given to another).
@@ -1022,6 +1046,7 @@ export function EntryHistory({
         parked.current = back.draft;
     }
     return () => {
+      unheard();
       if (visit === null || visit.ended()) return;
       const held = fixRef.current;
       const open =

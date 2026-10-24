@@ -15,6 +15,7 @@ import { ENGINE_R21, UNIT_R21 } from "./catalogue-web10a-r21.mjs";
 import { ENGINE_R22, UNIT_R22 } from "./catalogue-web10a-r22.mjs";
 import { ENGINE_R23, UNIT_R23 } from "./catalogue-web10a-r23.mjs";
 import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
+import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 
 export class PatchError extends Error {}
 
@@ -21826,6 +21827,7 @@ export const UNIT = [
   ...UNIT_R22,
   ...UNIT_R23,
   ...UNIT_R24,
+  ...UNIT_R25,
 ];
 
 /**

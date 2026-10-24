@@ -39,7 +39,12 @@ import {
   patched,
   type RowModel,
 } from "../view";
-import { type TaskVisit, useTaskVisit } from "../visit";
+import {
+  type TaskVisit,
+  useTaskRouteMoved,
+  useTaskScreenAt,
+  useTaskVisit,
+} from "../visit";
 import { correctionKey, disownCorrection, resumable } from "./correction-owner";
 import { forgetKeptFix, hasKeptFix } from "./EntryHistory";
 
@@ -569,13 +574,32 @@ export function useTaskDetail(
   // sync screens (DA21-I2): owned by the screen's visit, not this mount (revision 22, `visit.ts`), so a remount at the same address goes on
   // with them and only the visit's end lets go of them. What it shows is the visit's too: a later mount lets go of the day a COMPLETE read
   // no longer shows, never of one merely not read yet.
+  // A screen React never removed (the person went away and came back before it re-rendered) is the screen the person is at again
+  // (revision 25, R37 / P3): once its router, its history and the document are at its address it belongs to the visit going on there, which
+  // records the day it shows now, so a later mount lets go of that day when it shows another in its place. Only the day shown: what the
+  // ended visit parked, or kept with no editor holding it, is not carried to the new visit.
   const visitOf = useTaskVisit();
+  const shownAt = useTaskScreenAt();
+  const onRouteMoved = useTaskRouteMoved();
   const visit = useRef<TaskVisit | null>(null);
   const alone = useRef<DayShown>({ target: null, progress: null });
   // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for when the screen opens for an identity and task
   useEffect(() => {
-    visit.current = visitOf(env.identity);
+    const identity = env.identity;
+    let mine = visitOf(identity);
+    visit.current = mine;
     alone.current = { target: null, progress: null };
+    return onRouteMoved(() => {
+      if (mine === null || !mine.ended() || !shownAt(mine.address)) return;
+      const next = visitOf(identity);
+      if (next === null) return;
+      const was = shownBy(mine, taskId);
+      const now = shownBy(next, taskId);
+      now.target = was.target;
+      now.progress = was.progress;
+      mine = next;
+      visit.current = next;
+    });
   }, [env.identity, taskId]);
   const complete = inputs !== null;
   const target = inputs?.target ?? null;
