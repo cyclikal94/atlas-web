@@ -452,6 +452,16 @@ and new MU-2436 (`not_sent` never retried; the control fails) in `scripts/mutati
 showed a second inherited maintained-test defect, from the merged pool tooling: `tests/static/playwright-servers.test.ts` read each
 physical line, so `smoke-image.sh`'s Playwright runs continued over several lines (their `ATLAS_PRODUCTION_URL` on the line before)
 looked as if they supplied no server. It now reads a `\`-continued command as one; the script is unchanged.
+Revision 27 (Review 27 R39, a maintained-test oracle defect; no product change): I-T12 judged every `/daily` response of the page as one
+list and required a first page after the first continuation's 409, although a newer read (started by the sync engine delivering the
+publication) may already have finished before that 409 arrives, and an unrelated scope's first page could satisfy it. The test now
+records every `/daily` request of the page in one route (scope, day, zone, `revision`, `after`, and the server's answer before the page
+receives it) and judges named chains. Its first case stops the test leader's sync once the cache holds the account's tasks, holds both
+scopes' first continuations, publishes through the backend (one first-page task marked done, the other archived, one task created),
+then releases joint and personal in turn: each 409 is followed by a cursorless restart of THAT scope only (the other is still held, so no
+new read began), complete and wholly of the newer revision; the screen shows the done row from the server and the archived row as the
+device's own; sync then resumes. Its second case keeps sync running: the publication starts a newer read that completes while the old one
+is held; the old continuations' 409s, released afterwards, start nothing. The static stack inventory counts the 22nd task case.
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old

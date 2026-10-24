@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import type { BrowserContext, Page } from "@playwright/test";
+import type { BrowserContext, Page, Route } from "@playwright/test";
 import * as commands from "../../src/features/tasks/model/commands";
 import {
   type OccurrenceView,
@@ -247,9 +247,10 @@ async function makeTask(
   options: {
     title?: string;
     grants?: Array<{ kind: "account"; id: string; edit: boolean }>;
+    taskId?: string;
   } = {},
 ): Promise<Made> {
-  const taskId = crypto.randomUUID();
+  const taskId = options.taskId ?? crypto.randomUUID();
   const slot = slotOn(definition.schedule, definition.schedule.start_date);
   const occ = await occurrenceId(taskId, slot.key);
   const prog = await progressId(occ, id.account_id);
@@ -1136,63 +1137,541 @@ test.describe("I-T11: archive and restore (A13)", () => {
   });
 });
 
+/**
+ * I-T12 (R39, revision 27): the oracle names the read it judges. Every `/daily` request of the page passes through ONE route that records
+ * its scope, day, zone, `revision` and `after` in interception order and fetches the server's answer itself (`route.fetch`), so the
+ * status and the page's revision, items and cursor are on the ledger BEFORE the page receives them. A scope's chain is sequential: while
+ * its continuation is held, that chain can ask nothing else, so a first page of the same scope seen meanwhile belongs to another read;
+ * and a new read always asks BOTH scopes (`useTodayView`'s `Promise.all`), so one scope held with no new request is proof that no new read
+ * began. The first continuation of each scope in `hold` is held until the test releases it.
+ */
+type Scope = "joint" | "personal";
+interface DailyCall {
+  n: number;
+  scope: Scope;
+  day: string | null;
+  zone: string | null;
+  revision: number | null;
+  after: string | null;
+  held: boolean;
+  /** The server's status, recorded before the page is answered (null while held or in flight). */
+  status: number | null;
+  page: {
+    revision: number;
+    ids: string[];
+    items: OccurrenceView[];
+    next: string | null;
+  } | null;
+}
+const DAILY_ROUTE = `**${API}/daily?**`;
+async function dailyLedger(page: Page, hold: readonly Scope[]) {
+  const calls: DailyCall[] = [];
+  const held = new Map<Scope, { call: DailyCall; release: () => void }>();
+  const releases: Array<() => void> = [];
+  let lastEvent = Date.now();
+  let closed = false;
+  const handler = async (route: Route) => {
+    const q = new URL(route.request().url()).searchParams;
+    const call: DailyCall = {
+      n: calls.length,
+      scope: q.get("scope") as Scope,
+      day: q.get("day"),
+      zone: q.get("timezone"),
+      revision: q.has("revision") ? Number(q.get("revision")) : null,
+      after: q.get("after"),
+      held: false,
+      status: null,
+      page: null,
+    };
+    calls.push(call);
+    lastEvent = Date.now();
+    if (
+      !closed &&
+      call.revision !== null &&
+      hold.includes(call.scope) &&
+      !held.has(call.scope)
+    ) {
+      call.held = true;
+      await new Promise<void>((resolve) => {
+        held.set(call.scope, { call, release: resolve });
+        releases.push(resolve);
+      });
+    }
+    try {
+      const response = await route.fetch();
+      call.status = response.status();
+      if (call.status === 200) {
+        const body = (await response.json()) as {
+          revision: number;
+          items: OccurrenceView[];
+          next_after: string | null;
+        };
+        call.page = {
+          revision: body.revision,
+          ids: body.items.map((item) => item.id),
+          items: body.items,
+          next: body.next_after,
+        };
+      }
+      lastEvent = Date.now();
+      await route.fulfill({ response });
+    } catch (error) {
+      // Only the test's own teardown (the page closing under a held request) may end a request without an answer.
+      if (!closed) throw error;
+      await route.abort().catch(() => undefined);
+    }
+  };
+  await page.route(DAILY_ROUTE, handler);
+  const of = (scope: Scope) => calls.filter((c) => c.scope === scope);
+  return {
+    calls,
+    of,
+    /** The held continuation of `scope`, once the page has asked for it. */
+    async held(scope: Scope): Promise<DailyCall> {
+      await expect
+        .poll(() => held.has(scope), {
+          message: `the ${scope} continuation is held`,
+          timeout: 60_000,
+        })
+        .toBe(true);
+      return (held.get(scope) as { call: DailyCall }).call;
+    },
+    release(scope: Scope) {
+      held.get(scope)?.release();
+    },
+    /** The server has answered `call` (its status is on the ledger). */
+    async answered(call: DailyCall) {
+      await expect.poll(() => call.status, { timeout: 60_000 }).not.toBeNull();
+    },
+    /** No `/daily` request was made or answered for `ms`, and none but the held ones is unanswered. */
+    async quietFor(ms: number) {
+      await expect
+        .poll(
+          () =>
+            Date.now() - lastEvent >= ms &&
+            calls.every((c) => c.status !== null || (c.held && !c.page)),
+          { timeout: 60_000, intervals: [100] },
+        )
+        .toBe(true);
+    },
+    async dispose() {
+      closed = true;
+      for (const release of releases) release();
+      await page.unroute(DAILY_ROUTE, handler);
+    },
+  };
+}
+
+/**
+ * The chain of `scope` that starts at the cursorless first page `first`: every later call of that scope, in order, must continue it (the
+ * revision the first page answered, the cursor the previous page gave) until a page ends it. Anything else (another first page, another
+ * revision, a cursor of an older page) fails here, named.
+ */
+function chainFrom(calls: DailyCall[], first: DailyCall) {
+  expect(first.revision, "a chain starts without a revision").toBeNull();
+  expect(first.after, "a chain starts without a cursor").toBeNull();
+  expect(first.status).toBe(200);
+  const head = first.page as NonNullable<DailyCall["page"]>;
+  const pages = [first];
+  for (const call of calls.filter(
+    (c) => c.scope === first.scope && c.n > first.n,
+  )) {
+    const previous = (pages.at(-1) as DailyCall).page;
+    expect(
+      previous?.next,
+      `call ${call.n} follows the end of the ${first.scope} chain from call ${first.n}`,
+    ).not.toBeNull();
+    expect(
+      { revision: call.revision, after: call.after },
+      `call ${call.n} continues the ${first.scope} chain from call ${first.n}`,
+    ).toEqual({ revision: head.revision, after: previous?.next ?? null });
+    expect(call.status).toBe(200);
+    expect(call.page?.revision).toBe(head.revision);
+    pages.push(call);
+  }
+  return {
+    revision: head.revision,
+    complete: (pages.at(-1) as DailyCall).page?.next === null,
+    items: pages.flatMap((c) => c.page?.items ?? []),
+    calls: pages,
+  };
+}
+
+/** The page asked `/daily` again from call `since` on, every such call is answered, and the last one ended its chain (or failed). */
+function settledSince(calls: DailyCall[], since: number): boolean {
+  const later = calls.slice(since);
+  if (later.length === 0 || calls.some((c) => c.status === null && !c.held))
+    return false;
+  const last = later.at(-1) as DailyCall;
+  return last.status !== 200 || last.page?.next === null;
+}
+
+/** Every occurrence the server lists for the day now, in either scope (the test's own read, before the ledger exists). */
+async function listedToday(page: Page, id: Id, day: string): Promise<string[]> {
+  const ids: string[] = [];
+  for (const scope of ["joint", "personal"] as const) {
+    let after: string | null = null;
+    let revision: number | null = null;
+    do {
+      const out = await call(
+        page,
+        id,
+        "GET",
+        `/daily?day=${day}&timezone=${encodeURIComponent(ZONE)}&scope=${scope}&state=all&limit=200${
+          after === null ? "" : `&after=${after}&revision=${revision}`
+        }`,
+      );
+      expect(out.status, JSON.stringify(out.body)).toBe(200);
+      const body = out.body as {
+        items: Array<{ id: string }>;
+        next_after: string | null;
+        revision: number;
+      };
+      ids.push(...body.items.map((item) => item.id));
+      revision = body.revision;
+      after = body.next_after;
+    } while (after !== null);
+  }
+  return ids;
+}
+
+/** A task id whose occurrence id sorts before `bound` (the endpoint pages a day's items in id order). */
+async function taskIdBelow(definition: TaskDefinition, bound: string) {
+  const key = slotOn(definition.schedule, definition.schedule.start_date).key;
+  for (let tries = 0; tries < 2_000_000; tries += 1) {
+    const taskId = crypto.randomUUID();
+    if ((await occurrenceId(taskId, key)) < bound) return taskId;
+  }
+  throw new Error(`no task id gives an occurrence id below ${bound}`);
+}
+
+/** The cache holds the task, the occurrence and my progress of every task (the sync engine has delivered them; each round asks it to sync). */
+async function untilDelivered(page: Page, account: string, made: Made[]) {
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate(() => window.__atlasData?.nudgeSync());
+        const rows =
+          ((await page.evaluate(
+            (a) => window.__atlasData?.rows(a, "cache"),
+            account,
+          )) as Array<{ id: string }> | undefined) ?? [];
+        const ids = new Set(rows.map((r) => r.id));
+        return made.every(
+          (m) =>
+            ids.has(m.taskId) &&
+            ids.has(m.occurrenceId) &&
+            ids.has(m.progressId),
+        );
+      },
+      { message: "the sync engine delivered every task", timeout: 60_000 },
+    )
+    .toBe(true);
+}
+
+const appliedRevision = async (page: Page, account: string) =>
+  (
+    (await page.evaluate((a) => window.__atlasData?.syncState(a), account)) as {
+      applied_revision?: number | null;
+    } | null
+  )?.applied_revision ?? null;
+
+const todayPath = (day: string) =>
+  `/today?day=${day}&tz=${encodeURIComponent(ZONE)}`;
+
 test.describe("I-T12: TASK-7, a publication between two pages of /daily (A2)", () => {
+  // A fresh document reads the page size when its task boundary mounts: set before every document of the test, so the one read the test
+  // judges is the read of a single client-side navigation to Today (no reload and no second Today mount on the way).
+  test.beforeEach(async ({ context }) => {
+    await context.addInitScript(() => {
+      (
+        window as unknown as { __atlasTasksDailyPageSize?: number }
+      ).__atlasTasksDailyPageSize = 2;
+    });
+  });
+
   test("the continuation is refused 409 and the scope restarts from its first page; no page of the old revision is shown", async ({
     context,
     provokes,
   }) => {
     provokes(409);
-    const { page, id } = await bootAs(context, main);
-    const made = [];
-    for (let i = 0; i < 3; i += 1)
-      made.push(await makeTask(page, id, def(), { title: `I-T12 ${i}` }));
-    await page.evaluate(() => {
-      (
-        window as unknown as { __atlasTasksDailyPageSize?: number }
-      ).__atlasTasksDailyPageSize = 2;
-    });
-    let published = false;
-    const statuses: Array<{ revision: boolean; status: number }> = [];
-    page.on("response", (r) => {
-      const url = new URL(r.url());
-      if (url.pathname === `${API}/daily`)
-        statuses.push({
-          revision: url.searchParams.has("revision"),
-          status: r.status(),
+    const { page, id } = await bootAs(context, main, "/tasks");
+    const day = today();
+    // Three tasks that sort FIRST in the day: the two-item first page of each scope is two of them. The publication marks the first
+    // ("sentinel") done and archives the second ("leaving"), so a page of the old revision can be told from the new one by a value AND by
+    // a member the new revision no longer has.
+    const existing = await listedToday(page, id, day);
+    const bound = existing.reduce((a, b) => (b < a ? b : a), "g");
+    const made: Made[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const definition = def();
+      made.push(
+        await makeTask(page, id, definition, {
+          title: `I-T12 ${i}`,
+          taskId: await taskIdBelow(definition, bound),
+        }),
+      );
+    }
+    made.sort((a, b) => (a.occurrenceId < b.occurrenceId ? -1 : 1));
+    const [sentinel, leaving, staying] = made as [Made, Made, Made];
+    // Isolate the read: the cache holds everything the server has written for this account, then the sync engine is stopped, so no
+    // committed content (and no other trigger the test does not make) can begin another read while the one judged here runs.
+    await untilDelivered(page, id.account_id, made);
+    await page.evaluate(() => window.__atlasData?.stopSync());
+    const applied = await appliedRevision(page, id.account_id);
+    expect(applied).not.toBeNull();
+    let publication: Made | null = null;
+    const ledger = await dailyLedger(page, ["joint", "personal"]);
+    try {
+      await go(page, todayPath(day));
+      const heldJoint = await ledger.held("joint");
+      const heldPersonal = await ledger.held("personal");
+      // One read so far: per scope, its first page and the continuation now held, both of this day and zone.
+      for (const [scope, cont] of [
+        ["joint", heldJoint],
+        ["personal", heldPersonal],
+      ] as const) {
+        const calls = ledger.of(scope);
+        expect(
+          calls.map((c) => c.n),
+          `the ${scope} calls before the publication`,
+        ).toEqual([calls[0]?.n, cont.n]);
+        const first = calls[0] as DailyCall;
+        expect(chainFrom([first], first).complete).toBe(false);
+        expect({ day: first.day, zone: first.zone }).toEqual({
+          day,
+          zone: ZONE,
         });
-    });
-    await page.route(`**${API}/daily?**`, async (route) => {
-      const url = new URL(route.request().url());
-      if (url.searchParams.has("revision") && !published) {
-        published = true;
-        // Another write lands between the two pages: the revision the continuation names is no longer current.
-        await makeTask(page, id, def(), { title: "I-T12 publication" });
+        expect(
+          { revision: cont.revision, after: cont.after },
+          `the ${scope} continuation names the first page's revision and cursor`,
+        ).toEqual({
+          revision: first.page?.revision,
+          after: first.page?.next,
+        });
+        expect(first.page?.ids, `the ${scope} first page`).toEqual(
+          made.slice(0, 2).map((m) => m.occurrenceId),
+        );
       }
-      await route.continue();
-    });
-    // A fresh mount reads the page size (the environment is built when the boundary mounts).
-    await reopenBound(
-      page,
-      id.account_id,
-      `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`,
-    );
-    await page.evaluate(() => {
-      (
-        window as unknown as { __atlasTasksDailyPageSize?: number }
-      ).__atlasTasksDailyPageSize = 2;
-    });
-    await go(page, "/tasks");
-    await go(page, `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`);
-    for (const m of made)
+      const oldFirst = {
+        joint: (ledger.of("joint")[0] as DailyCall).page?.items[0],
+        personal: (ledger.of("personal")[0] as DailyCall).page?.items[0],
+      };
+      for (const scope of ["joint", "personal"] as const) {
+        expect(oldFirst[scope]?.id).toBe(sentinel.occurrenceId);
+        expect(oldFirst[scope]?.outcome, scope).not.toBe("complete");
+        expect(oldFirst[scope]?.actionable, scope).toBe(true);
+      }
+
+      // Other writes land between the two pages, through the backend: the sentinel is marked done, `leaving` is archived (it leaves the
+      // day) and a task is created.
+      expect(
+        (
+          await send(
+            page,
+            id,
+            record(sentinel.occurrenceId, sentinel.progressId, id.account_id, {
+              kind: "checkbox",
+              complete: true,
+            }),
+            { [sentinel.progressId]: 1 },
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await send(
+            page,
+            id,
+            commands.archive({ taskId: leaving.taskId, archived: true }),
+            { [leaving.taskId]: 1 },
+          )
+        ).status,
+      ).toBe(200);
+      publication = await makeTask(page, id, def(), {
+        title: "I-T12 publication",
+      });
+
+      // The joint continuation, released while its read is still the current one: refused 409 by the server, and the SAME read asks
+      // the joint first page again (no cursor, no revision) and walks the newer revision to its end.
+      const sinceJoint = ledger.calls.length;
+      ledger.release("joint");
+      await ledger.answered(heldJoint);
+      expect(heldJoint.status).toBe(409);
+      await expect
+        .poll(() => settledSince(ledger.calls, sinceJoint), {
+          message: "the page asks /daily again after the joint 409",
+          timeout: 60_000,
+        })
+        .toBe(true);
+      // Only the joint scope was asked again: the personal continuation is still held, so no other read began (a new read asks both
+      // scopes), and the restart is the held read's own.
+      const afterJoint = ledger.calls.slice(sinceJoint);
+      expect(
+        afterJoint.map((c) => c.scope),
+        "the calls after the joint 409",
+      ).toEqual(afterJoint.map(() => "joint"));
+      const joint = chainFrom(ledger.calls, afterJoint[0] as DailyCall);
+      expect(joint.complete, "the joint restart reaches its last page").toBe(
+        true,
+      );
+
+      const sincePersonal = ledger.calls.length;
+      ledger.release("personal");
+      await ledger.answered(heldPersonal);
+      expect(heldPersonal.status).toBe(409);
+      await expect
+        .poll(() => settledSince(ledger.calls, sincePersonal), {
+          message: "the page asks /daily again after the personal 409",
+          timeout: 60_000,
+        })
+        .toBe(true);
+      const afterPersonal = ledger.calls.slice(sincePersonal);
+      expect(
+        afterPersonal.map((c) => c.scope),
+        "the calls after the personal 409",
+      ).toEqual(afterPersonal.map(() => "personal"));
+      const personal = chainFrom(ledger.calls, afterPersonal[0] as DailyCall);
+      expect(
+        personal.complete,
+        "the personal restart reaches its last page",
+      ).toBe(true);
+
+      // The accepted chains are wholly of the newer revision: complete, unmixed, and carrying the publication and the sentinel's change.
+      expect(joint.revision).toBeGreaterThan(heldJoint.revision as number);
+      expect(personal.revision).toBeGreaterThan(
+        heldPersonal.revision as number,
+      );
+      for (const chain of [joint, personal]) {
+        const ids = chain.items.map((item) => item.id);
+        expect(new Set(ids).size, "no item twice").toBe(ids.length);
+        expect(ids).toEqual([...ids].sort());
+        for (const m of [sentinel, staying, publication])
+          expect(ids).toContain(m.occurrenceId);
+        expect(ids).not.toContain(leaving.occurrenceId);
+      }
+      const newSentinel = {
+        joint: joint.items.find((i) => i.id === sentinel.occurrenceId),
+        personal: personal.items.find((i) => i.id === sentinel.occurrenceId),
+      };
+      for (const scope of ["joint", "personal"] as const) {
+        expect(newSentinel[scope]?.outcome, scope).toBe("complete");
+        expect(newSentinel[scope]?.actionable, scope).toBe(false);
+      }
+
+      // The screen shows that answer. This device's cache (sync stopped) has heard of neither the record nor the archive, so only the
+      // newer pages can make the sentinel done; and `leaving`, which only the OLD pages list, is the device's own row, not the server's.
+      for (const m of [sentinel, staying])
+        await expect(
+          page.locator(`[data-today-row="${m.occurrenceId}"]`),
+        ).toHaveAttribute("data-source", "server", { timeout: 60_000 });
       await expect(
-        page.locator(`[data-today-row="${m.occurrenceId}"]`),
+        page.locator(`[data-today-row="${sentinel.occurrenceId}"]`),
+      ).toHaveAttribute("data-pill", "done");
+      await expect(
+        page.locator(`[data-today-row="${leaving.occurrenceId}"]`),
+        "the row only the old pages list is this device's own",
+      ).toHaveAttribute("data-source", "local");
+      await expect(page.locator("[data-today-error]")).toHaveCount(0);
+      // Isolation held: one read, two restarts, nothing else asked; the cache did not move; the day did not change under the test.
+      await ledger.quietFor(1_500);
+      expect(ledger.calls.length).toBe(
+        2 + 2 + joint.calls.length + personal.calls.length,
+      );
+      expect(await appliedRevision(page, id.account_id)).toBe(applied);
+      expect(today()).toBe(day);
+    } finally {
+      await ledger.dispose();
+      await page.evaluate(
+        (a) => window.__atlasData?.startSync(a),
+        id.account_id,
+      );
+    }
+    // Ordinary sync resumes: the publication and the archive reach the cache and the screen.
+    const published = publication as Made | null;
+    expect(published).not.toBeNull();
+    await untilDelivered(page, id.account_id, [published as Made]);
+    await expect(
+      page.locator(`[data-today-row="${(published as Made).occurrenceId}"]`),
+    ).toHaveAttribute("data-source", "server", { timeout: 60_000 });
+    await expect(
+      page.locator(`[data-today-row="${leaving.occurrenceId}"]`),
+    ).toHaveCount(0, { timeout: 60_000 });
+  });
+
+  test("a 409 that reaches a read a newer read has already replaced is dropped: the replacement stays shown, the old read neither restarts nor publishes", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(409);
+    const { page, id } = await bootAs(context, main, "/tasks");
+    const day = today();
+    const made: Made[] = [];
+    for (let i = 0; i < 3; i += 1)
+      made.push(await makeTask(page, id, def(), { title: `I-T12b ${i}` }));
+    await untilDelivered(page, id.account_id, made);
+    const ledger = await dailyLedger(page, ["joint", "personal"]);
+    try {
+      await go(page, todayPath(day));
+      // The old read is held at both continuations: it can ask nothing more until they are released.
+      const heldJoint = await ledger.held("joint");
+      const heldPersonal = await ledger.held("personal");
+      for (const scope of ["joint", "personal"] as const)
+        expect(ledger.of(scope)).toHaveLength(2);
+      const mark = ledger.calls.length;
+
+      // A publication, delivered by the running sync engine: committed content begins a newer read, which completes while the old one
+      // is still held. Its first pages can only be a newer read's (the old read's chains are blocked).
+      const publication = await makeTask(page, id, def(), {
+        title: "I-T12b publication",
+      });
+      await page.evaluate(() => window.__atlasData?.nudgeSync());
+      await untilDelivered(page, id.account_id, [publication]);
+      await expect(
+        page.locator(`[data-today-row="${publication.occurrenceId}"]`),
       ).toHaveAttribute("data-source", "server", { timeout: 60_000 });
-    expect(published).toBe(true);
-    const refused = statuses.findIndex((s) => s.revision && s.status === 409);
-    expect(refused).toBeGreaterThanOrEqual(0);
-    expect(
-      statuses.slice(refused + 1).some((s) => !s.revision && s.status === 200),
-    ).toBe(true);
+      await ledger.quietFor(2_000);
+      const replacement = { joint: 0, personal: 0 };
+      for (const scope of ["joint", "personal"] as const) {
+        const firsts = ledger
+          .of(scope)
+          .filter((c) => c.n >= mark && c.revision === null);
+        expect(firsts.length, `a newer ${scope} read began`).toBeGreaterThan(0);
+        // The newest is complete and of a newer revision than the held continuation; it lists the publication.
+        const chain = chainFrom(ledger.calls, firsts.at(-1) as DailyCall);
+        expect(chain.complete).toBe(true);
+        const heldRevision = (scope === "joint" ? heldJoint : heldPersonal)
+          .revision as number;
+        expect(chain.revision).toBeGreaterThan(heldRevision);
+        expect(chain.items.map((i) => i.id)).toContain(
+          publication.occurrenceId,
+        );
+        replacement[scope] = chain.calls.length;
+      }
+      const settled = ledger.calls.length;
+
+      // The old continuations are released only now: the server refuses both 409, and the old read, no longer current, asks nothing.
+      ledger.release("joint");
+      ledger.release("personal");
+      await ledger.answered(heldJoint);
+      await ledger.answered(heldPersonal);
+      expect([heldJoint.status, heldPersonal.status]).toEqual([409, 409]);
+      await ledger.quietFor(2_000);
+      expect(
+        ledger.calls.slice(settled).map((c) => c.n),
+        "no /daily request after the old read's 409s",
+      ).toEqual([]);
+      // The replacement is still what the screen shows; the old read published nothing and reported no failure.
+      for (const m of [...made, publication])
+        await expect(
+          page.locator(`[data-today-row="${m.occurrenceId}"]`),
+        ).toHaveAttribute("data-source", "server");
+      await expect(page.locator("[data-today-error]")).toHaveCount(0);
+      expect(replacement.joint).toBeGreaterThan(1);
+      expect(today()).toBe(day);
+    } finally {
+      await ledger.dispose();
+    }
   });
 });
 

@@ -440,9 +440,10 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
-        tasks: 21,
+        // WEB-10a revision 27 (R39): I-T12's supersession case is the 22nd task case.
+        tasks: 22,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(221);
+      expect(inBrowser(whole, browser)).toHaveLength(222);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -501,7 +502,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       snapshot: 18,
       pages: 39,
       "password-path": 24,
-      tasks: 63,
+      tasks: 66,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
@@ -613,8 +614,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 221,
-        passed: 215,
+        planned_cases: 222,
+        passed: 216,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
