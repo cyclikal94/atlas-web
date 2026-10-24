@@ -99,6 +99,10 @@ describe("notices about a sign-in that finished while an account displays", () =
         within(remaining).queryByText(NEUTRAL_COPY["1c.superseded"].message) ===
           null,
     ).toBe(true);
+    expect(
+      document.querySelector('[data-notice="feedback-superseded"]'),
+    ).toBeNull();
+    expect(remaining).toBeNull();
   });
 
   test("linking single sign-on says so", async () => {
@@ -115,5 +119,23 @@ describe("notices about a sign-in that finished while an account displays", () =
     expect(
       await screen.findByText(MESSAGE_TEXT.sso_linked),
     ).toBeInTheDocument();
+  });
+});
+
+describe("WEB-08c R4 (matrix 3.7.2, T22 t5(i), lifecycle row 7): where a tree starts", () => {
+  test("the page's first tree and the same account's later trees keep the address; a tree for a DIFFERENT account starts at / (synchronously, before its router exists)", () => {
+    const factory = createProtectedTree(sessionDouble());
+    history.replaceState(null, "", "/settings/signing-in?x=1");
+    factory("acct-c");
+    expect(`${location.pathname}${location.search}`).toBe(
+      "/settings/signing-in?x=1",
+    );
+    factory("acct-c");
+    expect(location.pathname).toBe("/settings/signing-in");
+    factory("acct-y");
+    expect(`${location.pathname}${location.search}`).toBe("/");
+    history.replaceState(null, "", "/settings");
+    factory("acct-y");
+    expect(location.pathname).toBe("/settings");
   });
 });

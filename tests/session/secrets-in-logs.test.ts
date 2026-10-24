@@ -75,8 +75,13 @@ describe("secrets never reach a log (EC-48)", () => {
     const haystack = JSON.stringify(emitted) + consoleCalls.join("\n");
     for (const secret of secrets) expect(haystack).not.toContain(secret);
     // At rest, once the attempt is over, the durable record holds none of them either (the verifier is deleted at
-    // settlement; a grant, password, CSRF token and cookie are never written).
-    const atRest = JSON.stringify(f.store.records);
+    // settlement; a grant, password and cookie are never written). ADAPTED (WEB-08c revision 2, human decision
+    // HF1-SHARED-CONFIRMATION-20261013): the settled session's CSRF token is now written in exactly ONE place, `auth_state.confirmation`
+    // (same-origin storage, shared by the origin's pages); it must appear nowhere else, and it is still never logged (above).
+    const records = structuredClone(f.store.records);
+    const shared = records.auth_state.confirmation;
+    if (shared) shared.csrf_token = "";
+    const atRest = JSON.stringify(records);
     for (const secret of secrets) expect(atRest).not.toContain(secret);
   });
 });

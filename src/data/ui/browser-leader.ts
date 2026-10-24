@@ -97,6 +97,7 @@ export function startBrowserLeader(
     markers,
     conflicts: host.conflicts,
     ids: { uuid: () => crypto.randomUUID() },
+    visible: () => document.visibilityState === "visible",
     publish: (attachment) => host.setLeader(attachment),
     elapsed: () => performance.now(),
     ...(options.trace ? { trace: options.trace } : {}),

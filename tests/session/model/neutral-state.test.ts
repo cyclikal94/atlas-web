@@ -119,8 +119,18 @@ describe("deriveNeutral", () => {
     );
     expect(derive(recs, { waitingOnOtherWindow: true })).toBe("1e.waiting");
     expect(derive(recs, { readFailure: true })).toBe("1e.read_failure");
-    expect(derive(recs, { recovery: "catching_up" })).toBe("2");
-    expect(derive(recs, { recovery: "failed" })).toBe("3");
+    // ADAPTATION (WEB-08c revision 4, R9 of the review of 14 October 2026): the original asserted states 2 and 3 from the report alone,
+    // with NO fence (`recs` has none). That fallback is the R9 defect: a report the page still held after the recovery cleared its fence
+    // kept the page gated for ever. The original intent, "the catch-up states are named from the recovery report", is kept where recovery
+    // applies (older-epoch fences: the next test, and `catchUp` below); without a fence the report names nothing.
+    expect(derive(recs, { recovery: "catching_up" })).toBeNull();
+    expect(derive(recs, { recovery: "failed" })).toBeNull();
+    const catchUp = records({
+      settled: { epoch: 3 },
+      fences: { A: [invalid(1, 1)] },
+    });
+    expect(derive(catchUp, { recovery: "catching_up" })).toBe("2");
+    expect(derive(catchUp, { recovery: "failed" })).toBe("3");
     expect(derive(recs, { notice: "1a.device_changed" })).toBe(
       "1a.device_changed",
     );

@@ -120,21 +120,19 @@ export default defineConfig(({ mode }) => {
     preview: { proxy, cors: false },
     build: {
       target: "es2022",
-      // The PWA test build injects no `<link rel="modulepreload">` into its HTML, like the production build (whose entry is one chunk and
-      // has none). With the worker answering the precached modules, Chromium 153 discards such HTML preloads with a console warning ("a
-      // cross-world service worker resource mismatch"), intermittently; preloads made at run time for lazy chunks are kept (WEB-14a,
-      // docs/pwa.md).
-      ...(pwaFixture
-        ? {
-            modulePreload: {
-              resolveDependencies: (
-                _file: string,
-                deps: string[],
-                context: { hostType: "html" | "js" },
-              ) => (context.hostType === "html" ? [] : deps),
-            },
-          }
-        : {}),
+      // PWA fixture HTML preloads conflict with the worker's cached modules in Chromium.
+      // Lazy imports must also avoid preloading the already executed entry (WebKit HF-11).
+      modulePreload: {
+        resolveDependencies: (_filename, deps, { hostType }) =>
+          hostType === "html" && pwaFixture
+            ? []
+            : hostType === "js"
+              ? deps.filter(
+                  (dep) =>
+                    !/(^|\/)assets\/(index|fixture)-[^/]+\.js$/.test(dep),
+                )
+              : deps,
+      },
       outDir: pwaFixture
         ? "dist-pwa/fixture"
         : fixture

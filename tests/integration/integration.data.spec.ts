@@ -5,6 +5,7 @@ import {
   bootHarness,
   expect,
   type ProxyRule,
+  paceSignIn,
   proxy,
   type RawSession,
   raw,
@@ -30,31 +31,8 @@ const API = "/api/experimental/v1";
 
 // The released backend allows 10 password attempts per account in a fixed 60 s window (and 120 requests per source). These specs sign in
 // far more often than that, so EVERY sign-in here (in a page or raw) first waits until fewer than 8 attempts of that account are less
-// than a minute old. The ledger is a file of the stack's own state (a failed test restarts the worker, which would lose memory).
-const LEDGER = stackFile("atlas-signin-ledger.json");
-async function budget(who: Who): Promise<void> {
-  for (;;) {
-    let all: Record<string, number[]> = {};
-    try {
-      all = JSON.parse(readFileSync(LEDGER, "utf8")) as Record<
-        string,
-        number[]
-      >;
-    } catch {
-      all = {};
-    }
-    const now = Date.now();
-    const recent = (all[who] ?? []).filter((t) => now - t < 60_000);
-    if (recent.length < 8) {
-      all[who] = [...recent, now];
-      writeFileSync(LEDGER, JSON.stringify(all));
-      return;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, 60_000 - (now - (recent[0] ?? now)) + 250),
-    );
-  }
-}
+// than a minute old. The ledger is a file of the stack's own state (helpers.ts `paceSignIn`; a failed test restarts the worker, which would lose memory).
+const budget = (who: Who) => paceSignIn(who);
 const signIn = async (page: Page, who: Who) => {
   await budget(who);
   return signInUnpaced(page, who);

@@ -3,6 +3,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import {
   expect,
   exposeSession,
+  paceSignIn,
   proxy,
   type RawSession,
   raw,
@@ -37,30 +38,7 @@ import {
 const API = "/api/experimental/v1";
 
 // The released backend throttles password sign-ins (10 per account per minute): the same paced ledger as the data specs, keyed by stack.
-const LEDGER = stackFile("atlas-signin-ledger.json");
-async function budget(who: Who): Promise<void> {
-  for (;;) {
-    let all: Record<string, number[]> = {};
-    try {
-      all = JSON.parse(readFileSync(LEDGER, "utf8")) as Record<
-        string,
-        number[]
-      >;
-    } catch {
-      all = {};
-    }
-    const now = Date.now();
-    const recent = (all[who] ?? []).filter((t) => now - t < 60_000);
-    if (recent.length < 8) {
-      all[who] = [...recent, now];
-      writeFileSync(LEDGER, JSON.stringify(all));
-      return;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, 60_000 - (now - (recent[0] ?? now)) + 250),
-    );
-  }
-}
+const budget = (who: Who) => paceSignIn(who);
 const signIn = async (page: Page, who: Who) => {
   await budget(who);
   return signInUnpaced(page, who);

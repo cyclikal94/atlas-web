@@ -1,6 +1,7 @@
 import type { AnyRoute } from "@tanstack/react-router";
 import { buildCalendarsSection } from "../calendars/section";
 import { buildAppearanceSection } from "./appearance-section";
+import { SESSIONS_SECTION_ROUTE, settingsPath } from "./section-routes";
 import { buildSessionsDevicesSection } from "./sessions-devices/section";
 import { buildSigningInSection } from "./signing-in/section";
 import { buildYourDataSection } from "./your-data/section";
@@ -39,7 +40,7 @@ const SECTIONS: readonly SettingsSection[] = [
     id: "sessions",
     label: "Sessions & devices",
     description: "Where you're signed in, and the devices that sync.",
-    route: "sessions",
+    route: SESSIONS_SECTION_ROUTE,
     order: 30,
     owner: "WEB-08",
     build: buildSessionsDevicesSection,
@@ -76,9 +77,6 @@ const SECTIONS: readonly SettingsSection[] = [
 export const settingsSections = (): readonly SettingsSection[] =>
   [...SECTIONS].sort((a, b) => a.order - b.order);
 
-/**
- * The link target of a registry section. Its routes are built at run time (see `settingsRoute`), so the typed router does not
- * know them; this is the one place that says so.
- */
+/** The link target of a registry section (see `settingsPath`). */
 export const sectionPath = (section: SettingsSection): "/settings" =>
-  `/settings/${section.route}` as "/settings";
+  settingsPath(section.route);

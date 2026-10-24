@@ -119,6 +119,22 @@ export type Fence =
   | (FenceBase & { kind: "operation"; envelope: Envelope });
 export type FenceKind = Fence["kind"];
 
+/**
+ * WEB-08c, human decision HF1-SHARED-CONFIRMATION-20261013: the latest server confirmation of the settled session, shared by every page of the
+ * origin. Written by the settlement (the activation's answer) and by any page's clean identity read of exactly that session (account, epoch,
+ * session id), in the transaction that deletes that read's lease. It is NOT part of `settled` (which changes only under `atlas-auth`, P-F):
+ * it confers nothing. A page adopts `csrf_token` for (account, epoch) only when it names the session the record settles, and skips its resume
+ * verification while `confirmed_at` is less than the interval old. A wall-clock timestamp: it only spares a background check, never permits
+ * display or sending, and nothing is ordered by it (D-09). Absent in records written before the decision.
+ */
+export interface Confirmation {
+  account_id: AccountId;
+  epoch: Epoch;
+  session_id: SessionId;
+  csrf_token: string;
+  confirmed_at: IsoInstant;
+}
+
 export interface AuthState {
   schema: 1;
   /** Only increases; never reused. */
@@ -129,6 +145,8 @@ export interface AuthState {
   settled: Settled | null;
   fences: Record<AccountId, Fence[]>;
   leases: Record<LeaseId, Lease>;
+  /** HF1-SHARED-CONFIRMATION-20261013 (`Confirmation`); optional, so earlier records stay valid. */
+  confirmation?: Confirmation | null;
 }
 
 /** D-02: the device ID is a record in `atlas-auth`. */

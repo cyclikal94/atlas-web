@@ -29,7 +29,12 @@ import {
 } from "../../scripts/integration/stacks.mjs";
 
 /**
- * WEB-14a revision 15 (review R22, R23): the integration runner's stack assignment and schedule, through the runner's own modules
+ * WEB-08c revision 14 (review 14: R17 `integration-stack-throttle-isolation`, R18 `integration-runner-failfast`): the integration
+ * runner's stack assignment and schedule, through the runner's own modules. Adapted from the sibling WEB-14a working tree's tests
+ * (revisions 15/16, commit dab446e: a reference input, not accepted or merged; its review labels R22/R23 are kept on the tests that
+ * came from it) to this branch's stacks; the process-group ownership tests are this task's own (process-groups.mjs).
+ *
+ * WEB-14a's description, adapted:
  * (scripts/integration/stacks.mjs, schedule.mjs). Discovery is Playwright's real `--list` of tests/integration (no backend, no
  * browser); only the stack PROCESSES are doubles: `execute` writes the result file a stack's Playwright would write.
  *
@@ -322,7 +327,7 @@ async function world({
       narrowed,
       evidence,
       env,
-      app: "",
+      postgres: false,
       layer: "test",
     },
     deps: {
@@ -432,11 +437,12 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         oidc: 10,
         "oidc-off": 1,
         settings: 10,
+        lifecycle: 17,
+        "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(178);
-      expect(inBrowser(pwa, browser)).toHaveLength(1);
+      expect(inBrowser(whole, browser)).toHaveLength(211);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -445,24 +451,30 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       ).toBe(s.name === "sharing" || s.name === "snapshot");
   }, 120_000);
 
-  test("compared with the schedule Review ran, only sharing, snapshot, pages, password-path and calendar cases move: from base to their own fresh stacks", async () => {
-    // The revision-14 stacks, verbatim (scripts/integration/run.mjs at 6ad80ae).
+  test("compared with the schedule review 14 ran, only sharing, snapshot, pages and password-path cases move: from base to their own fresh stacks", async () => {
+    // The stacks of candidate b003cff (review 14), verbatim (scripts/integration/run.mjs STACKS).
     const OLD: Array<[string, string[]]> = [
       [
         "base",
         [
           "--grep-invert",
-          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|U)[0-9]|I-2[0-9]|I-30",
+          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|L|U)[0-9]|I-CAL|I-2[0-9]|I-30",
         ],
       ],
       ["i14e", ["--grep", "I-14e"]],
       ["i14d", ["--grep", "I-14d \\(revision 11\\)"]],
       ["data", ["tests/integration/integration.data.spec.ts"]],
+      ["calendar", ["tests/integration/integration.calendars.spec.ts"]],
       ["traces", ["--grep", "I-20|I-22|I-23"]],
       ["registration", ["--grep", "I-24|I-25|I-26"]],
       ["oidc", ["--grep", "I-21|I-27|I-28a"]],
       ["oidc-off", ["--grep", "I-28b"]],
       ["settings", ["--grep", "I-29|I-30"]],
+      ["lifecycle", ["tests/integration/integration.lifecycle.spec.ts"]],
+      [
+        "lifecycle-restart",
+        ["tests/integration/integration.lifecycle-restart.spec.ts"],
+      ],
     ];
     const before = new Map<string, string>();
     for (const [name, args] of OLD)
@@ -483,13 +495,12 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       expect(was).toBe("base");
       moved[name] = (moved[name] ?? 0) + 1;
     }
-    // Per engine: sharing 7, snapshot 6 (R22), pages 13, password-path 8 (revision 15) and the accepted calendar stack's 13.
+    // Per engine: sharing 7, snapshot 6 (R17), pages 13 and password-path 8 (the measured base overrun).
     expect(moved).toEqual({
       sharing: 21,
       snapshot: 18,
       pages: 39,
       "password-path": 24,
-      calendar: 39,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
@@ -601,8 +612,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 177,
-        passed: 171,
+        planned_cases: 210,
+        passed: 204,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -1177,7 +1188,7 @@ test("a skip is designed only for its own file and under its own condition", () 
   });
   const noOidc =
     "this stack did not configure the stub OpenID Connect provider";
-  const context = { env: {}, oidc: false, app: "" };
+  const context = { env: {}, oidc: false, postgres: false };
   expect(
     designedSkip("integration.web08b-oidc.spec.ts", skipped(noOidc), context),
   ).toBe(noOidc);
@@ -1220,6 +1231,8 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-oidc",
     "-oidc-off",
     "-settings",
+    "-lifecycle",
+    "-lifecycle-restart",
     "-sharing",
     "-snapshot",
   ]);
@@ -1269,7 +1282,7 @@ describe("R23a (revision 16): a stack passes only on terminal execution evidence
       startedAt: START - 1_000,
       finishedAt: START + 60_000,
       project: "integration-chromium",
-      context: { env: {}, oidc: false, app: "" },
+      context: { env: {}, oidc: false, postgres: false },
       ...over,
     });
   const sum = (counts: object) =>
@@ -1670,7 +1683,7 @@ describe("R23a (revision 16): a stack passes only on terminal execution evidence
 
   test("the real measurement skips are designed only while ATLAS_PROFILE is unset", () => {
     const judged = judge(real(), {
-      context: { env: { ATLAS_PROFILE: "1" }, oidc: false, app: "" },
+      context: { env: { ATLAS_PROFILE: "1" }, oidc: false, postgres: false },
     });
     expect(judged.verdict).toBe("incomplete");
     expect(judged.counts).toMatchObject({

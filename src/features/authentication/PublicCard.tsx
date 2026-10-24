@@ -3,7 +3,11 @@ import { Button } from "../../components/ui/button";
 import { NeutralStatus } from "../../components/ui/neutral-status";
 import { authFeedback, type FeedbackItem } from "./feedback";
 import { MessageText } from "./MessageText";
-import { LOCK_WAIT_BANNER, SUPERSEDED_BANNER } from "./outcome-copy";
+import {
+  ENDED_BANNER,
+  LOCK_WAIT_BANNER,
+  SUPERSEDED_BANNER,
+} from "./outcome-copy";
 
 /**
  * The frame of the public surfaces (sign-in and join): a centred card, the Atlas mark, a heading. It shows nothing about any
@@ -80,6 +84,11 @@ export function FeedbackBanners({ items }: { items: readonly FeedbackItem[] }) {
                   {LOCK_WAIT_BANNER.heading}.
                 </strong>{" "}
                 {LOCK_WAIT_BANNER.message}
+              </>
+            ) : item.kind === "ended" ? (
+              <>
+                <strong className="font-medium">{ENDED_BANNER.heading}.</strong>{" "}
+                {ENDED_BANNER.message}
               </>
             ) : (
               <MessageText message={item.message} />

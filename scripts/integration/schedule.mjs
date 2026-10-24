@@ -1,4 +1,5 @@
-// WEB-14a revision 15 (review R22, R23): one integration invocation, from the case inventory to the exit status.
+// WEB-08c revision 14 (review 14: R17, R18): one integration invocation, from the case inventory to the exit status. Adapted from
+// the sibling WEB-14a working tree (revisions 15/16, commit dab446e: a reference input, not accepted or merged); see stacks.mjs.
 //
 //   1. refuse to start if any evidence path of this invocation already exists (no result is overwritten or mistaken for this run's),
 //      then claim the evidence directory EXCLUSIVELY (`invocation.json`, created only if absent): of two invocations given the same
@@ -12,7 +13,7 @@
 //   4. write the schedule after every stack and the summary at the end; exit non-zero unless every planned stack passed AND every
 //      evidence write succeeded.
 //
-// Revision 16 (review R23b): an evidence write that fails is latched for the whole invocation (it is listed in the summary, the
+// Evidence writes (WEB-14a revision 16, review R23b, kept): an evidence write that fails is latched for the whole invocation (it is listed in the summary, the
 // summary can then never say passed or complete, and the exit is non-zero), and it stops the schedule BEFORE the next launch,
 // including the failure of the very record that would admit that launch. A result file that cannot be read or judged, and any other
 // error after a launch, makes that stack incomplete, marks the rest not run and still reaches the final schedule and summary.
@@ -114,7 +115,8 @@ export function playwrightLister({ root, browsers, dir, env }) {
 const exitFor = (signal) => (signal === "SIGINT" ? 130 : 143);
 
 export async function runIntegration({ options, deps }) {
-  const { browsers, stacks, narrowed, evidence, env, app, layer } = options;
+  const { browsers, stacks, narrowed, evidence, env, postgres, app, layer } =
+    options;
   // The default suite's whole manifest (closure check) and whether this run is only a named subset of it (`--stacks`).
   const manifest = options.manifest ?? stacks;
   const partial = Boolean(options.partial);
@@ -362,7 +364,7 @@ export async function runIntegration({ options, deps }) {
               startedAt,
               finishedAt,
               project: `integration-${entry.browser}`,
-              context: { env, oidc: entry._stack.oidc, app },
+              context: { env, oidc: entry._stack.oidc, postgres, app },
               refusals: entry.throttle.refusals_429,
               deliberateThrottle: entry._deliberate,
             });
@@ -380,6 +382,8 @@ export async function runIntegration({ options, deps }) {
         entry.counts = unprovenAll(entry);
       }
       const problems = cleaned?.problems ?? [];
+      if ((cleaned?.notes ?? []).length > 0)
+        entry.cleanup_notes = cleaned.notes;
       if (problems.length > 0) {
         entry.cleanup_problems = problems;
         if (entry.state === "passed") {

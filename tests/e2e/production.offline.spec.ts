@@ -1,3 +1,4 @@
+import type { Page } from "@playwright/test";
 import { test as declared } from "./auth-helpers";
 import {
   exempt,
@@ -21,6 +22,13 @@ import {
  * page of the same origin (WebKit logs each failed offline navigation, which is the browser's message, not the app's). Every original
  * assertion is kept.
  */
+async function rootReady(page: Page) {
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
+  ).toBeVisible();
+  await expect(page.locator("#protected-root")).toHaveAttribute("inert", "");
+}
+
 test.use({ firstGeneration: "production-a" });
 
 test("a cached deep link opens offline, and backend paths never receive the shell", async ({
@@ -39,6 +47,7 @@ test("a cached deep link opens offline, and backend paths never receive the shel
   await quiet(page);
   await page.reload();
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+  await rootReady(page);
   await quiet(page);
   await goOffline(context, generations, browserName);
   await page.goto(`${generations.url}/tasks/example`);
@@ -90,6 +99,7 @@ declared(
       "Playwright WebKit cannot emulate offline for service-worker navigations",
     );
     await page.goto("/");
+    await rootReady(page);
     await page.evaluate(async () => {
       await navigator.serviceWorker.register("/sw.js");
       await navigator.serviceWorker.ready;
@@ -102,6 +112,7 @@ declared(
     // after "load"; going offline and navigating away while one is in flight aborts it, and Firefox logs that abort as "A ServiceWorker
     // intercepted the request and encountered an unexpected error" (driver attempt 6, run 2026-10-10T22-59-09.801Z-ac97c236: the old
     // page's request was the one aborted; the new page loaded the same chunk from the worker). The page settles first; nothing is relaxed.
+    await rootReady(page);
     await page.waitForLoadState("networkidle");
     await context.setOffline(true);
     const token = "d".repeat(64);

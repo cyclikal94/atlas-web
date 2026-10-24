@@ -7,12 +7,15 @@ export interface Stack {
   args?: string[];
   oidc: boolean;
   deliberateThrottle?: boolean;
+  /** What the stack's cases change in their own backend (documentation for the isolation argument). */
+  mutates?: string;
   passthrough?: string[];
 }
 export interface SkipContext {
   env: Record<string, string | undefined>;
   oidc: boolean;
-  app: string;
+  postgres: boolean;
+  app?: string;
 }
 export const DEFAULT_STACKS: Stack[];
 export const SEPARATE: Array<{
@@ -27,6 +30,8 @@ export const DESIGNED_SKIPS: Array<{
   when: (context: SkipContext) => boolean;
 }>;
 export function stackArgs(stack: Stack): string[];
+export const PLAYWRIGHT_POLICY: string[];
+export function passthroughProblems(passthrough: string[]): string[];
 export function planStacks(options: {
   grep: string;
   passthrough: string[];
@@ -84,16 +89,21 @@ export function judgeStack(options: {
   refusals?: Array<{ method: string; path: string; at: number }>;
   deliberateThrottle?: boolean;
 }): Judged;
-export function throttleRecord(
-  exchanges: Array<{
-    method: string;
-    path: string;
-    status: number;
-    at: number;
-  }>,
-): {
+export const SOURCE_BUDGET: { limit: number; windowMs: number };
+export const SOURCE_BUDGET_CONSUMERS: Array<[string, string]>;
+export function consumesSourceBudget(method: string, path: string): boolean;
+export interface Exchange {
+  method: string;
+  path: string;
+  /** The backend's status; null when the upstream connection failed. */
+  status: number | null;
+  at: number;
+}
+export function throttleRecord(exchanges: Exchange[]): {
   requests: number;
-  sign_in_class_posts: number;
-  sign_in_class_peak_60s: number;
+  source_budget_requests: number;
+  source_budget_by_route: Record<string, number>;
+  source_budget_peak_60s: number;
+  source_budget_limit: number;
   refusals_429: Array<{ method: string; path: string; at: number }>;
 };

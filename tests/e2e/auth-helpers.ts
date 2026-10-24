@@ -12,6 +12,7 @@ import { test as base, expect, type Page } from "@playwright/test";
  */
 export const test = base.extend<{
   provokes: (...provoked: Array<number | "abort" | RegExp>) => void;
+  toleratesNavigationAbort: (engine: string, message: RegExp) => void;
   guard: undefined;
 }>({
   provokes: async ({ page: _page }, use, info) => {
@@ -21,18 +22,41 @@ export const test = base.extend<{
       for (const one of provoked) allowed.add(one);
     });
   },
+  toleratesNavigationAbort: async ({ page: _page }, use, info) => {
+    const list: Array<{ engine: string; message: RegExp }> = [];
+    toleratedByTest.set(info.testId, list);
+    await use((engine, message) => {
+      list.push({ engine, message });
+    });
+  },
   guard: [
-    async ({ page, context, provokes: _provokes }, use, info) => {
+    async (
+      {
+        page,
+        context,
+        provokes: _provokes,
+        toleratesNavigationAbort: _tolerates,
+      },
+      use,
+      info,
+    ) => {
       const problems: string[] = [];
       const watched = new Set<Page>();
       const watch = (target: Page) => {
         if (watched.has(target)) return;
         watched.add(target);
         const label = target === page ? "page" : `page ${watched.size}`;
+        const tolerated = (text: string) =>
+          (toleratedByTest.get(info.testId) ?? []).some(
+            (one) =>
+              one.engine === target.context().browser()?.browserType().name() &&
+              one.message.test(text),
+          );
         target.on("console", (message) => {
           if (message.type() !== "error" && message.type() !== "warning")
             return;
           const text = message.text();
+          if (tolerated(text)) return;
           // Playwright's own notice when a spec runs with `serviceWorkers: "block"` (WEB-14a revision 19): not the application's.
           if (text === "Service Worker registration blocked by Playwright")
             return;
@@ -58,9 +82,10 @@ export const test = base.extend<{
             return;
           problems.push(`${label}: ${message.type()}: ${text}`);
         });
-        target.on("pageerror", (error) =>
-          problems.push(`${label}: pageerror: ${error.message}`),
-        );
+        target.on("pageerror", (error) => {
+          if (!tolerated(error.message))
+            problems.push(`${label}: pageerror: ${error.message}`);
+        });
       };
       watch(page);
       for (const open of context.pages()) watch(open);
@@ -76,5 +101,10 @@ export const test = base.extend<{
   ],
 });
 const allowedByTest = new Map<string, Set<number | "abort" | RegExp>>();
+
+const toleratedByTest = new Map<
+  string,
+  Array<{ engine: string; message: RegExp }>
+>();
 
 export { expect };

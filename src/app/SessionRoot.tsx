@@ -8,6 +8,7 @@ import { JoinSurface } from "../features/authentication/JoinSurface";
 import { publicSurfaceFor } from "../features/authentication/public-route";
 import { SignInSurface } from "../features/authentication/SignInSurface";
 import { signInRequest } from "../features/authentication/sign-in-request";
+import { switchFlow } from "../features/switch/state";
 import { useAppUpdate } from "../lib/pwa/store";
 import {
   type NeutralStateId,
@@ -86,6 +87,15 @@ function NeutralScreen({ pathname }: { pathname: string }) {
   );
   const state =
     view.kind === "signed_out" || view.kind === "neutral" ? view.state : null;
+  // WEB-08c (D-8c-04): "That sign-in didn't finish", raised by `attempt-end.ts` when an indeterminate sign-in was resolved and nothing
+  // settled. On the signed-out sign-in surface it is the accepted 1c.ended CARD; its "Sign in again" leads to the form, and the fact is
+  // then no longer news.
+  const feedback = useSyncExternalStore(
+    authFeedback.subscribe,
+    authFeedback.get,
+    authFeedback.get,
+  );
+  const ended = feedback.find((item) => item.kind === "ended") ?? null;
   // The request holds only while it can be answered: for a sign-in state, or for the join page's "Sign in".
   const answerable =
     (view.kind === "signed_out" && state === null) ||
@@ -105,12 +115,15 @@ function NeutralScreen({ pathname }: { pathname: string }) {
       if (lastShown.current !== null && lastShown.current !== shownAccount)
         authFeedback.clearOnBegin();
       lastShown.current = shownAccount;
+      // WEB-08c: a switch journey opened by another account is no longer anyone's (the protected tree's host also drops it).
+      switchFlow.dropUnless(shownAccount);
       // What the public surfaces carried across the neutral gate (a refusal for the sign-in form, a submitted invitation for the
       // join page) is only for them: once an account displays it is not news, and must not greet the next person to sign out.
       authFeedback.takeFailure();
       invitationMemory.forgetSpent();
     } else if (signedOut && lastShown.current !== null) {
       authFeedback.clearOnBegin();
+      switchFlow.close();
       lastShown.current = null;
     }
   }, [shownAccount, signedOut]);
@@ -125,6 +138,23 @@ function NeutralScreen({ pathname }: { pathname: string }) {
       if (state === null) {
         if (isApiRefusal(api))
           return <CompatibilityScreen issues={[]} api={api} />;
+        if (
+          ended !== null &&
+          !request.requested &&
+          publicSurfaceFor(pathname) === "sign-in"
+        )
+          return (
+            <NeutralState
+              state="1c.ended"
+              actions={{
+                ...session.actions,
+                signIn: () => {
+                  authFeedback.dismiss(ended.id);
+                  session.actions.signIn();
+                },
+              }}
+            />
+          );
         if (request.requested || publicSurfaceFor(pathname) === "sign-in")
           return <SignInSurface mode="signed_out" />;
         return <JoinSurface key={linkVersion} />;

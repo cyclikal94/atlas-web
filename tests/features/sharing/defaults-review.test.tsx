@@ -659,10 +659,21 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     t.stop();
   });
 
-  test("MU-S50: an answer that still predates the opening (the clock went back) is not 'Now': a retryable failure, Confirm disabled", async () => {
+  /**
+   * MU-S50's world (WEB-08c revision 12, R13): the review's clock is the sharing env's `now`, set by the test, and each refresh stamps its
+   * record when its request is MADE (`stamp`), not when the answer is delivered. The original version stamped the Retry answer before
+   * the click (`Date.now() + 1`), while Retry renews its boundary to its own later `now()`: more than a millisecond between the two and
+   * the "fresh" answer predated Retry, so the final assertion depended on execution speed (review 12, MU-S50 failed in a full run).
+   */
+  function staleOpening() {
     const env = stubEnv();
-    let issued = 1;
+    const clock = { now: 100 };
+    let stamp: () => number = () => 1;
+    let held: Promise<void> | null = null;
     env.refreshDefaults = async () => {
+      // Issued now, at the request: a later delivery keeps this time.
+      const issued = stamp();
+      if (held) await held;
       env.setDefaults(
         record(snapshot({ revision: revision(6) }), {
           issued_at: issued,
@@ -671,7 +682,30 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
       );
       return "fetched";
     };
-    mountReview(reviewDraft(record(), ["person"]), env);
+    mountSharing(
+      <DefaultsReview
+        draft={reviewDraft(record(), ["person"])}
+        onClose={vi.fn()}
+      />,
+      { env, sharing: { online: true, now: () => clock.now } },
+    );
+    return {
+      clock,
+      stampAt: (next: () => number) => {
+        stamp = next;
+      },
+      holdDelivery: () => {
+        let release: () => void = () => undefined;
+        held = new Promise((resolve) => {
+          release = resolve;
+        });
+        return release;
+      },
+    };
+  }
+
+  /** The review opened at 100 and its read was answered with a record issued at 1: not "Now", a retryable failure. */
+  async function expectStaleOpeningRefused() {
     await waitFor(() =>
       expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
     );
@@ -679,8 +713,48 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     expect(screen.queryByText(copy.REVIEW_NOW_FAILED)).not.toBeNull();
     const retry = screen.queryByRole("button", { name: copy.TRY_AGAIN });
     expect(retry).not.toBeNull();
-    issued = Date.now() + 1;
-    fireEvent.click(retry as HTMLElement);
+    return retry as HTMLElement;
+  }
+
+  test("MU-S50: an answer that still predates the opening (the clock went back) is not 'Now': a retryable failure, Confirm disabled", async () => {
+    const world = staleOpening();
+    const retry = await expectStaleOpeningRefused();
+    // Retry at 200; its own request is issued at 200, so its answer is "Now".
+    world.clock.now = 200;
+    world.stampAt(() => world.clock.now);
+    fireEvent.click(retry);
+    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
+  });
+
+  test("MU-S50: a Retry answered with a record issued before the Retry (199 for a Retry at 200) is still not 'Now'", async () => {
+    const world = staleOpening();
+    const retry = await expectStaleOpeningRefused();
+    world.clock.now = 200;
+    world.stampAt(() => 199);
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
+    );
+    expect(screen.queryByText(copy.REVIEW_NOW_FAILED)).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: copy.TRY_AGAIN }),
+    ).not.toBeNull();
+    expect(confirmButton()).toBeDisabled();
+  });
+
+  test("MU-S50 control: a Retry's answer delivered late (the clock at 500) is judged by when its request was issued (200), so it is 'Now'", async () => {
+    const world = staleOpening();
+    const retry = await expectStaleOpeningRefused();
+    world.clock.now = 200;
+    world.stampAt(() => world.clock.now);
+    const release = world.holdDelivery();
+    fireEvent.click(retry);
+    await screen.findByText(copy.REVIEW_NOW_LOADING);
+    expect(confirmButton()).toBeDisabled();
+    world.clock.now = 500;
+    await act(async () => {
+      release();
+    });
     await waitFor(() => expect(confirmButton()).not.toBeDisabled());
   });
 

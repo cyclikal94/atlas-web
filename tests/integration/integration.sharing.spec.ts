@@ -5,6 +5,7 @@ import {
   bootHarness,
   expect,
   exposeSession,
+  paceSignIn,
   proxy,
   signIn as signInUnpaced,
   stackFile,
@@ -28,31 +29,8 @@ import {
  */
 const API = "/api/experimental/v1";
 
-// The sign-in pacing of integration.data.spec.ts, in this stack's own ledger: at most 8 attempts per account a minute.
-const LEDGER = stackFile("atlas-signin-ledger.json");
-async function budget(who: Who): Promise<void> {
-  for (;;) {
-    let all: Record<string, number[]> = {};
-    try {
-      all = JSON.parse(readFileSync(LEDGER, "utf8")) as Record<
-        string,
-        number[]
-      >;
-    } catch {
-      all = {};
-    }
-    const now = Date.now();
-    const recent = (all[who] ?? []).filter((t) => now - t < 60_000);
-    if (recent.length < 8) {
-      all[who] = [...recent, now];
-      writeFileSync(LEDGER, JSON.stringify(all));
-      return;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, 60_000 - (now - (recent[0] ?? now)) + 250),
-    );
-  }
-}
+// Sign-in pacing shared with integration.data.spec.ts (the same ledger file per stack): at most 8 attempts per account a minute.
+const budget = (who: Who) => paceSignIn(who);
 const ROTATION: Who[] = ["alice", "carol", "dave", "erin"];
 const ROTATION_FILE = stackFile("atlas-account-rotation.txt");
 let main: Who = "alice";

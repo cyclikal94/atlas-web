@@ -19,6 +19,7 @@ import {
 } from "./auth-settlement";
 import { AuthStub, type Hold } from "./auth-stub";
 import { expect } from "./helpers";
+import { gateLog, recordGateTransitions } from "./lifecycle-browser";
 
 /**
  * WEB-14a revision 19, labelled HARNESS ADAPTATION (Kieran, 15 October 2026): the production build registers the app's service worker
@@ -116,6 +117,22 @@ async function shownAs(
   // Revision 23 (C5, S08): the navigation starts the Settings readers (account, devices, sessions); the card is judged only after their
   // own boundary, which never recomputes the account the caller expects.
   await settleAuth(stub, pagesOf(page), { parked });
+  await expect(page.locator("[data-account-card]")).toContainText(username, {
+    timeout: 20_000,
+  });
+}
+
+// Keep the accepted HF-1 single-click check independent of WEB-14a settlement instrumentation.
+async function shownAsDirectly(page: Page, username: string | RegExp) {
+  const nav = page
+    .getByRole("navigation")
+    .getByRole("link", { name: "Settings" })
+    .first();
+  // WEB-08c revision 2, HF-1: the ORIGINAL single click, unadapted (as at `84a8361`). Revision 1 repeated the click because the other pages'
+  // identity reads right after a settlement surrendered their leases and closed this page's tree for a few milliseconds; the product
+  // correction (HF1-SHARED-CONFIRMATION-20261013: the settlement's token and confirmation are shared) removes those reads, so ONE click must
+  // land. WEB08D-NAVIGATION-FRESHNESS-20261011: WEB-09d verifies it again in the integrated client before beta.
+  await nav.click();
   await expect(page.locator("[data-account-card]")).toContainText(username, {
     timeout: 20_000,
   });
@@ -939,6 +956,46 @@ test.describe("ordering traces in a real engine (two pages, held answers)", () =
       (g) => stub.accounts.get(g.account)?.username === "kieran",
     );
     expect(grantForKieran?.state).toBe("issued");
+  });
+
+  test("HF-1 correction (HF1-SHARED-CONFIRMATION-20261013): after B settles with another page open, NO page makes an identity read, B's tree never closes again, and ONE Settings click lands", async ({
+    context,
+  }) => {
+    const stub = await newStub(context);
+    await recordGateTransitions(context);
+    const [a, b] = await twoTabs(context);
+    const holdActivate = stub.hold(isActivate, 1);
+    await signInForm(b, "sam", "pw2");
+    await expect.poll(() => stub.count("POST", ACTIVATE)).toBe(1);
+    const identityReadsBefore = stub.count("GET", "/browser-sessions/current");
+    holdActivate.release();
+    await expect(
+      b.locator("#protected-root:not([inert])").getByRole("navigation"),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect(
+      a.locator("#protected-root:not([inert])").getByRole("navigation"),
+    ).toBeVisible({ timeout: 20_000 });
+    // Both pages displayed; let every post-settlement request of both run (the sync start, the labels, the device list).
+    await b.waitForTimeout(3_000);
+    expect(
+      stub.count("GET", "/browser-sessions/current") - identityReadsBefore,
+      "no page makes an identity read after the settlement (the shared confirmation and token)",
+    ).toBe(0);
+    // Every write after the settlement carried the settled session's own token (shared, never another session's).
+    const session = stub.cookie;
+    for (const r of stub.requests.filter((r) => r.csrf !== null))
+      expect(r.csrf).toBe(`csrf.${session}`);
+    // B's protected tree, once exposed, was never closed again (no transition back to inert or to the gate).
+    const log = await gateLog(b);
+    const firstOpen = log.findIndex((e) => !e.inert && !e.gateOpen);
+    expect(firstOpen, "B displayed").toBeGreaterThanOrEqual(0);
+    expect(
+      log.slice(firstOpen).filter((e) => e.inert || e.gateOpen),
+      "B's tree never closed after it was first displayed",
+    ).toEqual([]);
+    // The original single click.
+    await shownAsDirectly(b, "sam");
+    await shownAsDirectly(a, "sam");
   });
 
   test("T15 (tab 2 is activating when tab 1 looks): tab 1 is shown 'Finishing sign-in', offers no form and sends nothing, then shows tab 2's account", async ({

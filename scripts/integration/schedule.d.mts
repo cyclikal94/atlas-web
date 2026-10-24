@@ -1,4 +1,4 @@
-import type { Stack } from "./stacks.mjs";
+import type { Exchange, Stack } from "./stacks.mjs";
 
 export const OWNER: string;
 
@@ -16,12 +16,7 @@ export function playwrightLister(options: {
 export interface Launched {
   exitCode: number | null;
   signal?: string | null;
-  exchanges?: Array<{
-    method: string;
-    path: string;
-    status: number;
-    at: number;
-  }>;
+  exchanges?: Exchange[];
 }
 export function runIntegration(options: {
   options: {
@@ -32,13 +27,14 @@ export function runIntegration(options: {
     narrowed: boolean;
     evidence: string;
     env: Record<string, string | undefined>;
-    app: string;
+    postgres: boolean;
+    app?: string;
     layer: string;
   };
   deps: {
     list: (selection: string[], label: string) => Promise<string>;
     execute: (stack: Stack, browser: string) => Promise<Launched>;
-    cleanup: () => Promise<{ problems: string[] }>;
+    cleanup: () => Promise<{ problems: string[]; notes?: string[] }>;
     readReport: (file: string) => string | null;
     exists: (path: string) => boolean;
     /** Creates `file` only if it does not exist (throws otherwise): this invocation's exclusive claim on its evidence directory. */

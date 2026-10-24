@@ -1,16 +1,23 @@
-// WEB-14a revision 15 (review R22, R23): which integration cases run on which fresh stack, and how a stack's outcome is judged.
+// WEB-08c revision 14 (review 14: R17 `integration-stack-throttle-isolation`, R18 `integration-runner-failfast`): which integration
+// cases run on which fresh stack, and how a stack's outcome is judged.
 //
 // Pure: no process is started here. scripts/integration/run.mjs supplies the processes (the backend, the proxy, the preview and
 // Playwright) and scripts/integration/schedule.mjs the order; tests/static/integration-runner.test.ts supplies doubles.
 //
-// R22: the old base stack was "everything a negative title filter did not exclude", so later suites (sharing, snapshot) joined it
-// silently and ran after the password, logout and credential-changing cases on the same backend, accounts and sign-in throttle.
-// Every spec file is now NAMED by exactly one stack or a separate obligation, and `assignCases` checks Playwright's own listing:
-// a discovered case in no stack, in two, or in a file nobody names stops the run before any backend starts.
+// Design provenance: adapted from the sibling WEB-14a working tree (revisions 15/16, commit dab446e, reviews R22/R23/R23a), which
+// is a REFERENCE input only (not accepted, not merged). This task owns, adapts and validates its own copy: its stacks are this
+// branch's (the WEB-08c lifecycle stacks, no PWA obligation), the throttle record counts the pinned backend's exact source-budget
+// handlers rather than a path heuristic, and the runner additionally owns Playwright's process group (run.mjs).
 //
-// Revision 16 (review R23a): a stack passes only on terminal execution evidence. The report's shape, its start time and its totals
-// are checked, every planned case needs exactly one passing result at retry 0 (or the exact designed-skip shape), and every planned
-// case is counted exactly once, as `unproven` when the evidence does not show what happened to it.
+// R17: the old base stack was "everything a negative title filter did not exclude", so later suites (sharing `I-SH…`, snapshot
+// `I-N…`) joined it silently and ran after the password, logout and credential-changing cases on the same backend, accounts and
+// sign-in throttle (review 14: 13 setup failures, POST /browser-sessions 429 `rate_limited`, Retry-After 60). Every spec file is
+// now NAMED by exactly one stack, and `assignCases` checks Playwright's own listing: a discovered case in no stack, in two, or in a
+// file nobody names stops the run before any backend starts.
+//
+// R18: a stack passes only on terminal execution evidence. The report's shape, its start time and its totals are checked, every
+// planned case needs exactly one passing result at retry 0 (or the exact designed-skip shape), and every planned case is counted
+// exactly once, as `unproven` when the evidence does not show what happened to it.
 
 const SPEC = (name) => `tests/integration/integration.${name}.spec.ts`;
 
@@ -19,6 +26,8 @@ const SPEC = (name) => `tests/integration/integration.${name}.spec.ts`;
  * (scripts/integration/run.mjs `main`). `suffix` names the result file (`results-<browser><suffix>.json`, unchanged for the older
  * stacks). `oidc`: whether the stack starts the stub OpenID Connect provider. `deliberateThrottle`: the stack contains a case that
  * provokes the backend's own 429 on purpose (I-30b); anywhere else a backend 429 means the stack's budget was not its own.
+ * `mutates`: what the stack's cases change in their own backend (documentation for the isolation argument; every stack's backend is
+ * fresh, so nothing here reaches another stack).
  */
 export const DEFAULT_STACKS = [
   {
@@ -33,22 +42,26 @@ export const DEFAULT_STACKS = [
       SPEC("profile-sync"),
     ],
     oidc: false,
+    mutates: "compatibility answers, credential swaps, operation replays",
   },
-  // Revision 15: pages and password-path leave base. Measured on the corrected boundary, base with both used the backend's whole
-  // 120-per-minute source budget in 24 s and I-03's sixth to eleventh activation attempts were refused with 429, which I-03 accepts
-  // as "a 4xx" (a false pass the throttle check now fails). WEB-08d measured the same independently.
+  // R17: pages and password-path leave base. The sibling WEB-14a measured base WITH them using the backend's whole 120-per-minute
+  // source budget in 24 s (I-03's later activations refused with 429, which I-03 accepts as "a 4xx": a false pass the throttle check
+  // now fails); WEB-08d measured the same independently. Both sign in many times, so each has a backend of its own.
   {
     name: "pages",
     suffix: "-pages",
     files: [SPEC("pages")],
     grepInvert: "I-14e|I-14d \\(revision 11\\)",
     oidc: false,
+    mutates: "sessions of alice/bob (switching, logout in another page)",
   },
   {
     name: "password-path",
     suffix: "-password-path",
     files: [SPEC("password-path")],
     oidc: false,
+    mutates:
+      "device ids, raw sessions, carol's password (I-08), logout/retirement",
   },
   {
     name: "i14e",
@@ -56,6 +69,7 @@ export const DEFAULT_STACKS = [
     files: [SPEC("pages")],
     grep: "I-14e",
     oidc: false,
+    mutates: "sessions only",
   },
   {
     name: "i14d",
@@ -63,26 +77,37 @@ export const DEFAULT_STACKS = [
     files: [SPEC("pages")],
     grep: "I-14d \\(revision 11\\)",
     oidc: false,
+    mutates: "sessions only",
   },
-  { name: "data", suffix: "-data", files: [SPEC("data")], oidc: false },
+  {
+    name: "data",
+    suffix: "-data",
+    files: [SPEC("data")],
+    oidc: false,
+    mutates:
+      "account data, commands, local databases; paced by its stack ledger",
+  },
   // Accepted WEB-13a journeys retain their own backend, throttle and loopback feed.
   {
     name: "calendar",
     suffix: "-calendar",
     files: [SPEC("calendars")],
     oidc: false,
+    mutates: "linked calendars; paced by its stack ledger",
   },
   {
     name: "traces",
     suffix: "-traces",
     files: [SPEC("web08b-traces")],
     oidc: false,
+    mutates: "sign-in attempts (superseded/cancelled activations)",
   },
   {
     name: "registration",
     suffix: "-registration",
     files: [SPEC("web08b-registration")],
     oidc: false,
+    mutates: "invitations redeemed, accounts registered",
   },
   {
     name: "oidc",
@@ -90,6 +115,7 @@ export const DEFAULT_STACKS = [
     files: [SPEC("web08b-oidc")],
     grepInvert: "I-28b",
     oidc: true,
+    mutates: "linked identities (one subject per test)",
   },
   {
     name: "oidc-off",
@@ -97,6 +123,7 @@ export const DEFAULT_STACKS = [
     files: [SPEC("web08b-oidc")],
     grep: "I-28b",
     oidc: false,
+    mutates: "nothing beyond a sign-in",
   },
   {
     name: "settings",
@@ -104,20 +131,43 @@ export const DEFAULT_STACKS = [
     files: [SPEC("web08b-settings")],
     oidc: false,
     deliberateThrottle: true,
+    mutates: "passwords, sessions; I-30b provokes the backend's own 429",
   },
-  // R22: their own stacks. They rotate through alice, carol, dave and erin with the ORIGINAL passwords (I-08 changes carol's in
-  // base) and pace sign-ins only against their own ledger, which cannot see what earlier suites used of the backend's throttle.
+  // WEB-08c: the composed lifecycle journeys (switching, T7/T8/T12/T13/T17/T21/T23, G-23). They sign in often and change accounts'
+  // passwords and sessions, so they have a stack of their own.
+  {
+    name: "lifecycle",
+    suffix: "-lifecycle",
+    files: [SPEC("lifecycle")],
+    oidc: false,
+    mutates: "passwords, sessions, labels; paced by its stack ledger",
+  },
+  // WEB-08c (R5 of the review of 11 October 2026): the composed RESTART journeys (I-L8, I-L11). They log out and retire devices.
+  {
+    name: "lifecycle-restart",
+    suffix: "-lifecycle-restart",
+    files: [SPEC("lifecycle-restart")],
+    oidc: false,
+    mutates:
+      "logout, device retirement, recovery sessions; paced by its stack ledger",
+  },
+  // R17: their own stacks. They rotate through alice, carol, dave and erin with the ORIGINAL passwords (I-08 changes carol's in the
+  // password-path stack) and pace sign-ins only against their own ledger, which cannot see what other suites used of the backend's
+  // throttle: on a backend of their own, the ledger is the only sign-in traffic there is.
   {
     name: "sharing",
     suffix: "-sharing",
     files: [SPEC("sharing")],
     oidc: false,
+    mutates:
+      "households, invitations, shared resources; paced by its stack ledger",
   },
   {
     name: "snapshot",
     suffix: "-snapshot",
     files: [SPEC("snapshot")],
     oidc: false,
+    mutates: "account data seeded for the snapshot; paced by its stack ledger",
   },
 ];
 
@@ -136,6 +186,12 @@ export const SEPARATE = [
  * makes the stack incomplete. A designed skip is reported as not run, never as passed.
  */
 export const DESIGNED_SKIPS = [
+  {
+    file: "integration.pwa.spec.ts",
+    description:
+      "needs the worker-enabled build: scripts/integration/run.mjs --app dist-pwa/fixture-a",
+    when: ({ app }) => !(app ?? "").includes("dist-pwa"),
+  },
   {
     file: "integration.profile.spec.ts",
     description: "not run: measurements are taken by `pnpm profile:session`",
@@ -171,10 +227,24 @@ export const DESIGNED_SKIPS = [
     when: () => true,
   },
   {
-    file: "integration.pwa.spec.ts",
+    // The PostgreSQL repeat runs the backend in a container, which cannot reach the loopback feed.
+    file: "integration.calendars.spec.ts",
     description:
-      "needs the worker-enabled build: scripts/integration/run.mjs --app dist-pwa/fixture-a",
-    when: ({ app }) => !app.includes("dist-pwa"),
+      "no loopback feed (the PostgreSQL repeat runs the backend in a container, which cannot reach it)",
+    when: ({ postgres }) => Boolean(postgres),
+  },
+  {
+    // I-L9 (G-23): opt-in real time; review runs it separately with --grep I-L9 --oidc on.
+    file: "integration.lifecycle.spec.ts",
+    description:
+      "opt-in: about 5½ minutes of REAL time per engine (ATLAS_INTEGRATION_REALTIME=1)",
+    when: ({ env }) => env.ATLAS_INTEGRATION_REALTIME !== "1",
+  },
+  {
+    file: "integration.lifecycle.spec.ts",
+    description:
+      "the link and unlink need the stub OpenID Connect provider (run with --oidc on)",
+    when: ({ oidc }) => !oidc,
   },
 ];
 
@@ -189,12 +259,55 @@ export function stackArgs(stack) {
 }
 
 /**
+ * R18 (VE-20261004 fail-fast): every stack's Playwright runs with one worker, no retry, and stops scheduling its own cases at its
+ * first failure. The policy comes AFTER the caller's arguments would, so it is not merely a default: an argument that would change it
+ * (or the reporter, project or output the runner owns) is refused before anything is listed or started.
+ */
+export const PLAYWRIGHT_POLICY = [
+  "--workers=1",
+  "--retries=0",
+  "--max-failures=1",
+];
+const RUNNER_OWNED = [
+  ["--workers", "-j"],
+  ["--retries"],
+  ["--max-failures", "-x"],
+  ["--fully-parallel"],
+  ["--reporter"],
+  ["--project"],
+  ["--output"],
+  ["--list"],
+  ["--pass-with-no-tests"],
+  ["--last-failed"],
+  ["--only-changed"],
+  ["--shard"],
+  ["--ui"],
+  ["--debug"],
+];
+/** The Playwright arguments after `--` that would override what the runner owns, or [] when there are none. */
+export function passthroughProblems(passthrough) {
+  const problems = [];
+  for (const arg of passthrough) {
+    const name = arg.startsWith("--") ? arg.split("=")[0] : arg;
+    const owned = RUNNER_OWNED.find((names) => names.includes(name));
+    if (owned)
+      problems.push(
+        `${arg}: the runner owns ${owned[0]} (one worker, no retry, --max-failures=1, its own reporter, project and output)`,
+      );
+  }
+  return problems;
+}
+
+/**
  * The stacks of one invocation. A run the caller has narrowed (`--grep`, or Playwright arguments after `--` such as a spec file) is
  * ONE stack: the caller chose what runs, and the closure check does not apply (its listing is still the case inventory).
  * `only` (`--stacks a,b`) runs a named subset of the default stacks, in their usual order: the closure check still covers the whole
  * manifest, and the summary is marked partial (never complete).
  */
 export function planStacks({ grep, passthrough, oidc, postgres, only = [] }) {
+  const refused = passthroughProblems(passthrough);
+  if (refused.length > 0)
+    throw new Error(`refused Playwright arguments:\n  ${refused.join("\n  ")}`);
   const narrowed = Boolean(grep) || passthrough.length > 0;
   if (narrowed && only.length > 0)
     throw new Error("--stacks names default stacks; it cannot be narrowed too");
@@ -522,10 +635,20 @@ export function judgeStack({
   const counts = emptyCounts();
   const designed = [];
   let incomplete = false;
+  let untrustworthy = false;
   let failed = false;
   const finish = () => {
     return {
-      verdict: incomplete ? "incomplete" : failed ? "failed" : "passed",
+      // WEB-08c revision 14 (R18): with --max-failures=1 a failed stack's later cases are always not run, so a failure the report
+      // shows outranks its unrun cases (failed, the rest counted not_run). A report that is not trustworthy evidence (absent,
+      // malformed, stale, contradictory, another project's, missing or extra cases) stays incomplete whatever it claims.
+      verdict: untrustworthy
+        ? "incomplete"
+        : failed
+          ? "failed"
+          : incomplete
+            ? "incomplete"
+            : "passed",
       reasons,
       counts,
       designed_skips: designed,
@@ -533,6 +656,7 @@ export function judgeStack({
   };
   const unproven = (reason) => {
     incomplete = true;
+    untrustworthy = true;
     reasons.push(reason);
     counts.unproven = total(planned);
     return finish();
@@ -579,6 +703,7 @@ export function judgeStack({
   const wrong = cases.filter((c) => c.project !== project);
   if (wrong.length > 0) {
     incomplete = true;
+    untrustworthy = true;
     reasons.push(
       `${wrong.length} result(s) for another project (${wrong[0].project})`,
     );
@@ -591,6 +716,7 @@ export function judgeStack({
   );
   if (disagree.length > 0) {
     incomplete = true;
+    untrustworthy = true;
     reasons.push(
       `the report's totals contradict its tests (${disagree.map((k) => `${k} ${parsed.stats[k]} != ${statuses[k]}`).join(", ")})`,
     );
@@ -612,6 +738,7 @@ export function judgeStack({
     } else {
       if (outcome === "failed") failed = true;
       else incomplete = true;
+      if (outcome === "unproven") untrustworthy = true;
       counts[outcome] += 1;
       reasons.push(`${reason}: ${key}`);
     }
@@ -621,6 +748,7 @@ export function judgeStack({
     for (let i = used.get(key) ?? 0; i < n; i += 1) missing.push(key);
   if (missing.length > 0) {
     incomplete = true;
+    untrustworthy = true;
     counts.unproven += missing.length;
     reasons.push(
       `${missing.length} planned case(s) have no result (first: ${missing[0]})`,
@@ -628,6 +756,7 @@ export function judgeStack({
   }
   if (extra.length > 0) {
     incomplete = true;
+    untrustworthy = true;
     reasons.push(
       `${extra.length} result(s) were not planned (first: ${extra[0]})`,
     );
@@ -635,35 +764,73 @@ export function judgeStack({
   return finish();
 }
 
-/** The paths whose answers count against the backend's sign-in throttle (a path heuristic, for the per-stack demand record). */
-const THROTTLED = /\/(browser-sessions|password|registrations?|oidc)(\/|$)/;
+/**
+ * The requests that consume the pinned backend's per-SOURCE budget (120 per fixed 60 s window that starts at the source's first
+ * counted request; `throttle.rs` Budget::allow): every handler that calls `source_attempt` at v0.29.0-rc.1 (commit 4396c993,
+ * `crates/server/src/app.rs` routes): password sign-in (native `POST /sessions`, browser `POST /browser-sessions`), activation and its
+ * cancellation, password change, registration and its preview, browser registration, and the OIDC start/callback (browser and
+ * native). Every stack's specs share one loopback source, whichever account, tab, worker or raw client makes the call.
+ * The per-ACCOUNT budget (10 per window; reset by a successful password verification) is not modelled here: a refusal of either
+ * limiter is a 429, which the throttle check below fails.
+ */
+export const SOURCE_BUDGET = { limit: 120, windowMs: 60_000 };
+const API_PREFIX = "/api/experimental/v1";
+export const SOURCE_BUDGET_CONSUMERS = [
+  ["POST", "/sessions"],
+  ["POST", "/browser-sessions"],
+  ["POST", "/browser-sessions/activate"],
+  ["POST", "/browser-sessions/activate/cancel"],
+  ["POST", "/password"],
+  ["POST", "/registration"],
+  ["POST", "/registration/preview"],
+  ["POST", "/browser-registration"],
+  ["GET", "/oidc/native/start"],
+  ["POST", "/oidc/native/exchange"],
+  ["POST", "/oidc/start"],
+  ["GET", "/oidc/callback"],
+];
+/** Whether one request (method, path without query) is counted against the source budget. */
+export function consumesSourceBudget(method, path) {
+  const route = (path ?? "").startsWith(API_PREFIX)
+    ? path.slice(API_PREFIX.length)
+    : null;
+  return (
+    route !== null &&
+    SOURCE_BUDGET_CONSUMERS.some(([m, p]) => m === method && p === route)
+  );
+}
 
-/** What one stack asked of the backend's throttle, from the proxy's view of every UPSTREAM answer (proxy-injected statuses excluded). */
+/**
+ * What one stack asked of the backend's throttle, from the proxy's view of every UPSTREAM answer (proxy-injected statuses excluded;
+ * a request the proxy refuses itself never reaches the backend and is not observed). The peak is over any 60 s interval, an upper
+ * bound for the backend's fixed windows. Every counted request is included whatever its status (a refused or failed attempt still
+ * consumed the budget).
+ */
 export function throttleRecord(exchanges) {
   const refusals = exchanges
     .filter((e) => e.status === 429)
     .map(({ method, path, at }) => ({ method, path, at }));
-  const admitted = exchanges
-    .filter(
-      (e) =>
-        e.method === "POST" && e.status !== 429 && THROTTLED.test(e.path ?? ""),
-    )
+  const counted = exchanges
+    .filter((e) => consumesSourceBudget(e.method, e.path))
     .map((e) => e.at)
     .sort((a, b) => a - b);
   let peak = 0;
-  for (let i = 0, j = 0; i < admitted.length; i += 1) {
-    while (admitted[i] - admitted[j] >= 60_000) j += 1;
+  for (let i = 0, j = 0; i < counted.length; i += 1) {
+    while (counted[i] - counted[j] >= SOURCE_BUDGET.windowMs) j += 1;
     peak = Math.max(peak, i - j + 1);
   }
   const byPath = {};
   for (const e of exchanges)
-    if (e.method === "POST" && THROTTLED.test(e.path ?? ""))
-      byPath[e.path] = (byPath[e.path] ?? 0) + 1;
+    if (consumesSourceBudget(e.method, e.path)) {
+      const key = `${e.method} ${e.path.slice(API_PREFIX.length)}`;
+      byPath[key] = (byPath[key] ?? 0) + 1;
+    }
   return {
     requests: exchanges.length,
-    sign_in_class_posts: admitted.length,
-    sign_in_class_by_path: byPath,
-    sign_in_class_peak_60s: peak,
+    source_budget_requests: counted.length,
+    source_budget_by_route: byPath,
+    source_budget_peak_60s: peak,
+    source_budget_limit: SOURCE_BUDGET.limit,
     refusals_429: refusals,
   };
 }
