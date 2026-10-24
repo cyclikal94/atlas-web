@@ -11,6 +11,7 @@ import {
   useInteractions,
 } from "../sessions-devices/ownership";
 import { untilSent } from "../sessions-devices/until-sent";
+import { ConfirmItsYou } from "./ConfirmItsYou";
 import { leavesOutcomeUnknown } from "./outcome";
 import { Unconfirmed } from "./Unconfirmed";
 import { useStaleSession } from "./use-stale-session";
@@ -255,6 +256,7 @@ export function LinkedIdentities({
                     <Button
                       aria-label={`Remove ${issuerLabel(issuer)}`}
                       aria-describedby={consequenceId}
+                      data-return-focus={`unlink-${issuer}`}
                       onClick={() => void remove(issuer)}
                     >
                       Remove
@@ -291,6 +293,10 @@ export function LinkedIdentities({
       {unconfirmed ? (
         <Unconfirmed check={() => session.operations.readAccount()} />
       ) : null}
+      {/* WEB-08c (G-23): while the session is too old (and only then), offer to confirm it's you in place. The disabled reasons stay. */}
+      {online && stale && pending.size === 0 ? (
+        <ConfirmItsYou username={account.username} navigate={navigate} />
+      ) : null}
       <div className="flex flex-col items-start gap-2">
         {pending.has("link") ? (
           <Button disabled reason="Opening your provider…">
@@ -301,7 +307,9 @@ export function LinkedIdentities({
             {LINK_LABEL}
           </Button>
         ) : (
-          <Button onClick={() => void link()}>{LINK_LABEL}</Button>
+          <Button data-return-focus="link-sso" onClick={() => void link()}>
+            {LINK_LABEL}
+          </Button>
         )}
         <p className="text-[12.5px] leading-[1.6] text-ink-2">{LINK_HINT}</p>
         {linkProblem ? (

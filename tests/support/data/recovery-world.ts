@@ -67,6 +67,13 @@ export interface RecoveryWorld extends PageWorld {
   salt: number;
   /** The admission probe cannot read the record (it answers null). */
   admissionUnreadable: boolean;
+  /**
+   * The account has nothing fenced (WEB-08c K-2). Production's probe then answers `blocked` for the RECOVERY class (`recoveryEligible`
+   * is false without a fence) and `begin` says `no_fence`; the world's probe models that only when a test sets this.
+   */
+  unfenced: boolean;
+  /** Called after `begin` has decided its answer and before it returns: a test changes the record in that interval (WEB-08c K-2). */
+  afterBegin?: (answer: RecoveryBegin) => void;
   probes: Array<{ klass: "ordinary" | "recovery"; epoch: number }>;
   /**
    * Whether `report` notifies the job's subscription, as production's does (the session evaluates on a report and publishes a new
@@ -162,6 +169,7 @@ export async function recoveryWorld(
     hold: false,
     salt: 0,
     admissionUnreadable: false,
+    unfenced: false,
     probes: [],
     reportNotifies: false,
     traced: [],
@@ -183,6 +191,8 @@ export async function recoveryWorld(
       return null;
     return gate.reason;
   };
+  const revisionNow = (): string =>
+    JSON.stringify([gateNow(), out.hold, out.salt, out.unfenced]);
   out.view = {
     get: () => view,
     set(next) {
@@ -239,26 +249,39 @@ export async function recoveryWorld(
         out.calls.push({ call: "begin", account });
         const next = out.begins.shift();
         if (next instanceof Error) throw next;
-        if (next === undefined) {
-          const gate = gateNow();
-          if (gate !== null) return { kind: "ineligible", reason: gate };
-        } else if (next.kind === "ineligible") {
-          if (GATES.includes(next.reason))
-            out.setGate(next.reason as GateReason);
-          return next;
-        }
-        out.recordGate = null;
-        sequence += 1;
-        return (
-          next ?? {
-            kind: "eligible",
-            handle: {
-              account,
-              epoch: base.identity.get()?.epoch ?? 1,
-              s: sequence,
-            },
+        const answer = ((): RecoveryBegin => {
+          if (next === undefined) {
+            const gate = gateNow();
+            if (gate !== null) return { kind: "ineligible", reason: gate };
+          } else if (next.kind === "ineligible") {
+            if (GATES.includes(next.reason))
+              out.setGate(next.reason as GateReason);
+            return next;
           }
-        );
+          out.recordGate = null;
+          sequence += 1;
+          return (
+            next ?? {
+              kind: "eligible",
+              handle: {
+                account,
+                epoch: base.identity.get()?.epoch ?? 1,
+                s: sequence,
+              },
+            }
+          );
+        })();
+        // As production's `begin` (WEB-08c K-2): a refusal decided on the record carries the admission revision of that same read.
+        const recorded =
+          answer.kind === "ineligible" &&
+          answer.revision === undefined &&
+          answer.reason !== "stale" &&
+          answer.reason !== "offline" &&
+          answer.reason !== "unresolved_lease"
+            ? { ...answer, revision: revisionNow() }
+            : answer;
+        out.afterBegin?.(recorded);
+        return recorded;
       },
       finish: async (handle) => {
         out.calls.push({ call: "finish", handle });
@@ -275,8 +298,9 @@ export async function recoveryWorld(
       if (out.admissionUnreadable) return null;
       const gate = gateNow();
       return {
-        revision: JSON.stringify([gate, out.hold, out.salt]),
-        blocked: gate !== null || out.hold,
+        revision: revisionNow(),
+        blocked:
+          gate !== null || out.hold || (klass === "recovery" && out.unfenced),
       };
     },
     apiUrl: (path) => new URL(`http://localhost/api/experimental/v1${path}`),

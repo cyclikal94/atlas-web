@@ -46,7 +46,10 @@ export interface NeutralMemory {
     | "1a.device_changed"
     | "1c.lock_wait"
     | null;
-  /** WEB-09b reports the recovery job's phase; the job itself is not this module's. */
+  /**
+   * WEB-09b reports the recovery job's phase; the job itself is not this module's. It selects state 2 or 3 only while older-epoch
+   * recovery fences close the settled account (WEB-08c R9); `evaluate` withdraws a report of another identity before deriving.
+   */
   recovery: "catching_up" | "failed" | null;
   /** This page holds an in-memory hold for the settled account. */
   hold: boolean;
@@ -118,8 +121,9 @@ export function deriveNeutral(
   if (memory.unresolvedLeaseKnown)
     return env.online ? "1e.interrupted_online" : "1e.interrupted_offline";
   if (memory.waitingOnOtherWindow) return "1e.waiting";
-  if (memory.recovery === "catching_up") return "2";
-  if (memory.recovery === "failed") return "3";
+  // WEB-08c revision 4 (R9): the recovery report chooses between 2 and 3 only above, while older-epoch recovery fences close the account.
+  // With no fence it names nothing: a report the page still holds after the recovery cleared its fence (a lost or late withdrawal, a
+  // follower whose hint never came) is no gate, and the exposure protocol decides as for any account that nothing closes.
   // A retirement that was refused as stale leaves no fence; the card stays until the person reviews the device.
   if (memory.notice === "1a.device_changed") return "1a.device_changed";
   return null;

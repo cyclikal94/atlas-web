@@ -181,6 +181,8 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
           id={ids.current}
           label="Current password"
           name="current-password"
+          // WEB-08c (T22): the key the resume gate restores focus to, for the same account only (never the value).
+          data-focus-key="password-current"
           type="password"
           autoComplete="current-password"
           surface="panel"
@@ -194,6 +196,7 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
             id={ids.next}
             label="New password"
             name="new-password"
+            data-focus-key="password-new"
             type="password"
             autoComplete="new-password"
             surface="panel"

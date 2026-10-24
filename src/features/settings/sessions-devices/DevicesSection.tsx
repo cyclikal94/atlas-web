@@ -184,6 +184,9 @@ export function DevicesSection() {
                       {online ? (
                         <Button
                           aria-label={retireLabel}
+                          data-return-focus={
+                            row.current ? "device-this" : undefined
+                          }
                           onClick={() => {
                             // As for naming: the hook's state can lag the browser by a render (review r25 R25-N2).
                             if (navigator.onLine) openRetiring(row);

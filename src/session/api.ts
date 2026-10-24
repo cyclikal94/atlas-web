@@ -406,6 +406,12 @@ export type RecoveryBegin =
         | "unresolved_lease"
         | "stale"
         | "offline";
+      /**
+       * WEB-08c K-2: for a refusal decided on the durable record, the admission revision (`api.admission`, recovery class) of the SAME
+       * read. A caller that waits for the refusal to end compares later probes with it: a gate that ended before its first probe is then
+       * a change, not that probe's baseline. Absent when nothing was read (offline, an unreadable record, lease work).
+       */
+      readonly revision?: string;
     };
 export interface Recovery {
   begin(account: AccountId): Promise<RecoveryBegin>;
@@ -419,8 +425,20 @@ export interface Recovery {
     | "lock_timeout"
     | "failed"
   >;
-  /** WEB-09b reports the job's phase so the neutral states 2 and 3 can show; it changes no protection. */
-  report(phase: "catching_up" | "failed" | null): void;
+  /**
+   * WEB-09b reports the job's phase so the neutral states 2 and 3 can show; it changes no protection.
+   *
+   * WEB-08c revision 4 (R9 of the review of 14 October 2026): a report is SCOPED to the (account, epoch) it was made for (`scope`; when
+   * absent, the settled identity of the call). It only chooses between state 2 and state 3 while that identity is settled AND older-epoch
+   * recovery fences are what close it: it never closes an account by itself, so a report that is lost, late or never withdrawn cannot keep
+   * a page gated once the recovery has cleared its fence (the page's own record read decides). `null` withdraws the report. (Every caller
+   * is ordered: the page's own recovery job, or the follower for its current identity; a report of another identity is withdrawn at the
+   * page's next read anyway.)
+   */
+  report(
+    phase: "catching_up" | "failed" | null,
+    scope?: { readonly account: AccountId; readonly epoch: Epoch },
+  ): void;
   /**
    * WEB-09b: the person pressed the neutral state's "Try again" (`actions.retry`). The sync leader of the page listens, so that state 3
    * ("Couldn't finish catching up") reaches the recovery job that owns the attempt (on this page, or the leading page through

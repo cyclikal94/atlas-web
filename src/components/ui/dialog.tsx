@@ -34,6 +34,11 @@ export interface DialogProps {
    */
   returnFocusRef?: RefObject<HTMLElement | null>;
   /**
+   * Whether the header carries the in-dialog sync control (default true). WF-SWITCH-02 is the one documented exception: it is a
+   * credential step for a DIFFERENT account, so it reports no sync state (`wireframes/switch/states.md`, the I1 exception).
+   */
+  syncControl?: boolean;
+  /**
    * Where the full-screen sheet gives way to the centred dialog. `tablet` (the default): from 768 px, the generic rule (ia.md §3 and
    * design-coverage §6). `desktop`: from 1280 px, for a dialog whose accepted tablet frames draw it as a full-bleed sheet at both
    * tablet orientations (the sharing editors: WEB-05.5 `tablet/sharing-portrait.html` and `sharing-landscape.html`, Q14; WEB-12a R6).
@@ -66,6 +71,7 @@ export function Dialog({
   onCloseAutoFocus,
   initialFocusSelector,
   returnFocusRef,
+  syncControl = true,
   sheetBelow = "tablet",
 }: DialogProps) {
   const container = useRequiredPortalContainer();
@@ -155,13 +161,15 @@ export function Dialog({
               ) : null}
             </div>
             <div className="ml-auto flex min-w-0 items-center gap-2">
-              <SyncStatusChip
-                variant="dialog"
-                onBeforeOpen={() => {
-                  onRetainDraft?.();
-                  onClose();
-                }}
-              />
+              {syncControl ? (
+                <SyncStatusChip
+                  variant="dialog"
+                  onBeforeOpen={() => {
+                    onRetainDraft?.();
+                    onClose();
+                  }}
+                />
+              ) : null}
               <DialogPrimitive.Close
                 aria-label="Close"
                 onClick={(event) => {

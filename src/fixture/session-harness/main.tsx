@@ -1,5 +1,9 @@
 import { type Booted, boot } from "../../app/boot";
 import { getPageDataHost } from "../../data";
+// Static, not dynamic: the fixture shell already loads both in its initial chunks, and a dynamic import split them into new initial
+// chunks (WEB-08c revision 2, campaign 2026-10-13T21-37-54.392Z-04e93063: the fixture budget).
+import { createBroadcastSyncChannel } from "../../data/engine/sync-channel";
+import { createProductionQuota } from "../../data/ui/production-quota";
 import {
   createBroadcastHints,
   createWebLocksPort,
@@ -72,6 +76,13 @@ export interface SessionHarness {
    * controller's, unchanged.
    */
   currentRead(localId: string): Promise<unknown>;
+  /**
+   * FIXTURE ONLY (WEB-08c revision 2, R5 I-L12): save a draft through the PRODUCTION controller's outbox facade (`createDataEnv`'s
+   * `outbox()`, the writer a feature screen saves through) for the displayed account, so the PRODUCTION leader's own dispatcher sends it under
+   * its normal ownership. No production feature registers a command kind yet; the spec is the data harness's (`HarnessEnqueue`). Waits up to
+   * 5 s for the displayed account's facade; `no_outbox` otherwise. The result is the facade's, flattened as the data harness reports it.
+   */
+  enqueue(spec: unknown): Promise<unknown>;
 }
 
 const params = new URLSearchParams(location.search);
@@ -165,11 +176,26 @@ const harness: SessionHarness = {
       await new Promise((resolve) => setTimeout(resolve, 25));
     return env.actions.readCurrent(localId as never);
   },
+  async enqueue(spec) {
+    saveEnv ??= createCurrentReadEnv("save");
+    const env = await saveEnv;
+    for (let i = 0; i < 200 && env.outbox() === null; i += 1)
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    const outbox = env.outbox();
+    if (outbox === null) return { kind: "no_outbox" };
+    const { requestOf, flat } = await import("../data-harness/main");
+    return flat(await outbox.enqueue(requestOf(spec as never)));
+  },
 };
 
 let currentReadEnv: Promise<import("../../data/ui/env").DataEnv> | null = null;
-/** The production controller of `currentRead` (built once, on first use; never part of the harness's first chunk). */
-async function createCurrentReadEnv() {
+let saveEnv: Promise<import("../../data/ui/env").DataEnv> | null = null;
+/**
+ * The production controller of `currentRead` (built once, on first use; never part of the harness's first chunk), and (WEB-08c revision 2)
+ * of `enqueue`, whose controller is composed as the protected tree's is (the `atlas-sync` channel, the page's markers and command registry),
+ * so a save notifies the production leader's dispatcher exactly as a screen's save does.
+ */
+async function createCurrentReadEnv(purpose: "read" | "save" = "read") {
   const session = harness.booted?.session;
   if (!session) throw new Error("fixture: the session has not booted");
   const [{ createDataEnv }, { createCommandRegistry }, { apiUrl }] =
@@ -179,7 +205,7 @@ async function createCurrentReadEnv() {
       import("../../lib/api-client/wire"),
     ]);
   const host = getPageDataHost();
-  const commands = createCommandRegistry();
+  const commands = purpose === "save" ? host.commands : createCommandRegistry();
   const flags = window as unknown as {
     __currentReadHold?: boolean;
     __currentReadHeld?: boolean;
@@ -228,7 +254,11 @@ async function createCurrentReadEnv() {
         });
       }),
     online: { get: () => navigator.onLine, subscribe: () => () => undefined },
-    quota: { check: async () => "admit" } as never,
+    // A save reserves its bytes as a screen's does: the origin's production quota ledger (the read keeps its admit-only stub).
+    quota:
+      purpose === "save"
+        ? createProductionQuota()
+        : ({ check: async () => "admit" } as never),
     ids: { uuid: () => crypto.randomUUID() },
     clock: { now: () => Date.now(), iso: () => new Date().toISOString() },
     fence: () => ({ hasPendingOperation: false, sessionStarted: true }),
@@ -241,6 +271,9 @@ async function createCurrentReadEnv() {
     apiUrl: (path) => apiUrl(path),
     seal: (account, epoch, pending) =>
       session.api.seal(account, epoch, pending),
+    ...(purpose === "save"
+      ? { channel: createBroadcastSyncChannel(), markers: host.markers }
+      : {}),
   });
 }
 // The data harness is attached too, so one page can run the production session AND arrange or inspect real rows in the

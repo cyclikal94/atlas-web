@@ -4,6 +4,7 @@ import type { Fixture } from "../support/session/harness";
 import { checkProperties } from "../support/session/properties";
 import {
   fencesOf,
+  forceResumeVerification,
   leaseIds,
   newWorld,
   ordinaryGet,
@@ -252,11 +253,10 @@ describe("surrender first (check 2)", () => {
       f.world.logs.length; // keep the log
       const start = f.world.logs.length;
       f.world.spyBodies = true;
-      // Force a resume verification on the displaying page.
-      await f.world.advance(40_000);
-      l.page.session.actions.retry();
-      other.session.actions.retry();
-      await f.world.runUntilIdle();
+      // ADAPTED (WEB-08c revision 2, HF1-SHARED-CONFIRMATION-20261013): was "advance 40 s, then retry() on both pages", which never ran a
+      // verification of its own: the identity read came from the booting page, which now adopts the shared token and confirmation instead.
+      // The page returns after the interval, so its resume verification is THE identity read whose answer (the rewrite) is examined.
+      await forceResumeVerification(f, other);
       const surrenders = f.world.logs
         .slice(start)
         .filter((e) => e.type === "trace.surrender" && e.identityRead === true);

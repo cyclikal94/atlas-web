@@ -17,6 +17,12 @@ vi.mock("../../src/session", async (importOriginal) => {
     }),
   };
 });
+// The call order under test does not depend on anything React draws. A real root's commit schedules a passive-effect flush that
+// reads `window.event`; on a loaded host it could run after this file's environment was torn down ("window is not defined", an
+// unhandled error outside every test). The roots are therefore inert here.
+vi.mock("react-dom/client", () => ({
+  createRoot: vi.fn(() => ({ render: vi.fn(), unmount: vi.fn() })),
+}));
 vi.mock("../../src/app/capabilities", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../src/app/capabilities")>();

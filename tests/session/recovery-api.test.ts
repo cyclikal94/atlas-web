@@ -17,6 +17,7 @@ import {
   installAttempt,
   leaseIds,
   newWorld,
+  openPage,
   signedInPage,
   stateOf,
 } from "../support/session/scenarios";
@@ -247,7 +248,22 @@ describe("H: the eligibility rule refuses", () => {
     const { f, l } = await reauthenticated();
     mutate(f, l.account);
     const begun = await f.runWith(l.page.session.recovery.begin(l.account));
-    expect(begun).toEqual({ kind: "ineligible", reason });
+    // ADAPTED (WEB-08c K-2, R3 of the review of 11 October 2026): was `toEqual({ kind: "ineligible", reason })`. The refusal keeps its
+    // reason and now also carries the admission revision of the read it was decided on: exactly what the recovery-class probe answers
+    // for the same record, so a waiter's baseline is the refusal's own state.
+    const probed = await f.runWith(
+      l.page.session.api.admission(
+        "recovery",
+        l.account,
+        stateOf(f).settled?.epoch ?? 0,
+      ),
+    );
+    expect(probed?.blocked).toBe(true);
+    expect(begun).toEqual({
+      kind: "ineligible",
+      reason,
+      revision: probed?.revision,
+    });
   };
   test("(ii) an operation entry: the operation resolves first", () =>
     ineligible((f, a) => {
@@ -349,6 +365,146 @@ describe("recovery states are presentational", () => {
       kind: "neutral",
       state: "2",
     });
+  });
+});
+
+/**
+ * WEB-08c revision 4 (R9 of the review of 14 October 2026; design assessment P2/P3, invariants 3 and 4): a recovery report is presentation,
+ * SCOPED to the identity it was made for, and it chooses between states 2 and 3 only while older-epoch recovery fences close the account.
+ * Completion is learned from the page's OWN record read (a hint, a visibility change, or the scan of a visible page that shows state 2 or 3),
+ * never from a withdrawal message: the review's reproduction was a follower left on "Catching up" with `fences: []` because the leading
+ * page's single "none" was lost.
+ */
+describe("R9: a report never outlives the recovery it describes", () => {
+  async function twoPagesOnState3() {
+    const { f, l } = await reauthenticated();
+    const two = await openPage(f);
+    await f.settle();
+    const scope = { account: l.account, epoch: 2 };
+    for (const page of [l.page, two])
+      page.session.recovery.report("failed", scope);
+    await f.settle();
+    for (const page of [l.page, two])
+      expect(page.session.view.get()).toMatchObject({
+        kind: "neutral",
+        state: "3",
+      });
+    return { f, l, two, scope };
+  }
+  const clearFence = async (f: Fixture, page: FakePage, account: string) => {
+    const begun = await f.runWith(page.session.recovery.begin(account));
+    if (begun.kind !== "eligible") throw new Error("not eligible");
+    expect(await f.runWith(page.session.recovery.finish(begun.handle))).toBe(
+      "cleared",
+    );
+    expect(fencesOf(f, account)).toEqual([]);
+  };
+
+  test("S1: the fence is cleared and NO page is told 'none': every page displays from its own record read (original: stranded on state 3)", async () => {
+    const { f, l, two } = await twoPagesOnState3();
+    await clearFence(f, l.page, l.account);
+    await f.settle();
+    // Nobody called report(null). The auth hint after `finish` made each page read its record: no fence, so the report names nothing.
+    for (const page of [l.page, two])
+      expect(page.session.view.get().kind).toBe("displaying");
+    expect(l.page.kernel.neutral.recovery).toBeNull();
+    expect(two.kernel.neutral.recovery).toBeNull();
+    expect(checkProperties(f, { invalidating: [401] })).toEqual([]);
+  });
+
+  test("S3: every hint to the follower is LOST too: it finds the completion by its own record read within one scan interval while visible", async () => {
+    const { f, l, two } = await twoPagesOnState3();
+    f.world.setKnob("D2", "unbounded", (meta) => meta.page === two.id);
+    await clearFence(f, l.page, l.account);
+    await f.settle();
+    expect(l.page.session.view.get().kind).toBe("displaying");
+    // Its hint is held (lost): the follower has read nothing yet.
+    expect(
+      f.world.heldCount("D2", (meta) => meta.page === two.id),
+    ).toBeGreaterThan(0);
+    expect(two.session.view.get()).toMatchObject({
+      kind: "neutral",
+      state: "3",
+    });
+    // Within one scan interval it reads its record and displays.
+    await f.world.advance(two.kernel.config.scanIntervalMs);
+    await f.settle();
+    expect(two.session.view.get().kind).toBe("displaying");
+    expect(
+      f.world.logs.some(
+        (entry) =>
+          entry.page === two.id &&
+          entry.type === "trace.evaluate" &&
+          entry.reason === "scan",
+      ),
+    ).toBe(true);
+    f.world.dropHeld("D2");
+  });
+
+  test("S3/S8 control: a HIDDEN page on state 3 reads nothing on its own; it reads at `visible` and displays then", async () => {
+    const { f, l, two } = await twoPagesOnState3();
+    f.world.setKnob("D2", "unbounded", (meta) => meta.page === two.id);
+    two.hide();
+    await f.settle();
+    await clearFence(f, l.page, l.account);
+    await f.settle();
+    const rechecks = () =>
+      f.world.logs.filter(
+        (entry) =>
+          entry.page === two.id &&
+          entry.type === "trace.evaluate" &&
+          entry.reason === "scan",
+      ).length;
+    await f.world.advance(4 * two.kernel.config.scanIntervalMs);
+    await f.settle();
+    expect(rechecks()).toBe(0);
+    expect(two.session.view.get().kind).not.toBe("displaying");
+    two.show();
+    await f.settle();
+    expect(two.session.view.get().kind).toBe("displaying");
+    f.world.dropHeld("D2");
+  });
+
+  test("control: while the fence stands the scan keeps state 3 (it is a read, never a display or a request)", async () => {
+    const { f, two } = await twoPagesOnState3();
+    const before = f.server.requests.length;
+    await f.world.advance(3 * two.kernel.config.scanIntervalMs);
+    await f.settle();
+    expect(two.session.view.get()).toMatchObject({
+      kind: "neutral",
+      state: "3",
+    });
+    expect(two.surface.mounted).toBeNull();
+    expect(f.server.requests.length).toBe(before);
+  });
+
+  test("a report scoped to ANOTHER identity shows nothing; the identity's own report shows state 3 and its withdrawal state 2", async () => {
+    const { f, l } = await reauthenticated();
+    const session = l.page.session;
+    session.recovery.report("failed", { account: l.account, epoch: 1 });
+    await f.settle();
+    expect(session.view.get()).toMatchObject({ kind: "neutral", state: "2" });
+    expect(l.page.kernel.neutral.recovery).toBeNull();
+    session.recovery.report("failed", { account: "someone-else", epoch: 2 });
+    await f.settle();
+    expect(session.view.get()).toMatchObject({ kind: "neutral", state: "2" });
+    session.recovery.report("failed", { account: l.account, epoch: 2 });
+    await f.settle();
+    expect(session.view.get()).toMatchObject({ kind: "neutral", state: "3" });
+    session.recovery.report(null, { account: l.account, epoch: 2 });
+    await f.settle();
+    expect(session.view.get()).toMatchObject({ kind: "neutral", state: "2" });
+  });
+
+  test("a report made while the account has NO fence is withdrawn at the page's next read, and a later fence starts from state 2, not the old report", async () => {
+    const { f, l } = await reauthenticated();
+    await clearFence(f, l.page, l.account);
+    await f.settle();
+    expect(l.page.session.view.get().kind).toBe("displaying");
+    l.page.session.recovery.report("failed", { account: l.account, epoch: 2 });
+    await f.settle();
+    expect(l.page.session.view.get().kind).toBe("displaying");
+    expect(l.page.kernel.neutral.recovery).toBeNull();
   });
 });
 

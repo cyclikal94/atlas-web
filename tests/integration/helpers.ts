@@ -52,6 +52,8 @@ export const ORIGIN = process.env.ATLAS_INTEGRATION_URL ?? "";
 export const BACKEND = process.env.ATLAS_INTEGRATION_BACKEND ?? "";
 export const API = `${ORIGIN}/api/experimental/v1`;
 
+export { paceSignIn, stackFile } from "./stack-state";
+
 export interface ProxyRule {
   id?: string;
   method?: string;
@@ -68,12 +70,13 @@ export interface ProxyRule {
     | "rewrite_status"
     | "rewrite_json"
     | "replace_response"
+    | "refuse"
     | "swap";
   ms?: number;
   status?: number;
   set?: Record<string, unknown>;
   delete?: string[];
-  /** `replace_response`: the JSON body to answer with. */
+  /** `replace_response` and `refuse`: the JSON body to answer with. */
   json?: unknown;
 }
 export interface ProxyLogEntry {
@@ -486,6 +489,186 @@ export const finishSignIn = (page: Page) =>
   page.evaluate(
     () =>
       window.__t.signin as Promise<{ kind: string; [key: string]: unknown }>,
+  );
+
+export interface SettledLike {
+  account_id: string;
+  epoch: number;
+  session_id: string;
+}
+/** A redacted receipt of `withStaleSharedConfirmation`: booleans and ages, never the token, cookie or verifier. */
+export interface ConfirmationAgeing {
+  aged: true;
+  settlement_matched: true;
+  confirmation_matched: true;
+  /** The confirmation's age when it was found (the settlement's own: a few seconds at most). */
+  found_age_ms: number;
+  /** Its age as written, by the page's own clock (the clock the session compares it with). */
+  written_age_ms: number;
+}
+
+/**
+ * WEB-08c revision 14 (review 14 R16, family `r43-premise-shared-confirmation`): makes the NEXT document's background identity read
+ * (the resume verification a displaying page makes) eligible, as a page booting more than the interval after the last confirmation
+ * finds it. Since HF1-SHARED-CONFIRMATION-20261013 the settlement (and any page's clean identity read) writes a shared
+ * `confirmation`; a page adopts its token for exactly the settled session (no age requirement) and, while it is less than 30 s old,
+ * makes NO `GET /browser-sessions/current` (src/session/kernel/evaluate.ts, src/session/session.ts `confirmedRecently`): the
+ * accepted behaviour, which a case that needs that read must not assume away.
+ *
+ * In ONE read-write transaction of this origin's `atlas-auth` record it checks that the record still settles exactly `expected`
+ * (account, epoch, session) and holds a confirmation of exactly that session, and rewrites only that confirmation's `confirmed_at`
+ * to `ageMs` before now (the page's clock); every other field, the token included, is kept, so the next document still adopts the
+ * token (no extra CSRF read) and its only identity read is the verification, exactly as before the decision. Anything else (a
+ * different or absent settlement, no confirmation, a confirmation of another session) is a SETUP failure: nothing is changed and
+ * it throws. Resolves after the transaction committed.
+ *
+ * It does not reach a live page's memory (its own last verification stays), so the read is eligible only in a NEW document
+ * (`freshHarnessDocument`); and it does not stop another page from writing a new confirmation later (each caller here has one page).
+ */
+export async function withStaleSharedConfirmation(
+  page: Page,
+  expected: SettledLike,
+  ageMs = 120_000,
+): Promise<ConfirmationAgeing> {
+  const outcome = await page.evaluate(
+    ({ want, ageMs }) =>
+      new Promise<
+        | { ok: true; foundAgeMs: number; writtenAgeMs: number }
+        | { ok: false; why: string }
+      >((resolve, reject) => {
+        const open = indexedDB.open("atlas-auth");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const write = db.transaction("records", "readwrite");
+          const store = write.objectStore("records");
+          const request = store.get("auth_state");
+          let verdict:
+            | { ok: true; foundAgeMs: number; writtenAgeMs: number }
+            | { ok: false; why: string } = {
+            ok: false,
+            why: "the record was not read",
+          };
+          const same = (
+            a: { account_id?: unknown; epoch?: unknown; session_id?: unknown },
+            b: typeof want,
+          ) =>
+            a.account_id === b.account_id &&
+            a.epoch === b.epoch &&
+            a.session_id === b.session_id;
+          request.onsuccess = () => {
+            const record = request.result as
+              | (Record<string, unknown> & {
+                  settled?: Record<string, unknown> | null;
+                  confirmation?: Record<string, unknown> | null;
+                })
+              | undefined;
+            if (!record?.settled || !same(record.settled, want)) {
+              verdict = {
+                ok: false,
+                why: "the record does not settle the expected session",
+              };
+              return;
+            }
+            if (!record.confirmation || !same(record.confirmation, want)) {
+              verdict = {
+                ok: false,
+                why: "the record has no confirmation of the expected session",
+              };
+              return;
+            }
+            const now = Date.now();
+            const found =
+              now - Date.parse(String(record.confirmation.confirmed_at));
+            const confirmedAt = new Date(now - ageMs).toISOString();
+            store.put(
+              {
+                ...record,
+                confirmation: {
+                  ...record.confirmation,
+                  confirmed_at: confirmedAt,
+                },
+              },
+              "auth_state",
+            );
+            verdict = {
+              ok: true,
+              foundAgeMs: found,
+              writtenAgeMs: now - Date.parse(confirmedAt),
+            };
+          };
+          write.oncomplete = () => {
+            db.close();
+            resolve(verdict);
+          };
+          write.onerror = () => {
+            db.close();
+            reject(write.error);
+          };
+          write.onabort = () => {
+            db.close();
+            reject(write.error ?? new Error("the transaction aborted"));
+          };
+        };
+      }),
+    { want: expected, ageMs },
+  );
+  if (!outcome.ok)
+    throw new Error(
+      `setup: the shared confirmation was not aged (${outcome.why}); nothing was changed`,
+    );
+  return {
+    aged: true,
+    settlement_matched: true,
+    confirmation_matched: true,
+    found_age_ms: outcome.foundAgeMs,
+    written_age_ms: outcome.writtenAgeMs,
+  };
+}
+
+/**
+ * R16: navigates `page` to a NEW harness document (`/__session?route=...`, never `reload()`: a reload of the harness page loads the
+ * app route itself, without the fixture bridge), waits for its boot and exposes its session, and checks that the new document's
+ * durable record still settles exactly `expected`: otherwise the premise (the same session, now unconfirmed) is gone and it throws.
+ * The context's init scripts run again in the new document; `window.__t` is new.
+ */
+export async function freshHarnessDocument(
+  page: Page,
+  expected: SettledLike,
+  route = "/today",
+): Promise<void> {
+  await page.goto(`/__session?route=${encodeURIComponent(route)}`);
+  // A document without the fixture bridge (the app route itself, as `reload()` of a harness page loads) is a setup failure named as
+  // such, within a bound, before anything is read from it.
+  await page
+    .waitForFunction(() => window.__atlasFixture?.session !== undefined, null, {
+      timeout: 10_000,
+    })
+    .catch(() => {
+      throw new Error(
+        `setup: the new document has no fixture session bridge (${new URL(page.url()).pathname} is not the harness page)`,
+      );
+    });
+  await exposeSession(page);
+  const settled = (await records(page)).auth_state.settled;
+  if (
+    settled?.account_id !== expected.account_id ||
+    settled?.epoch !== expected.epoch ||
+    settled?.session_id !== expected.session_id
+  )
+    throw new Error(
+      "setup: the new document's record does not settle the expected session",
+    );
+}
+
+/** The proxy's log entries of the identity read (`GET /browser-sessions/current`). */
+export const identityReadsAtProxy = async () =>
+  (await proxy.log()).filter(
+    (entry) =>
+      entry.method === "GET" &&
+      /\/api\/experimental\/v1\/browser-sessions\/current(\?|$)/.test(
+        entry.path,
+      ),
   );
 
 /** Wait until the proxy holds `count` responses for a rule. */

@@ -127,23 +127,29 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
   // D-10: load the protected tree, neutral forms and landing controller after the capability checks, but before any session
   // starts or `expose` runs. Fragment capture remains synchronous above; `act` never waits for a component import.
   // Keeping the forms/controller off the initial boot path preserves the startup budget when authentication and sync are composed.
-  const [{ createProtectedTree }, { SessionRoot }, { completeLanding }] =
-    await Promise.all([
-      import("./protected-tree"),
-      import("./SessionRoot"),
-      import("../features/authentication/controller"),
-    ]);
+  const [
+    { createProtectedTree },
+    { SessionRoot },
+    { completeLanding },
+    lifecycle,
+  ] = await Promise.all([
+    import("./protected-tree"),
+    import("./SessionRoot"),
+    import("../features/authentication/controller"),
+    // WEB-08c: the `1c.ended` producer and "Review this device" (loaded with the forms, before the session starts).
+    import("./lifecycle-wiring"),
+  ]);
   finishLanding = completeLanding;
   // The session and the surface refer to each other only through this closure: the surface asks for the tree, and the
   // tree needs the session for its screens.
-  let renderTree: (() => ReactNode) | null = null;
+  let renderTree: ((account: string) => ReactNode) | null = null;
   const surface = createProtectedSurface({
-    renderTree: () => {
+    renderTree: (account) => {
       if (!renderTree)
         throw new Error(
           "The protected tree was asked for before the session existed",
         );
-      return renderTree();
+      return renderTree(account);
     },
     gateDialog: createGateDialog(),
     liveRegions,
@@ -162,11 +168,14 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
       supportedRange: rangeFromPin(contractVersion),
       onSignIn: () => signInRequest.request(),
       onReload: options.onReload ?? (() => location.reload()),
+      onReviewDevice: () => lifecycle.reviewDevice(session),
       ...(options.config === undefined ? {} : { config: options.config }),
     },
   );
   live = session;
   renderTree = createProtectedTree(session);
+  // Before `start`: an indeterminate attempt found at boot (begun before a reload or in another tab, T5/T8) is resolved during it.
+  lifecycle.startAttemptEndWatcher(session);
   const leads = options.dataLeader !== false;
   // Before the session starts: the protected tree may be mounted during `start`, and its provider must then wait for the PAGE's runtime
   // that the leader composes rather than build one of its own (P-3).

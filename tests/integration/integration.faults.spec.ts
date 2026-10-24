@@ -49,7 +49,35 @@ test.describe("I-04: late activation after cancel (T8 at module level)", () => {
     const listed = await page.evaluate(() =>
       window.__retry(() => window.__s.operations.listSessions()),
     );
-    expect(listed).toMatchObject({ ok: false, error: "auth_state" });
+    // ADAPTED (WEB-08c revision 14, family `i04-first-stamped-request-premise`; the original assertion was
+    // `expect(listed).toMatchObject({ ok: false, error: "auth_state" })`). It assumed THIS call is the first stamped request after the
+    // late activation. The page's own post-display read (the data layer's `GET /me`) can be issued first: it then observes the 401, the
+    // session closes, and this call is refused `closed` without being sent (revision-14 continuation run, kernel trace and network log).
+    // The original intent is kept: the FIRST stamped request after the late activation, whichever it is, is the backend's 401; this
+    // call never succeeds; it answers `auth_state` itself unless an earlier stamped request observed the 401 first.
+    const log = await proxy.log();
+    const activated = log.findIndex(
+      (e) =>
+        e.method === "POST" && /\/browser-sessions\/activate$/.test(e.path),
+    );
+    const stamped = log
+      .slice(activated + 1)
+      .filter(
+        (e) =>
+          e.path.startsWith("/api/") &&
+          !/\/browser-sessions(\/|\?|$)|\/health(\?|$)/.test(e.path),
+      );
+    expect(
+      stamped[0]?.status,
+      "the first stamped request after the late activation is the backend's 401",
+    ).toBe(401);
+    expect(listed.ok, "the call never succeeds").toBe(false);
+    if (!listed.ok && listed.error === "closed")
+      expect(
+        stamped[0]?.path,
+        "an earlier stamped request observed the 401",
+      ).not.toMatch(/\/sessions(\?|$)/);
+    else expect(listed).toMatchObject({ ok: false, error: "auth_state" });
     await untilRecord(
       page,
       (s) =>

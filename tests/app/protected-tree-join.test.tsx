@@ -86,9 +86,13 @@ describe("notices about a sign-in that finished while an account displays", () =
     );
     const notices = screen.getByRole("region", { name: "Notices" });
     fireEvent.click(notices.querySelector("button") as HTMLElement);
+    // The dismissed notice is gone. (The same words are also announced into the polite live region one animation frame after the
+    // notice appears; that announcement is not the notice, so the check is of the notice itself, not of the text anywhere.)
+    expect(notice).not.toBeInTheDocument();
     expect(
-      screen.queryByText(NEUTRAL_COPY["1c.superseded"].message),
+      document.querySelector('[data-notice="feedback-superseded"]'),
     ).toBeNull();
+    expect(screen.queryByRole("region", { name: "Notices" })).toBeNull();
   });
 
   test("linking single sign-on says so", async () => {
@@ -105,5 +109,23 @@ describe("notices about a sign-in that finished while an account displays", () =
     expect(
       await screen.findByText(MESSAGE_TEXT.sso_linked),
     ).toBeInTheDocument();
+  });
+});
+
+describe("WEB-08c R4 (matrix 3.7.2, T22 t5(i), lifecycle row 7): where a tree starts", () => {
+  test("the page's first tree and the same account's later trees keep the address; a tree for a DIFFERENT account starts at / (synchronously, before its router exists)", () => {
+    const factory = createProtectedTree(sessionDouble());
+    history.replaceState(null, "", "/settings/signing-in?x=1");
+    factory("acct-c");
+    expect(`${location.pathname}${location.search}`).toBe(
+      "/settings/signing-in?x=1",
+    );
+    factory("acct-c");
+    expect(location.pathname).toBe("/settings/signing-in");
+    factory("acct-y");
+    expect(`${location.pathname}${location.search}`).toBe("/");
+    history.replaceState(null, "", "/settings");
+    factory("acct-y");
+    expect(location.pathname).toBe("/settings");
   });
 });

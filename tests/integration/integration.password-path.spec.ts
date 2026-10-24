@@ -6,15 +6,19 @@ import {
   challengeFor,
   expect,
   exposeSession,
+  freshHarnessDocument,
   freshVerifier,
+  identityReadsAtProxy,
   ORIGIN,
   proxy,
   raw,
   records,
+  type SettledLike,
   signIn,
   test,
   untilRecord,
   type Who,
+  withStaleSharedConfirmation,
 } from "./helpers";
 
 /**
@@ -82,6 +86,38 @@ test.describe("I-01: the password path through the module", () => {
     expect(state.settled?.session_id).toBe(current?.id);
     expect(state.settled?.epoch).toBe(1);
     expect(state.attempt).toBeNull(); // the verifier is gone at settlement
+
+    // WEB-08c revision 14 (review 14 R16): since HF1-SHARED-CONFIRMATION-20261013 the settlement's shared confirmation spares this
+    // settled page the optional identity read (the accepted behaviour; control: no identity read reached the proxy). The read's wire
+    // contract is checked on the verification that a NEW document makes when the record's confirmation is older than the interval
+    // (as any page booting later finds it, and as every display did before that decision): made eligible explicitly (only the
+    // confirmation's time rewritten, in a transaction that checks the settlement), then proven issued by the page (its response, the
+    // collector's record and the proxy's log), not assumed.
+    expect(await identityReadsAtProxy()).toEqual([]);
+    const settled = state.settled as SettledLike;
+    expect(await withStaleSharedConfirmation(page, settled)).toMatchObject({
+      aged: true,
+      settlement_matched: true,
+      confirmation_matched: true,
+      written_age_ms: 120_000,
+    });
+    const identityRead = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.endsWith("/browser-sessions/current"),
+    );
+    // Awaited only once the read is proven issued below (no unhandled rejection when the setup detector fails first).
+    identityRead.catch(() => undefined);
+    await freshHarnessDocument(page, settled);
+    await expect
+      .poll(async () => (await identityReadsAtProxy()).length, {
+        message:
+          "setup (R16): the new document made its identity read (none: the premise of the wire assertions below is absent)",
+        timeout: 15_000,
+      })
+      .toBeGreaterThanOrEqual(1);
+    await identityRead;
+    await expect
+      .poll(() => seen.some((r) => r.path === "/browser-sessions/current"))
+      .toBe(true);
 
     // current() is accepted with X-Atlas-Session: 1 and NO CSRF header; a stamped GET carries X-CSRF-Token (SA-01).
     const currentCall = seen.find(

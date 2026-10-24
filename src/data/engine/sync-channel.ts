@@ -24,7 +24,46 @@ export type SyncMessage =
    * page that does not lead (a follower's notice, or any page's neutral state 3). The leading page applies its own retry when the account
    * and the epoch are the ones it is bound to; the acts it makes are versioned on the failure that stands, as its own page's are.
    */
-  | { type: "retry_requested"; account: AccountId; epoch: number };
+  | {
+      type: "retry_requested";
+      account: AccountId;
+      epoch: number;
+      /**
+       * WEB-08c revision 4 (R9, S11): the recovery failure the person saw (`recovery_state.failure`) when the retry was pressed on state 3.
+       * The leading page applies the act only while that SAME failure stands: a retry made against a failure that has since been retried
+       * (or replaced by a newer one) resets nothing. Absent for a retry that names no recovery failure (a follower's sync notice).
+       */
+      failure?: string;
+    }
+  /**
+   * WEB-08c revision 3 (R5, T24 D, design assessment S9): the leading page's recovery job reported "Catching up" (state 2), "Couldn't
+   * finish catching up" (state 3) or nothing for the account at that epoch. Another page shows the same neutral card from it; it never
+   * changes what may be displayed (the record and the exposure protocol decide that).
+   */
+  | {
+      type: "recovery_state";
+      account: AccountId;
+      epoch: number;
+      phase: RecoveryPhase;
+      /**
+       * WEB-08c revision 4 (R9 of the review of 14 October 2026): the report's PRODUCER (one leading page's sync leader) and its sequence
+       * there. A page orders the reports of one producer by `seq` (an older or repeated one is ignored), so a late "failed" or "none" of
+       * that producer cannot replace its newer report. `failure` names the failure a "failed" report stands for (what a retry acts on).
+       * The leading page answers EVERY matching query with its current report (a new sequence), "none" included, so a lost report, query
+       * or answer only delays a page that keeps asking.
+       */
+      producer: string;
+      seq: number;
+      failure?: string;
+    }
+  /**
+   * A page that does not lead asks the leading page for its standing recovery report: when it comes to show state 2 or 3, and again, paced,
+   * for as long as it shows one and is visible (WEB-08c revision 4: a one-shot ask could be lost).
+   */
+  | { type: "recovery_state_query"; account: AccountId; epoch: number };
+
+/** The recovery job's report as the channel carries it: `none` is no report (the card is not the recovery's). */
+export type RecoveryPhase = "catching_up" | "failed" | "none";
 
 /**
  * The store a `data_changed` hint names when a page RECORDS a stop of a local write (a durable failure streak reaching its bound) or ENDS
@@ -41,6 +80,12 @@ export interface SyncChannel {
 
 const str = (v: unknown): v is string =>
   typeof v === "string" && v.length > 0 && v.length < 200;
+
+const epochOk = (v: unknown): boolean =>
+  typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+/** The optional `failure` of a recovery report or retry: absent, or a valid string (kept only when present); null when invalid. */
+const failureOf = (m: Record<string, unknown>) =>
+  m.failure === undefined ? {} : str(m.failure) ? { failure: m.failure } : null;
 
 /** Validates an incoming message against the closed union; anything else is ignored. */
 export function parseSyncMessage(value: unknown): SyncMessage | null {
@@ -72,13 +117,46 @@ export function parseSyncMessage(value: unknown): SyncMessage | null {
             nonce: m.nonce,
           }
         : null;
-    case "retry_requested":
+    case "recovery_state": {
+      const extra = failureOf(m);
       return str(m.account) &&
-        typeof m.epoch === "number" &&
-        Number.isSafeInteger(m.epoch) &&
-        m.epoch >= 0
-        ? { type: "retry_requested", account: m.account, epoch: m.epoch }
+        epochOk(m.epoch) &&
+        (m.phase === "catching_up" ||
+          m.phase === "failed" ||
+          m.phase === "none") &&
+        str(m.producer) &&
+        epochOk(m.seq) &&
+        extra
+        ? {
+            type: "recovery_state",
+            account: m.account,
+            epoch: m.epoch as number,
+            phase: m.phase,
+            producer: m.producer,
+            seq: m.seq as number,
+            ...extra,
+          }
         : null;
+    }
+    case "recovery_state_query":
+      return str(m.account) && epochOk(m.epoch)
+        ? {
+            type: "recovery_state_query",
+            account: m.account,
+            epoch: m.epoch as number,
+          }
+        : null;
+    case "retry_requested": {
+      const extra = failureOf(m);
+      return str(m.account) && epochOk(m.epoch) && extra
+        ? {
+            type: "retry_requested",
+            account: m.account,
+            epoch: m.epoch as number,
+            ...extra,
+          }
+        : null;
+    }
     case "data_changed":
       return str(m.account) &&
         Array.isArray(m.stores) &&
