@@ -21,9 +21,8 @@
 //     runner after the file's afterAll hooks and cleanups, so a failing hook cannot skip it).
 //
 // R33: an asynchronous extended matcher's result is consumed ONCE, by the framework's own unchanged `result.then(handler)` call (the
-// handler is the framework's, edited in place). Only a genuine native promise whose `then` is the intrinsic one (checked without running
-// user code) also gets an inert reaction to observe a rejection, which no user code can see; any other thenable is left to the
-// framework's call alone, and until its handler runs the invocation counts as unobserved (that attempt's occurrences are ambiguous).
+// handler is the framework's, edited in place). Revision 30 also gave a native promise an inert second reaction and counted other
+// thenables as unobserved until their handler ran; revision 31 removed both (below): there is no second reaction.
 //
 // Revision 31 (review r30 R31/R33 incomplete_fix; design assessment 34d402c4 RC1/RC2, C1-C4, I2-I5):
 //   - COLLECTION PATHS (RC1): Vitest's `failTask` expands a thrown array and then each AggregateError it meets (one level of each), and
@@ -38,8 +37,29 @@
 //     intrinsic `then` the argument count is unobservable and a rethrowing handler settles the derived promise exactly as the implicit
 //     thrower does, in the same job. Any other thenable keeps its one-argument call, and the worker is OPAQUE from then on: its handler
 //     running proves nothing about what the thenable's `then` returned, and a thenable made in a hook, an earlier test or an earlier
-//     attempt can hand anything to a later one, so every later occurrence of the worker is refused (fail closed). The same applies to
-//     a `.resolves`/`.rejects` subject whose species path is not intrinsic (`consuming`).
+//     attempt can hand anything to a later one, so every later occurrence of the worker is refused (fail closed).
+//
+// Revision 32 (review r31 R31 incomplete_fix; design assessment db604cfa RC1, C1-C5, I1-I5): revision 31 decided a `.resolves`/
+// `.rejects` subject BEFORE `Promise.resolve(subject)`, but assimilation reads the subject's `then`, and a getter there is user code that
+// can replace the species the framework's next `.then` consumes (review r31: a donor error returned as the derived promise). A decision
+// is now valid only over an interval that provably runs no user code, and every Promise operation the framework performs after user
+// code could have run is proven again at that operation or has its outcome checked on delivery (ROUTES):
+//   - `consuming`: the global `Promise` binding and its static `resolve`, the prototype's `then`/`catch`/`constructor`, the species
+//     getter, and how `Promise.resolve` will read the subject: an intrinsic promise, a primitive, or an object whose `then` lookup
+//     reaches a data property (or none) through non-proxy objects. Then nothing but intrinsic code runs from the check until the
+//     framework's `.then(...).catch(...)` chain exists. An accessor `then`, a proxy or any other promise is opaque (fail closed).
+//   - Each `.resolves`/`.rejects` call is a ROUTE with its own id. Its settlement handlers record what they produced: the matcher
+//     invocation they started (`settled(..., "matcher")`) or their own wrong-settlement site's error. The framework's `.catch` handler,
+//     through which every rejection of the chain passes, CARRIES only that output; anything else leaving it (a borrowed error from a
+//     formatter getter, from a substituted assimilation of a returned promise) gets an `async-settlement` edge of the route: a veto.
+//   - `recordAsyncExpect` re-proves its `finally` (and soft `then`) at the call; the returned wrapper re-proves its `then`/`catch` at the
+//     call and observes the rejection it delivers to the consumer: what reaches the consumer (or the soft handler) must be what the
+//     route's `.catch` carried, else an `async-delivery` edge (a substitution inside `finally`'s own later thenable job is caught here).
+//     A wrapper `finally`, a test-code JavaScript callback given to the wrapper (observing it would add a frame beneath it), and an
+//     asynchronous expectation without a route make the worker opaque.
+//   - The worker's Promise intrinsics are checked again at every collection: a modification still present there makes it opaque.
+// Disclosed boundary: consumption by test code or the runner's own `await` of a native promise the framework returned is not a framework
+// assertion route; a test that alters the realm's Promise intrinsics and restores them before any of these points is not detected.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { types } from "node:util";
 import {
@@ -63,7 +83,16 @@ const intrinsicProto = Promise.prototype;
 const nativeThen = intrinsicProto.then;
 const nativeCatch = intrinsicProto.catch;
 const nativeFinally = intrinsicProto.finally;
+const NATIVE = freeze({
+  // biome-ignore lint/suspicious/noThenProperty: the intrinsic method of each name, keyed by that name (never a thenable)
+  then: nativeThen,
+  catch: nativeCatch,
+  finally: nativeFinally,
+});
+const nativeResolve = Promise.resolve;
 const speciesGetter = getOwnPropertyDescriptor(Promise, Symbol.species)?.get;
+const nativeToString = Function.prototype.toString;
+const realm = globalThis;
 const iteratorKey = Symbol.iterator;
 
 const frames = [];
@@ -283,27 +312,234 @@ const markOpaque = (id) => {
   }
 };
 
+/** Revision 32: the global `Promise` binding and its static `resolve` are the intrinsic ones (own data properties: no getter runs). */
+function realmPromise() {
+  return (
+    dataIs(realm, "Promise", IntrinsicPromise) &&
+    Promise === IntrinsicPromise &&
+    dataIs(IntrinsicPromise, "resolve", nativeResolve)
+  );
+}
+
 /**
- * Revision 31: Vitest's `.resolves`/`.rejects` wrappers are about to consume `subject` with `Promise.resolve(subject).then(...).catch(...)`
- * (and `recordAsyncExpect`'s `finally`), returning the derived promise to the test. A custom (non-promise) thenable is assimilated by
- * intrinsic code there (its own `then`'s return value is ignored), but a genuine promise with a non-intrinsic species path, or replaced
- * global promise methods, could hand the test a laundering derived promise. Decided without running user code, immediately before
- * that `Promise.resolve`; a non-intrinsic path is opaque for the rest of the worker. Returns nothing (the framework's code is unchanged).
+ * Revision 32: whether `promise.<method>(...)`, called with no user code before it, runs only intrinsic code until it returns: the
+ * receiver is intrinsic (`intrinsic`: then the species path is too), has no own `method`, and the prototype's `method` is the intrinsic
+ * data property. `catch` and `finally` invoke the intrinsic `then` of the same receiver.
+ */
+function operable(promise, method) {
+  return (
+    intrinsic(promise) &&
+    !hasOwn(promise, method) &&
+    dataIs(intrinsicProto, method, NATIVE[method])
+  );
+}
+
+/**
+ * Revision 32: whether `Promise.resolve(subject)` runs no user code. A primitive is fulfilled as it is. An intrinsic promise is returned
+ * itself (its `constructor` read is a data read of the prototype). Any other object is read ONCE, for `then`: proven only when that
+ * lookup reaches a data property (or none) through non-proxy objects (descriptor reads, no getter runs). An accessor `then` (review r31:
+ * its second read installed a species), a proxy anywhere on the chain or any other promise is not proven.
+ */
+function assimilable(subject) {
+  if (
+    subject === null ||
+    (typeof subject !== "object" && typeof subject !== "function")
+  )
+    return true;
+  if (types.isPromise(subject) && !types.isProxy(subject))
+    return intrinsic(subject);
+  try {
+    for (let o = subject; o !== null; o = getPrototypeOf(o)) {
+      if (types.isProxy(o)) return false;
+      const d = getOwnPropertyDescriptor(o, "then");
+      if (d !== undefined) return hasOwn(d, "value");
+    }
+    return true;
+  } catch {
+    // an exotic object whose descriptor cannot be read (an uninitialised namespace binding) is not proven
+    return false;
+  }
+}
+
+/**
+ * Revision 32: the routes of `.resolves`/`.rejects` calls, by the promise the framework built (`route`) and hands to
+ * `recordAsyncExpect` (`recording`). Each route: its own id (its vetoes are edges of that id), the invocation its matcher handler started
+ * (`intended`), its wrong-settlement site and the invocation window it was made in (`site`, `from`, `to`), and the objects its `.catch`
+ * handler carried (`carried`).
+ */
+const routes = new WeakMap();
+const isObject = (v) =>
+  v !== null && (typeof v === "object" || typeof v === "function");
+
+/**
+ * Called at the end of the line before the framework's `Promise.resolve(subject).then(...).catch(...)`, with no user code between this
+ * check and the end of that chain when it holds (see `assimilable`, `operable`): then `Promise.resolve` assimilates without user code,
+ * its `.then` and the `.catch` are the intrinsic methods, and every promise of the chain is a %Promise% made by the intrinsic
+ * constructor. Otherwise the worker is opaque. Returns the new route either way (its handlers still record what they see).
  */
 export function consuming(subject) {
+  let route = null;
   try {
-    const promise = types.isPromise(subject) && !types.isProxy(subject);
+    invocations += 1;
+    route = {
+      id: invocations,
+      intended: null,
+      site: null,
+      from: 0,
+      to: 0,
+      carried: new WeakSet(),
+    };
     const ok =
-      (promise ? intrinsic(subject) : intrinsicGlobals()) &&
+      realmPromise() &&
+      intrinsicGlobals() &&
       dataIs(intrinsicProto, "catch", nativeCatch) &&
-      dataIs(intrinsicProto, "finally", nativeFinally);
-    if (!ok) {
-      invocations += 1;
-      markOpaque(invocations);
-    }
+      assimilable(subject);
+    if (!ok) markOpaque(route.id);
   } catch (error) {
     fail("consuming", error);
+    if (route !== null) markOpaque(route.id);
   }
+  return route;
+}
+
+/** A settlement handler of `route` starts: the invocation counter now (what it starts later is numbered above it). */
+export function settling(route) {
+  return route === null ? null : invocations;
+}
+
+/**
+ * The settlement handler of `route` that started at `start` has finished (returned or thrown). `kind` "matcher": the handler called
+ * the matcher, whose invocation is the first one started inside it (`start + 1`; none if nothing started). Otherwise `kind` is the
+ * handler's own wrong-settlement site: its error was made inside the window `(start, now]`.
+ */
+export function settled(route, start, kind) {
+  try {
+    if (route === null || typeof start !== "number") return;
+    if (kind === "matcher")
+      route.intended = invocations > start ? start + 1 : null;
+    else {
+      route.site = kind;
+      route.from = start;
+      route.to = invocations;
+    }
+  } catch (error) {
+    fail("settled", error);
+  }
+}
+
+/** Whether `value` is what `route`'s settlement handler produced: its matcher invocation's error, or its own site's error. */
+function produced(route, value) {
+  if (!isObject(value)) return false;
+  const r = receipts.get(value);
+  if (r === undefined || r.invocation === null) return false;
+  if (route.intended !== null && r.invocation === route.intended) return true;
+  return (
+    route.site !== null &&
+    r.site === route.site &&
+    r.invocation > route.from &&
+    r.invocation <= route.to
+  );
+}
+
+/**
+ * The framework's `.catch` handler of `route` rethrew (`thrown`) the rejection it received (`input`). Every rejection of the chain
+ * passes here. It carries `input` only when it rethrew exactly that and that is what the route produced; anything else leaving it
+ * (another object, a borrowed error from a formatter getter or from a substituted settlement of a returned promise) gets an
+ * `async-settlement` edge of the route.
+ */
+export function caught(route, input, thrown) {
+  try {
+    if (route === null) return;
+    if (thrown === input && produced(route, input)) route.carried.add(input);
+    else edge(thrown, route, "async-settlement");
+  } catch (error) {
+    fail("caught", error);
+  }
+}
+
+/** The framework built `promise` (the end of the chain) for `route`. */
+export function route(promise, r) {
+  try {
+    if (r !== null && isObject(promise)) routes.set(promise, r);
+  } catch (error) {
+    fail("route", error);
+  }
+}
+
+/** `recordAsyncExpect` starts with `promise`: its route, or null (an asynchronous expectation the framework built without one). */
+export function recording(promise) {
+  try {
+    return isObject(promise) ? (routes.get(promise) ?? null) : null;
+  } catch (error) {
+    fail("recording", error);
+    return null;
+  }
+}
+
+/**
+ * The framework is about to call `promise.<method>(...)` for `route` (`recordAsyncExpect`'s `finally` and soft `then`, the returned
+ * wrapper's `then`/`catch`), with no user code before the call. Not provably intrinsic, or no route: the worker is opaque.
+ */
+export function operating(r, promise, method) {
+  try {
+    if (r === null) {
+      invocations += 1;
+      markOpaque(invocations);
+    } else if (!operable(promise, method)) markOpaque(r.id);
+  } catch (error) {
+    fail("operating", error);
+  }
+}
+
+/** The returned wrapper's `finally`: the rejection it passes on cannot be observed, so the worker is opaque. */
+export function unqualified(r) {
+  try {
+    if (r === null) invocations += 1;
+    markOpaque(r?.id ?? invocations);
+  } catch (error) {
+    fail("unqualified", error);
+  }
+}
+
+/** A rejection of `route` reached its consumer: it must be what the route's `.catch` carried, else an `async-delivery` edge. */
+export function delivered(r, reason) {
+  try {
+    if (r === null) return;
+    if (isObject(reason) && r.carried.has(reason)) return;
+    edge(reason, r, "async-delivery");
+  } catch (error) {
+    fail("delivered", error);
+  }
+}
+
+/** Whether `fn` is a built-in (or bound or proxied) function: its own frames are not JavaScript the test wrote. */
+const builtin = (fn) =>
+  /\{\s*\[native code\]\s*\}\s*$/.test(nativeToString.call(fn));
+
+/**
+ * The rejection handler the returned wrapper passes to the proven-intrinsic `then`/`catch` in place of `onRejected`: for a built-in
+ * one (`await`'s resolving functions), the same function behind a delivery check (it has no frames a test can see); for none, a
+ * delivery check that rethrows (the intrinsic method's own pass-through, made explicit: same job, same reason). A JavaScript callback
+ * the test wrote is passed unchanged and the worker is opaque (observing it would add a frame beneath the test's code).
+ */
+export function receiving(r, onRejected) {
+  try {
+    if (r === null) return onRejected;
+    if (typeof onRejected !== "function")
+      return (reason) => {
+        delivered(r, reason);
+        throw reason;
+      };
+    if (builtin(onRejected))
+      return (reason) => {
+        delivered(r, reason);
+        return onRejected(reason);
+      };
+    markOpaque(r.id);
+  } catch (error) {
+    fail("receiving", error);
+  }
+  return onRejected;
 }
 
 /** The invocation `async` armed for the framework's call being evaluated (`rejection` takes it: evaluated right after, no user code between). */
@@ -529,8 +765,20 @@ export function phase(test, name) {
   }
 }
 
+/** Revision 32: every Promise intrinsic a route proof relies on is still the intrinsic one. */
+const realmIntact = () =>
+  realmPromise() &&
+  intrinsicGlobals() &&
+  dataIs(intrinsicProto, "catch", nativeCatch) &&
+  dataIs(intrinsicProto, "finally", nativeFinally);
+
 function context(test, name, advance) {
   try {
+    // Revision 32: a modification of the realm's Promise intrinsics still present when an error is collected makes the worker opaque.
+    if (!realmIntact()) {
+      invocations += 1;
+      markOpaque(invocations);
+    }
     const state = stateOf(test);
     if (state === null)
       return freeze({
@@ -777,6 +1025,9 @@ Object.defineProperty(globalThis, REGISTRY, {
     edgesOf: (error) => [...(edges.get(error) ?? [])],
     /** Revision 31: the intrinsic-promise decision (the setup proves it on known intrinsic and non-intrinsic promises). */
     intrinsic,
+    /** Revision 32: whether `Promise.resolve(subject)` runs no user code, and whether the realm's Promise intrinsics are intact. */
+    assimilable,
+    realmIntact,
     /** Whether the asynchronous context reaches a promise reaction (the worker's async-context mode is checked by the setup). */
     propagates: () => {
       const probe = freeze({ probe: true });

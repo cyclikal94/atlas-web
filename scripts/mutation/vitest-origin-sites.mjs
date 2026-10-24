@@ -1,3 +1,10 @@
+// WEB-14a revision 32 (review r31 R31 incomplete_fix, design assessment db604cfa C1-C5): schema 5. Revision 31 checked a
+// `.resolves`/`.rejects` subject before `Promise.resolve`, whose assimilation runs a `then` getter (user code) that can replace the
+// species the next `.then` consumes. Each such call is now a ROUTE (vitest-origin-runtime.mjs): a pre-check that holds only over an
+// interval with no user code (a data-property `then`), the settlement handlers recording what they produced, the `.catch` handler
+// carrying only that, `recordAsyncExpect`'s `finally`/soft `then` and the returned wrapper's `then`/`catch` proven at each call, and
+// every rejection delivered to a consumer checked against what was carried (new edge kinds `async-settlement`, `async-delivery`).
+//
 // WEB-14a revision 31 (review r30 R31/R33 incomplete_fix, design assessment 34d402c4 C1-C4): schema 4. `failTask` now gives every
 // child it collects the snapshot of the array it iterated and of the AggregateError it expanded (the framework's own decisions, read
 // from its own variables: no second `Array.isArray`/`instanceof`, no traversal), so a container's edge reaches its children (RC1). The
@@ -42,7 +49,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ORIGIN_SCHEMA = "atlas-assertion-origin/4";
+export const ORIGIN_SCHEMA = "atlas-assertion-origin/5";
 export const ORIGIN_KEY = "__atlasAssertionOrigin";
 /** The property of a SERIALISED error copy holding its occurrence record (the runner's copy; the original error is never changed). */
 export const OCCURRENCE_KEY = "__atlasAssertionOccurrence";
@@ -52,7 +59,7 @@ export const HEALTH_META_KEY = "atlasAssertionOriginHealth";
 export const ASYNC_CONTEXT_FLAG = "--experimental-async-context-frame";
 export const ORIGIN_NONCE_ENV = "ATLAS_VITEST_ORIGIN_NONCE";
 /** The worker-realm registry (runtime → setup). Not a source of evidence: admission reads the occurrence records on serialised errors. */
-export const REGISTRY = Symbol.for("atlas.assertion-origin/4");
+export const REGISTRY = Symbol.for("atlas.assertion-origin/5");
 /** The chai flag holding an `expect()` root's record (copied along a chain by chai's transferFlags, absent on internal assertions). */
 export const ROOT_FLAG = "atlas-origin-root";
 
@@ -411,9 +418,9 @@ export const MODULES = Object.freeze([
       // argument (revision 29 subscribed a second time). Its handler is edited IN PLACE: built by an arrow that captures the matcher's
       // invocation (`async`, evaluated with the arguments, after the framework's own `then` read), its body runs in that invocation and
       // records a throw as that invocation's edge; the destructuring of the result moves into the body so that a throwing result
-      // getter is covered too. `async` also observes the rejection of a genuine native promise (an inert reaction, no user code).
+      // getter is covered too. (Revision 30's inert second reaction on a native promise was removed by revision 31.)
       // Revision 31 (RC2): whether the result is an intrinsic promise is decided at the end of the line that produced it, before the
-      // framework's own `typeof result.then` and `result.then` reads.
+      // framework's own `typeof result.then` and `result.then` reads; only those data reads run between that decision and the call.
       edit(
         "const result = expectAssertion.call(state, obj, ...args);",
         "const result = expectAssertion.call(state, obj, ...args); const __atlasIntrinsic = __atlasOrigin.intrinsic(result);",
@@ -428,16 +435,69 @@ export const MODULES = Object.freeze([
         "\t\t\t\t});\n\t\t\t\tconst { pass, message, actual, expected, meta } = result;",
         "\t\t\t\t} catch (__atlasThrown) { __atlasOrigin.handlerThrew(__atlasInvocation, __atlasThrown); throw __atlasThrown; } finally { __atlasOrigin.handled(__atlasInvocation); } })(__atlasOrigin.async(result, __atlasIntrinsic)), ...__atlasOrigin.rejection());\n\t\t\t\tconst { pass, message, actual, expected, meta } = result;",
       ),
-      // Revision 31 (RC2): `.resolves`/`.rejects` consume their subject with `Promise.resolve(subject).then(...)`; whether that path is
-      // intrinsic is decided at the end of the line before (no user code runs between), and a non-intrinsic one makes the worker opaque.
+      // Revision 32 (review r31 R31, design assessment db604cfa C1/C2): each `.resolves`/`.rejects` call is a ROUTE. `consuming` ends the
+      // line before `Promise.resolve(subject)` and proves that nothing but intrinsic code runs from there to the end of the
+      // `.then(...).catch(...)` chain, assimilation included (revision 31's check did not cover a `then` getter). Each settlement
+      // handler's body runs in a `try` opened at the end of its first line and closed at the end of its last, so no framework text
+      // moves: `settled` records the matcher invocation it started, or its own site's error. The `.catch` handler carries only that
+      // (`caught`); the chain is registered (`route`) for `recordAsyncExpect`.
       edit(
-        '\t\t\t\tutils.flag(this, "_name", key);\n\t\t\t\tconst promise = Promise.resolve(obj).then((value) => {',
-        '\t\t\t\tutils.flag(this, "_name", key); __atlasOrigin.consuming(obj);\n\t\t\t\tconst promise = Promise.resolve(obj).then((value) => {',
+        '\t\t\t\tutils.flag(this, "_name", key);\n\t\t\t\tconst promise = Promise.resolve(obj).then((value) => {\n\t\t\t\t\tutils.flag(this, "object", value);\n\t\t\t\t\treturn result.call(this, ...args);\n\t\t\t\t}, (err) => {',
+        '\t\t\t\tutils.flag(this, "_name", key); const __atlasRoute = __atlasOrigin.consuming(obj);\n\t\t\t\tconst promise = Promise.resolve(obj).then((value) => { const __atlasStart = __atlasOrigin.settling(__atlasRoute); try {\n\t\t\t\t\tutils.flag(this, "object", value);\n\t\t\t\t\treturn result.call(this, ...args); } finally { __atlasOrigin.settled(__atlasRoute, __atlasStart, "matcher"); }\n\t\t\t\t}, (err) => { const __atlasStart = __atlasOrigin.settling(__atlasRoute); try {',
+      ),
+      edit(
+        "\t\t\t\t\t_error.cause = err;\n\t\t\t\t\tthrow _error;\n\t\t\t\t}).catch((err) => {",
+        '\t\t\t\t\t_error.cause = err;\n\t\t\t\t\tthrow _error; } finally { __atlasOrigin.settled(__atlasRoute, __atlasStart, "vitest.resolves.rejected"); }\n\t\t\t\t}).catch((err) => { try {',
       ),
       edit(
         '\t\t\t\tutils.flag(this, "_name", key);\n\t\t\t\tconst promise = Promise.resolve(wrapper).then((value) => {',
-        '\t\t\t\tutils.flag(this, "_name", key); __atlasOrigin.consuming(wrapper);\n\t\t\t\tconst promise = Promise.resolve(wrapper).then((value) => {',
+        '\t\t\t\tutils.flag(this, "_name", key); const __atlasRoute = __atlasOrigin.consuming(wrapper);\n\t\t\t\tconst promise = Promise.resolve(wrapper).then((value) => { const __atlasStart = __atlasOrigin.settling(__atlasRoute); try {',
       ),
+      edit(
+        '\t\t\t\t\t}));\n\t\t\t\t}, (err) => {\n\t\t\t\t\tutils.flag(this, "object", err);\n\t\t\t\t\treturn result.call(this, ...args);\n\t\t\t\t}).catch((err) => {',
+        '\t\t\t\t\t})); } finally { __atlasOrigin.settled(__atlasRoute, __atlasStart, "vitest.rejects.resolved"); }\n\t\t\t\t}, (err) => { const __atlasStart = __atlasOrigin.settling(__atlasRoute); try {\n\t\t\t\t\tutils.flag(this, "object", err);\n\t\t\t\t\treturn result.call(this, ...args); } finally { __atlasOrigin.settled(__atlasRoute, __atlasStart, "matcher"); }\n\t\t\t\t}).catch((err) => { try {',
+      ),
+      // Both `.catch` handlers (identical text): what leaves them is carried or vetoed; then the chain is registered.
+      edit(
+        "\t\t\t\t\tif (isError(err) && error.stack) err.stack = error.stack.replace(error.message, err.message);\n\t\t\t\t\tthrow err;\n\t\t\t\t});\n\t\t\t\treturn recordAsyncExpect(",
+        ...Array(2).fill(
+          "\t\t\t\t\tif (isError(err) && error.stack) err.stack = error.stack.replace(error.message, err.message);\n\t\t\t\t\tthrow err; } catch (__atlasThrown) { __atlasOrigin.caught(__atlasRoute, err, __atlasThrown); throw __atlasThrown; }\n\t\t\t\t}); __atlasOrigin.route(promise, __atlasRoute);\n\t\t\t\treturn recordAsyncExpect(",
+        ),
+      ),
+      // Revision 32 (C1/C2): `recordAsyncExpect` finds its route, proves its `finally` and soft `then` at each call (user code may have
+      // run since the chain was built), checks what reaches the soft handler, and its returned wrapper proves its `then`/`catch` at
+      // the call and observes the rejection it delivers (`receiving`); its `finally` is unqualified.
+      edit(
+        "function recordAsyncExpect(_test, promise, assertion, error, isSoft) {",
+        "function recordAsyncExpect(_test, promise, assertion, error, isSoft) { const __atlasRoute = __atlasOrigin.recording(promise);",
+      ),
+      edit(
+        "\tif (test && promise instanceof Promise) {\n\t\t// if promise is explicitly awaited, remove it from the list\n\t\tpromise = promise.finally(() => {",
+        '\tif (test && promise instanceof Promise) { __atlasOrigin.operating(__atlasRoute, promise, "finally");\n\t\t// if promise is explicitly awaited, remove it from the list\n\t\tpromise = promise.finally(() => {',
+      ),
+      edit(
+        "\t\tif (!test.promises) test.promises = [];",
+        '\t\tif (!test.promises) test.promises = []; if (isSoft) __atlasOrigin.operating(__atlasRoute, promise, "then");',
+      ),
+      edit(
+        "\t\tif (isSoft) promise = promise.then(noop, (err) => {",
+        "\t\tif (isSoft) promise = promise.then(noop, (err) => { __atlasOrigin.delivered(__atlasRoute, err);",
+      ),
+      edit(
+        "\t\t\tthen(onFulfilled, onRejected) {\n\t\t\t\tresolved = true;\n\t\t\t\treturn promise.then(onFulfilled, onRejected);",
+        '\t\t\tthen(onFulfilled, onRejected) {\n\t\t\t\tresolved = true; __atlasOrigin.operating(__atlasRoute, promise, "then");\n\t\t\t\treturn promise.then(onFulfilled, __atlasOrigin.receiving(__atlasRoute, onRejected));',
+      ),
+      edit(
+        "\t\t\tcatch(onRejected) {\n\t\t\t\tresolved = true;\n\t\t\t\treturn promise.catch(onRejected);",
+        '\t\t\tcatch(onRejected) {\n\t\t\t\tresolved = true; __atlasOrigin.operating(__atlasRoute, promise, "catch");\n\t\t\t\treturn promise.catch(__atlasOrigin.receiving(__atlasRoute, onRejected));',
+      ),
+      edit(
+        "\t\t\tfinally(onFinally) {\n\t\t\t\tresolved = true;\n\t\t\t\treturn promise.finally(onFinally);",
+        "\t\t\tfinally(onFinally) {\n\t\t\t\tresolved = true; __atlasOrigin.unqualified(__atlasRoute);\n\t\t\t\treturn promise.finally(onFinally);",
+      ),
+      // (`expect.soft` subscribing to an extended matcher's result, `result.then(noop, ...)` in wrapAssertion, needs no check of its own:
+      // between the revision-31 intrinsic decision on that matcher's result and this call only the framework's own data reads run, and
+      // the derived promise it subscribes to is the intrinsic one the framework's call returned.)
       // Both JestExtendError sites: the error marks itself when its fields are set (the runtime tells the sites apart).
       edit(
         "\t\tthis.__vitest_error_context__ = __vitest_error_context__;\n\t}\n}",

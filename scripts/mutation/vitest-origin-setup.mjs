@@ -7,7 +7,8 @@
 // `attest`), so this file adds no hook to the suites under test.
 //
 // Revision 29 checked receipts on the error objects themselves; revision 30 keeps them in the runtime (the errors are untouched).
-// Revision 31 (review r30 R33, design assessment 34d402c4 C4) also proves the intrinsic-promise decision on known cases.
+// Revision 31 (review r30 R33, design assessment 34d402c4 C4) also proves the intrinsic-promise decision on known cases; revision 32
+// (review r31 R31) the realm's Promise intrinsics and the assimilation decision of `.resolves`/`.rejects` subjects.
 import { chai, expect } from "vitest";
 import {
   ASYNC_CONTEXT_FLAG,
@@ -146,6 +147,38 @@ for (const [label, value, expected] of intrinsicCases)
     refuse(`the intrinsic-promise probe (${label}) is not ${expected}`);
 if (probeGetterRan)
   refuse("the intrinsic-promise decision ran a constructor getter");
+// Revision 32 (review r31 R31, design assessment db604cfa C2): the realm's Promise intrinsics are the ones the runtime captured, and the
+// assimilation decision holds on known subjects: a primitive, an intrinsic promise and a thenable whose `then` is a data property (own or
+// inherited) are proven; an accessor `then` (whose getter must not run), a proxy, a subclass and an own-`constructor` promise are not.
+if (registry.realmIntact() !== true)
+  refuse(
+    "the realm's Promise intrinsics are not the ones the runtime captured",
+  );
+let thenGetterRan = false;
+const accessorThen = {
+  // biome-ignore lint/suspicious/noThenProperty: an accessor `then` is this probe's subject
+  get then() {
+    thenGetterRan = true;
+    return () => {};
+  },
+};
+const assimilationCases = [
+  ["primitive", 1, true],
+  ["plain promise", Promise.resolve(), true],
+  // biome-ignore lint/suspicious/noThenProperty: a custom thenable is this probe's subject
+  ["data then", { then() {} }, true],
+  // biome-ignore lint/suspicious/noThenProperty: an inherited data `then` is this probe's subject
+  ["inherited data then", Object.create({ then() {} }), true],
+  ["accessor then", accessorThen, false],
+  ["proxy", new Proxy({}, {}), false],
+  ["subclass", new (class extends Promise {})(() => {}), false],
+  ["own constructor", ownConstructor, false],
+];
+for (const [label, value, expected] of assimilationCases)
+  if (registry.assimilable(value) !== expected)
+    refuse(`the assimilation probe (${label}) is not ${expected}`);
+if (thenGetterRan || probeGetterRan)
+  refuse("the assimilation decision ran a getter");
 if (registry.depth() !== 0)
   refuse("matcher frames are unbalanced after the probes");
 if (registry.failures.length > 0)

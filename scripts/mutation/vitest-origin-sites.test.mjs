@@ -152,7 +152,8 @@ test("each module instruments with every site exactly once, the runtime import o
     expect.split("Reflect.apply").length,
     expectSource.join("\n").split("Reflect.apply").length,
   );
-  // Revision 31: `.resolves`/`.rejects` classify their subject at the end of the line before their own `Promise.resolve`.
+  // Revision 32 (review r31 R31): each `.resolves`/`.rejects` call opens its route at the end of the line before its own
+  // `Promise.resolve` (revision 31's bare `consuming` call there did not cover assimilation; the runtime now proves it).
   for (const subject of ["obj", "wrapper"]) {
     const line = expectSource.findIndex(
       (l, i) =>
@@ -164,13 +165,95 @@ test("each module instruments with every site exactly once, the runtime import o
     assert.ok(line > 0, subject);
     assert.equal(
       expectLines[line],
-      `${expectSource[line]} __atlasOrigin.consuming(${subject});`,
+      `${expectSource[line]} const __atlasRoute = __atlasOrigin.consuming(${subject});`,
     );
   }
-  assert.equal(
-    expect.split("Promise.resolve(").length,
-    expectSource.join("\n").split("Promise.resolve(").length,
-  );
+  // No framework text moves and no Promise operation is added: every edited line of the two wrappers and of `recordAsyncExpect` keeps
+  // the framework's text up to its last call or brace (only appended), except the returned wrapper's `onRejected` argument slot.
+  const sourceText = expectSource.join("\n");
+  for (const call of [
+    "Promise.resolve(",
+    ".then(",
+    ".catch(",
+    ".finally(",
+    "instanceof Promise",
+  ])
+    assert.equal(
+      expect.split(call).length,
+      sourceText.split(call).length,
+      call,
+    );
+  const at = (text) => expectSource.findIndex((l) => l.includes(text));
+  const scanned = [
+    [at("function recordAsyncExpect("), at("function handleTestError(")],
+    [
+      at('utils.addProperty(chai.Assertion.prototype, "resolves"'),
+      at("function formatCalls("),
+    ],
+  ].flatMap(([from, to]) => {
+    assert.ok(from > 0 && to > from);
+    return Array.from({ length: to - from }, (_, k) => from + k);
+  });
+  for (const i of scanned) {
+    if (expectLines[i] === expectSource[i]) continue;
+    if (/return promise\.(then|catch)\(/.test(expectSource[i])) {
+      const head = expectSource[i].slice(
+        0,
+        expectSource[i].indexOf("onRejected);"),
+      );
+      assert.ok(expectLines[i].startsWith(head), `line ${i + 1}`);
+      assert.ok(
+        expectLines[i].endsWith(
+          "__atlasOrigin.receiving(__atlasRoute, onRejected));",
+        ),
+        `line ${i + 1}`,
+      );
+      continue;
+    }
+    const mark = expectLines[i].includes("__atlasOrigin.mark(");
+    if (mark) continue; // a site wrapped by the marking edits (revision 29)
+    if (expectSource[i].trimEnd().endsWith("}));")) continue;
+    assert.ok(
+      expectLines[i].startsWith(expectSource[i]) ||
+        // the rejects site's closing line, already wrapped by its mark edit
+        expectLines[i].startsWith(`${expectSource[i].slice(0, -2)}));`),
+      `line ${i + 1} is not append-only: ${JSON.stringify(expectSource[i])}`,
+    );
+  }
+  for (const [text, count] of [
+    ["__atlasOrigin.consuming(", 2],
+    ["__atlasOrigin.settling(__atlasRoute)", 4],
+    ['__atlasOrigin.settled(__atlasRoute, __atlasStart, "matcher")', 2],
+    [
+      '__atlasOrigin.settled(__atlasRoute, __atlasStart, "vitest.resolves.rejected")',
+      1,
+    ],
+    [
+      '__atlasOrigin.settled(__atlasRoute, __atlasStart, "vitest.rejects.resolved")',
+      1,
+    ],
+    [
+      "throw err; } catch (__atlasThrown) { __atlasOrigin.caught(__atlasRoute, err, __atlasThrown); throw __atlasThrown; }",
+      2,
+    ],
+    ["}); __atlasOrigin.route(promise, __atlasRoute);", 2],
+    ["const __atlasRoute = __atlasOrigin.recording(promise);", 1],
+    ['__atlasOrigin.operating(__atlasRoute, promise, "finally");', 1],
+    ['if (isSoft) __atlasOrigin.operating(__atlasRoute, promise, "then");', 1],
+    [
+      'resolved = true; __atlasOrigin.operating(__atlasRoute, promise, "then");',
+      1,
+    ],
+    [
+      'resolved = true; __atlasOrigin.operating(__atlasRoute, promise, "catch");',
+      1,
+    ],
+    ["__atlasOrigin.delivered(__atlasRoute, err);", 1],
+    ["__atlasOrigin.receiving(__atlasRoute, onRejected)", 2],
+    ["resolved = true; __atlasOrigin.unqualified(__atlasRoute);", 1],
+    ["__atlasOrigin.softening(", 0],
+  ])
+    assert.equal(expect.split(text).length - 1, count, text);
   assert.equal(expect.split("asyncExtension").length - 1, 0);
   assert.equal(expect.split("subscribe").length - 1, 0);
   // The JestExtendError constructions are untouched (they mark themselves in the constructor).

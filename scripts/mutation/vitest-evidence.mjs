@@ -42,6 +42,11 @@
 // matcher result or `.resolves`/`.rejects` subject that was not an intrinsic promise makes the WORKER opaque from then on (`opaque`:
 // every later occurrence refused whatever its handler did);
 // an intrinsic promise's rejection is observed by the framework's own reaction, so it needs no wait. Envelope schema 5.
+//
+// Revision 32 (review r31 R31 incomplete_fix, design assessment db604cfa C3/C4): a `.resolves`/`.rejects` subject's assimilation can
+// run a `then` getter that substitutes the derived promise, so a donor caught earlier reached the reader with only its own clean edges.
+// Each such call is now a route whose vetoes are edges of the route (`async-settlement`, `async-delivery`; origin schema 5). The single
+// `admission` below refuses them for both consumers; nothing else in the rule changed.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import {
   adapterDigest,
@@ -108,7 +113,17 @@ export function project(value) {
 const isInt = (v) => Number.isInteger(v);
 const isOptionalInt = (v) => v === null || Number.isInteger(v);
 const isOptionalString = (v) => v === null || typeof v === "string";
-const EDGE_KINDS = ["sync", "soft", "async-result", "async-rejection"];
+// Revision 32: `async-settlement` (left a `.resolves`/`.rejects` route's `.catch` without being what that route produced) and
+// `async-delivery` (reached a route's consumer without having been carried by its `.catch`): edges of the ROUTE, always vetoes.
+const EDGE_KINDS = [
+  "sync",
+  "soft",
+  "async-result",
+  "async-rejection",
+  "async-settlement",
+  "async-delivery",
+];
+const ROUTE_EDGES = ["async-settlement", "async-delivery"];
 
 /** A construction receipt inside an occurrence record, exactly of its shape, or `undefined` when malformed. */
 function receiptOf(record) {
@@ -413,7 +428,7 @@ export function admission(
   // handed anything back; every later occurrence of the worker is refused, whatever its handler did.
   if (occurrence.opaque.length > 0)
     return no(
-      "an earlier asynchronous matcher result or promise subject of this worker was a non-intrinsic thenable (its outcome cannot be observed)",
+      "an earlier asynchronous matcher result, promise subject or Promise operation of this worker was not provably intrinsic (a non-intrinsic thenable or path: its outcome cannot be observed)",
     );
   switch (receipt.role) {
     case "comparison":
@@ -447,9 +462,19 @@ export function admission(
     return no(
       "propagated as the rejection of an asynchronous matcher's body (an execution failure)",
     );
-  if (occurrence.edges.some((e) => e.invocation !== receipt.invocation))
+  if (
+    occurrence.edges.some(
+      (e) =>
+        !ROUTE_EDGES.includes(e.kind) && e.invocation !== receipt.invocation,
+    )
+  )
     return no(
       "propagated out of another matcher invocation (an execution failure of that matcher)",
+    );
+  // Revision 32 (review r31 R31): a `.resolves`/`.rejects` route vetoes what it did not produce or did not carry to its consumer.
+  if (occurrence.edges.some((e) => ROUTE_EDGES.includes(e.kind)))
+    return no(
+      "delivered through a .resolves/.rejects route that did not produce it (a substituted or borrowed settlement: an execution failure)",
     );
   // A framed comparison must have left its own invocation: by a throw out of its outermost frame (or by being collected inside it by
   // `expect.soft`), or, for the extended matcher's asynchronous result, through that matcher's handler.

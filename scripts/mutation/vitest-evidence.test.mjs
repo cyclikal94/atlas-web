@@ -558,6 +558,8 @@ test("admission (revision 29, kept in revision 30): an assertion only by the rec
     }),
     occurrenceOf(r, { phase: undefined }),
     occurrenceOf("receipt"),
+    // Revision 32: only the six edge kinds of origin schema 5 exist.
+    occurrenceOf(r, { edges: [{ invocation: 1, kind: "async-route" }] }),
   ])
     assert.deepEqual(project({ [OCCURRENCE_KEY]: bad }).occurrence, {
       invalid: true,
@@ -655,6 +657,30 @@ test("admission (revision 30): per occurrence, by its collection phase, attempt,
       /rejection of an asynchronous matcher/,
     ],
     [genuine({ edges: [] }), /never left its own invocation/],
+    // Revision 32 (review r31 R31): a `.resolves`/`.rejects` route vetoes what it did not produce or did not carry to its consumer,
+    // whatever the donor's own clean edges, and so does a route edge on a container the framework expanded.
+    ...["async-settlement", "async-delivery"].map((kind) => [
+      genuine({
+        edges: [
+          { invocation: 7, kind: "sync" },
+          { invocation: 11, kind },
+        ],
+      }),
+      /through a \.resolves\/\.rejects route that did not produce it/,
+    ]),
+    [
+      genuine({
+        path: [
+          {
+            kind: "array",
+            object: true,
+            receipt: null,
+            edges: [{ invocation: 11, kind: "async-delivery" }],
+          },
+        ],
+      }),
+      /collected out of an array that left a matcher invocation/,
+    ],
     // A hook, cleanup or lifecycle collection is a veto, whatever it carries.
     ...[
       "beforeEach",
