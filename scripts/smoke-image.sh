@@ -52,7 +52,7 @@ for platform in $PLATFORMS; do
   echo "=== $platform"
   $BUILD --platform "$platform" --build-arg NGINX_IMAGE="$NGINX_IMAGE" \
     --build-arg ATLAS_WEB_VERSION="$(node -p "require('./package.json').version")" \
-    --build-arg ATLAS_WEB_REVISION="$(git rev-parse HEAD)" -t "$tag" . >/dev/null 2>&1
+    --build-arg ATLAS_WEB_REVISION="$(node scripts/source-revision.mjs)" -t "$tag" . >/dev/null 2>&1
   IMAGES+=("$tag")
   docker image inspect "$tag" > "$EVIDENCE/image-inspect-$arch.json"
 
@@ -129,7 +129,12 @@ for platform in $PLATFORMS; do
   # --- the browser suite against the real container (native architecture only)
   if [ "$platform" = "$BROWSER_PLATFORM" ]; then
     echo "--- browser suite against the $arch container (production project)"
-    if ATLAS_PRODUCTION_URL="$base" pnpm exec playwright test --project=production-chromium production.neutral production.csp > "$EVIDENCE/playwright-image-$arch.log" 2>&1; then ok "$arch: production browser suite passes against the container"; else fail "$arch: production browser suite failed (see $EVIDENCE/playwright-image-$arch.log)"; tail -30 "$EVIDENCE/playwright-image-$arch.log" >&2; fi
+    ATLAS_PRODUCTION_URL="$base" PLAYWRIGHT_JSON_OUTPUT_FILE="$EVIDENCE/playwright-inventory-$arch.json" \
+      pnpm exec playwright test --project=production-chromium production.neutral production.csp \
+      --workers=1 --retries=0 --repeat-each=1 --forbid-only --list --reporter=json > "$EVIDENCE/playwright-inventory-$arch.log" 2>&1
+    if ATLAS_PRODUCTION_URL="$base" PLAYWRIGHT_JSON_OUTPUT_FILE="$EVIDENCE/playwright-image-$arch.json" \
+      pnpm exec playwright test --project=production-chromium production.neutral production.csp \
+      --workers=1 --retries=0 --repeat-each=1 --forbid-only --update-snapshots=none --reporter=list,json > "$EVIDENCE/playwright-image-$arch.log" 2>&1; then ok "$arch: production browser suite passes against the container"; else fail "$arch: production browser suite failed (see $EVIDENCE/playwright-image-$arch.log)"; tail -30 "$EVIDENCE/playwright-image-$arch.log" >&2; fi
   fi
   docker logs "$name" > "$EVIDENCE/container-log-$arch.txt" 2>&1 || true
 done
