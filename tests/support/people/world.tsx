@@ -18,9 +18,24 @@ import {
 } from "../../../src/data";
 import { digestOf } from "../../../src/data/model/canonical";
 import {
-  commandKindOf,
+  decideSupersede,
   estimateDraftBytes,
+  planEdit,
+  planEnqueue,
+  snapshotRequest,
+  validateRequest,
 } from "../../../src/data/model/outbox";
+import {
+  OUTSTANDING,
+  reconcileVersions,
+} from "../../../src/data/model/reconcile";
+import { TargetFold } from "../../../src/data/model/related";
+import { initialSyncState } from "../../../src/data/model/sync-state";
+import type {
+  DraftRow,
+  ResourceVersionRow,
+  SyncStateRow,
+} from "../../../src/data/model/types";
 import type {
   CommandAttempt,
   PeopleApi,
@@ -74,11 +89,15 @@ import { ME } from "./records";
  *
  *  - The data layer is the stub controller (`stubEnv`) with a store double that answers the three read plans the screens use
  *    (`data.readMerged`, `data.readResourceList`, `data.readOutstandingCreates`) from `cache` and `drafts`, live.
- *  - The outbox is a double that runs each request's `build` on the bases the real plan would resolve (the record a queued save of this
- *    device raised, else the cached version of a checked target, else the seed of a created one; the record follows a newer cached version
- *    as the real reconciliation does) and records it; a queued draft then appears among the outstanding drafts, with its bases, as the
- *    real store would. A build that throws is a refused write (the real facade reports it as a failed save). A save under a local id that is
- *    already a draft is the same save (a duplicate adds nothing).
+ *  - The outbox is a double whose writes are DECIDED by the real pure plans (review 11, R11.1): the request is snapshotted and checked at
+ *    its boundary (`snapshotRequest`, `validateRequest`), then `planEnqueue`, `planEdit` and `decideSupersede` decide over what the real
+ *    transaction would read (the targets' cached rows, the version records `versions`, the other drafts by `TargetFold`, `draft_seq`), and
+ *    the world applies what they return as ONE state change before telling its readers: the whole header with its body, whose
+ *    `command_digest` is the digest of the stored body; an edit rebuilds from the draft's OWN bases and moves no version record; a
+ *    supersession deletes the old draft (from the conflict inbox too), rewrites its dependants and recomputes the records. A refusal writes
+ *    nothing; a build that cannot run or is not JSON throws a `TypeError`, as the real facades do. `built` logs each committed write. What
+ *    the facade adds around the plans is NOT modelled here: the quota reservation and its re-admission, the store's transaction and its
+ *    aborts, closure and the identity fence, pending effects and `observed` tokens. `outcomes` scripts a facade refusal instead.
  *  - Held audience changes are form copies (`copies`), written by a double of the held store and read by `data.readFormCopies`.
  *  - The people and sharing APIs are scriptable doubles that record every call.
  */
@@ -415,6 +434,9 @@ export interface PeopleWorld {
   mount(path: string): Promise<{ router: ReturnType<typeof createAppRouter> }>;
 }
 
+/** The instant every write of the world is made at. */
+const NOW = "2026-10-12T09:00:00.000Z";
+
 export function peopleWorld(
   options: { online?: boolean; identity?: string } = {},
 ): PeopleWorld {
@@ -644,66 +666,126 @@ export function peopleWorld(
 
   const built: Built[] = [];
   const outcomes: PeopleWorld["outcomes"] = [];
-  const basesOf = (request: EnqueueRequest) => {
-    const bases: Record<string, number> = {};
-    for (const target of request.targets) {
-      const tracked = versions.get(target.resourceId);
-      const cached = cache.get(target.resourceId)?.version;
-      const base = tracked ?? cached ?? target.seedIfUntracked;
-      if (base !== undefined) bases[target.resourceId] = base;
+  // The outbox's durable state as the real plans read it (review 11, R11.1): the version records with their basis, and `draft_seq`.
+  const basis = new Map<string, ResourceVersionRow["basis"]>();
+  let draftSeq = seq;
+  const versionRows = (ids: readonly string[]) => {
+    const rows = new Map<string, ResourceVersionRow>();
+    for (const id of ids) {
+      const tracked = versions.get(id);
+      if (tracked !== undefined)
+        rows.set(id, {
+          resource_id: id,
+          locally_assumed_version: tracked,
+          basis: basis.get(id) ?? "resource",
+        });
     }
-    return bases;
+    return rows;
   };
-  const bumpedOf = (request: EnqueueRequest) =>
-    request.targets
-      .filter((target) => target.versionChecked)
-      .map((target) => target.resourceId);
-  /** Whether an outstanding draft other than `except` raised `id`. */
-  const raisedBy = (id: string, except?: string) =>
-    drafts.some(
-      (d) =>
-        d.local_id !== except &&
-        d.bumped.includes(id) &&
-        ["queued", "in_flight", "blocked", "acknowledged"].includes(d.status),
-    );
+  const cachedRows = (ids: readonly string[]) => {
+    const rows = new Map<string, CacheRow>();
+    for (const id of ids) {
+      const row = cache.get(id);
+      if (row !== undefined) rows.set(id, row);
+    }
+    return rows;
+  };
+  const putVersions = (
+    puts: readonly ResourceVersionRow[],
+    deletes: readonly string[] = [],
+  ) => {
+    for (const id of deletes) {
+      versions.delete(id);
+      basis.delete(id);
+    }
+    for (const row of puts) {
+      versions.set(row.resource_id, row.locally_assumed_version);
+      basis.set(row.resource_id, row.basis);
+    }
+  };
+  const syncRow = (): SyncStateRow => {
+    // `draft_seq` never falls below a draft a test seeded: a new draft is the newest, as the real counter makes it.
+    for (const d of drafts) draftSeq = Math.max(draftSeq, d.created_seq);
+    return { ...initialSyncState(service.incarnationId), draft_seq: draftSeq };
+  };
+  const headers = () =>
+    drafts.map(({ command: _command, ...header }) => header);
+  /** `readTouched`'s other drafts: the ones that stand in, per id, for every non-terminal draft that targets it, `exclude` aside. */
+  const relatedTo = (ids: readonly string[], exclude: ReadonlySet<string>) => {
+    const others = new Map<string, DraftRow>();
+    for (const id of new Set(ids)) {
+      const fold = new TargetFold(id);
+      for (const row of headers())
+        if (row.index_targets.includes(id) && !exclude.has(row.local_id))
+          fold.add(row);
+      for (const row of fold.rows()) others.set(row.local_id, row);
+    }
+    return [...others.values()];
+  };
+  /** The real facades' answer to a plan that could not build or measure the command: a `TypeError`, never a success. */
+  const unbuildable = (reason: string) =>
+    new TypeError(`the save could not be built or measured as JSON: ${reason}`);
+  /**
+   * The version records after a delivered page names `rows` (`commitPage`'s `reconcileVersions`, over the drafts as that commit leaves
+   * them): a delivered version at or above the record ends it when no outstanding draft targets the row; a higher one otherwise raises
+   * the record (queued drafts keep their bases and meet a genuine 409).
+   */
+  const publish = (rows: readonly CacheRow[]) => {
+    const outstanding = new Set<string>();
+    for (const d of drafts)
+      if (OUTSTANDING.has(d.status))
+        for (const id of d.index_targets) outstanding.add(id);
+    const named = rows.map((row) => row.id);
+    const { versionPuts, versionDeletes } = reconcileVersions({
+      versions: [...versionRows(named).values()],
+      mentions: new Map(
+        rows.map((row) => [row.id, { removed: false, version: row.version }]),
+      ),
+      outstanding,
+    });
+    putVersions(versionPuts, versionDeletes);
+  };
   const nextLocalId = () => {
     seq += 1;
     return `00000000-0000-4000-8000-${String(seq).padStart(12, "0")}`;
   };
+  /**
+   * A committed write, as the log of what was built: the command is the one STORED (the plan's snapshot, built on the bases the plan used),
+   * and the display patch and review are what the request's build returned on those same bases.
+   */
   const record = (
     op: Built["op"],
     request: EnqueueRequest,
-    localId: string,
+    stored: Pick<DraftRow, "local_id" | "bases">,
+    command: JsonObject,
     target?: string,
   ) => {
-    // The real facade sizes the write first, building from placeholder bases (no bases, the widest version) before the transaction.
-    estimateDraftBytes(request);
-    const bases = basesOf(request);
-    const result = request.build(bases);
-    if (op !== "edit")
-      for (const id of bumpedOf(request))
-        versions.set(id, (bases[id] as number) + 1);
+    const result = request.build({ ...stored.bases });
     built.push({
       request,
-      command: result.command as Record<string, unknown>,
+      command: command as Record<string, unknown>,
       ...(result.displayPatch === undefined
         ? {}
         : { displayPatch: result.displayPatch }),
       ...(result.defaultsReview === undefined
         ? {}
         : { defaultsReview: result.defaultsReview }),
-      localId,
+      localId: stored.local_id,
       op,
       ...(target === undefined ? {} : { target }),
     });
-    return { ...result, bases };
   };
   let outboxAvailable = true;
   const outbox = {
-    enqueue: async (request: EnqueueRequest, handOff?: HandOff) => {
+    enqueue: async (given: EnqueueRequest, handOff?: HandOff) => {
+      // The facade's boundary: a private copy of the request, checked before anything is awaited (an invalid one throws).
+      const request = snapshotRequest(given);
+      validateRequest(request);
       const scripted = outcomes.shift();
       if (scripted !== undefined && scripted.kind === "refused")
         return scripted;
+      // The real facade sizes the write first, building from placeholder bases (no bases, the widest version) before the transaction.
+      estimateDraftBytes(request);
       const localId = request.localId ?? nextLocalId();
       // A hand-off (`transferDraft`): its copies must be as read and no draft may have the id; then the draft and the copy's end are one step.
       if (handOff !== undefined) {
@@ -725,10 +807,32 @@ export function peopleWorld(
             reason: "source_changed",
           } as EnqueueOutcome;
       }
-      // The same save again (a retry after a lost completion): nothing is added.
-      else if (drafts.some((d) => d.local_id === localId))
-        return { kind: "queued", localId, createdSeq: seq } as EnqueueOutcome;
-      const result = record("enqueue", request, localId);
+      // The enqueue plan (`planEnqueue`) over what the transaction reads: the targets' cached rows and version records, the drafts that
+      // stand in for every other draft against them, and the draft already under this id (the same save again: nothing is added).
+      const ids = request.targets.map((target) => target.resourceId);
+      const planned = planEnqueue(request, {
+        sync: syncRow(),
+        cache: cachedRows(ids),
+        versions: versionRows(ids),
+        related: relatedTo(ids, new Set([localId])),
+        existing: headers().find((d) => d.local_id === localId),
+        localId,
+        accountId: ME,
+        now: NOW,
+      });
+      if (planned.kind === "refused")
+        return { kind: "refused", reason: planned.reason } as EnqueueOutcome;
+      if (planned.kind === "invalid") throw unbuildable(planned.reason);
+      if (planned.kind === "duplicate")
+        return {
+          kind: "queued",
+          localId,
+          createdSeq: planned.draft.created_seq,
+        } as EnqueueOutcome;
+      // ONE state change: the header and its body, the version records and the counter (then the readers are told).
+      putVersions(planned.versionPuts);
+      draftSeq = planned.sync.draft_seq;
+      record("enqueue", given, planned.draft, planned.command);
       if (handOff !== undefined) {
         const key = copyKey(
           handOff.source.formContext,
@@ -741,68 +845,150 @@ export function peopleWorld(
           content_digest: digestOf(handOff.tombstone),
         });
       }
-      drafts = [
-        ...drafts,
-        {
-          local_id: localId,
-          account_id: ME,
-          endpoint: request.endpoint,
-          target_id: null,
-          kind: commandKindOf(result.command, request.endpoint),
-          command: result.command,
-          command_digest: "x",
-          defaults_revision: result.defaultsRevision ?? null,
-          target_resource_ids: request.targets.map((t) => t.resourceId),
-          side_effect_bases: {},
-          index_targets: request.targets.map((t) => t.resourceId),
-          bases: result.bases,
-          bumped: bumpedOf(request),
-          defaults_context: null,
-          review_block:
-            result.defaultsReview && result.defaultsReview.length > 0
-              ? { kind: "defaults", kinds: [...result.defaultsReview] }
-              : null,
-          depends_on: [...(request.dependsOnExtra ?? [])],
-          status: "queued",
-          held_pending_cache: false,
-          unavailable_outcome: false,
-          retry_state: null,
-          attempts: 0,
-          last_attempt_at: null,
-          last_error: null,
-          display_patch: null,
-          receipt_revision: null,
-          created_seq: seq,
-          created_at: "2026-10-12T09:00:00.000Z",
-        } as DraftWithCommand,
-      ];
+      drafts = [...drafts, { ...planned.draft, command: planned.command }];
       notify();
-      return { kind: "queued", localId, createdSeq: seq } as EnqueueOutcome;
+      return {
+        kind: "queued",
+        localId,
+        createdSeq: planned.draft.created_seq,
+      } as EnqueueOutcome;
     },
-    editQueued: async (localId: string, request: EnqueueRequest) => {
+    editQueued: async (localId: string, given: EnqueueRequest) => {
+      const request = snapshotRequest(given);
+      validateRequest(request);
       const scripted = outcomes.shift();
       if (scripted !== undefined && scripted.kind === "refused")
         return scripted;
-      const draft = drafts.find((d) => d.local_id === localId);
-      if (draft === undefined) return { kind: "refused", reason: "not_found" };
-      if (draft.status !== "queued")
-        return { kind: "refused", reason: "not_queued" };
-      if (request.expectDraft !== undefined && !request.expectDraft(draft))
-        return { kind: "refused", reason: "draft_changed" };
-      const result = record("edit", request, localId, localId);
+      estimateDraftBytes(request);
+      // The edit plan (`planEdit`) over the draft as it is stored NOW: it rebuilds from the draft's OWN bases, refuses a draft that is gone,
+      // sent, retargeted or no longer the one the request reviewed, and returns the whole header with the new body's digest.
+      const planned = planEdit(
+        request,
+        headers().find((d) => d.local_id === localId),
+        syncRow(),
+      );
+      if (planned.kind === "refused")
+        return { kind: "refused", reason: planned.reason };
+      if (planned.kind === "invalid") throw unbuildable(planned.reason);
+      // The header and the body replace the stored pair together; the version records do not move (the edit raised nothing).
+      record("edit", given, planned.draft, planned.command, localId);
       drafts = drafts.map((d) =>
-        d.local_id === localId ? { ...d, command: result.command } : d,
+        d.local_id === localId
+          ? { ...planned.draft, command: planned.command }
+          : d,
       );
       notify();
       return { kind: "edited", localId };
     },
-    supersede: async (old: string, request: EnqueueRequest) => {
-      // The old draft's contribution is retired first, and the replacement reads the corrected record (the real plan's order).
-      for (const id of bumpedOf(request))
-        if (!raisedBy(id, old)) versions.delete(id);
-      const localId = nextLocalId();
-      record("supersede", request, localId, old);
-      return { kind: "superseded", localId, paused: [] };
+    supersede: async (old: string, given: EnqueueRequest) => {
+      const request = snapshotRequest(given);
+      validateRequest(request);
+      const scripted = outcomes.shift();
+      if (scripted !== undefined && scripted.kind === "refused")
+        return scripted;
+      estimateDraftBytes(request);
+      const localId = request.localId ?? nextLocalId();
+      // The old draft as the store holds it: a draft of this world, else the conflict inbox's (its body is `putBody`'s).
+      const inbox = env.conflicts.get();
+      const listed =
+        inbox.status === "ready"
+          ? inbox.value.rows.find((row) => row.draft.local_id === old)?.draft
+          : undefined;
+      const oldRow = headers().find((d) => d.local_id === old) ?? listed;
+      const existing = headers().find((d) => d.local_id === localId);
+      // The cascade (`readCascade`): the old draft and everything that waits on it, transitively.
+      const cascade = new Map<string, DraftRow>();
+      if (oldRow !== undefined && existing === undefined) {
+        cascade.set(oldRow.local_id, oldRow);
+        const frontier = [oldRow.local_id];
+        while (frontier.length > 0) {
+          const id = frontier.pop() as string;
+          for (const row of headers())
+            if (row.depends_on.includes(id) && !cascade.has(row.local_id)) {
+              cascade.set(row.local_id, row);
+              frontier.push(row.local_id);
+            }
+        }
+      }
+      const members = [...cascade.values()].sort(
+        (a, b) => a.created_seq - b.created_seq,
+      );
+      const ids = [
+        ...(oldRow === undefined
+          ? []
+          : members.flatMap((m) => [...m.index_targets, ...m.bumped])),
+        ...request.targets.map((target) => target.resourceId),
+      ];
+      const decision = decideSupersede(request, {
+        old: oldRow,
+        existing,
+        existingPaused:
+          oldRow === undefined && existing !== undefined
+            ? headers()
+                .filter(
+                  (d) =>
+                    d.depends_on.includes(existing.local_id) &&
+                    d.status === "version_conflict" &&
+                    d.last_error?.stage === "dependency_superseded",
+                )
+                .map((d) => d.local_id)
+            : [],
+        direct: members.filter(
+          (m) => m.local_id !== old && m.depends_on.includes(old),
+        ),
+        cascade: members,
+        extras: headers().filter((d) =>
+          (request.dependsOnExtra ?? []).includes(d.local_id),
+        ),
+        // The world records no pending effects (nothing of it is sent).
+        effects: [],
+        others: relatedTo(ids, new Set(cascade.keys())),
+        cache: cachedRows(ids),
+        versions: versionRows(ids),
+        sync: syncRow(),
+        localId,
+        accountId: ME,
+        now: NOW,
+      });
+      if (decision.kind === "refused")
+        return { kind: "refused", reason: decision.reason };
+      if (decision.kind === "invalid") throw unbuildable(decision.reason);
+      if (decision.kind === "duplicate")
+        return {
+          kind: "superseded",
+          localId: decision.draft.local_id,
+          paused: decision.paused,
+        };
+      // ONE state change: the old draft leaves (from the inbox too), its dependants are rewritten, the replacement and its body are put,
+      // and the version records are recomputed.
+      putVersions(decision.versionPuts, decision.versionDeletes);
+      if (decision.sync !== undefined) draftSeq = decision.sync.draft_seq;
+      record("supersede", given, decision.draft, decision.command, old);
+      const rewritten = new Map(decision.draftPuts.map((d) => [d.local_id, d]));
+      drafts = [
+        ...drafts
+          .filter((d) => !decision.draftDeletes.includes(d.local_id))
+          .map((d) => {
+            const put = rewritten.get(d.local_id);
+            return put === undefined ? d : { ...put, command: d.command };
+          }),
+        { ...decision.draft, command: decision.command },
+      ];
+      bodies.delete(old);
+      if (listed !== undefined && inbox.status === "ready")
+        env.setConflicts({
+          status: "ready",
+          value: {
+            ...inbox.value,
+            rows: inbox.value.rows.filter((row) => row.draft.local_id !== old),
+          },
+        });
+      notify();
+      return {
+        kind: "superseded",
+        localId: decision.draft.local_id,
+        paused: decision.paused,
+      };
     },
   };
   (env as unknown as { outbox: () => unknown }).outbox = () =>
@@ -1105,14 +1291,7 @@ export function peopleWorld(
     },
     putCache(row) {
       cache.set(row.id, row);
-      // `reconcileVersions`: a delivered version at or above the record ends it when nothing of this device is outstanding for the row;
-      // a higher one otherwise raises the record (queued drafts keep their bases and meet a genuine 409).
-      const tracked = versions.get(row.id);
-      if (tracked !== undefined) {
-        if (row.version >= tracked && !raisedBy(row.id))
-          versions.delete(row.id);
-        else if (row.version > tracked) versions.set(row.id, row.version);
-      }
+      publish([row]);
       act(() => notify());
     },
     setDrafts(next) {
@@ -1160,6 +1339,7 @@ export function peopleWorld(
     handOff(rows, next) {
       for (const row of rows) cache.set(row.id, row);
       drafts = next;
+      publish(rows);
       act(() => notify());
     },
     gated,

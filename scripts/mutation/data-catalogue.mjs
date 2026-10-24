@@ -22529,6 +22529,79 @@ export const UNIT = [
         "    const guessed = { ...binding, policyVersion: 1 };\n    setSnapshot(guessed);\n    setOutcome(null);\n    setResubmit({ binding: guessed, revision: state.revision });\n",
       ),
   },
+  // Review 11, R11.1 (DA11-03/DA11-08): the People world's outbox now judges a reviewed body at the write as the real one does, so the
+  // callers' predicates are held to a change the outbox itself committed while the person's save was held at the write.
+  {
+    id: "MU-2382",
+    title:
+      "WEB-11a R11 (DA11-03): a field's in-place edit of its queued update states no reviewed body, so another edit committed meanwhile is overwritten",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*field: .*while the outbox commits another edit of L/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ...putFieldUpdateRequest(base),\n          expectDraft: reviewedDraft(bound),\n",
+        "          ...putFieldUpdateRequest(base),\n",
+      ),
+  },
+  {
+    id: "MU-2383",
+    title:
+      "WEB-11a R11 (DA11-03): an unlinked person's in-place rename states no reviewed body, so another rename committed meanwhile is overwritten",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*rename: .*while the outbox commits another rename/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ...renameEditRequest(input),\n          expectDraft: reviewedDraft(snapshot),\n",
+        "          ...renameEditRequest(input),\n",
+      ),
+  },
+  {
+    id: "MU-2384",
+    title:
+      "WEB-11a R11 (DA11-03): an unsent create's in-place edit is not judged on its reviewed digest at the write (only before it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect:
+      /DA11-03: .*queued create: .*while the outbox commits another edit of the create/,
+    patch: (t) =>
+      sub(
+        t,
+        "            stored.command_digest === reviewed,",
+        "            true,",
+      ),
+  },
+  {
+    id: "MU-2385",
+    title:
+      "WEB-11a R11 (DA11-03): a field edit refused at the write (draft_changed) falls back to queuing the older form",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*field: .*while the outbox commits another edit of L/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
+        "      if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-2386",
+    title:
+      "WEB-11a R11 (DA11-03): a rename refused at the write (draft_changed) falls back to queuing the older form",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*rename: .*while the outbox commits another rename/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
+        "      if (false as boolean) {",
+      ),
+  },
 ];
 
 /**

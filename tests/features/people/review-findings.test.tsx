@@ -455,6 +455,19 @@ describe("review 2, finding 3: an old editor never overwrites a newer edit of th
       if (!concurrent) {
         await waitFor(() => expect(w.built).toHaveLength(1));
         expect(w.built[0]).toMatchObject({ op: "edit", target: "L" });
+        // Review 11 (R11.1): L keeps its stored base 4 (never the raised record 5) and stores its new body's digest.
+        expect(w.drafts).toHaveLength(1);
+        expect(w.drafts[0]?.command).toMatchObject({
+          command: {
+            expected_version: 4,
+            expected_policy_version: 6,
+            value: { kind: "text", text: "Older open editor" },
+          },
+        });
+        expect(w.drafts[0]?.command_digest).toBe(
+          digestOf(w.drafts[0]?.command ?? {}),
+        );
+        expect(w.versions.get(F)).toBe(5);
         return;
       }
       await waitFor(() =>

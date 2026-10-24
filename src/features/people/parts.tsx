@@ -136,6 +136,13 @@ export function initialsOf(name: string): string {
   return out === "" ? "?" : out;
 }
 
+/**
+ * The large avatar's size: the exact values its two single-use utilities computed (a 3.5rem square, an 18px font). It is drawn once, on
+ * the person's page, so a style of its own keeps those utilities out of the production CSS (the combined CSS budget, WEB-11a revision 11;
+ * their class names are not written here, since the CSS build scans comments too).
+ */
+const LARGE = { width: "3.5rem", height: "3.5rem", fontSize: "18px" } as const;
+
 export function Avatar({
   name,
   size = "small",
@@ -146,7 +153,8 @@ export function Avatar({
   return (
     <span
       aria-hidden="true"
-      className={`flex flex-none items-center justify-center rounded-round border border-hairline-strong bg-raised font-medium text-ink-1 ${size === "large" ? "size-14 text-[18px]" : "size-9 text-[13px]"}`}
+      className={`flex flex-none items-center justify-center rounded-round border border-hairline-strong bg-raised font-medium text-ink-1${size === "large" ? "" : " size-9 text-[13px]"}`}
+      style={size === "large" ? LARGE : undefined}
     >
       {initialsOf(name)}
     </span>

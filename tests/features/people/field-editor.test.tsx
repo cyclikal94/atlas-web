@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { digestOf } from "../../../src/data/model/canonical";
 import {
   forgetAllPeopleMemory,
   peopleMemory,
@@ -562,6 +563,20 @@ describe("updating a field", () => {
     await waitFor(() => expect(w.built).toHaveLength(1));
     expect(w.built[0]?.op).toBe("edit");
     expect(w.built[0]?.target).toBe("f1");
+    // Review 11 (R11.1): one stored pair, the edited body and its own digest, on the create's id.
+    const body = {
+      command: {
+        kind: "put_field",
+        id: F,
+        parent_id: P,
+        label: "Phone",
+        value: { kind: "text", text: "0771" },
+      },
+    };
+    expect(w.drafts.map((d) => [d.local_id, d.command])).toEqual([
+      ["f1", body],
+    ]);
+    expect(w.drafts[0]?.command_digest).toBe(digestOf(body));
   });
 
   test("a version conflict: 'Save mine on the current version' supersedes the CONFLICTED save's content on the current bases", async () => {

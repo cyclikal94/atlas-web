@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { DraftWithCommand } from "../../../src/data";
+import { digestOf } from "../../../src/data/model/canonical";
 import {
   AUDIENCE_LOAD_FAILED,
   CONFLICT_NEEDS_AUDIENCE,
@@ -725,7 +726,10 @@ describe("DA10-07: published while the editor's reads failed; Try again", () => 
 });
 
 describe("DA10-08: the bound save's completion belongs to its session and revision", () => {
-  test("typed again while the bound save is written: the save ends nothing, the later input stays and saves in place of it", async () => {
+  // SYNTHETIC (review 11's design assessment, DA11-06 / I7): while the save is written the form's fieldset is disabled, so a person cannot
+  // type here; the change event is dispatched to the disabled input to hold the completion to its submitted revision (a later revision
+  // is never ended by an earlier save). It is not evidence of a typing journey: DA11-06 below is the reachable continuation.
+  test("synthetic later revision while the bound save is written (the input is disabled): the save ends nothing, the later revision stays and saves in place of it", async () => {
     const w = world();
     const id = await queuedField(w);
     await typed(w, id);
@@ -748,6 +752,8 @@ describe("DA10-08: the bound save's completion belongs to its session and revisi
     };
     await saveMine(d);
     await waitFor(() => expect(entered.count).toBe(1));
+    // What a person meets: the input cannot be typed into while the save is written.
+    expect(value(d)).toBeDisabled();
     fireEvent.change(value(d), { target: { value: "Third value" } });
     await act(async () => {
       open();
@@ -775,11 +781,20 @@ describe("DA10-08: the bound save's completion belongs to its session and revisi
       op: "edit",
       target: w.drafts[0]?.local_id,
     });
-    expect(commandOf(w, 2)).toMatchObject({
+    // The in-place edit keeps the update's OWN stored base (1, as `expectUpdate` saw it) and stores the digest of its new body.
+    expect(commandOf(w, 2)).toEqual({
+      kind: "put_field",
       id,
+      parent_id: P,
+      expected_version: 1,
       expected_policy_version: 1,
+      label: "Queued",
       value: { kind: "text", text: "Third value" },
     });
+    expect(w.drafts).toHaveLength(1);
+    expect(w.drafts[0]?.command_digest).toBe(
+      digestOf(w.drafts[0]?.command ?? {}),
+    );
     await closed();
   });
 

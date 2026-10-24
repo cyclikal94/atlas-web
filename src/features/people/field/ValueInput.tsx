@@ -272,7 +272,7 @@ export function ValueInput({
                       ),
                     )
                   }
-                  className="size-4"
+                  className="h-4 w-4"
                 />
                 {copy.SELECTED}
               </label>
@@ -348,7 +348,7 @@ export function ValueInput({
                       ),
                     )
                   }
-                  className="size-4"
+                  className="h-4 w-4"
                 />
                 {copy.DONE}
               </label>
