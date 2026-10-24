@@ -16,9 +16,16 @@ const PICKER = "src/features/tasks/form/PresetPicker.tsx";
 const VISIT = "src/features/tasks/visit.ts";
 const ROUTES = "src/lib/route-changes.ts";
 
-/** An editor's session belongs to no visit: only its mount keeps it (revision 21's edit form, R34: the form the data hides drops it). */
+/**
+ * An editor's session belongs to no visit: only its mount keeps it (revision 21's edit form, R34: the form the data hides drops it).
+ * Re-anchored in revision 23 (same intent): the editor's owner is now reassignable (`let`, R35 follow-up).
+ */
 const noOwner = (t) =>
-  sub(t, "    const owner = visitOf(identity);\n", "    const owner = null;\n");
+  sub(
+    t,
+    "    let owner = visitOf(identity);\n",
+    "    let owner: TaskVisit | null = null;\n",
+  );
 /** The visits never hear a departure: a visit ends only when a task screen asks for another address or identity (DA22-I3). */
 const unobserved = (t) =>
   sub(

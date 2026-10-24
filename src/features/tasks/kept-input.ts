@@ -1,10 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   forgetTaskVisits,
+  onTaskRouteChange,
   onTaskVisitEnded,
   type TaskAttachment,
   type TaskVisit,
   useTaskAttachment,
+  useTaskScreenAt,
   useTaskVisit,
 } from "./visit";
 
@@ -35,7 +37,9 @@ import {
  * form closing onto the task, a fresh amount) only if it still PRESENTS (`visit.ts`, `TaskAttachment`), that is, the person has not
  * gone elsewhere, the sync screens included, since it opened. An editor the person left, still mounted while React removes it, just lets
  * go of the settled session: no navigation, no new session. A later return finds what the settlement left (a consumed save is not offered
- * again, newer input is still there).
+ * again, newer input is still there). An editor React never removed (the person went away and came back before it re-rendered) starts
+ * afresh once the person is at its address again, as a new mount there would: a new session and attachment, from what the screen shows
+ * now, never the consumed input to save twice and never an editor whose Save does nothing.
  */
 export interface KeptEntry<T> {
   readonly session: number;
@@ -261,6 +265,7 @@ export function useKeptInput<T>(
 ): KeptInput<T> {
   const visitOf = useTaskVisit();
   const attachTo = useTaskAttachment();
+  const shownAt = useTaskScreenAt();
   const attachment = useRef<TaskAttachment | null>(null);
   // Leaving the screen revokes the attachment as React removes the editor, before any passive cleanup (R35).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the editor opened for this key and identity leaves the screen
@@ -285,9 +290,11 @@ export function useKeptInput<T>(
   latest.current = { initial, options };
   // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for when the editor opens (the key and identity are the reason)
   useEffect(() => {
-    const owner = visitOf(identity);
-    const here = attachTo(owner);
+    let owner = visitOf(identity);
+    let here = attachTo(owner);
     attachment.current = here;
+    // Its session consumed while it did not present, and the editor still mounted (R35 follow-up, revision 23).
+    let orphaned = false;
     const open = (make: () => T) => {
       const entry = openKept(
         key,
@@ -305,6 +312,23 @@ export function useKeptInput<T>(
       });
     };
     open(() => latest.current.initial());
+    // The person is at the orphaned editor's address again (it was never removed): it starts afresh on the visit going on there.
+    const revive = () => {
+      if (!orphaned || owner === null || !shownAt(owner.address)) return;
+      const next = visitOf(identity);
+      const again = attachTo(next);
+      if (again === null || !again.presents()) {
+        again?.detach();
+        return;
+      }
+      orphaned = false;
+      here?.detach();
+      owner = next;
+      here = again;
+      attachment.current = again;
+      open(() => latest.current.initial());
+    };
+    const unheard = onTaskRouteChange(revive);
     const stop = subscribeKept(key, (event) => {
       if (event.session !== session.current) return;
       if (event.kind === "settled") {
@@ -314,15 +338,22 @@ export function useKeptInput<T>(
       }
       session.current = null;
       // Asked now, immediately before acting: an editor the person has left is told nothing to act on (R35).
-      const next =
-        here === null || here.presents()
-          ? latest.current.options.consumed(event.value as T, event.detail)
-          : null;
+      if (here !== null && !here.presents()) {
+        orphaned = true;
+        setShown((s) => ({ ...s, busy: false }));
+        revive();
+        return;
+      }
+      const next = latest.current.options.consumed(
+        event.value as T,
+        event.detail,
+      );
       if (next !== null) open(() => next);
       else setShown((s) => ({ ...s, busy: false }));
     });
     return () => {
       here?.detach();
+      unheard();
       stop();
       if (session.current !== null) releaseKept(key, session.current);
       session.current = null;

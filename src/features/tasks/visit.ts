@@ -220,6 +220,27 @@ export function useTaskAttachment(): (
 }
 
 /**
+ * Whether the person is at `address` now, by its router (where it is and its history) and the document, without beginning a visit there
+ * (revision 23): an editor whose save settled while it did not present asks this before attaching again.
+ */
+export function useTaskScreenAt(): (address: string) => boolean {
+  const router = useScreenRouter();
+  return (address) =>
+    trimmed(routes().pathname()) === address &&
+    (router === null ||
+      (trimmed(router.latestLocation.pathname) === address &&
+        (router.history === undefined ||
+          trimmed(router.history.location.pathname) === address)));
+}
+
+/** Told after the observed address changed (the document's record, or the tests' memory history), with the new path. */
+export function onTaskRouteChange(
+  listener: (pathname: string) => void,
+): () => void {
+  return routes().subscribe(listener);
+}
+
+/**
  * For tests whose router has a memory history: observe its changes instead of the document's. The visit going on (if any) ends: a new
  * router is a new world.
  */

@@ -11,7 +11,11 @@ const VISIT = "src/features/tasks/visit.ts";
 
 /** A consumed save's editor acts whether or not the person is still at its screen (revision 22's behaviour: R35). */
 const ungated = (t) =>
-  sub(t, "        here === null || here.presents()\n", "        true\n");
+  sub(
+    t,
+    "      if (here !== null && !here.presents()) {\n",
+    "      if (false) {\n",
+  );
 /** The visit's own router never revokes an attachment (only the document's later record would). */
 const noRouterRevocation = (t) =>
   sub(
@@ -20,7 +24,7 @@ const noRouterRevocation = (t) =>
     "    if (history !== undefined && false)\n      stop = history.subscribe(",
   );
 
-/** Unit mutants (layers L1b, the app's router over the production data controller and the IndexedDB double, and L1a), MU-2402..MU-2407. */
+/** Unit mutants (layers L1b, the app's router over the production data controller and the IndexedDB double, and L1a), MU-2402..MU-2407, MU-2409. */
 export const UNIT_R23 = [
   {
     id: "MU-2402",
@@ -110,11 +114,26 @@ export const UNIT_R23 = [
             "  const session = useRef<number | null>(null);\n",
             "  const session = useRef<number | null>(null);\n  const submittedHere = useRef(false);\n",
           ),
-          "        here === null || here.presents()\n",
-          "        (here === null || here.presents()) && submittedHere.current\n",
+          "      if (here !== null && !here.presents()) {\n",
+          "      if ((here !== null && !here.presents()) || !submittedHere.current) {\n",
         ),
         "      if (ticket !== null) setShown((s) => ({ ...s, busy: true }));\n",
         "      if (ticket !== null) {\n        submittedHere.current = true;\n        setShown((s) => ({ ...s, busy: true }));\n      }\n",
+      ),
+  },
+
+  {
+    id: "MU-2409",
+    title:
+      "WEB-10a rev 23 (R35 follow-up): an editor whose save settled while it did not present stays without a session when the person is back at it (its Save does nothing; the new form re-offers the consumed input)",
+    file: KEPT,
+    tests: [SAVES],
+    expect: /away and back before React removed the form/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!orphaned || owner === null || !shownAt(owner.address)) return;\n",
+        "      return;\n",
       ),
   },
 ];

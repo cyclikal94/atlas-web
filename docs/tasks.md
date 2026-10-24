@@ -415,11 +415,12 @@ Revision 23 (Review 23 R35 and its design assessment DA23; decision 49): `save-p
 save the outbox has committed, acknowledged after the Tasks link or the sync screens but before React removed the old form, and after it
 was removed; the queued create and the queued revision edited in place under the same schedules; a refused and a thrown save at the sync
 screens; the pending form returned to before the acknowledgement; a new visit of the form typed again before the old acknowledgement; a
-correction acknowledged after leaving for the sync screens; controls: staying closes the form onto its task) and `task-attachment.test.tsx`
+correction acknowledged after leaving for the sync screens; the same form instance after away-and-back before React removed it, which
+starts afresh and saves the next input; controls: staying closes the form onto its task) and `task-attachment.test.tsx`
 (a real router over a browser history in jsdom: not presenting from the moment the router moves, before the document's address is
 written; revoked for good by a departure to the sync screens; a change of only the query); native E-T45 (the save's write committed and
 only its IndexedDB `complete` handler held by the test; the Tasks link or the visible sync control, the old form still mounted, and the
-release in one task of the page; the staying controls) in three engines; unit MU-2402…MU-2407 and real-engine MU-2408
+release in one task of the page; the staying controls) in three engines; unit MU-2402…MU-2407, MU-2409 and real-engine MU-2408
 (`scripts/mutation/catalogue-web10a-r23.mjs`); MU-2063 re-anchored (same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
@@ -597,8 +598,11 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     revision; consumed, never offered again, or kept with its note), whichever editor is mounted; only the side effects of a consumed
     save are withheld from an editor that does not present: the form's close onto its task, the amount's fresh session, the correction
     dialog's close. A form the person comes back to (the same visit, Back from the sync screens) is a new attachment and acts on its
-    pending save; a save answered while the person is away never redirects them later. Nothing about writes, the queue or retention
-    changes.
+    pending save; a save answered while the person is away never redirects them later. An editor React never removed (the person went
+    away and came back before it re-rendered) and whose save settled while it did not present starts afresh once the person is at its
+    address again, as a new mount would: a new session and attachment from what the screen shows now, so its next Save writes the next
+    input (the edit coalescing into the queued revision) and the new form never re-offers the consumed input. Nothing about writes, the
+    queue or retention changes.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -705,9 +709,7 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
   other than to the sync screens, including leaving the sync screens for anywhere but that address (revision 22 reverses decision 44 on
   this point, per Review 22 and DA22-I3).
 - **A save answered while the person is away closes nothing (decision 49, revision 23).** Coming back to the form after it settled shows
-  what the settlement left (the new task's picker, or the edit form afresh); the saved task is in the list and the queue. An editor kept
-  mounted across an away-and-back too fast for React to remove it (no person's navigation is that fast) holds no session after its save
-  settles there: its Save does nothing until the screen is opened again.
+  what the settlement left (the new task's picker, or the edit form afresh); the saved task is in the list and the queue.
 
 ## Not claimed
 

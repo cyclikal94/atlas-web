@@ -376,6 +376,79 @@ describe("R35: an edit saved into the queued change it was shown", () => {
       });
 });
 
+describe("R35: away and back before React removed the form, then acknowledged (the same form instance)", () => {
+  // Two navigations in one act: React never removes the old form, so the instance the person returns to is the one whose attachment
+  // the departure revoked. Its save is consumed without moving the person; the form then starts afresh as a new mount there would, so
+  // the person's next input is saved (never a Save that does nothing, never the consumed input offered again).
+  for (const mode of ["new", "edit"] as const)
+    for (const where of ["/tasks", "/sync"] as const)
+      test(`${mode} form, ${where} and back: the form is fresh, and the next Save writes the next input`, async () => {
+        const { t, task, path, key } = await openForm(mode);
+        const hold = holdAcknowledgement(t);
+        await saveCommitted(t, hold);
+        const first = savedOnce(t, mode, task);
+        const instance = document.querySelector(
+          "[data-task-form]",
+        ) as HTMLElement;
+        instance.dataset.instance = "old";
+        const watch = watchSettlement(key);
+        await act(async () => {
+          void t.router.navigate(
+            (where === "/sync" ? SYNC : { to: "/tasks", search: {} }) as never,
+          );
+          void t.router.navigate({ to: path, search: {} } as never);
+          hold.release();
+        });
+        await t.settle();
+        watch.stop();
+        expect(watch.seen[0], "the save was consumed").toEqual({
+          kind: "consumed",
+          formMounted: true,
+        });
+        // The precondition: the person is back at the form, and it is the same instance React never removed.
+        expect(at(t)).toBe(path);
+        expect(
+          (document.querySelector("[data-task-form]") as HTMLElement | null)
+            ?.dataset.instance,
+          "the same form instance",
+        ).toBe("old");
+        expect(fieldset().disabled, "nothing pending").toBe(false);
+        if (mode === "new")
+          expect(name().value, "not the consumed input offered again").toBe("");
+        savedOnce(t, mode, task);
+        fireEvent.change(name(), { target: { value: "Second title" } });
+        fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+        // A fixed settle, not a wait on the route: a fault that never moves must fail the assertions below, not time out.
+        await t.settle();
+        const all = commands(t);
+        if (mode === "edit")
+          // The edit saves into the queued revision it now shows (one command, the next title).
+          expect(all).toEqual([
+            expect.objectContaining({
+              kind: "revise_task",
+              id: task.taskId,
+              title: "Second title",
+            }),
+          ]);
+        else {
+          // Two tasks: the consumed one and the next one deliberately saved (bodies come back in key order, not creation order).
+          expect(all).toHaveLength(2);
+          expect(all.map((c) => [c.kind, c.title]).sort()).toEqual([
+            ["create_task", "Second title"],
+            ["create_task", TYPED],
+          ]);
+        }
+        const last = String(
+          (mode === "edit"
+            ? all[0]
+            : all.find((c) => c.title === "Second title")
+          )?.id,
+        );
+        if (mode === "new") expect(last).not.toBe(first);
+        expect(at(t)).toBe(`/tasks/${last}`);
+      });
+});
+
 describe("R35: an occurrence correction acknowledged after the person left", () => {
   test("the sync screens before the old dialog is removed: the person stays, one correction, Back shows the day without the dialog", async () => {
     const task = await seededTask({
