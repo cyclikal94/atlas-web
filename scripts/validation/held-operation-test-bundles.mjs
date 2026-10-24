@@ -13,6 +13,10 @@
 // Revision 26 (review r25 R25-N1; design assessment 26f1a626 Q1, Q2): a bundle is `/2` and carries a SYNTHETIC applicability record
 // (`applicability`, default TARGET: complete and well formed, with made-up digests) and its report the matching runtime witness. `legacy:
 // true` builds a revision 25 `/1` bundle (no record). Callers name the consumer's target explicitly; nothing defaults it for them.
+//
+// Revision 27 (review r26 R26-N1; design assessment eff76566 Q4): the synthetic record is of schema /2 (the complete installation's
+// digest and entry count, the resolution digest, the snapshot root, the package-manager configuration), its witness names the snapshot's
+// @playwright/test, and `legacyRecord(change)` builds the revision 26 /1 record a genuine r26 bundle carries.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -20,6 +24,10 @@ import {
   canonical,
 } from "./held-operation-applicability.mjs";
 import { MANIFEST, probeArgv, sha256 } from "./held-operation-evidence.mjs";
+import {
+  INSTALLATION_SCHEMA,
+  SNAPSHOT_SCHEMA,
+} from "./held-operation-installation.mjs";
 import {
   CONTRACT_VERSION,
   ENGINES,
@@ -101,6 +109,24 @@ export function applicabilityRecord(change) {
     installation: {
       modules_yaml_sha256: digest(".modules.yaml"),
       lock_yaml_sha256: digest("lock.yaml"),
+      schema: INSTALLATION_SCHEMA,
+      sha256: digest("installation"),
+      entries: 28454,
+      files: 22863,
+      links: 1819,
+      directories: 3772,
+      bytes: 351000000,
+      normalised: 111,
+      resolution_sha256: digest("resolution"),
+      dependencies: 31,
+      root: "/t/held-op-exec-aaaaaa",
+    },
+    config: {
+      npmrc_user: "none",
+      pnpm_rc_macos: "none",
+      pnpm_config_macos: "none",
+      pnpm_rc_xdg: "none",
+      pnpm_config_xdg: "none",
     },
     browsers: {
       chromium: {
@@ -125,6 +151,47 @@ export function applicabilityRecord(change) {
   return r;
 }
 export const TARGET = applicabilityRecord();
+/**
+ * A SYNTHETIC execution snapshot record (the runner's snapshot.json) of a run measured as `record`: sealed, checked unchanged before
+ * each child and at the end, removed, and bound to the record's installation digest and root. `change(snapshot)` edits a copy.
+ */
+export function snapshotRecord(record = TARGET, change) {
+  const sealed = digest("sealed snapshot");
+  const s = {
+    schema: SNAPSHOT_SCHEMA,
+    root: record.installation?.root,
+    source: "/w",
+    used: true,
+    relocated: [".bin/vite"],
+    prepared: true,
+    sealed_sha256: sealed,
+    sealed_entries: 29545,
+    installation_sha256: record.installation?.sha256,
+    checks: [
+      { when: "after the applicability was collected", sha256: sealed },
+      { when: "before the build", sha256: sealed },
+    ],
+    end_sha256: sealed,
+    unchanged: true,
+    removed: true,
+    removal_error: null,
+  };
+  change?.(s);
+  return s;
+}
+/** The revision 26 record (schema /1): four package trees and pnpm's two metadata files, no installation content. */
+export function legacyRecord(change) {
+  const r = applicabilityRecord((x) => {
+    x.schema = "web08d-held-operation-applicability/1";
+    x.installation = {
+      modules_yaml_sha256: x.installation.modules_yaml_sha256,
+      lock_yaml_sha256: x.installation.lock_yaml_sha256,
+    };
+    delete x.config;
+  });
+  change?.(r);
+  return r;
+}
 /** The runtime witness a Playwright run under `record` writes into its report (tests/e2e/evidence-run.ts runtimeWitness). */
 export const witnessOf = (record) => ({
   node: record.child?.node,
@@ -132,6 +199,9 @@ export const witnessOf = (record) => ({
   platform: record.child?.platform,
   arch: record.child?.arch,
   playwright: record.packages?.["@playwright/test"]?.version,
+  ...(record.schema === APPLICABILITY_SCHEMA
+    ? { playwright_dir: record.packages?.["@playwright/test"]?.dir }
+    : {}),
 });
 
 /** A synthetic source fingerprint whose spec is `spec` and helper HELPER_BYTES, with the shape of runtime.mjs fingerprint(). */

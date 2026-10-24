@@ -37,13 +37,17 @@ import {
   compareApplicability,
 } from "./held-operation-applicability.mjs";
 import * as evidenceModule from "./held-operation-evidence.mjs";
+import * as installationModule from "./held-operation-installation.mjs";
+import { installationAssessments } from "./held-operation-installation-checks.mjs";
 import * as evaluator from "./held-operation-qualification.mjs";
 import {
   applicabilityRecord,
   controlBundle,
   INVOCATION,
+  legacyRecord,
   negativeBundle,
   OTHER_INVOCATION,
+  snapshotRecord,
   sourceOf,
   TARGET,
   withManifest,
@@ -866,7 +870,12 @@ function campaignParts(q, e) {
     fatal: null,
     interrupted: false,
     sourceUnchanged: true,
-    applicability: { target_sha256: TARGET_SHA, after: APPLICABLE },
+    applicability: {
+      target_sha256: TARGET_SHA,
+      record: TARGET,
+      after: APPLICABLE,
+    },
+    snapshot: snapshotRecord(),
     prerequisite: null,
     planned: {
       invocation: INVOCATION,
@@ -946,6 +955,7 @@ const prerequisite = (
         before: { sha256: TARGET_SHA, record: TARGET },
         after: { sha256: TARGET_SHA, record: TARGET },
       },
+      snapshot: snapshotRecord(),
       inputs_runtime: { node: "v22.23.2", platform: "darwin", arch: "arm64" },
     },
     {
@@ -1660,12 +1670,16 @@ function withField(record, field, value) {
   return copy;
 }
 /** A value of the same shape as `v` that is not `v` (a different runtime fact, still well formed). */
-const otherValue = (field, v) =>
-  /node$/.test(field)
+const otherValue = (field, v) => {
+  const rule = applicabilityModule.FIELDS.find(([f]) => f === field)?.[1];
+  return /node$/.test(field)
     ? "v22.18.0"
-    : /sha256$/.test(field)
-      ? sha(`other ${field}`)
-      : `${v} (other)`;
+    : rule === "count"
+      ? v + 1
+      : /sha256$/.test(field) || rule === "digest-or-none"
+        ? sha(`other ${field}`)
+        : `${v} (other)`;
+};
 /** The comparison with its digests, as a bundle's verifier would judge `record` for the consumer `target`. */
 const decided = (a, target, record) => a.compareApplicability(target, record);
 /** The canonical list of compared fields (from the unmutated module: a mutant that drops a field must not drop its check). */
@@ -2077,6 +2091,7 @@ function applicabilityAssessments(q, e, a, check) {
         before: { sha256: TARGET_SHA, record: T },
         after: { sha256: TARGET_SHA, record: T },
       },
+      snapshot: snapshotRecord(T),
       inputs_runtime: { node: "v22.23.2", platform: "darwin", arch: "arm64" },
     };
     change(evidence);
@@ -2090,6 +2105,32 @@ function applicabilityAssessments(q, e, a, check) {
   check(
     "prerequisite: matching controls, records and target are met",
     () => prereq().length === 0,
+  );
+  // Revision 27: the producing run's execution snapshot record.
+  check(
+    "prerequisite: a controls run with no execution snapshot record (revision 26 or earlier) is not met",
+    () =>
+      prereq((ev) => {
+        ev.snapshot = null;
+      }).some((p) => p.includes("no execution snapshot record")),
+  );
+  check(
+    "prerequisite: a controls run whose snapshot changed before a child is not met",
+    () =>
+      prereq((ev) => {
+        ev.snapshot = snapshotRecord(T, (x) => {
+          x.checks.push({ when: "before Playwright", sha256: sha("other") });
+        });
+      }).some((p) => p.includes("changed (before Playwright)")),
+  );
+  check(
+    "prerequisite: a controls run whose snapshot measured another installation is not met",
+    () =>
+      prereq((ev) => {
+        ev.snapshot = snapshotRecord(T, (x) => {
+          x.installation_sha256 = sha("another installation");
+        });
+      }).some((p) => p.includes("measured installation")),
   );
   check("prerequisite: no consumer target is not met", () =>
     prereq(undefined, null).some((p) => p.includes("no consuming target")),
@@ -2238,7 +2279,7 @@ function applicabilityAssessments(q, e, a, check) {
       !passes({
         ...base,
         applicability: {
-          target_sha256: TARGET_SHA,
+          ...base.applicability,
           after: a.compareApplicability(
             T,
             withField(T, "child.node", "v22.18.0"),
@@ -2251,7 +2292,34 @@ function applicabilityAssessments(q, e, a, check) {
     () =>
       !passes({
         ...base,
-        applicability: { target_sha256: TARGET_SHA, after: null },
+        applicability: { ...base.applicability, after: null },
+      }),
+  );
+  // Revision 27: this run's own execution snapshot.
+  check(
+    "campaign: a run with no execution snapshot record fails",
+    () => !passes({ ...base, snapshot: null }),
+  );
+  check(
+    "campaign: a run whose snapshot changed by the end fails",
+    () =>
+      !passes({
+        ...base,
+        snapshot: snapshotRecord(T, (x) => {
+          x.end_sha256 = sha("changed");
+          x.unchanged = false;
+        }),
+      }),
+  );
+  check(
+    "campaign: a run whose snapshot was not removed fails",
+    () =>
+      !passes({
+        ...base,
+        snapshot: snapshotRecord(T, (x) => {
+          x.removed = false;
+          x.removal_error = "EBUSY";
+        }),
       }),
   );
   check(
@@ -2336,7 +2404,7 @@ function applicabilityAssessments(q, e, a, check) {
 }
 
 /** Every check the evaluator must pass, by name: the evaluator's own mutants must fail at least one (design assessment Q3). */
-function assessments(q, e, a = applicabilityModule) {
+function assessments(q, e, a = applicabilityModule, i = installationModule) {
   const failed = [];
   const check = (name, ok) => {
     try {
@@ -2722,6 +2790,8 @@ function assessments(q, e, a = applicabilityModule) {
       () => judge(q, m.id, select(A6.control, m.probes)).verdict === "survived",
     );
   applicabilityAssessments(q, e, a, check);
+  // Revision 27: the installation boundary on disk, with this mutant's own modules (held-operation-installation-checks.mjs).
+  installationAssessments(i, a, q, check);
   return failed;
 }
 
@@ -3403,6 +3473,236 @@ const EVALUATOR_MUTANTS = [
     "      : true\n",
     "E",
   ],
+  // Revision 27 (review r26 R26-N1; design assessment eff76566 Q5): the installation boundary. "I" mutates
+  // held-operation-installation.mjs, which the applicability module and the evaluator import as the same mutated instance.
+  [
+    "EM81 a link is identified by its text, not the entry it resolves to",
+    'posix(relative(base, real)) || "."',
+    "text",
+    "I",
+  ],
+  [
+    "EM82 a link out of the installation is admitted",
+    "        if (!inside(base, real))\n",
+    "        if (false)\n",
+    "I",
+  ],
+  [
+    "EM83 a dangling link is admitted",
+    "          refuse(r, `a dangling link",
+    "          real = full; // refuse(r, `a dangling link",
+    "I",
+  ],
+  [
+    "EM84 a hard link is admitted",
+    "        if (st.nlink !== 1)",
+    "        if (st.nlink < 1)",
+    "I",
+  ],
+  ["EM85 a file's bytes are not hashed", "sha256(n.bytes)", "sha256(r)", "I"],
+  [
+    "EM86 the executable bit is ignored",
+    'st.mode & 0o111 ? "x" : "-"',
+    '"-"',
+    "I",
+  ],
+  [
+    "EM87 the pnpm virtual store is not walked",
+    "      if (!rel && CACHE_DIRS.includes(e.name)) continue;\n      const full = join(dir, e.name);\n      const st = lstatSync(full);",
+    '      if (!rel && [...CACHE_DIRS, ".pnpm"].includes(e.name)) continue;\n      const full = join(dir, e.name);\n      const st = lstatSync(full);',
+    "I",
+  ],
+  [
+    "EM88 a shim's NODE_PATH is not checked",
+    "        if (/(^|\\/)\\.bin\\//.test(r))",
+    "        if (false)",
+    "I",
+  ],
+  [
+    "EM89 a file naming the live installation is admitted",
+    '          if (bytes.indexOf(join(f, "node_modules")) >= 0)',
+    "          if (false)",
+    "I",
+  ],
+  [
+    "EM90 the execution root is not normalised",
+    "    if (out.indexOf(needle) < 0) continue;\n    const parts = [];\n    let from = 0;",
+    "    if (true) continue;\n    const parts = [];\n    let from = 0;",
+    "I",
+  ],
+  [
+    "EM91 the top-level .bin shims are treated as a cache",
+    'export const CACHE_DIRS = [".vite", ".vite-temp"];',
+    'export const CACHE_DIRS = [".vite", ".vite-temp", ".bin"];',
+    "I",
+  ],
+  [
+    "EM92 the whole workspace state is normalised away",
+    "          delete state.lastValidatedTimestamp;",
+    "          for (const k of Object.keys(state)) delete state[k];",
+    "I",
+  ],
+  [
+    "EM93 another node_modules on the way up is not checked",
+    "          if (existsSync(candidate) && realpathSync(candidate) !== own)",
+    "          if (false)",
+    "I",
+  ],
+  [
+    "EM94 Node's global folders are not checked",
+    "    if (existsSync(g)) problems.push",
+    "    if (false) problems.push",
+    "I",
+  ],
+  [
+    "EM95 a sealed snapshot always verifies",
+    "  if (now.sha256 === baseline.sha256) return now;",
+    "  return now;",
+    "I",
+  ],
+  [
+    "EM96 the stat inventory ignores change times",
+    "st.ctimeNs",
+    "st.size",
+    "I",
+  ],
+  [
+    "EM97 sealing leaves the installation writable",
+    "      } else chmodSync(full, lstatSync(full).mode & 0o555);",
+    "      } else void full;",
+    "I",
+  ],
+  [
+    "EM98 relocation rewrites nothing",
+    "        if (out !== bytes) {",
+    "        if (false) {",
+    "I",
+  ],
+  [
+    "EM99 a snapshot's source copy is not checked against the fingerprint",
+    "    if (sha256(readFileSync(join(dir, name))) !== digest)",
+    "    if (false)",
+    "I",
+  ],
+  [
+    "EM100 a snapshot copies the tool caches",
+    "    filter: (from) => !CACHE_DIRS.some((c) => from === join(modules, c)),",
+    "    filter: () => true,",
+    "I",
+  ],
+  [
+    "EM101 the installation digest is not compared",
+    '  ["installation.sha256", "digest"],\n',
+    "",
+    "A",
+  ],
+  [
+    "EM102 the resolution digest is not compared",
+    '  ["installation.resolution_sha256", "digest"],\n',
+    "",
+    "A",
+  ],
+  [
+    "EM103 the user's npmrc is not compared",
+    'export const CONFIG_FILES = [\n  "npmrc_user",\n',
+    "export const CONFIG_FILES = [\n",
+    "A",
+  ],
+  [
+    "EM104 the children's NODE_OPTIONS is ignored",
+    "  if (child?.node_options)",
+    "  if (false)",
+    "A",
+  ],
+  [
+    "EM105 the children's NODE_PATH is ignored",
+    "    if (entry && !isInside(base, resolve(entry)))",
+    "    if (false)",
+    "A",
+  ],
+  [
+    "EM106 a dependency resolving differently from a copy origin is admitted",
+    "      if (dirs.some((d) => d !== dirs[0]))",
+    "      if (false)",
+    "A",
+  ],
+  [
+    "EM107 a dependency resolving outside the installation is admitted",
+    "      else if (!isInside(base, dirs[0]))",
+    "      else if (false)",
+    "A",
+  ],
+  [
+    "EM108 the collector ignores a resolution path out of the installation",
+    "  if (leaks.length)",
+    "  if (false)",
+    "A",
+  ],
+  [
+    "EM109 the collector does not forbid the live installation",
+    "    foreign: source && resolve(source) !== resolve(root) ? [source] : [],",
+    "    foreign: [],",
+    "A",
+  ],
+  [
+    "EM110 the report's @playwright/test directory is not witnessed",
+    '      ? [["playwright_dir", "packages.@playwright/test.dir"]]',
+    "      ? []",
+    "A",
+  ],
+  [
+    "EM111 a record of the revision 26 schema is compared as current",
+    "    if (!object(r) || r.schema !== APPLICABILITY_SCHEMA)",
+    "    if (!object(r))",
+    "A",
+  ],
+  [
+    "EM112 a snapshot of another schema is accepted",
+    "  if (snapshot.schema !== SNAPSHOT_SCHEMA)",
+    "  if (false)",
+  ],
+  [
+    "EM113 a snapshot check that saw a change is ignored",
+    "    if (c?.sha256 !== snapshot.sealed_sha256)",
+    "    if (false)",
+  ],
+  [
+    "EM114 a snapshot changed by the end is accepted",
+    "  if (snapshot.end_sha256 !== snapshot.sealed_sha256)",
+    "  if (false)",
+  ],
+  [
+    "EM115 a snapshot not removed is accepted",
+    "  if (snapshot.removed !== true)",
+    "  if (false)",
+  ],
+  [
+    "EM116 a snapshot of another installation is accepted",
+    "    if (snapshot.installation_sha256 !== record.installation?.sha256)",
+    "    if (false)",
+  ],
+  [
+    "EM117 the prerequisite ignores the producing run's snapshot",
+    "    ...snapshotProblems(evidence.snapshot, before?.record).map(",
+    "    ...[].map(",
+  ],
+  [
+    "EM118 the campaign ignores its own snapshot",
+    "    ...snapshotProblems(snapshot, applicability?.record).map(",
+    "    ...[].map(",
+  ],
+  [
+    "EM119 a recorded package's digest covers none of its entries",
+    "          return path === rel || path.startsWith(",
+    "          return false && path.startsWith(",
+    "A",
+  ],
+  [
+    "EM120 a recorded package is digested where it stands (revision 26's tree digest), not from the normalised inventory",
+    "      tree_sha256: inventoryDigest(",
+    "      tree_sha256: treeDigest(dir) || inventoryDigest(",
+    "A",
+  ],
 ];
 
 test("Q3: every evaluator mutant fails at least one of these checks; the evaluator itself passes all", async (t) => {
@@ -3424,12 +3724,17 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
       join(import.meta.dirname, "held-operation-applicability.mjs"),
       "utf8",
     ),
+    I: readFileSync(
+      join(import.meta.dirname, "held-operation-installation.mjs"),
+      "utf8",
+    ),
   };
   // Revision 26: "A" names held-operation-applicability.mjs, which both of the others import (one mutated instance for all three).
   const names = {
     Q: "held-operation-qualification.mjs",
     E: "held-operation-evidence.mjs",
     A: "held-operation-applicability.mjs",
+    I: "held-operation-installation.mjs",
   };
   const caughtBy = {};
   for (const [name, from, to, which = "Q"] of EVALUATOR_MUTANTS) {
@@ -3440,7 +3745,7 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
       join(import.meta.dirname, "engine-results.mjs"),
       join(sub, "engine-results.mjs"),
     );
-    for (const k of ["Q", "E", "A"])
+    for (const k of ["Q", "E", "A", "I"])
       writeFileSync(
         join(sub, names[k]),
         k === which ? sources[k].replace(from, to) : sources[k],
@@ -3448,7 +3753,8 @@ test("Q3: every evaluator mutant fails at least one of these checks; the evaluat
     const q = await import(pathToFileURL(join(sub, names.Q)).href);
     const e = await import(pathToFileURL(join(sub, names.E)).href);
     const a = await import(pathToFileURL(join(sub, names.A)).href);
-    caughtBy[name] = assessments(q, e, a);
+    const i = await import(pathToFileURL(join(sub, names.I)).href);
+    caughtBy[name] = assessments(q, e, a, i);
     assert.ok(caughtBy[name].length > 0, `${name} survived`);
   }
   // Evidence for the reviewer: the checks each evaluator mutant fails (opt-in; the test writes nothing otherwise).
@@ -4157,8 +4463,33 @@ function driverFixture(t) {
       r.controller.exec_sha256 = sha("node 25.8.2");
     }),
   });
+  // Revision 27: a revision 26 bundle (a genuine-shaped /1 record of four package trees, no installation content).
+  bundles["nc1-r26"] = negativeBundle(nc("NC1"), ENTRY("NC1"), {
+    applicability: legacyRecord(),
+  });
   for (const [name, b] of Object.entries(bundles))
     writeBundle(join(dir, ".agtx", name), b);
+  // Revision 27: the same NC1 bundle published by a run that left no snapshot record (one still going, or a revision 26 run), and by a
+  // run whose snapshot changed before a child started.
+  writeBundle(join(dir, ".agtx/norun/nc1"), bundles.nc1);
+  writeBundle(join(dir, ".agtx/changedrun/nc1"), bundles.nc1);
+  writeFileSync(
+    join(dir, ".agtx/changedrun/snapshot.json"),
+    `${JSON.stringify(
+      snapshotRecord(TARGET, (x) => {
+        x.checks.push({ when: "before Playwright", sha256: sha("changed") });
+        x.unchanged = false;
+      }),
+      null,
+      2,
+    )}\n`,
+  );
+  // Revision 27: the producing run's completion witness beside the parts (their run directory is .agtx): a sealed, unchanged,
+  // removed snapshot of TARGET.
+  writeFileSync(
+    join(dir, ".agtx/snapshot.json"),
+    `${JSON.stringify(snapshotRecord(), null, 2)}\n`,
+  );
   // The consumer's own record (TARGET), as `--target <applicability.json>` reads it.
   writeFileSync(join(dir, ".agtx/target.json"), canonical(TARGET));
   writeFileSync(
@@ -4358,6 +4689,57 @@ test("H8 (revision 26): an admission to the bundle's own runtime record is admis
   assert.equal(out.admission_eligible, true);
   assert.equal(out.applicability.decision, "applicable");
   assert.equal(out.applicability.target_sha256, TARGET_SHA);
+});
+
+for (const [label, bundle, why] of [
+  [
+    "a run that left no snapshot record",
+    "norun/nc1",
+    "no execution snapshot record",
+  ],
+  [
+    "a run whose snapshot changed before a child",
+    "changedrun/nc1",
+    "changed (before Playwright)",
+  ],
+  ["a revision 26 run (a /1 record)", "nc1-r26", "applicability"],
+])
+  test(`H11 (revision 27): an admission of a bundle published by ${label} exits 1, never admission-eligible`, (t) => {
+    const dir = driverFixture(t);
+    const step = evidenceStep(bundle, "--negative", "NC1");
+    const result = driver(dir, [
+      { ...step, argv: [...step.argv, "--out", ".agtx/refused.json"] },
+      laterStep,
+    ]);
+    assert.equal(result.records[0].exit, 1);
+    assert.equal(result.records[1].status, "not_run");
+    assert.equal(existsSync(join(dir, ".agtx/later")), false);
+    const out = JSON.parse(
+      readFileSync(join(dir, ".agtx/refused.json"), "utf8"),
+    );
+    assert.equal(out.admission_eligible, false);
+    assert.equal(out.passed, false);
+    const reasons = [
+      ...(out.producing_run?.problems ?? []),
+      ...(out.judgement?.problems ?? []),
+    ];
+    assert.ok(
+      reasons.some((r) => r.includes(why)),
+      JSON.stringify(reasons),
+    );
+  });
+test("H11 (revision 27): a revision 26 bundle still replays as history, never admission-eligible", (t) => {
+  const dir = driverFixture(t);
+  const step = evidenceStep("nc1-r26", "--negative", "NC1", "--historical");
+  const result = driver(dir, [
+    { ...step, argv: [...step.argv, "--out", ".agtx/history.json"] },
+    laterStep,
+  ]);
+  assert.equal(result.records[0].exit, 0);
+  const out = JSON.parse(readFileSync(join(dir, ".agtx/history.json"), "utf8"));
+  assert.equal(out.outcome, "historical-holds");
+  assert.equal(out.admission_eligible, false);
+  assert.equal(out.producing_run, null);
 });
 
 for (const [name, steps] of [

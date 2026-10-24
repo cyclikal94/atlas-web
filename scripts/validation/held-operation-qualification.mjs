@@ -37,6 +37,7 @@ import {
   canonical,
   compareApplicability,
 } from "./held-operation-applicability.mjs";
+import { SNAPSHOT_SCHEMA } from "./held-operation-installation.mjs";
 
 export const CONTRACT_VERSION = "web08d-held-operation-qualification/1";
 export const NEGATIVE_CONTRACT_VERSION = "web08d-held-operation-negative/3";
@@ -2397,6 +2398,59 @@ function identityProblems(kind, planned, got) {
 }
 
 /**
+ * Revision 27 (review r26 R26-N1; design assessment eff76566 I4, I5, H5, H8): why a run's EXECUTION SNAPSHOT record (its snapshot.json,
+ * held-operation-installation.mjs) does not show that it executed exactly what its applicability record measured. The snapshot must be
+ * of the current schema; sealed with a stat inventory that every check before a child started and the check at the end found unchanged;
+ * removed; and bound to the record (`record`: the installation digest and root the run measured and judged under). A missing snapshot
+ * (a revision 26 or earlier run) is unknown, never "unchanged".
+ */
+export function snapshotProblems(snapshot, record) {
+  if (!snapshot || typeof snapshot !== "object")
+    return [
+      "no execution snapshot record: what the run executed is unknown (a revision 26 or earlier run, or an unreadable record)",
+    ];
+  const problems = [];
+  if (snapshot.schema !== SNAPSHOT_SCHEMA)
+    problems.push(
+      `its execution snapshot is of schema ${JSON.stringify(snapshot.schema)}, not ${SNAPSHOT_SCHEMA}`,
+    );
+  if (!DIGEST.test(String(snapshot.sealed_sha256)))
+    problems.push("its execution snapshot was never sealed");
+  const checks = Array.isArray(snapshot.checks) ? snapshot.checks : null;
+  if (!checks) problems.push("its execution snapshot records no checks");
+  for (const c of checks ?? [])
+    if (c?.sha256 !== snapshot.sealed_sha256)
+      problems.push(
+        `its execution snapshot changed (${c?.when ?? "at a check"})`,
+      );
+  if (snapshot.end_sha256 !== snapshot.sealed_sha256)
+    problems.push(
+      "its execution snapshot changed by the end of the run (or was not checked at the end)",
+    );
+  if (snapshot.unchanged !== true)
+    problems.push("its execution snapshot is not recorded unchanged");
+  if (snapshot.removed !== true)
+    problems.push(
+      `its execution snapshot was not removed: ${snapshot.removal_error ?? "no removal recorded"}`,
+    );
+  if (!record || typeof record !== "object")
+    problems.push(
+      "its execution snapshot cannot be bound: there is no applicability record of what it measured",
+    );
+  else {
+    if (snapshot.installation_sha256 !== record.installation?.sha256)
+      problems.push(
+        `its execution snapshot measured installation ${snapshot.installation_sha256}, but its applicability record names ${record.installation?.sha256}`,
+      );
+    if (!snapshot.root || snapshot.root !== record.installation?.root)
+      problems.push(
+        `its execution snapshot is ${snapshot.root}, but its applicability record was collected at ${record.installation?.root}`,
+      );
+  }
+  return problems;
+}
+
+/**
  * A `--stage negatives` run's prerequisite (design assessment C3): a passed `--stage controls` run of the same source, engines and
  * contract whose live and copy controls covered every probe the negative controls inject into. Returns why it is not.
  *
@@ -2410,6 +2464,11 @@ function identityProblems(kind, planned, got) {
  * agree with each other and with the target, field by field; each control's bundle must carry exactly that run's record and be judged
  * applicable to this target; its inputs' Node/platform/architecture must be its record's. A missing record (a revision 25 run) is
  * unknown, never equal. Source equality says nothing about any of this.
+ *
+ * Revision 27 (review r26 R26-N1; design assessment eff76566 I4, I5, H8): the records now name the complete installed content, and the
+ * producing run's execution snapshot (`evidence.snapshot`, its snapshot.json) must show that it executed exactly that content, unchanged
+ * from sealing to its end (snapshotProblems). An unchanged installation that a controls run measured but did not execute from, or one
+ * that changed and was restored during it, does not admit its controls.
  */
 export function prerequisiteProblems(
   evidence,
@@ -2463,6 +2522,11 @@ export function prerequisiteProblems(
     problems.push(
       `its summary names applicability ${summary.applicability_sha256}, not its recorded ${before?.sha256}`,
     );
+  problems.push(
+    ...snapshotProblems(evidence.snapshot, before?.record).map(
+      (p) => `the controls run: ${p}`,
+    ),
+  );
   if (summary.passed !== true) problems.push("the controls run did not pass");
   if (summary.stage !== "controls")
     problems.push(`the evidence is a ${summary.stage} run, not a controls run`);
@@ -2566,6 +2630,10 @@ export function prerequisiteProblems(
  * applicability record (collected before anything was built); every control and negative control must carry exactly that record and be
  * judged `applicable` against exactly that target, and `applicability.after` (the record collected again at the end, compared with it)
  * must be `applicable`: a runtime that changed during the run, or that could not be collected again, fails it.
+ *
+ * Revision 27 (review r26 R26-N1; design assessment eff76566 I4, I6): `snapshot` is the run's own execution snapshot record; it must
+ * show that every child ran from the sealed, unchanged snapshot its record measured, and that the snapshot was removed
+ * (snapshotProblems against `applicability.record`, the record collected before anything was built).
  */
 export function campaignOutcome({
   preflight,
@@ -2573,6 +2641,7 @@ export function campaignOutcome({
   interrupted,
   sourceUnchanged,
   applicability,
+  snapshot,
   prerequisite,
   planned,
   controls,
@@ -2597,6 +2666,11 @@ export function campaignOutcome({
           )
         : ["the runtime after the run is unknown (not collected again)"]),
     );
+  reasons.push(
+    ...snapshotProblems(snapshot, applicability?.record).map(
+      (p) => `this run: ${p}`,
+    ),
+  );
   if (prerequisite?.problems.length)
     reasons.push(
       ...prerequisite.problems.map((p) => `prerequisite controls: ${p}`),

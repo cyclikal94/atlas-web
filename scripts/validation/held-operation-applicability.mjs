@@ -24,12 +24,24 @@
 // `incompatible` names each differing field; `unknown` names each missing, malformed or unsupported one (two unknowns are never equal).
 // There is no equivalence relation: a different supported Node patch is a different runtime here. Collection that fails is a refusal,
 // never a fabricated identity.
+//
+// Revision 27 (review r26 R26-N1; design assessment eff76566 I2-I7, steps 1-5): the four package trees and pnpm's two metadata files
+// were not the installation: a private React change left the record byte-identical. Schema /2 adds the COMPLETE installed content
+// (held-operation-installation.mjs installationManifest: every entry of the execution root's node_modules, its digest and entry count),
+// the actual resolution of every direct dependency from every execution origin (the probe's, landing inside that installation and the
+// same from each origin; `installation.resolution_sha256`), the absence of any resolution path out of it (no other node_modules on the
+// way to the filesystem root, no Node global folders, no NODE_OPTIONS, NODE_PATH only inside it) and the package-manager configuration
+// outside the worktree (`config.*`, digest or "none"). The record is collected from the run's private execution SNAPSHOT, so `root` is
+// where the children really run; `source` names the live worktree whose installation no installed file may name. A /1 record is of an
+// unsupported schema here: `unknown`, never admitted, while its bundle still verifies as history (I7). The report's runtime witness of a
+// /2 record must also name the snapshot's own @playwright/test (the installation the run really loaded).
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   accessSync,
   constants,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -39,12 +51,36 @@ import {
   statSync,
 } from "node:fs";
 import os from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  allocateSnapshot,
+  createSnapshot,
+  globalConfig,
+  INSTALLATION_SCHEMA,
+  installationManifest,
+  inventoryDigest,
+  isInside,
+  preparePnpm,
+  relocate,
+  removeSnapshot,
+  resolutionProblems,
+  seal,
+  snapshotParent,
+  verifySealed,
+} from "./held-operation-installation.mjs";
 
-export const APPLICABILITY_SCHEMA = "web08d-held-operation-applicability/1";
+export const APPLICABILITY_SCHEMA = "web08d-held-operation-applicability/2";
 export const COMPARISON_VERSION =
-  "web08d-held-operation-applicability-comparison/1";
+  "web08d-held-operation-applicability-comparison/2";
 export const PACKAGES = [
   "@playwright/test",
   "playwright",
@@ -95,6 +131,14 @@ const PROBE = join(
   "held-operation-runtime-probe.cjs",
 );
 
+/** The package-manager configuration files outside the worktree (held-operation-installation.mjs globalConfig), by name. */
+export const CONFIG_FILES = [
+  "npmrc_user",
+  "pnpm_rc_macos",
+  "pnpm_config_macos",
+  "pnpm_rc_xdg",
+  "pnpm_config_xdg",
+];
 /** Every compared field: its dotted path in the record and the shape a known value has. */
 export const FIELDS = [
   ["controller.node", "version"],
@@ -115,6 +159,11 @@ export const FIELDS = [
   ["child.corepack_tree_sha256", "digest-or-none"],
   ["installation.modules_yaml_sha256", "digest"],
   ["installation.lock_yaml_sha256", "digest"],
+  ["installation.schema", "word"],
+  ["installation.sha256", "digest"],
+  ["installation.entries", "count"],
+  ["installation.resolution_sha256", "digest"],
+  ...CONFIG_FILES.map((k) => [`config.${k}`, "digest-or-none"]),
   ...PACKAGES.flatMap((p) => [
     [`packages.${p}.version`, "word"],
     [`packages.${p}.tree_sha256`, "digest"],
@@ -128,6 +177,7 @@ export const LOCATIONS = [
   "child.exec_path",
   "child.pnpm_path",
   "child.corepack_root",
+  "installation.root",
   ...PACKAGES.map((p) => `packages.${p}.dir`),
 ];
 
@@ -147,6 +197,7 @@ const RULES = {
   "digest-or-none": (v) =>
     v === "none" || (typeof v === "string" && DIGEST.test(v)),
   word: (v) => typeof v === "string" && v.trim() !== "" && v !== "unknown",
+  count: (v) => Number.isSafeInteger(v) && v > 0,
 };
 
 /** The record's bytes as written: keys sorted at every level, so the same identity has the same bytes. */
@@ -238,15 +289,16 @@ function packageRoot(file) {
   return dirname(file);
 }
 
-/** Runs the child probe exactly as the runner runs its children (`pnpm exec`, this environment, the worktree as cwd). */
-export function runChildProbe({ root, browsers, env }) {
+/** Runs the child probe exactly as the runner runs its children (`pnpm exec`, this environment, the execution root as cwd). */
+export function runChildProbe({ root, browsers, env, origins = [] }) {
   const dir = mkdtempSync(join(env.TMPDIR ?? os.tmpdir(), "held-op-runtime-"));
   const out = join(dir, "child.json");
   try {
     const r = spawnSync(
       "pnpm",
-      ["exec", "node", PROBE, out, root, browsers.join(",")],
-      { cwd: root, env, encoding: "utf8", timeout: 120_000 },
+      ["exec", "node", PROBE, out, root, browsers.join(","), ...origins],
+      // A hang guard, not a duration requirement (revision 27: 120 s timed out on a heavily loaded controller); a timeout refuses.
+      { cwd: root, env, encoding: "utf8", timeout: 900_000 },
     );
     if (r.error) throw r.error;
     if (r.status !== 0)
@@ -259,16 +311,64 @@ export function runChildProbe({ root, browsers, env }) {
   }
 }
 
+/** Why the probe's view of resolution leaves the measured installation (empty when it does not), and its location-free digest. */
+export function resolutionOf(child, root, origins) {
+  const base = realpathSync(join(root, "node_modules"));
+  const problems = [];
+  if (child?.node_options)
+    problems.push(
+      `the children inherit NODE_OPTIONS ${JSON.stringify(child.node_options)} (an unmeasured input)`,
+    );
+  for (const entry of String(child?.node_path ?? "").split(delimiter))
+    if (entry && !isInside(base, resolve(entry)))
+      problems.push(`the children inherit NODE_PATH ${entry}, outside ${base}`);
+  const views = [root, ...origins].map((o) => child?.resolution?.[o]);
+  if (views.some((v) => !v || typeof v !== "object"))
+    problems.push("the probe did not report resolution from every origin");
+  const lines = [];
+  if (!problems.length) {
+    const names = Object.keys(views[0]).sort();
+    if (!names.length) problems.push("the probe resolved no dependencies");
+    for (const name of names) {
+      const dirs = views.map((v) => v[name]);
+      if (dirs.some((d) => d !== dirs[0]))
+        problems.push(
+          `${name} resolves differently from the execution origins: ${JSON.stringify(dirs)}`,
+        );
+      else if (typeof dirs[0] !== "string")
+        problems.push(`${name} does not resolve from ${root}`);
+      else if (!isInside(base, dirs[0]))
+        problems.push(
+          `${name} resolves to ${dirs[0]}, outside the measured installation`,
+        );
+      else lines.push(`${name} ${relative(base, dirs[0])}`);
+    }
+    if (views.some((v) => Object.keys(v).length !== names.length))
+      problems.push("the origins resolved different dependency lists");
+  }
+  return {
+    problems,
+    sha256: createHash("sha256").update(lines.join("\n")).digest("hex"),
+    dependencies: lines.length,
+  };
+}
+
 /**
- * Collects the applicability record of a run that will use `browsers` from `root` with environment `env` (design assessment step 2).
- * `probe` is a seam for the unit tests; the runner always uses the real child probe. Throws when anything cannot be established.
+ * Collects the applicability record of a run that will use `browsers` from the execution root `root` with environment `env` (design
+ * assessment step 2). `source` is the live worktree the root was snapshotted from (no installed file may name its installation);
+ * `origins` are the other directories children execute from (the copied test trees' parent). `keep.inventory` receives the
+ * installation's full inventory (diagnostics). `probe` is a seam for the unit tests; the runner always uses the real child probe.
+ * Throws when anything cannot be established.
  */
 export function collectApplicability({
   root,
+  source = null,
+  origins = [],
   browsers,
   env = process.env,
   probe = runChildProbe,
   controller = process,
+  keep = null,
 }) {
   if (
     !Array.isArray(browsers) ||
@@ -278,7 +378,7 @@ export function collectApplicability({
     throw new Error(`unknown engines ${JSON.stringify(browsers)}`);
   const exec = realpathSync(controller.execPath);
   const launcher = resolveOnPath("pnpm", env);
-  const child = probe({ root: resolve(root), browsers, env });
+  const child = probe({ root: resolve(root), browsers, env, origins });
   if (!child?.parent_exec_path)
     throw new Error(
       "the runtime probe could not name the pnpm that launched it",
@@ -288,15 +388,44 @@ export function collectApplicability({
   const corepack = child.corepack_root
     ? realpathSync(child.corepack_root)
     : null;
+  // The complete installed content and the ways resolution could leave it (revision 27).
+  const reach = resolutionProblems(root, [root, ...origins], {
+    home: env.HOME,
+    nodes: [exec, realpathSync(child.exec_path)],
+  });
+  const resolution = resolutionOf(child, resolve(root), origins);
+  const leaks = [...reach, ...resolution.problems];
+  if (leaks.length)
+    throw new Error(
+      `resolution can leave the measured installation: ${leaks.join("; ")}`,
+    );
+  const manifest = installationManifest(root, {
+    foreign: source && resolve(source) !== resolve(root) ? [source] : [],
+  });
+  if (keep) keep.inventory = manifest.inventory;
+  // Revision 27: each package's tree digest is its part of the installation inventory (normalised like the whole), so a package whose
+  // nested shims name the snapshot has the same identity at every snapshot path; a package outside the installation is a refusal.
+  const base = realpathSync(join(root, "node_modules"));
   const packages = {};
   for (const name of PACKAGES) {
     const p = child.packages?.[name];
     if (!p?.dir || !p.version)
       throw new Error(`the runtime probe could not resolve ${name}`);
+    const dir = realpathSync(p.dir);
+    if (!isInside(base, dir))
+      throw new Error(
+        `${name} resolves to ${dir}, outside the measured installation`,
+      );
+    const rel = relative(base, dir).split(sep).join("/");
     packages[name] = {
       version: String(p.version),
       dir: p.dir,
-      tree_sha256: treeDigest(p.dir),
+      tree_sha256: inventoryDigest(
+        manifest.inventory.filter((l) => {
+          const path = l.split(" ")[1];
+          return path === rel || path.startsWith(`${rel}/`);
+        }),
+      ),
     };
   }
   const installed = {};
@@ -362,10 +491,63 @@ export function collectApplicability({
       lock_yaml_sha256: sha256(
         readFileSync(join(root, "node_modules/.pnpm/lock.yaml")),
       ),
+      schema: INSTALLATION_SCHEMA,
+      sha256: manifest.sha256,
+      entries: manifest.entries,
+      files: manifest.files,
+      links: manifest.links,
+      directories: manifest.directories,
+      bytes: manifest.bytes,
+      normalised: manifest.normalised,
+      resolution_sha256: resolution.sha256,
+      dependencies: resolution.dependencies,
+      root: realpathSync(root),
     },
+    config: globalConfig(env.HOME, env),
     browsers: installed,
     env: behaviouralEnv(env),
   };
+}
+
+/**
+ * The record a FRESH run here would execute under (revision 27; the judge CLI's `--target current`): a private snapshot of `source`
+ * (its fingerprinted `files`), relocated, prepared, sealed and measured exactly as the runner measures its own, then removed. A failure
+ * anywhere, the snapshot changing while it is measured, or a failed removal is a refusal, never a record.
+ */
+export function collectSnapshotTarget({
+  source,
+  files,
+  browsers,
+  env = process.env,
+  keep = null,
+}) {
+  const dir = allocateSnapshot(snapshotParent(env));
+  let record = null;
+  let failure = null;
+  try {
+    createSnapshot({ root: source, files, dir });
+    relocate(dir, source);
+    const trees = join(dir, ".agtx/held-operation-probe-trees/target");
+    mkdirSync(trees, { recursive: true });
+    preparePnpm(dir, env);
+    const baseline = seal(dir);
+    record = collectApplicability({
+      root: dir,
+      source,
+      origins: [trees],
+      browsers,
+      env,
+      keep,
+    });
+    verifySealed(dir, baseline, "while the target was collected");
+  } catch (error) {
+    failure = error;
+  }
+  const removal = removeSnapshot(dir);
+  if (failure) throw failure;
+  if (removal)
+    throw new Error(`the target's snapshot was not removed: ${removal}`);
+  return record;
 }
 
 /** Why one side's browsers or environment cannot be compared (null when it can). */
@@ -522,6 +704,10 @@ export function witnessProblems(witness, record) {
     ["platform", "child.platform"],
     ["arch", "child.arch"],
     ["playwright", "packages.@playwright/test.version"],
+    // Revision 27: a /2 record's run loaded @playwright/test from its own snapshot (a /1 record's report has no such witness).
+    ...(record?.schema === APPLICABILITY_SCHEMA
+      ? [["playwright_dir", "packages.@playwright/test.dir"]]
+      : []),
   ]) {
     const want = at(record, field);
     if (want === undefined) continue;

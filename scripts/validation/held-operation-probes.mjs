@@ -53,6 +53,16 @@
 // written at the build boundary itself, once admission has succeeded, so a refusal is observable as its absence. With --check and
 // --controls-evidence the prerequisite is admitted the same way and nothing is built (exit 0 only when admitted).
 //
+// Revision 27 (review r26 R26-N1; design assessment eff76566 I2-I7, steps 1-5): the record left out almost all installed content, and
+// the children ran from the live worktree, whose installation any writer can change between two collections. Whenever anything may be
+// admitted or built, the run now EXECUTES FROM A PRIVATE SNAPSHOT (held-operation-installation.mjs): the fingerprinted source files and
+// the whole installation cloned into a new 0700 directory under TMPDIR, relocated, prepared by pnpm, sealed read-only; the applicability
+// record (schema /2) is collected there and names the complete installed content (`installation-inventory.json` holds the inventory its
+// digest covers). Every build, preview and Playwright child runs in the snapshot, each only after its stat inventory is found unchanged
+// since sealing, and once more at the end; copy trees live inside it (and are copied back to .agtx/held-operation-probe-trees afterwards
+// as before). snapshot.json records the seal, every check, the end and the removal; a change, a failed check or a failed removal fails
+// the run, and a --stage negatives prerequisite admits a controls run only when its snapshot record shows exactly that.
+//
 // Usage: node scripts/validation/held-operation-probes.mjs [--check] [--stage all|controls|negatives]
 //          [--probes P01,S7,...] [--only HM10,...] [--browsers chromium,firefox,webkit]
 //          [--controls-evidence <the --out of a --stage controls run>] --out <dir>
@@ -62,11 +72,13 @@
 //                negatives: the negative controls alone (with --controls-evidence).
 //   --probes     restricts the controls of --stage controls to these probes (exact case titles still required).
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -91,6 +103,19 @@ import {
   writeArtefact,
 } from "./held-operation-evidence.mjs";
 import {
+  allocateSnapshot,
+  createSnapshot,
+  inventoryDifferences,
+  inventoryDigest,
+  preparePnpm,
+  relocate,
+  removeSnapshot,
+  SNAPSHOT_SCHEMA,
+  seal,
+  snapshotParent,
+  verifySealed,
+} from "./held-operation-installation.mjs";
+import {
   CONTRACT_VERSION,
   campaignOutcome,
   EVIDENCE_SCHEMA,
@@ -105,6 +130,7 @@ import {
   PROBE_IDS,
   PROBE_SPEC,
   prerequisiteProblems,
+  snapshotProblems,
   validateContracts,
 } from "./held-operation-qualification.mjs";
 import { fingerprint, json, newRun, processes } from "./runtime.mjs";
@@ -179,9 +205,19 @@ if (stage === "negatives" && !checkOnly && !controlsEvidence)
   );
 
 const runDir = newRun(outDir);
-// Copies of the test tree live under .agtx/ (ignored, outside the source fingerprint) so that Node resolves the
-// worktree's node_modules from them; never beside the live specs.
+// Revision 27: whenever anything may be admitted or built, every child runs from this run's private execution snapshot.
+const needsTarget = !checkOnly || Boolean(controlsEvidence);
+const execRoot = needsTarget
+  ? allocateSnapshot(snapshotParent(process.env))
+  : root;
+// Copies of the test tree live under .agtx/ (outside the source fingerprint) so that Node resolves the execution root's
+// node_modules from them; never beside the live specs. They are copied back to the worktree's .agtx/ at the end (`kept`).
 const trees = join(
+  execRoot,
+  ".agtx/held-operation-probe-trees",
+  runDir.split("/").at(-1),
+);
+const kept = join(
   root,
   ".agtx/held-operation-probe-trees",
   runDir.split("/").at(-1),
@@ -192,7 +228,7 @@ json(join(runDir, "inputs.json"), before);
 const invocation = runDir.split("/").at(-1);
 const sourceBytes = readFileSync(join(runDir, "inputs.json"));
 console.log(`Evidence: ${runDir}`);
-const proc = processes(root);
+const proc = processes(execRoot);
 const started = Date.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const record = { controls: [], negatives: [], mutants: [] };
@@ -201,10 +237,91 @@ let preflight = false;
 let interrupted = false;
 let prerequisite = null;
 // This run's own runtime applicability (revision 26): collected before admission whenever anything may be admitted or built.
-const needsTarget = !checkOnly || Boolean(controlsEvidence);
 let target = null;
 let targetBytes = null;
 let targetSha = null;
+/** The execution snapshot's record (revision 27), rewritten after every step so an interrupted run still shows how far it got. */
+const snapshot = {
+  schema: SNAPSHOT_SCHEMA,
+  root: needsTarget ? execRoot : null,
+  source: root,
+  used: needsTarget,
+  relocated: [],
+  prepared: false,
+  sealed_sha256: null,
+  sealed_entries: null,
+  installation_sha256: null,
+  checks: [],
+  end_sha256: null,
+  unchanged: false,
+  removed: false,
+  removal_error: null,
+};
+let sealedBaseline = null;
+const saveSnapshot = () => json(join(runDir, "snapshot.json"), snapshot);
+// A qualification seam (revision 27; design assessment Q3, Q6): with ATLAS_HELD_OPERATION_BARRIER=<dir>, the run stops at each named
+// boundary (`sealed`: sealed, not yet measured; `admitted`: admission written, before the first child; `end`: after the last child and
+// the final collection, before the final check), writing <dir>/<point>.reached and waiting for <dir>/<point>.go (10 minutes at most).
+// It changes timing only and is recorded in snapshot.json; without it nothing waits.
+const barrierDir = process.env.ATLAS_HELD_OPERATION_BARRIER || null;
+snapshot.barrier = barrierDir;
+async function barrier(point) {
+  if (!barrierDir) return;
+  writeFileSync(join(barrierDir, `${point}.reached`), execRoot);
+  const deadline = Date.now() + 600_000;
+  while (!existsSync(join(barrierDir, `${point}.go`))) {
+    if (Date.now() > deadline)
+      throw new Error(`the ${point} barrier was never released`);
+    await sleep(50);
+  }
+}
+/** The stat inventory again, before a child starts (or at the end): unchanged since sealing, or the run fails here. */
+function checkSnapshot(when) {
+  if (!sealedBaseline) throw new Error(`no sealed execution snapshot ${when}`);
+  try {
+    const now = verifySealed(execRoot, sealedBaseline, when);
+    snapshot.checks.push({
+      when,
+      sha256: now.sha256,
+      at: new Date().toISOString(),
+    });
+  } catch (error) {
+    snapshot.checks.push({ when, sha256: null, error: String(error.message) });
+    throw error;
+  } finally {
+    saveSnapshot();
+  }
+}
+/** Every child of the run, started only after the snapshot is checked (`what` names it in the record). */
+const child = {
+  run(what, command, argv, env) {
+    checkSnapshot(`before ${what}`);
+    return proc.run(command, argv, env);
+  },
+  start(what, command, argv, env) {
+    checkSnapshot(`before ${what}`);
+    return proc.start(command, argv, env);
+  },
+};
+/** The installed entries a producing run's inventory and this run's differ in (diagnostics; never an admission input). */
+function installationDiagnostics(dir, record) {
+  if (!dir || !record?.installation?.sha256 || !target?.installation)
+    return null;
+  if (record.installation.sha256 === target.installation.sha256)
+    return { same: true };
+  const mine = recordAt(join(runDir, "installation-inventory.json"))?.record;
+  const theirs = recordAt(join(dir, "installation-inventory.json"))?.record;
+  if (
+    !Array.isArray(theirs) ||
+    inventoryDigest(theirs) !== record.installation.sha256
+  )
+    return {
+      same: false,
+      differences:
+        "the producing run's inventory is missing or is not its record's",
+    };
+  return { same: false, differences: inventoryDifferences(theirs, mine) };
+}
 /** A run's recorded applicability file: its bytes' digest and the record, or null when it is absent or unreadable (unknown). */
 function recordAt(path) {
   try {
@@ -219,7 +336,8 @@ function recordAt(path) {
 }
 
 async function build(mutantDir, buildDir, log) {
-  const result = await proc.run(
+  const result = await child.run(
+    `the build into ${buildDir}`,
     "pnpm",
     [
       "exec",
@@ -241,7 +359,8 @@ async function withPreview(buildDir, action) {
   const token = Buffer.from(buildDir).toString("base64url");
   const marker = "atlas-validation-owner.txt";
   writeFileSync(join(buildDir, marker), token);
-  const server = proc.start(
+  const server = child.start(
+    `the preview of ${buildDir}`,
     "pnpm",
     [
       "exec",
@@ -296,17 +415,24 @@ async function withPreview(buildDir, action) {
     clearTimeout(timer);
   }
 }
-/** An unmutated (or patched) copy of what Playwright loads: the config and tests/e2e. */
+/** An unmutated (or patched) copy of what Playwright loads: the config and tests/e2e (of the execution snapshot, revision 27). */
 function copyTree(name, patches = []) {
   const tree = join(trees, name);
   mkdirSync(tree, { recursive: true });
-  cpSync(join(root, "tests/e2e"), join(tree, "tests/e2e"), {
+  cpSync(join(execRoot, "tests/e2e"), join(tree, "tests/e2e"), {
     recursive: true,
   });
   cpSync(
-    join(root, "playwright.config.ts"),
+    join(execRoot, "playwright.config.ts"),
     join(tree, "playwright.config.ts"),
   );
+  // The snapshot's source files are sealed read-only; the copy is this run's own scratch tree, so its files get back the owner write
+  // permission the live files have (a negative control's hook and a helper mutant are written into it). Contents are untouched.
+  for (const e of readdirSync(tree, { recursive: true, withFileTypes: true }))
+    if (e.isFile()) {
+      const full = join(e.parentPath ?? e.path, e.name);
+      chmodSync(full, statSync(full).mode | 0o200);
+    }
   for (const patch of patches)
     writeFileSync(join(tree, patch.file), patch.text);
   return tree;
@@ -327,7 +453,7 @@ async function probes(url, cwd, ids, directory, env = {}, part = null) {
     join(directory, "test-results"),
   );
   const selection = { ATLAS_E2E_PROBES: "held-operation", ...env };
-  const result = await proc.run("pnpm", argv, {
+  const result = await child.run(`Playwright for ${directory}`, "pnpm", argv, {
     ...selection,
     ATLAS_FIXTURE_URL: url,
     ATLAS_E2E_BROWSERS: "all",
@@ -490,8 +616,40 @@ try {
     throw new Error(`${failures.length} probe mutation(s) failed preflight`);
   preflight = true;
   if (needsTarget) {
+    // The private execution snapshot (revision 27): cloned, relocated, prepared by pnpm, sealed, then measured where it will run.
     try {
-      target = collectApplicability({ root, browsers, env: process.env });
+      createSnapshot({ root, files: before.files, dir: execRoot });
+      snapshot.relocated = relocate(execRoot, root);
+      mkdirSync(trees, { recursive: true });
+      preparePnpm(execRoot, process.env);
+      snapshot.prepared = true;
+      sealedBaseline = seal(execRoot);
+      snapshot.sealed_sha256 = sealedBaseline.sha256;
+      snapshot.sealed_entries = sealedBaseline.entries;
+      saveSnapshot();
+      await barrier("sealed");
+    } catch (error) {
+      saveSnapshot();
+      json(join(runDir, "applicability-error.json"), {
+        when: "preparing the execution snapshot",
+        error: String(error.message ?? error),
+      });
+      throw new Error(
+        `This run's execution snapshot cannot be prepared (nothing is admitted or built): ${error.message}`,
+      );
+    }
+    const keep = {};
+    try {
+      target = collectApplicability({
+        root: execRoot,
+        source: root,
+        origins: [trees],
+        browsers,
+        env: process.env,
+        keep,
+      });
+      // The collection itself ran pnpm in the sealed snapshot: it must have changed nothing.
+      checkSnapshot("after the applicability was collected");
     } catch (error) {
       json(join(runDir, "applicability-error.json"), {
         when: "before admission",
@@ -506,6 +664,10 @@ try {
     writeFileSync(join(runDir, "applicability.json"), targetBytes, {
       flag: "wx",
     });
+    // The inventory the record's installation digest covers (diagnostics; a reader checks it against that digest, never trusts it).
+    json(join(runDir, "installation-inventory.json"), keep.inventory);
+    snapshot.installation_sha256 = target.installation.sha256;
+    saveSnapshot();
   }
   if (controlsEvidence) {
     // The prerequisite controls (design assessment C3): one passed --stage controls run of this very source and these engines.
@@ -538,6 +700,8 @@ try {
             before: recordAt(join(dir, "applicability.json")),
             after: recordAt(join(dir, "applicability-after.json")),
           },
+          // What it executed from (revision 27): its execution snapshot's record, raw; absent for a revision 26 or earlier run.
+          snapshot: recordAt(join(dir, "snapshot.json"))?.record ?? null,
           summary: JSON.parse(
             readFileSync(join(dir, "probe-results.json"), "utf8"),
           ).summary,
@@ -583,6 +747,12 @@ try {
           evidence?.applicability?.before?.record,
         ),
       },
+      // Which installed entries differ (revision 27, diagnostics only): the producer's saved inventory, checked against its record's
+      // digest, beside this consumer's.
+      installation: installationDiagnostics(
+        evidence?.path,
+        evidence?.applicability?.before?.record,
+      ),
       controls: (evidence?.controls ?? []).map((c) => ({
         name: c.name,
         ok: c.ok,
@@ -605,14 +775,18 @@ try {
       check_only: checkOnly,
       prerequisite: Boolean(controlsEvidence),
       applicability_sha256: targetSha,
+      installation_sha256: target?.installation?.sha256 ?? null,
+      snapshot: execRoot,
+      snapshot_sealed_sha256: snapshot.sealed_sha256,
       at: new Date().toISOString(),
     });
+  if (needsTarget) await barrier("admitted");
   if (!checkOnly) {
     const controlBuild = join(runDir, "control-build");
     await build(null, controlBuild, join(runDir, "control-build.log"));
     if (stage !== "negatives") {
       for (const [name, cwd] of [
-        ["control", root],
+        ["control", execRoot],
         ["copy-control", copyTree("copy-control")],
       ]) {
         const part = join(runDir, name);
@@ -725,7 +899,7 @@ try {
         const buildDir = join(directory, "build");
         await build(source, buildDir, join(directory, "build.log"));
         run = await withPreview(buildDir, (url) =>
-          probes(url, root, mutant.probes, join(directory, "browser")),
+          probes(url, execRoot, mutant.probes, join(directory, "browser")),
         );
       } else {
         const tree = copyTree(mutant.id, [{ file: mutant.file, text }]);
@@ -758,16 +932,26 @@ try {
 const after = fingerprint(root);
 json(join(runDir, "inputs-after.json"), after);
 const unchanged = before.sha256 === after.sha256;
-// The runtime again, at the end (revision 26): compared with the record this run was admitted and judged under.
+// The runtime again, at the end (revision 26): compared with the record this run was admitted and judged under. Revision 27: in the
+// same snapshot, after its last check; then the snapshot's stat inventory once more, the copy trees kept, and the snapshot removed.
 let applicabilityAfter = null;
 if (target) {
   try {
+    const keep = {};
     const again = canonical(
-      collectApplicability({ root, browsers, env: process.env }),
+      collectApplicability({
+        root: execRoot,
+        source: root,
+        origins: [trees],
+        browsers,
+        env: process.env,
+        keep,
+      }),
     );
     writeFileSync(join(runDir, "applicability-after.json"), again, {
       flag: "wx",
     });
+    json(join(runDir, "installation-inventory-after.json"), keep.inventory);
     applicabilityAfter = compareApplicability(target, JSON.parse(again));
   } catch (error) {
     json(join(runDir, "applicability-error.json"), {
@@ -776,10 +960,42 @@ if (target) {
     });
   }
 }
+if (needsTarget) {
+  try {
+    await barrier("end");
+  } catch (error) {
+    snapshot.end_error = String(error.message);
+  }
+  if (sealedBaseline && !snapshot.end_error)
+    try {
+      snapshot.end_sha256 = verifySealed(
+        execRoot,
+        sealedBaseline,
+        "at the end of the run",
+      ).sha256;
+    } catch (error) {
+      snapshot.end_error = String(error.message);
+    }
+  snapshot.unchanged =
+    Boolean(sealedBaseline) &&
+    snapshot.end_sha256 === snapshot.sealed_sha256 &&
+    snapshot.checks.every((c) => c.sha256 === snapshot.sealed_sha256);
+  try {
+    if (existsSync(trees)) cpSync(trees, kept, { recursive: true });
+  } catch (error) {
+    snapshot.kept_error = String(error.message);
+  }
+  snapshot.removal_error = removeSnapshot(execRoot);
+  snapshot.removed = snapshot.removal_error === null;
+  saveSnapshot();
+}
 const checkReasons = checkOnly
   ? [
       ...(preflight ? [] : ["preflight did not pass"]),
       ...(fatal ? [`failed: ${fatal.split("\n")[0]}`] : []),
+      ...(needsTarget
+        ? snapshotProblems(snapshot, target).map((p) => `this run: ${p}`)
+        : []),
       ...(interrupted ? ["interrupted"] : []),
       ...(unchanged ? [] : ["the source changed during the run"]),
       ...(needsTarget && applicabilityAfter?.decision !== "applicable"
@@ -798,7 +1014,12 @@ const outcome = checkOnly
       fatal,
       interrupted,
       sourceUnchanged: unchanged,
-      applicability: { target_sha256: targetSha, after: applicabilityAfter },
+      applicability: {
+        target_sha256: targetSha,
+        record: target,
+        after: applicabilityAfter,
+      },
+      snapshot,
       prerequisite: controlsEvidence
         ? (prerequisite ?? { problems: ["the prerequisite was never checked"] })
         : null,
@@ -854,7 +1075,18 @@ const summary = {
   source_unchanged: unchanged,
   applicability_sha256: targetSha,
   applicability_after: applicabilityAfter?.decision ?? null,
-  trees,
+  // Revision 27: the execution snapshot every child ran from, and whether it stayed exactly as sealed.
+  snapshot: needsTarget
+    ? {
+        root: snapshot.root,
+        sealed_sha256: snapshot.sealed_sha256,
+        checks: snapshot.checks.length,
+        unchanged: snapshot.unchanged,
+        removed: snapshot.removed,
+      }
+    : null,
+  installation_sha256: target?.installation?.sha256 ?? null,
+  trees: needsTarget ? kept : trees,
   passed: outcome.passed,
   reasons: outcome.reasons,
   fatal,

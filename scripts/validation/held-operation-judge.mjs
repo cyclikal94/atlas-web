@@ -27,6 +27,12 @@
 //                                             (`historical-healthy`), never admission.
 // `--source current` binds the source alone; it never implies a runtime.
 //
+// Revision 27 (review r26 R26-N1; design assessment eff76566 step 5, I5, H7, H11): `--target current` is measured as a fresh run would
+// execute (held-operation-applicability.mjs collectSnapshotTarget: a private snapshot of this worktree, prepared, sealed, measured,
+// removed), never from the live tree. An admission also needs the bundle's PRODUCING RUN to have completed from a sealed, unchanged
+// snapshot bound to the bundle's record: its run directory's snapshot.json (snapshotProblems). A part published while its run was still
+// going, or by a run whose snapshot changed, is not admission-eligible. Historical replays are unchanged.
+//
 // Usage: node scripts/validation/held-operation-judge.mjs
 //          --negative <NC id> --evidence <manifest.json> (--target current|<applicability.json> | --historical)
 //                             [--report <report.json>] [--spec <spec>] [--exit <n>]
@@ -39,9 +45,9 @@
 //        [--out <judgement.json>]
 // Defaults: a mutant is expected `caught`, a control `healthy`; a negative control must be `qualified` (a diagnostic, `diagnostic-holds`).
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectApplicability } from "./held-operation-applicability.mjs";
+import { collectSnapshotTarget } from "./held-operation-applicability.mjs";
 import {
   judgeControlEvidence,
   qualifyNegative,
@@ -59,6 +65,7 @@ import {
   NO_EVIDENCE,
   normalise,
   PROBE_IDS,
+  snapshotProblems,
 } from "./held-operation-qualification.mjs";
 import { fingerprint } from "./runtime.mjs";
 
@@ -187,6 +194,8 @@ let judgement;
 let outcome;
 let expected;
 let label;
+// Why the bundle's producing run is not a completed, sealed, unchanged execution of its record (admission only; null otherwise).
+let producing = null;
 if (bound) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const expect = {
@@ -210,11 +219,29 @@ if (bound) {
         part: nc ? nc.id : options.get("--part"),
         nc,
       }).browsers;
-      expect.target = collectApplicability({
-        root,
+      expect.target = collectSnapshotTarget({
+        source: root,
+        files: fingerprint(root).files,
         browsers: selection?.length ? selection : browsers,
       });
     } else expect.target = JSON.parse(readFileSync(given, "utf8"));
+    // The producing run's completion witness: its execution snapshot record, beside the part's directory.
+    const runDir = dirname(dirname(resolve(options.get("--evidence"))));
+    let snapshot = null;
+    try {
+      snapshot = JSON.parse(
+        readFileSync(join(runDir, "snapshot.json"), "utf8"),
+      );
+    } catch {
+      snapshot = null;
+    }
+    let record = null;
+    try {
+      record = JSON.parse(bundle.files?.applicability?.toString("utf8"));
+    } catch {
+      record = null;
+    }
+    producing = snapshotProblems(snapshot, record);
   }
   label = historical
     ? "a HISTORICAL replay of a published evidence bundle: what its own recorded run shows, with no applicability to this host assessed; never an admission, not a fresh browser run"
@@ -282,9 +309,15 @@ const result = {
   exit: exit ?? null,
   outcome,
   expected,
-  passed: outcome === expected,
+  passed: outcome === expected && !producing?.length,
+  // Revision 27: an admission's producing run must have completed from a sealed, unchanged snapshot of its record.
+  producing_run: producing ? { problems: producing } : null,
   // Admission needs a target the bundle's runtime applies to (revision 26): a historical replay never admits.
-  admission_eligible: bound && options.has("--target") && outcome === expected,
+  admission_eligible:
+    bound &&
+    options.has("--target") &&
+    outcome === expected &&
+    producing?.length === 0,
   applicability:
     judgement.applicability ?? judgement.evidence?.applicability ?? null,
   judgement,
@@ -296,4 +329,6 @@ console.log(
 );
 for (const problem of judgement.problems.slice(0, 20))
   console.log(`  ${problem}`);
+for (const problem of producing ?? [])
+  console.log(`  producing run: ${problem}`);
 process.exitCode = result.passed ? 0 : 1;
