@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { BrowserContext, Route } from "@playwright/test";
+import type { BrowserContext, Page, Route } from "@playwright/test";
 
 /**
  * A small stateful STAND-IN for the Atlas API, served to the PRODUCTION build in a real engine through `context.route`
@@ -61,6 +61,15 @@ export interface OidcFlow {
 export interface Hold {
   release(): void;
   stop(): void;
+  /** How many requests this hold has caught so far (held now, or released). */
+  caught(): number;
+}
+/** What a hold matches on. `page` is the page that issued the request (null when it has none), so a hold can be bound to one tab. */
+export interface HoldMatch {
+  method: string;
+  path: string;
+  n: number;
+  page: Page | null;
 }
 
 const err = (code: string) => ({
@@ -98,11 +107,12 @@ export class AuthStub {
   private counter = 0;
   readonly oidcFlows: OidcFlow[] = [];
   private holds: Array<{
-    match: (r: { method: string; path: string; n: number }) => boolean;
+    match: (r: HoldMatch) => boolean;
     gate: Promise<void>;
     open: () => void;
     active: boolean;
     remaining: number;
+    caught: number;
   }> = [];
   private nextOverride: Array<{
     match: (r: { method: string; path: string }) => boolean;
@@ -138,14 +148,21 @@ export class AuthStub {
    * processed on arrival.
    */
   hold(
-    match: (r: { method: string; path: string; n: number }) => boolean,
+    match: (r: HoldMatch) => boolean,
     times = Number.POSITIVE_INFINITY,
   ): Hold {
     let open: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
       open = resolve;
     });
-    const entry = { match, gate, open, active: true, remaining: times };
+    const entry = {
+      match,
+      gate,
+      open,
+      active: true,
+      remaining: times,
+      caught: 0,
+    };
     this.holds.push(entry);
     return {
       release: () => entry.open(),
@@ -153,6 +170,7 @@ export class AuthStub {
         entry.active = false;
         entry.open();
       },
+      caught: () => entry.caught,
     };
   }
   /** What the provider's callback redirect carries once the person approved: a grant bound to the flow's challenge. */
@@ -241,11 +259,13 @@ export class AuthStub {
         recorded.status = answer.status;
       }
     }
+    const page = request.frame().page();
     const hold = this.holds.find(
-      (h) => h.active && h.remaining > 0 && h.match({ method, path, n }),
+      (h) => h.active && h.remaining > 0 && h.match({ method, path, n, page }),
     );
     if (hold) {
       hold.remaining -= 1;
+      hold.caught += 1;
       await hold.gate;
     }
     if (abort) return route.abort("connectionreset");

@@ -1047,26 +1047,23 @@ test.describe("R5 / HF-1: a Settings click delivered while the protected tree is
     return { stub, a, b };
   }
 
-  /** Closes tab A with its device read held; returns once tab B is closed for its held check. */
+  /**
+   * Closes tab A with ITS OWN device read held; returns once tab B is closed for ITS OWN held check. Both holds are bound to the
+   * page that must issue the request (review r29 R29-N1): B's own background `/sessions` read, which can arrive at any time after
+   * it is displayed, must neither take A's hold nor satisfy the wait for it, and a check from any other page must not take B's.
+   */
   async function closeForHeldCheck(stub: AuthStub, a: Page, b: Page) {
-    const checksBefore = stub.count("GET", "/browser-sessions/current");
-    const readsBefore = stub.count("GET", "/sessions");
     const holdRead = stub.hold(
-      (r) => r.method === "GET" && r.path === "/sessions",
+      (r) => r.page === a && r.method === "GET" && r.path === "/sessions",
       1,
     );
-    const holdCheck = stub.hold(isCheck, 1);
+    const holdCheck = stub.hold((r) => r.page === b && isCheck(r), 1);
     await settingsLink(a).click();
-    await expect
-      .poll(() => stub.count("GET", "/sessions"), { timeout: 10_000 })
-      .toBeGreaterThan(readsBefore);
+    // A's read is in flight (held) before A is closed: the orphaned request lease this order needs.
+    await expect.poll(() => holdRead.caught(), { timeout: 10_000 }).toBe(1);
     await a.close();
     holdRead.stop();
-    await expect
-      .poll(() => stub.count("GET", "/browser-sessions/current"), {
-        timeout: 10_000,
-      })
-      .toBeGreaterThan(checksBefore);
+    await expect.poll(() => holdCheck.caught(), { timeout: 10_000 }).toBe(1);
     expect(await treeState(b)).toEqual({
       neutral: "1e.interrupted_online",
       open: false,
