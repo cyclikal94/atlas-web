@@ -12,6 +12,7 @@ import {
   fencesOf,
   holdAnswers,
   holdLock,
+  identityReadsSoFar,
   installAttempt,
   leaseIds,
   newWorld,
@@ -455,9 +456,12 @@ describe("T20: resolving an uncertain activation, every combination", () => {
       phase: "verifying",
       cancel: "session_revoked",
     });
+    // ADAPTED (WEB-08c revision 2, HF1-SHARED-CONFIRMATION-20261013): was `r.ordinal > 1` (every identity read after the post-sign-in resume
+    // verification, which the shared confirmation now spares); the same "every OBSERVE read from here on".
+    const before = identityReadsSoFar(f);
     const rule = f.server.addRule({
       match: (r) =>
-        r.path.endsWith("/browser-sessions/current") && r.ordinal > 1,
+        r.path.endsWith("/browser-sessions/current") && r.ordinal > before,
       rewrite: { status: 503, body: "x", contentType: "text/plain" },
     });
     await resolve(f, l);

@@ -31,6 +31,8 @@ interface Grant {
   challenge: string;
   device: string;
   state: "issued" | "redeemed";
+  /** WEB-08c: the session this grant's activation created, so a `session_revoked` cancel can delete it. */
+  session?: string;
 }
 interface Invitation {
   household: { id: string; name: string } | null;
@@ -45,6 +47,8 @@ export interface Recorded {
   status: number;
   /** The page's address at the moment the request was issued: a grant or a token must never be in it. */
   pageUrl: string;
+  /** WEB-08c: the `X-CSRF-Token` the request carried (whose session's token it is), or null. */
+  csrf: string | null;
 }
 /** A provider flow the stub is holding between `/oidc/start` and the redirect back to the origin. */
 export interface OidcFlow {
@@ -70,7 +74,22 @@ export class AuthStub {
   readonly accounts = new Map<string, Account>();
   readonly grants = new Map<string, Grant>();
   readonly invitations = new Map<string, Invitation>();
-  readonly sessions = new Map<string, { id: string; account: string }>();
+  readonly sessions = new Map<
+    string,
+    { id: string; account: string; device: string; createdAt: number }
+  >();
+  /**
+   * WEB-08c additions, each defaulting to the behaviour the earlier specs rely on:
+   *  - `cancelResult`: what `activate/cancel` answers (`session_revoked` also deletes the session the grant created);
+   *  - `enforceCsrf`: a request whose CSRF token is not the cookie session's is refused `403 credential_mismatch` before any handler
+   *    (matrix 3.6.1, as the released backend does);
+   *  - `retireOutcome`: what `DELETE /devices/{id}` records for this browser's device.
+   */
+  cancelResult: "unknown" | "not_activated" | "session_revoked" = "unknown";
+  enforceCsrf = false;
+  retireOutcome: "confirmed_applied" | "rejected_stale" = "confirmed_applied";
+  /** WEB-08c: the network is down: every API request fails before it reaches the server (nothing is processed or recorded). */
+  offline = false;
   readonly requests: Recorded[] = [];
   /** The browser's cookie jar for the origin: the session id the browser holds. */
   cookie: string | null = null;
@@ -181,6 +200,7 @@ export class AuthStub {
   }
 
   private async handle(route: Route) {
+    if (this.offline) return route.abort("internetdisconnected");
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname.slice(API.length);
@@ -206,6 +226,7 @@ export class AuthStub {
       body,
       status: answer.status,
       pageUrl: request.frame().url(),
+      csrf: request.headers()["x-csrf-token"] ?? null,
     };
     this.requests.push(recorded);
     const override = this.nextOverride.find(
@@ -308,7 +329,13 @@ export class AuthStub {
         return fail(401, "unauthenticated");
       grant.state = "redeemed";
       const id = `sess-${++this.counter}`;
-      this.sessions.set(id, { id, account: grant.account });
+      grant.session = id;
+      this.sessions.set(id, {
+        id,
+        account: grant.account,
+        device: grant.device,
+        createdAt: Date.now(),
+      });
       return {
         status: 200,
         body: {
@@ -320,8 +347,16 @@ export class AuthStub {
         cookie: id,
       };
     }
-    if (path === "/browser-sessions/activate/cancel" && method === "POST")
-      return json(200, { result: "unknown" });
+    if (path === "/browser-sessions/activate/cancel" && method === "POST") {
+      if (this.cancelResult === "session_revoked") {
+        // The cancel names its attempt by the verifier (matrix 3.4.2): the grant whose challenge it answers.
+        const challenge = challengeOf(String(b.verifier ?? ""));
+        for (const grant of this.grants.values())
+          if (grant.challenge === challenge && grant.session)
+            this.sessions.delete(grant.session);
+      }
+      return json(200, { result: this.cancelResult });
+    }
     if (path === "/browser-sessions/current" && method === "GET") {
       if (headers["x-atlas-session"] !== "1") return fail(403, "forbidden");
       if (!session) return fail(401, "unauthenticated");
@@ -353,6 +388,60 @@ export class AuthStub {
       });
     }
     if (!session) return fail(401, "unauthenticated");
+    const csrf = headers["x-csrf-token"];
+    if (this.enforceCsrf && csrf && csrf !== `csrf.${session.id}`)
+      return fail(403, "credential_mismatch");
+    if (path === "/password" && method === "POST") {
+      const account = this.accounts.get(session.account);
+      if (!account || account.password !== b.current_password)
+        return fail(401, "unauthenticated");
+      account.password = String(b.new_password ?? account.password);
+      for (const s of [...this.sessions.values()])
+        if (s.account === session.account) this.sessions.delete(s.id);
+      return { status: 204 };
+    }
+    if (path === "/devices" && method === "GET") {
+      const device = session.device || "dev-stub";
+      const here = [...this.sessions.values()].filter(
+        (s) => s.account === session.account && s.device === session.device,
+      );
+      return json(200, {
+        devices: [
+          {
+            id: device,
+            last_synced_at: null,
+            active_sessions: here.length,
+            current: true,
+            state_token: `v1.${"s".repeat(43)}`,
+            summary: {
+              sessions: here.length,
+              native_handoffs: 0,
+              notification_subscriptions: 0,
+              pending_sign_ins: 0,
+              sync_registered: false,
+            },
+          },
+        ],
+      });
+    }
+    if (/^\/devices\/[^/]+$/.test(path) && method === "DELETE") {
+      const key = headers["idempotency-key"] ?? "";
+      if (this.retireOutcome === "rejected_stale")
+        return json(409, {
+          ...err("operation_conflict"),
+          operation_id: key,
+          account_id: session.account,
+          outcome: "rejected_stale",
+        });
+      for (const s of [...this.sessions.values()])
+        if (s.account === session.account && s.device === session.device)
+          this.sessions.delete(s.id);
+      return json(200, {
+        operation_id: key,
+        account_id: session.account,
+        outcome: "confirmed_applied",
+      });
+    }
     // The composed production client now starts WEB-09b's leader after authentication. This AUTHENTICATION double owns no
     // resources: answer an empty initial snapshot, then empty deltas. The real backend journeys cover actual sync/recovery.
     if (path === "/sync" && method === "GET") {
@@ -405,8 +494,8 @@ export class AuthStub {
           .filter((s) => s.account === session.account)
           .map((s) => ({
             id: s.id,
-            device_id: "dev-stub",
-            created_at: new Date().toISOString(),
+            device_id: s.device || "dev-stub",
+            created_at: new Date(s.createdAt).toISOString(),
             expires_at: new Date(Date.now() + 86_400_000).toISOString(),
             authentication: "local",
             current: s.id === session.id,

@@ -14,6 +14,7 @@ import {
 import { NEUTRAL_COPY } from "../../src/components/ui/neutral-state";
 import { authFeedback } from "../../src/features/authentication/feedback";
 import {
+  ENDED_IN_TREE,
   LOCK_WAIT_BANNER,
   MESSAGE_TEXT,
 } from "../../src/features/authentication/outcome-copy";
@@ -287,6 +288,20 @@ describe("R20 (revision 8): removing a notice announces nothing", () => {
     expect(requested).toBe(before + 1);
     flush();
     expect(m.polite()?.textContent).toBe(LOCK_WAIT_BANNER.heading);
+  });
+
+  test("merged lifecycle: an ended sign-in announces its own heading once and dismissal keeps a later task-save announcement", () => {
+    const m = mount();
+    act(() => authFeedback.add({ kind: "ended" }));
+    expect(requested).toBe(1);
+    flush();
+    expect(m.polite()?.textContent).toBe(ENDED_IN_TREE.heading);
+    act(() => void caller.announce(ANNOUNCE_SAVED));
+    flush();
+    const before = requested;
+    m.dismiss("feedback-ended");
+    expect(requested).toBe(before);
+    expect(m.polite()?.textContent).toBe(ANNOUNCE_SAVED);
   });
 
   test("N6: two notices with the same words are two announcements: dismissing the earlier keeps the later one's text, dismissing the later withdraws it", () => {

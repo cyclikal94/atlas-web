@@ -118,6 +118,30 @@ describe("completion is judged by membership: every selected mutant exactly once
     ]);
   });
 
+  test("merged lifecycle IDs retain namespace validation and duplicate detection", () => {
+    expect(
+      catalogueProblems(
+        [{ id: "MU-1" }, { id: "MU-8C-05" }, { id: "MU-8C-R4c" }],
+        3,
+      ),
+    ).toEqual([]);
+    expect(
+      catalogueProblems(
+        [
+          { id: "MU-8C-R4c" },
+          { id: "MU-8C-R4c" },
+          { id: "MU-8C-" },
+          { id: "MU-8C-R4c-extra" },
+        ],
+        4,
+      ),
+    ).toEqual([
+      "unit mutant MU-8C-R4c is listed twice",
+      "unit catalogue entry 2 has no numeric or WEB-08c MU id",
+      "unit catalogue entry 3 has no numeric or WEB-08c MU id",
+    ]);
+  });
+
   test("the catalogue check: duplicate and malformed ids, and a count other than expected", () => {
     expect(
       catalogueProblems(
@@ -126,7 +150,7 @@ describe("completion is judged by membership: every selected mutant exactly once
       ),
     ).toEqual([
       "unit mutant MU-1 is listed twice",
-      "unit catalogue entry 2 has no MU-<n> id",
+      "unit catalogue entry 2 has no numeric or WEB-08c MU id",
       "unit catalogue has 3 mutants, expected 2 (update the expected count with the catalogue)",
     ]);
   });

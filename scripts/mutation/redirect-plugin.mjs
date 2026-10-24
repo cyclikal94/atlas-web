@@ -23,9 +23,11 @@ export function mutantRedirect(root, mutantDirectory) {
       if (!resolved || resolved.external) return resolved;
       const path = resolved.id.split("?")[0] ?? resolved.id;
       const rel = relative(root, path);
-      // Source files, and (WEB-10a revision 11, R24: MU-2235) the catalogue's own expected counts; no other mutant patches `scripts/`.
+      // Source files and catalogue counts (R24: MU-2235), plus the exact inventory guard qualified by the accepted-base merge (MU-2425).
       if (
-        (rel.startsWith("src/") || rel.startsWith("scripts/mutation/")) &&
+        (rel.startsWith("src/") ||
+          rel.startsWith("scripts/mutation/") ||
+          rel === "scripts/lib/mutation-inventory.mjs") &&
         existsSync(join(mutant, rel))
       )
         return join(mutant, rel);

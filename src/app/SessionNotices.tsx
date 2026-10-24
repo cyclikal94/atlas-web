@@ -4,6 +4,7 @@ import { Button } from "../components/ui/button";
 import { authFeedback } from "../features/authentication/feedback";
 import { MessageText } from "../features/authentication/MessageText";
 import {
+  ENDED_IN_TREE,
   LOCK_WAIT_BANNER,
   SUPERSEDED_BANNER,
   textOf,
@@ -64,7 +65,9 @@ export function SessionNotices() {
             ? SUPERSEDED_BANNER.message
             : fact.kind === "lock_wait"
               ? LOCK_WAIT_BANNER.heading
-              : textOf(fact.message),
+              : fact.kind === "ended"
+                ? ENDED_IN_TREE.heading
+                : textOf(fact.message),
         ),
       );
   }, [notices, feedback]);
@@ -114,6 +117,13 @@ export function SessionNotices() {
                   {LOCK_WAIT_BANNER.heading}.
                 </strong>{" "}
                 {LOCK_WAIT_BANNER.message}
+              </>
+            ) : item.kind === "ended" ? (
+              <>
+                <strong className="font-medium">
+                  {ENDED_IN_TREE.heading}.
+                </strong>{" "}
+                {ENDED_IN_TREE.message}
               </>
             ) : (
               <MessageText message={item.message} />

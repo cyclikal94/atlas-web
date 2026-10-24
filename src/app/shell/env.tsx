@@ -1,4 +1,9 @@
-import { createContext, type ReactNode, useContext } from "react";
+import {
+  createContext,
+  type ReactNode,
+  type RefObject,
+  useContext,
+} from "react";
 import type { ChipDestination, SyncStatusModel } from "../../lib/sync-chip";
 
 /**
@@ -8,10 +13,16 @@ import type { ChipDestination, SyncStatusModel } from "../../lib/sync-chip";
 /**
  * A slot is content, or a function of the rail state. On the tablet icon rail (64px) a slot has room for one 44px control, so a
  * function slot receives `collapsed` and returns a compact form (an avatar, an icon) with its own accessible name.
+ *
+ * `returnFocus` is set when the slot is rendered inside a sheet that CLOSES as the slot's control opens a dialog of its own (the
+ * mobile More sheet): the control is removed with the sheet, so that dialog returns focus here instead, to the control that opened
+ * the sheet (WEB-08c R10). Absent, the control is its own return target.
  */
-export type ShellSlot =
-  | ReactNode
-  | ((state: { collapsed: boolean }) => ReactNode);
+export interface ShellSlotState {
+  collapsed: boolean;
+  returnFocus?: RefObject<HTMLElement | null>;
+}
+export type ShellSlot = ReactNode | ((state: ShellSlotState) => ReactNode);
 
 export interface ShellEnv {
   syncModel: SyncStatusModel;
@@ -23,8 +34,9 @@ export interface ShellEnv {
 export function renderSlot(
   slot: ShellSlot | undefined,
   collapsed: boolean,
+  returnFocus?: RefObject<HTMLElement | null>,
 ): ReactNode {
-  return typeof slot === "function" ? slot({ collapsed }) : slot;
+  return typeof slot === "function" ? slot({ collapsed, returnFocus }) : slot;
 }
 
 const ShellEnvContext = createContext<ShellEnv | null>(null);

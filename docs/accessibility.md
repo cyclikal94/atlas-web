@@ -89,6 +89,13 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   (9 of 10 runs); the dialog now reveals a focused control whole (`dialog.tsx`, block "nearest"; 10 of 10 clear afterwards). Browser emulation,
   not physical devices or a screen reader (WEB-09d, collected by WEB-15).
 
+## What WEB-08c built in (the account switcher's focus)
+
+- **Closing the switcher returns focus to an entry control that is still there.** From the rail's account control or Settings' "Switch account", focus returns to that control. On mobile the account control sits in the More sheet, which closes as the switcher opens (two sheets are never stacked), so the switcher returns focus to **More** instead (R10 of the review of 15 October 2026; the shell hands the sheet's own return target to the slot, `ShellSlotState.returnFocus`).
+- **Moving between the switcher's steps keeps focus in the step that follows.** Choosing a row puts focus in the credential step's first empty field; "Cancel — stay as …" puts it back on the list. The step that closed returns focus only when the whole flow has closed, so it never pulls focus out of its successor, whether or not the page behind is already inert.
+- **When the control that opened the switcher is gone, focus goes to the same entry in the page as it is now** (DA-F1 of the design assessment of 15 October 2026; the destination is Kieran's decision of that day). The window can cross the 768 px breakpoint while the switcher is open, replacing More with the rail or the reverse, and a switch refused at its activation returns the same account in a new tree with the credential step kept. On close, focus goes to the opening control while it is still usable. Otherwise it goes to Settings' "Switch account" for a flow opened there, then to the account entry of the current layout (the rail's account control, or More on mobile), then to the page heading. The switcher never reopens More and never navigates. Nothing is restored while another account is displayed, a gate covers the page, or the person has signed out: the session owns focus then (`SwitchFlow.tsx`, `returnTargets`).
+- Automated in `tests/app/switcher-focus-return.test.tsx` (jsdom, the production composition), `tests/e2e/production.switcher-focus.spec.ts` and `tests/e2e/production.switcher-focus-lifetime.spec.ts` (production build, three engines, desktop and a 390 × 844 viewport; the second changes the layout while the switcher is open and refuses a switch at its activation). None of them is evidence from a physical phone or a screen reader.
+
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
 For each core journey (open the app, move between destinations, open Appearance and change it, open the More sheet, read the sync status, reach a compatibility screen):
@@ -97,6 +104,7 @@ For each core journey (open the app, move between destinations, open Appearance 
 - [ ] Focus is always visible and never lost to `<body>` after an action.
 - [ ] Every control has a name, role and state that match what is shown.
 - [ ] Dialogs announce their title, keep focus inside, close on Escape and return focus.
+- [ ] The account switcher, opened from the rail, from Settings and from the More sheet on a phone: Escape, Close and "Cancel — stay as …" each leave focus on a visible control (More, on a phone), never on `<body>`.
 - [ ] Sync changes are announced once, at the right politeness, and a new conflict interrupts.
 - [ ] A locked or gated screen announces nothing about any account (WEB-08).
 - [ ] WEB-08b journeys: sign in with a wrong and then the right password; reach "Reconnect to keep going" and sign in again; open an invitation link, read the preview, create an account, and read the lost-response state; start single sign-on and return from the provider; open "Signing in", change the password and read the unconfirmed state; with "Signing in" open, switch the device offline and back, and read the reason beside each of Change password, Remove and Link single sign-on; open "Signing in" within a minute of signing in, leave it open for five minutes and note what a screen reader and keyboard focus do when Remove and Link become unavailable; the refusal on each form is announced once and focus lands on the right field.
@@ -113,3 +121,57 @@ For each core journey (open the app, move between destinations, open Appearance 
 
 The three combinations, a manual pass through the core journeys, and the recorded results are required before release. A keyboard-only walkthrough of the fixture shell,
 run by hand on the host, is informational and does not satisfy Q13.
+
+## T22: the resume gate with a screen reader (WEB-08c script; Q13 release evidence collected by WEB-15)
+
+Matrix T22 (`account-lifecycle-matrix.md`, lines 3464–3487) is a **working-client check with real assistive technology**. WEB-08c writes this script and an automated
+counterpart; the manual runs need a person and the devices below and are **not run** until an operator runs them against a WEB-08c candidate (or reassigns them, OD-1 in
+the WEB-08c report). The automated counterpart (`tests/e2e/production.lifecycle-a11y.spec.ts`, three engines) checks the accessibility tree, focus, Tab order and the polite
+status that a screen reader would be given; it is **not** assistive-technology evidence.
+
+**Combinations (each one run, plus one run with an open protected modal dialog):** NVDA with Firefox and with Chrome (Windows); VoiceOver with Safari on iOS and on iPadOS,
+in the browser and as the installed app; TalkBack with Chrome (Android).
+
+**Setup.** Sign in as account C on a build of the candidate. Open Settings → "Signing in" (a protected modal dialog: this is the open-modal run; for the other runs, close
+it and focus a link in the navigation instead). Put the cursor in "Current password" (it carries `data-focus-key="password-current"`) and type some characters without
+submitting. Open the same site in a second tab or window (on a phone: a second tab) and sign in there only when a branch says so.
+
+**Delaying the local check (test-only, nothing ships).** Before each return to the tab, run this snippet in the developer tools console of the tab under test (on iOS
+and Android use the remote inspector). It holds exactly the display check's record read: the first `atlas-auth` transaction created after the tab becomes visible again,
+which the application creates inside its `visibilitychange` handler (the same transaction the automated counterpart holds and checks). Its completion is delivered **5 s
+after that transaction was created** (the matrix's 5 s), then the snippet disarms itself. The display check waits up to 6 s for its read before treating the store as
+stalled (human decision T22-READ-BOUND-20261012, 12 October 2026; every other store wait keeps its hard 5 s), so a 5 s hold is the approved t4 branch. A hold longer than
+6 s is a stalled store that fails closed (finding O-3), which is a different branch.
+
+```js
+(() => { const t = IDBDatabase.prototype.transaction; let armed = false, used = false;
+  window.addEventListener("visibilitychange", () => { if (!used && document.visibilityState === "visible") armed = true; }, { capture: true });
+  IDBDatabase.prototype.transaction = function (...a) { const tx = t.apply(this, a);
+    if (!armed || this.name !== "atlas-auth") return tx; armed = false; used = true; let h = null;
+    const until = performance.now() + 5000;
+    const go = (e) => { const left = until - performance.now(); if (left > 0) setTimeout(() => go(e), Math.ceil(left)); else if (h) h.call(tx, e); };
+    tx.addEventListener("complete", go);
+    Object.defineProperty(tx, "oncomplete", { configurable: true, get: () => h, set: (f) => { h = f; } });
+    return tx; }; })();
+```
+
+**Steps.**
+
+| Step | Do | Pass criteria |
+| --- | --- | --- |
+| t0 | Switch to another tab or app (the tab is hidden) | The screen reader announces nothing about C; the focused field is no longer reachable; find-in-page finds nothing of C |
+| t1 | Wait long enough for the platform to suspend the tab where it does (a minute or more; on mobile, lock the screen) | — |
+| t2 | In the second tab: **(i)** sign in as another account Y; **(ii)** end C's session (sign out of C everywhere, or change C's password) and use the second tab once so it notices; **(iii)** do nothing | — |
+| t3 | Run the snippet, then return to the tab | The first thing presented is the gate: heading "Checking your account". Tab, Shift+Tab, the virtual cursor, the rotor and swipe navigation reach nothing but the gate. Nothing of C is spoken |
+| t4 | During the 5 s hold, try to reach the form | Still only the gate, for the whole 5 s. "Checking your account" is announced once, politely (it does not interrupt) |
+| t5 (i) | Wait | Y's shell is shown; "This window now shows a different account." is announced, no name is spoken; focus is on Y's main heading; nothing points into C's form, and the typed characters are gone |
+| t5 (ii) | Wait | "Reconnect to keep going" (state 1b) is shown and announced as an alert; focus is on its heading; nothing of C is reachable |
+| t5 (iii) | Wait | The page comes back as it was: focus is back in "Current password" with the typed characters, and nothing extra is announced. In a run without the open dialog (the Settings page scrolled down, focus on a link), the scroll position is back where it was |
+
+**Fails:** any protected text or control reachable by keyboard, virtual cursor, rotor, swipe or find-in-page during t3–t4; after t5 (i) or (ii), any restored focus that
+points into the old account; any account name spoken by the gate or a neutral state.
+
+**Recording template (one row per run; WEB-15 collects them):**
+
+| Date | Tester | Device / OS version | Browser / version (installed app?) | Screen reader / version | Branch (i/ii/iii, open modal?) | t3–t4 result | t5 result | Notes / recording link |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |

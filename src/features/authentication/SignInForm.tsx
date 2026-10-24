@@ -47,6 +47,9 @@ export function SignInForm({
   onBack,
   carried = null,
   onCarriedShown,
+  submitLabel = "Sign in",
+  backLabel = "Back",
+  usernameReadOnly = false,
 }: {
   online: boolean;
   initialUsername: string;
@@ -61,6 +64,12 @@ export function SignInForm({
   carried?: Message | null;
   /** Called once the carried refusal is on screen, so a later form does not show it again. */
   onCarriedShown?(): void;
+  /** WEB-08c: "Sign in as sam" (WF-SWITCH-02). The public sign-in page keeps "Sign in". */
+  submitLabel?: string;
+  /** WEB-08c: "Cancel — stay as kieran" (WF-SWITCH-02). */
+  backLabel?: string;
+  /** WEB-08c (G-23): the in-place re-authentication confirms the SAME account, so its username is shown and not editable. */
+  usernameReadOnly?: boolean;
 }) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState("");
@@ -152,6 +161,7 @@ export function SignInForm({
           spellCheck={false}
           maxLength={100}
           value={username}
+          readOnly={usernameReadOnly}
           disabled={!online}
           aria-invalid={usernameError ? true : undefined}
           aria-describedby={
@@ -202,11 +212,11 @@ export function SignInForm({
             disabled
             reason={disabledReason}
           >
-            Sign in
+            {submitLabel}
           </Button>
         ) : (
           <Button type="submit" variant="primary">
-            Sign in
+            {submitLabel}
           </Button>
         )}
         {disabledReason ? null : (
@@ -216,7 +226,7 @@ export function SignInForm({
         )}
         {onBack ? (
           <Button variant="quiet" onClick={onBack}>
-            Back
+            {backLabel}
           </Button>
         ) : null}
       </div>

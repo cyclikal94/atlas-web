@@ -42,7 +42,14 @@ export function evaluate(k: Kernel, reason: string): Promise<void> {
   return mine.done;
 }
 
-export async function readRecords(k: Kernel): Promise<AuthRecords | null> {
+/**
+ * A snapshot of the record, or `null` when it cannot be read within `bound` (hard: a later answer is ignored). Every caller but the
+ * display check uses the 5 s recording bound; the display check passes its own `displayReadStallMs` (T22-READ-BOUND-20261012).
+ */
+export async function readRecords(
+  k: Kernel,
+  bound = k.config.recordingStallMs,
+): Promise<AuthRecords | null> {
   try {
     const outcome = await k.withStall(
       k.transact(
@@ -50,7 +57,7 @@ export async function readRecords(k: Kernel): Promise<AuthRecords | null> {
         "read",
         false,
       ),
-      k.config.recordingStallMs,
+      bound,
     );
     return outcome === "stalled" ? null : outcome;
   } catch {
@@ -114,7 +121,7 @@ function failClosed(k: Kernel): void {
 }
 
 async function evaluateOnce(k: Kernel, reason: string): Promise<void> {
-  const records = await readRecords(k);
+  const records = await readRecords(k, k.config.displayReadStallMs);
   if (k.disposed) return;
   if (records === null) {
     // Fail closed (matrix 3.7.2 item 3): a page that cannot read the record shows nothing protected, so what is displayed,
@@ -132,6 +139,19 @@ async function evaluateOnce(k: Kernel, reason: string): Promise<void> {
   const record = records.auth_state;
   k.lastRecord = record;
   const settled = record.settled;
+  // HF1-SHARED-CONFIRMATION-20261013: the settled session's shared CSRF token, tagged (account, epoch) like the page's own. It is the token of
+  // exactly this settlement (an epoch is never reused), so it is adopted only when the page has none for it.
+  const shared = record.confirmation;
+  if (
+    settled &&
+    shared &&
+    shared.account_id === settled.account_id &&
+    shared.epoch === settled.epoch &&
+    shared.session_id === settled.session_id
+  ) {
+    const key = k.memory.csrfKey(settled.account_id, settled.epoch);
+    if (!k.memory.csrf.has(key)) k.memory.csrf.set(key, shared.csrf_token);
+  }
   k.emit("evaluate", { reason, settled: settled?.account_id ?? null });
 
   k.memory.settled = settled
@@ -185,6 +205,22 @@ async function evaluateOnce(k: Kernel, reason: string): Promise<void> {
     k.neutral = { ...k.neutral, unresolvedLeaseKnown: false };
     k.memory.unresolvedKnownFor = null;
   }
+
+  // WEB-08c revision 4 (R9): a recovery report is applicable only to the identity it was made for, and only while the account has a fence
+  // entry at all. Withdrawn here, at this successful read, before anything is derived from it: a report of another identity or of a
+  // recovery that is over (its fence cleared) can never keep this page on state 2 or 3. A new recovery of the account reports afresh.
+  // (`recoveryFor` is read only while a report is held.)
+  const reportedFor = k.memory.recoveryFor;
+  if (
+    k.neutral.recovery &&
+    !(
+      reportedFor &&
+      reportedFor.account === settled?.account_id &&
+      reportedFor.epoch === settled.epoch &&
+      record.fences[reportedFor.account]?.length
+    )
+  )
+    k.neutral = { ...k.neutral, recovery: null };
 
   k.hooks.onRecord(records);
 

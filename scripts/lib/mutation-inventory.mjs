@@ -13,8 +13,10 @@ export function catalogueProblems(catalogue, expected, name = "unit") {
   const seen = new Set();
   for (const [index, mutant] of catalogue.entries()) {
     const id = mutant?.id;
-    if (typeof id !== "string" || !/^MU-\d+$/.test(id))
-      problems.push(`${name} catalogue entry ${index} has no MU-<n> id`);
+    if (typeof id !== "string" || !/^MU-(?:\d+|8C-[A-Z]*\d+[a-z]?)$/.test(id))
+      problems.push(
+        `${name} catalogue entry ${index} has no numeric or WEB-08c MU id`,
+      );
     else if (seen.has(id))
       problems.push(`${name} mutant ${id} is listed twice`);
     else seen.add(id);

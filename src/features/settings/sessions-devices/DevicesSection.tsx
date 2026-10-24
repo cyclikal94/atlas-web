@@ -83,6 +83,7 @@ export function DevicesSection() {
                         ? "Retire this device"
                         : "Retire this other device"
                     }
+                    data-return-focus={row.current ? "device-this" : undefined}
                     onClick={() => setRetiring(row)}
                   >
                     Retire…

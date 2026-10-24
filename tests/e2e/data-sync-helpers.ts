@@ -160,22 +160,69 @@ export async function seedSettled(
  * answered that many milliseconds later than the shared stub would. It is the schedule that a loaded machine gives the stub's answer (a
  * round trip through the test process), made deliberate: with it, the order that used to start page A's outbox and boot page B
  * afterwards closed A's registry in about a third of its runs (see `twoPages`).
+ *
+ * WEB-08c revision 11 (R12): a hold is only an injection if the page MAKES that read. Since HF1-SHARED-CONFIRMATION-20261013 a page that
+ * boots within the resume-verification interval (30 s) of the session's shared confirmation adopts its token and makes no identity read of
+ * its own, so the route was never entered and the delay never applied (review 11: every counter `[]` in three engines). A hold now names how
+ * the boot is made to verify: `verifyThrough` is an existing page of this origin through which the shared confirmation is removed just
+ * before this page navigates (`withoutSharedConfirmation`: the record as a page of the previous version left it, and the boot verifies
+ * identity itself, as every boot did when the hold was measured), or `"confirmation kept"` to leave the record as it is (the negative
+ * control). Every identity read of the page and the delay it was given are recorded (`identityReadsOf`), and a held boot whose FIRST read
+ * was not held by exactly that much FAILS THE SET-UP with what it saw, instead of passing on a schedule it never had.
  */
+export type BootSessionOptions =
+  | { holdIdentityReadMs?: undefined }
+  | { holdIdentityReadMs: number; verifyThrough: Page | "confirmation kept" };
+
+/** What a held boot's injection did (WEB-08c revision 11, R12), for the evidence and the set-up's own check. */
+export interface IdentityReadInjection {
+  /** The hold asked for, in ms. */
+  requestedMs: number;
+  /** Whether the shared confirmation was removed before the page booted (null: the record was deliberately left as it is). */
+  confirmationRemoved: boolean | null;
+  /** The age, in ms, of the shared confirmation just before the page booted, read through `verifyThrough` (null: none, or the record was left as it is). */
+  confirmationAgeBeforeBoot: number | null;
+  /** Every identity read (`GET /browser-sessions/current`) the page made, in order, with the ms it was held (0: answered at once). */
+  heldMs: number[];
+}
+
+const injections = new WeakMap<Page, IdentityReadInjection>();
+
+/** The identity-read injection of a page booted with a hold (undefined: the page was not). */
+export const identityReadsOf = (
+  page: Page,
+): IdentityReadInjection | undefined => injections.get(page);
+
+/** How long a held boot's first identity read may take to come after the session is ready before the set-up fails (a harness bound). */
+const HELD_READ_BOUND_MS = 5_000;
+
 export async function bootSession(
   context: BrowserContext,
-  options: { holdIdentityReadMs?: number } = {},
+  options: BootSessionOptions = {},
 ): Promise<Page> {
   const page = await context.newPage();
   const hold = options.holdIdentityReadMs ?? 0;
-  if (hold > 0) {
-    let held = false;
+  let injection: IdentityReadInjection | null = null;
+  if (options.holdIdentityReadMs !== undefined) {
+    if (!(hold > 0))
+      throw new Error(
+        `bootSession: a held identity read needs a positive hold, not ${options.holdIdentityReadMs}`,
+      );
+    const record: IdentityReadInjection = {
+      requestedMs: hold,
+      confirmationRemoved: null,
+      confirmationAgeBeforeBoot: null,
+      heldMs: [],
+    };
+    injection = record;
+    injections.set(page, record);
     await page.route(
       "**/api/experimental/v1/browser-sessions/current",
       async (route) => {
-        if (!held) {
-          held = true;
-          await new Promise((resolve) => setTimeout(resolve, hold));
-        }
+        const delay = record.heldMs.length === 0 ? hold : 0;
+        record.heldMs.push(delay);
+        if (delay > 0)
+          await new Promise((resolve) => setTimeout(resolve, delay));
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -188,6 +235,14 @@ export async function bootSession(
         });
       },
     );
+    if (options.verifyThrough !== "confirmation kept") {
+      record.confirmationAgeBeforeBoot = await confirmationAge(
+        options.verifyThrough,
+      );
+      record.confirmationRemoved = await withoutSharedConfirmation(
+        options.verifyThrough,
+      );
+    }
   }
   await page.goto("/__session?route=%2Ftoday");
   await page.waitForFunction(
@@ -195,7 +250,91 @@ export async function bootSession(
   );
   await page.evaluate(() => window.__atlasFixture?.session?.ready);
   await page.waitForFunction(() => window.__atlasData !== undefined);
+  if (injection !== null) {
+    // The read is the boot's own verification; it is normally in by `ready`. A bound, not a duration under test: the read either comes or the
+    // injection was not exercised.
+    const began = Date.now();
+    while (
+      injection.heldMs.length === 0 &&
+      Date.now() - began < HELD_READ_BOUND_MS
+    )
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    if (injection.heldMs[0] !== hold)
+      throw new Error(
+        `bootSession: the named latency injection was not exercised: the page's first identity read was to be held ${hold} ms, and the page made ${injection.heldMs.length === 0 ? `no identity read within ${HELD_READ_BOUND_MS} ms of its session being ready` : `reads held ${JSON.stringify(injection.heldMs)} ms`} (${JSON.stringify(injection)})`,
+      );
+  }
   return page;
+}
+
+/**
+ * WEB-08c revision 10 (HF1-SHARED-CONFIRMATION-20261013): the age, in ms, of the session's shared confirmation in this origin's `atlas-auth`
+ * record (null: none). A page that boots while the record holds a confirmation of its settled session younger than the resume-verification
+ * interval (30 s) adopts its token and makes NO identity read of its own; an older one is verified again, as every boot was before.
+ */
+export async function confirmationAge(page: Page): Promise<number | null> {
+  return page.evaluate(
+    () =>
+      new Promise<number | null>((resolve, reject) => {
+        const open = indexedDB.open("atlas-auth");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const read = db.transaction("records", "readonly");
+          const request = read.objectStore("records").get("auth_state");
+          read.oncomplete = () => {
+            db.close();
+            const at = (
+              request.result as { confirmation?: { confirmed_at?: string } }
+            )?.confirmation?.confirmed_at;
+            resolve(at === undefined ? null : Date.now() - Date.parse(at));
+          };
+          read.onerror = () => {
+            db.close();
+            reject(read.error);
+          };
+        };
+      }),
+  );
+}
+
+/**
+ * WEB-08c revision 10: removes the shared confirmation from this origin's `atlas-auth` record (one read-write transaction, nothing else
+ * changed), so the record is as a page of a version BEFORE HF1-SHARED-CONFIRMATION-20261013 left it: the next page to boot has no token to
+ * adopt and no recent confirmation, and verifies identity itself exactly as every boot did then. Returns whether one was removed.
+ */
+export async function withoutSharedConfirmation(page: Page): Promise<boolean> {
+  return page.evaluate(
+    () =>
+      new Promise<boolean>((resolve, reject) => {
+        const open = indexedDB.open("atlas-auth");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const write = db.transaction("records", "readwrite");
+          const store = write.objectStore("records");
+          const request = store.get("auth_state");
+          let removed = false;
+          request.onsuccess = () => {
+            const record = request.result as
+              | (Record<string, unknown> & { confirmation?: unknown })
+              | undefined;
+            if (record?.confirmation === undefined) return;
+            const { confirmation: _, ...rest } = record;
+            store.put(rest, "auth_state");
+            removed = true;
+          };
+          write.oncomplete = () => {
+            db.close();
+            resolve(removed);
+          };
+          write.onerror = () => {
+            db.close();
+            reject(write.error);
+          };
+        };
+      }),
+  );
 }
 
 /**

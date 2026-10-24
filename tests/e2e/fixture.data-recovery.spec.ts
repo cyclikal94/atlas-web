@@ -32,6 +32,11 @@ import {
   untilSync,
 } from "./data-leader-helpers";
 import { upsert, uuid } from "./data-sync-helpers";
+import {
+  type DisplayOracle,
+  FIXTURE_ACCOUNT_MARKERS,
+  installDisplayOracle,
+} from "./display-oracle";
 import { expect, test } from "./helpers";
 
 /**
@@ -51,6 +56,42 @@ import { expect, test } from "./helpers";
  *   E-B9   case (e): `409 access_changed` mid-snapshot restarts it cursor-less under a new generation, counting nothing, with the notice;
  *   E-B13u trace 6, the UNRECOGNISED variant: three cursor-less unrecognised answers across reloads block; no fourth automatic request.
  */
+// WEB-08c revision 3 (R5; design assessment P1/P2): every case of this file ALSO runs under the continuous no-early-display oracle
+// (`display-oracle.ts`, qualified by `fixture.lifecycle-oracle.spec.ts`): no page mounts or lifts an account, or shows a protected title,
+// before its own last committed `atlas-auth` record names that account settled with no fence entry, and every page of the context was
+// enrolled before its application ran. The cases' own assertions are unchanged; this adds a check over the whole run.
+let displayOracle: DisplayOracle | null = null;
+test.beforeEach(async ({ context }) => {
+  // WEB-08c revision 4 (DA-H1): with the account's verified name as its marker, as every production-session fixture caller has.
+  displayOracle = await installDisplayOracle(context, {
+    markers: [...FIXTURE_ACCOUNT_MARKERS],
+  });
+});
+test.afterEach(async ({ context }, testInfo) => {
+  const oracle = displayOracle;
+  displayOracle = null;
+  if (!oracle) return;
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await testInfo.attach("display-oracle-violations.json", {
+      body: JSON.stringify(
+        {
+          violations: oracle.violations(),
+          pages: context.pages().length,
+          // WEB-08c revision 5: the per-document ledger (diagnostic only; a failed case stays failed).
+          ledger: await oracle
+            .coverage()
+            .catch((error: unknown) => String(error)),
+        },
+        null,
+        1,
+      ),
+      contentType: "application/json",
+    });
+    return;
+  }
+  await oracle.assertClean(testInfo.title);
+});
+
 const inert = (page: Page) =>
   page.evaluate(() =>
     document.getElementById("protected-root")?.hasAttribute("inert"),

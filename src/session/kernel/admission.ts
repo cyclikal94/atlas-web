@@ -1,6 +1,6 @@
 import { leasesOfOthers } from "../model/records";
 import { recoveryEligible } from "../model/reducers/cover";
-import type { AccountId, Epoch } from "../model/types";
+import type { AccountId, AuthRecords, Epoch } from "../model/types";
 import { isGating } from "../model/types";
 import { readRecords } from "./evaluate";
 import type { Kernel } from "./state";
@@ -17,6 +17,8 @@ export interface RequestAdmission {
  *
  * The durable inputs are read from the record (the settled stamp, a gating attempt, the account's fence entries and `fence_seq`, the
  * other pages' request leases of the account); the page-local ones from this page's memory (a hold, a closing write, its CSRF token).
+ * The revision also covers `latest_epoch`, which only increases: an attempt that began and ended between two probes leaves the record
+ * otherwise as it was, and a waiter that was refused because of it must still see a change (WEB-08c K-2).
  * `blocked` is true when one of them refuses the request now, by the same rules as the cover (`recoveryEligible` for the recovery
  * class; no fence and no gating attempt for the ordinary one), a hold or a closing write. Foreign leases and the token are part of the
  * revision only: the send loop itself waits for, or resolves, both.
@@ -33,6 +35,17 @@ export async function probeAdmission(
 ): Promise<RequestAdmission | null> {
   const records = await readRecords(k);
   if (records === null) return null;
+  return admissionFrom(k, records, klass, account, epoch);
+}
+
+/** The admission of one read of the record (with this page's memory as it is now): `probeAdmission`, and `recovery.begin`'s refusal. */
+export function admissionFrom(
+  k: Kernel,
+  records: Readonly<AuthRecords>,
+  klass: "ordinary" | "recovery",
+  account: AccountId,
+  epoch: Epoch,
+): RequestAdmission {
   const state = records.auth_state;
   const settled = state.settled;
   const stamp =
@@ -59,6 +72,7 @@ export async function probeAdmission(
       JSON.stringify([
         stamp,
         gating,
+        state.latest_epoch,
         state.fence_seq,
         fences,
         foreign,

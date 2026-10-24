@@ -733,6 +733,7 @@ test.describe("E-SH6: W14 in real IndexedDB (A10)", () => {
     // With a database (the fixture leader made it), the next read is persisted, whole.
     await startLeader(page);
     await waitForState(page, "idle");
+    const reopenedAt = Date.now();
     await reopen(page, "/sharing");
     // The harness reads through a connection of its own (the product controller's belongs to its runtime); it never creates one.
     expect(
@@ -752,6 +753,24 @@ test.describe("E-SH6: W14 in real IndexedDB (A10)", () => {
         ),
       )
       .toBe(1);
+    // ADAPTED PRECONDITION, WEB-08c revision 10 (labelled for the review; every assertion below is unchanged). The probes compare with the
+    // stored record, so it must be the reopened page's OWN read: the page that ran the leader persisted an earlier one (after its first
+    // sync), which already satisfies the format poll above, and the reopened page's read is persisted moments later. Before
+    // HF1-SHARED-CONFIRMATION-20261013 the reopened page made two identity reads first, which delayed its read past the test's; now it
+    // adopts the shared confirmation and reads at once, so in WebKit the record could change between the test's read of it and the probe
+    // (2 of 10 runs "kept" for the later probe, revision-10 evidence `sharing/`; accepted main 10 of 10): the later-issued rule was right,
+    // the test's precondition was not established. Asked after `reopenedAt`, that read's `issued_at` is at least it.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (a) =>
+            window.__atlasData
+              ?.defaultsRecord(a)
+              .then((r) => r?.issued_at ?? null),
+          ACCOUNT,
+        ),
+      )
+      .toBeGreaterThanOrEqual(reopenedAt);
     const stored = (await page.evaluate(
       (a) => window.__atlasData?.syncState(a),
       ACCOUNT,

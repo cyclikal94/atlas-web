@@ -594,7 +594,7 @@ export interface QueueRow {
   last_error_stage: string | null;
 }
 
-const flat = (out: object): HarnessOutcome => {
+export const flat = (out: object): HarnessOutcome => {
   const o = out as Record<string, unknown>;
   return {
     kind: String(o.kind),
@@ -1085,7 +1085,7 @@ const resolveBases = (
   return value;
 };
 
-const requestOf = (spec: HarnessEnqueue): EnqueueRequest => ({
+export const requestOf = (spec: HarnessEnqueue): EnqueueRequest => ({
   endpoint: spec.endpoint,
   ...(spec.targetId === undefined ? {} : { targetId: spec.targetId }),
   targets: spec.targets,

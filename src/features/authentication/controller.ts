@@ -1,10 +1,12 @@
 import type {
+  AttemptHandle,
   AttemptOutcome,
   BeginResult,
   OidcStartOutcome,
   RegistrationInput,
   Session,
 } from "../../session";
+import { attemptEnd } from "./attempt-signal";
 import { authFeedback } from "./feedback";
 import type { OidcLanding } from "./handoff";
 import { invitationMemory } from "./handoff";
@@ -33,7 +35,12 @@ export type NotDone =
   /** A newer attempt exists. The banner is published; the form has nothing to add. */
   | { kind: "superseded" }
   /** Another tab holds `atlas-auth`. The banner is published. */
-  | { kind: "lock_timeout" };
+  | { kind: "lock_timeout" }
+  /**
+   * WEB-08c (R1 of the review of 11 October 2026): the person cancelled this sign-in (its `signal`) before it could activate. The
+   * attempt was cancelled with the session, so nothing changed; nothing is published and nothing is carried.
+   */
+  | { kind: "cancelled" };
 
 export type SignInResult =
   | { kind: "settled"; method: SettledMethod }
@@ -106,25 +113,72 @@ function fromOutcome(
   }
 }
 
+const CANCELLED = { kind: "cancelled" } as const;
+
+/**
+ * Ties a caller's `signal` to the attempt it began (WEB-08c, R1 of the review of 11 October 2026): an abort cancels THAT attempt with the
+ * session (`attempts.cancel`), whenever it comes, including before `begin` returned. The session discards a cancelled attempt's grant and
+ * never issues its activation; once the activating write has committed, the neutral gate owns the screen and the kernel's terminal
+ * resolution decides, so a cancellation then changes nothing (no form is on screen to ask for it). Returns the detach function.
+ */
+function cancelOnAbort(
+  session: Session,
+  handle: AttemptHandle,
+  signal: AbortSignal | undefined,
+): () => void {
+  if (!signal) return () => undefined;
+  const cancel = () => void session.attempts.cancel(handle);
+  signal.addEventListener("abort", cancel, { once: true });
+  return () => signal.removeEventListener("abort", cancel);
+}
+
 /**
  * A password sign-in. A refusal is RETURNED and ALSO carried in page memory (`authFeedback.carryFailure`): between the exchange and
  * the activation the session view is the neutral gate, which unmounts the form that asked, so an activation refusal (device
  * capacity, a hidden tab, a pending wipe) arrives after the form has gone and belongs to the form that mounts next (review R1).
  * The form shows the carried message and takes it; the return value is for callers that are still there.
+ *
+ * `signal` (WEB-08c): the caller's Cancel. An aborted sign-in that did not settle or gate is `cancelled`: no banner, no carried
+ * refusal and no "didn't finish" (the person asked for nothing to change, and nothing did).
  */
 export async function signIn(
   session: Session,
   credentials: { username: string; password: string },
+  signal?: AbortSignal,
 ): Promise<SignInResult> {
   authFeedback.clearOnBegin();
+  const before = session.identity.get();
   const begun = await session.attempts.begin("password");
-  const result =
-    begun.kind !== "started"
-      ? notStarted(begun)
-      : fromOutcome(
-          await session.attempts.signInWithPassword(begun.handle, credentials),
-          "sign_in",
-        );
+  if (begun.kind !== "started") {
+    if (signal?.aborted) return CANCELLED;
+    const result = notStarted(begun);
+    if (result.kind === "failed") authFeedback.carryFailure(result.message);
+    return result;
+  }
+  if (signal?.aborted) {
+    await session.attempts.cancel(begun.handle);
+    return CANCELLED;
+  }
+  const detach = cancelOnAbort(session, begun.handle, signal);
+  let outcome: AttemptOutcome;
+  try {
+    outcome = await session.attempts.signInWithPassword(
+      begun.handle,
+      credentials,
+    );
+  } finally {
+    detach();
+  }
+  if (
+    signal?.aborted &&
+    outcome.kind !== "settled" &&
+    outcome.kind !== "gating"
+  )
+    return CANCELLED;
+  // WEB-08c (D-8c-04): an indeterminate activation; "That sign-in didn't finish" follows if it resolves with nothing settled. (A
+  // cancellation that came after the activating write gates too: its activation was not sent, and it did not finish.)
+  if (outcome.kind === "gating") attemptEnd.indeterminate(before);
+  const result = fromOutcome(outcome, "sign_in");
   if (result.kind === "failed") authFeedback.carryFailure(result.message);
   return result;
 }
@@ -239,21 +293,46 @@ function fromSsoStart(outcome: OidcStartOutcome, env: SsoEnv): SsoResult {
   }
 }
 
-/** Single sign-on, or linking it from Settings. Never navigates before the attempt is durably `redirected`. */
+/**
+ * Single sign-on, or linking it from Settings. Never navigates before the attempt is durably `redirected`.
+ *
+ * `signal` (WEB-08c, R1 of the review of 11 October 2026): the caller's Cancel. An aborted start never navigates: the attempt is
+ * cancelled with the session (a `redirected` attempt is not gating, so it is cleared and its landing is stale) and the result is
+ * `cancelled`.
+ */
 export async function startSso(
   session: Session,
   options: { link: boolean },
   env: SsoEnv,
+  signal?: AbortSignal,
 ): Promise<SsoResult> {
   authFeedback.clearOnBegin();
   const begun = await session.attempts.begin(
     options.link ? "oidc_link" : "oidc",
   );
   if (begun.kind !== "started") {
+    if (signal?.aborted) return CANCELLED;
     const result = notStarted(begun);
     return result.kind === "settled" ? { kind: "gating" } : result;
   }
-  return fromSsoStart(await session.attempts.startOidc(begun.handle), env);
+  if (signal?.aborted) {
+    await session.attempts.cancel(begun.handle);
+    return CANCELLED;
+  }
+  const detach = cancelOnAbort(session, begun.handle, signal);
+  let outcome: OidcStartOutcome;
+  try {
+    outcome = await session.attempts.startOidc(begun.handle);
+  } finally {
+    detach();
+  }
+  if (signal?.aborted) {
+    // The abort may have come after the start was recorded `redirected`: cancel it now that it is, and never leave the page.
+    if (outcome.kind === "redirect")
+      await session.attempts.cancel(begun.handle);
+    if (outcome.kind !== "session_ended") return CANCELLED;
+  }
+  return fromSsoStart(outcome, env);
 }
 
 /**
@@ -272,6 +351,7 @@ export async function completeLanding(
     });
     return;
   }
+  const before = session.identity.get();
   const outcome = await session.attempts.landing(landing.fragment);
   switch (outcome.kind) {
     case "settled":
@@ -304,7 +384,8 @@ export async function completeLanding(
       });
       return;
     case "gating":
-      // The 1c card owns the screen until the attempt resolves.
+      // The 1c card owns the screen until the attempt resolves; if it resolves with nothing settled, "That sign-in didn't finish".
+      attemptEnd.indeterminate(before);
       return;
   }
 }

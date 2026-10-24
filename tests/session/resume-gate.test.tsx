@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent } from "@testing-library/react";
+import { useSyncExternalStore } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   createGateDialog,
@@ -234,6 +235,156 @@ describe("lift: focus and scroll are restored only by the same-account lift", ()
   });
 });
 
+/**
+ * WEB-08c revision 3 (R8, HF-13; design assessment S18, invariant 7): a successful same-account lift restores the keyed control and NO
+ * obsolete callback takes focus afterwards. The adapter's own deferred heading focus (`focusHeading`, which waits up to 120 animation
+ * frames for a heading the router renders after the commit) was cancelled by a newer heading request or an unmount, but NOT by a lift
+ * that restored a keyed control, and once the heading existed it took focus even from a control the person had moved to. Animation
+ * frames are queued here and run when the test says, so each order is exact.
+ */
+describe("HF-13: no obsolete heading focus after a mount, a level-0 gate or a restoring lift", () => {
+  let frames: FrameRequestCallback[] = [];
+  let headingShown = false;
+  const listeners = new Set<() => void>();
+  const showHeading = () => {
+    headingShown = true;
+    for (const listener of listeners) listener();
+  };
+  function LateHeading() {
+    const shown = useSyncExternalStore(
+      (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      () => headingShown,
+    );
+    return shown ? <h1>Late heading</h1> : null;
+  }
+  const runFrames = () => {
+    // Every frame queued so far, and those they queue in turn, up to a bound (the adapter's own bound is 120).
+    for (let round = 0; round < 200 && frames.length > 0; round += 1) {
+      const due = frames;
+      frames = [];
+      act(() => {
+        for (const callback of due) callback(0);
+      });
+    }
+  };
+  let late: ProtectedSurface;
+  beforeEach(() => {
+    frames = [];
+    headingShown = false;
+    listeners.clear();
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    late = createProtectedSurface({
+      renderTree: () => (
+        <main>
+          <LateHeading />
+          <button type="button" data-focus-key="rename">
+            Rename
+          </button>
+        </main>
+      ),
+      gateDialog: {
+        ...ctx.gate,
+        open() {
+          ctx.gate.open();
+          ctx.gate.focusHeading();
+        },
+        close() {
+          ctx.gate.close();
+        },
+        focusHeading() {},
+      },
+      liveRegions: ctx.live,
+    });
+  });
+  const keyed = () =>
+    root().querySelector('[data-focus-key="rename"]') as HTMLElement;
+
+  test("control: a heading that renders late is focused by the mount's deferred attempt when nothing else has focus", () => {
+    act(() => {
+      late.attachTree("acct-a", 1);
+    });
+    expect(frames.length).toBeGreaterThan(0);
+    act(() => showHeading());
+    runFrames();
+    expect(document.activeElement?.textContent).toBe("Late heading");
+  });
+
+  test("the original schedule of HF-13: a keyed lift is not undone by the mount's still-pending heading attempt", () => {
+    act(() => {
+      late.attachTree("acct-a", 1);
+    });
+    act(() => showHeading());
+    // The heading is in the DOM, the mount's attempt is still queued; the person focuses a keyed control, the page hides and is shown.
+    keyed().focus();
+    act(() => {
+      late.saveFocusAndScroll("acct-a", 1);
+      late.applyLevel0();
+    });
+    let result: string | undefined;
+    act(() => {
+      result = late.attachTree("acct-a", 1);
+    });
+    expect(result).toBe("lifted");
+    expect(document.activeElement?.getAttribute("data-focus-key")).toBe(
+      "rename",
+    );
+    runFrames();
+    expect(document.activeElement?.getAttribute("data-focus-key")).toBe(
+      "rename",
+    );
+  });
+
+  test("a heading that renders late does not take focus from a control the person moved to inside the tree", () => {
+    act(() => {
+      late.attachTree("acct-a", 1);
+    });
+    keyed().focus();
+    act(() => showHeading());
+    runFrames();
+    expect(document.activeElement?.getAttribute("data-focus-key")).toBe(
+      "rename",
+    );
+  });
+
+  test("a level-0 gate cancels the pending heading attempt: the gate keeps focus until the lift", () => {
+    act(() => {
+      late.attachTree("acct-a", 1);
+    });
+    act(() => {
+      late.saveFocusAndScroll("acct-a", 1);
+      late.applyLevel0();
+    });
+    act(() => showHeading());
+    runFrames();
+    expect(document.activeElement?.id).toBe("resume-gate-heading");
+  });
+
+  test("a saved target that is gone at the lift falls back to the heading (a separate expected result)", () => {
+    act(() => {
+      late.attachTree("acct-a", 1);
+    });
+    act(() => showHeading());
+    runFrames();
+    keyed().focus();
+    act(() => {
+      late.saveFocusAndScroll("acct-a", 1);
+      late.applyLevel0();
+    });
+    keyed().remove();
+    act(() => {
+      late.attachTree("acct-a", 1);
+    });
+    runFrames();
+    expect(document.activeElement?.textContent).toBe("Late heading");
+  });
+});
+
 describe("level 1: a fence or a closed account leaves nothing protected", () => {
   test("unmount empties the root, keeps it gated, restores the neutral title and closes the gate dialog", () => {
     show(ctx.surface);
@@ -275,6 +426,47 @@ describe("the gate dialog's own contract", () => {
     expect(element.textContent).toBe(GATE_HEADING);
     gate.close();
     expect(element.open).toBe(false);
+  });
+
+  test("WEB-08c R4 (matrix 3.7.2 'Read pending', T22 t4): shown again while the gate is open, its status says 'Checking your account' ONCE; not while hidden; cleared by close", async () => {
+    let visibility: "visible" | "hidden" = "hidden";
+    Object.defineProperty(document, "visibilityState", {
+      get: () => visibility,
+      configurable: true,
+    });
+    try {
+      const gate = createGateDialog();
+      gate.open();
+      const status = document.querySelector(
+        `#${GATE_ID} [role="status"]`,
+      ) as HTMLElement;
+      const writes: string[] = [];
+      const observer = new MutationObserver(() =>
+        writes.push(status.textContent ?? ""),
+      );
+      observer.observe(status, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(status.textContent).toBe("");
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("pageshow"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+      expect(status.textContent).toBe(GATE_HEADING);
+      expect(writes.filter((text) => text === GATE_HEADING)).toHaveLength(1);
+      gate.close();
+      expect(status.textContent).toBe("");
+      // Closed: a later return writes nothing.
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(status.textContent).toBe("");
+      observer.disconnect();
+    } finally {
+      Reflect.deleteProperty(document, "visibilityState");
+    }
   });
 
   test("opening twice does not add a second dialog", () => {

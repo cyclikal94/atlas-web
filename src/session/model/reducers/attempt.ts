@@ -132,6 +132,8 @@ export function settle(
     epoch: Epoch;
     account_id: AccountId;
     session_id: SessionId;
+    /** HF1-SHARED-CONFIRMATION-20261013: the activation answer's CSRF token, shared with every page of the origin. */
+    csrf_token?: string;
     now: string;
   },
 ): Rmw<"SETTLED" | "SUPERSEDED"> {
@@ -149,6 +151,17 @@ export function settle(
     settled_at: input.now,
     session_id: input.session_id,
   };
+  // HF1-SHARED-CONFIRMATION-20261013: the activation's answer is the session's first confirmation; any older one names another session.
+  state.confirmation =
+    input.csrf_token === undefined
+      ? null
+      : {
+          account_id: input.account_id,
+          epoch: input.epoch,
+          session_id: input.session_id,
+          csrf_token: input.csrf_token,
+          confirmed_at: input.now,
+        };
   state.attempt = null;
   return { write: { auth_state: state }, result: "SETTLED" };
 }

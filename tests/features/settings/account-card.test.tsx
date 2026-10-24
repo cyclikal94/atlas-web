@@ -61,7 +61,7 @@ async function mount(operations: Partial<Operations> = {}) {
 
 /** C-ACC: WF-SETTINGS-01's account card. */
 describe("the account card", () => {
-  test("it reads /me fresh, shows the username as a username and the session's start, and has no account actions of its own", async () => {
+  test("it reads /me fresh, shows the username as a username and the session's start, and offers Switch account beside Sign out", async () => {
     const { session, container } = await mount({
       listSessions: vi.fn(async () => ({
         ok: true as const,
@@ -81,13 +81,16 @@ describe("the account card", () => {
     expect(
       await within(region).findByText(/^Signed in since \d{2}:\d{2} · /),
     ).toBeInTheDocument();
-    // Sign out is the only control: "Switch account" is WEB-08c's and is omitted, not disabled and not faked.
+    // WEB-08c (G-20): "Switch account" is appended to the `accountActions` seam, before "Sign out"; it opens WF-SWITCH-01 (a dialog).
+    // (WEB-08b shipped the seam empty: the switch control was omitted, not disabled and not faked, until the journey existed.)
     expect(
       within(region)
         .getAllByRole("button")
         .map((b) => b.textContent),
-    ).toEqual(["Sign out"]);
-    expect(within(region).queryByText(/switch/i)).toBeNull();
+    ).toEqual(["Switch account", "Sign out"]);
+    expect(
+      within(region).getByRole("button", { name: "Switch account" }),
+    ).toHaveAttribute("aria-haspopup", "dialog");
     // The avatar initial is decoration.
     expect(region.querySelector("[aria-hidden='true']")?.textContent).toBe("K");
     // Read from the server on mount (twice under React StrictMode's development double-effect), never from a cache.
